@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "humble-lipstick-graph": {
+      "type": "stdio",
+      "command": ".graph/.venv/bin/python",
+      "args": [
+        ".graph/mcp_server.py"
+      ],
+      "env": {}
+    }
+  }
+}

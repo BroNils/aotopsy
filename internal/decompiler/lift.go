@@ -1,0 +1,684 @@
+package decompiler
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// LiftState is the per-function symbolic-execution state: register and
+// stack-slot "values" are pseudocode expression FRAGMENTS stored as
+// strings (not an expression tree), built via string concatenation --
+// this mirrors flutterdec's control_flow/expression_lift.rs LiftState
+// exactly (the report's central architectural finding: this decompiler
+// family is a string-rewriting system, not an AST-based one).
+type LiftState struct {
+	Regs    map[string]string // register name -> expr string
+	Locals  map[int64]string  // frame-relative byte offset -> local var name
+	LastCmp [2]string
+	HasCmp  bool
+}
+
+func newLiftState() *LiftState {
+	return &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
+}
+
+// Clone returns a deep-enough copy for the emitter's "try branch A with a
+// snapshot, then branch B with the same snapshot" flow-sensitive walk
+// (flutterdec's emit_block does this per branch instead of a real
+// dataflow join across paths).
+//
+// P4-6 (E-004/E-005): Locals is intentionally shared by reference (not
+// deep-copied). emitBranch relies on this sharing for cross-branch local-name
+// visibility: when branch A defines a local at frame offset N and branch B
+// also accesses offset N, both branches see the same name. Deep-copying
+// Locals would break this — branch B would lose names defined in branch A.
+// Regs IS deep-copied because register state is path-local (each branch's
+// register values diverge after the branch condition), while Locals is
+// frame-global (a stack slot is the same slot regardless of which branch
+// wrote to it).
+func (s *LiftState) Clone() *LiftState {
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, LastCmp: s.LastCmp, HasCmp: s.HasCmp}
+	for k, v := range s.Regs {
+		c.Regs[k] = v
+	}
+	return c
+}
+
+// operand is a parsed instruction operand: either a bare register/
+// immediate token, or a "[base+disp]" memory reference.
+type operand struct {
+	raw     string
+	isMem   bool
+	memBase string
+	memDisp int64
+	hasDisp bool
+}
+
+// splitOperands splits "mnemonic op1, op2, op3" into (mnemonic, [op1,
+// op2, op3]), respecting bracket depth so memory operands with an
+// internal comma-free "[base+disp]" shape stay intact as one token.
+func splitOperands(src string) (string, []string) {
+	src = strings.TrimSpace(src)
+	sp := strings.IndexAny(src, " \t")
+	if sp < 0 {
+		return src, nil
+	}
+	mnemonic := src[:sp]
+	rest := strings.TrimSpace(src[sp+1:])
+	return mnemonic, splitTopLevelCommas(rest)
+}
+
+// splitTopLevelCommas splits a comma list while respecting '['/']'
+// bracket depth, shared by splitOperands and the ARM64/x86 lifters'
+// standalone operand-string splitting needs.
+func splitTopLevelCommas(rest string) []string {
+	var ops []string
+	depth := 0
+	start := 0
+	for i, c := range rest {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				ops = append(ops, strings.TrimSpace(rest[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if start < len(rest) {
+		if tail := strings.TrimSpace(rest[start:]); tail != "" {
+			ops = append(ops, tail)
+		}
+	}
+	return ops
+}
+
+// parseOperand recognizes ARM64 "[x1, #0x8]" and x86 "[rbx+0x8]" /
+// "qword ptr [rbx+0x8]" memory syntax; everything else is a bare token
+// (register or immediate).
+func parseOperand(tok string) operand {
+	tok = strings.TrimSpace(tok)
+	lb := strings.Index(tok, "[")
+	rb := strings.LastIndex(tok, "]")
+	if lb < 0 || rb < lb {
+		return operand{raw: cleanImmPrefix(tok)}
+	}
+	inner := tok[lb+1 : rb]
+	inner = strings.ReplaceAll(inner, ",", "+")
+	parts := splitSignedTerms(inner)
+	op := operand{isMem: true}
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if i == 0 {
+			// The base register is never itself a signed numeric term
+			// (splitSignedTerms only splits on a LATER +/- as a term
+			// boundary), so it can't carry a leading sign here.
+			op.memBase = strings.TrimPrefix(p, "#")
+			continue
+		}
+		if v, ok := parseSignedImm(p); ok {
+			op.memDisp += v
+			op.hasDisp = true
+		}
+	}
+	return op
+}
+
+// splitSignedTerms splits an ARM64/x86 memory-operand inner string like
+// "rbp-0x8", "x1+0x10", or "rax+rcx*4+0x8" into ["rbp", "-0x8"] /
+// ["x1", "+0x10"] / ["rax", "+rcx*4", "+0x8"] -- i.e. every term after
+// the first KEEPS its sign, unlike a plain FieldsFunc split on '+' alone
+// (which mishandles the far more common x86 "[base-disp]" bare-minus
+// shape entirely -- this was a real bug found testing against a real
+// libapp.so, see decompiler_test.go's regression coverage).
+func splitSignedTerms(inner string) []string {
+	var terms []string
+	start := 0
+	for i := 1; i < len(inner); i++ {
+		c := inner[i]
+		if c != '+' && c != '-' {
+			continue
+		}
+		// A '-' immediately after 'e'/'E' (e.g. hex digits never produce
+		// this, but be defensive) is not a term boundary; in practice
+		// our tokens are plain "0x.." or decimal, so this simple rule is
+		// sufficient.
+		terms = append(terms, strings.TrimSpace(inner[start:i]))
+		start = i
+	}
+	terms = append(terms, strings.TrimSpace(inner[start:]))
+	return terms
+}
+
+// parseSignedImm parses a term that may itself carry a leading sign
+// (from splitSignedTerms) and, for x86's "reg*scale" index terms,
+// returns not-ok (scaled-index addressing isn't modeled as a constant
+// displacement).
+func parseSignedImm(term string) (int64, bool) {
+	term = strings.TrimSpace(term)
+	neg := false
+	if strings.HasPrefix(term, "-") {
+		neg = true
+		term = term[1:]
+	} else if strings.HasPrefix(term, "+") {
+		term = term[1:]
+	}
+	term = strings.TrimSpace(term)
+	if strings.Contains(term, "*") {
+		return 0, false // scaled-index register term, not a constant
+	}
+	v, ok := parseImm(term)
+	if !ok {
+		return 0, false
+	}
+	if neg {
+		v = -v
+	} else if v > 0x7FFFFFFF && v <= 0xFFFFFFFF {
+		// x86asm's default Mem.String() renders some negative 32-bit
+		// displacements as a raw unsigned hex pattern with a leading
+		// '+' instead of a proper minus sign (e.g. "RBP+0xffffff08" for
+		// what is really RBP-0xf8) -- confirmed by testing this
+		// decompiler against a real libapp.so, where "[RBP-0x8]" used a
+		// real minus but "[RBP+0xffffff08]" (a bigger, still-negative
+		// displacement) did not. Reinterpret any unsigned term in the
+		// int32 negative range as its signed int32 value.
+		v = int64(int32(uint32(v))) //nolint:gosec // v is range-checked above to fit in 32 bits before this reinterpret cast
+	}
+	return v, true
+}
+
+func cleanImmPrefix(tok string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tok), "#")
+}
+
+func parseImm(s string) (int64, bool) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "#"))
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
+	}
+	var v int64
+	var err error
+	if strings.HasPrefix(s, "0x") {
+		v, err = strconv.ParseInt(s[2:], 16, 64)
+	} else {
+		v, err = strconv.ParseInt(s, 10, 64)
+	}
+	if err != nil {
+		return 0, false
+	}
+	if neg {
+		v = -v
+	}
+	return v, true
+}
+
+// lookupReg resolves a register token to its current symbolic expression,
+// falling back to the register name itself if unknown (matching
+// flutterdec's lookup_reg).
+func (s *LiftState) lookupReg(tok string) string {
+	tok = strings.ToLower(strings.TrimSpace(tok))
+	if isZeroReg(tok) {
+		return "0"
+	}
+	if v, ok := s.Regs[tok]; ok {
+		if v == ffiCallTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
+			// Internal-only markers (see applyStore / the ldr/mov
+			// THR-stub-offset check in ApplyOther) -- must never leak into
+			// displayed pseudocode. A register can still hold one of these
+			// values when it's ALSO used as a regular argument/expression
+			// elsewhere (e.g. reused across a nearby call), not just as
+			// the one indirect-call target emitIndirectCall specifically
+			// checks for (which reads s.Regs directly, bypassing this
+			// filter, since it needs the real marker).
+			return tok
+		}
+		return v
+	}
+	return tok
+}
+
+func isZeroReg(tok string) bool {
+	return tok == "xzr" || tok == "wzr"
+}
+
+// operandExpr resolves any operand (register or memory) to an
+// expression string, handling frame-relative loads as local-variable
+// references (fir.FrameReg) and other base registers as a generic field
+// access (fieldExpr) -- mirrors flutterdec's operand_expr.
+func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
+	op := parseOperand(tok)
+	if !op.isMem {
+		if v, ok := parseImm(op.raw); ok {
+			return strconv.FormatInt(v, 10)
+		}
+		return s.lookupReg(op.raw)
+	}
+	base := strings.ToLower(op.memBase)
+	if base == fir.FrameReg && op.hasDisp {
+		if name, ok := s.Locals[op.memDisp]; ok {
+			return name
+		}
+		return localName(op.memDisp)
+	}
+	if base == fir.PoolReg {
+		return "pool[?]" // overridden by OpLoadPool handling in the emitter when PoolIndex is known
+	}
+	baseExpr := s.lookupReg(base)
+	if !op.hasDisp {
+		return baseExpr
+	}
+	return fieldExpr(baseExpr, op.memDisp)
+}
+
+// localName renders a frame-relative byte offset as a valid Dart
+// identifier -- found via real-binary testing that a literal minus sign
+// (e.g. "local_-8") is not a legal Dart identifier at all, so negative
+// offsets use an "m" prefix on the magnitude instead, matching
+// fieldExpr's own "-1 => base.m1" convention below.
+func localName(off int64) string {
+	if off < 0 {
+		return fmt.Sprintf("local_m%d", -off)
+	}
+	return fmt.Sprintf("local_%d", off)
+}
+
+// fieldExpr renders a base+offset expression as a Dart-ish field access,
+// mirroring flutterdec's field_expr (including its "-1 => ._tag"
+// special-case for the Dart object-header/class-id tag field).
+func fieldExpr(base string, off int64) string {
+	switch {
+	case off == -1:
+		return base + "._tag"
+	case off >= 0:
+		return fmt.Sprintf("%s.f%d", base, off)
+	default:
+		return fmt.Sprintf("%s.m%d", base, -off)
+	}
+}
+
+// ApplyOther lifts one OpOther instruction: updates register/local
+// values in-place and returns an assignment statement line to emit, if
+// the instruction is a store to something other than a tracked local
+// (matching flutterdec's apply_other_lift's stur/str handling).
+func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool) {
+	mnemonic, ops := splitOperands(ins.Src)
+	mnemonic = normalizeMnemonic(mnemonic)
+
+	switch mnemonic {
+	case "mov", "movz", "lea":
+		if len(ops) >= 2 {
+			// x86_64 uses "mov" for BOTH directions (ARM64 has distinct
+			// str/stur mnemonics, handled below) -- "mov [mem], reg" is a
+			// STORE and must go through applyStore like str/stur does, not
+			// be treated as a register destination. Confirmed a real,
+			// previously-silent gap: x86 MOV-to-memory was setting
+			// s.Regs["[r14+0x628]"] instead of recognizing the memory
+			// write, silently dropping it AND (found while wiring FFI-call
+			// detection) never triggering applyStore's THR.vm_tag_offset
+			// check for x86_64 at all. LEA never writes memory (always
+			// computes an address into a register), so it's excluded here.
+			if mnemonic != "lea" && strings.HasPrefix(strings.TrimSpace(ops[0]), "[") {
+				return applyStore(fir, s, ops[0], ops[1])
+			}
+			dst := strings.ToLower(ops[0])
+			// mirrors the ldr/ldur THR-stub-offset check below -- x86_64
+			// uses "mov" for register loads too (no separate ldr mnemonic).
+			if mnemonic != "lea" && fir.ThreadStubOffsets != nil {
+				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
+					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
+						s.Regs[dst] = thrStubSentinelPrefix + name
+						return "", false
+					}
+				}
+			}
+			s.Regs[dst] = operandExpr(fir, s, ops[1])
+		}
+	case "movk":
+		// MOVK (ARM64 move-keep) inserts a 16-bit immediate at a shifted
+		// position while preserving other bits. Unlike mov/movz which
+		// overwrite the full register, movk merges with the existing value.
+		// Format: movk dst, #imm, lsl #shift
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			imm := operandExpr(fir, s, ops[1])
+			shift := "0"
+			if len(ops) >= 3 {
+				// ops[2] is like "lsl #16" — extract the shift amount.
+				shiftSpec := strings.TrimSpace(ops[2])
+				if idx := strings.Index(shiftSpec, "#"); idx >= 0 {
+					shift = strings.TrimSpace(shiftSpec[idx+1:])
+				}
+			}
+			old := s.lookupReg(dst)
+			s.Regs[dst] = fmt.Sprintf("(%s | (%s << %s))", old, imm, shift)
+		}
+	case "add", "sub":
+		if len(ops) >= 3 {
+			dst := strings.ToLower(ops[0])
+			lhs := operandExpr(fir, s, ops[1])
+			rhs := operandExpr(fir, s, ops[2])
+			// ARM64 shifted register operand: add x0, x1, x2, lsl #3
+			// The shift in ops[3] must be applied to rhs before the add/sub.
+			if len(ops) >= 4 {
+				shiftSpec := strings.TrimSpace(ops[3])
+				// shiftSpec is like "lsl #3" or "lsr #2" — extract the
+				// shift amount after the "#" and apply as left shift
+				// (lsl) or right shift (lsr/asr/ror).
+				if idx := strings.Index(shiftSpec, "#"); idx >= 0 {
+					shiftAmt := strings.TrimSpace(shiftSpec[idx+1:])
+					if strings.HasPrefix(shiftSpec, "lsr") || strings.HasPrefix(shiftSpec, "asr") {
+						rhs = fmt.Sprintf("(%s >> %s)", rhs, shiftAmt)
+					} else {
+						rhs = fmt.Sprintf("(%s << %s)", rhs, shiftAmt)
+					}
+				}
+			}
+			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+		} else if len(ops) == 2 {
+			// x86 two-operand form: dst is also the first source.
+			dst := strings.ToLower(ops[0])
+			lhs := s.lookupReg(dst)
+			rhs := operandExpr(fir, s, ops[1])
+			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+		}
+	case "mul", "imul", "and", "orr", "or", "eor", "xor":
+		op := binOpSymbol(mnemonic)
+		if len(ops) >= 3 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2]))
+		} else if len(ops) == 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", s.lookupReg(dst), op, operandExpr(fir, s, ops[1]))
+		}
+	case "lsl", "shl":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			idx := 1
+			lhs := s.lookupReg(dst)
+			if len(ops) >= 3 {
+				lhs = operandExpr(fir, s, ops[1])
+				idx = 2
+			}
+			s.Regs[dst] = fmt.Sprintf("(%s << %s)", lhs, operandExpr(fir, s, ops[idx]))
+		}
+	case "lsr", "asr", "shr", "sar":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			idx := 1
+			lhs := s.lookupReg(dst)
+			if len(ops) >= 3 {
+				lhs = operandExpr(fir, s, ops[1])
+				idx = 2
+			}
+			s.Regs[dst] = fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx]))
+		}
+	case "ubfx":
+		if len(ops) >= 4 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			expr := fmt.Sprintf("bitField(%s, %s, %s)", src, cleanImmPrefix(ops[2]), cleanImmPrefix(ops[3]))
+			// The well-known Dart object class-id bitfield idiom
+			// (lsb=0xc, width=0x14 on ARM64) renders directly as
+			// classId(...) instead of the generic bitField(...) form.
+			if strings.TrimPrefix(ops[2], "#") == "0xc" && strings.TrimPrefix(ops[3], "#") == "0x14" {
+				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
+			}
+			s.Regs[dst] = expr
+		}
+	case "ldr", "ldur":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			if fir.ThreadStubOffsets != nil {
+				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
+					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
+						s.Regs[dst] = thrStubSentinelPrefix + name
+						return "", false
+					}
+				}
+			}
+			s.Regs[dst] = operandExpr(fir, s, ops[1])
+		}
+	case "cmp", "cmn":
+		if len(ops) >= 2 {
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
+			s.HasCmp = true
+		}
+	case "test", "tst":
+		// TEST/TST performs a bitwise AND (not subtraction) and sets ZF
+		// if the result is zero. For the common "test r, r; je" null-check
+		// idiom, the condition is "r == 0", not "r == r". Store 0 as the
+		// second operand so JE produces "r == 0" and JNE produces "r != 0".
+		if len(ops) >= 2 {
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), "0"}
+			s.HasCmp = true
+		}
+	case "str", "stur":
+		if len(ops) >= 2 {
+			return applyStore(fir, s, ops[1], ops[0])
+		}
+	// P3-feasible-1: Unary operations — common in Dart AOT compiled code.
+	case "mvn", "not":
+		// mvn (ARM64) / not (x86_64): bitwise NOT
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(~%s)", operandExpr(fir, s, ops[1]))
+		}
+	case "neg":
+		// neg: arithmetic negation (ARM64 and x86_64)
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1]))
+		}
+	// P3-feasible-1: Zero/sign-extend moves (x86_64)
+	case "movzx":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = operandExpr(fir, s, ops[1])
+		}
+	case "movsxd":
+		// movsxd sign-extends a 32-bit value to 64-bit — needs a cast
+		// to preserve sign-extension semantics in the pseudocode.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(int64)(%s)", operandExpr(fir, s, ops[1]))
+		}
+	case "movsx":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = fmt.Sprintf("(int)(%s)", operandExpr(fir, s, ops[1]))
+		}
+	// P3-feasible-1: Address generation (ARM64)
+	case "adr", "adrp":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = operandExpr(fir, s, ops[1])
+		}
+	// P3-feasible-1: Load/store pair (ARM64) — ldp/stp load/store two registers.
+	// We model them as two separate assignments.
+	case "ldp":
+		if len(ops) >= 3 {
+			dst1 := strings.ToLower(ops[0])
+			s.Regs[dst1] = operandExpr(fir, s, ops[2])
+			// Second register gets the next memory location (base+8).
+			// Build a new memory operand with disp+8 and resolve it
+			// through operandExpr so frame-relative loads produce the
+			// correct local name (e.g. local_24 instead of *(local_16 + 8)).
+			dst2 := strings.ToLower(ops[1])
+			if op := parseOperand(ops[2]); op.isMem {
+				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
+				s.Regs[dst2] = operandExpr(fir, s, memPlus8)
+			} else {
+				s.Regs[dst2] = fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2]))
+			}
+		}
+	case "stp":
+		if len(ops) >= 3 {
+			// Store pair: stp src1, src2, [mem] — emit as two stores.
+			// M-1 (oracle-audit): previously only stored ops[0], silently
+			// dropped ops[1]. Now store both: src1 to [mem], src2 to [mem+8].
+			line1, handled := applyStore(fir, s, ops[2], ops[0])
+			// Second store: src2 to [mem+8]. Reuse parseOperand to extract
+			// the base register and displacement from ops[2], then add 8.
+			// Process the second store regardless of whether the first was
+			// handled (the first may be a THR store that returns "", false,
+			// but the second store to [mem+8] must still be emitted).
+			op := parseOperand(ops[2])
+			if op.isMem {
+				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
+				line2, _ := applyStore(fir, s, memPlus8, ops[1])
+				if line2 != "" {
+					if line1 != "" {
+						return line1 + "\n" + line2, true
+					}
+					return line2, true
+				}
+			}
+			return line1, handled
+		}
+	// P3-feasible-1: Stack operations (x86_64) — push/pop are mov + sp adjust.
+	case "push":
+		if len(ops) >= 1 {
+			return fmt.Sprintf("push(%s);", operandExpr(fir, s, ops[0])), true
+		}
+	case "pop":
+		if len(ops) >= 1 {
+			dst := strings.ToLower(ops[0])
+			s.Regs[dst] = "/* pop */"
+		}
+	}
+	return "", false
+}
+
+// ffiCallTargetSentinel marks a register as "was just stored into a Thread
+// field" -- Dart AOT's native/FFI-leaf-call bookkeeping idiom (see
+// applyStore's THR-store handling below for the full rationale).
+// emit.go's emitIndirectCall checks for this instead of falling back to a
+// raw "indirectTarget_xN" name when that same register is used as an
+// indirect call target shortly after.
+const ffiCallTargetSentinel = "__ffi_call_target"
+
+// thrStubSentinelPrefix marks a register as "was just loaded from a known
+// Thread-cached stub entry-point offset" (dart-lang/sdk's
+// CACHED_VM_STUBS_ADDRESSES_LIST, e.g. Thread::write_barrier_entry_point_
+// or Thread::stack_overflow_shared_without_fpu_regs_entry_point_) -- the
+// resolved stub name is appended after the prefix. emit.go's
+// emitIndirectCall checks for this instead of falling back to a raw
+// "indirectTarget_xN"/dynamicCall name when that same register is used as
+// an indirect call target shortly after. See internal/disasm.
+// ThreadStubOffsets's doc comment for how the offset table itself was
+// derived (dart-lang/sdk's generated runtime_offsets_extracted.h, cross-
+// checked against real compiled sample disassembly).
+const thrStubSentinelPrefix = "__thr_stub:"
+
+// applyStore handles a store instruction: writes to a tracked local
+// (silent, no emitted line) or emits an explicit assignment statement to
+// a computed field-access expression (mirroring flutterdec's stur/str
+// handling in apply_other_lift).
+func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool) {
+	op := parseOperand(memTok)
+	valExpr := operandExpr(fir, s, srcTok)
+	if !op.isMem {
+		return "", false
+	}
+	base := strings.ToLower(op.memBase)
+	if base == fir.ThreadReg && op.hasDisp {
+		// Recognized structurally, NOT by matching a specific known
+		// Thread::vm_tag_offset() value -- verified on a real sample that
+		// the offset differs by architecture for the SAME Dart version/build
+		// (ARM64 0x7b8=1976, x86_64 0x770=1904 for the identical function
+		// in the identical binary), so trusting one architecture's THR
+		// field table for the other produced false negatives. The
+		// distinguishing signal is the SHAPE, not the offset: storing a
+		// register into a Thread field immediately before calling that
+		// EXACT SAME register is Dart AOT's native/FFI-leaf-call bookkeeping
+		// idiom (Thread::vm_tag_offset(), confirmed against dart-lang/sdk's
+		// il_arm64.cc/il_x64.cc FfiCallInstr::EmitNativeCode on both
+		// architectures) -- no other call convention stores the call
+		// target itself into Thread state right before dispatching it.
+		// Suppress the emitted line (pure bookkeeping, not application
+		// logic) but mark the register so the upcoming indirect call is
+		// named instead of showing a raw register name.
+		s.Regs[strings.ToLower(srcTok)] = ffiCallTargetSentinel
+		return "", false
+	}
+	if base == fir.FrameReg && op.hasDisp {
+		name, ok := s.Locals[op.memDisp]
+		if !ok {
+			name = localName(op.memDisp)
+			s.Locals[op.memDisp] = name
+		}
+		s.Regs[name] = valExpr
+		return fmt.Sprintf("%s = %s;", name, valExpr), true
+	}
+	baseExpr := s.lookupReg(base)
+	lhs := baseExpr
+	if op.hasDisp {
+		lhs = fieldExpr(baseExpr, op.memDisp)
+	} else if !isSimpleLvalueExpr(baseExpr) {
+		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
+		// found testing against a real libapp.so where a computed
+		// pointer is stored through directly) -- render it as a pointer
+		// dereference rather than an invalid "(x - y) = value;" lvalue.
+		lhs = fmt.Sprintf("*(%s)", baseExpr)
+	}
+	return fmt.Sprintf("%s = %s;", lhs, valExpr), true
+}
+
+// isSimpleLvalueExpr reports whether expr is plain enough (an
+// identifier, optionally with .field/[index] access) to appear
+// unwrapped on the left of an assignment.
+func isSimpleLvalueExpr(expr string) bool {
+	for _, r := range expr {
+		if r == '(' || r == ' ' || r == '+' || r == '-' || r == '*' {
+			return false
+		}
+	}
+	return expr != ""
+}
+
+func normalizeMnemonic(m string) string {
+	return strings.ToLower(strings.TrimSpace(m))
+}
+
+func binOpSymbol(mnemonic string) string {
+	switch mnemonic {
+	case "mul", "imul":
+		return "*"
+	case "and":
+		return "&"
+	case "orr", "or":
+		return "|"
+	case "eor", "xor":
+		return "^"
+	}
+	return "?"
+}
+
+// simplifyBinExpr constant-folds/zero-eliminates add/sub the way
+// flutterdec's simplify_bin_expr does for its most common cases.
+func simplifyBinExpr(mnemonic, lhs, rhs string) string {
+	op := "+"
+	if mnemonic == "sub" {
+		op = "-"
+	}
+	if rhs == "0" {
+		return lhs
+	}
+	if lv, ok := parseImm(lhs); ok {
+		if rv, ok := parseImm(rhs); ok {
+			if op == "+" {
+				return strconv.FormatInt(lv+rv, 10)
+			}
+			return strconv.FormatInt(lv-rv, 10)
+		}
+	}
+	return fmt.Sprintf("(%s %s %s)", lhs, op, rhs)
+}

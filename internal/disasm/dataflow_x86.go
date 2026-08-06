@@ -1,0 +1,445 @@
+package disasm
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+
+	"golang.org/x/arch/x86/x86asm"
+)
+
+// ScanX86FunctionCFG is ScanX86Function's CFG-wide replacement, exactly
+// mirroring ExtractCallEdgesCFG's rationale above: the old x86RegTracker
+// (W=12) ages out register provenance after a fixed instruction count,
+// which can lose it across a branch well before the use site. This
+// builds a real (if minimal) x86_64 CFG -- leaders at function start,
+// jump/conditional-jump targets, and instructions following a
+// terminator -- and runs the same reaching-definitions dataflow as
+// ExtractCallEdgesCFG (sharing its lvalue/meetLvalue lattice, just sized
+// for x86_64's 16 GP registers instead of ARM64's 31).
+//
+// internal/disasm cannot import internal/decompiler's own x86 CFG lifter
+// (BuildX86IR) -- the dependency runs the other way, decompiler already
+// imports disasm for ARM64 -- so the leader/block partitioning here is a
+// separate, minimal implementation, using the same JMP/Jcc classification
+// internal/decompiler/x86.go's isX86CondJump already uses (duplicated,
+// not shared, same reasoning as canonX86Reg's duplication from
+// cmd/aotopsy/gdtcall.go).
+// H-3 fix: thrFields parameter added to annotate THR loads with field names.
+func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
+	insts := decodeX86Flat(funcCode, funcVA)
+	if len(insts) == 0 {
+		return X86ScanResult{}
+	}
+	blocks := buildX86Blocks(insts)
+
+	type localEffect struct {
+		touched [16]bool
+		final   [16]lvalue
+	}
+	effects := make([]localEffect, len(blocks))
+	for bi, blk := range blocks {
+		var regs x86NoWindowRegs
+		var touched [16]bool
+		for i := blk.Start; i < blk.End; i++ {
+			touchX86InstrEffect(insts[i], &regs, &touched, poolDisplay, thrFields)
+		}
+		var eff localEffect
+		eff.touched = touched
+		for r := 0; r < 16; r++ {
+			if touched[r] {
+				if v := regs[r]; v != "" {
+					eff.final[r] = lvalue{kind: lvKnown, note: v}
+				} else {
+					eff.final[r] = lvalue{kind: lvBottom}
+				}
+			}
+		}
+		effects[bi] = eff
+	}
+
+	preds := make([][]int, len(blocks))
+	for bi, blk := range blocks {
+		for _, s := range blk.Succs {
+			if s.BlockID >= 0 && s.BlockID < len(blocks) {
+				preds[s.BlockID] = append(preds[s.BlockID], bi)
+			}
+		}
+	}
+
+	entryState := make([][16]lvalue, len(blocks))
+	exitState := make([][16]lvalue, len(blocks))
+	worklist := make([]int, len(blocks))
+	inWorklist := make([]bool, len(blocks))
+	for i := range worklist {
+		worklist[i] = i
+		inWorklist[i] = true
+	}
+
+	maxVisits := len(blocks)*len(blocks) + 64
+	visits := 0
+	for len(worklist) > 0 && visits < maxVisits {
+		id := worklist[0]
+		worklist = worklist[1:]
+		inWorklist[id] = false
+		visits++
+
+		var in [16]lvalue
+		switch {
+		case id == 0:
+			for r := range in {
+				in[r] = lvalue{kind: lvBottom}
+			}
+		case len(preds[id]) == 0:
+			for r := range in {
+				in[r] = lvalue{kind: lvBottom}
+			}
+		default:
+			for r := range in {
+				in[r] = lvalue{kind: lvTop}
+			}
+			for _, p := range preds[id] {
+				for r := 0; r < 16; r++ {
+					in[r] = meetLvalue(in[r], exitState[p][r])
+				}
+			}
+		}
+
+		changed := in != entryState[id]
+		entryState[id] = in
+
+		out := in
+		eff := effects[id]
+		for r := 0; r < 16; r++ {
+			if eff.touched[r] {
+				out[r] = eff.final[r]
+			}
+		}
+		if out != exitState[id] {
+			changed = true
+			exitState[id] = out
+		}
+
+		if changed {
+			for _, s := range blocks[id].Succs {
+				if s.BlockID >= 0 && s.BlockID < len(blocks) && !inWorklist[s.BlockID] {
+					worklist = append(worklist, s.BlockID)
+					inWorklist[s.BlockID] = true
+				}
+			}
+		}
+	}
+
+	var res X86ScanResult
+	for bi, blk := range blocks {
+		var regs x86NoWindowRegs
+		for r := 0; r < 16; r++ {
+			if entryState[bi][r].kind == lvKnown {
+				regs[r] = entryState[bi][r].note
+			}
+		}
+		fakeRT := &x86RegTracker{}
+		for r := 0; r < 16; r++ {
+			if regs[r] != "" {
+				fakeRT.defs[r] = x86RegProvenance{note: regs[r]}
+			}
+		}
+		for i := blk.Start; i < blk.End; i++ {
+			d := insts[i]
+			if d.Inst.Op == x86asm.CALL {
+				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay)
+				if e.TargetPC != 0 {
+					argMask := inferX86CallArgRegMaskLocal(insts, i)
+					e.ArgRegMask = argMask
+					e.ArgCountHint = popcount8(argMask)
+				}
+				res.Edges = append(res.Edges, e)
+				continue
+			}
+			touchX86InstrEffect(d, &regs, &[16]bool{}, poolDisplay, thrFields)
+			for r := 0; r < 16; r++ {
+				fakeRT.defs[r] = x86RegProvenance{note: regs[r]}
+			}
+			if pd, ok := poolStringRefFor(d, poolDisplay); ok {
+				res.StringRefs = append(res.StringRefs, StringRefRecord{
+					Func: funcName, PC: fmt.Sprintf("0x%x", d.Addr),
+					Kind: "PP", PoolIdx: pd.idx, Value: pd.value,
+				})
+			}
+		}
+	}
+	return res
+}
+
+// x86NoWindowRegs mirrors noWindowRegs above but sized for x86_64's 16 GP
+// registers instead of ARM64's 31.
+type x86NoWindowRegs [16]string
+
+type x86DecodedInst struct {
+	Addr uint64
+	Inst x86asm.Inst
+	Len  int
+}
+
+type x86BlockCFG struct {
+	Start, End int // indices into the flat decoded-instruction slice
+	Succs      []Succ
+}
+
+func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
+	var out []x86DecodedInst
+	for off := 0; off < len(funcCode); {
+		addr := funcVA + uint64(off)
+		inst, err := x86asm.Decode(funcCode[off:], 64)
+		length := inst.Len
+		if err != nil || length <= 0 {
+			out = append(out, x86DecodedInst{Addr: addr, Len: 1})
+			off++
+			continue
+		}
+		out = append(out, x86DecodedInst{Addr: addr, Inst: inst, Len: length})
+		off += length
+	}
+	return out
+}
+
+func x86RelTargetLocal(d x86DecodedInst) (uint64, bool) {
+	for _, arg := range d.Inst.Args {
+		if arg == nil {
+			continue
+		}
+		if rel, ok := arg.(x86asm.Rel); ok {
+			return d.Addr + uint64(d.Len) + uint64(int64(rel)), true //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
+		}
+	}
+	return 0, false
+}
+
+func isX86CondJumpLocal(op x86asm.Op) bool {
+	switch op {
+	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
+		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
+		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS:
+		return true
+	}
+	return false
+}
+
+// buildX86Blocks partitions a flat instruction slice into basic blocks:
+// leaders are the function start, JMP/Jcc targets, and instructions
+// following a terminator (RET/JMP/Jcc) -- CALL is deliberately NOT a
+// leader-inducing instruction, matching ARM64's BuildCFG (BL doesn't
+// split blocks there either), so provenance flows through call sites
+// exactly like it does across ARM64 BLs.
+func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
+	funcStart := insts[0].Addr
+	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
+
+	addrToIdx := make(map[uint64]int, len(insts))
+	for i, d := range insts {
+		addrToIdx[d.Addr] = i
+	}
+
+	const (
+		kOther = iota
+		kJmp
+		kJcc
+		kRet
+	)
+	kind := make([]int, len(insts))
+	target := make([]uint64, len(insts))
+	hasTarget := make([]bool, len(insts))
+
+	leaders := map[int]bool{0: true}
+	for i, d := range insts {
+		switch {
+		case d.Inst.Op == x86asm.RET:
+			kind[i] = kRet
+		case d.Inst.Op == x86asm.JMP:
+			kind[i] = kJmp
+			if t, ok := x86RelTargetLocal(d); ok {
+				target[i], hasTarget[i] = t, true
+			}
+		case isX86CondJumpLocal(d.Inst.Op):
+			kind[i] = kJcc
+			if t, ok := x86RelTargetLocal(d); ok {
+				target[i], hasTarget[i] = t, true
+			}
+		default:
+			continue
+		}
+		if i+1 < len(insts) {
+			leaders[i+1] = true
+		}
+		if hasTarget[i] && target[i] >= funcStart && target[i] < funcEnd {
+			if idx, ok := addrToIdx[target[i]]; ok {
+				leaders[idx] = true
+			}
+		}
+	}
+
+	sorted := make([]int, 0, len(leaders))
+	for idx := range leaders {
+		sorted = append(sorted, idx)
+	}
+	sort.Ints(sorted)
+
+	leaderToBlock := make(map[int]int, len(sorted))
+	blocks := make([]x86BlockCFG, len(sorted))
+	for i, start := range sorted {
+		end := len(insts)
+		if i+1 < len(sorted) {
+			end = sorted[i+1]
+		}
+		blocks[i] = x86BlockCFG{Start: start, End: end}
+		leaderToBlock[start] = i
+	}
+
+	for bi := range blocks {
+		blk := &blocks[bi]
+		if blk.End <= blk.Start {
+			continue
+		}
+		last := blk.End - 1
+		switch kind[last] {
+		case kRet:
+			// terminal
+		case kJmp:
+			if hasTarget[last] {
+				if idx, ok := addrToIdx[target[last]]; ok {
+					if tb, ok := leaderToBlock[idx]; ok {
+						blk.Succs = append(blk.Succs, Succ{BlockID: tb})
+						continue
+					}
+				}
+			}
+			// indirect jump / unresolved target -- terminal
+		case kJcc:
+			if hasTarget[last] {
+				if idx, ok := addrToIdx[target[last]]; ok {
+					if tb, ok := leaderToBlock[idx]; ok {
+						blk.Succs = append(blk.Succs, Succ{BlockID: tb, Cond: "T"})
+					}
+				}
+			}
+			if nb, ok := leaderToBlock[blk.End]; ok {
+				blk.Succs = append(blk.Succs, Succ{BlockID: nb, Cond: "F"})
+			}
+		default:
+			if nb, ok := leaderToBlock[blk.End]; ok {
+				blk.Succs = append(blk.Succs, Succ{BlockID: nb})
+			}
+		}
+	}
+	return blocks
+}
+
+// touchX86InstrEffect applies one instruction's register-definition
+// effect to regs -- the CALL classification itself is handled by the
+// caller (ScanX86FunctionCFG), since CALL doesn't define a register the
+// way MOV/LEA do.
+func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]bool, poolDisplay map[int]string, thrFields map[int]string) {
+	inst := d.Inst
+	if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
+		dstReg, dstOK := inst.Args[0].(x86asm.Reg)
+		if !dstOK {
+			return
+		}
+		if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && inst.Op == x86asm.MOV {
+			dstIdx, srcIdx := canonX86Reg(dstReg), canonX86Reg(srcReg)
+			if srcIdx >= 0 && srcIdx < 16 && regs[srcIdx] != "" {
+				x86Define(regs, touched, dstIdx, regs[srcIdx])
+			} else {
+				x86Kill(regs, touched, dstIdx)
+			}
+			return
+		}
+		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
+			dstIdx := canonX86Reg(dstReg)
+			switch canonX86Reg(mem.Base) {
+			case x86RegTHR:
+				// H-3 fix: annotate THR loads with field names when available.
+				if thrFields != nil {
+					if name, ok := thrFields[int(mem.Disp)]; ok {
+						x86Define(regs, touched, dstIdx, "THR."+name)
+					} else {
+						x86Define(regs, touched, dstIdx, "dispatch_table")
+					}
+				} else {
+					x86Define(regs, touched, dstIdx, "dispatch_table")
+				}
+			case x86RegPP:
+				poolIdx := int(mem.Disp/8) - 2
+				if disp, ok := poolDisplay[poolIdx]; ok {
+					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
+				} else {
+					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d]", poolIdx))
+				}
+			default:
+				// Generic memory-dereference load (vtable/closure-style calls
+				// off a non-PP/THR base). Mirrors ARM64's LDUR64 fallback in
+				// touchInstrEffect (dataflow.go) -- annotate rather than kill,
+				// so call sites indirecting through it still get a `via`.
+				x86Define(regs, touched, dstIdx, "object_field")
+			}
+			return
+		}
+		x86Kill(regs, touched, canonX86Reg(dstReg))
+		return
+	}
+	if len(inst.Args) >= 1 {
+		if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
+			x86Kill(regs, touched, canonX86Reg(dstReg))
+		}
+	}
+}
+
+func x86Define(regs *x86NoWindowRegs, touched *[16]bool, idx int, note string) {
+	if idx < 0 || idx > 15 {
+		return
+	}
+	regs[idx] = note
+	touched[idx] = true
+}
+
+func x86Kill(regs *x86NoWindowRegs, touched *[16]bool, idx int) {
+	if idx < 0 || idx > 15 {
+		return
+	}
+	regs[idx] = ""
+	touched[idx] = true
+}
+
+type poolStringRef struct {
+	idx   int
+	value string
+}
+
+// poolStringRefFor reports whether instruction d is a pool load ([R15+
+// disp]) whose resolved display value is a quoted string, for
+// string_refs.jsonl -- split out from touchX86InstrEffect so the
+// local-effect precompute pass (which doesn't need string refs, only
+// register touch/kill bookkeeping) doesn't pay for it twice.
+func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringRef, bool) {
+	inst := d.Inst
+	if inst.Op != x86asm.MOV || len(inst.Args) < 2 {
+		return poolStringRef{}, false
+	}
+	if _, dstOK := inst.Args[0].(x86asm.Reg); !dstOK {
+		return poolStringRef{}, false
+	}
+	mem, ok := inst.Args[1].(x86asm.Mem)
+	if !ok || canonX86Reg(mem.Base) != x86RegPP {
+		return poolStringRef{}, false
+	}
+	poolIdx := int(mem.Disp/8) - 2
+	disp, ok := poolDisplay[poolIdx]
+	if !ok || len(disp) < 2 || disp[0] != '"' {
+		return poolStringRef{}, false
+	}
+	val, err := strconv.Unquote(disp)
+	if err != nil {
+		return poolStringRef{}, false
+	}
+	return poolStringRef{idx: poolIdx, value: val}, true
+}

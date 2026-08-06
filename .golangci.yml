@@ -1,0 +1,34 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - unused      # dead code: unused funcs/vars/consts/types/struct fields (replaces deprecated deadcode/structcheck/varcheck)
+    - staticcheck # broad static-analysis suite (SA/ST/QF checks), catches real bugs and style issues
+    - unparam     # unused function parameters and always-same-value parameters
+    - ineffassign # ineffectual assignments (value written, never read)
+    - revive      # style/lint rules (golint successor)
+    - gocritic    # additional diagnostics, style, and performance checks
+    - errcheck    # unchecked error return values
+    - gosec       # security-focused static analysis
+  settings:
+    staticcheck:
+      checks:
+        - all
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true # too noisy for interface-satisfying stubs; unparam already covers the useful case
+  exclusions:
+    generated: lax
+    rules:
+      # Test files: relax error-checking/security noise that's fine in tests.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

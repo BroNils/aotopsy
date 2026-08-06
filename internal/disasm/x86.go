@@ -1,0 +1,328 @@
+package disasm
+
+import (
+	"fmt"
+
+	"golang.org/x/arch/x86/x86asm"
+)
+
+// x86_64 Dart AOT reserved-register roles, confirmed directly against
+// dart-lang/sdk's runtime/vm/constants_x64.h: `const Register PP = R15;`,
+// `const Register THR = R14;`. Unlike ARM64 (a fixed 4-byte instruction
+// width, handled by Inst/Disassemble/ExtractCallEdges above), x86_64's
+// variable-length instructions make materializing a full []Inst slice and
+// re-walking it for call-edge extraction awkward, so this file scans each
+// function in a single pass instead -- the same design internal/decompiler
+// and cmd/aotopsy/gdtcall.go already use for x86_64.
+const (
+	x86RegPP  = 15 // R15
+	x86RegTHR = 14 // R14
+)
+
+// x86RegProvenance records a register's last known origin. Note: no
+// time-based expiry field -- that was the old fixed-window design
+// (see MODIFICATIONS.md / ARCHITECTURE.md's "x86_64 port status");
+// ScanX86FunctionCFG (dataflow_x86.go) tracks provenance via a real
+// CFG-wide dataflow instead, and only uses x86RegTracker as a small
+// read-only adapter so classifyX86Call below doesn't need two lookup
+// call shapes.
+type x86RegProvenance struct {
+	note string
+}
+
+type x86RegTracker struct {
+	defs [16]x86RegProvenance
+}
+
+func (rt *x86RegTracker) lookup(idx int) string {
+	if idx < 0 || idx > 15 {
+		return ""
+	}
+	return rt.defs[idx].note
+}
+
+// canonX86Reg maps any-width GP register operand to a canonical family
+// index 0..15 (RAX..R15), or -1 for anything else (XMM, segment regs,
+// high-byte AH/CH/DH/BH, etc.) -- same mapping as
+// cmd/aotopsy/gdtcall.go's canon64, duplicated here rather than shared
+// since internal/disasm cannot import from cmd/aotopsy (the dependency
+// only goes the other way).
+func canonX86Reg(r x86asm.Reg) int {
+	switch r {
+	case x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL:
+		return 0
+	case x86asm.RCX, x86asm.ECX, x86asm.CX, x86asm.CL:
+		return 1
+	case x86asm.RDX, x86asm.EDX, x86asm.DX, x86asm.DL:
+		return 2
+	case x86asm.RBX, x86asm.EBX, x86asm.BX, x86asm.BL:
+		return 3
+	case x86asm.RSP, x86asm.ESP, x86asm.SP, x86asm.SPB:
+		return 4
+	case x86asm.RBP, x86asm.EBP, x86asm.BP, x86asm.BPB:
+		return 5
+	case x86asm.RSI, x86asm.ESI, x86asm.SI, x86asm.SIB:
+		return 6
+	case x86asm.RDI, x86asm.EDI, x86asm.DI, x86asm.DIB:
+		return 7
+	case x86asm.R8, x86asm.R8L, x86asm.R8W, x86asm.R8B:
+		return 8
+	case x86asm.R9, x86asm.R9L, x86asm.R9W, x86asm.R9B:
+		return 9
+	case x86asm.R10, x86asm.R10L, x86asm.R10W, x86asm.R10B:
+		return 10
+	case x86asm.R11, x86asm.R11L, x86asm.R11W, x86asm.R11B:
+		return 11
+	case x86asm.R12, x86asm.R12L, x86asm.R12W, x86asm.R12B:
+		return 12
+	case x86asm.R13, x86asm.R13L, x86asm.R13W, x86asm.R13B:
+		return 13
+	case x86asm.R14, x86asm.R14L, x86asm.R14W, x86asm.R14B:
+		return 14
+	case x86asm.R15, x86asm.R15L, x86asm.R15W, x86asm.R15B:
+		return 15
+	}
+	return -1
+}
+
+// X86ScanResult carries call edges and string references extracted from
+// one function in a single instruction-decode pass.
+type X86ScanResult struct {
+	Edges      []CallEdge
+	StringRefs []StringRefRecord
+}
+
+// x86ArgRegCanon lists the SysV AMD64 ABI's integer argument registers, in
+// calling-convention order, as canonX86Reg's canonical indices (RDI=7,
+// RSI=6, RDX=2, RCX=1, R8=8, R9=9 -- NOT contiguous, unlike ARM64's X0-X7).
+// Mirrors x86ArgRegs in internal/decompiler/x86.go; position i here is
+// ArgRegs[i] there.
+var x86ArgRegCanon = [6]int{7, 6, 2, 1, 8, 9}
+
+// x86ArgRegBitPos returns which bit of an inferCallArgRegMaskLocal-style
+// mask a canonical register index corresponds to (its position in
+// x86ArgRegCanon/x86ArgRegs), or -1 if it isn't one of the 6 argument
+// registers.
+func x86ArgRegBitPos(canonIdx int) int {
+	for i, c := range x86ArgRegCanon {
+		if c == canonIdx {
+			return i
+		}
+	}
+	return -1
+}
+
+// maxX86ArgSetupBack bounds inferX86CallArgRegMaskLocal's backward scan --
+// same rationale as ARM64's maxArgSetupBack (calledge.go): argument setup
+// is a short, contiguous span immediately before the call.
+const maxX86ArgSetupBack = 16
+
+// inferX86CallArgRegMaskLocal is inferCallArgRegMaskLocal's x86_64
+// counterpart: scans backward from insts[callIdx] (a CALL instruction)
+// counting which of RDI/RSI/RDX/RCX/R8/R9 (bit i = x86ArgRegCanon[i]) were
+// freshly defined via MOV/LEA in the immediate lead-up to this call. Stops
+// at the first earlier CALL (a previous, unrelated call's own setup) or
+// after maxX86ArgSetupBack instructions. Same caveats as the ARM64
+// version: a single call site's mask is register-allocator noise prone
+// (e.g. a value preserved across the call for later use can share a
+// register with a real argument at a DIFFERENT call site) -- callers must
+// aggregate across every call site targeting the same callee and take the
+// bitwise-AND intersection, not trust one site alone (see
+// cmd/aotopsy/decompile_native_cmd.go's resolveArgRegIndices and its
+// doc comment for why intersection, not exact-equality or majority).
+func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
+	var mask uint8
+	for i, steps := callIdx-1, 0; i >= 0 && steps < maxX86ArgSetupBack; i, steps = i-1, steps+1 {
+		d := insts[i]
+		if d.Inst.Op == x86asm.CALL {
+			break
+		}
+		if d.Inst.Op != x86asm.MOV && d.Inst.Op != x86asm.LEA {
+			continue
+		}
+		if len(d.Inst.Args) == 0 {
+			continue
+		}
+		dstReg, ok := d.Inst.Args[0].(x86asm.Reg)
+		if !ok {
+			continue
+		}
+		pos := x86ArgRegBitPos(canonX86Reg(dstReg))
+		if pos < 0 {
+			continue
+		}
+		mask |= 1 << uint(pos)
+	}
+	return mask
+}
+
+func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string) CallEdge {
+	e := CallEdge{FromPC: addr, Kind: "call"}
+	for _, arg := range inst.Args {
+		if arg == nil {
+			continue
+		}
+		if rel, ok := arg.(x86asm.Rel); ok {
+			target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
+			e.TargetPC = target
+			if name, ok := symbols(target); ok {
+				e.TargetName = name
+			}
+			return e
+		}
+		if reg, ok := arg.(x86asm.Reg); ok {
+			e.Kind = "call_indirect"
+			e.Reg = reg.String()
+			e.Via = rt.lookup(canonX86Reg(reg))
+			return e
+		}
+		if mem, ok := arg.(x86asm.Mem); ok {
+			e.Kind = "call_indirect"
+			if mem.Index == 0 {
+				e.Reg = fmt.Sprintf("[%s+0x%x]", mem.Base, mem.Disp)
+			} else {
+				e.Reg = fmt.Sprintf("[%s+%s*%d+0x%x]", mem.Base, mem.Index, mem.Scale, mem.Disp)
+			}
+			// CALL [reg+disp] can address the dispatch table / object pool
+			// directly as the call's own memory operand -- e.g. `call
+			// [r14+0x238]` -- with no prior MOV loading it into a plain
+			// register first. rt.lookup only knows provenance for registers
+			// that were *defined* by an earlier instruction; R14/R15
+			// themselves are never "defined" that way, so check the base
+			// register's fixed role before falling back to the tracker.
+			var baseNote string
+			switch canonX86Reg(mem.Base) {
+			case x86RegTHR:
+				// THR-relative calls are dispatch table calls regardless of
+				// whether an index register is present. The indexed form
+				// (call [R14 + RCX*8 + disp]) is the primary dispatch table
+				// call pattern in Dart AOT x86_64 code.
+				baseNote = "dispatch_table"
+			case x86RegPP:
+				poolIdx := int(mem.Disp/8) - 2
+				if disp, ok := poolDisplay[poolIdx]; ok {
+					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
+				} else {
+					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
+				}
+			default:
+				baseNote = rt.lookup(canonX86Reg(mem.Base))
+			}
+			if canonX86Reg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+				e.Via = "dispatch_table"
+			} else {
+				e.Via = baseNote
+			}
+			return e
+		}
+	}
+	return e
+}
+
+// X86Inst is a minimal decoded-instruction record (address + text) used
+// for thr-audit's context window, sitting alongside ScanX86Function's
+// CallEdge/StringRefRecord-oriented output above.
+type X86Inst struct {
+	Addr uint64
+	Text string
+}
+
+// DecodeX86Simple disassembles a function's raw bytes into address+text
+// pairs only -- everything ExtractX86THRAccesses/BuildAuditRecords need,
+// without the register-provenance bookkeeping ScanX86Function carries.
+func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
+	var out []X86Inst
+	for off := 0; off < len(funcCode); {
+		addr := funcVA + uint64(off)
+		inst, err := x86asm.Decode(funcCode[off:], 64)
+		length := inst.Len
+		if err != nil || length <= 0 {
+			out = append(out, X86Inst{Addr: addr, Text: "<bad>"})
+			off++
+			continue
+		}
+		out = append(out, X86Inst{Addr: addr, Text: inst.String()})
+		off += length
+	}
+	return out
+}
+
+// ExtractX86THRAccesses scans a function's raw bytes for MOV instructions
+// whose memory operand is THR-relative ([R14+disp]), mirroring
+// ExtractTHRAccesses's ARM64 X26 scan. Load = THR field read into a
+// register; store = register written into a THR field. fields is
+// optional (marks Resolved when the offset has a known name).
+func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
+	var out []THRAccess
+	for off := 0; off < len(funcCode); {
+		addr := funcVA + uint64(off)
+		inst, err := x86asm.Decode(funcCode[off:], 64)
+		length := inst.Len
+		if err != nil || length <= 0 {
+			off++
+			continue
+		}
+		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
+			width := inst.DataSize / 8
+			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
+					_, resolved := fields[int(mem.Disp)]
+					out = append(out, THRAccess{
+						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
+						DstReg: canonX86Reg(dstReg), Width: width, Resolved: resolved,
+					})
+				}
+			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
+				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
+					_, resolved := fields[int(mem.Disp)]
+					out = append(out, THRAccess{
+						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
+						IsStore: true, SrcReg: canonX86Reg(srcReg), Width: width, Resolved: resolved,
+					})
+				}
+			}
+		}
+		off += length
+	}
+	return out
+}
+
+// BuildX86AuditRecords is ExtractX86THRAccesses's counterpart to
+// BuildAuditRecords, operating on []X86Inst instead of []Inst for
+// context-window lookup.
+func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []THRAuditRecord {
+	pcIdx := make(map[uint64]int, len(allInsts))
+	for i, inst := range allInsts {
+		pcIdx[inst.Addr] = i
+	}
+
+	records := make([]THRAuditRecord, 0, len(accesses))
+	for _, a := range accesses {
+		var ctx []string
+		if idx, ok := pcIdx[a.PC]; ok {
+			for d := -2; d <= 2; d++ {
+				j := idx + d
+				if j >= 0 && j < len(allInsts) {
+					prefix := "  "
+					if d == 0 {
+						prefix = "> "
+					}
+					ctx = append(ctx, fmt.Sprintf("%s0x%x: %s", prefix, allInsts[j].Addr, allInsts[j].Text))
+				}
+			}
+		}
+
+		rec := THRAuditRecord{
+			Sample: sample, DartVersion: dartVersion, PC: fmt.Sprintf("0x%x", a.PC),
+			Insn: a.InsnText, THROffset: fmt.Sprintf("0x%x", a.THROffset), IsStore: a.IsStore,
+			Width: a.Width, FuncName: funcName, Resolved: a.Resolved, Context: ctx,
+		}
+		if a.IsStore {
+			rec.SrcReg = a.SrcReg
+		} else {
+			rec.DstReg = a.DstReg
+		}
+		records = append(records, rec)
+	}
+	return records
+}
