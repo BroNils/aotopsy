@@ -74,29 +74,68 @@ func AnalyzeFunction(
 	}
 
 	// Pre-scan: find dispatch table call patterns and record selector offsets.
-	// Pattern: ADD/SUB X30, X0, #imm → LDR X30, [X21, X30, LSL #3] → BLR X30
+	// Three patterns exist depending on Dart version:
+	//
+	// 3.x (Dart 2.16+): ADD/SUB X30, X0, #imm → LDR X30, [X21, X30, LSL #3] → BLR X30
+	//   SDK: AddImmediate(LR, cid_reg, offset) — LR = X30 as temp
+	//
+	// 2.x pattern A: ADD/SUB X0, X0, #imm → LDR X30, [X21, X0, LSL #3] → BLR X30
+	//   SDK: AddImmediate(cid_reg, cid_reg, offset) — cid_reg = X0, in-place
+	//
+	// 2.x pattern B: LDURH Wn, [Xobj, #1] → SUB Xn, Xn, #imm → LDR X30, [X21, Xn, LSL #3] → BLR X30
+	//   Class ID extracted via 16-bit load, then SUB in-place on any register,
+	//   then LDR uses that register as index.
+	//
 	// The imm gives the selector offset (in slot units, relative to kOriginElement).
-	// We store the selector offset keyed by the BLR's address so resolveBLR
-	// can use it even when the receiver class ID is unknown (Top).
 	for i := 0; i < len(insts)-2; i++ {
-		// Check for ADD X30, X0, #imm or SUB X30, X0, #imm
 		raw := insts[i].Raw
 		var selectorOffset int
+		var slotReg int // register used as dispatch table index
 		var found bool
+
+		// Pattern 3.x: ADD/SUB X30, X0, #imm (rd=30, rn=0)
 		if rd, rn, imm, ok := isADD64Immediate(raw); ok && rd == 30 && rn == 0 {
 			selectorOffset = imm
+			slotReg = 30
 			found = true
 		} else if rd, rn, imm, ok := isSUB64Immediate(raw); ok && rd == 30 && rn == 0 {
 			selectorOffset = -imm
+			slotReg = 30
 			found = true
+		}
+		// Pattern 2.x A: ADD/SUB X0, X0, #imm (rd=0, rn=0)
+		if !found {
+			if rd, rn, imm, ok := isADD64Immediate(raw); ok && rd == 0 && rn == 0 {
+				selectorOffset = imm
+				slotReg = 0
+				found = true
+			} else if rd, rn, imm, ok := isSUB64Immediate(raw); ok && rd == 0 && rn == 0 {
+				selectorOffset = -imm
+				slotReg = 0
+				found = true
+			}
+		}
+		// Pattern 2.x B: ADD/SUB Xn, Xn, #imm (rd==rn, any register)
+		// This catches the case where LDURH loads class ID into Wn,
+		// then SUB Xn, Xn, #imm computes the slot in-place.
+		if !found {
+			if rd, rn, imm, ok := isADD64Immediate(raw); ok && rd == rn && rd < 31 {
+				selectorOffset = imm
+				slotReg = rd
+				found = true
+			} else if rd, rn, imm, ok := isSUB64Immediate(raw); ok && rd == rn && rd < 31 {
+				selectorOffset = -imm
+				slotReg = rd
+				found = true
+			}
 		}
 		if !found {
 			continue
 		}
-		// Check next instruction: LDR X30, [X21, X30, LSL #3]
+		// Check next instruction: LDR X30, [X21, XslotReg, LSL #3]
 		if i+1 < len(insts) {
 			ldrRaw := insts[i+1].Raw
-			if base, rm, rt, ok := isLDRRegExtended(ldrRaw); ok && base == 21 && rm == 30 && rt == 30 {
+			if base, rm, rt, ok := isLDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm == slotReg {
 				// Check instruction after: BLR X30
 				if i+2 < len(insts) {
 					if blrReg, ok := isBLR(insts[i+2].Raw); ok && blrReg == 30 {
@@ -823,6 +862,49 @@ func transferInstruction(
 			return
 		}
 		// Unknown field or receiver type.
+		state[rt] = Top()
+		return
+	}
+
+	// 5-ldurh. LDURH Wt, [Xn, #imm9] — 16-bit load (Dart 2.x class ID extraction).
+	// In Dart 2.x: kClassIdTagPos=16, kClassIdTagSize=16.
+	// LoadClassId: LoadFromOffset(result, object, 2-1, kUnsignedTwoBytes)
+	// = LDURH Wt, [Xobj, #1] — loads 2-byte class ID from tags at offset 2.
+	// If imm9 == 1, this is a class ID load → set Bottom().
+	if base, rt, imm9, ok := isLDURH(raw); ok {
+		if rt >= 31 {
+			return
+		}
+		// Stack loads via LDURH (unlikely but handle for safety)
+		if base == 29 {
+			if t, ok2 := stackTypes[imm9]; ok2 {
+				state[rt] = t
+			} else {
+				state[rt] = Top()
+			}
+			return
+		}
+		if base == 15 {
+			if t, ok2 := stackTypes[imm9+0x10000]; ok2 {
+				state[rt] = t
+			} else {
+				state[rt] = Top()
+			}
+			return
+		}
+		// Class ID load: LDURH Wt, [Xobj, #1]
+		if imm9 == 1 && base < 31 {
+			state[rt] = Bottom()
+			ctx.HeaderHits++
+			return
+		}
+		// Regular 16-bit field load
+		if base < 31 && state[base].Kind == LatticeKnownClass {
+			if classID, ok2 := ctx.FieldValueClass(state[base].ClassID, int32(imm9)); ok2 {
+				state[rt] = KnownClass(classID)
+				return
+			}
+		}
 		state[rt] = Top()
 		return
 	}
@@ -1567,6 +1649,25 @@ func isSTUR32(raw uint32) (base, rt int, imm9 int, ok bool) {
 // Mask: 0xFFE00C00, Value: 0xB8400000
 func isLDUR32(raw uint32) (base, rt int, imm9 int, ok bool) {
 	if raw&0xFFE00C00 != 0xB8400000 {
+		return 0, 0, 0, false
+	}
+	rt = int(raw & 0x1F)
+	base = int((raw >> 5) & 0x1F)
+	imm9 = int(int32(raw>>12) & 0x1FF)
+	if imm9 > 256 {
+		imm9 -= 512
+	}
+	return base, rt, imm9, true
+}
+
+// isLDURH detects LDURH Wt, [Xn, #imm9] (16-bit unscaled load).
+// Used in Dart 2.x for class ID extraction:
+//   LDURH Wt, [Xobj, #1] = load 2 bytes at obj+1+1 = obj+2 = class ID field
+// (kClassIdTagPos=16, kClassIdTagSize=16 in 2.x; vs 12/20 in 3.x)
+// Encoding: 01 111 000 01 0 imm9 00 Rn Rt (size=01, V=0, opc=01)
+// Base: 0x78400000, Mask: 0xFFE00C00
+func isLDURH(raw uint32) (base, rt int, imm9 int, ok bool) {
+	if raw&0xFFE00C00 != 0x78400000 {
 		return 0, 0, 0, false
 	}
 	rt = int(raw & 0x1F)
