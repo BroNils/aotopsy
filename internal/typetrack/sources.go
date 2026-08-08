@@ -128,6 +128,26 @@ type TypeContext struct {
 	// Context are absent from AOT snapshots so both were always empty.
 	InstanceFieldTypes map[int]map[int32]int
 
+	// FieldStoreTypes is the whole-program (class, byte offset) → value class
+	// map recovered from field STORE instructions in function bodies:
+	// classID → byteOffset → classID of the stored value.
+	// This is the interprocedural field-store → field-load tracking (gap-analysis §3.1).
+	// When a STR Xt, [Xn, #offset] is encountered and both Xn (receiver) and
+	// Xt (value) have KnownClass, we record (Xn.ClassID, offset) → Xt.ClassID.
+	// This information is used by FieldValueClass as a third source (after
+	// declared type and observed instance type) to type field loads.
+	FieldStoreTypes map[int]map[int32]int
+
+	// AllocationSites maps allocation site PC → classID.
+	// Distinguishes same class allocated at different sites (gap-analysis §3.1).
+	// When an allocation stub call is detected, the site (call PC) and class
+	// (from the stub or from RDI/X0 before the call) are recorded.
+	AllocationSites map[uint64]int
+
+	// InstantiatedClasses is the set of class IDs that are instantiated
+	// (allocated) anywhere in the program. Used by RTA (gap-analysis §3.1).
+	InstantiatedClasses map[int]bool
+
 	// ClosureDataByClosure maps closure ref ID → parent function ref ID.
 	// In AOT, Context objects are not serialized, but ClosureData IS.
 	// Each ClosureData has parent_function and closure refs, enabling
@@ -255,6 +275,9 @@ func BuildTypeContext(
 	MinAppClassID:           minAppClassIDSafe(pl.CT),
 		MethodNameToRefIDs:      buildMethodNameToRefIDs(pl),
 		InstanceFieldTypes:      make(map[int]map[int32]int),
+		FieldStoreTypes:         make(map[int]map[int32]int),
+		AllocationSites:         make(map[uint64]int),
+		InstantiatedClasses:     make(map[int]bool),
 		ClosureDataByClosure:    make(map[int]int),
 		ClosureDataByParent:     make(map[int][]int),
 		PoolClosureClass:        make(map[int]int),
@@ -631,17 +654,18 @@ func BuildTypeContext(
 // FieldValueClass resolves a field load `base.<byteOff>` on a receiver of class
 // receiverCID to the class of the loaded value.
 //
-// Two sources, in precedence order:
+// Three sources, in precedence order:
 //
 //  1. The DECLARED field type -- FieldByOwnerOffset gives the Field object at
 //     that offset and FieldTypes its resolved type class. Authoritative when
 //     present.
 //  2. The OBSERVED type from const Instance objects in the snapshot
 //     (InstanceFieldTypes), used only when every observed instance of the
-//     class agrees. This is what the Instance capture buys: it types fields
-//     the declared type cannot (dynamic/Object?, or a version where Type ->
-//     ClassID resolution is unavailable, e.g. Dart 2.13-2.15 where
-//     TypeClassIdIsRef makes FieldTypes empty).
+//     class agrees.
+//  3. The STORED type from field-store instructions in function bodies
+//     (FieldStoreTypes), recovered from interprocedural analysis. This types
+//     fields that neither declared nor observed types can (e.g., fields set
+//     at runtime to objects of a known class).
 //
 // Both ARM64 and x86_64 field-load handlers call this, so the precedence rule
 // lives in exactly one place.
@@ -649,8 +673,9 @@ func BuildTypeContext(
 // IMPORTANT: byteOff from the caller is the raw instruction's displacement,
 // which is field_offset - kHeapObjectTag (kHeapObjectTag = 1 for both ARM64
 // and x86_64 compressed-pointer builds). The maps (FieldByOwnerOffset,
-// InstanceFieldTypes) are keyed by field_offset (from object start, without
-// kHeapObjectTag subtraction). So we add kHeapObjectTag back before lookup.
+// InstanceFieldTypes, FieldStoreTypes) are keyed by field_offset (from object
+// start, without kHeapObjectTag subtraction). So we add kHeapObjectTag back
+// before lookup.
 func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bool) {
 	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
 	// map key = field_offset. Add 1 to align.
@@ -665,6 +690,12 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
 		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
 			ctx.InstanceFieldHits++
+			return classID, true
+		}
+	}
+	// P1.3: Field-store → field-load tracking.
+	if byOff, ok := ctx.FieldStoreTypes[receiverCID]; ok {
+		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
 			return classID, true
 		}
 	}

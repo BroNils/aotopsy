@@ -412,6 +412,8 @@ func transferInstruction(
 			if state[base].Kind == LatticeKnownClass && state[rt].Kind == LatticeKnownClass {
 				key := state[base].ClassID*100000 + imm9
 				stackTypes[key+0x20000] = state[rt]
+				// P1.3: Record field store for whole-program field-store → field-load tracking.
+				recordFieldStore(ctx, state[base].ClassID, int32(imm9), state[rt].ClassID)
 			}
 		}
 	}
@@ -436,6 +438,8 @@ func transferInstruction(
 			if state[base].Kind == LatticeKnownClass && state[rt].Kind == LatticeKnownClass {
 				key := state[base].ClassID*100000 + imm9
 				stackTypes[key+0x20000] = state[rt]
+				// P1.3: Record field store for whole-program tracking.
+				recordFieldStore(ctx, state[base].ClassID, int32(imm9), state[rt].ClassID)
 			}
 		}
 	}
@@ -1028,6 +1032,10 @@ func transferInstruction(
 			}
 		}
 		if isAllocation {
+			// P1.4: Record allocation site.
+			if state[0].Kind == LatticeKnownClass {
+				recordAllocationSite(ctx, inst.Addr, state[0].ClassID)
+			}
 			// Preserve X0's KnownClass — the allocation returns a new object
 			// of the same class that was in X0 before the call.
 			// Kill X1-X7 (other arguments are consumed).
@@ -1147,6 +1155,10 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
+     // P1.5: RTA filter — only include instantiated classes.
+     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
+     	continue
+     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1181,6 +1193,10 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
+     // P1.5: RTA filter — only include instantiated classes.
+     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
+     	continue
+     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1208,6 +1224,10 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
+     // P1.5: RTA filter — only include instantiated classes.
+     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
+     	continue
+     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1346,6 +1366,10 @@ func resolveBLR(
 				// classID is reasonable (>= 0).
 				impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
 				if impliedCID < 0 {
+					continue
+				}
+				// P1.5: RTA filter — only include classes that are instantiated.
+				if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
 					continue
 				}
 				if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
