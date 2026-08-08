@@ -39,6 +39,32 @@ func AnalyzeFunctionX86(
 		EntryTypes: entryTypes,
 	}
 
+	// Pre-scan: find x86_64 dispatch table call patterns.
+	// Pattern from SDK (flow_graph_compiler_x64.cc):
+	//   MOV RAX, [R14 + dispatch_table_array_offset]  (LoadDispatchTable)
+	//   CALL [RAX + RCX*8 + disp32]                    (dispatch table call)
+	// disp32 = (selector_offset - kOriginElement) * kWordSize
+	// selector_offset = disp32/kWordSize + kOriginElement
+	// We store the selector offset keyed by the CALL's address.
+	for i := 0; i < len(insts); i++ {
+		inst := insts[i]
+		if inst.Inst.Op != x86asm.CALL {
+			continue
+		}
+		mem, ok := inst.Inst.Args[0].(x86asm.Mem)
+		if !ok {
+			continue
+		}
+		baseReg := canonX86RegLocal(mem.Base)
+		idxReg := canonX86RegLocal(mem.Index)
+		// Check: CALL [RAX + RCX*8 + disp32]
+		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
+			// selector_offset = disp/8 + kOriginElement
+			selectorOffset := int(mem.Disp/8) + ctx.KOriginElement
+			ctx.SelectorOffsets[inst.Addr] = selectorOffset
+		}
+	}
+
 	blocks := buildBlocksX86(insts)
 	if len(blocks) == 0 {
 		return result
@@ -545,11 +571,18 @@ func transferInstructionX86(
 				if idxReg == x86RegRCX && state[x86RegRCX].Kind == LatticeKnownClass {
 					slot := int(state[x86RegRCX].ClassID) + int(mem.Disp/8)
 					resolveX86Dispatch(state, slot, inst, ctx, result)
+				} else if idxReg == x86RegRCX {
+					// P2.1: RCX is Bottom or Top — try selector offset scan.
+					resolveX86DispatchSelectorOffset(state, inst, ctx, result)
 				}
 			} else if idxReg == x86RegRCX && state[x86RegRCX].Kind == LatticeKnownClass {
 				// Direct dispatch table call: CALL [reg + RCX*8 + disp].
 				slot := int(state[x86RegRCX].ClassID) + int(mem.Disp/8)
 				resolveX86Dispatch(state, slot, inst, ctx, result)
+			} else if idxReg == x86RegRCX && mem.Scale == 8 {
+				// P2.1: RCX is Bottom or Top, but pattern matches dispatch table call.
+				// Try selector offset scan.
+				resolveX86DispatchSelectorOffset(state, inst, ctx, result)
 			}
 			// Kill return value + arg regs.
 			state[x86RegRAX] = Top()
@@ -677,6 +710,50 @@ func resolveX86Dispatch(
 				}
 			}
 		}
+	}
+	result.BLRResolutions = append(result.BLRResolutions, res)
+}
+
+// resolveX86DispatchSelectorOffset resolves a dispatch table call using
+// the pre-scanned selector offset, without needing the receiver class ID.
+// Scans all dispatch table entries at the selector offset to find unique targets.
+func resolveX86DispatchSelectorOffset(
+	state *[31]TypeLattice,
+	inst X86DecodedInst,
+	ctx *TypeContext,
+	result *IntraResult,
+) {
+	selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]
+	if !ok {
+		return
+	}
+	targetSet := map[string]bool{}
+	var targets []string
+	for _, entry := range ctx.DispatchBySlot {
+		if entry.Kind != cluster.DispatchCode {
+			continue
+		}
+		impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
+		if impliedCID < 0 {
+			continue
+		}
+		if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+			if !targetSet[name] {
+				targetSet[name] = true
+				targets = append(targets, name)
+			}
+		}
+	}
+	res := BlrResolution{
+		PC:        inst.Addr,
+		SlotIndex: -1,
+	}
+	if len(targets) == 1 {
+		res.TargetName = targets[0]
+		res.Resolved = true
+	} else if len(targets) > 1 {
+		res.TargetName = strings.Join(targets, " | ")
+		res.Resolved = true
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }

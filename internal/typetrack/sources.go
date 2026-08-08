@@ -145,6 +145,13 @@ type TypeContext struct {
 	// for closure calls that would otherwise be Top (no type info).
 	PoolClosureClass map[int]int
 
+	// SelectorOffsets maps BLR instruction address → selector offset
+	// (in dispatch table slot units). Pre-scanned from the instruction
+	// stream: ADD/SUB X30, X0, #imm before LDR X30, [X21, X30, LSL #3]
+	// gives the selector offset. Used to resolve dispatch table calls
+	// even when the receiver class ID is unknown (Top).
+	SelectorOffsets map[uint64]int
+
 	// Subclasses maps class ID → list of direct subclass IDs.
 	// Built as the inverse of SuperClass, this is the Class Hierarchy Analysis
 	// (CHA) structure: for a given receiver class, enumerate all subclasses
@@ -251,6 +258,7 @@ func BuildTypeContext(
 		ClosureDataByClosure:    make(map[int]int),
 		ClosureDataByParent:     make(map[int][]int),
 		PoolClosureClass:        make(map[int]int),
+		SelectorOffsets:         make(map[uint64]int),
 		Subclasses:              make(map[int][]int),
 	}
 
@@ -343,12 +351,16 @@ func BuildTypeContext(
 	}
 
 	// 5. Build poolClassByIndex: PP index → ClassID.
-	// Fase 7 PART A fix: for Instance objects (CID >= ct.Instance), RefCID
-	// gives the instance's class ID (correct for dispatch). For Type objects,
-	// RefCID gives the Type class's CID (wrong for dispatch — need the class
-	// the Type represents, from TypeInfo.ClassID). For other objects (Class,
-	// Function, etc.), skip — they don't participate in dispatch.
-	// refToType is already built above (line 160) as map[int]*cluster.TypeInfo.
+	// For Instance objects, RefCID gives the instance's class ID.
+	// For Type objects, RefCID gives the Type class's CID (wrong for
+	// dispatch — need the class the Type represents, from TypeInfo.ClassID).
+	// For other objects (Class, Function, etc.), skip.
+	//
+	// IMPORTANT: We populate ALL CIDs, including predefined/framework classes
+	// (Widget, State, RenderObject, etc.). Framework classes DO have dispatch
+	// methods (Widget.build, State.initState, etc.) and are the majority of
+	// dispatch table calls. The previous restriction (cid >= NumPredefinedCids)
+	// excluded 90%+ of dispatch calls from resolution.
 	for _, pe := range clResult.Pool {
 		if pe.Kind != cluster.PoolTagged {
 			continue
@@ -356,19 +368,16 @@ func BuildTypeContext(
 		classID := -1
 		if pl.RefCID != nil {
 			if cid, ok := pl.RefCID[pe.RefID]; ok && cid >= 0 {
-				if pl.CT != nil && cid >= pl.CT.NumPredefinedCids {
-					// App-defined Instance subclass: RefCID IS the dispatch class ID.
-					// Only app-defined classes (>= NumPredefinedCids) have dispatch
-					// methods — predefined CIDs like TypeArguments (47), Array (90),
-					// etc. don't have user-defined methods to dispatch.
-					classID = cid
-				} else if pl.CT != nil && cid == pl.CT.Type {
+				if pl.CT != nil && cid == pl.CT.Type {
 					// Type object: resolve to the class it represents.
 					if ti, ok := refToType[pe.RefID]; ok && ti.ClassID >= 0 {
 						classID = int(ti.ClassID)
 					}
+				} else {
+					// Instance or other tagged object: RefCID IS the class ID.
+					// Include ALL classes — both app-defined and framework.
+					classID = cid
 				}
-				// Other objects (Class, Function, etc.): skip, classID stays -1.
 			}
 		}
 		if classID >= 0 {

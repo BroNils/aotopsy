@@ -282,6 +282,16 @@ func Run(opts Opts) (*Result, error) {
 	}
 	result.FuncCount = disasmResult.Written
 
+	// Step 4.1: Cross-referencing JSONL outputs (gap-analysis §6).
+	// Reads functions.jsonl, call_edges.jsonl, string_refs.jsonl
+	// produced by the disasm stage.
+	funcs, _ := ReadJSONL[disasm.FuncRecord](filepath.Join(opts.OutDir, "functions.jsonl"))
+	edges, _ := ReadJSONL[disasm.CallEdgeRecord](filepath.Join(opts.OutDir, "call_edges.jsonl"))
+	stringRefs, _ := ReadJSONL[disasm.StringRefRecord](filepath.Join(opts.OutDir, "string_refs.jsonl"))
+	if err := writeXrefJSONL(opts.OutDir, clResult, pl, funcs, edges, stringRefs); err != nil {
+		opts.logf("  xref: %v\n", err)
+	}
+
 	// Step 4.5: Type inference — resolve dispatch-table BLR call sites
 	// by inferring receiver ClassID at each call site.
 	// Non-fatal: if it fails, BLR edges remain unresolved (as before).

@@ -13,6 +13,7 @@ import (
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/output"
 	"aotopsy/internal/render"
 	"aotopsy/internal/signal"
 )
@@ -161,6 +162,42 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	}
 	fi, _ = os.Stat(dotPath)
 	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, dotPath, cli.Reset, fi.Size())
+
+	// Write SARIF report.
+	var findings []output.SignalFinding
+	for _, sf := range g.Funcs {
+		// String-based findings
+		for _, ref := range sf.StringRefs {
+			for _, cat := range ref.Categories {
+				findings = append(findings, output.SignalFinding{
+					Category:    cat,
+					StringValue: ref.Value,
+					Function:    sf.Name,
+					PC:          ref.PC,
+				})
+			}
+		}
+		// Category-based findings (e.g. THR calls) without string refs
+		if len(sf.StringRefs) == 0 && len(sf.Categories) > 0 {
+			for _, cat := range sf.Categories {
+				findings = append(findings, output.SignalFinding{
+					Category:    cat,
+					StringValue: "",
+					Function:    sf.Name,
+					PC:          sf.PC,
+				})
+			}
+		}
+	}
+	if len(findings) > 0 {
+		if err := output.WriteSARIF(inDir, findings, "1.0.0"); err != nil {
+			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
+		} else {
+			sarifPath := filepath.Join(inDir, "report.sarif")
+			fi, _ := os.Stat(sarifPath)
+			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, fi.Size(), len(findings))
+		}
+	}
 
 	// Build connected signal CFG.
 	if !noAsm {

@@ -421,6 +421,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	source := strings.Join(e.lines, "\n")
 	source = compactLines(source)
+	// Expression cleanup passes (from flutterdec expr_cleanup.rs)
+	source = constantFold(source)
+	source = rewriteNegatedComparisons(source)
+	source = simplifyWrappedMemberAccess(source)
+	source = stripOuterParens(source)
+	// Arg renaming with type hints (from flutterdec naming.rs)
+	source = applyArgRenaming(source, fir.ParamTypeNames)
 	source = applyNamingPass(source, fir)
 
 	return Artifact{FunctionName: fir.Name, Source: source, Stats: e.stats}

@@ -212,6 +212,54 @@ console.log("[aotopsy] " + hooks.length + " function hook(s) installed on " + MO
 console.log("[aotopsy] " + probes.length + " indirect-call probe(s) installed on " + MODULE_NAME);
 `)
 	}
+
+	// Stalker.followAllThreads — trace all threads, not just main.
+	// Filters GC threads by name to reduce noise.
+	b.WriteString(`
+// === Stalker: follow all threads (gap-analysis §5) ===
+// Traces every thread's execution, filtering GC threads to reduce noise.
+// Enable by setting ENABLE_STALKER=true below.
+var ENABLE_STALKER = false;
+if (ENABLE_STALKER) {
+  Process.enumerateThreads().forEach(function(thread) {
+    var name = thread.name || "unknown";
+    // Skip GC and compiler threads to reduce noise
+    if (name.indexOf("Dart_") === 0 || name.indexOf("GC") >= 0 || name.indexOf("Compiler") >= 0) {
+      console.log("[aotopsy] Stalker: skipping " + name + " (tid=" + thread.id + ")");
+      return;
+    }
+    Stalker.follow(thread.id, {
+      events: { call: true, ret: false, exec: false, block: false },
+      onCallSummary: function(summary) {
+        for (var target in summary) {
+          var count = summary[target];
+          var mod = Process.findModuleByAddress(ptr(target));
+          var label = mod ? mod.name + "+0x" + (ptr(target).sub(mod.base)).toString(16) : hex(target);
+          if (count > 10) { // filter rare calls
+            console.log("[aotopsy] Stalker " + name + ": " + label + " x" + count);
+          }
+        }
+      }
+    });
+    console.log("[aotopsy] Stalker: following " + name + " (tid=" + thread.id + ")");
+  });
+}
+
+// === Memory access monitor (gap-analysis §5) ===
+// Watches PP/THR/heap accesses. Enable by setting ENABLE_MEMMON=true.
+var ENABLE_MEMMON = false;
+if (ENABLE_MEMMON) {
+  // Monitor THR (Thread) region for field accesses
+  var thrRange = [0, 0x1000]; // adjust based on arch
+  MemoryAccessMonitor.enable(thrRange, {
+    onAccess: function(details) {
+      console.log("[aotopsy] memmon: " + details.operation + " @ " + hex(details.address) +
+        " from " + hex(details.from) + " (tid=" + details.threadId + ")");
+    }
+  });
+  console.log("[aotopsy] Memory access monitor enabled on THR range");
+}
+`)
 	return b.String()
 }
 

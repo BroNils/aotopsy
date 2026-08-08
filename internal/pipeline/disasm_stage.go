@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"aotopsy/internal/callgraph"
 	"aotopsy/internal/cli"
@@ -72,7 +74,6 @@ func RunDisasmStage(
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
-	peephole := disasm.NewPeepholeState(poolDisplay)
 
 	opts.stagef("disasm", "%s%d%s functions, pool %s%d%s entries (%d resolved)",
 		cli.Gold, len(ranges), cli.Reset, cli.Gold, len(clResult.Pool), cli.Reset, len(poolDisplay))
@@ -139,186 +140,231 @@ func RunDisasmStage(
 	dr := &DisasmResult{}
 	var funcInfos []callgraph.FuncInfo
 
+	// Parallel disassembly: each function is independent (read-only code
+	// slice, read-only lookup). File writes are serialized via a mutex.
+	// Workers are capped at 4 for memory safety (AGENTS.md §16: 6GB host).
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	workers := runtime.NumCPU()
+	if workers > 4 {
+		workers = 4
+	}
+	type job struct {
+		idx int
+		r   *cluster.CodeRange
+	}
+	jobs := make(chan job, n)
 	for i := 0; i < n; i++ {
 		r := &ranges[i]
 		if r.Size == 0 {
 			continue
 		}
+		jobs <- job{idx: i, r: r}
+	}
+	close(jobs)
 
-		// Slice code bytes for this function.
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
-
-		// Resolve name.
-		var funcName, ownerName, name string
-		if r.RefID >= 0 {
-			ci := pl.CodeNames[r.RefID]
-			funcName = ci.FuncName
-			ownerName = ci.OwnerName
-			name = QualifiedName(ownerName, funcName, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-			name = funcName
-		}
-
-		// Disassemble.
-		peephole.Reset()
-		insts := disasm.Disassemble(funcCode, disasm.Options{
-			BaseAddr: funcVA,
-			Symbols:  lookup,
-		})
-
-		// Build per-function annotators.
-		thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
-		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, peephole.Annotate}
-
-		// Write asm file.
-		filename := FuncRelPath(ownerName, funcName, r.PCOffset)
-		if err := output.WriteASM(opts.OutDir, filename, insts, lookup, annotators...); err != nil {
-			return nil, fmt.Errorf("write asm %s: %w", filename, err)
-		}
-
-		// Write raw bytes for CFG construction.
-		if err := output.WriteBin(opts.OutDir, filename, funcCode); err != nil {
-			return nil, fmt.Errorf("write bin %s: %w", filename, err)
-		}
-
-		// Write index entry.
-		entry := DisasmIndexEntry{
-			Name:      funcName,
-			OwnerName: ownerName,
-			RefID:     r.RefID,
-			OwnerRef:  r.OwnerRef,
-			PCOffset:  r.PCOffset,
-			Size:      r.Size,
-			File:      filepath.ToSlash(filepath.Join("asm", filename+".txt")),
-		}
-		if err := enc.Encode(entry); err != nil {
-			return nil, fmt.Errorf("write index: %w", err)
-		}
-
-		// Emit functions.jsonl entry.
-		var paramCount int
-		if r.RefID >= 0 {
-			paramCount = pl.CodeNames[r.RefID].ParamCount
-		}
-		funcRec := disasm.FuncRecord{
-			PC:         fmt.Sprintf("0x%x", funcVA),
-			Size:       int(r.Size),
-			Name:       name,
-			Owner:      ownerName,
-			ParamCount: paramCount,
-		}
-		if err := funcsEnc.Encode(funcRec); err != nil {
-			return nil, fmt.Errorf("write functions.jsonl: %w", err)
-		}
-
-		// Extract call edges. CFG-wide provenance (ExtractCallEdgesCFG)
-		// instead of the old fixed W=8 sliding window: propagates
-		// register provenance along real control-flow edges, so it
-		// isn't lost just because a PP/THR load happened more than 8
-		// instructions before its use.
-		edges := disasm.ExtractCallEdgesCFG(name, insts, lookup, annotators)
-		for _, e := range edges {
-			rec := disasm.CallEdgeRecord{
-				FromFunc: name,
-				FromPC:   fmt.Sprintf("0x%x", e.FromPC),
-				Kind:     e.Kind,
-				Reg:      e.Reg,
-				Via:      e.Via,
-			}
-			if e.Kind == "bl" {
-				if e.TargetName != "" {
-					rec.Target = e.TargetName
-				} else {
-					rec.Target = fmt.Sprintf("0x%x", e.TargetPC)
+	var disasmErr error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localPeephole := disasm.NewPeepholeState(poolDisplay)
+			for j := range jobs {
+				if disasmErr != nil {
+					return
 				}
-			}
-			if err := edgesEnc.Encode(rec); err != nil {
-				return nil, fmt.Errorf("write call_edges.jsonl: %w", err)
-			}
-			dr.TotalEdges++
-			if e.Kind == "blr" {
-				dr.TotalBLR++
-				if e.Via != "" {
-					dr.BLRAnnotated++
-				} else {
-					dr.BLRUnannotated++
-				}
-			}
-		}
+				r := j.r
 
-		// Build per-function CFG DOT and accumulate for call graph.
-		if opts.Graph {
-			lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
-			if nblocks > 1 {
-				g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
-				dot := render.DOTCFG(g, name)
-				dotPath := filepath.Join(cfgDir, filename+".dot")
-				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
-					return nil, fmt.Errorf("mkdir cfg: %w", err)
+				funcStart := uint64(r.PCOffset) - codeOff
+				funcEnd := funcStart + uint64(r.Size)
+				if funcEnd > uint64(len(code)) {
+					funcEnd = uint64(len(code))
 				}
-				if err := os.WriteFile(dotPath, []byte(dot), 0644); err != nil {
-					return nil, fmt.Errorf("write cfg dot %s: %w", filename, err)
-				}
-				dr.CFGCount++
-			}
-			funcInfos = append(funcInfos, callgraph.FuncInfo{
-				Name:      name,
-				CallEdges: edges,
-			})
-		}
-
-		// Extract string references from PP loads.
-		stringRefs := ExtractStringRefs(insts, poolDisplay, name)
-		for _, sr := range stringRefs {
-			if err := stringRefsEnc.Encode(sr); err != nil {
-				return nil, fmt.Errorf("write string_refs.jsonl: %w", err)
-			}
-			dr.TotalStringRefs++
-		}
-
-		// Extract unresolved THR accesses.
-		thrAccesses := disasm.ExtractTHRAccesses(insts, thrFields)
-		for _, a := range thrAccesses {
-			if a.Resolved {
-				continue
-			}
-			rec := disasm.UnresolvedTHRRecord{
-				FuncName:  name,
-				PC:        fmt.Sprintf("0x%x", a.PC),
-				THROffset: fmt.Sprintf("0x%x", a.THROffset),
-				Width:     a.Width,
-				IsStore:   a.IsStore,
-				Class:     "UNKNOWN",
-			}
-			if ann := thrCtxAnn(disasm.Inst{Addr: a.PC, Raw: 0}); ann != "" {
-				switch {
-				case strings.Contains(ann, "RUNTIME_ENTRY"):
-					rec.Class = "RUNTIME_ENTRY"
-				case strings.Contains(ann, "OBJSTORE"):
-					rec.Class = "OBJSTORE"
-				case strings.Contains(ann, "ISO_GROUP"):
-					rec.Class = "ISO_GROUP"
-				case strings.HasPrefix(ann, "THR."):
+				if funcStart >= funcEnd {
 					continue
 				}
-			}
-			if err := unresTHREnc.Encode(rec); err != nil {
-				return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
-			}
-			dr.TotalUnresTHR++
-		}
+				funcCode := code[funcStart:funcEnd]
+				funcVA := codeVA + funcStart
 
-		dr.Written++
+				var funcName, ownerName, name string
+				if r.RefID >= 0 {
+					ci := pl.CodeNames[r.RefID]
+					funcName = ci.FuncName
+					ownerName = ci.OwnerName
+					name = QualifiedName(ownerName, funcName, r.PCOffset)
+				} else {
+					funcName = fmt.Sprintf("stub_%x", r.PCOffset)
+					name = funcName
+				}
+
+				localPeephole.Reset()
+				insts := disasm.Disassemble(funcCode, disasm.Options{
+					BaseAddr: funcVA,
+					Symbols:  lookup,
+				})
+
+				thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
+				annotators := []disasm.Annotator{ppAnn, thrCtxAnn, localPeephole.Annotate}
+
+				filename := FuncRelPath(ownerName, funcName, r.PCOffset)
+
+				// Disassembly is done in parallel; file writes are serialized.
+				mu.Lock()
+				if disasmErr != nil {
+					mu.Unlock()
+					return
+				}
+
+				if err := output.WriteASM(opts.OutDir, filename, insts, lookup, annotators...); err != nil {
+					disasmErr = fmt.Errorf("write asm %s: %w", filename, err)
+					mu.Unlock()
+					return
+				}
+				if err := output.WriteBin(opts.OutDir, filename, funcCode); err != nil {
+					disasmErr = fmt.Errorf("write bin %s: %w", filename, err)
+					mu.Unlock()
+					return
+				}
+
+				entry := DisasmIndexEntry{
+					Name:      funcName,
+					OwnerName: ownerName,
+					RefID:     r.RefID,
+					OwnerRef:  r.OwnerRef,
+					PCOffset:  r.PCOffset,
+					Size:      r.Size,
+					File:      filepath.ToSlash(filepath.Join("asm", filename+".txt")),
+				}
+				if err := enc.Encode(entry); err != nil {
+					disasmErr = fmt.Errorf("write index: %w", err)
+					mu.Unlock()
+					return
+				}
+
+				var paramCount int
+				if r.RefID >= 0 {
+					paramCount = pl.CodeNames[r.RefID].ParamCount
+				}
+				funcRec := disasm.FuncRecord{
+					PC:         fmt.Sprintf("0x%x", funcVA),
+					Size:       int(r.Size),
+					Name:       name,
+					Owner:      ownerName,
+					ParamCount: paramCount,
+				}
+				if err := funcsEnc.Encode(funcRec); err != nil {
+					disasmErr = fmt.Errorf("write functions.jsonl: %w", err)
+					mu.Unlock()
+					return
+				}
+
+				edges := disasm.ExtractCallEdgesCFG(name, insts, lookup, annotators)
+				for _, e := range edges {
+					rec := disasm.CallEdgeRecord{
+						FromFunc: name,
+						FromPC:   fmt.Sprintf("0x%x", e.FromPC),
+						Kind:     e.Kind,
+						Reg:      e.Reg,
+						Via:      e.Via,
+					}
+					if e.Kind == "bl" {
+						if e.TargetName != "" {
+							rec.Target = e.TargetName
+						} else {
+							rec.Target = fmt.Sprintf("0x%x", e.TargetPC)
+						}
+					}
+					if err := edgesEnc.Encode(rec); err != nil {
+						disasmErr = fmt.Errorf("write call_edges.jsonl: %w", err)
+						mu.Unlock()
+						return
+					}
+					dr.TotalEdges++
+					if e.Kind == "blr" {
+						dr.TotalBLR++
+						if e.Via != "" {
+							dr.BLRAnnotated++
+						} else {
+							dr.BLRUnannotated++
+						}
+					}
+				}
+
+				if opts.Graph {
+					lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
+					if nblocks > 1 {
+						g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
+						dot := render.DOTCFG(g, name)
+						dotPath := filepath.Join(cfgDir, filename+".dot")
+						if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
+							disasmErr = fmt.Errorf("mkdir cfg: %w", err)
+							mu.Unlock()
+							return
+						}
+						if err := os.WriteFile(dotPath, []byte(dot), 0644); err != nil {
+							disasmErr = fmt.Errorf("write cfg dot %s: %w", filename, err)
+							mu.Unlock()
+							return
+						}
+						dr.CFGCount++
+					}
+					funcInfos = append(funcInfos, callgraph.FuncInfo{
+						Name:      name,
+						CallEdges: edges,
+					})
+				}
+
+				stringRefs := ExtractStringRefs(insts, poolDisplay, name)
+				for _, sr := range stringRefs {
+					if err := stringRefsEnc.Encode(sr); err != nil {
+						disasmErr = fmt.Errorf("write string_refs.jsonl: %w", err)
+						mu.Unlock()
+						return
+					}
+					dr.TotalStringRefs++
+				}
+
+				thrAccesses := disasm.ExtractTHRAccesses(insts, thrFields)
+				for _, a := range thrAccesses {
+					if a.Resolved {
+						continue
+					}
+					rec := disasm.UnresolvedTHRRecord{
+						FuncName:  name,
+						PC:        fmt.Sprintf("0x%x", a.PC),
+						THROffset: fmt.Sprintf("0x%x", a.THROffset),
+						Width:     a.Width,
+						IsStore:   a.IsStore,
+						Class:     "UNKNOWN",
+					}
+					if ann := thrCtxAnn(disasm.Inst{Addr: a.PC, Raw: 0}); ann != "" {
+						switch {
+						case strings.Contains(ann, "RUNTIME_ENTRY"):
+							rec.Class = "RUNTIME_ENTRY"
+						case strings.Contains(ann, "OBJSTORE"):
+							rec.Class = "OBJSTORE"
+						case strings.Contains(ann, "ISO_GROUP"):
+							rec.Class = "ISO_GROUP"
+						case strings.HasPrefix(ann, "THR."):
+							continue
+						}
+					}
+					if err := unresTHREnc.Encode(rec); err != nil {
+						disasmErr = fmt.Errorf("write unresolved_thr.jsonl: %w", err)
+						mu.Unlock()
+						return
+					}
+					dr.TotalUnresTHR++
+				}
+
+				dr.Written++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if disasmErr != nil {
+		return nil, disasmErr
 	}
 
 	opts.logf("  %sfunctions:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.Written, cli.Blue, asmDir, cli.Reset)

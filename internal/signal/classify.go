@@ -32,6 +32,21 @@ const (
 	CatBlockchain  = "blockchain"  // Wallet, mnemonic, seed phrase, blockchain, NFT
 	CatGambling    = "gambling"    // Betting, casino, slots, lottery, poker
 	CatAttribution = "attribution" // Install referrer, campaign, organic, SDK tracking
+
+	// Security analysis categories (gap-analysis §4.1).
+	CatRooting     = "rooting"     // Root/jailbreak: magisk, supersu, xposed, frida-server
+	CatAntiAnalysis = "anti_analysis" // Anti-debug, anti-VM, anti-frida, emulator detection
+	CatSSLPinning  = "ssl_pinning" // Certificate pinning, X509TrustManager
+	CatAccessibility = "accessibility" // AccessibilityService, keylogger, screenCapture
+	CatFraud       = "fraud"       // Phishing, OTP, banking, card numbers
+	CatDynamicLoad = "dynamic_load" // DynamicLibrary.open, loadLibrary, mirrorSystem
+	CatIPC         = "ipc"         // Binder, ServiceManager, AIDL, ContentProvider
+	CatCovertChannel = "covert_channel" // Tor, socks5, proxychain, DNS tunnel
+	CatDRMBypass   = "drm_bypass"  // Widevine, FairPlay, PlayReady
+	CatObfuscation = "obfuscation" // Short meaningless names, identifier entropy
+	CatCryptoConst = "crypto_const" // AES S-box, SHA-256 K, crypto magic numbers
+	CatMethodChannel = "method_channel" // Flutter MethodChannel("name")
+	CatPlugin      = "plugin"      // Flutter plugin package names
 )
 
 var (
@@ -339,6 +354,71 @@ func ClassifyString(value string) []string {
 		cats = append(cats, CatAttribution)
 	}
 
+	// Rooting / jailbreak detection
+	if containsKeyword(value, rootingKeywords) {
+		cats = append(cats, CatRooting)
+	}
+
+	// Anti-analysis (anti-debug, anti-VM, anti-frida, emulator detection)
+	if containsKeyword(value, antiAnalysisKeywords) {
+		cats = append(cats, CatAntiAnalysis)
+	}
+
+	// SSL/TLS pinning
+	if containsKeyword(value, sslPinningKeywords) {
+		cats = append(cats, CatSSLPinning)
+	}
+
+	// Accessibility abuse (keylogger, screen capture)
+	if containsKeyword(value, accessibilityKeywords) {
+		cats = append(cats, CatAccessibility)
+	}
+
+	// Fraud / phishing / banking
+	if containsKeyword(value, fraudKeywords) {
+		cats = append(cats, CatFraud)
+	}
+
+	// Dynamic loading
+	if containsKeyword(value, dynamicLoadKeywords) {
+		cats = append(cats, CatDynamicLoad)
+	}
+
+	// IPC / Binder / AIDL
+	if containsKeyword(value, ipcKeywords) {
+		cats = append(cats, CatIPC)
+	}
+
+	// Covert channel (Tor, proxy, DNS tunnel)
+	if containsKeyword(value, covertChannelKeywords) {
+		cats = append(cats, CatCovertChannel)
+	}
+
+	// DRM bypass
+	if containsKeyword(value, drmBypassKeywords) {
+		cats = append(cats, CatDRMBypass)
+	}
+
+	// Crypto constants (AES S-box, SHA-256 K)
+	if isCryptoConstant(value) {
+		cats = append(cats, CatCryptoConst)
+	}
+
+	// Flutter MethodChannel
+	if reMethodChannel.MatchString(value) {
+		cats = append(cats, CatMethodChannel)
+	}
+
+	// Flutter plugin
+	if containsKeyword(value, pluginKeywords) {
+		cats = append(cats, CatPlugin)
+	}
+
+	// Obfuscation detection: short meaningless names
+	if isObfuscatedName(value) {
+		cats = append(cats, CatObfuscation)
+	}
+
 	return cats
 }
 
@@ -483,4 +563,189 @@ func entropy(s string) float64 {
 		}
 	}
 	return ent
+}
+
+
+// --- Security analysis keyword lists ---
+
+var rootingKeywords = []string{
+	"magisk", "supersu", "superuser", "xposed", "frida-server", "frida_server",
+	"substrate", "riru", "zygisk", "busybox", "superuser.apk",
+	"/system/xbin/su", "/system/bin/su", "/sbin/su", "which su",
+	"chainfire", "kingroot", "kingoroot", "towelroot",
+	"root_checker", "rootchecker", "isrooted", "is_rooted",
+	"testkeys", "userdebug", "ro.debuggable", "ro.secure",
+}
+
+var antiAnalysisKeywords = []string{
+	"ptrace", "tracerpid", "/proc/self/status", "proc/self/maps",
+	"frida-gadget", "frida_gadget", "isdebuggerattached", "is_debugger_attached",
+	"android.os.debug", "debug.isdebuggerconnected",
+	"ro.kernel.qemu", "qemu", "qemuprops", "goldfish", "ranchu",
+	"emulator", "isemulator", "is_emulator", "emulator_check",
+	"anti_debug", "antidebug", "anti_debugging", "debugging_check",
+	"frida", "xposed", "substrate", "cydia", "sileo",
+	"hooking", "hook_detection", "detect_hook",
+	"safetynet", "safety_net", "integrity_check", "playintegrity",
+	"attestation", "device_integrity",
+}
+
+var sslPinningKeywords = []string{
+	"certificatepinner", "certificate_pinner", "certificatepinning",
+	"ssl_pinning", "sslpinning", "certpinning", "cert_pinning",
+	"x509trustmanager", "x509_trust_manager", "trustmanager",
+	"okhttp3.cert", "okhttp.cert", "certificatepinnercallback",
+	"sha256/", "sha1/", "publickeyhash", "public_key_hash",
+	"spki-pin", "spki_pin", "pins-sha256",
+	"network_security_config", "networksecurityconfig",
+	"cleartexttraffic", "cleartext_traffic",
+}
+
+var accessibilityKeywords = []string{
+	"accessibilityservice", "accessibility_service",
+	"keylogger", "key_logger", "keylog",
+	"screencapture", "screen_capture", "screenshot",
+	"mediaprojection", "media_projection",
+	"accessibilityevent", "accessibility_event",
+	"accessibilitynodeinfo", "accessibility_node_info",
+	"performaction", "perform_action",
+	"gesturedescription", "gesture_description",
+	"dispatchgesture", "dispatch_gesture",
+}
+
+var fraudKeywords = []string{
+	"phishing", "phish", "credential_harvest", "credentialharvest",
+	"otp", "one_time_password", "otpbypass", "otp_bypass",
+	"cardnumber", "card_number", "creditcard", "credit_card",
+	"cvv", "cvc", "cardverification", "card_verification",
+	"banking", "bank_account", "bankaccount", "iban", "bic",
+	"identity_theft", "identitytheft",
+	"social_security", "socialsecurity", "ssn",
+	"skimmer", "card_skimming", "cardskimming",
+}
+
+var dynamicLoadKeywords = []string{
+	"dynamiclibrary", "dynamic_library", "dynamiclibrary.open",
+	"loadlibrary", "load_library", "dlopen", "dlsym",
+	"mirrorsystem", "mirror_system", "dart:mirrors",
+	"classloader", "class_loader", "dexclassloader", "dex_class_loader",
+	"pathclassloader", "path_class_loader",
+	"plugin_registry", "pluginregistry",
+	"reflect", "reflection", "invokemethod",
+}
+
+var ipcKeywords = []string{
+	"binder", "ibinder", "service_manager", "servicemanager",
+	"aidl", "parcel", "transact",
+	"contentprovider", "content_provider", "contentresolver",
+	"content_resolver", "contenturis",
+	"activitymanager", "activity_manager",
+	"packagemanager", "package_manager",
+	"notificationmanager", "notification_manager",
+	"keyguardmanager", "keyguard_manager",
+	"powermanager", "power_manager",
+}
+
+var covertChannelKeywords = []string{
+	"tor", "onion_router", "onionrouter", "tor_proxy",
+	"socks5", "socks4", "socks_proxy",
+	"proxychain", "proxy_chain",
+	"dns_tunnel", "dnstunnel", "iodine", "dns2tcp",
+	"stunnel", "ssh_tunnel", "sshtunnel",
+	"vpn_service", "vpnservice", "vpn_tunnel",
+	"cloudflare_tunnel", "ngrok", "localtunnel",
+}
+
+var drmBypassKeywords = []string{
+	"widevine", "fairplay", "playready",
+	"drm_info", "drminfo", "drm_session", "drmsession",
+	"media_drm", "mediadrm", "mediadrmmanager",
+	"provisioning", "license_request", "licenserequest",
+	"key_request", "keyrequest",
+	"decrypt_key", "decryptkey", "content_key", "contentkey",
+}
+
+var pluginKeywords = []string{
+	"plugins.flutter.io", "io.flutter.plugins",
+	"flutter_plugin", "flutterplugin",
+	"plugin registrant", "pluginregistrant",
+	"generated_plugin", "generatedplugin",
+	"flutter_plugin_registrant",
+}
+
+var reMethodChannel = regexp.MustCompile(`(?i)methodchannel\s*\(`)
+
+// isCryptoConstant checks if a value matches known crypto algorithm constants.
+// Uses a map for O(1) lookup. Only the most distinctive constants are listed
+// — those that uniquely identify a specific algorithm.
+var cryptoConstants = map[string]bool{
+	// SHA-256 K[0..7] (most distinctive — first 8 round constants)
+	"0x428a2f98": true, "0x71374491": true, "0xb5c0fbcf": true, "0xe9b5dba5": true,
+	"0x3956c25b": true, "0x59f111f1": true, "0x923f82a4": true, "0xab1c5ed5": true,
+	// SHA-256 H[0..7] (initial hash values)
+	"0x6a09e667": true, "0xbb67ae85": true, "0x3c6ef372": true, "0xa54ff53a": true,
+	"0x510e527f": true, "0x9b05688c": true, "0x1f83d9ab": true, "0x5be0cd19": true,
+	// SHA-1 K[0..3]
+	"0x5a827999": true, "0x6ed9eba1": true, "0x8f1bbcdc": true, "0xca62c1d6": true,
+	// SHA-1 H[0..4]
+	"0x67452301": true, "0xefcdab89": true, "0x98badcfe": true, "0x10325476": true, "0xc3d2e1f0": true,
+	// MD5 T[0..3]
+	"0xd76aa478": true, "0xe8c7b756": true, "0x242070db": true, "0xc1bdceee": true,
+	// AES S-box (first 4 entries — most distinctive)
+	"0x637c777b": true, "0x7b777c63": true, "0xf2b8669f": true, "0x6dc9a7b6": true,
+	// ChaCha20 constants ("expand 32-byte k")
+	"0x61707865": true, "0x3320646e": true, "0x79622d32": true, "0x6b206574": true,
+	// CRC32
+	"0xedb88320": true, "0x04c11db7": true, "0x82f63b78": true,
+	// BLAKE2b IV[0..3]
+	"0x243f6a88": true, "0x85a308d3": true, "0x13198a2e": true, "0x03707344": true,
+	// XTEA delta
+	"0x9e3779b9": true,
+	// Blowfish P-array[0..3] (same as BLAKE2b IV — listed once)
+	// AES Rcon[0..9]
+	"0x01000000": true, "0x02000000": true, "0x04000000": true, "0x08000000": true,
+	"0x10000000": true, "0x20000000": true, "0x40000000": true, "0x80000000": true,
+	"0x1b000000": true, "0x36000000": true,
+	// SHA-512 K[0..3] (64-bit)
+	"0x428a2f98d728ae22": true, "0x7137449123ef65cd": true,
+	"0xb5c0fbcfec4d3b2f": true, "0xe9b5dba58189dbbc": true,
+	// SHA-512 H[0..3] (64-bit)
+	"0x6a09e667f3bcc908": true, "0xbb67ae8584caa73b": true,
+	"0x3c6ef372fe94f82b": true, "0xa54ff53a5f1d36f1": true,
+	// Keccak round constants (first 4)
+	"0x0000000000000001": true, "0x0000000000008082": true,
+	"0x800000000000808a": true, "0x8000000080008000": true,
+}
+
+func isCryptoConstant(value string) bool {
+	return cryptoConstants[strings.ToLower(strings.TrimSpace(value))]
+}
+
+// isObfuscatedName detects short meaningless names typical of Dart --obfuscate.
+// Heuristic: 1-3 char names with no vowels, or names like "aA", "bB", "xY".
+func isObfuscatedName(value string) bool {
+	if len(value) < 1 || len(value) > 4 {
+		return false
+	}
+	// All uppercase or all lowercase single char
+	if len(value) == 1 && value[0] >= 'A' && value[0] <= 'z' {
+		return false // single chars are common in normal code
+	}
+	// Check for vowel-less short names (typical of obfuscation)
+	hasVowel := false
+	for _, c := range value {
+		switch c {
+		case 'a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U':
+			hasVowel = true
+		}
+	}
+	// 2-3 char names without vowels are suspicious
+	if !hasVowel && len(value) >= 2 && len(value) <= 3 {
+		// But exclude common short names: fn, db, id, ok, no, do, if, etc.
+		commonShort := map[string]bool{"fn": true, "db": true, "id": true, "ok": true, "no": true, "do": true, "if": true, "my": true, "by": true, "tx": true, "rx": true, "dx": true, "cx": true, "ex": true, "fx": true, "gx": true, "hx": true, "ix": true, "jx": true, "kx": true, "lx": true, "mx": true, "nx": true, "ox": true, "px": true, "qx": true, "sx": true, "ux": true, "vx": true, "wx": true, "xx": true, "yx": true, "zx": true}
+		if !commonShort[value] {
+			return true
+		}
+	}
+	return false
 }

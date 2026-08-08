@@ -31,7 +31,12 @@ func compactOnePass(lines []string) ([]string, bool) {
 	lines, c3 := collapseRedundantGuardedReturn(lines)
 	lines, c4 := collapseDuplicateReturns(lines)
 	lines, c5 := unwrapDeadWhileTrue(lines)
-	return lines, c1 || c2 || c3 || c4 || c5
+	lines, c6 := retryLoopSynthesis(lines)
+	lines, c7 := collapseIfElseReturn(lines)
+	lines, c8 := mergeIfChainContinue(lines)
+	lines, c9 := deadStoreElimination(lines)
+	lines, c10 := copyPropagation(lines)
+	return lines, c1 || c2 || c3 || c4 || c5 || c6 || c7 || c8 || c9 || c10
 }
 
 func leadingIndent(line string) int {

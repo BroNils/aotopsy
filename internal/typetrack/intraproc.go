@@ -73,6 +73,40 @@ func AnalyzeFunction(
 		return result
 	}
 
+	// Pre-scan: find dispatch table call patterns and record selector offsets.
+	// Pattern: ADD/SUB X30, X0, #imm → LDR X30, [X21, X30, LSL #3] → BLR X30
+	// The imm gives the selector offset (in slot units, relative to kOriginElement).
+	// We store the selector offset keyed by the BLR's address so resolveBLR
+	// can use it even when the receiver class ID is unknown (Top).
+	for i := 0; i < len(insts)-2; i++ {
+		// Check for ADD X30, X0, #imm or SUB X30, X0, #imm
+		raw := insts[i].Raw
+		var selectorOffset int
+		var found bool
+		if rd, rn, imm, ok := isADD64Immediate(raw); ok && rd == 30 && rn == 0 {
+			selectorOffset = imm
+			found = true
+		} else if rd, rn, imm, ok := isSUB64Immediate(raw); ok && rd == 30 && rn == 0 {
+			selectorOffset = -imm
+			found = true
+		}
+		if !found {
+			continue
+		}
+		// Check next instruction: LDR X30, [X21, X30, LSL #3]
+		if i+1 < len(insts) {
+			ldrRaw := insts[i+1].Raw
+			if base, rm, rt, ok := isLDRRegExtended(ldrRaw); ok && base == 21 && rm == 30 && rt == 30 {
+				// Check instruction after: BLR X30
+				if i+2 < len(insts) {
+					if blrReg, ok := isBLR(insts[i+2].Raw); ok && blrReg == 30 {
+						ctx.SelectorOffsets[insts[i+2].Addr] = selectorOffset
+					}
+				}
+			}
+		}
+	}
+
 	// Build basic blocks.
 	blocks := buildBlocks(insts)
 	if len(blocks) == 0 {
@@ -120,8 +154,10 @@ func AnalyzeFunction(
 			stackTypes[k] = v
 		}
 
+		var prevRaw uint32
 		for _, inst := range blk.insts {
-			transferInstruction(&state, inst, ctx, result, lca, stackTypes)
+			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes)
+			prevRaw = inst.Raw
 		}
 
 		oldExit := blockExit[idx]
@@ -340,9 +376,12 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 // transferInstruction updates the register type state based on one instruction.
 // On BLR instructions, it attempts to resolve the dispatch target.
 // stackTypes tracks stack slot types for frame pointer (X29) loads/stores.
+// prevRaw is the raw encoding of the previous instruction (0 if none),
+// used to detect header-load → UBFX patterns for class ID extraction.
 func transferInstruction(
 	state *[31]TypeLattice,
 	inst disasm.Inst,
+	prevRaw uint32,
 	ctx *TypeContext,
 	result *IntraResult,
 	lca func(int, int) int,
@@ -667,6 +706,15 @@ func transferInstruction(
 			state[rd] = KnownDispatch(state[rn].ClassID + imm)
 			ctx.ADDClassHits++
 			return
+		} else if state[rn].Kind == LatticeBottom {
+			// P1.2: ADD on Bottom (class ID from header load with unknown receiver).
+			// imm is the selector offset. We don't know the class ID, but we
+			// know the selector offset. Store it as KnownDispatch with a
+			// special marker (DispatchIndex = -imm - 1, negative = unknown class).
+			// The BLR handler will use SelectorOffsets to resolve.
+			state[rd] = KnownDispatch(-imm - 1) // negative = unknown class, encode selector offset
+			ctx.ADDClassHits++
+			return
 		}
 	}
 
@@ -684,6 +732,13 @@ func transferInstruction(
 			// Dart SDK: offset = selector - kOriginElement, if negative,
 			// AddImmediate emits SUB with |offset|.
 			state[rd] = KnownDispatch(state[rn].ClassID - imm)
+			ctx.ADDClassHits++
+			return
+		} else if state[rn].Kind == LatticeBottom {
+			// P1.2: SUB on Bottom (class ID from header load with unknown receiver).
+			// imm is |selector_offset| (SUB is used for negative offsets).
+			// selector_offset = -imm. Store as KnownDispatch with marker.
+			state[rd] = KnownDispatch(imm - 1) // positive = unknown class, encode |selector_offset|
 			ctx.ADDClassHits++
 			return
 		}
@@ -753,6 +808,15 @@ func transferInstruction(
 				state[rt] = KnownClass(classID)
 				return
 			}
+		}
+		// P1.2: Header load with unknown receiver type.
+		// If imm9 == -1, this is a tag load. Set Bottom() instead of Top()
+		// so UBFX can detect it as a class ID extraction and the dispatch
+		// slot computation can use selector offset scan.
+		if imm9 == -1 && base < 31 {
+			state[rt] = Bottom()
+			ctx.HeaderHits++
+			return
 		}
 		// Unknown field or receiver type.
 		state[rt] = Top()
@@ -871,6 +935,9 @@ func transferInstruction(
 	// 5b. UBFX/UBFM Xt, Xn, #lsb, #width — bitfield extract.
 	//     If Xn has KnownClass, this is likely extracting the class_id from
 	//     an object header. The result is still the class_id (KnownClass).
+	//     If Xn is Bottom (header load with unknown receiver), preserve Bottom
+	//     — the UBFX is extracting class ID from tags, and the result is a
+	//     class ID value (not an object pointer).
 	if rd, rn, ok := isUBFX(raw); ok {
 		if rd >= 31 {
 			return
@@ -880,6 +947,29 @@ func transferInstruction(
 			state[rd] = state[rn]
 			ctx.UBFXHits++
 			return
+		}
+		// P1.1: If previous instruction was LDUR Xt, [Xn, #-1] (header load)
+		// and current state[rn] is Bottom, this UBFX extracts class ID.
+		// Preserve Bottom — the result is a class ID, not an object.
+		if rn < 31 && state[rn].Kind == LatticeBottom {
+			// Check if prevRaw was a header load (LDUR Xt, [Xn, #-1])
+			if _, rt, ok2 := isLDUR64(prevRaw); ok2 && rt == rn {
+				imm9 := int(int32(prevRaw>>12) & 0x1FF)
+				if imm9 > 256 {
+					imm9 -= 512
+				}
+				if imm9 == -1 {
+					state[rd] = Bottom()
+					ctx.UBFXHits++
+					return
+				}
+			}
+			// Also check LDUR32 (compressed pointers)
+			if _, rt, _, ok2 := isLDUR32(prevRaw); ok2 && rt == rn {
+				state[rd] = Bottom()
+				ctx.UBFXHits++
+				return
+			}
 		}
 		// Unknown bitfield extract — kill type.
 		if rd >= 0 && rd < 31 {
@@ -1039,6 +1129,104 @@ func resolveBLR(
 		// Direct slot lookup.
 		res.SlotIndex = t.DispatchIndex
 		ctx.DispatchHits++
+
+		// P1.2: If DispatchIndex is negative, this is an unknown-class
+		// dispatch with a known selector offset (from ADD/SUB on Bottom).
+		// DispatchIndex = -selectorOffset - 1 (ADD) or |selectorOffset| - 1 (SUB).
+		// Use SelectorOffsets map for the actual offset, or decode from index.
+		if t.DispatchIndex < 0 {
+			// Try SelectorOffsets first (from pre-scan)
+			if selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+				targetSet := map[string]bool{}
+				var targets []string
+				for _, entry := range ctx.DispatchBySlot {
+					if entry.Kind != cluster.DispatchCode {
+						continue
+					}
+					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
+					if impliedCID < 0 {
+						continue
+					}
+					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+						if !targetSet[name] {
+							targetSet[name] = true
+							targets = append(targets, name)
+						}
+					}
+				}
+				if len(targets) == 1 {
+					res.TargetName = targets[0]
+					res.Resolved = true
+				} else if len(targets) > 1 {
+					res.TargetName = strings.Join(targets, " | ")
+					res.Resolved = true
+				}
+				result.BLRResolutions = append(result.BLRResolutions, res)
+				return
+			}
+			// Fallback: decode selector offset from DispatchIndex
+			// ADD: DispatchIndex = -imm - 1 → selectorOffset = imm = -(DispatchIndex + 1)
+			// SUB: DispatchIndex = imm - 1 → selectorOffset = -imm = -(DispatchIndex + 1)
+			// Both: selectorOffset = -(DispatchIndex + 1)
+			selectorOffset := -(t.DispatchIndex + 1)
+			if selectorOffset > 0 {
+				// ADD case: selector_offset = imm (positive)
+				targetSet := map[string]bool{}
+				var targets []string
+				for _, entry := range ctx.DispatchBySlot {
+					if entry.Kind != cluster.DispatchCode {
+						continue
+					}
+					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
+					if impliedCID < 0 {
+						continue
+					}
+					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+						if !targetSet[name] {
+							targetSet[name] = true
+							targets = append(targets, name)
+						}
+					}
+				}
+				if len(targets) == 1 {
+					res.TargetName = targets[0]
+					res.Resolved = true
+				} else if len(targets) > 1 {
+					res.TargetName = strings.Join(targets, " | ")
+					res.Resolved = true
+				}
+			} else if selectorOffset < 0 {
+				// SUB case: selector_offset = -imm (negative)
+				absOffset := -selectorOffset
+				targetSet := map[string]bool{}
+				var targets []string
+				for _, entry := range ctx.DispatchBySlot {
+					if entry.Kind != cluster.DispatchCode {
+						continue
+					}
+					impliedCID := entry.Index + absOffset + ctx.KOriginElement
+					if impliedCID < 0 {
+						continue
+					}
+					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+						if !targetSet[name] {
+							targetSet[name] = true
+							targets = append(targets, name)
+						}
+					}
+				}
+				if len(targets) == 1 {
+					res.TargetName = targets[0]
+					res.Resolved = true
+				} else if len(targets) > 1 {
+					res.TargetName = strings.Join(targets, " | ")
+					res.Resolved = true
+				}
+			}
+			result.BLRResolutions = append(result.BLRResolutions, res)
+			return
+		}
+
 		if name, ok := ctx.ResolveDispatchTarget(t.DispatchIndex); ok {
 			res.TargetName = name
 			res.Resolved = true
@@ -1134,8 +1322,51 @@ func resolveBLR(
 			}
 		}
 	case LatticeTop:
-		// No type info — most common case.
-		res.Resolved = false
+		// No type info — try selector offset from pre-scan.
+		// If we know the selector offset, scan ALL dispatch table entries
+		// at that offset across all class IDs to find unique targets.
+		if selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+			// Scan all dispatch table entries at this selector offset.
+			// slot = classID + selectorOffset - kOriginElement
+			// We don't know classID, so scan all slots that match
+			// the pattern: entry.Index - selectorOffset + kOrigin = classID
+			// i.e., for each dispatch entry, check if (entry.Index + kOrigin - selectorOffset)
+			// is a valid classID.
+			targetSet := map[string]bool{}
+			var targets []string
+			for _, entry := range ctx.DispatchBySlot {
+				if entry.Kind != cluster.DispatchCode {
+					continue
+				}
+				// entry.Index = classID + selectorOffset - kOrigin
+				// So classID = entry.Index - selectorOffset + kOrigin
+				// We don't need to validate classID — just collect all
+				// targets at this selector offset.
+				// But we need to filter: only entries where the implied
+				// classID is reasonable (>= 0).
+				impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
+				if impliedCID < 0 {
+					continue
+				}
+				if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
+					if !targetSet[name] {
+						targetSet[name] = true
+						targets = append(targets, name)
+					}
+				}
+			}
+			if len(targets) == 1 {
+				res.TargetName = targets[0]
+				res.Resolved = true
+				res.SlotIndex = -1
+			} else if len(targets) > 1 {
+				// Multiple targets at this selector offset — polymorphic.
+				// List all unique targets.
+				res.TargetName = strings.Join(targets, " | ")
+				res.Resolved = true
+				res.SlotIndex = -1
+			}
+		}
 	case LatticeBottom:
 		res.Resolved = false
 	}
