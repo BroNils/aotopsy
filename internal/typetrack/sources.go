@@ -138,6 +138,19 @@ type TypeContext struct {
 	// Reverse mapping of ClosureDataByClosure for lookup by parent function.
 	ClosureDataByParent map[int][]int
 
+	// PoolClosureClass maps PP pool index → owner class ID for Closure objects.
+	// When a PP load fetches a Closure, the Closure's ClosureData.parent_function
+	// gives us the declaring function, whose owner class determines the dispatch
+	// table slot for any BLR through that closure. This enables BLR resolution
+	// for closure calls that would otherwise be Top (no type info).
+	PoolClosureClass map[int]int
+
+	// Subclasses maps class ID → list of direct subclass IDs.
+	// Built as the inverse of SuperClass, this is the Class Hierarchy Analysis
+	// (CHA) structure: for a given receiver class, enumerate all subclasses
+	// that might override a method, then collect their dispatch targets.
+	Subclasses map[int][]int
+
 	// Debug counters.
 	// InstanceFieldHits counts field loads typed from observed const-instance
 	// data that the declared field type could not resolve.
@@ -237,10 +250,19 @@ func BuildTypeContext(
 		InstanceFieldTypes:      make(map[int]map[int32]int),
 		ClosureDataByClosure:    make(map[int]int),
 		ClosureDataByParent:     make(map[int][]int),
+		PoolClosureClass:        make(map[int]int),
+		Subclasses:              make(map[int][]int),
 	}
 
 	// 1. Build class hierarchy for LCA.
 	ctx.SuperClass = BuildClassHierarchy(clResult.Classes, clResult.Types, pl.RefToNamed)
+
+	// 1b. Build inverse hierarchy (subclasses) for CHA.
+	for cid, parent := range ctx.SuperClass {
+		if parent >= 0 {
+			ctx.Subclasses[parent] = append(ctx.Subclasses[parent], cid)
+		}
+	}
 
 	// 2. Build classID → name map.
 	for i := range clResult.Classes {
@@ -256,9 +278,18 @@ func BuildTypeContext(
 
 	// 3. Build field type lookup: fieldRefID → ClassID.
 	// FieldInfo.TypeRefID points to a Type object; Type.ClassID gives the CID.
+	// For v2.x TypeClassIdIsRef, Type.ClassID is 0 and TypeClassIdRef holds
+	// the Smi ref — resolve it via MintValues (Smi encoding: classID = value >> 1).
 	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
 	for i := range clResult.Types {
-		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
+		ti := &clResult.Types[i]
+		// Resolve TypeClassIdRef via MintValues for v2.x TypeClassIdIsRef.
+		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
+			if smiValue, ok := clResult.MintValues[ti.TypeClassIdRef]; ok {
+				ti.ClassID = int32(smiValue >> 1) // Smi: value << 1 | 0
+			}
+		}
+		refToType[ti.RefID] = ti
 	}
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]
@@ -535,6 +566,56 @@ func BuildTypeContext(
 		}
 	}
 
+	// Build PoolClosureClass: for each PP entry that is a Closure object,
+	// resolve closure → ClosureData.parent_function → Function.owner → Class → ClassID.
+	// This lets a PP load of a Closure set KnownClass(parentOwnerClassID) instead
+	// of Top(), enabling BLR resolution for closure call sites.
+	if pl.CT != nil && pl.CT.Closure != 0 {
+		// Build Function ref → owner class ref map.
+		funcOwnerRef := make(map[int]int)
+		for i := range clResult.Named {
+			no := &clResult.Named[i]
+			if no.CID == pl.CT.Function && no.OwnerRefID > 0 {
+				funcOwnerRef[no.RefID] = no.OwnerRefID
+			}
+		}
+		// Build class ref → class ID map.
+		classRefToID := make(map[int]int32)
+		for _, ci := range clResult.Classes {
+			classRefToID[ci.RefID] = ci.ClassID
+		}
+		// For each pool entry that is a Closure, resolve the chain.
+		for _, pe := range clResult.Pool {
+			if pe.Kind != cluster.PoolTagged || pe.RefID <= 0 {
+				continue
+			}
+			cid, ok := pl.RefCID[pe.RefID]
+			if !ok || cid != pl.CT.Closure {
+				continue
+			}
+			// Closure ref → parent function ref via ClosureDataByClosure.
+			parentFuncRef, ok2 := ctx.ClosureDataByClosure[pe.RefID]
+			if !ok2 || parentFuncRef <= 0 {
+				continue
+			}
+			// Parent function → owner class ref.
+			ownerRef, ok3 := funcOwnerRef[parentFuncRef]
+			if !ok3 || ownerRef <= 0 {
+				continue
+			}
+			// PatchClass hop: owner may be a PatchClass, hop to real class.
+			if ownerNo, ok4 := pl.RefToNamed[ownerRef]; ok4 && pl.CT.PatchClass != 0 && ownerNo.CID == pl.CT.PatchClass {
+				ownerRef = ownerNo.OwnerRefID
+			}
+			// Class ref → class ID.
+			classID, ok5 := classRefToID[ownerRef]
+			if !ok5 || classID < 0 {
+				continue
+			}
+			ctx.PoolClosureClass[pe.Index] = int(classID)
+		}
+	}
+
 	return ctx
 }
 
@@ -555,16 +636,25 @@ func BuildTypeContext(
 //
 // Both ARM64 and x86_64 field-load handlers call this, so the precedence rule
 // lives in exactly one place.
+//
+// IMPORTANT: byteOff from the caller is the raw instruction's displacement,
+// which is field_offset - kHeapObjectTag (kHeapObjectTag = 1 for both ARM64
+// and x86_64 compressed-pointer builds). The maps (FieldByOwnerOffset,
+// InstanceFieldTypes) are keyed by field_offset (from object start, without
+// kHeapObjectTag subtraction). So we add kHeapObjectTag back before lookup.
 func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bool) {
+	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
+	// map key = field_offset. Add 1 to align.
+	lookupOff := byteOff + 1
 	if fields, ok := ctx.FieldByOwnerOffset[receiverCID]; ok {
-		if fieldRefID, ok := fields[byteOff]; ok {
+		if fieldRefID, ok := fields[lookupOff]; ok {
 			if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
 				return classID, true
 			}
 		}
 	}
 	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
-		if classID, ok := byOff[byteOff]; ok && classID > 0 {
+		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
 			ctx.InstanceFieldHits++
 			return classID, true
 		}
@@ -592,6 +682,52 @@ func (ctx *TypeContext) ResolveDispatchTarget(slot int) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// AllSubclasses returns all transitive subclass IDs of the given class,
+// including the class itself. Used by CHA to enumerate all possible
+// dispatch targets for a virtual call on a known receiver class.
+func (ctx *TypeContext) AllSubclasses(classID int) []int {
+	seen := map[int]bool{classID: true}
+	var out []int
+	var walk func(int)
+	walk = func(cid int) {
+		out = append(out, cid)
+		for _, sub := range ctx.Subclasses[cid] {
+			if !seen[sub] {
+				seen[sub] = true
+				walk(sub)
+			}
+		}
+	}
+	walk(classID)
+	return out
+}
+
+// ResolveDispatchCHA enumerates all dispatch targets for a virtual call
+// on a receiver of classID at the given selector offset. Returns all
+// distinct target function names found across the class and its subclasses.
+//
+// This is the CHA consumer: when resolveBLR knows the receiver class
+// (LatticeKnownClass) and the selector offset is known (from a preceding
+// ADD/SUB), it can enumerate all possible targets instead of giving up.
+func (ctx *TypeContext) ResolveDispatchCHA(classID, selectorOffset int) []string {
+	slot := classID + selectorOffset - ctx.KOriginElement
+	var targets []string
+	seen := map[string]bool{}
+	for _, cid := range ctx.AllSubclasses(classID) {
+		s := cid + selectorOffset - ctx.KOriginElement
+		if name, ok := ctx.ResolveDispatchTarget(s); ok && !seen[name] {
+			seen[name] = true
+			targets = append(targets, name)
+		}
+	}
+	// Also check the original slot directly.
+	if name, ok := ctx.ResolveDispatchTarget(slot); ok && !seen[name] {
+		seen[name] = true
+		targets = append(targets, name)
+	}
+	return targets
 }
 
 // minAppClassIDSafe returns NumPredefinedCids from ct, or 0 if ct is nil.

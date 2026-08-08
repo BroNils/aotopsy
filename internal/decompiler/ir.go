@@ -172,6 +172,34 @@ type FuncIR struct {
 	// Entries are already rendered ("T", or "T extends NativeFunction"), so the
 	// emitter joins them without knowing how bounds are resolved.
 	TypeParamNames []string `json:"-"`
+
+	// FieldNameResolver resolves a (classID, byteOffset) pair to a field name.
+	// When non-nil, fieldExpr uses it to emit base.fieldName instead of
+	// base.fNN. Set by the caller from pipeline.BuildClassLayouts before
+	// EmitPseudocode runs.
+	FieldNameResolver func(classID int, byteOffset int64) string `json:"-"`
+
+	// IsAsync is set when the function is detected as async. Detection paths:
+	// 1. Direct BL to symbols containing "init_async"/"return_async" (pre-scan)
+	// 2. THR stub calls to suspend_state_*_entry_point (emitIndirectCall)
+	// 3. SuspendState CID in pool loads (decompile_native_cmd.go)
+	// 4. Call targets containing "_SuspendState" + "_await"/"_resume"/"_yield"/"_initAsync"/"_returnAsync"
+	// 5. Call targets containing "Future.delayed"/"Future._asyncComplete"/"Future._thenAwait"
+	// 6. Post-walk patch if any of the above set IsAsync during walking
+	IsAsync bool `json:"-"`
+
+	// SwitchCases holds recovered switch/case dispatch info for indirect
+	// branches (br xN from IndirectGotoInstr). Each entry maps a case index
+	// to the block ID that handles it. When non-empty, emitJump emits a real
+	// `switch (index) { case 0: ... }` instead of a comment.
+	// Populated by the caller from jump-table TypedData in the object pool.
+	SwitchCases []SwitchCase `json:"-"`
+}
+
+// SwitchCase is one case in a recovered switch dispatch.
+type SwitchCase struct {
+	Index   int    // case value (0-based)
+	BlockID int    // target block ID in FuncIR.Blocks
 }
 
 // TryRegionEntry is one recovered try block: a PC range plus the handler it

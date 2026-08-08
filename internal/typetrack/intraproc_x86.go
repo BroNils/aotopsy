@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"aotopsy/internal/cluster"
 	"golang.org/x/arch/x86/x86asm"
 )
 
@@ -375,6 +376,15 @@ func transferInstructionX86(
 				if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 					state[dstIdx] = KnownClass(classID)
 					ctx.PPHits++
+				} else if ctx.PoolClosureClass != nil {
+					// Closure consumer: same as ARM64, resolve Closure →
+					// ClosureData.parent_function → owner class.
+					if classID, ok3 := ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
+						state[dstIdx] = KnownClass(classID)
+						ctx.PPHits++
+						return
+					}
+					state[dstIdx] = Top()
 				} else {
 					state[dstIdx] = Top()
 				}
@@ -393,6 +403,14 @@ func transferInstructionX86(
 					if name, found := ctx.THRFields[byteOff]; found {
 						stubName = name
 					}
+				}
+				// Dispatch table array load: MOV reg, [THR + dispatch_table_array_offset]
+				// SDK (flow_graph_compiler_x64.cc): LoadDispatchTable = movq(dst, [THR + offset])
+				// This is a MOV, not LEA — so the LEA handler below never fires.
+				// Set KnownDispatch(0) so subsequent CALL [reg + RCX*8 + disp] can resolve.
+				if stubName == "dispatch_table_array" {
+					state[dstIdx] = KnownDispatch(0)
+					return
 				}
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
@@ -621,6 +639,44 @@ func resolveX86Dispatch(
 		res.TargetName = name
 		res.Resolved = true
 		ctx.DispatchHits++
+	} else {
+		// P4 reverse dispatch scan: if the slot doesn't directly resolve,
+		// scan nearby slots for monomorphic targets (same as ARM64).
+		// This handles cases where the dispatch table entry is null/stub
+		// but a nearby slot has a valid Code target.
+		if ctx.DispatchBySlot != nil {
+			candidates := 0
+			var candidateName string
+			var allCandidates []string
+			for offset := 0; offset < 128; offset++ {
+				s := slot + offset
+				entry, ok := ctx.DispatchBySlot[s]
+				if !ok || entry.Kind != cluster.DispatchCode {
+					continue
+				}
+				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+					candidates++
+					candidateName = name
+					allCandidates = append(allCandidates, name)
+				}
+			}
+			if candidates == 1 {
+				res.TargetName = candidateName
+				res.Resolved = true
+			} else if candidates > 1 {
+				uniqueNames := map[string]bool{}
+				for _, n := range allCandidates {
+					uniqueNames[n] = true
+				}
+				if len(uniqueNames) == 1 {
+					res.TargetName = allCandidates[0]
+					res.Resolved = true
+				} else {
+					res.TargetName = strings.Join(allCandidates, " | ")
+					res.Resolved = true
+				}
+			}
+		}
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }

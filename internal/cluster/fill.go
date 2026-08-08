@@ -101,12 +101,16 @@ type ClassInfo struct {
 }
 
 // TypeInfo holds the resolved type_class_id for a Type object -- i.e. which
-// class a `super_type`/other Type reference actually names. Only populated
-// for the v3.x fill shape (type_class_id packed into the "flags" scalar,
-// not a separate ref -- see readFillRefs' IsType handling).
+// class a `super_type`/other Type reference actually names.
+//
+// v3.x: type_class_id is packed into the "flags" scalar (IsType=true path).
+// v2.x with TypeClassIdIsRef: type_class_id is a Smi ref at a specific index
+// in ReadFromTo. The ref is captured in TypeClassIdRef and resolved to a
+// class ID later via MintValues (Smi encoding: classID = smiValue >> 1).
 type TypeInfo struct {
-	RefID   int
-	ClassID int32
+	RefID          int
+	ClassID        int32
+	TypeClassIdRef int // ref ID of type_class_id Smi (v2.x TypeClassIdIsRef only); -1 otherwise
 }
 
 // --- New capture types (previously skipped) ---
@@ -249,6 +253,15 @@ type ClosureDataInfo struct {
 	PackedFields      uint32
 }
 
+// CompressedStackMapsInfo holds a raw CompressedStackMaps payload.
+// Not decoded yet — the payload is a compressed bitmap of which registers
+// are live at each safepoint. No consumer exists currently, but the data
+// is captured so future decompilation quality improvements can access it.
+type CompressedStackMapsInfo struct {
+	RefID   int
+	Payload []byte
+}
+
 // FieldInfo holds field layout data extracted from a Field object's fill.
 type FieldInfo struct {
 	RefID            int
@@ -378,6 +391,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 	var rodataStringClusters []*ClusterMeta
 	var rodataPcDescClusters []*ClusterMeta
 	var rodataCSMClusters []*ClusterMeta
+	var rodataCSM2Clusters []*ClusterMeta
 
 	for i := range result.Clusters {
 		cm := &result.Clusters[i]
@@ -418,14 +432,22 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			if ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap && len(cm.Lengths) > 0 {
 				rodataCSMClusters = append(rodataCSMClusters, cm)
 			}
+			// CompressedStackMaps also lives in ROData on non-compressed builds.
+			// Same asymmetry fix as PcDescriptors/CSM above.
+			if ct != nil && ct.CompressedStackMaps != 0 && cm.CID == ct.CompressedStackMaps && len(cm.Lengths) > 0 {
+				rodataCSM2Clusters = append(rodataCSM2Clusters, cm)
+			}
 
 		case FillInlineBytes:
-			// Capture only PcDescriptors payloads; the sibling inline-bytes
-			// CIDs (CodeSourceMap, CompressedStackMaps) have no consumer yet
-			// and copying them would cost memory for nothing.
+			// Capture PcDescriptors, CodeSourceMap, and CompressedStackMaps
+			// payloads. PcDescriptors and CSM have consumers (try/catch
+			// recovery, inline frame markers). CompressedStackMaps is captured
+			// for completeness — it records which registers are live at
+			// safepoints, useful for future decompilation quality improvements.
 			capturePcDesc := ct != nil && ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors
 			captureCSM := ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap
-			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM)
+			captureCSM2 := ct != nil && ct.CompressedStackMaps != 0 && cm.CID == ct.CompressedStackMaps
+			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM || captureCSM2)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d) pos=0x%x: %w", i, cm.CID, fillPos, err)
 			}
@@ -451,6 +473,14 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 						result.CodeSourceMaps = append(result.CodeSourceMaps,
 							CodeSourceMapInfo{RefID: ref, Entries: entries})
 					}
+					ref++
+				}
+			}
+			if captureCSM2 {
+				ref := cm.StartRef
+				for _, p := range payloads {
+					result.CompressedStackMaps = append(result.CompressedStackMaps,
+						CompressedStackMapsInfo{RefID: ref, Payload: p})
 					ref++
 				}
 			}
@@ -588,7 +618,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 
 	// Extract PcDescriptors / CodeSourceMap payloads (same ROData addressing
 	// as strings; used by non-compressed-pointer builds).
-	if len(rodataPcDescClusters) > 0 || len(rodataCSMClusters) > 0 {
+	if len(rodataPcDescClusters) > 0 || len(rodataCSMClusters) > 0 || len(rodataCSM2Clusters) > 0 {
 		objStart := dataImageObjStart(len(data), snapshotSize, profile)
 		if objStart > 0 {
 			for _, cm := range rodataPcDescClusters {
@@ -598,6 +628,13 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			for _, cm := range rodataCSMClusters {
 				result.CodeSourceMaps = append(result.CodeSourceMaps,
 					extractRODataCodeSourceMaps(data, cm, objStart, profile, isVM)...)
+			}
+			// CompressedStackMaps ROData extraction (non-compressed builds).
+			for _, cm := range rodataCSM2Clusters {
+				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile, isVM) {
+					result.CompressedStackMaps = append(result.CompressedStackMaps,
+						CompressedStackMapsInfo{RefID: p.RefID, Payload: p.Payload})
+				}
 			}
 		}
 	}
@@ -1239,6 +1276,25 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				ClosureRef:        allRefs[1],
 			}
 			closureDataInfos = append(closureDataInfos, cd)
+		}
+		// v2.x TypeClassIdIsRef: Type.type_class_id is a Smi ref.
+		// Capture it so BuildTypeContext can resolve it via MintValues.
+		// Ref index depends on version:
+		//   v2.10 (NumRefs=5): type_test_stub(0), type_class_id(1), arguments(2), hash(3), signature(4)
+		//   v2.12-v2.13 (NumRefs=4): type_test_stub(0), type_class_id(1), arguments(2), hash(3)
+		//   v2.14-v2.15 (NumRefs=3): type_class_id(0), arguments(1), hash(2)
+		if profile.TypeClassIdIsRef && profile.CIDs != nil && cm.CID == profile.CIDs.Type && len(allRefs) > 0 {
+			typeClassIdIdx := 1 // default for v2.10-v2.13 (NumRefs >= 4)
+			if spec.NumRefs == 3 {
+				typeClassIdIdx = 0 // v2.14-v2.15: type_class_id at index 0
+			}
+			if typeClassIdIdx < len(allRefs) {
+				types = append(types, TypeInfo{
+					RefID:          ref,
+					ClassID:        0, // resolved later via MintValues
+					TypeClassIdRef: allRefs[typeClassIdIdx],
+				})
+			}
 		}
 		if isTypeParameters && len(allRefs) >= 4 {
 			// UntaggedTypeParameters ReadFromTo: names(0), flags(1),

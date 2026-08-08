@@ -5,9 +5,10 @@ package disasm
 
 // BranchInfo describes a decoded branch instruction.
 type BranchInfo struct {
-	Target uint64 // absolute target address (0 if RET)
-	Cond   bool   // true if conditional (has fallthrough)
-	IsRet  bool   // true if RET
+	Target     uint64 // absolute target address (0 if RET or indirect)
+	Cond       bool   // true if conditional (has fallthrough)
+	IsRet      bool   // true if RET
+	IsIndirect bool   // true if BR (indirect branch — jump table, tail call)
 }
 
 // DecodeBranch attempts to decode a branch instruction from raw encoding at the given PC.
@@ -16,6 +17,12 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 	// RET (0xD65F03C0 exactly, or RET Xn = 0xD65F0000 | Rn<<5)
 	if raw&0xFFFFFC1F == 0xD65F0000 {
 		return &BranchInfo{IsRet: true}
+	}
+
+	// BR xN (indirect branch): 1101011 0 0 00 11111 000000 Rn 00000
+	// Encoding: 0xD61F0000 | Rn<<5
+	if raw&0xFFFFFC1F == 0xD61F0000 {
+		return &BranchInfo{IsIndirect: true}
 	}
 
 	// B (unconditional): 000101 imm26

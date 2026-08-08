@@ -158,6 +158,25 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 			name = sym
 		}
 	}
+	// P7: Async/await detection. Calls to suspend_state_init_async_ep or
+	// suspend_state_await_ep indicate this is an async function. Mark it
+	// so the signature gets `async`. Await calls are rendered as `await`
+	// rather than a regular call.
+	if strings.Contains(name, "init_async") {
+		e.fir.IsAsync = true
+		e.emit(indent, "// async function entry (InitAsync stub)")
+		return
+	}
+	if strings.Contains(name, "await") && strings.Contains(name, "suspend") {
+		e.fir.IsAsync = true
+		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
+		return
+	}
+	if strings.Contains(name, "return_async") {
+		e.fir.IsAsync = true
+		e.emit(indent, "return %s;", tmpName)
+		return
+	}
 	intent := resolveCallIntent(name, selectorHint)
 	// P3-feasible-3: Skip temp assignment for known void calls.
 	if isVoidCall(name, selectorHint) {
@@ -207,6 +226,22 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// runtime_offsets_extracted.h (ground truth, not a guess).
 	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
+		// P7: Detect async/await stubs loaded from THR.
+		if strings.Contains(stubName, "init_async") {
+			e.fir.IsAsync = true
+			e.emit(indent, "// async function entry (InitAsync stub)")
+			return
+		}
+		if strings.Contains(stubName, "await") && strings.Contains(stubName, "suspend") {
+			e.fir.IsAsync = true
+			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
+			return
+		}
+		if strings.Contains(stubName, "return_async") {
+			e.fir.IsAsync = true
+			e.emit(indent, "return %s;", tmpName)
+			return
+		}
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s(%s); // Dart AOT runtime stub call (Thread cached entry point)", tmpName, stubName, argsText)
 		return

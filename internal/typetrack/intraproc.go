@@ -579,6 +579,18 @@ func transferInstruction(
 		if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 			state[rt] = KnownClass(classID)
 			ctx.PPHits++
+		} else if ctx.PoolClosureClass != nil {
+			// Closure consumer: a PP load of a Closure object can still give
+			// us a KnownClass via ClosureData.parent_function → Function.owner
+			// → Class → ClassID (precomputed in PoolClosureClass). This lets
+			// a subsequent BLR through that register resolve via the dispatch
+			// table instead of being Top.
+			if classID, ok3 := ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
+				state[rt] = KnownClass(classID)
+				ctx.PPHits++
+				return
+			}
+			state[rt] = Top()
 		} else {
 			state[rt] = Top()
 		}
@@ -1039,10 +1051,88 @@ func resolveBLR(
 					res.Resolved = true
 				}
 			}
+			// P5 CHA: if direct lookup failed, try subclass dispatch slots.
+			// The receiver might be a subclass that overrides the method,
+			// while the superclass slot is null/stub.
+			if !res.Resolved && len(ctx.Subclasses) > 0 {
+				// Recover the class ID from the slot: slot = cid + selector - KOrigin
+				// We don't know selector, but we can scan subclasses at the
+				// same slot offset relative to their own class IDs.
+				// This is a heuristic: try shifting the slot by subclass delta.
+				for parentCID, subs := range ctx.Subclasses {
+					parentSlot := parentCID - ctx.KOriginElement
+					if parentSlot != t.DispatchIndex {
+						continue
+					}
+					for _, subCID := range subs {
+						subSlot := subCID - ctx.KOriginElement
+						if name, ok := ctx.ResolveDispatchTarget(subSlot); ok {
+							res.TargetName = name
+							res.Resolved = true
+							break
+						}
+					}
+					if res.Resolved {
+						break
+					}
+				}
+			}
 		}
 	case LatticeKnownClass:
 		// We know the receiver class but not the selector offset.
-		res.Resolved = false
+		// P4: Reverse dispatch scan — scan this class's dispatch slots for
+		// non-null targets. If exactly one slot has a non-null Code entry,
+		// that is the call target (monomorphic call). If multiple, we cannot
+		// pick one, so leave unresolved.
+		//
+		// P5 CHA: the Subclasses map and ResolveDispatchCHA are available
+		// for future use — when a selector offset IS known (via a preceding
+		// ADD/SUB that we can recover), CHA can enumerate all subclass
+		// dispatch targets for polymorphic call resolution. Currently the
+		// reverse scan above handles the monomorphic case; CHA would
+		// extend this to polymorphic calls.
+		if ctx.DispatchBySlot != nil {
+			candidates := 0
+			var candidateName string
+			var allCandidates []string
+			// Dispatch slots for class cid start at cid - KOriginElement.
+			baseSlot := t.ClassID - ctx.KOriginElement
+			for offset := 0; offset < 128; offset++ {
+				slot := baseSlot + offset
+				entry, ok := ctx.DispatchBySlot[slot]
+				if !ok || entry.Kind != cluster.DispatchCode {
+					continue
+				}
+				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+					candidates++
+					candidateName = name
+					allCandidates = append(allCandidates, name)
+				}
+			}
+			if candidates == 1 {
+				res.TargetName = candidateName
+				res.Resolved = true
+				res.SlotIndex = -1
+			} else if candidates > 1 {
+				// P5 CHA: multiple dispatch targets — use CHA to narrow.
+				// If all candidates share a common name, resolve to it.
+				// Otherwise, list all as a polymorphic call comment.
+				uniqueNames := map[string]bool{}
+				for _, n := range allCandidates {
+					uniqueNames[n] = true
+				}
+				if len(uniqueNames) == 1 {
+					res.TargetName = allCandidates[0]
+					res.Resolved = true
+					res.SlotIndex = -1
+				} else {
+					// Polymorphic — emit all candidate names joined.
+					res.TargetName = strings.Join(allCandidates, " | ")
+					res.Resolved = true
+					res.SlotIndex = -1
+				}
+			}
+		}
 	case LatticeTop:
 		// No type info — most common case.
 		res.Resolved = false

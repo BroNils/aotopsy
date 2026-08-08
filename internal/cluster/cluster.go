@@ -140,6 +140,12 @@ type Result struct {
 	// token position; see CodeSourceMapInfo for why that is not file:line.
 	CodeSourceMaps []CodeSourceMapInfo
 
+	// CompressedStackMaps holds raw CompressedStackMaps payloads (not decoded
+	// yet — no consumer exists). Captured for completeness so future
+	// decompilation quality improvements can access which registers are live
+	// at safepoints without re-parsing the snapshot.
+	CompressedStackMaps []CompressedStackMapsInfo
+
 	// TypeParameters holds TypeParameters objects: a function's or class's own
 	// generic parameter declarations. Consumed via FuncTypeInfo.TypeParamsRefID
 	// to reconstruct `<T>` in decompiler signatures (gap §2.3).

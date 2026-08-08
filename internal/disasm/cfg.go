@@ -111,6 +111,14 @@ func BuildCFG(name string, insts []Inst) FuncCFG {
 			continue
 		}
 
+		// P6: BR (indirect branch) — terminal, no known target. This is
+		// what jump-table dispatch looks like in the CFG: a block ending
+		// in `br xN` has no successors we can resolve statically.
+		if bi.IsIndirect {
+			blk.IsTerm = true
+			continue
+		}
+
 		// Resolve branch target to a block.
 		targetBlockID := -1
 		if bi.Target >= funcStart && bi.Target < funcEnd {

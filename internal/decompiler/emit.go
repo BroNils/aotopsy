@@ -76,6 +76,9 @@ type emitter struct {
 	// tryOpened records regions already structured with real try/catch, so the
 	// many recursion paths into a region do not each emit their own.
 	tryOpened map[int]bool
+	// handlerBlocks records block IDs that were already emitted inside a
+	// catch clause, so they are not repeated at their natural CFG position.
+	handlerBlocks map[int]bool
 }
 
 // buildBlockTryIndex assigns each block to the try region covering its start.
@@ -198,6 +201,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	}
 	if len(fir.TryRegions) > 0 {
 		e.tryOpened = make(map[int]bool, len(fir.TryRegions))
+		e.handlerBlocks = make(map[int]bool)
 	}
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
@@ -230,6 +234,64 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.Regs[fir.ArgRegs[ri]] = fmt.Sprintf("arg%d", i)
 		}
 	}
+	// P7: Pre-scan for async stub calls to set IsAsync before the signature
+	// is emitted. The signature needs `async` prefix, but IsAsync is set
+	// during block walking which happens after the signature. A pre-scan
+	// of call targets is the clean solution.
+	//
+	// Two sources of async detection:
+	// 1. Direct BL calls to symbols containing "init_async"/"return_async"
+	// 2. THR stub calls (indirect BLR) — detected during walking, but
+	//    those set IsAsync AFTER the signature is emitted. To handle both,
+	//    we record the signature line index and patch it post-walk.
+	if !fir.IsAsync && e.symbols != nil {
+		for bi := range fir.Blocks {
+			for _, ins := range fir.Blocks[bi].Instrs {
+				if ins.Op != OpCall {
+					continue
+				}
+				if va, ok := parseHexVA(ins.Target); ok {
+					if name, ok2 := e.symbols(va); ok2 && name != "" {
+						// P7: Async detection via call targets.
+						// Direct BL to async stubs (rare in AOT — usually inlined).
+						if strings.Contains(name, "init_async") || strings.Contains(name, "return_async") ||
+							strings.Contains(name, "InitAsync") || strings.Contains(name, "ReturnAsync") {
+							fir.IsAsync = true
+							break
+						}
+						// P7: Async detection via SuspendState runtime helpers.
+						// Functions that call _SuspendState._await, _SuspendState._resume,
+						// or _SuspendState._yieldAsyncStar are async/async* functions.
+						if strings.Contains(name, "_SuspendState") &&
+							(strings.Contains(name, "_await") ||
+								strings.Contains(name, "_resume") ||
+								strings.Contains(name, "_yield") ||
+								strings.Contains(name, "_handleException") ||
+								strings.Contains(name, "_initAsync") ||
+								strings.Contains(name, "_returnAsync")) {
+							fir.IsAsync = true
+							break
+						}
+						// P7: Async detection via Future method calls.
+						// Functions that call Future.delayed, Future.any, etc.
+						// are likely async functions. This is a heuristic —
+						// sync functions can also call Future methods, but
+						// in practice most callers of Future.delayed are async.
+						if strings.Contains(name, "Future.delayed") ||
+							strings.Contains(name, "Future._asyncComplete") ||
+							strings.Contains(name, "Future._thenAwait") {
+							fir.IsAsync = true
+							break
+						}
+					}
+				}
+			}
+			if fir.IsAsync {
+				break
+			}
+		}
+	}
+
 	// Signature, with the function's declared generic type parameters when
 	// recovered: `dynamic foo<T>(...)`. These are type PARAMETERS from
 	// FunctionType.type_parameters, not type arguments -- see
@@ -243,9 +305,26 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if fir.EnclosingFunction != "" {
 		e.lines = append(e.lines, fmt.Sprintf("// closure declared in: %s", fir.EnclosingFunction))
 	}
-	e.lines = append(e.lines, fmt.Sprintf("dynamic %s(%s) {", sig, strings.Join(argList, ", ")))
+	asyncPrefix := ""
+	if fir.IsAsync {
+		asyncPrefix = "async "
+	}
+	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
+	e.lines = append(e.lines, fmt.Sprintf("%sdynamic %s(%s) {", asyncPrefix, sig, strings.Join(argList, ", ")))
 	e.state.Regs[fir.ThreadReg] = "THR"
 	e.state.Regs[fir.PoolReg] = "PP"
+
+	// P7: Async state machine annotation. Dart compiles async functions
+	// into state machines: the function body is split at each await point,
+	// and a switch on the SuspendState's state index selects which
+	// continuation to run on resume. The if/switch chain the compiler
+	// generates is visible in the CFG as branches on a loaded state index.
+	// Annotate it so the reader knows the if/else chain is the async
+	// state machine dispatch, not application logic.
+	if fir.IsAsync {
+		e.lines = append(e.lines, "  // async state machine: branches on SuspendState state index")
+		e.lines = append(e.lines, "  // await points are marked with `await` below")
+	}
 
 	// Exception handlers are reported as a comment block, NOT as synthesised
 	// try/catch syntax.
@@ -319,12 +398,21 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 				e.lines = append(e.lines, "  //   handler: "+desc)
 			}
 		}
-		e.lines = append(e.lines, "  // Handler code is emitted inside the catch; it also appears at its natural")
-		e.lines = append(e.lines, "  // CFG position below, so that block is shown twice.")
+		e.lines = append(e.lines, "  // Handler code is emitted inside the catch; it is suppressed at its")
+		e.lines = append(e.lines, "  // natural CFG position to avoid duplication.")
 	}
 
 	if entryID, ok := fir.BlockByVA(fir.EntryVA); ok {
 		e.emitBlock(entryID, 1, 0)
+	}
+
+	// P7: Post-walk async patch. If IsAsync was set during block walking
+	// (by emitIndirectCall detecting a THR stub like suspend_state_init_async),
+	// the signature line was already emitted without `async`. Patch it now.
+	if fir.IsAsync && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
+		if !strings.HasPrefix(e.lines[sigLineIdx], "async ") {
+			e.lines[sigLineIdx] = "async " + e.lines[sigLineIdx]
+		}
 	}
 
 	e.lines = append(e.lines, "}") // close the main function body
@@ -386,6 +474,11 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 		}
 		return
 	}
+	// Skip handler blocks at their natural CFG position — they were already
+	// emitted inside the catch clause. This avoids showing the same code twice.
+	if e.handlerBlocks != nil && e.handlerBlocks[id] {
+		return
+	}
 	if depth >= maxDepth || e.active[id] || e.visits[id] >= maxVisitCount || id < 0 || id >= len(e.fir.Blocks) {
 		e.emitOmittedPath(id, indent)
 		return
@@ -438,11 +531,17 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 		e.emitBlockBody(id, indent+1, depth)
 		e.curTryRegion = prevRegion
 		e.emit(indent, "} %s {", r.CatchClause())
-		// Emit the handler's own code in the catch body. The handler block also
-		// appears at its natural CFG position; that duplication is preferable to
-		// a catch whose body is only a comment.
+		// Emit the handler's own code in the catch body. The handler block
+		// is recorded in handlerBlocks so it is not repeated at its natural
+		// CFG position below.
 		if hid, ok := e.fir.BlockByVA(r.HandlerVA); ok {
 			e.emitBlock(hid, indent+1, depth+1)
+			// Mark AFTER emitting so the guard in emitBlock doesn't suppress
+			// the catch-side emission. The natural-position walk will then
+			// skip it.
+			if e.handlerBlocks != nil {
+				e.handlerBlocks[hid] = true
+			}
 		} else {
 			e.emit(indent+1, "// handler at 0x%x (block not recovered)", r.HandlerVA)
 		}
@@ -643,6 +742,35 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 		e.emitSuccessor(targetID, indent, depth)
 		return
 	}
+	// P6: Indirect branch (br xN) — jump-table dispatch or tail call.
+	// When SwitchCases is populated, emit real `switch` syntax with case
+	// targets. Otherwise emit a dispatch comment.
+	if ins.Target != "" && !strings.HasPrefix(ins.Target, "0x") {
+		if len(e.fir.SwitchCases) > 0 {
+			// Real switch/case recovery: emit switch with ALL case blocks.
+			// Use emitBlockBody (not emitSuccessor) for each case so the
+			// emitter does NOT follow fallthrough into the next case —
+			// each case is emitted independently with its own break.
+			e.emit(indent, "switch (%s) {", ins.Target)
+			for _, sc := range e.fir.SwitchCases {
+				e.emit(indent+1, "case %d:", sc.Index)
+				if sc.BlockID >= 0 && sc.BlockID < len(e.fir.Blocks) {
+					e.emitBlockBody(sc.BlockID, indent+2, depth+1)
+				} else {
+					e.emit(indent+2, "// case target block %d not recovered", sc.BlockID)
+				}
+				e.emit(indent+2, "break;")
+			}
+			e.emit(indent+1, "default:")
+			e.emit(indent+2, "// unreachable")
+			e.emit(indent, "}")
+			return
+		}
+		e.emit(indent, "// switch dispatch via %s (indirect branch / jump table)", ins.Target)
+		e.emit(indent, "// target = %s;", ins.Target)
+		e.stats.UnresolvedCF++
+		return
+	}
 	if ins.Target != "" {
 		e.emit(indent, "return tailCall_%s();", sanitizeTailCallName(ins.Target))
 		return
@@ -701,7 +829,8 @@ func (e *emitter) appendHelperFunctions() {
 			blockTryRegion: e.blockTryRegion,
 			tryMarked:      e.tryMarked,
 			inlineMarked:   e.inlineMarked,
-			tryOpened:      e.tryOpened}
+			tryOpened:      e.tryOpened,
+			handlerBlocks:  e.handlerBlocks}
 		sub.emitBlock(id, 1, 0)
 
 		e.lines = append(e.lines, fmt.Sprintf("dynamic _block_%d() {", id))

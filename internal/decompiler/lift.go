@@ -275,7 +275,11 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if !op.hasDisp {
 		return baseExpr
 	}
-	return fieldExpr(baseExpr, op.memDisp)
+	var resolver func(int64, int64) string
+	if fir.FieldNameResolver != nil {
+		resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(0, off) }
+	}
+	return fieldExpr(baseExpr, op.memDisp, resolver)
 }
 
 // localName renders a frame-relative byte offset as a valid Dart
@@ -293,7 +297,16 @@ func localName(off int64) string {
 // fieldExpr renders a base+offset expression as a Dart-ish field access,
 // mirroring flutterdec's field_expr (including its "-1 => ._tag"
 // special-case for the Dart object-header/class-id tag field).
-func fieldExpr(base string, off int64) string {
+//
+// When resolver is non-nil, it is consulted to replace the synthetic
+// fNN/mNN name with the real Dart field name from the class layout
+// (e.g. base.name instead of base.f8).
+func fieldExpr(base string, off int64, resolver func(int64, int64) string) string {
+	if resolver != nil {
+		if name := resolver(0, off); name != "" {
+			return base + "." + name
+		}
+	}
 	switch {
 	case off == -1:
 		return base + "._tag"
@@ -621,7 +634,11 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
-		lhs = fieldExpr(baseExpr, op.memDisp)
+		var resolver func(int64, int64) string
+		if fir.FieldNameResolver != nil {
+			resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(0, off) }
+		}
+		lhs = fieldExpr(baseExpr, op.memDisp, resolver)
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
 		// found testing against a real libapp.so where a computed

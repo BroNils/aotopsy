@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -131,6 +132,45 @@ func cmdDecompileNative(args []string) error {
 
 	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
 	poolDisplay := resolvePoolDisplay(result.Pool, pl)
+
+	// Build class layouts for field-name resolution in the decompiler.
+	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
+	// instead of base.fNN.
+	//
+	// The lifter does not know the receiver's class ID at fieldExpr time
+	// (that would require integrating typetrack's KnownClass into the
+	// lifter). Instead, we build a global offset→name map: if a byte
+	// offset maps to the same field name across ALL classes that have a
+	// field at that offset, it is unambiguous and can be used. If
+	// different classes have different names at the same offset, it is
+	// ambiguous and we skip it (return "" → fallback to fNN).
+	classLayouts := pipeline.BuildClassLayouts(result, pl, info.Version.CompressedPointers)
+	type fieldVote struct {
+		name    string
+		conflict bool
+	}
+	globalFieldNames := map[int32]*fieldVote{} // byteOffset → name (unanimous only)
+	for _, cl := range classLayouts {
+		for _, f := range cl.Fields {
+			v, exists := globalFieldNames[f.ByteOffset]
+			if !exists {
+				globalFieldNames[f.ByteOffset] = &fieldVote{name: f.Name}
+				continue
+			}
+			if v.name != f.Name {
+				v.conflict = true
+			}
+		}
+	}
+	fieldNameResolver := func(classID int, byteOffset int64) string {
+		// classID is ignored — we use the global unanimous map.
+		// When typetrack integration is added, this can be upgraded to
+		// use the per-class map for higher precision.
+		if v, ok := globalFieldNames[int32(byteOffset)]; ok && !v.conflict {
+			return v.name
+		}
+		return ""
+	}
 
 	// Build exception handler map: Code.RefID → []ExceptionHandlerEntry.
 	// Code.ExceptionHandlersRef points to an ExceptionHandlers object in
@@ -381,6 +421,15 @@ func cmdDecompileNative(args []string) error {
 		paramFuncTypeByRef[result.FuncTypes[i].RefID] = &result.FuncTypes[i]
 	}
 	typeParams := pipeline.NewTypeParamResolver(result, pl)
+	// poolEntryByIndex looks up a pool entry by its PP index.
+	poolByIndex := make(map[int]cluster.PoolEntry, len(result.Pool))
+	for _, pe := range result.Pool {
+		poolByIndex[pe.Index] = pe
+	}
+	poolEntryByIndex := func(idx int) (cluster.PoolEntry, bool) {
+		pe, ok := poolByIndex[idx]
+		return pe, ok
+	}
 	paramTypeNamesFor := func(r cluster.CodeRange) []string {
 		if r.RefID < 0 {
 			return nil
@@ -458,6 +507,7 @@ func cmdDecompileNative(args []string) error {
 		fir.ThreadStubOffsets = disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
 		fir.ParamTypeNames = paramTypeNamesFor(r)
 		fir.TypeParamNames = genericParamNamesFor(r)
+		fir.FieldNameResolver = fieldNameResolver
 		if len(closureParents) > 0 && r.RefID >= 0 {
 			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
 			if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok {
@@ -549,9 +599,63 @@ func cmdDecompileNative(args []string) error {
 				fir.InlineFrames[blockVA] = frames
 			}
 		}
-		// (No generic-type-argument wiring here any more -- it resolved the
-		// wrong object and never produced output. See the removal note on
-		// decompiler.FuncIR.GenericTypeArgs.)
+		// P6: Switch/case recovery — detect IndirectGoto pattern (br xN).
+		// Dart AOT uses IndirectGotoInstr for switches with >=16 cases.
+		// The codegen (il_arm64.cc) loads a TypedData (int32 offsets) from
+		// the pool, reads offset[index], adds base address (ADR), and br.
+		// The PP load may use 2-level addressing (ADD xN, x27, #hi + LDR xN, [xN, #lo])
+		// which the lifter doesn't recognize as OpLoadPool. So instead of
+		// relying on OpLoadPool, we detect br xN directly and map the
+		// following blocks (which are the case targets — each is a MOV+RET
+		// or a block of case body code) as switch cases.
+		if isARM64 && len(fir.Blocks) > 0 {
+			for bi := range fir.Blocks {
+				for _, ins := range fir.Blocks[bi].Instrs {
+					if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
+						continue
+					}
+					// Found br xN — this is a jump-table dispatch.
+					// Map ALL following blocks as case targets. Each case
+					// starts at a block boundary after the br block. We
+					// collect blocks until we run out or hit 64 cases.
+					// Cases can have complex bodies (if/else, calls) —
+					// don't filter by block size or terminator type.
+					var cases []decompiler.SwitchCase
+					for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
+						cases = append(cases, decompiler.SwitchCase{
+							Index:   len(cases),
+							BlockID: fir.Blocks[ci].ID,
+						})
+					}
+					if len(cases) >= 2 {
+						fir.SwitchCases = cases
+					}
+					break
+				}
+			}
+		}
+
+		// P7: Async/await detection via SuspendState CID in pool loads.
+		// Async functions allocate a SuspendState object (CID=78) early.
+		if !fir.IsAsync && info.Version.CIDs.SuspendState != 0 {
+			for bi := range fir.Blocks {
+				for _, ins := range fir.Blocks[bi].Instrs {
+					if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
+						continue
+					}
+					if pe, ok := poolEntryByIndex(ins.PoolIndex); ok {
+						if cid, ok2 := pl.RefCID[pe.RefID]; ok2 && cid == info.Version.CIDs.SuspendState {
+							fir.IsAsync = true
+							break
+						}
+					}
+				}
+				if fir.IsAsync {
+					break
+				}
+			}
+		}
+
 		return fir, nil
 	}
 
@@ -693,10 +797,6 @@ func cmdDecompileNative(args []string) error {
 		funcStart := uint64(r.PCOffset) - codeOff
 		funcVA := codeVA + funcStart
 		functionsByOwnerClassRef[classRef] = append(functionsByOwnerClassRef[classRef], funcVA)
-	}
-	poolByIndex := make(map[int]cluster.PoolEntry, len(result.Pool))
-	for _, pe := range result.Pool {
-		poolByIndex[pe.Index] = pe
 	}
 	// classRefTouchedByPoolLoad resolves an OpLoadPool instruction's pool
 	// index to the concrete class ref of whatever object it loads (if the
@@ -919,10 +1019,51 @@ func cmdDecompileNative(args []string) error {
 	}
 
 	matched := 0
+	// P3: Class method reconstruction — sort matched ranges by owner name
+	// so methods of the same class are contiguous, then emit real
+	// `class Owner { ... }` syntax. This avoids invalid Dart (multiple
+	// class declarations for the same class).
+	type ownerRange struct {
+		r     cluster.CodeRange
+		owner string
+	}
+	var matchedRanges []ownerRange
 	for _, r := range ranges {
 		if !rangeMatchesFilter(r) {
-			continue // skip stubs (always) and, if --filter is set, non-matching functions too
+			continue
 		}
+		owner := ""
+		if r.RefID >= 0 {
+			if ci, ok := pl.CodeNames[r.RefID]; ok && ci.OwnerName != "" {
+				owner = ci.OwnerName
+			}
+		}
+		matchedRanges = append(matchedRanges, ownerRange{r: r, owner: owner})
+	}
+	sort.SliceStable(matchedRanges, func(i, j int) bool {
+		return matchedRanges[i].owner < matchedRanges[j].owner
+	})
+
+	type classBuffer struct {
+		owner     string
+		artifacts []decompiler.Artifact
+	}
+	var curClass *classBuffer
+	flushClass := func() {
+		if curClass == nil || len(curClass.artifacts) == 0 {
+			curClass = nil
+			return
+		}
+		_, _ = fmt.Fprintf(w, "class %s {\n", curClass.owner)
+		for _, art := range curClass.artifacts {
+			body := strings.ReplaceAll(art.Source, "\n", "\n  ")
+			_, _ = fmt.Fprintf(w, "  // === %s ===\n  %s\n\n", art.FunctionName, body)
+		}
+		_, _ = fmt.Fprintf(w, "}\n\n")
+		curClass = nil
+	}
+	for _, mr := range matchedRanges {
+		r := mr.r
 		matched++
 		if matched <= *skipFuncs {
 			continue // this shard's --skip window hasn't started yet
@@ -950,7 +1091,22 @@ func cmdDecompileNative(args []string) error {
 				skipped++
 				return
 			}
-			_, _ = fmt.Fprintf(w, "// === %s (PCOffset=0x%x) ===\n%s\n\n", art.FunctionName, r.PCOffset, art.Source)
+			// P3: Class method reconstruction — buffer per class, emit
+			// real `class Owner { ... }` when owner changes.
+			ownerName := mr.owner
+			if ownerName != "" {
+				// Function belongs to a class — buffer it.
+				if curClass == nil || curClass.owner != ownerName {
+					flushClass()
+					curClass = &classBuffer{owner: ownerName}
+				}
+				curClass.artifacts = append(curClass.artifacts, art)
+			} else {
+				// Standalone function (stub, top-level) — flush any open
+				// class, then emit directly.
+				flushClass()
+				_, _ = fmt.Fprintf(w, "// === %s (PCOffset=0x%x) ===\n%s\n\n", art.FunctionName, r.PCOffset, art.Source)
+			}
 			agg.TotalCalls += art.Stats.TotalCalls
 			agg.IndirectCalls += art.Stats.IndirectCalls
 			agg.SemanticDirectCalls += art.Stats.SemanticDirectCalls
@@ -990,6 +1146,8 @@ func cmdDecompileNative(args []string) error {
 				emitted, skipped, m.HeapAlloc/1024/1024, time.Since(startTime).Round(time.Second))
 		}
 	}
+	// P3: flush last class buffer.
+	flushClass()
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("final flush %s: %w", combinedPath, err)
 	}

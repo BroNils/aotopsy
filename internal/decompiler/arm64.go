@@ -112,6 +112,12 @@ func liftARM64Instr(inst disasm.Inst) Instr {
 		ir.Target = fmt.Sprintf("0x%x", bi.Target)
 		ir.CondKind = "cmp"
 		ir.CondOp = arm64CondOp(strings.ToLower(firstOperandToken(inst.Operands)))
+	case mnemonic == "br":
+		// P6: br xN — indirect branch (jump table, tail call, or computed goto).
+		// Mark as OpJump with the register as target so the emitter can
+		// render it as a tail call or switch dispatch.
+		ir.Op = OpJump
+		ir.Target = firstOperandReg(inst.Operands)
 	case mnemonic == "cbz" || mnemonic == "cbnz":
 		if bi := disasm.DecodeBranch(inst.Raw, inst.Addr); bi != nil {
 			ir.Op = OpBranch
