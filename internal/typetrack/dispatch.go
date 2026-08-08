@@ -27,6 +27,8 @@ func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeConte
 		PoolHits          int `json:"pool_hits,omitempty"`
 		HeaderHits        int `json:"header_hits,omitempty"`
 		DispatchHits      int `json:"dispatch_hits,omitempty"`
+		UBFXHits          int `json:"ubfx_hits,omitempty"`
+		ADDClassHits      int `json:"add_class_hits,omitempty"`
 		InstanceFieldHits int `json:"instance_field_hits,omitempty"`
 		// InstanceFieldClasses is how many classes have at least one
 		// unanimously-typed field offset recovered from const instances.
@@ -39,6 +41,8 @@ func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeConte
 		report.PoolHits = ctx.PPHits
 		report.HeaderHits = ctx.HeaderHits
 		report.DispatchHits = ctx.DispatchHits
+		report.UBFXHits = ctx.UBFXHits
+		report.ADDClassHits = ctx.ADDClassHits
 		report.InstanceFieldHits = ctx.InstanceFieldHits
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)
 	}
