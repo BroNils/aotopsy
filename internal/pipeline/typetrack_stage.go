@@ -54,15 +54,19 @@ func RunTypeInferenceStage(
 
 	opts.logf("  type inference: starting...\n")
 
-	resolved, total, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
+	resolved, total, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
 		return nil // non-fatal
 	}
 
 	opts.logf("  type inference: resolved %d/%d BLR call sites\n", resolved, total)
+	if tctx != nil && len(tctx.InstanceFieldTypes) > 0 {
+		opts.logf("  observed field types: %d classes, %d field loads typed from const instances\n",
+			len(tctx.InstanceFieldTypes), tctx.InstanceFieldHits)
+	}
 
-	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, resolved, total); err != nil {
+	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, resolved, total, tctx); err != nil {
 		return fmt.Errorf("write typetrack report: %w", err)
 	}
 
@@ -83,17 +87,17 @@ func runTypeInference(
 	table *cluster.InstructionsTable,
 	isARM64 bool,
 	thrFields map[int]string,
-) (int, int, error) {
+) (int, int, *typetrack.TypeContext, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
 	// snapshot DATA region (info.IsolateData.Data), not the instructions
 	// region. result.FillEnd is the byte offset within this data.
 	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
 	if err != nil {
-		return 0, 0, nil // non-fatal
+		return 0, 0, nil, nil // non-fatal
 	}
 	if len(dispatchEntries) == 0 {
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 
 	// 2. Build TypeContext.
@@ -264,10 +268,11 @@ func runTypeInference(
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
 	resolved, total, err := rewriteCallEdges(outDir, interResult)
 	if err != nil {
-		return 0, 0, fmt.Errorf("rewrite call_edges: %w", err)
+		return 0, 0, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
 
-	return resolved, total, nil
+	// ctx is returned so the caller can report per-source hit counters.
+	return resolved, total, ctx, nil
 }
 
 // rewriteCallEdges reads call_edges.jsonl, updates BLR edges with resolved

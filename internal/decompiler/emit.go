@@ -18,6 +18,8 @@ type Stats struct {
 	UnresolvedCF          int `json:"unresolved_cf"`
 	RawRegisterCalls      int `json:"raw_register_calls"`
 	NonLastBranch         int `json:"non_last_branch"`
+	TryBlocks             int `json:"try_blocks"`
+	CatchHandlers         int `json:"catch_handlers"`
 }
 
 // Artifact is one function's emitted pseudocode plus its stats.
@@ -59,6 +61,107 @@ type emitter struct {
 	budgetHit   bool
 	stats       Stats
 	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+
+	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
+	// range covers it, for per-block try annotation. See annotateBlockTry.
+	blockTryRegion map[int]int
+	// tryMarked records which blocks already carry a try marker, so the
+	// repeated visits of the CFG walk do not repeat it.
+	tryMarked map[int]bool
+	// inlineMarked does the same for inlined-frame markers, keyed by VA.
+	inlineMarked map[uint64]bool
+	// curTryRegion is the try region currently open, stored as index+1 so the
+	// zero value means "none". Prevents a region re-opening inside itself.
+	curTryRegion int
+	// tryOpened records regions already structured with real try/catch, so the
+	// many recursion paths into a region do not each emit their own.
+	tryOpened map[int]bool
+}
+
+// buildBlockTryIndex assigns each block to the try region covering its start.
+//
+// Regions are block-aligned by SnapTryRegionsToBlocks, so a block is either
+// wholly inside a region or wholly outside it; testing StartVA is enough. When
+// regions overlap (nested trys that descriptors could not separate) the
+// innermost — smallest — one wins, which matches Dart semantics where the
+// nearest enclosing handler runs first.
+func (e *emitter) buildBlockTryIndex() {
+	if len(e.fir.TryRegions) == 0 {
+		return
+	}
+	e.blockTryRegion = make(map[int]int, len(e.fir.Blocks))
+	for bi := range e.fir.Blocks {
+		va := e.fir.Blocks[bi].StartVA
+		best := -1
+		var bestSize uint64
+		for ri := range e.fir.TryRegions {
+			r := &e.fir.TryRegions[ri]
+			if va < r.StartVA || va >= r.EndVA {
+				continue
+			}
+			size := r.EndVA - r.StartVA
+			if best < 0 || size < bestSize {
+				best, bestSize = ri, size
+			}
+		}
+		if best >= 0 {
+			e.blockTryRegion[bi] = best
+		}
+	}
+}
+
+// annotateInlineFrames marks a block whose code came from an inlined callee.
+//
+// Deduplicated per VA for the same reason as the try markers: the CFG walk
+// re-emits blocks, and repeating an identical frame line adds nothing.
+func (e *emitter) annotateInlineFrames(va uint64, indent int) {
+	if len(e.fir.InlineFrames) == 0 {
+		return
+	}
+	frames, ok := e.fir.InlineFrames[va]
+	if !ok || len(frames) == 0 {
+		return
+	}
+	if e.inlineMarked == nil {
+		e.inlineMarked = make(map[uint64]bool)
+	}
+	if e.inlineMarked[va] {
+		return
+	}
+	e.inlineMarked[va] = true
+	e.emit(indent, "// [inlined: %s]", strings.Join(frames, " -> "))
+}
+
+// annotateBlockTry emits a marker for a block that sits inside a try region.
+//
+// Why a marker and not real `try { … }` syntax: emitBlock is a recursive walk
+// that FOLLOWS CONTROL FLOW, not address order. A block can be emitted more
+// than once (maxVisitCount), nested inside if/else produced by the traversal,
+// or omitted entirely. Opening a brace at a region's first block and closing it
+// at the last would therefore produce unbalanced, malformed Dart in the general
+// case. Marking each protected block is correct regardless of traversal order
+// and repetition, and still tells the reader exactly which code the handler
+// covers. Real syntax needs the emitter restructured to emit regions as units.
+func (e *emitter) annotateBlockTry(id, indent int) {
+	ri, ok := e.blockTryRegion[id]
+	if !ok {
+		return
+	}
+	// Once per block, not once per visit. The CFG walk re-emits blocks (up to
+	// maxVisitCount) and loop bodies especially: without this, one big
+	// loop-heavy function (_Timer._runTimers) produced 9010 identical marker
+	// lines, 91% of all markers in a 900-function sweep. The fact being
+	// reported -- "this block is inside try N" -- is a property of the block,
+	// so stating it once is both sufficient and readable.
+	if e.tryMarked == nil {
+		e.tryMarked = make(map[int]bool)
+	}
+	if e.tryMarked[id] {
+		return
+	}
+	e.tryMarked[id] = true
+	r := e.fir.TryRegions[ri]
+	e.emit(indent, "// [in try #%d -> %s at 0x%x]", r.TryIndex, r.CatchClause(), r.HandlerVA)
 }
 
 // EmitPseudocode is the top-level entry point: lifts+walks fir's CFG into
@@ -83,6 +186,19 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
+	// Map blocks to the try region covering them, for per-block annotation.
+	e.buildBlockTryIndex()
+	// Allocate up front so sub-emitters for helper functions share the same
+	// set rather than each starting with a nil map of their own.
+	if e.blockTryRegion != nil {
+		e.tryMarked = make(map[int]bool, len(e.blockTryRegion))
+	}
+	if len(fir.InlineFrames) > 0 {
+		e.inlineMarked = make(map[uint64]bool, len(fir.InlineFrames))
+	}
+	if len(fir.TryRegions) > 0 {
+		e.tryOpened = make(map[int]bool, len(fir.TryRegions))
+	}
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
 	// aggregating cross-function call-site evidence -- NOT a positional
@@ -114,13 +230,103 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.Regs[fir.ArgRegs[ri]] = fmt.Sprintf("arg%d", i)
 		}
 	}
-	e.lines = append(e.lines, fmt.Sprintf("dynamic %s(%s) {", safeFuncName(fir.Name), strings.Join(argList, ", ")))
+	// Signature, with the function's declared generic type parameters when
+	// recovered: `dynamic foo<T>(...)`. These are type PARAMETERS from
+	// FunctionType.type_parameters, not type arguments -- see
+	// FuncIR.TypeParamNames.
+	sig := safeFuncName(fir.Name)
+	if len(fir.TypeParamNames) > 0 {
+		sig += "<" + strings.Join(fir.TypeParamNames, ", ") + ">"
+	}
+	// For a closure, name the function it was declared inside. Without this an
+	// anonymous closure is indistinguishable from every other one in its class.
+	if fir.EnclosingFunction != "" {
+		e.lines = append(e.lines, fmt.Sprintf("// closure declared in: %s", fir.EnclosingFunction))
+	}
+	e.lines = append(e.lines, fmt.Sprintf("dynamic %s(%s) {", sig, strings.Join(argList, ", ")))
 	e.state.Regs[fir.ThreadReg] = "THR"
 	e.state.Regs[fir.PoolReg] = "PP"
+
+	// Exception handlers are reported as a comment block, NOT as synthesised
+	// try/catch syntax.
+	//
+	// The previous version wrapped the whole body in `try { ... } catch (e, st)
+	// { <comments>; rethrow; }`. That output was actively wrong in four ways,
+	// all reproduced against real binaries:
+	//
+	//  1. The handler's own basic blocks stay in the CFG and were emitted
+	//     INSIDE the try body, so recovered handler code was presented as
+	//     normal fall-through control flow. On dart:async's
+	//     _RootZone.runUnaryGuarded the call that the source has in its catch
+	//     clause (handleUncaughtError) appeared inside the try.
+	//  2. `rethrow;` was invented. No handler in the sample corpus rethrows;
+	//     the real bodies return values (e.g. `return -1;`).
+	//  3. `catch (e, st)` was hardcoded regardless of needs_stacktrace, so a
+	//     source-level `catch (e)` was rendered with a stack-trace binding it
+	//     does not have.
+	//  4. It fired on is_generated handlers too -- compiler-synthesised async
+	//     machinery -- putting a try/catch on functions whose source has none.
+	//
+	// Recovering real try regions needs the handler PC ranges to re-partition
+	// the CFG, which this emitter does not do. Until it does, reporting the
+	// recovered facts is honest and the syntax was not.
+	if len(fir.ExceptionHandlers) > 0 {
+		e.stats.TryBlocks += len(fir.TryRegions)
+		e.stats.CatchHandlers = len(fir.ExceptionHandlers)
+
+		if len(fir.TryRegions) > 0 {
+			// Real PC extents recovered from PcDescriptors' try_index.
+			e.lines = append(e.lines, fmt.Sprintf("  // %d try region(s) recovered from PcDescriptors + ExceptionHandlers:",
+				len(fir.TryRegions)))
+			for _, r := range fir.TryRegions {
+				line := fmt.Sprintf("  //   try #%d: PCs in [0x%x, 0x%x) -> %s at 0x%x",
+					r.TryIndex, r.StartVA, r.EndVA, r.CatchClause(), r.HandlerVA)
+				if r.Handler.HasCatchAll {
+					line += " catch_all"
+				}
+				if r.Handler.OuterTryIndex >= 0 {
+					line += fmt.Sprintf(" outer_try=%d", r.Handler.OuterTryIndex)
+				}
+				if r.Handler.IsGenerated {
+					// async/await lowering, not a `try` the programmer wrote.
+					line += " compiler_generated"
+				}
+				if e.symbols != nil {
+					if name, ok := e.symbols(r.HandlerVA); ok && name != "" {
+						line += " (" + name + ")"
+					}
+				}
+				e.lines = append(e.lines, line)
+			}
+			// Two ways these ranges under-report, both from descriptor
+			// density; see TryRegionEntry's doc. Stated inline so nobody reads
+			// the range as the exact source-level try body.
+			e.lines = append(e.lines, "  // NOTE ranges are block-aligned LOWER BOUNDS. PcDescriptors only mark call")
+			e.lines = append(e.lines, "  // sites, so a raw range can be one instruction; it is widened to whole basic")
+			e.lines = append(e.lines, "  // blocks (sound: a block has one entry). A try may therefore cover less than")
+			e.lines = append(e.lines, "  // the source's, and nested trys can merge, so region count != try-block count.")
+		} else {
+			// Handlers exist but no descriptor carried a try_index for this
+			// function, so no extent is known.
+			e.lines = append(e.lines, fmt.Sprintf("  // %d exception handler(s), no try extents recoverable:",
+				len(fir.ExceptionHandlers)))
+			for _, h := range fir.ExceptionHandlers {
+				desc := fmt.Sprintf("PC+0x%x outer_try=%d catch_all=%v needs_stacktrace=%v",
+					h.PCOffset, h.OuterTryIndex, h.HasCatchAll, h.NeedsStacktrace)
+				if h.IsGenerated {
+					desc += " compiler_generated=true"
+				}
+				e.lines = append(e.lines, "  //   handler: "+desc)
+			}
+		}
+		e.lines = append(e.lines, "  // Handler code is emitted inside the catch; it also appears at its natural")
+		e.lines = append(e.lines, "  // CFG position below, so that block is shown twice.")
+	}
 
 	if entryID, ok := fir.BlockByVA(fir.EntryVA); ok {
 		e.emitBlock(entryID, 1, 0)
 	}
+
 	e.lines = append(e.lines, "}") // close the main function body
 
 	e.appendHelperFunctions() // appends sibling "_block_N()" top-level functions, if any
@@ -194,7 +400,66 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 	e.visits[id]++
 	defer delete(e.active, id)
 
+	// Real try/catch structuring.
+	//
+	// The brace pair is opened and closed inside THIS invocation, so it is
+	// balanced by construction no matter how the recursion below unfolds --
+	// which is what makes this safe in an emitter that walks control flow
+	// rather than address order, re-emits blocks, and omits paths. Nesting is
+	// guarded by curTryRegion so a region does not re-open inside itself.
+	if ri, ok := e.blockTryRegion[id]; ok && e.curTryRegion != ri+1 {
+		r := e.fir.TryRegions[ri]
+		// Structure the region ONCE per function. The CFG walk reaches a region
+		// from many recursion paths, and opening a real try on each produced 162
+		// try blocks for a single 32-block region in _Timer._runTimers (416
+		// across a 900-function sweep, for 27 regions). Later entries get a
+		// marker instead: the structure is stated once where it reads best, and
+		// subsequent protected code is still identified.
+		if e.tryOpened == nil {
+			e.tryOpened = make(map[int]bool)
+		}
+		if e.tryOpened[ri] {
+			// Once per BLOCK, not per visit: the walk re-emits blocks, and an
+			// undeduplicated marker reached 9194 lines for 27 regions.
+			if e.tryMarked == nil {
+				e.tryMarked = make(map[int]bool)
+			}
+			if !e.tryMarked[id] {
+				e.tryMarked[id] = true
+				e.emit(indent, "// [still in try #%d -> %s at 0x%x]", r.TryIndex, r.CatchClause(), r.HandlerVA)
+			}
+			e.emitBlockBody(id, indent, depth)
+			return
+		}
+		e.tryOpened[ri] = true
+		e.emit(indent, "try {")
+		prevRegion := e.curTryRegion
+		e.curTryRegion = ri + 1 // +1 so zero means "no region"
+		e.emitBlockBody(id, indent+1, depth)
+		e.curTryRegion = prevRegion
+		e.emit(indent, "} %s {", r.CatchClause())
+		// Emit the handler's own code in the catch body. The handler block also
+		// appears at its natural CFG position; that duplication is preferable to
+		// a catch whose body is only a comment.
+		if hid, ok := e.fir.BlockByVA(r.HandlerVA); ok {
+			e.emitBlock(hid, indent+1, depth+1)
+		} else {
+			e.emit(indent+1, "// handler at 0x%x (block not recovered)", r.HandlerVA)
+		}
+		e.emit(indent, "}")
+		return
+	}
+
+	e.emitBlockBody(id, indent, depth)
+}
+
+// emitBlockBody emits one block's instructions and follows its fallthrough
+// successor. Split out of emitBlock so the try/catch wrapper there can emit the
+// same body at a deeper indent without re-running emitBlock's recursion guards
+// (which have already fired for this block).
+func (e *emitter) emitBlockBody(id, indent, depth int) {
 	blk := &e.fir.Blocks[id]
+	e.annotateInlineFrames(blk.StartVA, indent)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
 		switch ins.Op {
@@ -426,7 +691,17 @@ func (e *emitter) appendHelperFunctions() {
 		seen[id] = true
 
 		sub := &emitter{fir: e.fir, symbols: e.symbols, pool: e.pool, state: newLiftState(),
-			active: make(map[int]bool), visits: make(map[int]int), omittedSet: make(map[int]bool)}
+			active: make(map[int]bool), visits: make(map[int]int), omittedSet: make(map[int]bool),
+			// Share the block->region index so extracted helper functions
+			// annotate their protected blocks too, and share tryMarked so a
+			// block is marked once across the whole function's output. Without
+			// sharing tryMarked, each helper's fresh emitter re-marked blocks
+			// it walked: _Timer._runTimers reported 679 marked blocks inside a
+			// 752-byte region, which cannot hold that many.
+			blockTryRegion: e.blockTryRegion,
+			tryMarked:      e.tryMarked,
+			inlineMarked:   e.inlineMarked,
+			tryOpened:      e.tryOpened}
 		sub.emitBlock(id, 1, 0)
 
 		e.lines = append(e.lines, fmt.Sprintf("dynamic _block_%d() {", id))

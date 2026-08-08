@@ -570,6 +570,12 @@ func transferInstruction(
 				return
 			}
 		}
+		// Removed: an "ICData:<name>" KnownStub path keyed on PP index.
+		// ICData is never present in an AOT snapshot (see cluster.ICDataInfo),
+		// so the lookup could never hit; measured effect was 0 additional BLR
+		// resolutions on every sample. It was also semantically wrong -- the
+		// name it propagated came from the ICData object's *owner*, not from
+		// CallSiteData.target_name.
 		if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 			state[rt] = KnownClass(classID)
 			ctx.PPHits++
@@ -731,13 +737,9 @@ func transferInstruction(
 				ctx.HeaderHits++
 				return
 			}
-			if fields, ok2 := ctx.FieldByOwnerOffset[state[base].ClassID]; ok2 {
-				if fieldRefID, ok3 := fields[int32(imm9)]; ok3 {
-					if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-						state[rt] = KnownClass(classID)
-						return
-					}
-				}
+			if classID, ok2 := ctx.FieldValueClass(state[base].ClassID, int32(imm9)); ok2 {
+				state[rt] = KnownClass(classID)
+				return
 			}
 		}
 		// Unknown field or receiver type.
@@ -774,13 +776,9 @@ func transferInstruction(
 				state[rt] = storedType
 				return
 			}
-			if fields, ok2 := ctx.FieldByOwnerOffset[state[base].ClassID]; ok2 {
-				if fieldRefID, ok3 := fields[int32(imm9)]; ok3 {
-					if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-						state[rt] = KnownClass(classID)
-						return
-					}
-				}
+			if classID, ok2 := ctx.FieldValueClass(state[base].ClassID, int32(imm9)); ok2 {
+				state[rt] = KnownClass(classID)
+				return
 			}
 			state[rt] = KnownClass(state[base].ClassID)
 			ctx.HeaderHits++
@@ -820,13 +818,9 @@ func transferInstruction(
 					return
 				}
 				// Check FieldByOwnerOffset for declared field type.
-				if fields, ok2 := ctx.FieldByOwnerOffset[state[baseReg].ClassID]; ok2 {
-					if fieldRefID, ok3 := fields[int32(byteOff)]; ok3 {
-						if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-							state[rt] = KnownClass(classID)
-							return
-						}
-					}
+				if classID, ok2 := ctx.FieldValueClass(state[baseReg].ClassID, int32(byteOff)); ok2 {
+					state[rt] = KnownClass(classID)
+					return
 				}
 				// Field not found in FieldByOwnerOffset — approximate as KnownClass
 				// (the loaded value is still an object of the same class, e.g. header)
@@ -851,13 +845,9 @@ func transferInstruction(
 					state[rt] = storedType
 					return
 				}
-				if fields, ok2 := ctx.FieldByOwnerOffset[state[baseReg].ClassID]; ok2 {
-					if fieldRefID, ok3 := fields[int32(byteOff)]; ok3 {
-						if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-							state[rt] = KnownClass(classID)
-							return
-						}
-					}
+				if classID, ok2 := ctx.FieldValueClass(state[baseReg].ClassID, int32(byteOff)); ok2 {
+					state[rt] = KnownClass(classID)
+					return
 				}
 				state[rt] = KnownClass(state[baseReg].ClassID)
 				ctx.HeaderHits++
@@ -924,6 +914,8 @@ func transferInstruction(
 				}
 				result.BLRResolutions = append(result.BLRResolutions, res)
 			}
+			// Removed: the matching "ICData:" consumer for the KnownStub
+			// producer deleted above. Dead once the producer is gone.
 		}
 		// Check if this is an allocation call via KnownStub.
 		isAllocation := false
@@ -1053,13 +1045,6 @@ func resolveBLR(
 		res.Resolved = false
 	case LatticeTop:
 		// No type info — most common case.
-		// SUPER FEATURE 2: try reverse scan if we have a selector offset hint.
-		// The selector offset was extracted from the preceding ADD/SUB
-		// instruction and stored in the BLR register's DispatchIndex.
-		// But if state[rn] is Top, we lost the type info.
-		// Check if the BLR register was loaded from dispatch table
-		// (via LDR Xt, [X21, Xm, LSL #3]) — if Xm had a KnownDispatchIndex
-		// that we lost, we can't recover it here.
 		res.Resolved = false
 	case LatticeBottom:
 		res.Resolved = false

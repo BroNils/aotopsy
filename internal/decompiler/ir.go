@@ -9,6 +9,8 @@
 // is based on for the full rationale.
 package decompiler
 
+import "sort"
+
 // Op classifies one instruction's role in control flow / value flow, this
 // is deliberately a small enum mirroring flutterdec-ir's IROp -- most
 // instructions are OpOther and get lifted by their raw mnemonic text.
@@ -125,6 +127,167 @@ type FuncIR struct {
 	// count before trusting it at all, rather than assuming it's
 	// authoritative just because it parsed without an error.
 	ParamTypeNames []string
+
+	// ExceptionHandlers holds try/catch handler metadata for this function,
+	// populated by the caller from cluster.ExceptionHandlerInfo BEFORE
+	// EmitPseudocode runs. Each entry describes one handler's PC offset
+	// (relative to the function's entry VA), outer try index, and flags.
+	// When non-empty, EmitPseudocode wraps the function body in a try/catch
+	// block and emits catch clauses at handler entry points.
+	ExceptionHandlers []ExceptionHandlerEntry `json:"-"`
+
+	// EnclosingFunction names the function this closure was declared inside,
+	// resolved from ClosureData.parent_function. Empty for non-closures.
+	// OwnerRefID only reaches the owning class, so without this every anonymous
+	// closure in a class is indistinguishable.
+	EnclosingFunction string `json:"-"`
+
+	// InlineFrames maps a block's start VA to the inlined-function call stack
+	// active there, outermost first, resolved to names by the caller from
+	// CodeSourceMap + Code.inlined_id_to_function. Empty/absent means the code
+	// belongs to this function itself.
+	//
+	// This is the consumer for the CodeSourceMap capture: it is what tells a
+	// reader that a run of instructions is really a callee the compiler inlined,
+	// which is otherwise invisible in the pseudocode.
+	InlineFrames map[uint64][]string `json:"-"`
+
+	// TryRegions holds recovered try blocks with their PC extents, populated by
+	// the caller from PcDescriptors before EmitPseudocode runs. Unlike
+	// ExceptionHandlers (entry points only) these carry ranges, so they are
+	// what any real try/catch structuring must be built on.
+	TryRegions []TryRegionEntry `json:"-"`
+
+	// TypeParamNames holds this function's declared GENERIC TYPE PARAMETER
+	// names in declaration order -- ["T"] for `runUnaryGuarded<T>` -- resolved
+	// by the caller from FunctionType.type_parameters -> TypeParameters.names
+	// before EmitPseudocode runs. When non-empty, the emitter appends
+	// <T1, T2, ...> to the signature.
+	//
+	// This replaces an earlier GenericTypeArgs field that read the
+	// TypeArguments of the parameter_types ARRAY instead: a different object
+	// (it describes the array, not the function), and type *arguments* rather
+	// than type *parameters*, so it would have emitted invalid Dart had it
+	// ever produced output. It never did -- 0 of 300 functions measured.
+	// Entries are already rendered ("T", or "T extends NativeFunction"), so the
+	// emitter joins them without knowing how bounds are resolved.
+	TypeParamNames []string `json:"-"`
+}
+
+// TryRegionEntry is one recovered try block: a PC range plus the handler it
+// dispatches to.
+//
+// The range comes from PcDescriptors' try_index (ExceptionHandlers alone gives
+// handler entry points but no extents). Both VAs are absolute, converted from
+// the Code-relative offsets the snapshot stores.
+//
+// CAVEAT for anyone rendering these: region granularity is bounded by
+// descriptor density. Descriptors exist only at call sites and runtime calls,
+// so two nested source-level trys can collapse into one region -- measured on
+// compare_sample's nestedTryCatch, which has 2 handlers but yields 1 region.
+// Region count is NOT try-block count.
+type TryRegionEntry struct {
+	StartVA  uint64
+	EndVA    uint64 // exclusive
+	TryIndex int
+	// Handler is the matching ExceptionHandlerEntry, resolved by TryIndex.
+	Handler ExceptionHandlerEntry
+	// HandlerVA is the absolute address of the handler's entry point.
+	HandlerVA uint64
+}
+
+// SnapTryRegionsToBlocks widens each try region outward to basic-block
+// boundaries and reports how many regions grew.
+//
+// This is sound, not a heuristic. A basic block is straight-line code with a
+// single entry, so control cannot enter it partway: if ANY pc in a block is
+// inside try N, every pc in that block is inside try N. Snapping therefore
+// cannot over-claim coverage.
+//
+// It matters because raw PcDescriptor ranges are severe lower bounds --
+// descriptors only exist at call sites and runtime calls, so a try whose body
+// contains one call yields a range of a single instruction. Snapping recovers
+// the enclosing straight-line code, which is what a reader actually wants and
+// what any future `try { }` structuring needs.
+//
+// It does NOT fix the other under-report: two nested trys can still merge when
+// descriptors are too sparse to separate them.
+func (f *FuncIR) SnapTryRegionsToBlocks() int {
+	if len(f.TryRegions) == 0 || len(f.Blocks) == 0 {
+		return 0
+	}
+	// Block extent: [StartVA, last instruction's Addr]. The end is inclusive of
+	// the final instruction's address; regions use an exclusive end, so callers
+	// get lastAddr+1 at minimum. Instruction width is unknown here (x86_64 is
+	// variable length), so the next block's StartVA is used where available.
+	type extent struct{ start, end uint64 }
+	extents := make([]extent, 0, len(f.Blocks))
+	for i := range f.Blocks {
+		b := &f.Blocks[i]
+		if len(b.Instrs) == 0 {
+			continue
+		}
+		e := b.Instrs[len(b.Instrs)-1].Addr + 1
+		extents = append(extents, extent{start: b.StartVA, end: e})
+	}
+	if len(extents) == 0 {
+		return 0
+	}
+	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
+	// A block's true end is the next block's start when they are contiguous,
+	// which recovers the final instruction's width.
+	for i := 0; i+1 < len(extents); i++ {
+		if extents[i+1].start > extents[i].end {
+			extents[i].end = extents[i+1].start
+		}
+	}
+
+	widened := 0
+	for i := range f.TryRegions {
+		r := &f.TryRegions[i]
+		newStart, newEnd := r.StartVA, r.EndVA
+		for _, e := range extents {
+			// Overlap test against the region's original extent.
+			if e.end <= r.StartVA || e.start >= r.EndVA {
+				continue
+			}
+			if e.start < newStart {
+				newStart = e.start
+			}
+			if e.end > newEnd {
+				newEnd = e.end
+			}
+		}
+		if newStart != r.StartVA || newEnd != r.EndVA {
+			widened++
+			r.StartVA, r.EndVA = newStart, newEnd
+		}
+	}
+	return widened
+}
+
+// CatchClause renders the Dart catch binding this handler actually has.
+//
+// Driven by needs_stacktrace: a source-level `catch (e)` sets it false and
+// `catch (e, s)` sets it true. The previous emitter hardcoded `catch (e, st)`
+// and so mis-rendered every single-binding catch -- verified against
+// ground_truth.dart's tryCatchFinally, which is `catch (e)` and reports
+// needs_stacktrace=false.
+func (r TryRegionEntry) CatchClause() string {
+	if r.Handler.NeedsStacktrace {
+		return "catch (e, st)"
+	}
+	return "catch (e)"
+}
+
+// ExceptionHandlerEntry describes one exception handler in a function.
+// Populated from cluster.ExceptionHandlerInfo by the pipeline.
+type ExceptionHandlerEntry struct {
+	PCOffset        int32 `json:"pc_offset"`
+	OuterTryIndex   int16 `json:"outer_try_index,omitempty"`
+	NeedsStacktrace bool  `json:"needs_stacktrace,omitempty"`
+	HasCatchAll     bool  `json:"has_catch_all,omitempty"`
+	IsGenerated     bool  `json:"is_generated,omitempty"`
 }
 
 // BlockByVA resolves a block by its start address.

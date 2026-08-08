@@ -132,6 +132,90 @@ func cmdDecompileNative(args []string) error {
 	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
 	poolDisplay := resolvePoolDisplay(result.Pool, pl)
 
+	// Build exception handler map: Code.RefID → []ExceptionHandlerEntry.
+	// Code.ExceptionHandlersRef points to an ExceptionHandlers object in
+	// result.ExceptionHandlers. We map that ref to the handler entries
+	// so the decompiler can emit try/catch structure.
+	excHandlersByRef := make(map[int][]cluster.ExceptionHandlerEntry)
+	for i := range result.ExceptionHandlers {
+		eh := &result.ExceptionHandlers[i]
+		excHandlersByRef[eh.RefID] = eh.Handlers
+	}
+	codeRefToExcHandlers := make(map[int][]cluster.ExceptionHandlerEntry)
+	for _, ce := range result.Codes {
+		if ce.ExceptionHandlersRef >= 0 {
+			if handlers, ok := excHandlersByRef[ce.ExceptionHandlersRef]; ok {
+				codeRefToExcHandlers[ce.RefID] = handlers
+			}
+		}
+	}
+
+	// Code.RefID -> decoded PcDescriptors. Their try_index is the only source
+	// for try-block EXTENTS; ExceptionHandlers above gives entry points only.
+	pcDescByRef := make(map[int][]cluster.PcDescriptorEntry, len(result.PcDescriptors))
+	for i := range result.PcDescriptors {
+		pcDescByRef[result.PcDescriptors[i].RefID] = result.PcDescriptors[i].Entries
+	}
+	codeRefToPcDesc := make(map[int][]cluster.PcDescriptorEntry)
+	for _, ce := range result.Codes {
+		if ce.PcDescriptorsRef >= 0 {
+			if entries, ok := pcDescByRef[ce.PcDescriptorsRef]; ok {
+				codeRefToPcDesc[ce.RefID] = entries
+			}
+		}
+	}
+
+	// Code.RefID -> decoded CodeSourceMap, and -> the inlined_id_to_function
+	// name table its PushFunction indices point into. Together these turn
+	// "this pc is in inline frame 3" into "this pc is inside Foo.bar".
+	csmByRef := make(map[int]*cluster.CodeSourceMapInfo, len(result.CodeSourceMaps))
+	for i := range result.CodeSourceMaps {
+		csmByRef[result.CodeSourceMaps[i].RefID] = &result.CodeSourceMaps[i]
+	}
+	arrayByRef := make(map[int]*cluster.ArrayInfo, len(result.Arrays))
+	for i := range result.Arrays {
+		arrayByRef[result.Arrays[i].RefID] = &result.Arrays[i]
+	}
+	codeRefToCSM := make(map[int]*cluster.CodeSourceMapInfo)
+	codeRefToInlinedNames := make(map[int][]string)
+	for _, ce := range result.Codes {
+		if ce.CodeSourceMapRef >= 0 {
+			if csm, ok := csmByRef[ce.CodeSourceMapRef]; ok {
+				codeRefToCSM[ce.RefID] = csm
+			}
+		}
+		if ce.InlinedFuncsRef < 0 {
+			continue
+		}
+		arr, ok := arrayByRef[ce.InlinedFuncsRef]
+		if !ok {
+			continue
+		}
+		names := make([]string, len(arr.ElementRefIDs))
+		for i, fnRef := range arr.ElementRefIDs {
+			if no, ok := pl.RefToNamed[fnRef]; ok {
+				owner := pl.ResolveOwnerName(no)
+				name := pl.ResolveName(no)
+				if name == "" {
+					name = pl.ResolveVMName(no)
+				}
+				switch {
+				case owner != "" && name != "":
+					names[i] = owner + "." + name
+				case name != "":
+					names[i] = name
+				}
+			}
+		}
+		codeRefToInlinedNames[ce.RefID] = names
+	}
+
+	// The typeInfoByRef / typeArgsByRef / resolveTypeName / resolveTypeArgs
+	// helpers that used to be built here are gone along with
+	// decompiler.FuncIR.GenericTypeArgs -- see that field's removal note.
+	// resolveTypeName also linear-scanned result.Classes on every call, which
+	// would have been O(types x classes) had it ever produced output.
+
 	// vmStubNames: VA->real-name map for the VM isolate's own stub Code
 	// objects (StackOverflowSharedWithoutFPURegs, etc.), parsed from a
 	// SEPARATE snapshot region (info.VmData) than the app's own isolate
@@ -189,7 +273,7 @@ func cmdDecompileNative(args []string) error {
 	// perfectly resolvable Code object (RefID >= 0), just with an
 	// unresolvable owner.
 	// H-3 fix: get THR fields for x86_64 call edge annotation.
-	thrFields := disasm.THRFields(info.Version.DartVersion, isARM64)
+	thrFields := disasm.THRFieldsWithProfile(info.Version.DartVersion, isARM64, info.Version)
 
 	if isARM64 {
 		if threadStubOffsets := disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64); len(threadStubOffsets) > 0 {
@@ -317,6 +401,34 @@ func cmdDecompileNative(args []string) error {
 		return names
 	}
 
+	// Generic type PARAMETER names (the `<T>` in `runUnaryGuarded<T>`), a
+	// different thing from the parameter TYPES resolved just above. Source:
+	// FunctionType.type_parameters -> TypeParameters.names.
+	funcTypeGenerics := pipeline.BuildFuncTypeParamNames(result, pl)
+	// Closure -> declaring function, from ClosureData.parent_function.
+	closureParents := pipeline.BuildClosureParents(result, pl)
+	genericParamNamesFor := func(r cluster.CodeRange) []string {
+		if funcTypeGenerics == nil || r.RefID < 0 {
+			return nil
+		}
+		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
+		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
+		if !ok || owner.SignatureRefID <= 0 {
+			return nil
+		}
+		params := funcTypeGenerics[owner.SignatureRefID]
+		if len(params) == 0 {
+			return nil
+		}
+		// Render here so the decompiler stays unaware of how bounds resolve:
+		// "T" or "T extends NativeFunction".
+		out := make([]string, len(params))
+		for i, p := range params {
+			out[i] = p.String()
+		}
+		return out
+	}
+
 	buildFuncIR := func(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		funcStart := uint64(r.PCOffset) - codeOff
 		funcEnd := funcStart + uint64(r.Size)
@@ -345,6 +457,101 @@ func cmdDecompileNative(args []string) error {
 		}
 		fir.ThreadStubOffsets = disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
 		fir.ParamTypeNames = paramTypeNamesFor(r)
+		fir.TypeParamNames = genericParamNamesFor(r)
+		if len(closureParents) > 0 && r.RefID >= 0 {
+			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
+			if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok {
+				parent := closureParents[owner.RefID]
+				// Drop same-name parents. A tear-off's ClosureData points at a
+				// DIFFERENT Function object that shares the method's name, so a
+				// ref-level self-check (done in BuildClosureParents) does not
+				// catch it: 49 of 99 annotations were "closure declared in: X"
+				// on X itself. Comparing names removes those without losing any
+				// genuinely nested closure.
+				if parent != "" && parent != fir.Name &&
+					!strings.HasPrefix(fir.Name, parent+"_") {
+					fir.EnclosingFunction = parent
+				}
+			}
+		}
+		// Wire exception handlers from cluster capture → decompiler FuncIR.
+		if handlers, ok := codeRefToExcHandlers[r.RefID]; ok {
+			fir.ExceptionHandlers = make([]decompiler.ExceptionHandlerEntry, len(handlers))
+			for i, h := range handlers {
+				fir.ExceptionHandlers[i] = decompiler.ExceptionHandlerEntry{
+					PCOffset:        h.PCOffset,
+					OuterTryIndex:   h.OuterTryIndex,
+					NeedsStacktrace: h.NeedsStacktrace,
+					HasCatchAll:     h.HasCatchAll,
+					IsGenerated:     h.IsGenerated,
+				}
+			}
+
+			// Recover try EXTENTS from PcDescriptors and pair each with its
+			// handler. endPC is the function's size: the last descriptor has no
+			// successor to delimit it, so without this the final region would
+			// be dropped.
+			if entries, ok := codeRefToPcDesc[r.RefID]; ok && len(entries) > 0 {
+				regions := cluster.BuildTryRegions(entries, r.Size)
+				// Recover enclosing trys that left no descriptor of their own:
+				// a pc inside try N is inside handler[N].outer_try_index too.
+				regions = cluster.ExpandOuterTryRegions(regions, handlers)
+				for _, reg := range regions {
+					if reg.TryIndex < 0 || reg.TryIndex >= len(fir.ExceptionHandlers) {
+						// try_index must index this Code's own handler table;
+						// anything else means a mismatched Code/handler pair
+						// rather than a usable region.
+						continue
+					}
+					h := fir.ExceptionHandlers[reg.TryIndex]
+					fir.TryRegions = append(fir.TryRegions, decompiler.TryRegionEntry{
+						StartVA:   funcStart + codeVA + uint64(reg.StartPC),
+						EndVA:     funcStart + codeVA + uint64(reg.EndPC),
+						TryIndex:  reg.TryIndex,
+						Handler:   h,
+						HandlerVA: funcStart + codeVA + uint64(h.PCOffset),
+					})
+				}
+				// Widen to basic-block boundaries. Sound because a block has a
+				// single entry, so a block containing any in-try pc is entirely
+				// in-try. Raw descriptor ranges are otherwise single-instruction
+				// lower bounds.
+				fir.SnapTryRegionsToBlocks()
+			}
+		}
+
+		// Inlined-frame annotation: for each block, ask the CodeSourceMap which
+		// inline stack is active at its start VA and resolve the indices to
+		// function names. Blocks belonging to the function itself get nothing.
+		if csm, ok := codeRefToCSM[r.RefID]; ok && len(fir.Blocks) > 0 {
+			names := codeRefToInlinedNames[r.RefID]
+			for bi := range fir.Blocks {
+				blockVA := fir.Blocks[bi].StartVA
+				// CSM pc offsets are relative to the Code payload start, the
+				// same base funcStart is measured from.
+				pcOff := uint32(blockVA - codeVA)
+				stack, _, ok := csm.InlineStackAt(pcOff)
+				if !ok || len(stack) == 0 {
+					continue
+				}
+				var frames []string
+				for _, id := range stack {
+					if int(id) < len(names) && names[id] != "" {
+						frames = append(frames, names[id])
+					}
+				}
+				if len(frames) == 0 {
+					continue
+				}
+				if fir.InlineFrames == nil {
+					fir.InlineFrames = make(map[uint64][]string)
+				}
+				fir.InlineFrames[blockVA] = frames
+			}
+		}
+		// (No generic-type-argument wiring here any more -- it resolved the
+		// wrong object and never produced output. See the removal note on
+		// decompiler.FuncIR.GenericTypeArgs.)
 		return fir, nil
 	}
 
@@ -751,6 +958,12 @@ func cmdDecompileNative(args []string) error {
 			agg.PlaceholderIfs += art.Stats.PlaceholderIfs
 			agg.UnresolvedCF += art.Stats.UnresolvedCF
 			agg.RawRegisterCalls += art.Stats.RawRegisterCalls
+			// These three were missing from the fold, so the aggregate JSON
+			// reported 0 for them no matter what the per-function artifacts
+			// said. Observed: "try_blocks": 0 on a run that emitted 10.
+			agg.NonLastBranch += art.Stats.NonLastBranch
+			agg.TryBlocks += art.Stats.TryBlocks
+			agg.CatchHandlers += art.Stats.CatchHandlers
 			emitted++
 			if *genFrida {
 				funcStart := uint64(r.PCOffset) - codeOff

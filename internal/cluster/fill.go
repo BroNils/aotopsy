@@ -19,7 +19,12 @@ type NamedObject struct {
 	NameRefID      int // ref ID pointing to name string (-1 if none)
 	OwnerRefID     int // ref ID pointing to owner (-1 if none)
 	SignatureRefID int // ref ID pointing to FunctionType signature (-1 if none)
-	CodeIndex      int // Function's code_index scalar (-1 if not a Function / not captured)
+	// DataRefID is Function.data (ref index 3). For a closure function this is
+	// its ClosureData, whose parent_function names the enclosing function --
+	// strictly more precise than OwnerRefID, which only gives the owning class.
+	// -1 if not a Function or not captured.
+	DataRefID int
+	CodeIndex int // Function's code_index scalar (-1 if not a Function / not captured)
 }
 
 // FuncTypeInfo holds parameter count data extracted from a FunctionType object.
@@ -35,6 +40,43 @@ type FuncTypeInfo struct {
 	// Dart version (see that field's doc comment for the verified
 	// per-version ref-loop index). -1 if not captured/not applicable.
 	ParamTypesArrayRefID int
+
+	// TypeParamsRefID is the ref ID of this FunctionType's type_parameters
+	// (a TypeParameters object): the function's OWN generic parameters, i.e.
+	// the `<T>` in `void runUnaryGuarded<T>(...)`. -1 when absent or not
+	// captured for this Dart version.
+	//
+	// Its ref-loop index is DERIVED as FuncTypeParamTypesIdx-2 rather than
+	// tabulated separately, because UntaggedFunctionType lays out
+	// type_parameters, result_type, parameter_types consecutively in every
+	// supported version. Verified in runtime/vm/raw_object.h:
+	//
+	//	3.9.2  leading refs type_test_stub, hash  => type_parameters idx 2,
+	//	                                             parameter_types  idx 4
+	//	2.17.6 leading ref  type_test_stub (hash moved to the end)
+	//	                                          => type_parameters idx 1,
+	//	                                             parameter_types  idx 3
+	//
+	// Deriving it also means the capture is enabled exactly where
+	// FuncTypeParamTypesIdx has been verified for a version, and nowhere
+	// else -- no new unverified per-version constant.
+	TypeParamsRefID int
+}
+
+// TypeParametersInfo holds a TypeParameters object's refs.
+//
+// ReadFromTo order per UntaggedTypeParameters (raw_object.h @ 3.9.2):
+// names(0), flags(1), bounds(2), defaults(3), matching specTypeParameters'
+// NumRefs: 4. `names` is an Array of Strings holding the declared parameter
+// names ("T", "K", "V", ...) -- that Array's elements are captured in
+// Result.Arrays, so resolving a name list is
+// TypeParameters -> NamesArrayRef -> ArrayInfo.ElementRefIDs -> Strings.
+type TypeParametersInfo struct {
+	RefID         int
+	NamesArrayRef int
+	FlagsRef      int
+	BoundsRef     int
+	DefaultsRef   int
 }
 
 // ArrayInfo holds an Array/ImmutableArray object's elements, extracted
@@ -65,6 +107,146 @@ type ClassInfo struct {
 type TypeInfo struct {
 	RefID   int
 	ClassID int32
+}
+
+// --- New capture types (previously skipped) ---
+
+// RefNull is the ref ID of the snapshot's null object.
+//
+// Deserializer::AddBaseObjects installs Object::null() as the very first base
+// object and reference numbering starts at kFirstReference == 1, so ref 1 is
+// always null. Verified against runtime/vm/app_snapshot.cc @ 3.9.2
+// ("s->AddBaseObject(Object::null(), \"Null\", \"null\")") and empirically: 866
+// of 925 ClosureData records in compare_sample carry closure_ref == 1, which is
+// the null closure_ field.
+const RefNull = 1
+
+// InstanceFieldRef is one captured pointer field of an Instance, tagged with
+// the byte offset it occupies inside the object.
+//
+// Recording the offset at capture time is not a convenience -- it is the only
+// correct way to do it. An Instance's fill stream walks every field SLOT from
+// the header to next_field_offset_in_words, and each slot is either an unboxed
+// raw value or a ref. Unboxed slots produce no ref, so the position of a ref
+// within a bare []int ref list does NOT equal its slot index: every ref after
+// the first unboxed field is shifted. An earlier revision tried to recover the
+// mapping afterwards by sorting the class's own declared field offsets and
+// zipping them against the ref list, which is wrong twice over -- it drops the
+// shift above, and it ignores inherited fields, which occupy the LEADING slots
+// (Class.next_field_offset_in_words counts superclass fields too).
+type InstanceFieldRef struct {
+	ByteOffset int32 // offset from the start of the object, in bytes
+	Ref        int   // ref ID of the stored value
+}
+
+// InstanceInfo holds an Instance object's pointer field values, captured from
+// fill. Unboxed (raw) fields are read to keep the stream aligned but carry no
+// ref, so they are absent from Fields; NumFieldSlots records how many slots
+// existed in total so callers can tell "no ref here" from "not captured".
+type InstanceInfo struct {
+	RefID int
+	CID   int // class ID of this instance == its cluster's CID
+	// HeaderWords is 2 under compressed pointers (tags + hash, 4 bytes each)
+	// and 1 otherwise (tags, 8 bytes).
+	HeaderWords int
+	// NumFieldSlots is next_field_offset_in_words - HeaderWords.
+	NumFieldSlots int
+	Fields        []InstanceFieldRef
+}
+
+// ContextInfo holds a Context object's captured variables.
+// Contexts store closure-captured variables (parent context + variable refs).
+type ContextInfo struct {
+	RefID     int
+	ParentRef int   // ref ID of parent context (-1 if none)
+	VarRefs   []int // ref IDs of captured variables
+}
+
+// TypeArgumentsInfo holds a TypeArguments object's type refs.
+// These represent generic type instantiations (e.g., List<int> → [int]).
+type TypeArgumentsInfo struct {
+	RefID          int
+	Length         int   // number of type refs
+	TypeRefs       []int // ref IDs of Type objects
+	Instantiations int   // ref ID of instantiations array (-1 if none)
+	Hash           int32
+	Nullability    int
+}
+
+// ExceptionHandlerEntry describes one exception handler.
+type ExceptionHandlerEntry struct {
+	PCOffset        int32 // PC offset of the handler entry
+	OuterTryIndex   int16 // outer try index (-1 if none)
+	NeedsStacktrace bool
+	HasCatchAll     bool
+	IsGenerated     bool
+}
+
+// ExceptionHandlerInfo holds an ExceptionHandlers object's handler entries.
+// This enables try/catch structure recovery in the decompiler.
+type ExceptionHandlerInfo struct {
+	RefID           int
+	HandledTypesRef int // ref ID of handled types data (-1 if none)
+	Handlers        []ExceptionHandlerEntry
+}
+
+// ICDataInfo holds an ICData object's refs, in ReadFromTo order.
+//
+// ICData is a JIT-only inline cache. The AOT precompiler does not retain
+// ic_data_array_, so no AOT snapshot in this project's corpus contains an
+// ICData cluster (verified: 0 entries across 16 samples spanning Dart 2.12,
+// 3.7, 3.9, 3.10, 3.11 and 3.12, both arm64 and x64). This type exists so
+// that IF such a cluster ever appears (e.g. a kFullJIT snapshot) the refs
+// are captured rather than skipped -- it is NOT a basis for call-target
+// resolution, and the fields below are unverified against a real binary.
+type ICDataInfo struct {
+	RefID         int
+	TargetNameRef int // ref 0: CallSiteData.target_name
+	ArgsDescRef   int // ref 1: CallSiteData.args_descriptor
+	EntriesRef    int // ref 2: ICData.entries (Array of class_id/target pairs)
+}
+
+// ScriptInfo holds a Script object's URL and optional line/col metadata.
+type ScriptInfo struct {
+	RefID             int
+	URLRef            int   // ref ID of URL string
+	LineOffset        int32 // v2.10/v2.13 only
+	ColOffset         int32 // v2.10/v2.13 only
+	KernelScriptIndex int32
+}
+
+// LoadingUnitInfo holds a LoadingUnit object's metadata.
+// Loading units represent deferred libraries (split AOT).
+type LoadingUnitInfo struct {
+	RefID     int
+	ParentRef int   // ref ID of parent loading unit (-1 if root)
+	UnitID    int32 // loading unit ID
+}
+
+// KernelProgramInfoRef holds a KernelProgramInfo object's refs.
+// KPI contains references to the kernel binary (dill) data, which
+// could theoretically enable Dart source reconstruction.
+// Note: KPI is NOT serialized in AOT PRODUCT snapshots — this will
+// always be empty for AOT binaries.
+type KernelProgramInfoRef struct {
+	RefID              int
+	KernelComponentRef int // ref ID of kernel component
+	StringOffsetsRef   int // ref ID of string offsets
+	StringDataRef      int // ref ID of string data
+	CanonicalNamesRef  int // ref ID of canonical names
+	ConstantsRef       int // ref ID of constants
+	ConstantsTableRef  int // ref ID of constants table
+}
+
+// ClosureDataInfo holds a ClosureData object's refs.
+// In AOT, ClosureData has: parent_function (ref 0), closure (ref 1),
+// and packed_fields (scalar). context_scope_ is null in AOT.
+// This enables closure → parent function resolution without Context objects.
+type ClosureDataInfo struct {
+	RefID             int
+	ParentFunctionRef int // ref ID of parent function (-1 if none)
+	ClosureRef        int // ref ID of closure object (-1 if none)
+	PackedFields      uint32
 }
 
 // FieldInfo holds field layout data extracted from a Field object's fill.
@@ -127,7 +309,9 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 
 // dataImageObjStart computes the byte offset within data[] where ROData objects begin.
 // For non-compressed-pointers mode, the Dart SDK computes the data image as:
-//   DataImage() = Addr() + RoundUp(length(), kMaxObjectAlignment)
+//
+//	DataImage() = Addr() + RoundUp(length(), kMaxObjectAlignment)
+//
 // where Addr() is the start of the snapshot blob (including magic),
 // length() is the stored length (excluding the 4-byte magic), and
 // kMaxObjectAlignment = 2 * word_size = 16 on 64-bit.
@@ -192,6 +376,8 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 	// The data image position depends on FillEnd, which is only known
 	// after all clusters have been processed.
 	var rodataStringClusters []*ClusterMeta
+	var rodataPcDescClusters []*ClusterMeta
+	var rodataCSMClusters []*ClusterMeta
 
 	for i := range result.Clusters {
 		cm := &result.Clusters[i]
@@ -219,14 +405,58 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			if isStringCluster && len(cm.Lengths) > 0 {
 				rodataStringClusters = append(rodataStringClusters, cm)
 			}
+			// PcDescriptors also live in ROData. Their payload carries the
+			// try_index per PC, which is the only source for try/catch region
+			// extents (ExceptionHandlers gives handler entries but no ranges).
+			if ct != nil && ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors && len(cm.Lengths) > 0 {
+				rodataPcDescClusters = append(rodataPcDescClusters, cm)
+			}
+			// CodeSourceMap takes the same ROData route on non-compressed
+			// builds. Capturing it only on the inline-bytes path left Dart
+			// < 2.18 with zero CodeSourceMaps despite PcDescriptors working
+			// right beside it.
+			if ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap && len(cm.Lengths) > 0 {
+				rodataCSMClusters = append(rodataCSMClusters, cm)
+			}
 
 		case FillInlineBytes:
-			if err := skipFillInlineBytes(s, cm); err != nil {
+			// Capture only PcDescriptors payloads; the sibling inline-bytes
+			// CIDs (CodeSourceMap, CompressedStackMaps) have no consumer yet
+			// and copying them would cost memory for nothing.
+			capturePcDesc := ct != nil && ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors
+			captureCSM := ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap
+			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM)
+			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d) pos=0x%x: %w", i, cm.CID, fillPos, err)
+			}
+			// Keep partial results in both cases: these are streams of
+			// independent records, so a malformed tail still leaves usable
+			// information for the earlier PCs.
+			if capturePcDesc {
+				ref := cm.StartRef
+				for _, p := range payloads {
+					entries, decErr := DecodePcDescriptors(p)
+					if len(entries) > 0 || decErr == nil {
+						result.PcDescriptors = append(result.PcDescriptors,
+							PcDescriptorsInfo{RefID: ref, Entries: entries})
+					}
+					ref++
+				}
+			}
+			if captureCSM {
+				ref := cm.StartRef
+				for _, p := range payloads {
+					entries, decErr := DecodeCodeSourceMap(p)
+					if len(entries) > 0 || decErr == nil {
+						result.CodeSourceMaps = append(result.CodeSourceMaps,
+							CodeSourceMapInfo{RefID: ref, Entries: entries})
+					}
+					ref++
+				}
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned)
+			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
@@ -234,6 +464,12 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.FuncTypes = append(result.FuncTypes, funcTypes...)
 			result.Fields = append(result.Fields, fieldInfos...)
 			result.Types = append(result.Types, typeInfos...)
+			result.ICData = append(result.ICData, icDataInfos...)
+			result.Scripts = append(result.Scripts, scriptInfos...)
+			result.LoadingUnits = append(result.LoadingUnits, loadingUnitInfos...)
+			result.KernelProgramInfo = append(result.KernelProgramInfo, kpiRefs...)
+			result.ClosureData = append(result.ClosureData, closureDataInfos...)
+			result.TypeParameters = append(result.TypeParameters, typeParamInfos...)
 
 		case FillDouble:
 			if err := skipFillDouble(s, cm, profile.PreCanonicalSplit); err != nil {
@@ -274,19 +510,25 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillExceptionHandlers:
-			if err := skipFillExceptionHandlers(s, cm, fillRefUnsigned); err != nil {
+			ehInfos, err := readFillExceptionHandlers(s, cm, fillRefUnsigned)
+			if err != nil {
 				return fmt.Errorf("fill: cluster %d (ExceptionHandlers) pos=0x%x: %w", i, fillPos, err)
 			}
+			result.ExceptionHandlers = append(result.ExceptionHandlers, ehInfos...)
 
 		case FillContext:
-			if err := skipFillContext(s, cm, fillRefUnsigned); err != nil {
+			ctxInfos, err := readFillContext(s, cm, fillRefUnsigned)
+			if err != nil {
 				return fmt.Errorf("fill: cluster %d (Context): %w", i, err)
 			}
+			result.Contexts = append(result.Contexts, ctxInfos...)
 
 		case FillTypeArguments:
-			if err := skipFillTypeArguments(s, cm, fillRefUnsigned, profile); err != nil {
+			taInfos, err := readFillTypeArguments(s, cm, fillRefUnsigned, profile)
+			if err != nil {
 				return fmt.Errorf("fill: cluster %d (TypeArguments): %w", i, err)
 			}
+			result.TypeArguments = append(result.TypeArguments, taInfos...)
 
 		case FillClass:
 			named, classInfos, err := readFillClass(s, cm, &spec, fillRefUnsigned, profile.TopLevelCid16, profile.ClassHasTokenPos)
@@ -305,9 +547,11 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.Fields = append(result.Fields, fieldInfos...)
 
 		case FillInstance:
-			if err := skipFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit); err != nil {
+			instInfos, err := readFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit)
+			if err != nil {
 				return fmt.Errorf("fill: cluster %d (Instance CID %d): %w", i, cm.CID, err)
 			}
+			result.Instances = append(result.Instances, instInfos...)
 
 		case FillRecord:
 			if err := skipFillRecord(s, cm, fillRefUnsigned); err != nil {
@@ -342,6 +586,22 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 		}
 	}
 
+	// Extract PcDescriptors / CodeSourceMap payloads (same ROData addressing
+	// as strings; used by non-compressed-pointer builds).
+	if len(rodataPcDescClusters) > 0 || len(rodataCSMClusters) > 0 {
+		objStart := dataImageObjStart(len(data), snapshotSize, profile)
+		if objStart > 0 {
+			for _, cm := range rodataPcDescClusters {
+				result.PcDescriptors = append(result.PcDescriptors,
+					extractRODataPcDescriptors(data, cm, objStart, profile, isVM)...)
+			}
+			for _, cm := range rodataCSMClusters {
+				result.CodeSourceMaps = append(result.CodeSourceMaps,
+					extractRODataCodeSourceMaps(data, cm, objStart, profile, isVM)...)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -363,7 +623,12 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm)
 	case FillRefs:
-		_, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned)
+		// Pass the real profile through. Passing nil here used to panic:
+		// readFillRefs dereferences profile.CIDs to decide which CID-specific
+		// capture applies, so every FillRefs cluster reached from
+		// DebugFillPositions (aotopsy _debug clusters / _debug objects) hit a
+		// nil-pointer dereference.
+		_, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)
@@ -381,11 +646,14 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillTypedData:
 		return skipFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit)
 	case FillExceptionHandlers:
-		return skipFillExceptionHandlers(s, cm, fillRefUnsigned)
+		_, err := readFillExceptionHandlers(s, cm, fillRefUnsigned)
+		return err
 	case FillContext:
-		return skipFillContext(s, cm, fillRefUnsigned)
+		_, err := readFillContext(s, cm, fillRefUnsigned)
+		return err
 	case FillTypeArguments:
-		return skipFillTypeArguments(s, cm, fillRefUnsigned, profile)
+		_, err := readFillTypeArguments(s, cm, fillRefUnsigned, profile)
+		return err
 	case FillClass:
 		_, _, err := readFillClass(s, cm, spec, fillRefUnsigned, profile.TopLevelCid16, profile.ClassHasTokenPos)
 		return err
@@ -393,7 +661,8 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		_, _, err := readFillField(s, cm, spec, fillRefUnsigned)
 		return err
 	case FillInstance:
-		return skipFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit)
+		_, err := readFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit)
+		return err
 	case FillRecord:
 		return skipFillRecord(s, cm, fillRefUnsigned)
 	case FillContextScope:
@@ -654,10 +923,12 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 // readFillRefs reads fill data for a FillRefs cluster, extracting name/owner/signature refs.
 // When spec.IsFuncType is true, also extracts packed_parameter_counts from scalars.
 // When spec.IsField is true, also extracts kind_bits and host_offset from scalars.
-func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUnsigned bool) ([]NamedObject, []FuncTypeInfo, []FieldInfo, []TypeInfo, error) {
+// For ICData, Script, LoadingUnit, KernelProgramInfo: captures all refs and
+// scalars into CID-specific structured types.
+func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]NamedObject, []FuncTypeInfo, []FieldInfo, []TypeInfo, []ICDataInfo, []ScriptInfo, []LoadingUnitInfo, []KernelProgramInfoRef, []ClosureDataInfo, []TypeParametersInfo, error) {
 	count := int(cm.Count)
 	if count <= 0 {
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
 	}
 
 	// Capture into `named` (and thus RefToNamed) whenever there's either a
@@ -684,27 +955,57 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		types = make([]TypeInfo, 0, count)
 	}
 
+	// CID-specific capture slices.
+	var icDataInfos []ICDataInfo
+	var scriptInfos []ScriptInfo
+	var loadingUnitInfos []LoadingUnitInfo
+	var kpiRefs []KernelProgramInfoRef
+	var closureDataInfos []ClosureDataInfo
+	var typeParamInfos []TypeParametersInfo
+	// Second line of defence for the nil-profile crash fixed in
+	// fillOneCluster: a nil profile (or nil CID table) now disables
+	// CID-specific capture instead of panicking. The scalar/ref *stream
+	// reads* below are driven by spec, not by profile, so skipping capture
+	// keeps the stream aligned.
+	var isICData, isScript, isLoadingUnit, isKPI, isClosureData, isTypeParameters bool
+	if profile != nil && profile.CIDs != nil {
+		isICData = cm.CID == profile.CIDs.ICData
+		isScript = cm.CID == profile.CIDs.Script
+		isLoadingUnit = cm.CID == profile.CIDs.LoadingUnit
+		isKPI = cm.CID == profile.CIDs.KernelProgramInfo
+		isClosureData = cm.CID == profile.CIDs.ClosureData
+		isTypeParameters = profile.CIDs.TypeParameters != 0 && cm.CID == profile.CIDs.TypeParameters
+	}
+
 	ref := cm.StartRef
 	for i := 0; i < count; i++ {
 		// v2.10: Read<bool>(is_canonical) — 1 raw byte before refs.
 		if spec.LeadingBool {
 			if _, err := s.ReadByte(); err != nil {
-				return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d is_canonical: %w", i, count, err)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d is_canonical: %w", i, count, err)
 			}
 		}
 
-		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef int
+		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef int
 		nameRef = -1
 		ownerRef = -1
 		sigRef = -1
 		paramTypesRef = -1
 		fieldTypeRef = -1
+		typeParamsRef = -1
+		dataRef := -1
+
+		// For CID-specific capture, save all refs in order.
+		var allRefs []int
 
 		// Read refs using version-appropriate encoding.
 		for j := 0; j < spec.NumRefs; j++ {
 			r, err := readRef(s, fillRefUnsigned)
 			if err != nil {
-				return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
+			}
+			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters {
+				allRefs = append(allRefs, int(r))
 			}
 			if j == spec.NameIdx {
 				nameRef = int(r)
@@ -718,28 +1019,42 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if spec.IsFuncType && spec.FuncTypeParamTypesIdx > 0 && j == spec.FuncTypeParamTypesIdx {
 				paramTypesRef = int(r)
 			}
+			// type_parameters sits two slots before parameter_types; see
+			// FuncTypeInfo.TypeParamsRefID for the raw_object.h evidence.
+			if spec.IsFuncType && spec.FuncTypeParamTypesIdx >= 2 && j == spec.FuncTypeParamTypesIdx-2 {
+				typeParamsRef = int(r)
+			}
 			// Field type ref is at index 2 (refs: name=0, owner=1, type=2, initializer=3).
 			if spec.IsField && j == 2 {
 				fieldTypeRef = int(r)
+			}
+			// Function.data is ref 3; for closures it is the ClosureData.
+			if spec.IsFunction && j == 3 {
+				dataRef = int(r)
 			}
 		}
 
 		// Read scalars; extract type-specific data for FunctionType and Field clusters.
 		var fieldKindBits int32
 		funcCodeIndex := -1
+		// Script scalar capture: line_offset, col_offset, [flags], kernel_script_index.
+		var scriptLine, scriptCol, scriptKernelIdx int32
+		var scriptFlags byte
+		// LoadingUnit scalar capture: the loading-unit id.
+		var loadingUnitID int32
 		for si, op := range spec.Scalars {
 			if spec.IsFunction && si == 0 {
 				// code_index is OpUnsigned at scalar index 0.
 				ci, err := s.ReadUnsigned()
 				if err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d code_index: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d code_index: %w", i, count, err)
 				}
 				funcCodeIndex = int(ci)
 			} else if spec.IsFuncType && si == 1 {
 				// packed_parameter_counts is OpTagged32 at scalar index 1.
 				packed, err := s.ReadTagged32()
 				if err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d packed_param_counts: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d packed_param_counts: %w", i, count, err)
 				}
 				hasImplicit := (packed & 1) != 0
 				numFixed := int((packed >> 2) & 0x3FFF)
@@ -753,19 +1068,20 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					NumOptional:          numOptional,
 					HasImplicit:          hasImplicit,
 					ParamTypesArrayRefID: paramTypesRef,
+					TypeParamsRefID:      typeParamsRef,
 				})
 			} else if spec.IsField && si == 0 {
 				// kind_bits is OpTagged32 at scalar index 0.
 				kb, err := s.ReadTagged32()
 				if err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
 				}
 				fieldKindBits = int32(kb)
 			} else if spec.IsField && si == 1 {
 				// host_offset_or_field_id is OpRefId at scalar index 1.
 				hostOff, err := s.ReadRefId()
 				if err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d host_offset: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d host_offset: %w", i, count, err)
 				}
 				isStatic := (fieldKindBits>>1)&1 != 0
 				offset := int32(hostOff)
@@ -789,15 +1105,151 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				// runtime/vm/raw_object.h UntaggedType::TypeClassIdBits).
 				flags, err := s.ReadUnsigned()
 				if err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
 				}
 				classID := int32((flags >> 3) & 0xFFFFF)
 				types = append(types, TypeInfo{RefID: ref, ClassID: classID})
+			} else if isScript {
+				// Script scalars: [line_offset, col_offset, [flags],] kernel_script_index.
+				if profile.ScriptHasLineCol {
+					if si == 0 {
+						v, err := s.ReadTagged32()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script line: %w", i, count, err)
+						}
+						scriptLine = int32(v)
+					} else if si == 1 {
+						v, err := s.ReadTagged32()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script col: %w", i, count, err)
+						}
+						scriptCol = int32(v)
+					} else if profile.ScriptHasFlags && si == 2 {
+						v, err := s.ReadByte()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script flags: %w", i, count, err)
+						}
+						scriptFlags = v
+					} else {
+						v, err := s.ReadTagged32()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
+						}
+						scriptKernelIdx = int32(v)
+					}
+				} else if profile.ScriptHasFlags {
+					if si == 0 {
+						v, err := s.ReadByte()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script flags: %w", i, count, err)
+						}
+						scriptFlags = v
+					} else {
+						v, err := s.ReadTagged32()
+						if err != nil {
+							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
+						}
+						scriptKernelIdx = int32(v)
+					}
+				} else {
+					v, err := s.ReadTagged32()
+					if err != nil {
+						return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
+					}
+					scriptKernelIdx = int32(v)
+				}
+			} else if isLoadingUnit {
+				// LoadingUnit scalar: id, from
+				// LoadingUnitDeserializationCluster::ReadFill ->
+				// IdBits::encode(d.Read<intptr_t>()).
+				v, err := s.ReadTagged32()
+				if err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d loading_unit id: %w", i, count, err)
+				}
+				// Was `_ = v`, which silently dropped the id and made every
+				// loading_units.jsonl record report unit_id=0.
+				loadingUnitID = int32(v)
 			} else {
 				if err := skipScalar(s, op); err != nil {
-					return named, funcTypes, fields, types, fmt.Errorf("obj %d/%d scalar: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d scalar: %w", i, count, err)
 				}
 			}
+		}
+
+		// CID-specific capture: build structured types from allRefs + scalars.
+		if isICData && len(allRefs) >= 3 {
+			// ICData ReadFromTo order (ICDataDeserializationCluster::ReadFill,
+			// UntaggedICData): target_name(0), args_descriptor(1), entries(2).
+			//
+			// UNVERIFIED AGAINST A REAL BINARY, and expected to stay that way:
+			// no AOT snapshot in the corpus contains an ICData cluster (0 in
+			// all 16 samples across Dart 2.12/3.7/3.9/3.10/3.11/3.12). ICData
+			// is a JIT inline cache; the AOT precompiler drops ic_data_array_.
+			// So this branch is a capture-if-it-ever-appears path only. Do NOT
+			// build analysis features on it -- an earlier revision did (BLR
+			// resolution keyed on ICData) and it resolved exactly zero call
+			// sites while reporting the *owner's* name as the call target.
+			icDataInfos = append(icDataInfos, ICDataInfo{
+				RefID:         ref,
+				TargetNameRef: allRefs[0],
+				ArgsDescRef:   allRefs[1],
+				EntriesRef:    allRefs[2],
+			})
+		}
+		if isScript && len(allRefs) >= 1 {
+			si := ScriptInfo{
+				RefID:             ref,
+				URLRef:            allRefs[0],
+				LineOffset:        scriptLine,
+				ColOffset:         scriptCol,
+				KernelScriptIndex: scriptKernelIdx,
+			}
+			_ = scriptFlags // captured but not stored in struct (rarely needed)
+			scriptInfos = append(scriptInfos, si)
+		}
+		if isLoadingUnit && len(allRefs) >= 1 {
+			// LoadingUnit refs: parent(0). Scalar: id.
+			lui := LoadingUnitInfo{
+				RefID:     ref,
+				ParentRef: allRefs[0],
+				UnitID:    loadingUnitID,
+			}
+			loadingUnitInfos = append(loadingUnitInfos, lui)
+		}
+		if isKPI && len(allRefs) >= 9 {
+			// KPI refs: kernel_component(0), string_offsets(1), string_data(2),
+			// canonical_names(3), metadata_payloads(4), metadata_mappings(5),
+			// scripts(6), constants(7), constants_table(8).
+			kpiRefs = append(kpiRefs, KernelProgramInfoRef{
+				RefID:              ref,
+				KernelComponentRef: allRefs[0],
+				StringOffsetsRef:   allRefs[1],
+				StringDataRef:      allRefs[2],
+				CanonicalNamesRef:  allRefs[3],
+				ConstantsRef:       allRefs[7],
+				ConstantsTableRef:  allRefs[8],
+			})
+		}
+		if isClosureData && len(allRefs) >= 2 {
+			// ClosureData refs in AOT: parent_function(0), closure(1).
+			// context_scope_ is null in AOT (not read from stream).
+			cd := ClosureDataInfo{
+				RefID:             ref,
+				ParentFunctionRef: allRefs[0],
+				ClosureRef:        allRefs[1],
+			}
+			closureDataInfos = append(closureDataInfos, cd)
+		}
+		if isTypeParameters && len(allRefs) >= 4 {
+			// UntaggedTypeParameters ReadFromTo: names(0), flags(1),
+			// bounds(2), defaults(3).
+			typeParamInfos = append(typeParamInfos, TypeParametersInfo{
+				RefID:         ref,
+				NamesArrayRef: allRefs[0],
+				FlagsRef:      allRefs[1],
+				BoundsRef:     allRefs[2],
+				DefaultsRef:   allRefs[3],
+			})
 		}
 
 		if hasName {
@@ -807,13 +1259,14 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				NameRefID:      nameRef,
 				OwnerRefID:     ownerRef,
 				SignatureRefID: sigRef,
+				DataRefID:      dataRef,
 				CodeIndex:      funcCodeIndex,
 			})
 		}
 		ref++
 	}
 
-	return named, funcTypes, fields, types, nil
+	return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, nil
 }
 
 // skipScalar reads and discards one scalar value.
@@ -1167,6 +1620,10 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 		// determines whether remaining refs are read. This is different from v2.14+ where
 		// discarded status comes from the alloc phase.
 		var ownerRef int
+		var excHandlersRef int = -1
+		var pcDescRef int = -1
+		var csmRef int = -1
+		var inlinedFuncsRef int = -1
 		if stateBitsAfterRef > 0 {
 			// Read first N refs (before state_bits) — all codes, including discarded.
 			for j := 0; j < stateBitsAfterRef; j++ {
@@ -1213,6 +1670,12 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				if j == stateBitsAfterRef {
 					ownerRef = int(r)
 				}
+				if j == stateBitsAfterRef+1 {
+					excHandlersRef = int(r)
+				}
+				if j == stateBitsAfterRef+2 {
+					pcDescRef = int(r)
+				}
 			}
 		} else if !discarded {
 			// v2.10, v2.14+: read all refs in order (no interleaved state_bits).
@@ -1223,6 +1686,24 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				}
 				if j == 0 {
 					ownerRef = int(r)
+				}
+				if j == 1 {
+					excHandlersRef = int(r)
+				}
+				if j == 2 {
+					pcDescRef = int(r)
+				}
+				// inlined_id_to_function is ref 4: an Array of Functions that
+				// CodeSourceMap's PushFunction indices point into.
+				if j == 4 {
+					inlinedFuncsRef = int(r)
+				}
+				// code_source_map is ref 5 in AOT: owner(0),
+				// exception_handlers(1), pc_descriptors(2), catch_entry(3),
+				// inlined_id_to_function(4), code_source_map(5).
+				// object_pool and compressed_stackmaps are absent in AOT.
+				if j == 5 {
+					csmRef = int(r)
 				}
 			}
 		}
@@ -1243,11 +1724,15 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 			fmt.Fprintf(os.Stderr, "  code[%d/%d] main=%d owner=%d discarded=%v endPos=0x%x\n", i, cm.Count, cm.MainCount, ownerRef, discarded, s.Position())
 		}
 		codes = append(codes, CodeEntry{
-			RefID:        ref,
-			OwnerRef:     ownerRef,
-			ClusterIndex: clusterIndex,
-			PayloadInfo:  payloadInfo,
-			TextOffset:   textOff,
+			RefID:                ref,
+			OwnerRef:             ownerRef,
+			ClusterIndex:         clusterIndex,
+			PayloadInfo:          payloadInfo,
+			TextOffset:           textOff,
+			ExceptionHandlersRef: excHandlersRef,
+			PcDescriptorsRef:     pcDescRef,
+			CodeSourceMapRef:     csmRef,
+			InlinedFuncsRef:      inlinedFuncsRef,
 		})
 		ref++
 	}
@@ -1367,16 +1852,48 @@ func readFillObjectPool(s *dartfmt.Stream, cm *ClusterMeta, oldPoolFormat, poolT
 // Per object: ReadUnsigned(length) + ReadBytes(length).
 // Used for PcDescriptors, CodeSourceMap, CompressedStackMaps with compressed pointers.
 func skipFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta) error {
+	_, err := readFillInlineBytes(s, cm, false)
+	return err
+}
+
+// readFillInlineBytes reads an inline-bytes cluster, optionally keeping each
+// object's payload.
+//
+// Format per object: ReadUnsigned(length) + length raw bytes.
+//
+// This is how PcDescriptors / CodeSourceMap / CompressedStackMaps are stored
+// when the snapshot uses compressed pointers, i.e. every Dart 2.18+ build --
+// the payload sits inline in the fill stream, not in the ROData image. Only
+// non-compressed (2.x) builds route these through ROData. Both paths matter and
+// getting them mixed up is why an earlier attempt to read PcDescriptors from
+// ROData found nothing on a 3.9.2 arm64 sample.
+func readFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, capture bool) ([][]byte, error) {
+	var payloads [][]byte
+	if capture {
+		payloads = make([][]byte, 0, cm.Count)
+	}
 	for i := int64(0); i < cm.Count; i++ {
 		length, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("inline_bytes %d/%d length: %w", i, cm.Count, err)
+			return payloads, fmt.Errorf("inline_bytes %d/%d length: %w", i, cm.Count, err)
 		}
-		if err := s.Skip(int(length)); err != nil {
-			return fmt.Errorf("inline_bytes %d/%d data (%d bytes): %w", i, cm.Count, length, err)
+		if !capture {
+			if err := s.Skip(int(length)); err != nil {
+				return payloads, fmt.Errorf("inline_bytes %d/%d data (%d bytes): %w", i, cm.Count, length, err)
+			}
+			continue
 		}
+		buf, err := s.ReadBytes(int(length))
+		if err != nil {
+			return payloads, fmt.Errorf("inline_bytes %d/%d data (%d bytes): %w", i, cm.Count, length, err)
+		}
+		// Copy: ReadBytes may alias the underlying snapshot buffer, and these
+		// payloads outlive the parse.
+		cp := make([]byte, len(buf))
+		copy(cp, buf)
+		payloads = append(payloads, cp)
 	}
-	return nil
+	return payloads, nil
 }
 
 // skipFillArray parses Array/ImmutableArray fill and discards the result,
@@ -1505,77 +2022,99 @@ func skipFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable
 	return nil
 }
 
-// skipFillExceptionHandlers skips ExceptionHandlers fill.
+// readFillExceptionHandlers captures ExceptionHandlers fill data.
 // v2.17.6: ReadUnsigned(length) directly.
 // v3.x: ReadUnsigned(packed_fields), length = packed_fields >> 1 (AsyncHandlerBit at bit 0).
 // Then: ReadRef(handled_types_data) + per-handler: Read<uint32_t>(pc_offset) +
 // Read<int16_t>(outer_try_index) + Read<int8_t>(needs_stacktrace) +
 // Read<int8_t>(has_catch_all) + Read<int8_t>(is_generated).
-func skipFillExceptionHandlers(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
+func readFillExceptionHandlers(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) ([]ExceptionHandlerInfo, error) {
+	var result []ExceptionHandlerInfo
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
 		raw, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("exc_handlers %d length/packed: %w", i, err)
+			return result, fmt.Errorf("exc_handlers %d length/packed: %w", i, err)
 		}
-		// v2.17.6: value IS the length. v3.x: length = packed_fields >> 1.
 		length := raw
 		if !fillRefUnsigned {
 			length = raw >> 1
 		}
-		// ReadRef(handled_types_data).
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
-			return fmt.Errorf("exc_handlers %d handled_types: %w", i, err)
+		handledTypesRef, err := readRef(s, fillRefUnsigned)
+		if err != nil {
+			return result, fmt.Errorf("exc_handlers %d handled_types: %w", i, err)
+		}
+		eh := ExceptionHandlerInfo{
+			RefID:           ref,
+			HandledTypesRef: int(handledTypesRef),
 		}
 		for j := int64(0); j < length; j++ {
-			// Read<uint32_t>(handler_pc_offset) — marker 192.
-			if _, err := s.ReadTagged32(); err != nil {
-				return fmt.Errorf("exc_handlers %d handler %d pc: %w", i, j, err)
+			pcOffset, err := s.ReadTagged32()
+			if err != nil {
+				return result, fmt.Errorf("exc_handlers %d handler %d pc: %w", i, j, err)
 			}
-			// Read<int16_t>(outer_try_index) — marker 192 (Read16).
-			if _, err := s.ReadTagged32(); err != nil {
-				return fmt.Errorf("exc_handlers %d handler %d try_idx: %w", i, j, err)
+			outerTry, err := s.ReadTagged32()
+			if err != nil {
+				return result, fmt.Errorf("exc_handlers %d handler %d try_idx: %w", i, j, err)
 			}
-			// Read<int8_t>(needs_stacktrace) — Raw<1,T> = ReadByte.
-			if _, err := s.ReadByte(); err != nil {
-				return fmt.Errorf("exc_handlers %d handler %d stacktrace: %w", i, j, err)
+			needsStack, err := s.ReadByte()
+			if err != nil {
+				return result, fmt.Errorf("exc_handlers %d handler %d stacktrace: %w", i, j, err)
 			}
-			// Read<int8_t>(has_catch_all) — Raw<1,T> = ReadByte.
-			if _, err := s.ReadByte(); err != nil {
-				return fmt.Errorf("exc_handlers %d handler %d catch_all: %w", i, j, err)
+			hasCatchAll, err := s.ReadByte()
+			if err != nil {
+				return result, fmt.Errorf("exc_handlers %d handler %d catch_all: %w", i, j, err)
 			}
-			// Read<int8_t>(is_generated) — Raw<1,T> = ReadByte.
-			if _, err := s.ReadByte(); err != nil {
-				return fmt.Errorf("exc_handlers %d handler %d generated: %w", i, j, err)
+			isGenerated, err := s.ReadByte()
+			if err != nil {
+				return result, fmt.Errorf("exc_handlers %d handler %d generated: %w", i, j, err)
 			}
+			eh.Handlers = append(eh.Handlers, ExceptionHandlerEntry{
+				PCOffset:        int32(pcOffset),
+				OuterTryIndex:   int16(outerTry),
+				NeedsStacktrace: needsStack != 0,
+				HasCatchAll:     hasCatchAll != 0,
+				IsGenerated:     isGenerated != 0,
+			})
 		}
+		result = append(result, eh)
+		ref++
 	}
-	return nil
+	return result, nil
 }
 
-// skipFillContext skips Context fill.
-// Per object: ReadRef(parent) + num_variables × ReadRef(variable).
-// skipFillContext skips Context fill.
+// readFillContext captures Context fill data.
 // Per object: ReadUnsigned(length) + ReadRef(parent) + length × ReadRef(variable).
-func skipFillContext(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
+func readFillContext(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) ([]ContextInfo, error) {
+	var result []ContextInfo
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
 		length, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("context %d/%d length: %w", i, cm.Count, err)
+			return result, fmt.Errorf("context %d/%d length: %w", i, cm.Count, err)
 		}
-		// ReadRef(parent).
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
-			return fmt.Errorf("context %d parent: %w", i, err)
+		parentRef, err := readRef(s, fillRefUnsigned)
+		if err != nil {
+			return result, fmt.Errorf("context %d parent: %w", i, err)
+		}
+		ctx := ContextInfo{
+			RefID:     ref,
+			ParentRef: int(parentRef),
 		}
 		for j := int64(0); j < length; j++ {
-			if _, err := readRef(s, fillRefUnsigned); err != nil {
-				return fmt.Errorf("context %d var %d/%d: %w", i, j, length, err)
+			varRef, err := readRef(s, fillRefUnsigned)
+			if err != nil {
+				return result, fmt.Errorf("context %d var %d/%d: %w", i, j, length, err)
 			}
+			ctx.VarRefs = append(ctx.VarRefs, int(varRef))
 		}
+		result = append(result, ctx)
+		ref++
 	}
-	return nil
+	return result, nil
 }
 
-// skipFillTypeArguments skips TypeArguments fill.
+// readFillTypeArguments captures TypeArguments fill data.
 //
 // New format (v2.14, v2.16+):
 //
@@ -1586,94 +2125,91 @@ func skipFillContext(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) e
 //
 //	Per object: ReadRef(instantiations) + N × ReadRef(type) + Read<int32_t>(hash)
 //	  where N = cm.Lengths[i] from alloc phase (no length/nullability in stream).
-func skipFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) error {
+func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]TypeArgumentsInfo, error) {
 	if profile.OldTypeArgsFill {
-		return skipFillTypeArgumentsOld(s, cm, fillRefUnsigned)
+		return readFillTypeArgumentsOld(s, cm, fillRefUnsigned)
 	}
-	if debugFill {
-		pos := s.Position()
-		peek, _ := s.ReadBytes(32)
-		s.SetPosition(pos)
-		fmt.Fprintf(os.Stderr, "  TypeArgs fill start pos=0x%x raw=%x\n", pos, peek)
-		if len(cm.Lengths) > 0 {
-			n := 5
-			if len(cm.Lengths) < n {
-				n = len(cm.Lengths)
-			}
-			fmt.Fprintf(os.Stderr, "  TypeArgs alloc lengths[0:%d]=%v\n", n, cm.Lengths[:n])
-		}
-	}
+	var result []TypeArgumentsInfo
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
-		itemPos := s.Position()
-		// Fill reads length from stream (not from alloc).
 		length, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("type_args %d/%d length: %w", i, cm.Count, err)
+			return result, fmt.Errorf("type_args %d/%d length: %w", i, cm.Count, err)
 		}
-		if debugFill && (i < 3 || i >= 45 && i <= 50) {
-			fmt.Fprintf(os.Stderr, "  typeargs[%d] pos=0x%x length=%d\n", i, itemPos, length)
-		}
-		// v2.10: Read<bool>(is_canonical) — 1 raw byte.
 		if profile.PreCanonicalSplit {
 			if _, err := s.ReadByte(); err != nil {
-				return fmt.Errorf("type_args %d is_canonical: %w", i, err)
+				return result, fmt.Errorf("type_args %d is_canonical: %w", i, err)
 			}
 		}
-		// Read<int32_t>(hash) — marker 192.
 		hash, err := s.ReadTagged32()
 		if err != nil {
-			return fmt.Errorf("type_args %d hash: %w", i, err)
+			return result, fmt.Errorf("type_args %d hash: %w", i, err)
 		}
-		// ReadUnsigned(nullability) — marker 128.
 		nullab, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("type_args %d nullability: %w", i, err)
+			return result, fmt.Errorf("type_args %d nullability: %w", i, err)
 		}
-		// ReadRef(instantiations).
 		inst, err := readRef(s, fillRefUnsigned)
 		if err != nil {
-			return fmt.Errorf("type_args %d instantiations: %w", i, err)
+			return result, fmt.Errorf("type_args %d instantiations: %w", i, err)
 		}
-		if debugFill && i < 3 {
-			fmt.Fprintf(os.Stderr, "    hash=%d nullab=%d inst=%d\n", hash, nullab, inst)
+		ta := TypeArgumentsInfo{
+			RefID:          ref,
+			Length:         int(length),
+			Instantiations: int(inst),
+			Hash:           int32(hash),
+			Nullability:    int(nullab),
 		}
 		for j := int64(0); j < length; j++ {
-			if _, err := readRef(s, fillRefUnsigned); err != nil {
-				return fmt.Errorf("type_args %d type %d/%d: %w", i, j, length, err)
+			typeRef, err := readRef(s, fillRefUnsigned)
+			if err != nil {
+				return result, fmt.Errorf("type_args %d type %d/%d: %w", i, j, length, err)
 			}
+			ta.TypeRefs = append(ta.TypeRefs, int(typeRef))
 		}
+		result = append(result, ta)
+		ref++
 	}
-	return nil
+	return result, nil
 }
 
-// skipFillTypeArgumentsOld handles the pre-v2.14 TypeArguments fill format.
-// Per object: ReadRef(instantiations) + N × ReadRef(type) + Read<int32_t>(hash)
-// where N = cm.Lengths[i] from the alloc phase.
-func skipFillTypeArgumentsOld(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
+// readFillTypeArgumentsOld handles the pre-v2.14 TypeArguments fill format.
+func readFillTypeArgumentsOld(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) ([]TypeArgumentsInfo, error) {
+	var result []TypeArgumentsInfo
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
 		allocLen := int64(1)
 		if int(i) < len(cm.Lengths) {
 			allocLen = cm.Lengths[i]
 		}
-		// ReadRef(instantiations).
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
-			return fmt.Errorf("type_args_old %d/%d instantiations: %w", i, cm.Count, err)
+		inst, err := readRef(s, fillRefUnsigned)
+		if err != nil {
+			return result, fmt.Errorf("type_args_old %d/%d instantiations: %w", i, cm.Count, err)
 		}
-		// N × ReadRef(type) where N = alloc length.
+		ta := TypeArgumentsInfo{
+			RefID:          ref,
+			Length:         int(allocLen),
+			Instantiations: int(inst),
+		}
 		for j := int64(0); j < allocLen; j++ {
-			if _, err := readRef(s, fillRefUnsigned); err != nil {
-				return fmt.Errorf("type_args_old %d type %d/%d: %w", i, j, allocLen, err)
+			typeRef, err := readRef(s, fillRefUnsigned)
+			if err != nil {
+				return result, fmt.Errorf("type_args_old %d type %d/%d: %w", i, j, allocLen, err)
 			}
+			ta.TypeRefs = append(ta.TypeRefs, int(typeRef))
 		}
-		// Read<int32_t>(hash).
-		if _, err := s.ReadTagged32(); err != nil {
-			return fmt.Errorf("type_args_old %d hash: %w", i, err)
+		hash, err := s.ReadTagged32()
+		if err != nil {
+			return result, fmt.Errorf("type_args_old %d hash: %w", i, err)
 		}
+		ta.Hash = int32(hash)
+		result = append(result, ta)
+		ref++
 	}
-	return nil
+	return result, nil
 }
 
-// skipFillInstance skips Instance fill.
+// readFillInstance captures Instance fill data.
 // Format: ReadUnsigned64(unboxed_bitmap) ONCE, then per object:
 //
 //	for each field offset from header to next_field_offset:
@@ -1682,59 +2218,73 @@ func skipFillTypeArgumentsOld(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigne
 //
 // header_words: 2 for compressed pointers (tags + hash = 2 × 4 bytes = 2 compressed words).
 // header_words: 1 for uncompressed (tags = 1 × 8 bytes = 1 word).
-func skipFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compressedPointers, preCanonicalSplit bool) error {
-	// v2.13+: ReadUnsigned64(unboxed_fields_bitmap) read once before all objects.
-	// v2.10 (PreCanonicalSplit): bitmap from class table (not in stream); assume 0.
+func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compressedPointers, preCanonicalSplit bool) ([]InstanceInfo, error) {
+	var result []InstanceInfo
 	var bitmap int64
 	if !preCanonicalSplit {
 		var err error
 		bitmap, err = s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("instance(%d) bitmap: %w", cm.CID, err)
+			return result, fmt.Errorf("instance(%d) bitmap: %w", cm.CID, err)
 		}
 	}
 
 	nfo := int(cm.NextFieldOffsetInWords)
 	if nfo <= 0 {
-		return nil
+		return result, nil
 	}
-	// Compressed pointers: header = 2 compressed words (tags 4B + hash 4B).
-	// Uncompressed: header = 1 word (tags 8B).
 	headerWords := 1
+	wordSize := 8
 	if compressedPointers {
 		headerWords = 2
+		wordSize = 4
 	}
 	numFields := nfo - headerWords
 	if numFields < 0 {
 		numFields = 0
 	}
 
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
-		// v2.10: Read<bool>(is_canonical) per object — 1 raw byte.
 		if preCanonicalSplit {
 			if _, err := s.ReadByte(); err != nil {
-				return fmt.Errorf("instance(%d) %d/%d is_canonical: %w", cm.CID, i, cm.Count, err)
+				return result, fmt.Errorf("instance(%d) %d/%d is_canonical: %w", cm.CID, i, cm.Count, err)
 			}
+		}
+		inst := InstanceInfo{
+			RefID:         ref,
+			CID:           cm.CID,
+			HeaderWords:   headerWords,
+			NumFieldSlots: numFields,
 		}
 		for j := 0; j < numFields; j++ {
 			fieldWordIdx := headerWords + j
 			isUnboxed := (bitmap>>uint(fieldWordIdx))&1 != 0
 			if isUnboxed {
-				// ReadWordWith32BitReads: 2 × Read<uint32_t> (marker 192).
 				if _, err := s.ReadTagged32(); err != nil {
-					return fmt.Errorf("instance(%d) %d/%d unboxed field %d lo: %w", cm.CID, i, cm.Count, j, err)
+					return result, fmt.Errorf("instance(%d) %d/%d unboxed field %d lo: %w", cm.CID, i, cm.Count, j, err)
 				}
 				if _, err := s.ReadTagged32(); err != nil {
-					return fmt.Errorf("instance(%d) %d/%d unboxed field %d hi: %w", cm.CID, i, cm.Count, j, err)
+					return result, fmt.Errorf("instance(%d) %d/%d unboxed field %d hi: %w", cm.CID, i, cm.Count, j, err)
 				}
-			} else {
-				if _, err := readRef(s, fillRefUnsigned); err != nil {
-					return fmt.Errorf("instance(%d) %d/%d ref %d: %w", cm.CID, i, cm.Count, j, err)
-				}
+				continue
 			}
+			fieldRef, err := readRef(s, fillRefUnsigned)
+			if err != nil {
+				return result, fmt.Errorf("instance(%d) %d/%d ref %d: %w", cm.CID, i, cm.Count, j, err)
+			}
+			// Byte offset in the same coordinate system BuildClassLayouts
+			// uses for FieldInfo: word index from the object start times the
+			// word size (4 under compressed pointers, else 8).
+			inst.Fields = append(inst.Fields, InstanceFieldRef{
+				ByteOffset: int32(fieldWordIdx) * int32(wordSize),
+				Ref:        int(fieldRef),
+			})
 		}
+		result = append(result, inst)
+		ref++
 	}
-	return nil
+	return result, nil
 }
 
 // skipFillRecord skips Record fill.

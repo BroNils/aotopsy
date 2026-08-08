@@ -12,13 +12,35 @@ import (
 
 // WriteTypeInferenceReport writes a summary report of the type inference
 // results to typetrack_report.json in the output directory.
-func WriteTypeInferenceReport(outDir string, resolved, total int) error {
+//
+// ctx may be nil. When present, its hit counters are included so each type
+// source's contribution is measurable rather than assumed -- specifically
+// instance_field_hits, which is the only visible evidence that the Instance
+// capture (gap §1.2) actually feeds type inference (gap §3.1). A consumer whose
+// contribution is never measured is how this project previously ended up
+// shipping an ICData resolver that resolved zero call sites.
+func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeContext) error {
 	report := struct {
 		ResolvedBLR int `json:"resolved_blr"`
 		TotalBLR    int `json:"total_blr"`
+		// Per-source hit counters (omitted when no context was supplied).
+		PoolHits          int `json:"pool_hits,omitempty"`
+		HeaderHits        int `json:"header_hits,omitempty"`
+		DispatchHits      int `json:"dispatch_hits,omitempty"`
+		InstanceFieldHits int `json:"instance_field_hits,omitempty"`
+		// InstanceFieldClasses is how many classes have at least one
+		// unanimously-typed field offset recovered from const instances.
+		InstanceFieldClasses int `json:"instance_field_classes,omitempty"`
 	}{
 		ResolvedBLR: resolved,
 		TotalBLR:    total,
+	}
+	if ctx != nil {
+		report.PoolHits = ctx.PPHits
+		report.HeaderHits = ctx.HeaderHits
+		report.DispatchHits = ctx.DispatchHits
+		report.InstanceFieldHits = ctx.InstanceFieldHits
+		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

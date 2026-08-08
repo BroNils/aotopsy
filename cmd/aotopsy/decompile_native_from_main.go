@@ -199,6 +199,10 @@ func runFromMain(d fromMainDeps) error {
 			agg.PlaceholderIfs += art.Stats.PlaceholderIfs
 			agg.UnresolvedCF += art.Stats.UnresolvedCF
 			agg.RawRegisterCalls += art.Stats.RawRegisterCalls
+			// Same three missing fields as in --all's fold; kept in sync.
+			agg.NonLastBranch += art.Stats.NonLastBranch
+			agg.TryBlocks += art.Stats.TryBlocks
+			agg.CatchHandlers += art.Stats.CatchHandlers
 			emitted++
 			if d.genFrida {
 				fridaHooks = append(fridaHooks, fridaHook{VA: va, Name: art.FunctionName, ArgRegs: realArgRegs(fir)})

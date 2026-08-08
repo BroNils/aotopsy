@@ -107,9 +107,43 @@ type TypeContext struct {
 	// UnlinkedCall.target_name gives the method name being called.
 	PoolUnlinkedCallNames map[int]string
 
+	// InstanceFieldTypes is the observed (class, byte offset) -> value class
+	// map recovered from const Instance objects serialized in the snapshot:
+	// classID -> byteOffset -> classID of the stored value.
+	//
+	// This is the consumer for the Instance capture and the seed of the
+	// gap-analysis §3.1 "(class, offset) -> type map". It is *observed* type
+	// information, complementary to FieldByOwnerOffset/FieldTypes which give
+	// the *declared* type: it can type a field declared `dynamic`/`Object?`
+	// whose canonicalized const instances all hold one concrete class.
+	//
+	// Only unanimous offsets are recorded. If two instances of the same class
+	// store different concrete classes at the same offset, the entry is
+	// dropped rather than picking one -- a wrong concrete type is worse than
+	// no type, because callers treat KnownClass as authoritative. Null values
+	// (RefNull) are ignored: null constrains nothing.
+	//
+	// Note two earlier maps here (ICDataByOwner/ICDataByPPIndex and
+	// ContextVariables) were removed rather than fixed, because ICData and
+	// Context are absent from AOT snapshots so both were always empty.
+	InstanceFieldTypes map[int]map[int32]int
+
+	// ClosureDataByClosure maps closure ref ID → parent function ref ID.
+	// In AOT, Context objects are not serialized, but ClosureData IS.
+	// Each ClosureData has parent_function and closure refs, enabling
+	// closure → parent function resolution without Context data.
+	ClosureDataByClosure map[int]int
+
+	// ClosureDataByParent maps parent function ref ID → list of closure ref IDs.
+	// Reverse mapping of ClosureDataByClosure for lookup by parent function.
+	ClosureDataByParent map[int][]int
+
 	// Debug counters.
-	PPHits       int
-	HeaderHits   int
+	// InstanceFieldHits counts field loads typed from observed const-instance
+	// data that the declared field type could not resolve.
+	InstanceFieldHits int
+	PPHits            int
+	HeaderHits        int
 	UBFXHits     int
 	ADDClassHits int
 	DispatchHits int
@@ -200,6 +234,9 @@ func BuildTypeContext(
 		// M-14 fix: nil check for pl.CT
 	MinAppClassID:           minAppClassIDSafe(pl.CT),
 		MethodNameToRefIDs:      buildMethodNameToRefIDs(pl),
+		InstanceFieldTypes:      make(map[int]map[int32]int),
+		ClosureDataByClosure:    make(map[int]int),
+		ClosureDataByParent:     make(map[int][]int),
 	}
 
 	// 1. Build class hierarchy for LCA.
@@ -434,7 +471,105 @@ func BuildTypeContext(
 		}
 	}
 
+	// --- Phase 3: observed instance field types + ClosureData index ---
+
+	// Instance -> (class, offset) -> value class. Offsets come straight from
+	// the capture (cluster.InstanceFieldRef.ByteOffset), which records the
+	// field's word index at read time; do NOT try to reconstruct them from the
+	// order of a ref list -- unboxed slots and inherited fields both break
+	// that. Unanimity is required, see InstanceFieldTypes' doc comment.
+	type offsetVotes struct {
+		classID  int
+		conflict bool
+	}
+	votes := map[int]map[int32]*offsetVotes{}
+	for i := range clResult.Instances {
+		inst := &clResult.Instances[i]
+		for _, f := range inst.Fields {
+			if f.Ref <= cluster.RefNull {
+				continue // null (or an invalid ref) tells us nothing
+			}
+			valCID, ok := pl.RefCID[f.Ref]
+			if !ok || valCID <= 0 {
+				continue
+			}
+			byCls, ok := votes[inst.CID]
+			if !ok {
+				byCls = map[int32]*offsetVotes{}
+				votes[inst.CID] = byCls
+			}
+			v, ok := byCls[f.ByteOffset]
+			if !ok {
+				byCls[f.ByteOffset] = &offsetVotes{classID: valCID}
+				continue
+			}
+			if v.classID != valCID {
+				v.conflict = true
+			}
+		}
+	}
+	for cid, byOff := range votes {
+		for off, v := range byOff {
+			if v.conflict {
+				continue
+			}
+			m, ok := ctx.InstanceFieldTypes[cid]
+			if !ok {
+				m = map[int32]int{}
+				ctx.InstanceFieldTypes[cid] = m
+			}
+			m[off] = v.classID
+		}
+	}
+
+	// ClosureData: map closure ref → parent function ref (AOT alternative to Context).
+	// ClosureData IS serialized in AOT, unlike Context -- verified against
+	// ClosureDataDeserializationCluster::ReadFill in the Dart SDK, which skips
+	// context_scope_ for kFullAOT and then reads parent_function then closure,
+	// and empirically (925-33712 ClosureData objects per sample in the corpus).
+	for i := range clResult.ClosureData {
+		cd := &clResult.ClosureData[i]
+		if cd.ClosureRef >= 0 && cd.ParentFunctionRef >= 0 {
+			ctx.ClosureDataByClosure[cd.ClosureRef] = cd.ParentFunctionRef
+			ctx.ClosureDataByParent[cd.ParentFunctionRef] = append(ctx.ClosureDataByParent[cd.ParentFunctionRef], cd.ClosureRef)
+		}
+	}
+
 	return ctx
+}
+
+// FieldValueClass resolves a field load `base.<byteOff>` on a receiver of class
+// receiverCID to the class of the loaded value.
+//
+// Two sources, in precedence order:
+//
+//  1. The DECLARED field type -- FieldByOwnerOffset gives the Field object at
+//     that offset and FieldTypes its resolved type class. Authoritative when
+//     present.
+//  2. The OBSERVED type from const Instance objects in the snapshot
+//     (InstanceFieldTypes), used only when every observed instance of the
+//     class agrees. This is what the Instance capture buys: it types fields
+//     the declared type cannot (dynamic/Object?, or a version where Type ->
+//     ClassID resolution is unavailable, e.g. Dart 2.13-2.15 where
+//     TypeClassIdIsRef makes FieldTypes empty).
+//
+// Both ARM64 and x86_64 field-load handlers call this, so the precedence rule
+// lives in exactly one place.
+func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bool) {
+	if fields, ok := ctx.FieldByOwnerOffset[receiverCID]; ok {
+		if fieldRefID, ok := fields[byteOff]; ok {
+			if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
+				return classID, true
+			}
+		}
+	}
+	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
+		if classID, ok := byOff[byteOff]; ok && classID > 0 {
+			ctx.InstanceFieldHits++
+			return classID, true
+		}
+	}
+	return 0, false
 }
 
 // ResolveDispatchTarget resolves a dispatch table slot to a function name.

@@ -60,3 +60,10 @@ docs_internal/
 /findpool305
 /aotopsy
 aotopsy_*
+docs/roadmap/
+docs/SESSION-HANDOFF*.md
+docs/SESSION_HANDOFF*.md
+# NOTE: internal/pipeline/regression_test.go was listed here and deleted in the
+# same change. That combination removed the only end-to-end regression suite AND
+# made re-adding it impossible without editing this file first. Restored; do not
+# re-ignore source or test files here -- this list is for build outputs.

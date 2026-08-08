@@ -407,14 +407,13 @@ func transferInstructionX86(
 					ctx.HeaderHits++
 					return
 				}
-				// Field type lookup via FieldByOwnerOffset.
-				if fields, ok2 := ctx.FieldByOwnerOffset[state[baseIdx].ClassID]; ok2 {
-					if fieldRefID, ok3 := fields[int32(mem.Disp)]; ok3 {
-						if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-							state[dstIdx] = KnownClass(classID)
-							return
-						}
-					}
+				// Field type: declared type first, then the type observed in
+				// const Instance objects. Shared with the ARM64 handlers via
+				// TypeContext.FieldValueClass so the precedence rule has one
+				// definition.
+				if classID, ok2 := ctx.FieldValueClass(state[baseIdx].ClassID, int32(mem.Disp)); ok2 {
+					state[dstIdx] = KnownClass(classID)
+					return
 				}
 				// Unknown field — keep KnownClass as approximation.
 				state[dstIdx] = KnownClass(state[baseIdx].ClassID)
