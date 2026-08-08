@@ -565,6 +565,8 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 // (which have already fired for this block).
 func (e *emitter) emitBlockBody(id, indent, depth int) {
 	blk := &e.fir.Blocks[id]
+	// Emit block label for goto targets (non-last branches).
+	e.emit(indent, "block_%d:;", id)
 	e.annotateInlineFrames(blk.StartVA, indent)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
@@ -586,16 +588,39 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			if isLast {
 				e.emitBranch(blk, ins, indent, depth)
 			} else {
-				// Non-last branch: emit a diagnostic comment so the
-				// control-flow instruction is not silently dropped.
-				e.emit(indent, "// non-last branch (cond=%s %s) — emitted as comment", ins.CondKind, ins.CondOp)
+				// Non-last branch: emit a real conditional goto.
+				// This preserves the control-flow edge that was previously
+				// silently dropped as a comment.
+				cond, ok := e.buildCondition(ins)
+				if !ok {
+					cond = "/* cond */"
+				}
+				var takenID = -1
+				for _, s := range blk.Succs {
+					if s.Cond == "T" {
+						takenID = s.BlockID
+						break
+					}
+				}
+				if takenID >= 0 {
+					e.emit(indent, "if (%s) { goto block_%d; }", cond, takenID)
+				} else {
+					e.emit(indent, "// non-last branch (cond=%s %s)", ins.CondKind, ins.CondOp)
+				}
 				e.stats.NonLastBranch++
 			}
 		case OpJump:
 			if isLast {
 				e.emitJump(blk, ins, indent, depth)
 			} else {
-				e.emit(indent, "// non-last jump to %s — emitted as comment", ins.Target)
+				// Non-last jump: emit a real goto.
+				if ins.Target != "" && strings.HasPrefix(ins.Target, "0x") {
+					e.emit(indent, "goto block_%s;", strings.TrimPrefix(ins.Target, "0x"))
+				} else if len(blk.Succs) > 0 {
+					e.emit(indent, "goto block_%d;", blk.Succs[0].BlockID)
+				} else {
+					e.emit(indent, "// non-last jump to %s", ins.Target)
+				}
 				e.stats.NonLastBranch++
 			}
 		default:
@@ -814,9 +839,16 @@ func (e *emitter) emitLoadPool(ins Instr) {
 // empty, matching flutterdec's append_helper_functions -- note this
 // means a helper's arg-register aliases aren't known, a documented
 // completeness gap flutterdec itself also has).
+//
+// Helper inlining: if a helper's body is small (<= maxInlineHelperLines
+// non-empty lines), it is inlined as a comment block at the call site
+// instead of emitted as a separate function. This reduces the number of
+// opaque `_block_N()` calls in the output.
 func (e *emitter) appendHelperFunctions() {
+	const maxInlineHelperLines = 5 // helpers with <= 5 non-empty lines are inlined
 	seen := map[int]bool{}
 	queue := append([]int(nil), e.omitted...)
+	inlined := map[int][]string{} // id → inlined body lines
 	for len(queue) > 0 && len(seen) < maxHelpers {
 		id := queue[0]
 		queue = queue[1:]
@@ -827,12 +859,6 @@ func (e *emitter) appendHelperFunctions() {
 
 		sub := &emitter{fir: e.fir, symbols: e.symbols, pool: e.pool, state: newLiftState(),
 			active: make(map[int]bool), visits: make(map[int]int), omittedSet: make(map[int]bool),
-			// Share the block->region index so extracted helper functions
-			// annotate their protected blocks too, and share tryMarked so a
-			// block is marked once across the whole function's output. Without
-			// sharing tryMarked, each helper's fresh emitter re-marked blocks
-			// it walked: _Timer._runTimers reported 679 marked blocks inside a
-			// 752-byte region, which cannot hold that many.
 			blockTryRegion: e.blockTryRegion,
 			tryMarked:      e.tryMarked,
 			inlineMarked:   e.inlineMarked,
@@ -840,9 +866,25 @@ func (e *emitter) appendHelperFunctions() {
 			handlerBlocks:  e.handlerBlocks}
 		sub.emitBlock(id, 1, 0)
 
-		e.lines = append(e.lines, fmt.Sprintf("dynamic _block_%d() {", id))
-		e.lines = append(e.lines, sub.lines...)
-		e.lines = append(e.lines, "}")
+		// Count non-empty lines (excluding labels and braces).
+		nonEmpty := 0
+		for _, line := range sub.lines {
+			t := strings.TrimSpace(line)
+			if t != "" && !strings.HasPrefix(t, "block_") && t != "{" && t != "}" {
+				nonEmpty++
+			}
+		}
+
+		if nonEmpty <= maxInlineHelperLines {
+			// Inline: store body for replacement at call sites.
+			inlined[id] = sub.lines
+			// Don't emit as separate function.
+		} else {
+			// Emit as separate function.
+			e.lines = append(e.lines, fmt.Sprintf("dynamic _block_%d() {", id))
+			e.lines = append(e.lines, sub.lines...)
+			e.lines = append(e.lines, "}")
+		}
 
 		for _, nid := range sub.omitted {
 			if !seen[nid] {
@@ -854,5 +896,28 @@ func (e *emitter) appendHelperFunctions() {
 		e.stats.TotalCalls += sub.stats.TotalCalls
 		e.stats.IndirectCalls += sub.stats.IndirectCalls
 		e.stats.NonLastBranch += sub.stats.NonLastBranch
+	}
+
+	// Replace `return _block_N();` calls with inlined body where available.
+	if len(inlined) > 0 {
+		for i, line := range e.lines {
+			t := strings.TrimSpace(line)
+			for id, body := range inlined {
+				callPattern := fmt.Sprintf("return _block_%d();", id)
+				if t == callPattern {
+					// Replace with inlined body (as a block).
+					e.lines[i] = strings.Repeat("  ", leadingIndent(line)) + "// inlined _block_" + fmt.Sprintf("%d", id)
+					// Insert body lines after this line.
+					newLines := make([]string, 0, len(e.lines)+len(body))
+					newLines = append(newLines, e.lines[:i+1]...)
+					for _, bl := range body {
+						newLines = append(newLines, strings.Repeat("  ", leadingIndent(line)+1)+strings.TrimSpace(bl))
+					}
+					newLines = append(newLines, e.lines[i+1:]...)
+					e.lines = newLines
+					break
+				}
+			}
+		}
 	}
 }
