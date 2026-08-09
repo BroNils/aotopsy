@@ -1249,10 +1249,6 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
-     // P1.5: RTA filter — only include instantiated classes.
-     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
-     	continue
-     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1287,10 +1283,6 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
-     // P1.5: RTA filter — only include instantiated classes.
-     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
-     	continue
-     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1318,10 +1310,6 @@ func resolveBLR(
 					if impliedCID < 0 {
 						continue
 					}
-     // P1.5: RTA filter — only include instantiated classes.
-     if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
-     	continue
-     }
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
 						if !targetSet[name] {
 							targetSet[name] = true
@@ -1460,10 +1448,6 @@ func resolveBLR(
 				// classID is reasonable (>= 0).
 				impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
 				if impliedCID < 0 {
-					continue
-				}
-				// P1.5: RTA filter — only include classes that are instantiated.
-				if len(ctx.InstantiatedClasses) > 0 && !ctx.InstantiatedClasses[impliedCID] {
 					continue
 				}
 				if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {

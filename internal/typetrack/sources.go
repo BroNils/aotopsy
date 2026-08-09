@@ -559,6 +559,9 @@ func BuildTypeContext(
 	votes := map[int]map[int32]*offsetVotes{}
 	for i := range clResult.Instances {
 		inst := &clResult.Instances[i]
+		// Every Instance object is a concrete instance of a class.
+		// Populate InstantiatedClasses for RTA filtering.
+		ctx.InstantiatedClasses[inst.CID] = true
 		for _, f := range inst.Fields {
 			if f.Ref <= cluster.RefNull {
 				continue // null (or an invalid ref) tells us nothing
