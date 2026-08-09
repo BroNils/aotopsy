@@ -661,7 +661,14 @@ func transferInstruction(
 		if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 			state[rt] = KnownClass(classID)
 			ctx.PPHits++
-		} else if ctx.PoolClosureClass != nil {
+		} else if ctx.PoolCodeNames != nil {
+			if name, ok3 := ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
+				state[rt] = KnownStub("PPCode:"+name, byteOff)
+				ctx.PPHits++
+				return
+			}
+		}
+		if ctx.PoolClosureClass != nil {
 			// Closure consumer: a PP load of a Closure object can still give
 			// us a KnownClass via ClosureData.parent_function → Function.owner
 			// → Class → ClassID (precomputed in PoolClosureClass). This lets
@@ -840,15 +847,20 @@ func transferInstruction(
 		}
 		if base < 31 && state[base].Kind == LatticeKnownClass {
 			if imm9 == -1 {
-				// Object header load: the header contains the class_id.
-				// Approximate: Xt = KnownClass(cid) — the header's class_id
-				// is the same as the receiver's class.
 				state[rt] = KnownClass(state[base].ClassID)
 				ctx.HeaderHits++
 				return
 			}
 			if classID, ok2 := ctx.FieldValueClass(state[base].ClassID, int32(imm9)); ok2 {
 				state[rt] = KnownClass(classID)
+				return
+			}
+		}
+		// PP-loaded Code entry_point: LDUR Xt, [Xn, #7]
+		if imm9 == 7 && base < 31 && state[base].Kind == LatticeKnownStub {
+			sn := state[base].StubName
+			if strings.HasPrefix(sn, "PPCode:") {
+				state[rt] = KnownStub(sn, imm9)
 				return
 			}
 		}

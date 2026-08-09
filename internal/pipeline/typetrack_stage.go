@@ -109,12 +109,78 @@ func runTypeInference(
 		codeRefToName[ref] = ci.FuncName
 	}
 
+	// Build PP index → function name map for PP-loaded Code objects.
+	// For each PP entry that is a Code object (CID == ct.Code):
+	//   1. Try RefToNamed (app isolate Function name)
+	//   2. Try VmRefToNamed (VM isolate Function name)
+	//   3. Try matching Code's TextOffset to a function VA
+	poolCodeNames := make(map[int]string)
+	// Build refID → function name from CodeNames (already have codeRefToName)
+	// Build refID → TextOffset from clResult.Codes
+	codeByRef := make(map[int]*cluster.CodeEntry, len(clResult.Codes))
+	for i := range clResult.Codes {
+		codeByRef[clResult.Codes[i].RefID] = &clResult.Codes[i]
+	}
+	// Build VA → function name from ranges
+	vaToName := make(map[uint64]string)
+	for _, r := range ranges {
+		if r.RefID >= 0 {
+			if ci, ok := pl.CodeNames[r.RefID]; ok {
+				funcStart := uint64(r.PCOffset) - codeOff
+				vaToName[codeVA+funcStart] = ci.FuncName
+			}
+		}
+	}
+	for _, pe := range clResult.Pool {
+		if pe.Kind != cluster.PoolTagged {
+			continue
+		}
+		if pl.CT != nil && pl.RefCID != nil {
+			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Code {
+				// Try app isolate NamedObject
+				if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
+					if no.NameRefID >= 0 {
+						if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
+							poolCodeNames[pe.Index] = name
+						}
+					}
+				}
+				// Try VM isolate NamedObject
+				if _, exists := poolCodeNames[pe.Index]; !exists && pl.VmRefToNamed != nil {
+					if no, ok2 := pl.VmRefToNamed[pe.RefID]; ok2 {
+						if no.NameRefID >= 0 {
+							if name, ok3 := pl.VmRefToStr[no.NameRefID]; ok3 && name != "" {
+								poolCodeNames[pe.Index] = name
+							}
+						}
+					}
+				}
+				// Try matching by TextOffset → VA → function name
+				if _, exists := poolCodeNames[pe.Index]; !exists {
+					if ce, ok2 := codeByRef[pe.RefID]; ok2 && ce.TextOffset > 0 {
+						va := codeVA + uint64(ce.TextOffset) - codeOff
+						// Find function whose range contains this VA
+						for funcVA, name := range vaToName {
+							if funcVA <= va && va < funcVA+0x10000 { // within 64KB
+								poolCodeNames[pe.Index] = name
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	poolData := &typetrack.PoolLookupData{
-		RefToStr:      pl.RefToStr,
-		RefToNamed:    pl.RefToNamed,
-		RefCID:        pl.RefCID,
-		CT:            pl.CT,
-		CodeRefToName: codeRefToName,
+		RefToStr:       pl.RefToStr,
+		RefToNamed:     pl.RefToNamed,
+		RefCID:         pl.RefCID,
+		CT:             pl.CT,
+		CodeRefToName:  codeRefToName,
+		VmRefToStr:     pl.VmRefToStr,
+		VmRefToNamed:   pl.VmRefToNamed,
+		PoolCodeNames:  poolCodeNames,
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.

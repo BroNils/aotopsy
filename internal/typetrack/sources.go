@@ -107,6 +107,9 @@ type TypeContext struct {
 	// UnlinkedCall.target_name gives the method name being called.
 	PoolUnlinkedCallNames map[int]string
 
+	// PoolCodeNames maps PP index to function name for Code objects.
+	PoolCodeNames map[int]string
+
 	// InstanceFieldTypes is the observed (class, byte offset) -> value class
 	// map recovered from const Instance objects serialized in the snapshot:
 	// classID -> byteOffset -> classID of the stored value.
@@ -231,6 +234,9 @@ type PoolLookupData struct {
 	RefCID         map[int]int                  // ref ID → CID (class ID of the object)
 	CT             *snapshot.CIDTable           // CID table (for Class/Function CID checks)
 	CodeRefToName  map[int]string               // code ref ID → function name
+	VmRefToStr     map[int]string               // VM snapshot strings by ref ID
+	VmRefToNamed   map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	PoolCodeNames  map[int]string               // PP index → function name for Code objects
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,
@@ -281,6 +287,7 @@ func BuildTypeContext(
 		ClosureDataByClosure:    make(map[int]int),
 		ClosureDataByParent:     make(map[int][]int),
 		PoolClosureClass:        make(map[int]int),
+		PoolCodeNames:           make(map[int]string),
 		SelectorOffsets:         make(map[uint64]int),
 		Subclasses:              make(map[int][]int),
 	}
@@ -494,6 +501,10 @@ func BuildTypeContext(
 		}
 	}
 	ctx.PoolUnlinkedCallNames = poolUnlinkedCallNames
+	// PoolCodeNames is built in typetrack_stage.go and passed via poolData.
+	if pl.PoolCodeNames != nil {
+		ctx.PoolCodeNames = pl.PoolCodeNames
+	}
 
 	// 8. Build FuncParamTypes and FuncParamCount from FuncTypeInfo.
 	// TARGET 1: Also resolve parameter type ClassIDs from parameter_types Array.
