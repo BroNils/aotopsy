@@ -144,5 +144,30 @@ grep for known symbols instead.
 
 - **NEVER use `sed`, `perl -i`, `awk`, or shell-based text substitution** to edit source files. These are prone to errors with CRLF/LF mismatches, escaping issues, and partial matches. The harness `edit` tool is guarded — it validates `old_string` uniqueness and preserves exact whitespace.
 - **NEVER use `python3 -c` with inline `open()/replace()` to edit files** for the same reason. If a bulk change is truly needed, use `write` to rewrite the entire file (after `read`ing it first).
+- **NEVER use `python3 << 'PYEOF'` heredoc scripts to edit files** — this caused syntax errors (brace mismatch, CRLF issues, non-unique matches). The edit tool validates uniqueness and preserves exact whitespace. Heredoc python scripts bypass all safety checks.
 - Shell commands (`exec`) are for running builds, tests, git, and one-off diagnostics — NOT for file content modification.
-- If `edit` fails with "String not found", read the file again to get the exact current content (tabs, spaces, line endings) before retrying. Do NOT fall back to `sed`.
+- If `edit` fails with "String not found", read the file again to get the exact current content (tabs, spaces, line endings) before retrying. Do NOT fall back to `sed` or python scripts.
+
+## Engineering Philosophy
+
+- **Jangan ambil jalan termudah.** Jika fix yang benar butuh refactor besar atau signature change, lakukan. Contoh: `transferInstruction` signature diubah untuk pass `prevRaw` — ini key untuk UBFX fix. "Changing the signature would require many changes" → DO IT ANYWAY.
+- **Jangan deklarasikan "limitation" apa yang belum dicoba.** P7 async detection dideklar "future work" padahal fix-nya (Future.delayed detection) straightforward. Never declare something impossible without first attempting it.
+- **Jangan settle untuk "approximate" atau "good enough"** ketika fix yang real achievable. kHeapObjectTag off-by-one fix seemed trivial tapi unlocked 11550 field hits from 11.
+- **Root cause analysis harus mendalam.** Gunakan gh search + gh api ke SDK source untuk verify setiap assumption. Jangan menebak. Contoh: ObjectStoreAOTFieldCount salah karena hanya count RW fields, padahal ada CW, FW, LAZY_CORE, LAZY_FFI, dll.
+- **"Data limitation" bukan akhir riset.** Jika BLR rendah, cari alternative resolution paths (PP-loaded Code, THR stubs, object field calls). Jangan berhenti di "dispatch table too small".
+
+## Source of Truth: SDK Verification
+
+Two techniques for verifying against Dart SDK source:
+
+1. **gh search + gh api**: `gh search code "pattern" --repo dart-lang/sdk` to find files, then `gh api -H "Accept: application/vnd.github.raw" "repos/dart-lang/sdk/contents/path?ref=VERSION"` to read at specific version tag.
+2. **websearch + gh api**: `web_search` for context/concept, then `gh api` for ground truth verification.
+
+Both are necessary: websearch gives context, gh api gives ground truth. Never rely on just one.
+
+### Critical lessons learned
+
+- **ObjectStoreAOTFieldCount**: Must count ALL field macros (RW + CW + FW + LAZY_CORE + LAZY_ISOLATE + LAZY_FFI + LAZY_INTERNAL + LAZY_ASYNC + ARW_AR + ARW_RELAXED), not just RW. Counting only RW → wrong stream position → dispatch table parsed from wrong position → BLR=0.
+- **from() differs between versions**: 2.12.0 ObjectStore::from() = &object_class_, 3.9.2 = &list_class_. IsolateObjectStore::from() is different and NOT used for serialization.
+- **Class ID extraction differs**: 2.x uses LDURH (16-bit, kClassIdTagPos=16), 3.x uses LDUR+UBFX (64-bit, kClassIdTagPos=12).
+- **Dispatch pattern differs**: 2.x uses cid_reg in-place (SUB X0, X0, #imm), 3.x uses LR as temp (SUB X30, X0, #imm).
