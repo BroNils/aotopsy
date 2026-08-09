@@ -147,8 +147,17 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	if snapshotSize <= 0 || profile.CompressedPointers {
 		return 0
 	}
-	// kMaxObjectAlignment = 2 * word_size = 16 on 64-bit (all supported archs).
-	align := int64(16)
+	// The data image BASE is placed at RoundUp(length(), kObjectStartAlignment).
+	// kObjectStartAlignment = 64 for Dart >=2.19 (16 for <=2.18), tracked by
+	// dataImageAlignment(profile). This is the LARGER of the two ROData
+	// alignments; the per-object delta stride uses kObjectAlignment (16) instead
+	// -- see extractRODataStrings. Using 16 here (the old hardcoded value) placed
+	// the image base 16 bytes too low on >=2.19 snapshots, so every string object
+	// header landed mid-data and string extraction silently returned nothing.
+	align := dataImageAlignment(profile)
+	if align <= 0 {
+		align = 16
+	}
 	// length() = snapshotSize - 4 (exclude magic bytes).
 	lengthVal := snapshotSize - 4
 	if lengthVal <= 0 {
@@ -540,25 +549,23 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		return nil
 	}
 
-	// Version-dependent alignment shift (was hardcoded 5 = 32 bytes, P0-3).
-	alignShift := uint(5) // fallback
-	if a := dataImageAlignment(profile); a > 0 {
-		alignShift = uint(0)
-		for (int64(1) << alignShift) < a {
-			alignShift++
-		}
-	}
+	// The ROData running_offset delta is encoded in units of kObjectAlignment
+	// (RODataDeserializationCluster::ReadAlloc: `running_offset += ReadUnsigned()
+	// << kObjectAlignmentLog2`). kObjectAlignment = 2*kWordSize = 16 on 64-bit
+	// (kObjectAlignmentLog2 = 4). This is a DIFFERENT, smaller alignment than the
+	// data-image BASE alignment (kObjectStartAlignment = 64 for >=2.19, applied in
+	// dataImageObjStart) -- the two must not be conflated. The ROData path only
+	// runs for non-compressed-pointers snapshots, which are 64-bit in practice.
+	alignShift := uint(4)
 
-	// kHeaderSize = kMaxObjectAlignment = 16 on 64-bit (verified against
-	// dart-lang/sdk image_snapshot.h: `kHeaderSize = kMaxObjectAlignment`).
-	// VM data image has a 16-byte image header before objects; isolate does not.
-	// This is an empirical observation: VM strings need +16 offset, isolate
-	// strings do not. The exact reason is likely a difference in how VM vs
-	// isolate data images are constructed by the serializer.
+	// No per-snapshot header adjustment: with the correct image-base alignment
+	// (kObjectStartAlignment, applied in dataImageObjStart) and the correct delta
+	// stride (kObjectAlignment=16, alignShift=4 above), the cumulative
+	// running_offset lands exactly on each object header for BOTH the VM and the
+	// isolate data images -- verified against real cid=94 OneByteString headers in
+	// both. The previous isVM-only +16 fudge only compensated for a wrong stride.
 	headerAdjust := int64(0)
-	if isVM {
-		headerAdjust = int64(1) << alignShift // kHeaderSize = 16
-	}
+	_ = isVM
 
 	runningOffset := int64(0)
 	ref := cm.StartRef
