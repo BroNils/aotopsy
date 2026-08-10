@@ -109,7 +109,7 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 		name := ""
 		if shstrtabShOff+uint64(shName) < shstrtabShOff+shstrtabSize && int(shstrtabShOff+uint64(shName)) < len(data) {
 			nameEnd := int(shstrtabShOff + uint64(shName))
-			for nameEnd < len(data) && data[nameEnd] != 0 {
+			for nameEnd < len(data) && data[nameEnd] != 0 && nameEnd < int(shstrtabShOff+shstrtabSize) {
 				nameEnd++
 			}
 			name = string(data[shstrtabShOff+uint64(shName) : nameEnd])
@@ -155,8 +155,11 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 // WriteEntropyFindings writes entropy findings to entropy_findings.jsonl.
 func WriteEntropyFindings(outDir, libPath string) error {
 	findings, err := AnalyzeEntropy(libPath)
-	if err != nil || len(findings) == 0 {
-		return nil // not fatal
+	if err != nil {
+		return err // surface the read/parse error instead of swallowing it
+	}
+	if len(findings) == 0 {
+		return nil
 	}
 	path := filepath.Join(outDir, "entropy_findings.jsonl")
 	f, err := os.Create(path)

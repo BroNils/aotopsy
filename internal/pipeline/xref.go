@@ -42,7 +42,7 @@ type AddressCallersXref struct {
 }
 
 // writeXrefJSONL writes cross-referencing JSONL files.
-func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) error {
+func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord, compressedPtrs bool) error {
 	// 1. string_value_xref.jsonl — string value → functions
 	// Also build from pool string entries if stringRefs is empty.
 	stringFuncs := map[string]map[string]bool{}
@@ -220,14 +220,14 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, fu
 			if name == "" {
 				continue
 			}
-			// Get field offsets from class layout
-			for _, fi := range clResult.Fields {
+			// Get field offsets from class layout. HostOffset is a ref ID into
+			wordSize := int32(8); if compressedPtrs { wordSize = 4 }; for _, fi := range clResult.Fields { // HostOffset is a MintValues ref ID (word offset), not a byte offset
 				if fi.OwnerRefID == ci.RefID {
 					fname := ""
 					if s, ok := pl.RefToStr[fi.NameRefID]; ok {
 						fname = s
 					}
-					key := fieldKey{className: name, offset: int(fi.HostOffset)} //nolint:gosec
+					wordOff, ok := clResult.MintValues[int(fi.HostOffset)]; if !ok { continue }; key := fieldKey{className: name, offset: int(int32(wordOff) * wordSize)} //nolint:gosec
 					if fieldReaders[key] == nil {
 						fieldReaders[key] = map[string]bool{}
 					}

@@ -322,9 +322,12 @@ func BuildTypeContext(
 	for i := range clResult.Types {
 		ti := &clResult.Types[i]
 		// Resolve TypeClassIdRef via MintValues for v2.x TypeClassIdIsRef.
+		// MintValues stores the actual class ID value (not Smi-encoded), so
+		// use it directly -- matching BuildClassLayouts in helpers.go which
+		// uses the word offset value verbatim.
 		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
 			if smiValue, ok := clResult.MintValues[ti.TypeClassIdRef]; ok {
-				ti.ClassID = int32(smiValue >> 1) // Smi: value << 1 | 0
+				ti.ClassID = int32(smiValue) // MintValues holds the real value, not a Smi-encoded ref
 			}
 		}
 		refToType[ti.RefID] = ti

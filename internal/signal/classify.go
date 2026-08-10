@@ -728,7 +728,7 @@ func isObfuscatedName(value string) bool {
 		return false
 	}
 	// All uppercase or all lowercase single char
-	if len(value) == 1 && value[0] >= 'A' && value[0] <= 'z' {
+	if len(value) == 1 && (value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z') {
 		return false // single chars are common in normal code
 	}
 	// Check for vowel-less short names (typical of obfuscation)

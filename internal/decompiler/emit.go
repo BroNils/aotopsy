@@ -975,10 +975,12 @@ func (e *emitter) appendHelperFunctions() {
 					// Replace with inlined body (as a block).
 					e.lines[i] = strings.Repeat("  ", leadingIndent(line)) + "// inlined _block_" + fmt.Sprintf("%d", id)
 					// Insert body lines after this line.
-					newLines := make([]string, 0, len(e.lines)+len(body))
+
+	
+				newLines := make([]string, 0, len(e.lines)+len(body))
 					newLines = append(newLines, e.lines[:i+1]...)
-					for _, bl := range body {
-						newLines = append(newLines, strings.Repeat("  ", leadingIndent(line)+1)+strings.TrimSpace(bl))
+					bodyIndent := 0; if len(body) > 0 { bodyIndent = leadingIndent(body[0]) }; for _, bl := range body {
+						rel := leadingIndent(bl) - bodyIndent; indent := leadingIndent(line) + 1 + rel; if indent < 0 { indent = 0 }; newLines = append(newLines, strings.Repeat("  ", indent)+strings.TrimSpace(bl))
 					}
 					newLines = append(newLines, e.lines[i+1:]...)
 					e.lines = newLines

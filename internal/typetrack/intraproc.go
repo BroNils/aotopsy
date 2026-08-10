@@ -377,35 +377,27 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 				}
 			}
 			// Fall-through (if not the last instruction overall).
-			if true {
-				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-					blk.successors = append(blk.successors, bi)
-				}
+			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+				blk.successors = append(blk.successors, bi)
 			}
 			continue
 		}
 		// BL/BLR: fall-through to next block.
 		if _, ok := isBL(lastInst.Raw, lastInst.Addr); ok {
-			if true {
-				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-					blk.successors = append(blk.successors, bi)
-				}
+			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+				blk.successors = append(blk.successors, bi)
 			}
 			continue
 		}
 		if _, ok := isBLR(lastInst.Raw); ok {
-			if true {
-				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-					blk.successors = append(blk.successors, bi)
-				}
+			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+				blk.successors = append(blk.successors, bi)
 			}
 			continue
 		}
 		// Default: fall-through.
-		if true {
-			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-				blk.successors = append(blk.successors, bi)
-			}
+		if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+			blk.successors = append(blk.successors, bi)
 		}
 	}
 
@@ -1585,6 +1577,13 @@ func isSTR64UnsignedOffset(raw uint32) (baseReg int, byteOffset int, ok bool) {
 
 // isLDRRegExtended detects LDR Xt, [Xn, Xm, LSL #3] (register offset).
 // Returns base, index, and destination register.
+//
+// TODO(BUG-HUNT): the mask 0xFFE00C00 does NOT cover the option (bits 23-22)
+// and S (bit 12) fields of the LDR (register) encoding. This is an
+// intentional trade-off: the subsequent dispatch-detection checks constrain
+// the result enough to limit false positives, and tightening the mask to
+// also verify option==011 (LSL) and S==0 could break the existing dispatch
+// table detection. Verifying option/S here is left as future work.
 func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
 	if raw&0xFFE00C00 != 0xF8600800 {
 		return 0, 0, 0, false
@@ -1701,10 +1700,17 @@ func isADD64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 	rn = int((raw >> 5) & 0x1F)
 	imm12 := int((raw >> 10) & 0xFFF)
 	shift := int((raw >> 22) & 0x3)
+	// shift==0: no shift; shift==1: LSL #12. shift==2,3 are RESERVED in
+	// the ADD (immediate) encoding -- treat them as unknown (immValue=0)
+	// rather than silently applying the unshifted value, which would
+	// misinterpret a reserved encoding as a real immediate.
 	if shift == 1 {
 		immValue = imm12 << 12
-	} else {
+	} else if shift == 0 {
 		immValue = imm12
+	} else {
+		// Reserved shift (2 or 3): leave immValue at its zero value.
+		immValue = 0
 	}
 	return rd, rn, immValue, true
 }
@@ -1719,10 +1725,16 @@ func isSUB64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 	rn = int((raw >> 5) & 0x1F)
 	imm12 := int((raw >> 10) & 0xFFF)
 	shift := int((raw >> 22) & 0x3)
+	// shift==0: no shift; shift==1: LSL #12. shift==2,3 are RESERVED in
+	// the SUB (immediate) encoding -- treat them as unknown (immValue=0)
+	// rather than silently applying the unshifted value.
 	if shift == 1 {
 		immValue = imm12 << 12
-	} else {
+	} else if shift == 0 {
 		immValue = imm12
+	} else {
+		// Reserved shift (2 or 3): leave immValue at its zero value.
+		immValue = 0
 	}
 	return rd, rn, immValue, true
 }
@@ -1758,9 +1770,12 @@ func isUBFX(raw uint32) (rd, rn int, ok bool) {
 // Encoding: sf=1 | 01 | 01010 | 00 | 0 | Rm | 000000 | Rn=31 | Rd
 // Mask: 0xFF200000, Value: 0xAA000000 (with sf=1)
 func isMOVOrr(raw uint32) (rd int, ok bool) {
-	// ORR Xd, XZR, Xm: 0xAA000000 with Rn=31
-	if raw&0xFF20001F == 0xAA000000 {
-		// Wait, Rn field is bits 5-9. For MOV, Rn = XZR = 31.
+	// ORR Xd, XZR, Xm: 0xAA000000 with Rn=31.
+	// Mask 0xFF200000 covers sf+opcode+Rm+fixed bits, NOT Rd (bits 0-4) so
+	// any destination register matches. The previous mask 0xFF20001F
+	// included Rd, so only Rd==0 (MOV X0) ever matched.
+	if raw&0xFF200000 == 0xAA000000 {
+		// Rn field is bits 5-9. For MOV, Rn = XZR = 31.
 		rn := int((raw >> 5) & 0x1F)
 		if rn == 31 {
 			return int(raw & 0x1F), true

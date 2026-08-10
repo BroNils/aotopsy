@@ -325,8 +325,16 @@ func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, value
 		m = make(map[int32]int)
 		ctx.FieldStoreTypes[receiverCID] = m
 	}
-	// Only record if not already present (first-write-wins, like InstanceFieldTypes unanimity)
-	if _, exists := m[lookupOff]; !exists {
+	// Unanimity (drop-on-conflict), matching InstanceFieldTypes semantics:
+	// a wrong concrete type is worse than none, since KnownClass is treated
+	// as authoritative for BLR resolution. If two functions store different
+	// CIDs to the same field, record neither — use a sentinel (-1) to mark
+	// the conflict so a later third write can't resurrect a type.
+	if existing, exists := m[lookupOff]; exists {
+		if existing != valueCID && existing != -1 {
+			m[lookupOff] = -1 // conflict: polymorphic field, no single type
+		}
+	} else {
 		m[lookupOff] = valueCID
 	}
 }

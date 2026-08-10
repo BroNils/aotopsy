@@ -14,55 +14,14 @@ import (
 
 // --- Compaction passes (from compaction.rs) ---
 
-// retryLoopSynthesis detects the Dart AOT retry-loop pattern:
-//   var retry = false;
-//   while (retry) { ...body...; retry = true; }
-// and unwraps it (the loop runs at most once after the first iteration).
-// Ported from flutterdec's retry_decl_var + while_var pattern.
-func retryLoopSynthesis(lines []string) ([]string, bool) {
-	var out []string
-	changed := false
-	for i := 0; i < len(lines); i++ {
-		t := trimmed(lines[i])
-		// Look for "final var retry = false;" or "bool retry = false;"
-		if !strings.Contains(t, "= false;") || !strings.Contains(t, "retry") {
-			out = append(out, lines[i])
-			continue
-		}
-		// Extract variable name
-		m := regexp.MustCompile(`(?:final\s+)?(?:bool\s+)?(\w+)\s*=\s*false;`).FindStringSubmatch(t)
-		if m == nil {
-			out = append(out, lines[i])
-			continue
-		}
-		varName := m[1]
-		// Next non-empty line should be "while (varName) {"
-		j := i + 1
-		for j < len(lines) && trimmed(lines[j]) == "" {
-			j++
-		}
-		if j >= len(lines) || trimmed(lines[j]) != "while ("+varName+") {" {
-			out = append(out, lines[i])
-			continue
-		}
-		end := findBlockEnd(lines, j)
-		if end < 0 {
-			out = append(out, lines[i])
-			continue
-		}
-		// Check no "continue;" in body and body terminates
-		body := lines[j+1 : end]
-		if containsTopLevelContinue(body, leadingIndent(lines[j])+1) {
-			out = append(out, lines[i])
-			continue
-		}
-		// Unwrap: skip the declaration and while wrapper, dedent body
-		out = append(out, dedentBlock(body)...)
-		i = end
-		changed = true
-	}
-	return out, changed
-}
+// NOTE: retryLoopSynthesis was removed. It searched for
+//   var retry = false; while (retry) { ...body...; retry = true; }
+// and unwrapped the body, but (a) this emitter never generates that pattern
+// (it emits `while (true) { ... break; }`, handled by unwrapDeadWhileTrue),
+// so the pass never fired, and (b) the logic was wrong: `while (false)` runs
+// zero times, but unwrapping makes the body run once -- a semantic reversal.
+// The pattern was ported from flutterdec's Rust emitter which produced it;
+// it does not apply here.
 
 // collapseIfElseReturn detects:
 //   if (cond) { return X; } else { return Y; }
@@ -345,7 +304,7 @@ func applyArgRenaming(source string, paramTypes []string) string {
 		}
 		for argIdx, typeName := range paramTypes {
 			if argIdx > 7 || typeName == "" {
-				break
+				continue
 			}
 			oldName := "arg" + string(rune('0'+argIdx))
 			// Don't rename if type is dynamic or unknown
@@ -570,14 +529,48 @@ func deadStoreElimination(lines []string) ([]string, bool) {
 // copyPropagation replaces uses of a copy variable with its source:
 //   t1 = arg0;\n  t2 = t1 + 1;  →  t2 = arg0 + 1;
 // Only propagates simple copies (t1 = var) where t1 is not reassigned.
+//
+// Scope-aware: a copy declared at indent N is only valid at indent >= N (the
+// same block or a nested one). A copy inside an `if` block is NOT propagated
+// to lines outside that block where the temp may be undefined. A temp that is
+// reassigned (appears as `tN = ...` more than once, or as `final tN = ...`) is
+// excluded entirely since its value changes.
 func copyPropagation(lines []string) ([]string, bool) {
-	// Build copy map: var → source for simple "var = ident;" lines
-	copies := map[string]string{}
+	// First pass: count assignments per temp to detect reassignment.
+	assignCount := map[string]int{}
+	declaredFinal := map[string]bool{}
+	reAssign := regexp.MustCompile(`^(?:final\s+)?(t\d+)\s*=`)
 	for _, line := range lines {
 		t := trimmed(line)
-		m := regexp.MustCompile(`^(t\d+)\s*=\s*(\w+);$`).FindStringSubmatch(t)
-		if m != nil {
-			copies[m[1]] = m[2]
+		if m := reAssign.FindStringSubmatch(t); m != nil {
+			assignCount[m[1]]++
+			if strings.HasPrefix(t, "final ") {
+				declaredFinal[m[1]] = true
+			}
+		}
+	}
+
+	// Build copy map: var → (source, declaring indent). Only simple
+	// "var = ident;" lines with exactly one assignment (no reassignment).
+	type copyEntry struct {
+		source string
+		indent int
+	}
+	copies := map[string]copyEntry{}
+	simpleCopy := regexp.MustCompile(`^(t\d+)\s*=\s*(\w+);$`)
+	for _, line := range lines {
+		t := trimmed(line)
+		m := simpleCopy.FindStringSubmatch(t)
+		if m == nil {
+			continue
+		}
+		temp := m[1]
+		// Skip if reassigned or declared final (different semantics).
+		if assignCount[temp] != 1 || declaredFinal[temp] {
+			continue
+		}
+		if _, exists := copies[temp]; !exists {
+			copies[temp] = copyEntry{source: m[2], indent: leadingIndent(line)}
 		}
 	}
 	if len(copies) == 0 {
@@ -587,15 +580,22 @@ func copyPropagation(lines []string) ([]string, bool) {
 	out := make([]string, len(lines))
 	for i, line := range lines {
 		newLine := line
-		for copy, source := range copies {
+		lineIndent := leadingIndent(line)
+		t := trimmed(newLine)
+		for copy, entry := range copies {
+			// Only propagate to lines at the same or deeper indent (same
+			// block or nested). A copy declared inside `if` must not leak
+			// to a less-indented (outer) line.
+			if lineIndent < entry.indent {
+				continue
+			}
 			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(copy) + `\b`)
 			if re.MatchString(newLine) {
 				// Don't replace in the declaration line itself
-				t := trimmed(newLine)
 				if strings.HasPrefix(t, copy+" = ") {
 					continue
 				}
-				newLine = re.ReplaceAllString(newLine, source)
+				newLine = re.ReplaceAllString(newLine, entry.source)
 				changed = true
 			}
 		}
@@ -617,6 +617,18 @@ func commonSubexpressionElimination(lines []string) ([]string, bool) {
 	exprToTemp := map[string]string{}
 	var reAssign = regexp.MustCompile(`^final (t\d+) = (.+);$`)
 
+	// Count all assignments per temp (final or not) to detect reassignment.
+	// A temp that is reassigned cannot be safely used as a CSE target, since
+	// a later use of the expression would resolve to the reassigned value.
+	anyAssign := regexp.MustCompile(`^(?:final\s+)?(t\d+)\s*=`)
+	assignCount := map[string]int{}
+	for _, line := range lines {
+		t := trimmed(line)
+		if m := anyAssign.FindStringSubmatch(t); m != nil {
+			assignCount[m[1]]++
+		}
+	}
+
 	// First pass: collect all temp = expr assignments
 	for _, line := range lines {
 		t := trimmed(line)
@@ -626,6 +638,10 @@ func commonSubexpressionElimination(lines []string) ([]string, bool) {
 		}
 		temp := m[1]
 		expr := m[2]
+		// Skip temps that are reassigned elsewhere (value is not stable).
+		if assignCount[temp] > 1 {
+			continue
+		}
 		// Only track complex expressions (contain operator, not just a var)
 		if len(expr) < 8 {
 			continue
@@ -647,18 +663,27 @@ func commonSubexpressionElimination(lines []string) ([]string, bool) {
 		return lines, false
 	}
 
-	// Second pass: replace occurrences of expressions with temp references
+	// Second pass: replace occurrences of expressions with temp references.
+	// Track which temps have been declared so far: only replace with a temp
+	// AFTER its declaration line (a use before the declaration would reference
+	// an undefined temp).
 	changed := false
 	out := make([]string, len(lines))
+	declared := map[string]bool{}
 	for i, line := range lines {
 		newLine := line
 		t := trimmed(line)
-		// Don't modify the declaration line itself
-		if reAssign.MatchString(t) {
+		// Record declaration before skipping (so subsequent lines can use it).
+		if m := reAssign.FindStringSubmatch(t); m != nil {
+			declared[m[1]] = true
 			out[i] = line
 			continue
 		}
 		for expr, temp := range exprToTemp {
+			// Only replace with a temp that has already been declared.
+			if !declared[temp] {
+				continue
+			}
 			// Only replace if the expression appears as a standalone token
 			// (not as a substring of a larger expression)
 			if strings.Contains(newLine, expr) {
@@ -747,11 +772,65 @@ var exprSimplificationRules = []exprRule{
 	{regexp.MustCompile(`!!([^()\s]+)`), "$1"},
 }
 
+// simplifyExpressions applies arithmetic simplification rules to the source.
+// It protects string-literal contents from replacement: rules like `a * 1 → a`
+// would otherwise corrupt a literal `"x * 1"` into `"x"`. The source is split
+// into code and string-literal segments; rules apply only to code segments.
 func simplifyExpressions(source string) string {
-	for _, rule := range exprSimplificationRules {
-		source = rule.pattern.ReplaceAllString(source, rule.replace)
+	lines := strings.Split(source, "\n")
+	for i, line := range lines {
+		lines[i] = simplifyLineProtectingStrings(line)
 	}
-	return source
+	return strings.Join(lines, "\n")
+}
+
+// simplifyLineProtectingStrings applies the simplification rules to the
+// non-string-literal portions of a single line. String literals (single- or
+// double-quoted) are preserved verbatim. Comment-only lines are skipped.
+func simplifyLineProtectingStrings(line string) string {
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, "//") {
+		return line
+	}
+	// Tokenize into string-literal and non-literal segments.
+	var out strings.Builder
+	i := 0
+	for i < len(line) {
+		c := line[i]
+		if c == '"' || c == '\'' {
+			// Copy the string literal verbatim (including quotes and content).
+			quote := c
+			out.WriteByte(c)
+			i++
+			for i < len(line) {
+				out.WriteByte(line[i])
+				if line[i] == '\\' && i+1 < len(line) {
+					// Escaped char: copy next byte too.
+					i++
+					out.WriteByte(line[i])
+					i++
+					continue
+				}
+				if line[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		// Collect a non-literal segment up to the next quote.
+		start := i
+		for i < len(line) && line[i] != '"' && line[i] != '\'' {
+			i++
+		}
+		seg := line[start:i]
+		for _, rule := range exprSimplificationRules {
+			seg = rule.pattern.ReplaceAllString(seg, rule.replace)
+		}
+		out.WriteString(seg)
+	}
+	return out.String()
 }
 
 // --- Enum Reconstruction ---

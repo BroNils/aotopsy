@@ -1,5 +1,12 @@
 # AGENTS.md — AOTopsy
 
+## ⚠️ WAJIB: baca `AGENTS-local.md` juga
+
+Jika `AGENTS-local.md` ada di root repo, WAJIB dibaca sebelum bekerja. Berisi
+info lokal (lokasi sample binaries, env vars) yang tidak didokumentasikan di
+sini. Sample `libapp.so` dan `ground_truth.dart` tidak ada di repo — ada di
+`~/dev/` (lihat AGENTS-local.md).
+
 ## ⚠️ Host memory: 6 GB. Read this before running anything heavy.
 
 This dev box is a WSL2 VM with `memory=6GB` + 4 GB swap (`.wslconfig`). It has

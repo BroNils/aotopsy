@@ -1,9 +1,7 @@
 package signal
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -40,6 +38,12 @@ var sourcePatterns = map[string]string{
 }
 
 // Sink patterns: functions/APIs that send/store data.
+//
+// Patterns are matched via substring (strings.Contains on the lowercased
+// string ref value), so they must be specific enough to avoid false positives.
+// The bare substrings "log" and "print" matched unrelated words (dialog,
+// catalog, algorithm, fingerprint, blueprint, sprint), so they use the
+// call-site form "log(" / "print(" or the Dart-specific API names instead.
 var sinkPatterns = map[string]string{
 	"http":           "network_http",
 	"https":          "network_https",
@@ -50,8 +54,10 @@ var sinkPatterns = map[string]string{
 	"SharedPreferences": "shared_prefs",
 	"sqflite":        "sqlite_db",
 	"hive":           "hive_box",
-	"log":            "logging",
-	"print":          "console_output",
+	"log(":           "logging",
+	"print(":         "console_output",
+	"debugprint":     "console_output",
+	"developer.log":  "logging",
 	"analytics":      "analytics_send",
 	"crashlytics":    "crash_report",
 	"firebase":       "firebase_upload",
@@ -60,7 +66,7 @@ var sinkPatterns = map[string]string{
 // WriteTaintFindings performs taint analysis by identifying functions that
 // access source patterns and functions that access sink patterns, then
 // checking the call graph for source→sink flows (including cross-function).
-func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord) error {
+func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edges []disasm.CallEdgeRecord) error {
 	// Build function → patterns map
 	funcSources := map[string][]string{}
 	funcSinks := map[string][]string{}
@@ -82,48 +88,11 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord) erro
 		}
 	}
 
-	// Read call edges to find cross-function flows
-	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
-	edgesFile, err := os.Open(edgesPath)
-	if err != nil {
-		// Fallback: same-function taint only
-		var findings []TaintFinding
-		for fn, sources := range funcSources {
-			sinks, ok := funcSinks[fn]
-			if !ok {
-				continue
-			}
-			for _, src := range sources {
-				for _, sink := range sinks {
-					findings = append(findings, TaintFinding{
-						Source:     src,
-						Sink:       sink,
-						SourceFn:   fn,
-						SinkFn:     fn,
-						FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
-						Confidence: "low",
-					})
-				}
-			}
-		}
-		if len(findings) == 0 {
-			return nil
-		}
-		return writeJSONLFile(filepath.Join(outDir, "taint_findings.jsonl"), findings)
-	}
-	defer func() { _ = edgesFile.Close() }()
-
-	// Build call graph: caller → set of callees
+	// Build call graph from in-memory edges (same source as
+	// WriteBehavioralFindings) instead of re-reading call_edges.jsonl
+	// from disk, so the two analyses share identical edge data.
 	callerCallees := map[string]map[string]bool{}
-	dec := json.NewDecoder(edgesFile)
-	for dec.More() {
-		var e struct {
-			FromFunc string `json:"from_func"`
-			Target   string `json:"target"`
-		}
-		if err := dec.Decode(&e); err != nil {
-			break
-		}
+	for _, e := range edges {
 		if e.Target == "" {
 			continue
 		}
@@ -279,15 +248,27 @@ func WriteYaraFindings(outDir string, stringRefs []disasm.StringRefRecord) error
 		var matchedStrings []string
 		var matchedFuncs []string
 		seenFuncs := map[string]bool{}
-		for _, pattern := range rule.Strings {
-			for val, funcs := range stringFuncs {
-				if strings.Contains(strings.ToLower(val), strings.ToLower(pattern)) {
-					matchedStrings = append(matchedStrings, val)
-					for _, fn := range funcs {
-						if !seenFuncs[fn] {
-							seenFuncs[fn] = true
-							matchedFuncs = append(matchedFuncs, fn)
-						}
+		// Pre-lowercase the rule patterns once per rule instead of calling
+		// strings.ToLower(pattern) on every (pattern, val) pair.
+		lowerPatterns := make([]string, len(rule.Strings))
+		for i, pattern := range rule.Strings {
+			lowerPatterns[i] = strings.ToLower(pattern)
+		}
+		for val, funcs := range stringFuncs {
+			lowerVal := strings.ToLower(val) // pre-lowercase val once per string
+			matched := false
+			for _, lp := range lowerPatterns {
+				if strings.Contains(lowerVal, lp) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				matchedStrings = append(matchedStrings, val)
+				for _, fn := range funcs {
+					if !seenFuncs[fn] {
+						seenFuncs[fn] = true
+						matchedFuncs = append(matchedFuncs, fn)
 					}
 				}
 			}
@@ -386,11 +367,26 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 		}
 	}
 
+	// Build a PC → function name map so hex VA call targets (e.Target == "0x...")
+	// can be resolved to a function name before category lookup. Without this,
+	// funcCategory["0x1234"] is always "" and hex VA targets are never matched.
+	pcToName := map[string]string{}
+	for _, f := range funcs {
+		if f.PC != "" && f.Name != "" {
+			pcToName[f.PC] = f.Name
+		}
+	}
 	// Build call graph: caller → callees
 	callerCallees := map[string]map[string]bool{}
 	for _, e := range edges {
 		if e.Target == "" {
 			continue
+		}
+		// Resolve hex VA targets to their function name when possible.
+		if strings.HasPrefix(e.Target, "0x") {
+			if resolved, ok := pcToName[e.Target]; ok && resolved != "" {
+				e.Target = resolved
+			}
 		}
 		if callerCallees[e.FromFunc] == nil {
 			callerCallees[e.FromFunc] = map[string]bool{}

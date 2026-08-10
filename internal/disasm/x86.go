@@ -85,6 +85,40 @@ func canonX86Reg(r x86asm.Reg) int {
 	return -1
 }
 
+// x86RegWidthBytes returns the width in bytes of a register-sized argument
+// (8 for RAX, 4 for EAX, 2 for AX, 1 for AL), or 0 if arg is not a register.
+// Used to recover the memory access width for MOV instructions whose
+// DataSize is 0.
+func x86RegWidthBytes(arg x86asm.Arg) int {
+	r, ok := arg.(x86asm.Reg)
+	if !ok {
+		return 0
+	}
+	switch r {
+	case x86asm.RAX, x86asm.RCX, x86asm.RDX, x86asm.RBX,
+		x86asm.RSP, x86asm.RBP, x86asm.RSI, x86asm.RDI,
+		x86asm.R8, x86asm.R9, x86asm.R10, x86asm.R11,
+		x86asm.R12, x86asm.R13, x86asm.R14, x86asm.R15:
+		return 8
+	case x86asm.EAX, x86asm.ECX, x86asm.EDX, x86asm.EBX,
+		x86asm.ESP, x86asm.EBP, x86asm.ESI, x86asm.EDI,
+		x86asm.R8L, x86asm.R9L, x86asm.R10L, x86asm.R11L,
+		x86asm.R12L, x86asm.R13L, x86asm.R14L, x86asm.R15L:
+		return 4
+	case x86asm.AX, x86asm.CX, x86asm.DX, x86asm.BX,
+		x86asm.SP, x86asm.BP, x86asm.SI, x86asm.DI,
+		x86asm.R8W, x86asm.R9W, x86asm.R10W, x86asm.R11W,
+		x86asm.R12W, x86asm.R13W, x86asm.R14W, x86asm.R15W:
+		return 2
+	case x86asm.AL, x86asm.CL, x86asm.DL, x86asm.BL,
+		x86asm.SPB, x86asm.BPB, x86asm.SIB, x86asm.DIB,
+		x86asm.R8B, x86asm.R9B, x86asm.R10B, x86asm.R11B,
+		x86asm.R12B, x86asm.R13B, x86asm.R14B, x86asm.R15B:
+		return 1
+	}
+	return 0
+}
+
 // X86ScanResult carries call edges and string references extracted from
 // one function in a single instruction-decode pass.
 type X86ScanResult struct {
@@ -263,7 +297,21 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 			continue
 		}
 		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
-			width := inst.DataSize / 8
+			// DataSize is the operand size in bits but is 0 for many MOV
+			// encodings, yielding width=0. Prefer MemBytes (the memory
+			// operand size in bytes, already 1/2/4/8/16) when present;
+			// otherwise infer the width from the register operand's size
+			// class (RAX=8, EAX=4, AX=2, AL=1).
+			width := inst.MemBytes
+			if width <= 0 {
+				width = x86RegWidthBytes(inst.Args[0])
+				if width <= 0 {
+					width = x86RegWidthBytes(inst.Args[1])
+				}
+			}
+			if width <= 0 {
+				width = inst.DataSize / 8 // last-resort fallback
+			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]

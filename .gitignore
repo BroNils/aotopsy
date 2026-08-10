@@ -3,6 +3,7 @@ out/
 samples/
 libapp.aotopsy/
 runtime_test/
+docs/
 .graph/
 .devin/
 *.so

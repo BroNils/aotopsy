@@ -63,7 +63,11 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 	}
 
 	align := dataImageAlignment(profile)
-	diStart := roundUp(isoHeader.TotalSize, align)
+	// SDK formula: DataImage = Addr() + RoundUp(length(), align) where length()
+	// EXCLUDES the 4-byte magic. TotalSize = Length + 4, so round up Length.
+	// Using TotalSize crosses a rounding boundary for ~25% (align=16) / ~6%
+	// (align=64) of snapshots, placing the image `align` bytes too high.
+	diStart := roundUp(isoHeader.Length, align)
 	tableObjOff := diStart + hdr.InstructionTableDataOffset
 
 	// Minimum: oneByteStringHeader + Data header + 0 entries

@@ -328,7 +328,7 @@ func Run(opts Opts) (*Result, error) {
 	funcs, _ := ReadJSONL[disasm.FuncRecord](filepath.Join(opts.OutDir, "functions.jsonl"))
 	edges, _ := ReadJSONL[disasm.CallEdgeRecord](filepath.Join(opts.OutDir, "call_edges.jsonl"))
 	stringRefs, _ := ReadJSONL[disasm.StringRefRecord](filepath.Join(opts.OutDir, "string_refs.jsonl"))
-	if err := writeXrefJSONL(opts.OutDir, clResult, pl, funcs, edges, stringRefs); err != nil {
+	if err := writeXrefJSONL(opts.OutDir, clResult, pl, funcs, edges, stringRefs, info.Version.CompressedPointers); err != nil {
 		opts.logf("  xref: %v\n", err)
 	}
 
@@ -362,7 +362,7 @@ func Run(opts Opts) (*Result, error) {
 
 		// Step 5.2: Data flow / taint analysis (simplified).
 		// Identifies potential source→sink flows based on string patterns.
-		if err := signal.WriteTaintFindings(opts.OutDir, stringRefs); err != nil {
+		if err := signal.WriteTaintFindings(opts.OutDir, stringRefs, edges); err != nil {
 			opts.logf("  taint: %v\n", err)
 		}
 

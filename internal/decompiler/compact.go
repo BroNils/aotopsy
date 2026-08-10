@@ -31,13 +31,12 @@ func compactOnePass(lines []string) ([]string, bool) {
 	lines, c3 := collapseRedundantGuardedReturn(lines)
 	lines, c4 := collapseDuplicateReturns(lines)
 	lines, c5 := unwrapDeadWhileTrue(lines)
-	lines, c6 := retryLoopSynthesis(lines)
 	lines, c7 := collapseIfElseReturn(lines)
 	lines, c8 := mergeIfChainContinue(lines)
 	lines, c9 := deadStoreElimination(lines)
 	lines, c10 := copyPropagation(lines)
 	lines, c11 := commonSubexpressionElimination(lines)
-	return lines, c1 || c2 || c3 || c4 || c5 || c6 || c7 || c8 || c9 || c10 || c11
+	return lines, c1 || c2 || c3 || c4 || c5 || c7 || c8 || c9 || c10 || c11
 }
 
 func leadingIndent(line string) int {
@@ -164,7 +163,7 @@ func unwrapDeadWhileTrue(lines []string) ([]string, bool) {
 			end := findBlockEnd(lines, i)
 			if end > i {
 				body := lines[i+1 : end]
-				if !containsTopLevelContinue(body, leadingIndent(lines[i])+1) {
+				if !containsTopLevelContinue(body, leadingIndent(lines[i])+1) && bodyTerminates(body, leadingIndent(lines[i])+1) {
 					out = append(out, dedentBlock(body)...)
 					i = end
 					changed = true
@@ -175,6 +174,35 @@ func unwrapDeadWhileTrue(lines []string) ([]string, bool) {
 		out = append(out, lines[i])
 	}
 	return out, changed
+}
+
+// bodyTerminates reports whether the last top-level statement in body (at the
+// given indent) ends in a control-transfer keyword (return/break/continue/
+// throw/rethrow). A `while (true) { }` whose body does not terminate is an
+// infinite loop and must NOT be unwrapped into a single pass.
+func bodyTerminates(body []string, indent int) bool {
+	// Find the last non-empty, non-comment top-level line.
+	last := ""
+	for i := len(body) - 1; i >= 0; i-- {
+		t := trimmed(body[i])
+		if t == "" || strings.HasPrefix(t, "//") {
+			continue
+		}
+		if leadingIndent(body[i]) != indent {
+			continue
+		}
+		last = t
+		break
+	}
+	if last == "" {
+		return false
+	}
+	for _, kw := range []string{"return", "break", "continue", "throw", "rethrow"} {
+		if last == kw || strings.HasPrefix(last, kw+" ") || strings.HasPrefix(last, kw+";") {
+			return true
+		}
+	}
+	return false
 }
 
 // findBlockEnd returns the index of the line closing the brace opened at

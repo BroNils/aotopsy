@@ -103,8 +103,16 @@ func AnalyzeFunctionX86(
 			stackTypes[k] = v
 		}
 
+		// prevInst is the previous instruction in this block (nil at block
+		// start). Used by the SHR/AND handler to detect the header-load →
+		// class-ID-extract pattern and preserve Bottom, mirroring ARM64's
+		// prevRaw UBFX fix (which unlocked 11550 field hits). Without this,
+		// x86_64 kills Bottom on the header load and the selector-offset-scan
+		// dispatch path never fires, explaining the BLR gap vs ARM64.
+		var prevInst *X86DecodedInst
 		for _, inst := range blk.insts {
-			transferInstructionX86(&state, inst, ctx, result, lca, stackTypes)
+			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
+			prevInst = &inst
 		}
 
 		blockExit[idx] = state
@@ -333,13 +341,43 @@ func canonX86RegLocal(r x86asm.Reg) int {
 	return -1
 }
 
+// isX86HeaderLoad reports whether prev was a header load writing dstIdx:
+// `MOV dstReg, [base-1]` where -1 is kHeapObjectTag. This is the x86_64
+// equivalent of ARM64's `LDUR Xt, [Xn, #-1]`, used to detect the header-load →
+// class-ID-extract pattern so a subsequent SHR/AND preserves Bottom.
+func isX86HeaderLoad(prev *X86DecodedInst, dstIdx int) bool {
+	if prev == nil {
+		return false
+	}
+	p := prev.Inst
+	if p.Op != x86asm.MOV || len(p.Args) < 2 {
+		return false
+	}
+	dstReg, ok := p.Args[0].(x86asm.Reg)
+	if !ok {
+		return false
+	}
+	if canonX86RegLocal(dstReg) != dstIdx {
+		return false
+	}
+	mem, ok := p.Args[1].(x86asm.Mem)
+	if !ok {
+		return false
+	}
+	return mem.Disp == -1
+}
+
 // transferInstructionX86 updates the register type state for one x86_64 instruction.
 // H-4 fix: added stack type tracking, field type lookup, LEA dispatch slot
 // computation, and fixed allocation stub detection.
 // L-3 fix: stackTypes is now passed as a parameter instead of using a package global.
+// prevInst is the previous instruction in the block (nil at block start); used
+// by the SHR/AND handler to detect the header-load → class-ID-extract pattern
+// and preserve Bottom, mirroring ARM64's prevRaw UBFX fix.
 func transferInstructionX86(
 	state *[31]TypeLattice,
 	inst X86DecodedInst,
+	prevInst *X86DecodedInst,
 	ctx *TypeContext,
 	result *IntraResult,
 	lca func(int, int) int,
@@ -525,6 +563,13 @@ func transferInstructionX86(
 
 	// SHR/AND reg, imm — bitfield extract (class ID extraction from header).
 	// If the source has KnownClass, preserve it (same as ARM64 UBFX).
+	// If the source is Bottom AND the previous instruction was a header load
+	// (MOV reg, [base-1], the x86 equivalent of ARM64's LDUR Xt, [Xn, #-1]),
+	// preserve Bottom — the SHR/AND extracts the class ID from an unknown
+	// receiver, and Bottom lets the selector-offset-scan dispatch path fire.
+	// This mirrors the ARM64 prevRaw UBFX fix that unlocked 11550 field hits;
+	// without it x86_64 killed Bottom here and dispatch resolution was
+	// severely degraded vs ARM64.
 	if (ins.Op == x86asm.SHR || ins.Op == x86asm.AND) && len(ins.Args) >= 2 {
 		dstReg, dstOK := ins.Args[0].(x86asm.Reg)
 		if !dstOK {
@@ -536,11 +581,23 @@ func transferInstructionX86(
 		}
 		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
 			srcIdx := canonX86RegLocal(srcReg)
-			if srcIdx >= 0 && srcIdx < 31 && state[srcIdx].Kind == LatticeKnownClass {
-				// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
-				state[dstIdx] = state[srcIdx]
-				ctx.UBFXHits++
-				return
+			if srcIdx >= 0 && srcIdx < 31 {
+				if state[srcIdx].Kind == LatticeKnownClass {
+					// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
+					state[dstIdx] = state[srcIdx]
+					ctx.UBFXHits++
+					return
+				}
+				if state[srcIdx].Kind == LatticeBottom && prevInst != nil {
+					// Check if prevInst was a header load: MOV srcReg, [base-1].
+					// The x86 header load pattern is MOV reg, [reg-1] where -1
+					// is kHeapObjectTag (same as ARM64 LDUR Xt, [Xn, #-1]).
+					if isX86HeaderLoad(prevInst, srcIdx) {
+						state[dstIdx] = Bottom()
+						ctx.UBFXHits++
+						return
+					}
+				}
 			}
 		}
 		state[dstIdx] = Top()

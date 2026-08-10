@@ -94,7 +94,7 @@ func runTypeInference(
 	// region. result.FillEnd is the byte offset within this data.
 	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
 	if err != nil {
-		return 0, 0, nil, nil // non-fatal
+		return 0, 0, nil, fmt.Errorf("parse dispatch table: %w", err)
 	}
 	if len(dispatchEntries) == 0 {
 		return 0, 0, nil, nil

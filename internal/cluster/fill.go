@@ -344,8 +344,17 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	if snapshotSize <= 0 || profile.CompressedPointers {
 		return 0
 	}
-	// kMaxObjectAlignment = 2 * word_size = 16 on 64-bit (all supported archs).
-	align := int64(16)
+	// The data image BASE is placed at RoundUp(length(), kObjectStartAlignment).
+	// kObjectStartAlignment = 64 for Dart >=2.19 (16 for <=2.18), tracked by
+	// dataImageAlignment(profile). The old hardcoded 16 placed the base 48
+	// bytes too low on >=2.19 non-compressed (desktop) snapshots, so every
+	// computed object header landed mid-data and string extraction returned
+	// nothing. (Per-object delta stride uses the smaller kObjectAlignment=16,
+	// applied separately in extractRODataStrings.)
+	align := dataImageAlignment(profile)
+	if align <= 0 {
+		align = 16
+	}
 	// length() = snapshotSize - 4 (exclude magic bytes).
 	lengthVal := snapshotSize - 4
 	if lengthVal <= 0 {
@@ -1965,17 +1974,16 @@ func skipFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, pro
 // elements, needed to resolve a FunctionType's parameter_types (itself
 // just an Array ref) into its real per-parameter Type refs.
 //
-// New format (v2.16+):
+// Format (verified against dart-lang/sdk ArrayDeserializationCluster::ReadFill
+// at tags 2.10.0, 2.13.0, 2.15.0 — all use the same shape, with v2.10 adding
+// an extra Read<bool>(is_canonical) handled via PreCanonicalSplit):
 //
 //	Per object: ReadUnsigned(length) + ReadRef(type_args) + length × ReadRef(element).
 //
-// Old format (v2.13, v2.15 — OldArrayFill):
-//
-//	Per object: ReadRef(type_args) + N × ReadRef(element) where N = cm.Lengths[i] from alloc.
+// (A previous revision documented an "Old format" for v2.13/v2.15 and kept a
+// dead OldArrayFill branch + readFillArrayOld for it; no SDK version actually
+// used that format, so both were removed.)
 func readFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]ArrayInfo, error) {
-	if profile.OldArrayFill {
-		return readFillArrayOld(s, cm, fillRefUnsigned)
-	}
 	arrays := make([]ArrayInfo, 0, cm.Count)
 	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
@@ -1999,35 +2007,6 @@ func readFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, pro
 			r, err := readRef(s, fillRefUnsigned)
 			if err != nil {
 				return arrays, fmt.Errorf("array %d elem %d/%d: %w", i, j, length, err)
-			}
-			elems = append(elems, int(r))
-		}
-		arrays = append(arrays, ArrayInfo{RefID: ref, TypeArgsRefID: int(typeArgsRef), ElementRefIDs: elems})
-		ref++
-	}
-	return arrays, nil
-}
-
-// readFillArrayOld handles the pre-v2.16 Array fill format.
-// Per object: ReadRef(type_args) + N × ReadRef(element) where N = cm.Lengths[i] from alloc.
-func readFillArrayOld(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) ([]ArrayInfo, error) {
-	arrays := make([]ArrayInfo, 0, cm.Count)
-	ref := cm.StartRef
-	for i := int64(0); i < cm.Count; i++ {
-		allocLen := int64(0)
-		if int(i) < len(cm.Lengths) {
-			allocLen = cm.Lengths[i]
-		}
-		// ReadRef(type_arguments).
-		typeArgsRef, err := readRef(s, fillRefUnsigned)
-		if err != nil {
-			return arrays, fmt.Errorf("array_old %d/%d type_args: %w", i, cm.Count, err)
-		}
-		elems := make([]int, 0, allocLen)
-		for j := int64(0); j < allocLen; j++ {
-			r, err := readRef(s, fillRefUnsigned)
-			if err != nil {
-				return arrays, fmt.Errorf("array_old %d elem %d/%d: %w", i, j, allocLen, err)
 			}
 			elems = append(elems, int(r))
 		}
@@ -2172,19 +2151,17 @@ func readFillContext(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) (
 
 // readFillTypeArguments captures TypeArguments fill data.
 //
-// New format (v2.14, v2.16+):
+// Format (verified against dart-lang/sdk TypeArgumentsDeserializationCluster
+// ::ReadFill at tags 2.13.0, 2.15.0 — same shape, with v2.10 adding an extra
+// Read<bool>(is_canonical) handled via PreCanonicalSplit):
 //
 //	Per object: ReadUnsigned(length) + Read<int32_t>(hash) + ReadUnsigned(nullability) +
 //	  ReadRef(instantiations) + length × ReadRef(type).
 //
-// Old format (v2.13, v2.15 — OldTypeArgsFill):
-//
-//	Per object: ReadRef(instantiations) + N × ReadRef(type) + Read<int32_t>(hash)
-//	  where N = cm.Lengths[i] from alloc phase (no length/nullability in stream).
+// (A previous revision documented an "Old format" for v2.13/v2.15 and kept a
+// dead OldTypeArgsFill branch + readFillTypeArgumentsOld for it; no SDK version
+// actually used that format, so both were removed.)
 func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]TypeArgumentsInfo, error) {
-	if profile.OldTypeArgsFill {
-		return readFillTypeArgumentsOld(s, cm, fillRefUnsigned)
-	}
 	var result []TypeArgumentsInfo
 	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
@@ -2223,42 +2200,6 @@ func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned b
 			}
 			ta.TypeRefs = append(ta.TypeRefs, int(typeRef))
 		}
-		result = append(result, ta)
-		ref++
-	}
-	return result, nil
-}
-
-// readFillTypeArgumentsOld handles the pre-v2.14 TypeArguments fill format.
-func readFillTypeArgumentsOld(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) ([]TypeArgumentsInfo, error) {
-	var result []TypeArgumentsInfo
-	ref := cm.StartRef
-	for i := int64(0); i < cm.Count; i++ {
-		allocLen := int64(1)
-		if int(i) < len(cm.Lengths) {
-			allocLen = cm.Lengths[i]
-		}
-		inst, err := readRef(s, fillRefUnsigned)
-		if err != nil {
-			return result, fmt.Errorf("type_args_old %d/%d instantiations: %w", i, cm.Count, err)
-		}
-		ta := TypeArgumentsInfo{
-			RefID:          ref,
-			Length:         int(allocLen),
-			Instantiations: int(inst),
-		}
-		for j := int64(0); j < allocLen; j++ {
-			typeRef, err := readRef(s, fillRefUnsigned)
-			if err != nil {
-				return result, fmt.Errorf("type_args_old %d type %d/%d: %w", i, j, allocLen, err)
-			}
-			ta.TypeRefs = append(ta.TypeRefs, int(typeRef))
-		}
-		hash, err := s.ReadTagged32()
-		if err != nil {
-			return result, fmt.Errorf("type_args_old %d hash: %w", i, err)
-		}
-		ta.Hash = int32(hash)
 		result = append(result, ta)
 		ref++
 	}
@@ -2316,7 +2257,7 @@ func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compr
 		for j := 0; j < numFields; j++ {
 			fieldWordIdx := headerWords + j
 			isUnboxed := (bitmap>>uint(fieldWordIdx))&1 != 0
-			if isUnboxed {
+			if isUnboxed { // TODO(BUG-HUNT): unboxed read is always 2x ReadTagged32 (8 bytes) regardless of compressed pointers; bitmap granularity is the machine word (8 bytes), not the compressed word (4 bytes), so two 32-bit tagged reads consume one machine word on disk -- correct for current Dart AOT serialization but would need revisiting if bitmap granularity became compressed-word-sized. Left as-is intentionally; changing it could break verified fill behavior.
 				if _, err := s.ReadTagged32(); err != nil {
 					return result, fmt.Errorf("instance(%d) %d/%d unboxed field %d lo: %w", cm.CID, i, cm.Count, j, err)
 				}

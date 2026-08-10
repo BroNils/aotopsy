@@ -118,7 +118,7 @@ func IdentifyCryptoFromPoolImmediates(inDir string) ([]CryptoFinding, error) {
 func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 	data, err := os.ReadFile(libPath)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
 	var findings []CryptoFinding
@@ -138,8 +138,16 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 		if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
 			continue
 		}
-		// Determine if this is a 32-bit or 64-bit constant
-		if val <= 0xFFFFFFFF {
+		// Determine search width from the HEX STRING length, not the runtime
+		// value. A constant declared as 16 hex digits (e.g. "0x0000000000000001",
+		// Keccak RC[0]) is a 64-bit constant and must be searched as 8-byte LE,
+		// even though its value (1) fits in 32 bits. Searching it as 4-byte LE
+		// ("01 00 00 00") matches millions of unrelated bytes (every `MOV X0, #1`,
+		// boolean true, array length 1) and floods findings with false positives.
+		// A constant declared as <=8 hex digits is a genuine 32-bit constant.
+		hexDigits := len(strings.TrimPrefix(hex, "0x"))
+		is64Bit := hexDigits > 8
+		if !is64Bit && val <= 0xFFFFFFFF {
 			// 32-bit constant: search as 4-byte LE
 			buf := make([]byte, 4)
 			binary.LittleEndian.PutUint32(buf, uint32(val))
@@ -270,8 +278,7 @@ var pluginPatterns = []string{
 	"google_maps", "webview", "local_auth", "connectivity",
 	"device_info", "package_info", "flutter_local_notifications",
 	"flutter_push", "jpush", "umeng", "tencent_", "aliyun_",
-	"bytedance_", "huawei_", "xiaomi_", "stack_trace", "flutter/services",
-	"platform_channel", "PluginRegistry", "FlutterPlugin",
+	"bytedance_", "huawei_", "xiaomi_", "PluginRegistry", "FlutterPlugin",
 }
 
 // EnumeratePlugins scans string refs for Flutter plugin package names.
@@ -367,7 +374,7 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 				strings.Contains(lower, ".yaml") || strings.Contains(lower, ".yml") ||
 				strings.Contains(lower, ".gradle") || strings.Contains(lower, ".properties") ||
 				strings.Contains(lower, ".kt") || strings.Contains(lower, ".swift") ||
-				strings.Contains(lower, ".dart") || strings.Contains(lower, "int.") ||
+				strings.Contains(lower, "int.") ||
 				strings.Contains(lower, "double.") || strings.Contains(lower, "string.") ||
 				strings.Contains(lower, "bool.") || strings.Contains(lower, "list.") ||
 				strings.Contains(lower, "map.") || strings.Contains(lower, "set.") ||
@@ -404,7 +411,7 @@ type DeobfuscationFinding struct {
 }
 
 var (
-	base64Re = regexp.MustCompile(`^[A-Za-z0-9+/]{16,}={0,2}$`)
+	base64Re = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+/]{15,}={0,2}$`)
 )
 
 // DetectObfuscatedStrings scans string refs for potential obfuscated strings.
@@ -435,7 +442,11 @@ func DetectObfuscatedStrings(stringRefs []StringRefRecord) []DeobfuscationFindin
 		// but with some printable structure (suggests XOR with a key)
 		printable := 0
 		nonPrintable := 0
-		for _, c := range sr.Value {
+		// Iterate BYTES (not runes): len(sr.Value) is a byte count, so the
+		// printable/nonPrintable counts must also be per-byte to stay
+		// consistent with the len-based threshold below.
+		for i := 0; i < len(sr.Value); i++ {
+			c := sr.Value[i]
 			if c >= 32 && c <= 126 {
 				printable++
 			} else {
