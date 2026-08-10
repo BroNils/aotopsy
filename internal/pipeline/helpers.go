@@ -376,6 +376,11 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 			isStringCID := false
 			if l.CT != nil {
 				if cid, ok := l.RefCID[pe.RefID]; ok {
+					// Non-compressed-pointers snapshots store string refs under
+					// the abstract kStringCid (ct.String) cluster, not the
+					// OneByteString/TwoByteString subclass CIDs. Accept all three
+					// so ROData strings (the common case for desktop AOT) resolve
+					// to their actual value instead of a "<String>" placeholder.
 					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
 				} else if cid, ok := l.VmRefCID[pe.RefID]; ok {
 					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
@@ -438,7 +443,7 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 					isVMStringCID := false
 					if l.CT != nil {
 						if cid, ok2 := l.VmRefCID[pe.RefID]; ok2 {
-							isVMStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString
+							isVMStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
 						}
 					}
 					if isVMStringCID {
