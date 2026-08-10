@@ -411,7 +411,7 @@ type DeobfuscationFinding struct {
 }
 
 var (
-	base64Re = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+/]{15,}={0,2}$`)
+	base64Re = regexp.MustCompile(`^[A-Za-z0-9+/]{12,}={0,2}$`)
 )
 
 // DetectObfuscatedStrings scans string refs for potential obfuscated strings.
