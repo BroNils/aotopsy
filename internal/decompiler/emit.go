@@ -43,8 +43,27 @@ const (
 	// after this exact command crashed the host running unbounded
 	// against a real full Flutter framework build (not just a
 	// hypothetical -- a genuine incident during this porting session).
-	maxStepsPerEmitter = 20000
+	// Configurable via --max-steps flag (0 = use default).
+	defaultMaxStepsPerEmitter = 20000
 )
+
+// maxStepsPerEmitter returns the configured step budget, or the default
+// if no override is set. This allows adaptive budgets based on function
+// complexity without changing the constant.
+var maxStepsPerEmitterOverride int
+
+func maxStepsPerEmitter() int {
+	if maxStepsPerEmitterOverride > 0 {
+		return maxStepsPerEmitterOverride
+	}
+	return defaultMaxStepsPerEmitter
+}
+
+// SetMaxStepsPerEmitter sets the configurable step budget override.
+// 0 means use the default (20000).
+func SetMaxStepsPerEmitter(n int) {
+	maxStepsPerEmitterOverride = n
+}
 
 type emitter struct {
 	fir         *FuncIR
@@ -56,6 +75,9 @@ type emitter struct {
 	visits      map[int]int
 	omitted     []int
 	omittedSet  map[int]bool
+	// omittedStates stores register state snapshots at extraction points,
+	// so helper sub-emitters can receive live register aliases as parameters.
+	omittedStates map[int]*LiftState
 	callIdx     int
 	steps       int
 	budgetHit   bool
@@ -273,15 +295,24 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 							break
 						}
 						// P7: Async detection via Future method calls.
-						// Functions that call Future.delayed, Future.any, etc.
-						// are likely async functions. This is a heuristic —
-						// sync functions can also call Future methods, but
-						// in practice most callers of Future.delayed are async.
 						if strings.Contains(name, "Future.delayed") ||
 							strings.Contains(name, "Future._asyncComplete") ||
 							strings.Contains(name, "Future._thenAwait") {
 							fir.IsAsync = true
 							break
+						}
+						// Generator detection: sync* and async*
+						if strings.Contains(name, "InitSyncStar") || strings.Contains(name, "_initSyncStar") {
+							fir.IsSyncStar = true
+						}
+						if strings.Contains(name, "YieldAsyncStar") || strings.Contains(name, "_yieldAsyncStar") ||
+							strings.Contains(name, "SuspendSyncStarAtStart") || strings.Contains(name, "_suspendSyncStarAtStart") ||
+							strings.Contains(name, "SuspendSyncStarAtYield") || strings.Contains(name, "_suspendSyncStarAtYield") {
+							if strings.Contains(name, "Async") {
+								fir.IsAsyncStar = true
+							} else {
+								fir.IsSyncStar = true
+							}
 						}
 					}
 				}
@@ -308,6 +339,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	asyncPrefix := ""
 	if fir.IsAsync {
 		asyncPrefix = "async "
+	} else if fir.IsSyncStar {
+		asyncPrefix = "sync* "
+	} else if fir.IsAsyncStar {
+		asyncPrefix = "async* "
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
 	e.lines = append(e.lines, fmt.Sprintf("%sdynamic %s(%s) {", asyncPrefix, sig, strings.Join(argList, ", ")))
@@ -414,6 +449,17 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.lines[sigLineIdx] = "async " + e.lines[sigLineIdx]
 		}
 	}
+	// Generator post-walk patching (same as async).
+	if fir.IsSyncStar && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
+		if !strings.HasPrefix(e.lines[sigLineIdx], "sync* ") {
+			e.lines[sigLineIdx] = "sync* " + e.lines[sigLineIdx]
+		}
+	}
+	if fir.IsAsyncStar && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
+		if !strings.HasPrefix(e.lines[sigLineIdx], "async* ") {
+			e.lines[sigLineIdx] = "async* " + e.lines[sigLineIdx]
+		}
+	}
 
 	e.lines = append(e.lines, "}") // close the main function body
 
@@ -426,6 +472,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = rewriteNegatedComparisons(source)
 	source = simplifyWrappedMemberAccess(source)
 	source = stripOuterParens(source)
+	// Expression simplification (algebraic identities)
+	source = simplifyExpressions(source)
+	// Enum reconstruction (detect switch-over-CID patterns)
+	source = enumReconstruction(source)
+	// Null-safety annotation (detect null-check patterns)
+	source = nullSafetyAnnotation(source)
+	// Local variable type inference (heuristic)
+	source = localTypeInference(source, fir.ParamTypeNames)
 	// Arg renaming with type hints (from flutterdec naming.rs)
 	source = applyArgRenaming(source, fir.ParamTypeNames)
 	source = applyNamingPass(source, fir)
@@ -473,7 +527,7 @@ func identifyLoopHeaders(fir *FuncIR) map[int]bool {
 // version's 3-tier 14/24/48 budget-by-block-shape scheme).
 func (e *emitter) emitBlock(id, indent, depth int) {
 	e.steps++
-	if e.steps > maxStepsPerEmitter {
+	if e.steps > maxStepsPerEmitter() {
 		if !e.budgetHit {
 			e.budgetHit = true
 			e.emit(indent, "// analysis budget exceeded, remaining control flow omitted")
@@ -706,6 +760,11 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 	if !e.omittedSet[id] && len(e.omitted) < maxHelpers {
 		e.omittedSet[id] = true
 		e.omitted = append(e.omitted, id)
+		// Capture live register state at extraction point for helper.
+		if e.omittedStates == nil {
+			e.omittedStates = map[int]*LiftState{}
+		}
+		e.omittedStates[id] = e.state.Clone()
 	}
 	e.emit(indent, "return _block_%d();", id)
 }
@@ -864,6 +923,14 @@ func (e *emitter) appendHelperFunctions() {
 			inlineMarked:   e.inlineMarked,
 			tryOpened:      e.tryOpened,
 			handlerBlocks:  e.handlerBlocks}
+		// Pass live register state from extraction point to helper.
+		// This gives the helper knowledge of register aliases (e.g. arg0,
+		// THR, PP) that were live when the helper was extracted.
+		if e.omittedStates != nil {
+			if liveState, ok := e.omittedStates[id]; ok && liveState != nil {
+				sub.state = liveState.Clone()
+			}
+		}
 		sub.emitBlock(id, 1, 0)
 
 		// Count non-empty lines (excluding labels and braces).

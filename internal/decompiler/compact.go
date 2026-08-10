@@ -36,7 +36,8 @@ func compactOnePass(lines []string) ([]string, bool) {
 	lines, c8 := mergeIfChainContinue(lines)
 	lines, c9 := deadStoreElimination(lines)
 	lines, c10 := copyPropagation(lines)
-	return lines, c1 || c2 || c3 || c4 || c5 || c6 || c7 || c8 || c9 || c10
+	lines, c11 := commonSubexpressionElimination(lines)
+	return lines, c1 || c2 || c3 || c4 || c5 || c6 || c7 || c8 || c9 || c10 || c11
 }
 
 func leadingIndent(line string) int {

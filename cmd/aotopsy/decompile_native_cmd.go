@@ -42,10 +42,13 @@ func cmdDecompileNative(args []string) error {
 	outDir := fs.String("out", "", "output directory for --all mode -- writes ONE combined.dart file inside it (not one file per function; avoids thousands of small file-create syscalls, which correlated with real host crashes during this tool's own testing)")
 	maxFuncs := fs.Int("max", 500, "max functions to emit in --all mode (0 = unlimited -- can be very slow/memory-heavy on a real app with tens of thousands of functions; prefer a bounded value)")
 	skipFuncs := fs.Int("skip", 0, "skip this many matching functions before starting to emit -- combine with --max to process the whole binary in separate SHARDS (separate process invocations), each covering one slice, then concatenate the resulting combined.dart files. This is the recommended way to decompile a full real-world app: it bounds each individual run's resource/time footprint and lets one bad shard be re-run alone instead of restarting the whole batch")
+	maxStepsFlag := fs.Int("max-steps", 0, "override the per-function emitter step budget (default 20000, 0 = use default). Increase for very complex functions that get truncated; decrease for faster processing.")
 	filterSubstr := fs.String("filter", "", "modifier for --all ONLY (not its own mode, and not accepted with --from-main): restricts --all to functions whose name contains this substring (e.g. your own app's class name) -- a real Flutter build's libapp.so bundles the ENTIRE framework (widgets/rendering/Material/dart:core/etc), so an unfiltered --all against even a tiny app can mean thousands of framework functions that were never the actual target. Requires knowing a name substring in advance -- if you don't (a real RE scenario against an unfamiliar binary), use --from-main instead, which classifies by owning-library URL (dart:*/package:flutter*) instead of by name.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Set configurable emitter step budget.
+	decompiler.SetMaxStepsPerEmitter(*maxStepsFlag)
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
 	}
@@ -139,35 +142,66 @@ func cmdDecompileNative(args []string) error {
 	//
 	// The lifter does not know the receiver's class ID at fieldExpr time
 	// (that would require integrating typetrack's KnownClass into the
-	// lifter). Instead, we build a global offset→name map: if a byte
-	// offset maps to the same field name across ALL classes that have a
-	// field at that offset, it is unambiguous and can be used. If
-	// different classes have different names at the same offset, it is
-	// ambiguous and we skip it (return "" → fallback to fNN).
+	// lifter). Instead, we build a per-class field name map AND a global
+	// fallback map. The resolver tries per-class first (when classID is
+	// known from typetrack), then falls back to a majority-vote global
+	// map: the most common field name at each offset across all classes.
+	// This handles the common case where many classes share the same
+	// field name at the same offset (e.g. _hash at offset 28).
 	classLayouts := pipeline.BuildClassLayouts(result, pl, info.Version.CompressedPointers)
-	type fieldVote struct {
-		name    string
-		conflict bool
-	}
-	globalFieldNames := map[int32]*fieldVote{} // byteOffset → name (unanimous only)
+
+	// Per-class field name map: classID → byteOffset → fieldName
+	perClassFieldNames := map[int32]map[int32]string{}
+	// Global vote map: byteOffset → name → count
+	offsetVotes := map[int32]map[string]int{}
 	for _, cl := range classLayouts {
+		if perClassFieldNames[cl.ClassID] == nil {
+			perClassFieldNames[cl.ClassID] = map[int32]string{}
+		}
 		for _, f := range cl.Fields {
-			v, exists := globalFieldNames[f.ByteOffset]
-			if !exists {
-				globalFieldNames[f.ByteOffset] = &fieldVote{name: f.Name}
+			// Skip synthetic names (f_0x4, field_0x8)
+			if strings.HasPrefix(f.Name, "f_0x") || strings.HasPrefix(f.Name, "field_0x") {
 				continue
 			}
-			if v.name != f.Name {
-				v.conflict = true
+			perClassFieldNames[cl.ClassID][f.ByteOffset] = f.Name
+			if offsetVotes[f.ByteOffset] == nil {
+				offsetVotes[f.ByteOffset] = map[string]int{}
 			}
+			offsetVotes[f.ByteOffset][f.Name]++
 		}
 	}
+
+	// Build majority-vote global map: byteOffset → most common name
+	globalFieldNames := map[int32]string{}
+	for off, votes := range offsetVotes {
+		bestName := ""
+		bestCount := 0
+		total := 0
+		for name, count := range votes {
+			total += count
+			if count > bestCount {
+				bestCount = count
+				bestName = name
+			}
+		}
+		// Use majority name if it has >50% of votes, or if it's the only name
+		if total > 0 && (bestCount*2 > total || len(votes) == 1) {
+			globalFieldNames[off] = bestName
+		}
+	}
+
 	fieldNameResolver := func(classID int, byteOffset int64) string {
-		// classID is ignored — we use the global unanimous map.
-		// When typetrack integration is added, this can be upgraded to
-		// use the per-class map for higher precision.
-		if v, ok := globalFieldNames[int32(byteOffset)]; ok && !v.conflict {
-			return v.name
+		// Try per-class resolution first (when classID is known)
+		if classID > 0 {
+			if classFields, ok := perClassFieldNames[int32(classID)]; ok {
+				if name, ok2 := classFields[int32(byteOffset)]; ok2 {
+					return name
+				}
+			}
+		}
+		// Fall back to majority-vote global map
+		if name, ok := globalFieldNames[int32(byteOffset)]; ok {
+			return name
 		}
 		return ""
 	}

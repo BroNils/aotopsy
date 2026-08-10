@@ -60,6 +60,22 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		return nil, fmt.Errorf("read string_refs.jsonl: %w", err)
 	}
 
+	// Signal expansion: crypto ID, MethodChannel, plugins, deobfuscation, network endpoints.
+	// Convert disasm.StringRefRecord to signal.StringRefRecord for the signal package.
+	sigStringRefs := make([]signal.StringRefRecord, len(stringRefs))
+	for i, sr := range stringRefs {
+		sigStringRefs[i] = signal.StringRefRecord{
+			Func:    sr.Func,
+			PC:      sr.PC,
+			Kind:    sr.Kind,
+			PoolIdx: sr.PoolIdx,
+			Value:   sr.Value,
+		}
+	}
+	if err := signal.WriteSignalExpansionJSONL(inDir, sigStringRefs); err != nil {
+		logf("  signal expansion: %v\n", err)
+	}
+
 	// Compute entry points.
 	entryList := render.FindEntryPoints(funcs, edges)
 	entrySet := make(map[string]bool, len(entryList))

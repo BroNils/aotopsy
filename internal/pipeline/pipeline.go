@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/signal"
 	"aotopsy/internal/snapshot"
 )
 
@@ -257,6 +258,35 @@ func Run(opts Opts) (*Result, error) {
 	// (Dart 2.12.0 / 3.7.0 / 3.9.2 / 3.10.7 / 3.11.0 / 3.12.2, arm64 + x64).
 	writeCapturedJSONL(&opts, clResult, pl, classLayouts, opts.log())
 
+	// Write pool_immediates.jsonl for crypto constant identification.
+	poolImmPath := filepath.Join(opts.OutDir, "pool_immediates.jsonl")
+	poolImmFile, err := os.Create(poolImmPath)
+	if err != nil {
+		return nil, fmt.Errorf("create pool_immediates.jsonl: %w", err)
+	}
+	poolImmEnc := json.NewEncoder(poolImmFile)
+	poolImmEnc.SetEscapeHTML(false)
+	poolImmCount := 0
+	for _, pe := range clResult.Pool {
+		if pe.Kind == cluster.PoolImmediate {
+			rec := struct {
+				Index int    `json:"index"`
+				Value int64  `json:"value"`
+				Hex   string `json:"hex"`
+			}{
+				Index: pe.Index,
+				Value: pe.Imm,
+				Hex:   fmt.Sprintf("0x%x", uint64(pe.Imm)),
+			}
+			if err := poolImmEnc.Encode(&rec); err != nil {
+				_ = poolImmFile.Close()
+				return nil, fmt.Errorf("write pool_immediates.jsonl: %w", err)
+			}
+			poolImmCount++
+		}
+	}
+	_ = poolImmFile.Close()
+
 	// Write dart_meta.json.
 	thrFields := disasm.THRFieldsWithProfile(info.Version.DartVersion, isARM64, info.Version)
 	ptrSize := 8
@@ -282,21 +312,24 @@ func Run(opts Opts) (*Result, error) {
 	}
 	result.FuncCount = disasmResult.Written
 
-	// Step 4.1: Cross-referencing JSONL outputs (gap-analysis §6).
+	// Step 4.5: Type inference — resolve dispatch-table BLR call sites
+	// by inferring receiver ClassID at each call site.
+	// Non-fatal: if it fails, BLR edges remain unresolved (as before).
+	// Runs BEFORE xref so that dispatch_table.jsonl is available for
+	// selector_dispatch_xref.jsonl generation.
+	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields); err != nil {
+		opts.logf("  type inference: %v\n", err)
+	}
+
+	// Step 4.6: Cross-referencing JSONL outputs (gap-analysis §6).
 	// Reads functions.jsonl, call_edges.jsonl, string_refs.jsonl
-	// produced by the disasm stage.
+	// produced by the disasm stage, and dispatch_table.jsonl produced
+	// by the type inference stage.
 	funcs, _ := ReadJSONL[disasm.FuncRecord](filepath.Join(opts.OutDir, "functions.jsonl"))
 	edges, _ := ReadJSONL[disasm.CallEdgeRecord](filepath.Join(opts.OutDir, "call_edges.jsonl"))
 	stringRefs, _ := ReadJSONL[disasm.StringRefRecord](filepath.Join(opts.OutDir, "string_refs.jsonl"))
 	if err := writeXrefJSONL(opts.OutDir, clResult, pl, funcs, edges, stringRefs); err != nil {
 		opts.logf("  xref: %v\n", err)
-	}
-
-	// Step 4.5: Type inference — resolve dispatch-table BLR call sites
-	// by inferring receiver ClassID at each call site.
-	// Non-fatal: if it fails, BLR edges remain unresolved (as before).
-	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields); err != nil {
-		opts.logf("  type inference: %v\n", err)
 	}
 
 	// Step 5: Signal analysis (if enabled) -- reads functions.jsonl/
@@ -308,6 +341,40 @@ func Run(opts Opts) (*Result, error) {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
 		result.SignalCount = sigResult.SignalCount
+
+		// Step 5.1: Entropy analysis (packed/encrypted section detection).
+		if err := signal.WriteEntropyFindings(opts.OutDir, opts.LibPath); err != nil {
+			opts.logf("  entropy: %v\n", err)
+		}
+
+		// Step 5.1b: Crypto algorithm identification from binary scan.
+		// Dart AOT compiles integer constants to MOVZ/MOVK instructions,
+		// so crypto constants appear as raw bytes in .text, not as pool
+		// immediates. Scan the binary for known crypto constant patterns.
+		cryptoFromBinary, _ := signal.IdentifyCryptoFromBinary(opts.LibPath)
+		cryptoFromPool, _ := signal.IdentifyCryptoFromPoolImmediates(opts.OutDir)
+		allCrypto := append(cryptoFromBinary, cryptoFromPool...)
+		if len(allCrypto) > 0 {
+			if err := signal.WriteCryptoFindings(opts.OutDir, allCrypto); err != nil {
+				opts.logf("  crypto: %v\n", err)
+			}
+		}
+
+		// Step 5.2: Data flow / taint analysis (simplified).
+		// Identifies potential source→sink flows based on string patterns.
+		if err := signal.WriteTaintFindings(opts.OutDir, stringRefs); err != nil {
+			opts.logf("  taint: %v\n", err)
+		}
+
+		// Step 5.3: YARA-style malware matching.
+		if err := signal.WriteYaraFindings(opts.OutDir, stringRefs); err != nil {
+			opts.logf("  yara: %v\n", err)
+		}
+
+		// Step 5.4: Call-graph behavioral analysis.
+		if err := signal.WriteBehavioralFindings(opts.OutDir, funcs, edges); err != nil {
+			opts.logf("  behavioral: %v\n", err)
+		}
 	}
 
 	// Step 6: Flutter-meta generation (if enabled) -- Ghidra/IDA-oriented

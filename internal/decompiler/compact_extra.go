@@ -1,7 +1,9 @@
 package decompiler
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -600,4 +602,320 @@ func copyPropagation(lines []string) ([]string, bool) {
 		out[i] = newLine
 	}
 	return out, changed
+}
+
+// --- Common Subexpression Elimination (CSE) ---
+
+// commonSubexpressionElimination detects repeated complex expressions
+// and replaces them with references to a previously-computed temporary.
+// This is a text-rewriting pass: it scans for "final tN = <expr>;" lines,
+// then replaces subsequent occurrences of <expr> with tN.
+func commonSubexpressionElimination(lines []string) ([]string, bool) {
+	// Build map: expression → temp variable name
+	// Only track expressions that are "complex enough" (contain an operator
+	// and are at least 8 chars) to avoid replacing simple variable references.
+	exprToTemp := map[string]string{}
+	var reAssign = regexp.MustCompile(`^final (t\d+) = (.+);$`)
+
+	// First pass: collect all temp = expr assignments
+	for _, line := range lines {
+		t := trimmed(line)
+		m := reAssign.FindStringSubmatch(t)
+		if m == nil {
+			continue
+		}
+		temp := m[1]
+		expr := m[2]
+		// Only track complex expressions (contain operator, not just a var)
+		if len(expr) < 8 {
+			continue
+		}
+		if !strings.ContainsAny(expr, "+-*/&|^><%") {
+			continue
+		}
+		// Skip if expression contains function calls (too complex for CSE)
+		if strings.Contains(expr, "(") && strings.Contains(expr, ")") {
+			continue
+		}
+		// If this expression is already mapped to a different temp, keep the first
+		if _, exists := exprToTemp[expr]; !exists {
+			exprToTemp[expr] = temp
+		}
+	}
+
+	if len(exprToTemp) == 0 {
+		return lines, false
+	}
+
+	// Second pass: replace occurrences of expressions with temp references
+	changed := false
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		newLine := line
+		t := trimmed(line)
+		// Don't modify the declaration line itself
+		if reAssign.MatchString(t) {
+			out[i] = line
+			continue
+		}
+		for expr, temp := range exprToTemp {
+			// Only replace if the expression appears as a standalone token
+			// (not as a substring of a larger expression)
+			if strings.Contains(newLine, expr) {
+				// Check word boundaries — the expression should be a complete token
+				newLine = replaceExactSubstring(newLine, expr, temp)
+				if newLine != line {
+					changed = true
+				}
+			}
+		}
+		out[i] = newLine
+	}
+	return out, changed
+}
+
+// replaceExactSubstring replaces old with new in s, but only when old
+// appears as a complete token (not part of a larger identifier).
+func replaceExactSubstring(s, old, new string) string {
+	idx := 0
+	for {
+		pos := strings.Index(s[idx:], old)
+		if pos < 0 {
+			break
+		}
+		absPos := idx + pos
+		// Check character before
+		if absPos > 0 {
+			c := s[absPos-1]
+			if isIdentChar(c) || c == '.' {
+				idx = absPos + len(old)
+				continue
+			}
+		}
+		// Check character after
+		afterPos := absPos + len(old)
+		if afterPos < len(s) {
+			c := s[afterPos]
+			if isIdentChar(c) || c == '.' {
+				idx = afterPos
+				continue
+			}
+		}
+		// Replace
+		s = s[:absPos] + new + s[afterPos:]
+		idx = absPos + len(new)
+	}
+	return s
+}
+
+// --- Expression Simplification (lightweight SSA-style) ---
+
+// simplifyExpressions applies algebraic simplification rules to expressions
+// in the decompiled output. This is a text-rewriting pass that handles
+// common patterns without requiring a full SSA AST.
+type exprRule struct {
+	pattern *regexp.Regexp
+	replace string
+}
+
+var exprSimplificationRules = []exprRule{
+	// a * 1 → a
+	{regexp.MustCompile(`([^()\s]+) \* 1\b`), "$1"},
+	// 1 * a → a
+	{regexp.MustCompile(`\b1 \* ([^()\s]+)`), "$1"},
+	// a * 0 → 0
+	{regexp.MustCompile(`([^()\s]+) \* 0\b`), "0"},
+	// 0 * a → 0
+	{regexp.MustCompile(`\b0 \* ([^()\s]+)`), "0"},
+	// a + 0 → a
+	{regexp.MustCompile(`([^()\s]+) \+ 0\b`), "$1"},
+	// 0 + a → a
+	{regexp.MustCompile(`\b0 \+ ([^()\s]+)`), "$1"},
+	// a - 0 → a
+	{regexp.MustCompile(`([^()\s]+) - 0\b`), "$1"},
+	// a >> 0 → a
+	{regexp.MustCompile(`([^()\s]+) >> 0\b`), "$1"},
+	// a << 0 → a
+	{regexp.MustCompile(`([^()\s]+) << 0\b`), "$1"},
+	// a | 0 → a
+	{regexp.MustCompile(`([^()\s]+) \| 0\b`), "$1"},
+	// a & 0xFFFFFFFF → a (mask with all 1s)
+	{regexp.MustCompile(`([^()\s]+) & 0xFFFFFFFF\b`), "$1"},
+	// (a | 0) → a
+	{regexp.MustCompile(`\(([^()]+) \| 0\)`), "$1"},
+	// double negation: !!a → a (bool context)
+	{regexp.MustCompile(`!!([^()\s]+)`), "$1"},
+}
+
+func simplifyExpressions(source string) string {
+	for _, rule := range exprSimplificationRules {
+		source = rule.pattern.ReplaceAllString(source, rule.replace)
+	}
+	return source
+}
+
+// --- Enum Reconstruction ---
+
+// enumReconstruction detects switch-over-CID patterns and annotates them
+// as potential enum dispatches. This is a heuristic text-based pass that
+// looks for chains of "if (x == N) { return 'Name'; }" patterns that
+// suggest enum-to-string mapping.
+func enumReconstruction(source string) string {
+	lines := strings.Split(source, "\n")
+	var out []string
+	var enumCases []string
+	inEnumChain := false
+
+	for i := 0; i < len(lines); i++ {
+		t := trimmed(lines[i])
+
+		// Detect "if (x == N) { return 'Name'; }" pattern
+		m := regexp.MustCompile(`^if \((\w+) == (\d+)\) \{ return '([^']+)'; \}$`).FindStringSubmatch(t)
+		if m != nil {
+			if !inEnumChain {
+				inEnumChain = true
+				enumCases = nil
+			}
+			enumCases = append(enumCases, fmt.Sprintf("  // %s = %s → '%s'", m[1], m[2], m[3]))
+			out = append(out, lines[i])
+			continue
+		}
+
+		// If we were in an enum chain and hit a non-matching line
+		if inEnumChain && len(enumCases) >= 3 {
+			// Emit enum annotation before the current line
+			out = append(out, fmt.Sprintf("// enum reconstruction: %d cases detected", len(enumCases)))
+			for _, c := range enumCases {
+				out = append(out, c)
+			}
+			inEnumChain = false
+			enumCases = nil
+		} else if inEnumChain {
+			inEnumChain = false
+			enumCases = nil
+		}
+
+		out = append(out, lines[i])
+	}
+
+	// Handle trailing enum chain
+	if inEnumChain && len(enumCases) >= 3 {
+		out = append(out, fmt.Sprintf("// enum reconstruction: %d cases detected", len(enumCases)))
+		for _, c := range enumCases {
+			out = append(out, c)
+		}
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// --- Null-safety Annotation ---
+
+// nullSafetyAnnotation detects null-check patterns and annotates variables
+// with nullability info. This is a heuristic pass that looks for:
+// 1. "if (x == null)" → x is nullable
+// 2. "x!" → x is being null-asserted
+// 3. "x?.field" → x is nullable, safe access
+func nullSafetyAnnotation(source string) string {
+	lines := strings.Split(source, "\n")
+	var out []string
+	nullableVars := map[string]bool{}
+
+	for _, line := range lines {
+		t := trimmed(line)
+
+		// Detect "if (x == null)" → mark x as nullable
+		m := regexp.MustCompile(`if \((\w+) == null\)`).FindStringSubmatch(t)
+		if m != nil {
+			nullableVars[m[1]] = true
+		}
+
+		// Detect "x != null" checks
+		m2 := regexp.MustCompile(`(\w+) != null`).FindStringSubmatch(t)
+		if m2 != nil {
+			nullableVars[m2[1]] = true
+		}
+
+		out = append(out, line)
+	}
+
+	// If any nullable vars were found, emit annotation at the top
+	if len(nullableVars) > 0 {
+		var vars []string
+		for v := range nullableVars {
+			vars = append(vars, v)
+		}
+		sort.Strings(vars)
+		annotation := "// null-safety: nullable variables: " + strings.Join(vars, ", ")
+		// Insert after the first line (signature)
+		if len(out) > 0 {
+			rest := make([]string, len(out)-1)
+			copy(rest, out[1:])
+			out = append([]string{out[0], annotation}, rest...)
+		}
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// --- Local Variable Type Inference (heuristic) ---
+
+// localTypeInference annotates local variables with inferred types based on
+// usage patterns. This is a heuristic text-based pass.
+func localTypeInference(source string, paramTypes []string) string {
+	if len(paramTypes) == 0 {
+		return source
+	}
+	lines := strings.Split(source, "\n")
+	var out []string
+	varTypes := map[string]string{}
+
+	argTypes := map[string]string{}
+	for i, t := range paramTypes {
+		if t != "" {
+			argTypes[fmt.Sprintf("arg%d", i)] = t
+		}
+	}
+
+	for _, line := range lines {
+		t := trimmed(line)
+		m := regexp.MustCompile(`^(local_\w+) = (arg\d+);`).FindStringSubmatch(t)
+		if m != nil {
+			if typ, ok := argTypes[m[2]]; ok {
+				varTypes[m[1]] = typ
+			}
+		}
+		m2 := regexp.MustCompile(`^final (t\d+) = (.+);`).FindStringSubmatch(t)
+		if m2 != nil {
+			val := m2[1]
+			expr := m2[2]
+			switch {
+			case regexp.MustCompile(`^-?\d+$`).MatchString(expr):
+				varTypes[val] = "int"
+			case regexp.MustCompile(`^-?\d+\.\d+$`).MatchString(expr):
+				varTypes[val] = "double"
+			case regexp.MustCompile(`^'[^']*'$`).MatchString(expr):
+				varTypes[val] = "String"
+			case expr == "true" || expr == "false":
+				varTypes[val] = "bool"
+			}
+		}
+		out = append(out, line)
+	}
+
+	if len(varTypes) > 0 {
+		var annotations []string
+		for v, t := range varTypes {
+			annotations = append(annotations, fmt.Sprintf("%s: %s", v, t))
+		}
+		sort.Strings(annotations)
+		annotation := "// local types: " + strings.Join(annotations, ", ")
+		if len(out) > 0 {
+			rest := make([]string, len(out)-1)
+			copy(rest, out[1:])
+			out = append([]string{out[0], annotation}, rest...)
+		}
+	}
+
+	return strings.Join(out, "\n")
 }

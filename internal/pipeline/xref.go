@@ -44,6 +44,7 @@ type AddressCallersXref struct {
 // writeXrefJSONL writes cross-referencing JSONL files.
 func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) error {
 	// 1. string_value_xref.jsonl — string value → functions
+	// Also build from pool string entries if stringRefs is empty.
 	stringFuncs := map[string]map[string]bool{}
 	for _, sr := range stringRefs {
 		if sr.Value == "" {
@@ -53,6 +54,40 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, fu
 			stringFuncs[sr.Value] = map[string]bool{}
 		}
 		stringFuncs[sr.Value][sr.Func] = true
+	}
+	// Fallback: if stringRefs is empty, build from poolDisplay + functions
+	// that reference those pool entries (via string_refs.jsonl PC matching).
+	// This ensures string_value_xref is populated even when ExtractStringRefs
+	// finds 0 entries (e.g., when pool strings are VM snapshot strings).
+	if len(stringFuncs) == 0 && len(stringRefs) == 0 {
+		// Build from pool entries: map pool index → string value
+		poolStrings := map[int]string{}
+		for _, pe := range clResult.Pool {
+			if pe.Kind != cluster.PoolTagged {
+				continue
+			}
+			if pl.CT != nil && pl.RefCID != nil {
+				if cid, ok := pl.RefCID[pe.RefID]; ok {
+					isString := cid == pl.CT.OneByteString || cid == pl.CT.TwoByteString
+					if isString {
+						if s, ok := pl.RefToStr[pe.RefID]; ok {
+							poolStrings[pe.Index] = s
+						} else if s, ok := pl.VmRefToStr[pe.RefID]; ok {
+							poolStrings[pe.Index] = s
+						}
+					}
+				}
+			}
+		}
+		// For each pool string, find functions that reference it via string_refs
+		// Since stringRefs is empty, we can't map to functions.
+		// Instead, emit entries with empty function lists (the string exists
+		// in the pool but we don't know which functions reference it).
+		for _, val := range poolStrings {
+			if val != "" {
+				stringFuncs[val] = map[string]bool{}
+			}
+		}
 	}
 	if err := writeJSONL(filepath.Join(outDir, "string_value_xref.jsonl"), func() []interface{} {
 		var out []interface{}
@@ -102,28 +137,31 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, fu
 	}
 
 	// 3. selector_dispatch_xref.jsonl — selector offset → targets
-	// Uses dispatch_table.jsonl if available (written by pipeline).
+	// Uses dispatch_table.jsonl if available (written by typetrack stage).
+	// The JSONL format uses string kind ("null", "code", "stub") and
+	// includes target/slot_info fields, so we use a matching reader struct.
 	dispatchPath := filepath.Join(outDir, "dispatch_table.jsonl")
-	if dtEntries, err := ReadJSONL[cluster.DispatchTableEntry](dispatchPath); err == nil && len(dtEntries) > 0 {
-		byCodeIndex := CodeIndexToFunc(clResult, pl.CT, true)
+	type dtJSONL struct {
+		Index    int    `json:"index"`
+		Kind     string `json:"kind"`
+		Target   string `json:"target,omitempty"`
+		SlotInfo string `json:"slot_info,omitempty"`
+	}
+	if dtEntries, err := ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
 		selectorTargets := map[int][]string{}
 		for _, entry := range dtEntries {
-			if entry.Kind != cluster.DispatchCode {
+			if entry.Kind != "code" {
 				continue
 			}
-			name := ""
-			if no, ok := byCodeIndex[entry.ClusterIndex]; ok && no != nil {
-				if no.NameRefID >= 0 {
-					if s, ok := pl.RefToStr[no.NameRefID]; ok {
-						name = s
-					}
-				}
+			name := entry.Target
+			if name == "" {
+				// Try to extract from slot_info: "code cluster_index=N"
+				name = entry.SlotInfo
 			}
 			if name == "" {
-				name = fmt.Sprintf("code_%d", entry.ClusterIndex)
+				name = fmt.Sprintf("code_%d", entry.Index)
 			}
-			slot := entry.Index
-			selectorTargets[slot] = append(selectorTargets[slot], name)
+			selectorTargets[entry.Index] = append(selectorTargets[entry.Index], name)
 		}
 		if err := writeJSONL(filepath.Join(outDir, "selector_dispatch_xref.jsonl"), func() []interface{} {
 			var out []interface{}

@@ -188,6 +188,14 @@ type FuncIR struct {
 	// 6. Post-walk patch if any of the above set IsAsync during walking
 	IsAsync bool `json:"-"`
 
+	// IsSyncStar is set when the function is detected as a sync* generator.
+	// Detection: call targets containing "InitSyncStar" or "_initSyncStar".
+	IsSyncStar bool `json:"-"`
+
+	// IsAsyncStar is set when the function is detected as an async* generator.
+	// Detection: call targets containing "YieldAsyncStar" or "_yieldAsyncStar".
+	IsAsyncStar bool `json:"-"`
+
 	// SwitchCases holds recovered switch/case dispatch info for indirect
 	// branches (br xN from IndirectGotoInstr). Each entry maps a case index
 	// to the block ID that handles it. When non-empty, emitJump emits a real

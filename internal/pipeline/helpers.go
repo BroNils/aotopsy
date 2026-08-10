@@ -376,11 +376,15 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 			isStringCID := false
 			if l.CT != nil {
 				if cid, ok := l.RefCID[pe.RefID]; ok {
-					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString
+					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
+				} else if cid, ok := l.VmRefCID[pe.RefID]; ok {
+					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
 				}
 			}
 			if isStringCID {
 				if s, ok := l.RefToStr[pe.RefID]; ok {
+					display[pe.Index] = fmt.Sprintf("%q", s)
+				} else if s, ok := l.VmRefToStr[pe.RefID]; ok {
 					display[pe.Index] = fmt.Sprintf("%q", s)
 				}
 			} else if no, ok := l.RefToNamed[pe.RefID]; ok {
@@ -542,6 +546,11 @@ func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs b
 				fieldName := ""
 				if rf.nameRefID >= 0 {
 					if s, ok := pl.RefToStr[rf.nameRefID]; ok {
+						fieldName = s
+					}
+				}
+				if fieldName == "" {
+					if s, ok := pl.VmRefToStr[rf.nameRefID]; ok {
 						fieldName = s
 					}
 				}

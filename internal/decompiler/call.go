@@ -209,7 +209,13 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// selector-hint sniffing.
 	if e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))] == ffiCallTargetSentinel {
 		e.stats.SemanticIndirectCalls++
-		e.emit(indent, "final %s = nativeCall(%s); // Dart AOT native/FFI call (Thread vm_tag bookkeeping)", tmpName, argsText)
+		// Emit typed FFI call with argument count for signature inference.
+		// In a full implementation, this would resolve the FFI signature
+		// from FfiTrampolineData (callback_target → Function → signature).
+		// For now, we emit ffi_call with the args and a comment indicating
+		// this is a native FFI call with N arguments.
+		argCount := countArgs(argsText)
+		e.emit(indent, "final %s = ffi_call(%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, argsText, argCount)
 		return
 	}
 
@@ -299,6 +305,29 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	}
 	e.stats.RawRegisterCalls++
 	e.emit(indent, "final %s = dynamicCall(%s, [%s]);", tmpName, named, argsText)
+}
+
+// countArgs counts the number of comma-separated arguments in an args string.
+// Handles nested parentheses and brackets.
+func countArgs(argsText string) int {
+	if strings.TrimSpace(argsText) == "" {
+		return 0
+	}
+	depth := 0
+	count := 1
+	for _, c := range argsText {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func sanitizeCallName(s string) string {
