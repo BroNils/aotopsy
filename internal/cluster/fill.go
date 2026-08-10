@@ -344,13 +344,10 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	if snapshotSize <= 0 || profile.CompressedPointers {
 		return 0
 	}
-	// The data image BASE is placed at RoundUp(length(), kObjectStartAlignment).
-	// kObjectStartAlignment = 64 for Dart >=2.19 (16 for <=2.18), tracked by
-	// dataImageAlignment(profile). The old hardcoded 16 placed the base 48
-	// bytes too low on >=2.19 non-compressed (desktop) snapshots, so every
-	// computed object header landed mid-data and string extraction returned
-	// nothing. (Per-object delta stride uses the smaller kObjectAlignment=16,
-	// applied separately in extractRODataStrings.)
+	// The data image BASE is placed at RoundUp(length(), alignment).
+	// SDK ≤2.18: kMaxObjectAlignment=16; SDK ≥2.19: kObjectStartAlignment=64.
+	// dataImageAlignment() derives this from the DartVersion string (single
+	// cutoff at 2.19.0), verified via gh api against SDK source.
 	align := dataImageAlignment(profile)
 	if align <= 0 {
 		align = 16
@@ -855,14 +852,10 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		return nil
 	}
 
-	// Version-dependent alignment shift (was hardcoded 5 = 32 bytes, P0-3).
-	alignShift := uint(5) // fallback
-	if a := dataImageAlignment(profile); a > 0 {
-		alignShift = uint(0)
-		for (int64(1) << alignShift) < a {
-			alignShift++
-		}
-	}
+	// Per-object delta alignment: kObjectAlignment = 2 * word_size = 16 on
+	// 64-bit (all versions). This is NOT the same as dataImageAlignment
+	// (which is the image BASE alignment: 16 for ≤2.18, 64 for ≥2.19).
+	alignShift := uint(4) // log2(16) = 4
 
 	// kHeaderSize = kMaxObjectAlignment = 16 on 64-bit (verified against
 	// dart-lang/sdk image_snapshot.h: `kHeaderSize = kMaxObjectAlignment`).

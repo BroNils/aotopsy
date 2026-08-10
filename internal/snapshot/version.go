@@ -92,7 +92,6 @@ type VersionProfile struct {
 	TypeParamByteScalars    bool // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>
 	OldTypeScalars          bool // ≤2.18: Type fill has type_class_id_(unsigned)+combined(uint8) instead of flags(unsigned)
 	TopLevelCid16           bool // ≤2.18: kTopLevelCidOffset = 1<<16 (vs 1<<20 in ≥2.19)
-	ObjectAlignment         int  // kMaxObjectAlignment: 16 for ≤2.18, 64 for ≥2.19. 0 = use TopLevelCid16 proxy (backward compat)
 	OldPoolFormat           bool // ≤3.2: ObjectPool uses 7-bit TypeBits (no SnapshotBehavior)
 	PoolTypeSwapped         bool // ≥3.2: ObjectPool kImmediate=0,kTaggedObject=1 (was swapped in 3.2.0)
 	OldStringFormat         bool // ≤2.14: separate OneByteString/TwoByteString clusters with plain length (no <<1|flag)
