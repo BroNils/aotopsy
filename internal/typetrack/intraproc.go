@@ -1604,17 +1604,30 @@ func resolveBLR(
 				applySelectorCandidates(&res, unique)
 			}
 		}
-	case LatticeTop:
-		// No type info — try selector offset from pre-scan.
-		// If we know the selector offset, scan ALL dispatch table entries
-		// at that offset across all class IDs to find unique targets.
+	case LatticeTop, LatticeBottom:
+		// No usable type for the call register -- fall back to the selector
+		// immediate the pre-scan recorded for this exact BLR.
+		//
+		// Bottom must be handled here too, and it is the COMMON case on Dart
+		// 2.x. The sequence there is
+		//
+		//	LDURH W2, [X0,#1]        ; class id (kClassIdTagPos=16)
+		//	MOV   X0, X2
+		//	SUB   X0, X0, #imm       ; in-place, per 2.x EmitDispatchTableCall
+		//	LDR   X30, [X21,X0,LSL #3]
+		//	BLR   X30
+		//
+		// The LDR from the dispatch-table register sets X30 to Bottom
+		// ("a dispatch entry, slot unknown"), so the register is Bottom, not
+		// Top, and this fallback never ran: 3738 dispatch-table call sites in
+		// the 2.12 sample, 129 resolved. Bottom here is strictly MORE
+		// evidence than Top -- it says the value came from the dispatch table
+		// -- so refusing to use the selector was backwards.
 		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
 			// Scan every class's slot at this selector immediate; see
 			// selectorCandidates for the index arithmetic and its SDK source.
 			applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 		}
-	case LatticeBottom:
-		res.Resolved = false
 	}
 
 	result.BLRResolutions = append(result.BLRResolutions, res)

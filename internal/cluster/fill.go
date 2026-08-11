@@ -1025,6 +1025,18 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 	// reads* below are driven by spec, not by profile, so skipping capture
 	// keeps the stream aligned.
 	var isICData, isScript, isLoadingUnit, isKPI, isClosureData, isTypeParameters bool
+	// isOldType marks the Dart 2.10-2.15 Type layout, where type_class_id is
+	// a REF (a Smi) inside ReadFromTo rather than a scalar. Capturing it
+	// needs allRefs, so it has to be in the set below -- it was not, so the
+	// capture block further down ("v2.x TypeClassIdIsRef") always saw an
+	// empty allRefs and never ran: clResult.Types came out EMPTY for every
+	// 2.x snapshot (2187 Type objects in the 2.12 sample, 0 captured).
+	//
+	// Everything typed hangs off that: FieldTypes (declared field types),
+	// BuildClassHierarchy (superclasses, hence LCA and CHA), and the pool's
+	// Type -> class resolution. With it empty, 2.x had no field types at all
+	// and dispatch resolution had almost nothing to work from.
+	var isOldType bool
 	if profile != nil && profile.CIDs != nil {
 		isICData = cm.CID == profile.CIDs.ICData
 		isScript = cm.CID == profile.CIDs.Script
@@ -1032,6 +1044,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		isKPI = cm.CID == profile.CIDs.KernelProgramInfo
 		isClosureData = cm.CID == profile.CIDs.ClosureData
 		isTypeParameters = profile.CIDs.TypeParameters != 0 && cm.CID == profile.CIDs.TypeParameters
+		isOldType = profile.TypeClassIdIsRef && cm.CID == profile.CIDs.Type
 	}
 
 	ref := cm.StartRef
@@ -1061,7 +1074,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if err != nil {
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
 			}
-			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters {
+			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType {
 				allRefs = append(allRefs, int(r))
 			}
 			if j == spec.NameIdx {
