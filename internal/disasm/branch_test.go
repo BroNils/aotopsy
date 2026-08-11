@@ -123,3 +123,44 @@ func TestSignExtend(t *testing.T) {
 		}
 	}
 }
+
+// B.AL and B.NV use the B.cond encoding but always branch, so they are
+// unconditional. dart-lang/sdk's runtime/vm/constants_arm64.h names them
+// `AL = 14, // always (unconditional)` and `NV = 15`, and ARM defines the
+// 0b1111 encoding to behave as always.
+//
+// Reporting them as conditional gave the CFG a fallthrough edge that cannot
+// be taken, and made the decompiler render the branch with the literal
+// string "true" as its comparison operator -- `if ((x15 - 16) true THR.f64)`,
+// which is not valid Dart. That shape appeared 28148 times in the Dart 2.12
+// sample. The encoding below, 0x5400004e, is one such instruction taken from
+// it verbatim: `B AL, .+0x8`.
+func TestDecodeBranchTreatsAlwaysConditionsAsUnconditional(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  uint32
+	}{
+		{"B.AL from the 2.12 sample", 0x5400004e},
+		{"B.NV", 0x5400004f},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bi := DecodeBranch(tc.raw, 0x1000)
+			if bi == nil {
+				t.Fatal("not decoded as a branch at all")
+			}
+			if bi.Cond {
+				t.Error("an always-taken branch must not be reported as conditional")
+			}
+			if bi.Target != 0x1008 {
+				t.Errorf("target = 0x%x, want 0x1008", bi.Target)
+			}
+		})
+	}
+	// Every other condition code stays conditional.
+	for cond := uint32(0); cond < 14; cond++ {
+		bi := DecodeBranch(0x54000040|cond, 0x1000)
+		if bi == nil || !bi.Cond {
+			t.Errorf("cond %d should still be conditional, got %+v", cond, bi)
+		}
+	}
+}

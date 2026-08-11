@@ -209,9 +209,13 @@ func arm64CondOp(cc string) string {
 		return ">"
 	case "ge", "hs", "cs":
 		return ">="
-	case "al", "nv":
-		return "true"
 	}
+	// AL/NV are handled before this point: DecodeBranch reports them as
+	// unconditional, so they never become an OpBranch. They used to map to
+	// the string "true", which buildCondition then spliced into its
+	// "%s %s %s" comparison template, emitting `lhs true rhs`. Falling
+	// through to "?" here means that shape is not reachable even if a caller
+	// classifies one as conditional by mistake.
 	// mi/pl/vs/vc (sign/overflow-flag-only conditions) have no direct
 	// Dart comparison-operator equivalent without knowing the specific
 	// arithmetic op that set the flags -- left unresolved on purpose

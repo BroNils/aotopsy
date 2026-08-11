@@ -221,6 +221,12 @@ AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # rekam ulang
 Kalau gagal: **jangan langsung rekam ulang**. Cari dulu apa yang berubah;
 rekam ulang hanya setelah perubahan itu dipahami dan disengaja.
 
+Perhatikan bahwa gate ini membandingkan **isi**, bukan jumlah baris. Perbaikan
+`B.AL` lolos dari cek manual "jumlah baris sama" tapi tertangkap di sini:
+`call_edges.jsonl` tetap 40502 baris sementara 93 di antaranya mendapat
+anotasi `via` baru. Kalau mau menilai sebuah diff golden, bandingkan
+per-record (kunci → nilai), bukan `wc -l`.
+
 `TestGoldenOutputIsDeterministic` menjalankan pipeline dua kali dan menuntut
 byte identik — golden tidak ada artinya kalau outputnya sendiri goyang. Setiap
 `for k := range someMap` yang menulis ke state bersama, atau `sort.Slice`
