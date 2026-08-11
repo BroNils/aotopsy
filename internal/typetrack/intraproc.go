@@ -1134,9 +1134,36 @@ func transferInstruction(
 			}
 			return
 		}
-		// Class ID load: LDURH Wt, [Xobj, #1]
+		// Class ID load: LDURH Wt, [Xobj, #1].
+		//
+		// This is the Dart 2.x form of class-id extraction: kClassIdTagPos is
+		// 16 there, so the id is a 16-bit field at header offset 2, reached as
+		// #1 off the tagged pointer. Dart 3.x moved it to bits [12,32) and
+		// uses LDUR + UBFX instead.
+		//
+		// When the receiver's class is known, the extracted id IS that class,
+		// and saying so is what lets the following ADD/SUB compute a dispatch
+		// slot -- exactly what the 3.x UBFX handler does with a KnownClass
+		// operand. Returning Bottom unconditionally, as this did, throws away
+		// a class the analysis had already established.
+		//
+		// Measured honestly: on the 2.12 sample this branch sees 160806
+		// class-id loads and ZERO of them currently have a KnownClass base,
+		// so the fix changes no output yet. The blocker is upstream and
+		// SDK-confirmed: DartCallingConvention::kCpuRegistersForArgs does not
+		// exist before ~2.16 (absent from constants_arm64.h at tag 2.12.0,
+		// present at 3.9.2 as {R1,R2,R3,R5,R6,R7}), so 2.x passes the
+		// receiver on the STACK. Seeding entry[X1] = KnownClass(owner) types
+		// nothing there, and no receiver class ever reaches this load.
+		// Seeding 2.x receivers from the frame is the next step.
 		if imm9 == 1 && base < 31 {
-			state[rt] = Bottom()
+			if state[base].Kind == LatticeKnownClass {
+				state[rt] = KnownClass(state[base].ClassID)
+			} else {
+				// Class unknown, but the value IS a class id: Bottom keeps
+				// the SelectorDispatch path (ADD/SUB on Bottom) alive.
+				state[rt] = Bottom()
+			}
 			ctx.HeaderHits++
 			return
 		}
