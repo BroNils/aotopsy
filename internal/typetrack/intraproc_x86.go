@@ -764,18 +764,20 @@ func resolveX86Dispatch(
 			if candidates == 1 {
 				res.TargetName = candidateName
 				res.Resolved = true
+				res.Candidates = 1
 			} else if candidates > 1 {
+				// Same rule as the ARM64 path: identical names collapse to a
+				// monomorphic resolution, otherwise it is a candidate set.
 				uniqueNames := map[string]bool{}
+				var unique []string
 				for _, n := range allCandidates {
-					uniqueNames[n] = true
+					if !uniqueNames[n] {
+						uniqueNames[n] = true
+						unique = append(unique, n)
+					}
 				}
-				if len(uniqueNames) == 1 {
-					res.TargetName = allCandidates[0]
-					res.Resolved = true
-				} else {
-					res.TargetName = strings.Join(allCandidates, " | ")
-					res.Resolved = true
-				}
+				sort.Strings(unique)
+				applySelectorCandidates(&res, unique)
 			}
 		}
 	}

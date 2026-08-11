@@ -19,10 +19,37 @@ import (
 // capture (gap §1.2) actually feeds type inference (gap §3.1). A consumer whose
 // contribution is never measured is how this project previously ended up
 // shipping an ICData resolver that resolved zero call sites.
-func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeContext) error {
+// BLRBreakdown separates the three different claims an indirect-call
+// "resolution" can make. Reporting a single "resolved N/M" conflated them: a
+// site with one known callee and a site with 43 possible ones counted the
+// same, so the headline figure could rise while precision fell.
+type BLRBreakdown struct {
+	Total int `json:"total"`
+	// Monomorphic: exactly one callee is known.
+	Monomorphic int `json:"monomorphic"`
+	// Polymorphic: the callee is one of N implementations of a selector.
+	Polymorphic int `json:"polymorphic"`
+	// PolymorphicCandidates is the sum of candidate counts over all
+	// polymorphic sites -- average fan-out is Candidates/Polymorphic.
+	PolymorphicCandidates int `json:"polymorphic_candidates"`
+	// Stub: resolved to a VM stub through its THR slot. A real callee, but
+	// not a Dart function, so it is counted apart from Monomorphic.
+	Stub int `json:"stub"`
+	// Unresolved: nothing was recovered.
+	Unresolved int `json:"unresolved"`
+}
+
+// Resolved counts sites with exactly one known callee. It is deliberately NOT
+// the total of everything the analysis said something about.
+func (b BLRBreakdown) Resolved() int { return b.Monomorphic + b.Stub }
+
+func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) error {
 	report := struct {
-		ResolvedBLR int `json:"resolved_blr"`
-		TotalBLR    int `json:"total_blr"`
+		// ResolvedBLR/TotalBLR are kept for compatibility with existing
+		// readers; ResolvedBLR counts single-callee sites only.
+		ResolvedBLR int          `json:"resolved_blr"`
+		TotalBLR    int          `json:"total_blr"`
+		BLR         BLRBreakdown `json:"blr"`
 		// Per-source hit counters (omitted when no context was supplied).
 		PoolHits          int `json:"pool_hits,omitempty"`
 		HeaderHits        int `json:"header_hits,omitempty"`
@@ -30,12 +57,20 @@ func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeConte
 		UBFXHits          int `json:"ubfx_hits,omitempty"`
 		ADDClassHits      int `json:"add_class_hits,omitempty"`
 		InstanceFieldHits int `json:"instance_field_hits,omitempty"`
+		// InstantiatedClasses is the RTA universe: classes observed to be
+		// allocated anywhere in the program. RTAApplied says whether the
+		// selector-offset scan actually filtered candidates by it -- below
+		// rtaMinInstantiatedClasses the universe is too small to trust and
+		// the filter is skipped, which is easy to have on by accident.
+		InstantiatedClasses int  `json:"instantiated_classes,omitempty"`
+		RTAApplied          bool `json:"rta_applied"`
 		// InstanceFieldClasses is how many classes have at least one
 		// unanimously-typed field offset recovered from const instances.
 		InstanceFieldClasses int `json:"instance_field_classes,omitempty"`
 	}{
-		ResolvedBLR: resolved,
-		TotalBLR:    total,
+		ResolvedBLR: bd.Resolved(),
+		TotalBLR:    bd.Total,
+		BLR:         bd,
 	}
 	if ctx != nil {
 		report.PoolHits = ctx.PPHits
@@ -45,6 +80,8 @@ func WriteTypeInferenceReport(outDir string, resolved, total int, ctx *TypeConte
 		report.ADDClassHits = ctx.ADDClassHits
 		report.InstanceFieldHits = ctx.InstanceFieldHits
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)
+		report.InstantiatedClasses = len(ctx.InstantiatedClasses)
+		report.RTAApplied = ctx.RTAApplied()
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

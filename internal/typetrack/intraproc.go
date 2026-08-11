@@ -1,7 +1,6 @@
 package typetrack
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -16,35 +15,49 @@ const (
 	regDT  = 21 // X21 = dispatch table register
 )
 
-// BlrResolution is one resolved BLR call site.
+// BlrResolution is one indirect call site the analysis said something about.
+//
+// A site is one of three things, and they are NOT the same claim:
+//
+//   - monomorphic: exactly one callee is known. TargetName holds it,
+//     TargetNames is empty, Polymorphic is false.
+//   - polymorphic: the receiver class is unknown but the selector is, so the
+//     callee is one of N implementations of that selector. TargetNames holds
+//     up to maxPolymorphicNames of them, Candidates the true count, and
+//     TargetName is EMPTY -- there is no single callee to name.
+//   - unresolved: Resolved is false.
+//
+// TargetName used to carry a " | "-joined string for the polymorphic case.
+// Consumers treat it as a callee name: render.ReachableSet added it to the
+// call graph, so a 43-way virtual call became one graph node literally named
+// "detach | get:first | paint | ...".
 type BlrResolution struct {
-	PC         uint64 // instruction address
-	Reg        int    // BLR register number (0-30)
-	SlotIndex  int    // dispatch table slot (if resolved)
-	TargetName string // resolved function name (if any)
-	Resolved   bool   // true if we resolved a target
+	PC          uint64   // instruction address
+	Reg         int      // BLR register number (0-30)
+	SlotIndex   int      // dispatch table slot (if resolved)
+	TargetName  string   // the single resolved callee, monomorphic sites only
+	TargetNames []string // candidate callees, polymorphic sites only (capped)
+	Resolved    bool     // true if we said anything about this site
 
-	// Polymorphic is true when TargetName lists more than one possible
-	// callee (a selector-offset scan across classes). Candidates is how many
-	// distinct names the scan found, which can exceed the number listed in
-	// TargetName -- see maxPolymorphicNames.
+	// Polymorphic marks a site whose callee is one of TargetNames.
+	// Candidates is how many distinct names the scan found, which can exceed
+	// len(TargetNames) -- see maxPolymorphicNames.
 	Polymorphic bool
 	Candidates  int
 }
 
 // maxPolymorphicNames bounds how many callee names a polymorphic resolution
 // lists. A selector-offset scan across every class in the dispatch table can
-// match hundreds of implementations; joining them all produced a single
-// multi-kilobyte "target" string in call_edges.jsonl.
+// match hundreds of implementations; listing them all produced a single
+// multi-kilobyte field in call_edges.jsonl.
 const maxPolymorphicNames = 8
 
-// joinCandidates renders a candidate list for BlrResolution.TargetName.
-func joinCandidates(targets []string) string {
+// cappedCandidates returns at most maxPolymorphicNames names.
+func cappedCandidates(targets []string) []string {
 	if len(targets) <= maxPolymorphicNames {
-		return strings.Join(targets, " | ")
+		return targets
 	}
-	return strings.Join(targets[:maxPolymorphicNames], " | ") +
-		fmt.Sprintf(" | +%d more", len(targets)-maxPolymorphicNames)
+	return targets[:maxPolymorphicNames]
 }
 
 // selectorCandidates returns the distinct callee names reachable through a
@@ -71,7 +84,7 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 	var targets []string
 	// The RTA filter is only meaningful once enough instantiated classes have
 	// been observed; below that it would silently drop real targets.
-	rtaEnabled := len(ctx.InstantiatedClasses) >= rtaMinInstantiatedClasses
+	rtaEnabled := ctx.RTAApplied()
 	for key, entry := range ctx.DispatchBySlot {
 		if entry.Kind != cluster.DispatchCode {
 			continue
@@ -96,22 +109,40 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 	return targets
 }
 
+// RTAApplied reports whether the selector-offset scan filters candidates by
+// the set of instantiated classes. Exposed so the report can state it: a
+// filter that silently does not run looks exactly like one that finds nothing
+// to remove.
+func (ctx *TypeContext) RTAApplied() bool {
+	return len(ctx.InstantiatedClasses) >= rtaMinInstantiatedClasses
+}
+
 // rtaMinInstantiatedClasses is the number of observed instantiated classes
 // below which the RTA filter is not applied. A previous value of 9999
 // disabled the filter on every sample in the corpus while the comment next
 // to it claimed the threshold was 100.
+// Measured on the 3.12 x86_64 sample (2962 polymorphic sites): with the
+// filter off the scan yields 636904 candidate callees, with it on 174943 --
+// a 72.5% reduction, average fan-out 215 -> 59. It never turns a polymorphic
+// site monomorphic, but it is doing substantial work, so the threshold is
+// worth keeping honest.
 const rtaMinInstantiatedClasses = 100
 
-// applySelectorCandidates fills res from a selector-offset scan.
+// applySelectorCandidates fills res from a selector-offset scan: one name
+// means a real (monomorphic) resolution, more means a candidate set.
 func applySelectorCandidates(res *BlrResolution, targets []string) {
 	if len(targets) == 0 {
 		return
 	}
 	res.Candidates = len(targets)
-	res.TargetName = joinCandidates(targets)
 	res.Resolved = true
 	res.SlotIndex = -1
-	res.Polymorphic = len(targets) > 1
+	if len(targets) == 1 {
+		res.TargetName = targets[0]
+		return
+	}
+	res.Polymorphic = true
+	res.TargetNames = cappedCandidates(targets)
 }
 
 // IntraResult holds the result of intra-procedural analysis for one function.
@@ -1556,24 +1587,21 @@ func resolveBLR(
 				res.TargetName = candidateName
 				res.Resolved = true
 				res.SlotIndex = -1
+				res.Candidates = 1
 			} else if candidates > 1 {
-				// P5 CHA: multiple dispatch targets — use CHA to narrow.
-				// If all candidates share a common name, resolve to it.
-				// Otherwise, list all as a polymorphic call comment.
+				// P5 CHA: multiple dispatch targets. If they all name the
+				// same function it is still monomorphic; otherwise it is a
+				// candidate set, recorded as such.
 				uniqueNames := map[string]bool{}
+				var unique []string
 				for _, n := range allCandidates {
-					uniqueNames[n] = true
+					if !uniqueNames[n] {
+						uniqueNames[n] = true
+						unique = append(unique, n)
+					}
 				}
-				if len(uniqueNames) == 1 {
-					res.TargetName = allCandidates[0]
-					res.Resolved = true
-					res.SlotIndex = -1
-				} else {
-					// Polymorphic — emit all candidate names joined.
-					res.TargetName = strings.Join(allCandidates, " | ")
-					res.Resolved = true
-					res.SlotIndex = -1
-				}
+				sort.Strings(unique)
+				applySelectorCandidates(&res, unique)
 			}
 		}
 	case LatticeTop:

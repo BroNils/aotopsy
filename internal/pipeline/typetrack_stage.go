@@ -56,19 +56,29 @@ func RunTypeInferenceStage(
 
 	opts.logf("  type inference: starting...\n")
 
-	resolved, total, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
+	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
 		return nil // non-fatal
 	}
 
-	opts.logf("  type inference: resolved %d/%d BLR call sites\n", resolved, total)
+	// Report the three claims separately. "resolved N/M" alone hid the
+	// difference between a call site with one known callee and one with 43
+	// possible ones -- both used to count as resolved.
+	opts.logf("  type inference: %d/%d indirect call sites with a single callee (%d VM stub)\n",
+		bd.Resolved(), bd.Total, bd.Stub)
+	if bd.Polymorphic > 0 {
+		opts.logf("  polymorphic: %d site(s), %d candidate callees total (avg %.1f per site)\n",
+			bd.Polymorphic, bd.PolymorphicCandidates,
+			float64(bd.PolymorphicCandidates)/float64(bd.Polymorphic))
+	}
+	opts.logf("  unresolved: %d site(s)\n", bd.Unresolved)
 	if tctx != nil && len(tctx.InstanceFieldTypes) > 0 {
 		opts.logf("  observed field types: %d classes, %d field loads typed from const instances\n",
 			len(tctx.InstanceFieldTypes), tctx.InstanceFieldHits)
 	}
 
-	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, resolved, total, tctx); err != nil {
+	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, bd, tctx); err != nil {
 		return fmt.Errorf("write typetrack report: %w", err)
 	}
 
@@ -89,17 +99,17 @@ func runTypeInference(
 	table *cluster.InstructionsTable,
 	isARM64 bool,
 	thrFields map[int]string,
-) (int, int, *typetrack.TypeContext, error) {
+) (BLRBreakdown, *typetrack.TypeContext, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
 	// snapshot DATA region (info.IsolateData.Data), not the instructions
 	// region. result.FillEnd is the byte offset within this data.
 	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
 	if err != nil {
-		return 0, 0, nil, fmt.Errorf("parse dispatch table: %w", err)
+		return BLRBreakdown{}, nil, fmt.Errorf("parse dispatch table: %w", err)
 	}
 	if len(dispatchEntries) == 0 {
-		return 0, 0, nil, nil
+		return BLRBreakdown{}, nil, nil
 	}
 
 	// 2. Build TypeContext.
@@ -402,20 +412,20 @@ func runTypeInference(
 	interResult := typetrack.RunInterprocedural(ctx, funcInstsARM64, funcInstsX86, blEdges, maxIter, isARM64, blTargetToName)
 
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
-	resolved, total, err := rewriteCallEdges(outDir, interResult)
+	bd, err := rewriteCallEdges(outDir, interResult)
 	if err != nil {
-		return 0, 0, ctx, fmt.Errorf("rewrite call_edges: %w", err)
+		return bd, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
 
 	// 6. field_accessor_xref.jsonl — (class, field) → the functions that read
 	// and write it, from the per-function field accesses the type analysis
 	// recorded.
 	if err := writeFieldAccessorXref(outDir, ctx, interResult, clResult, pl, info.Version.CompressedPointers); err != nil {
-		return resolved, total, ctx, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
+		return bd, ctx, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
 	}
 
 	// ctx is returned so the caller can report per-source hit counters.
-	return resolved, total, ctx, nil
+	return bd, ctx, nil
 }
 
 // writeFieldAccessorXref writes field_accessor_xref.jsonl: for every instance
@@ -530,13 +540,19 @@ func writeFieldAccessorXref(
 	return writeJSONL(filepath.Join(outDir, "field_accessor_xref.jsonl"), entries)
 }
 
-// rewriteCallEdges reads call_edges.jsonl, updates BLR edges with resolved
-// targets from the inter-procedural analysis, and writes it back.
-func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, int, error) {
+// BLRBreakdown is typetrack.BLRBreakdown; aliased so this file reads
+// naturally.
+type BLRBreakdown = typetrack.BLRBreakdown
+
+// rewriteCallEdges reads call_edges.jsonl, fills in what the
+// inter-procedural analysis recovered for each indirect call site, writes it
+// back, and returns the breakdown.
+func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (BLRBreakdown, error) {
+	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
 	edges, err := ReadJSONL[disasm.CallEdgeRecord](edgesPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("read call_edges.jsonl: %w", err)
+		return bd, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
 
 	// Build PC → resolution map for each function.
@@ -544,32 +560,42 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 		funcName string
 		pc       string
 	}
-	resolutionMap := make(map[resKey]string)
+	resolutionMap := make(map[resKey]typetrack.BlrResolution)
 	for _, fa := range interResult.Functions {
 		for _, res := range fa.Intra.BLRResolutions {
-			if res.Resolved && res.TargetName != "" {
-				key := resKey{
-					funcName: fa.Name,
-					pc:       fmt.Sprintf("0x%x", res.PC),
-				}
-				resolutionMap[key] = res.TargetName
+			if !res.Resolved {
+				continue
 			}
+			if res.TargetName == "" && len(res.TargetNames) == 0 {
+				continue
+			}
+			key := resKey{
+				funcName: fa.Name,
+				pc:       fmt.Sprintf("0x%x", res.PC),
+			}
+			resolutionMap[key] = res
 		}
 	}
 
 	// Update edges.
-	resolved := 0
-	total := 0
 	for i := range edges {
 		e := &edges[i]
 		if e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		total++
+		bd.Total++
 		key := resKey{funcName: e.FromFunc, pc: e.FromPC}
-		if target, ok := resolutionMap[key]; ok {
-			e.Target = target
-			resolved++
+		if res, ok := resolutionMap[key]; ok {
+			if res.Polymorphic {
+				e.Targets = res.TargetNames
+				e.Candidates = res.Candidates
+				bd.Polymorphic++
+				bd.PolymorphicCandidates += res.Candidates
+			} else {
+				e.Target = res.TargetName
+				e.Candidates = res.Candidates
+				bd.Monomorphic++
+			}
 		} else if strings.HasPrefix(e.Via, "THR.") {
 			// Fallback: resolve THR stub calls from via annotation.
 			// via format: "THR.stub_name" or "THR.stub_name_ep"
@@ -580,8 +606,12 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 			stubName = strings.TrimSuffix(stubName, "_entry_point")
 			if stubName != "" {
 				e.Target = stubName
-				resolved++
+				bd.Stub++
+			} else {
+				bd.Unresolved++
 			}
+		} else {
+			bd.Unresolved++
 		}
 		// NOTE: there used to be a third branch here that matched
 		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
@@ -596,18 +626,18 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 	// Write back.
 	f, err := os.Create(edgesPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create call_edges.jsonl: %w", err)
+		return bd, fmt.Errorf("create call_edges.jsonl: %w", err)
 	}
 	defer f.Close()
 
 	enc := json.NewEncoder(f)
 	for _, e := range edges {
 		if err := enc.Encode(e); err != nil {
-			return 0, 0, fmt.Errorf("encode call_edge: %w", err)
+			return bd, fmt.Errorf("encode call_edge: %w", err)
 		}
 	}
 
-	return resolved, total, nil
+	return bd, nil
 }
 
 // isBLRaw detects ARM64 BL instruction. Returns target address.
