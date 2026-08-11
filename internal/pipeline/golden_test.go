@@ -64,6 +64,10 @@ func TestGoldenPipelineOutput(t *testing.T) {
 	samples := []struct{ env, name string }{
 		{"AOTOPSY_TEST_SAMPLE_ARM64", "compare_sample_arm64"},
 		{"AOTOPSY_TEST_SAMPLE_312_X64", "sample312_x64"},
+		// Dart 2.12 exercises a different instructions path entirely
+		// (text-offset deltas, no InstructionsTable), which is where the
+		// "395 of 7714 functions" bug lived.
+		{"AOTOPSY_TEST_SAMPLE_DART212", "dart212_arm64"},
 	}
 	for _, s := range samples {
 		t.Run(s.name, func(t *testing.T) { runGolden(t, s.env, s.name) })

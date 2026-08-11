@@ -1642,6 +1642,9 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 	ref := cm.StartRef
 	instrIdx := instrIdxBase
 	discardedCount := 0
+	// Mirrors Deserializer::previous_text_offset_, which persists across the
+	// whole cluster (v2.10-v2.15 bare-instructions AOT).
+	var runningTextOffset int64
 	for i := int64(0); i < cm.Count; i++ {
 		var payloadInfo int64
 		var textOff int64
@@ -1672,7 +1675,19 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				if err != nil {
 					return codes, fmt.Errorf("code %d/%d text_offset_delta: %w", i, cm.Count, err)
 				}
-				textOff = tod
+				// The value is a DELTA against a running total, not this
+				// Code's offset. Deserializer::ReadInstructions at 2.12.0:
+				//
+				//	previous_text_offset_ += ReadUnsigned();
+				//	const uword payload_start =
+				//	    image_reader_->GetBareInstructionsAt(previous_text_offset_);
+				//
+				// Storing the raw delta gave 7714 Code objects only 409
+				// distinct "offsets" (851 of them 0), so ranges collapsed
+				// onto each other, 95% got size 0 and were skipped, and the
+				// whole 2.x pipeline ran on ~5% of the binary.
+				runningTextOffset += tod
+				textOff = runningTextOffset
 			}
 			pi, err := s.ReadUnsigned()
 			if err != nil {

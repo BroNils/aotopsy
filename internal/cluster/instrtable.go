@@ -313,12 +313,34 @@ func ResolveCodeRangesFromTextOffset(codes []CodeEntry) []CodeRange {
 	}
 
 	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].PCOffset < ranges[j].PCOffset
+		if ranges[i].PCOffset != ranges[j].PCOffset {
+			return ranges[i].PCOffset < ranges[j].PCOffset
+		}
+		// Stable secondary key so runs of shared offsets come out in the
+		// same order on every run.
+		return ranges[i].RefID < ranges[j].RefID
 	})
 
-	// Compute sizes by diffing adjacent offsets.
-	for i := 0; i < len(ranges)-1; i++ {
-		ranges[i].Size = ranges[i+1].PCOffset - ranges[i].PCOffset
+	// Compute sizes by diffing against the next DISTINCT offset.
+	//
+	// Several Code objects legitimately share one instructions payload: the
+	// AOT compiler deduplicates identical code, so e.g. 181 Codes in the
+	// 2.12 sample all point at text offset 0xc8f4. Diffing strictly adjacent
+	// entries gave every one of them except the last a size of 0, and
+	// RunDisasmStage skips size-0 ranges -- 852 functions silently vanished
+	// even after the text offsets themselves were fixed.
+	for i := 0; i < len(ranges); {
+		j := i
+		for j < len(ranges) && ranges[j].PCOffset == ranges[i].PCOffset {
+			j++
+		}
+		if j < len(ranges) {
+			size := ranges[j].PCOffset - ranges[i].PCOffset
+			for k := i; k < j; k++ {
+				ranges[k].Size = size
+			}
+		}
+		i = j
 	}
 
 	return ranges
