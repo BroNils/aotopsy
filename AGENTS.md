@@ -181,6 +181,26 @@ kalau file sudah berubah ia tetap menulis, dan CRLF/escape diam-diam rusak.
 - **Root cause analysis harus mendalam.** Gunakan gh search + gh api ke SDK source untuk verify setiap assumption. Jangan menebak. Contoh: ObjectStoreAOTFieldCount salah karena hanya count RW fields, padahal ada CW, FW, LAZY_CORE, LAZY_FFI, dll.
 - **"Data limitation" bukan akhir riset.** Jika BLR rendah, cari alternative resolution paths (PP-loaded Code, THR stubs, object field calls). Jangan berhenti di "dispatch table too small".
 
+## Batas yang sudah diketahui (jangan diklaim selesai)
+
+- **Resolusi dispatch di Dart 2.x rendah** (2.12: 129 single-callee dari 5504
+  BLR, vs 3.9.2: 2378 dari 5354). Sebabnya bukan data yang hilang — arity
+  (`packed_fields_`) dan `is_static` (`kind_tag_`) sudah ter-recover 7320/7320
+  fungsi. Sebabnya 2.x melempar argumen lewat stack, bukan register
+  (`DartCallingConvention::kCpuRegistersForArgs` belum ada di
+  `constants_arm64.h` tag 2.12.0, sudah ada di 3.9.2), jadi tak ada tipe
+  receiver di entry.
+  Seeding `this` dari frame slot sudah pernah dicoba dan **dibuang**: kelas
+  pendeklarasi bukan kelas runtime yang eksak, sedangkan lookup dispatch butuh
+  yang eksak. Membatasi ke leaf class pun masih salah.
+  Petunjuk terbuka, dengan bukti: `Layer` (cid 617) abstract, implementasi
+  `findAnnotations` subclass-nya menempati cid 619-626, dan `Layer.find`
+  ter-resolve lewat index 2482 sementara `findAnnotations` mulai di 2484 —
+  konsisten dengan tabel dispatch 2.x meleset sekitar dua entri.
+  **Konfirmasi atau gugurkan dugaan itu dulu** sebelum membangun ulang
+  seeding-nya. Jangan hidupkan seeding tanpa itu; output yang salah lebih
+  buruk daripada `unresolved`.
+
 ## Dua gate yang harus tetap hijau
 
 Keduanya ada karena bug yang lolos berbulan-bulan: indeks object pool meleset

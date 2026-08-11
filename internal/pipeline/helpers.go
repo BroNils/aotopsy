@@ -108,6 +108,19 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
 			}
 		}
+		// Dart 2.x keeps arity on the Function object instead
+		// (UntaggedFunction.packed_fields_), so the signature chain above
+		// yields nothing there and ParamCount came out 0 for EVERY 2.x
+		// function. num_fixed_parameters counts the implicit receiver, and
+		// kind_tag_ says whether there is one, so the visible count is
+		// fixed + optional minus the receiver for instance methods.
+		if ci.ParamCount == 0 && owner.NumFixedParams >= 0 {
+			visible := owner.NumFixedParams + owner.NumOptionalParams
+			if owner.HasKindTag && !owner.IsStatic && visible > 0 {
+				visible--
+			}
+			ci.ParamCount = visible
+		}
 		l.CodeNames[ce.RefID] = ci
 	}
 	for _, ce := range result.Codes {

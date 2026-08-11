@@ -25,6 +25,24 @@ type NamedObject struct {
 	// -1 if not a Function or not captured.
 	DataRefID int
 	CodeIndex int // Function's code_index scalar (-1 if not a Function / not captured)
+
+	// NumFixedParams/NumOptionalParams come from UntaggedFunction.packed_fields_
+	// on Dart 2.x, where a regular function's arity lives on the Function
+	// object itself rather than on a FunctionType signature. Both are -1 when
+	// not captured (3.x, or a non-Function).
+	//
+	// NumFixedParams INCLUDES the implicit receiver for instance methods,
+	// matching the SDK's num_fixed_parameters.
+	NumFixedParams    int
+	NumOptionalParams int
+
+	// IsStatic comes from UntaggedFunction.kind_tag_ on Dart 2.x. A static
+	// method has no receiver, so its argument 0 is an ordinary parameter --
+	// seeding it with the owning class would be a fabricated type.
+	IsStatic bool
+	// HasKindTag is false when kind_tag was not captured, so IsStatic=false
+	// cannot be mistaken for "known to be an instance method".
+	HasKindTag bool
 }
 
 // FuncTypeInfo holds parameter count data extracted from a FunctionType object.
@@ -1107,6 +1125,8 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		// Read scalars; extract type-specific data for FunctionType and Field clusters.
 		var fieldKindBits int32
 		funcCodeIndex := -1
+		funcNumFixed, funcNumOptional := -1, -1
+		var funcIsStatic, funcHasKindTag bool
 		// Script scalar capture: line_offset, col_offset, [flags], kernel_script_index.
 		var scriptLine, scriptCol, scriptKernelIdx int32
 		var scriptFlags byte
@@ -1120,6 +1140,43 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d code_index: %w", i, count, err)
 				}
 				funcCodeIndex = int(ci)
+			} else if spec.IsFunction && si == 1 && len(spec.Scalars) == 3 {
+				// Dart 2.x only (specFunction adds this scalar when
+				// fillRefUnsigned): Read<uint32_t>(packed_fields_).
+				//
+				// UntaggedFunction::packed_fields_ bit layout at 2.12.0
+				// (runtime/vm/raw_object.h):
+				//
+				//	[0,1)   Optimizable
+				//	[1,2)   BackgroundOptimizable
+				//	[2,9)   NumTypeParameters       (kMaxTypeParametersBits=7)
+				//	[9,10)  HasNamedOptionalParameters
+				//	[10,20) NumFixedParameters      (kMaxFixedParametersBits=10)
+				//	[20,30) NumOptionalParameters   (kMaxOptionalParametersBits=10)
+				//
+				// 3.x moved arity onto FunctionType.packed_parameter_counts,
+				// which is why CodeNameInfo.ParamCount came out 0 for every
+				// 2.x function: it only ever looked at the signature.
+				packed, err := s.ReadTagged32()
+				if err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d packed_fields: %w", i, count, err)
+				}
+				funcNumFixed = int((packed >> 10) & 0x3FF)
+				funcNumOptional = int((packed >> 20) & 0x3FF)
+			} else if spec.IsFunction && si == 2 && len(spec.Scalars) == 3 {
+				// Dart 2.x: Read<uint32_t>(kind_tag_).
+				//
+				// Function::KindTagBits at 2.12.0 (runtime/vm/object.h):
+				//   kKindTagPos=0 size 5, kRecognizedTagPos=5 size 9,
+				//   kModifierPos=14 size 2, then the single-bit flags of
+				//   FOR_EACH_FUNCTION_KIND_BIT starting at bit 16 with
+				//   V(Static, is_static) first.
+				kindTag, err := s.ReadTagged32()
+				if err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
+				}
+				funcIsStatic = (kindTag>>16)&1 == 1
+				funcHasKindTag = true
 			} else if spec.IsFuncType && si == 1 {
 				// packed_parameter_counts is OpTagged32 at scalar index 1.
 				packed, err := s.ReadTagged32()
@@ -1343,13 +1400,17 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 
 		if hasName {
 			named = append(named, NamedObject{
-				CID:            cm.CID,
-				RefID:          ref,
-				NameRefID:      nameRef,
-				OwnerRefID:     ownerRef,
-				SignatureRefID: sigRef,
-				DataRefID:      dataRef,
-				CodeIndex:      funcCodeIndex,
+				CID:               cm.CID,
+				RefID:             ref,
+				NameRefID:         nameRef,
+				OwnerRefID:        ownerRef,
+				SignatureRefID:    sigRef,
+				DataRefID:         dataRef,
+				CodeIndex:         funcCodeIndex,
+				NumFixedParams:    funcNumFixed,
+				NumOptionalParams: funcNumOptional,
+				IsStatic:          funcIsStatic,
+				HasKindTag:        funcHasKindTag,
 			})
 		}
 		ref++

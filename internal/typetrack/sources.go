@@ -306,6 +306,17 @@ func BuildTypeContext(
 		Subclasses:           make(map[int][]int),
 	}
 
+	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
+	//
+	// On 2.10-2.15 Type.type_class_id is a Smi REF, so ReadFill leaves
+	// TypeInfo.ClassID at 0 and the real value has to come from MintValues.
+	// That resolution used to live further down, next to the field-type
+	// lookup -- but BuildClassHierarchy runs first and reads ClassID, so it
+	// saw 0 for every Type and produced an empty hierarchy on 2.x. With no
+	// hierarchy there is no LCA, no CHA, and no way to tell a leaf class from
+	// an abstract base.
+	resolveTypeClassIDs(clResult)
+
 	// 1. Build class hierarchy for LCA.
 	ctx.SuperClass = BuildClassHierarchy(clResult.Classes, clResult.Types, pl.RefToNamed)
 
@@ -354,22 +365,11 @@ func BuildTypeContext(
 	}
 
 	// 3. Build field type lookup: fieldRefID → ClassID.
-	// FieldInfo.TypeRefID points to a Type object; Type.ClassID gives the CID.
-	// For v2.x TypeClassIdIsRef, Type.ClassID is 0 and TypeClassIdRef holds
-	// the Smi ref — resolve it via MintValues (Smi encoding: classID = value >> 1).
+	// FieldInfo.TypeRefID points to a Type object; Type.ClassID gives the CID
+	// (already resolved for 2.x by resolveTypeClassIDs at step 0).
 	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
 	for i := range clResult.Types {
-		ti := &clResult.Types[i]
-		// Resolve TypeClassIdRef via MintValues for v2.x TypeClassIdIsRef.
-		// MintValues stores the actual class ID value (not Smi-encoded), so
-		// use it directly -- matching BuildClassLayouts in helpers.go which
-		// uses the word offset value verbatim.
-		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
-			if smiValue, ok := clResult.MintValues[ti.TypeClassIdRef]; ok {
-				ti.ClassID = int32(smiValue) // MintValues holds the real value, not a Smi-encoded ref
-			}
-		}
-		refToType[ti.RefID] = ti
+		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
 	}
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]
