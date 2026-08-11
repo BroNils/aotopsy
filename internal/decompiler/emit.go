@@ -500,12 +500,12 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	source := strings.Join(e.lines, "\n")
 	source = dropUnusedLabels(source)
+	// Structural compaction, dataflow and expression cleanup all run inside
+	// compactLines, on the statement/expression trees, to a shared fixed
+	// point -- the expression passes used to be four separate regex sweeps
+	// over the text here (constant folding, negated comparisons, wrapped
+	// member access, outer parens).
 	source = compactLines(source)
-	// Expression cleanup passes (from flutterdec expr_cleanup.rs)
-	source = constantFold(source)
-	source = rewriteNegatedComparisons(source)
-	source = simplifyWrappedMemberAccess(source)
-	source = stripOuterParens(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
 	// Enum reconstruction (detect switch-over-CID patterns)
