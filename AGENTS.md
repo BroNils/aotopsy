@@ -173,6 +173,19 @@ kalau file sudah berubah ia tetap menulis, dan CRLF/escape diam-diam rusak.
 - Formatter (`gofmt -w`) tetap boleh: itu tool bahasa yang memang bertugas
   menulis ulang file secara deterministik, bukan substitusi teks ad-hoc.
 
+**Ini sudah pernah dilanggar dan memang mahal.** Di sesi porting decompiler,
+`python3 - <<'PY'` dipakai untuk puluhan edit. Dua di antaranya **diam-diam
+tidak melakukan apa-apa**: `lift.go` dan `arm64.go` ber-CRLF, sementara pola
+`replace()`-nya ditulis dengan `\n`, jadi `replace` mengembalikan string yang
+sama dan file ditulis ulang tanpa perubahan. Tidak ada error, tidak ada
+peringatan. Yang menunjukkan ada yang salah cuma fitur yang tidak menyala
+(`x22` tetap 13600 padahal seharusnya 0) — ketahuan hanya karena kebetulan
+angkanya diperiksa. Tool `edit` akan gagal keras di situ karena `old_string`
+tidak cocok. Itulah gunanya.
+
+Aturan praktis: kalau tergoda menulis `python3 - <<'PY'` yang memuat
+`open(...,'w')`, berhenti. Pakai `edit` beberapa kali, atau `read` + `write`.
+
 ## Engineering Philosophy
 
 - **Jangan ambil jalan termudah.** Jika fix yang benar butuh refactor besar atau signature change, lakukan. Contoh: `transferInstruction` signature diubah untuk pass `prevRaw` — ini key untuk UBFX fix. "Changing the signature would require many changes" → DO IT ANYWAY.

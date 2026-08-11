@@ -6,8 +6,8 @@ import "strings"
 //
 // Each of these previously re-derived nesting for itself by counting braces
 // and dividing leading spaces by two. Two of them could emit unbalanced
-// braces as a result -- see collapseIfElseReturnStmt and mergeIfContinueStmt
-// below, where the specific defect is recorded. A Construct knows its own
+// braces as a result -- see collapseIfElseReturnStmt and mergeGuardsStmt,
+// where the specific defect is recorded. A Construct knows its own
 // clauses and its own extent, so "the else branch" is a field rather than
 // something to be re-discovered, and dropping a clause by accident is not
 // expressible.
@@ -24,7 +24,8 @@ func compactTree(stmts []Stmt) ([]Stmt, bool) {
 			collapseDuplicateReturnsStmt,
 			unwrapDeadWhileTrueStmt,
 			collapseIfElseReturnStmt,
-			mergeIfContinueStmt,
+			mergeGuardsStmt,
+			forLoopRecoveryStmt,
 			deadStoreEliminationStmt,
 		} {
 			var c bool
@@ -117,22 +118,6 @@ func singleReturn(body []Stmt) string {
 			return ""
 		}
 		found = l.Text
-	}
-	return found
-}
-
-// singleStmtIs reports whether the body's only statement is exactly text.
-func singleStmtIs(body []Stmt, text string) bool {
-	var found bool
-	for _, s := range body {
-		if !isCode(s) {
-			continue
-		}
-		l := asLine(s)
-		if l == nil || found || l.Text != text {
-			return false
-		}
-		found = true
 	}
 	return found
 }
@@ -300,69 +285,6 @@ func collapseIfElseReturnStmt(body []Stmt) ([]Stmt, bool) {
 		out := append([]Stmt{}, body[:i]...)
 		out = append(out, &Line{Ind: ind, Text: thenRet})
 		out = append(out, body[i+1:]...)
-		return out, true
-	}
-	return body, false
-}
-
-// mergeIfContinueStmt merges consecutive guards that all just continue:
-//
-//	if (c1) { continue; } if (c2) { continue; }  ->  if (c1 || c2) { continue; }
-//
-// Sound because `||` short-circuits exactly where the original stopped
-// evaluating: c2 was reached only when c1 was false.
-//
-// The text version treated an if-with-else as mergeable and DELETED the else
-// branch. Measured on the old implementation:
-//
-//	if (a) { continue; } else { important(); }  if (b) { continue; }
-//
-// became `if (a || b) { continue; }` -- important() gone, braces still
-// balanced, so nothing downstream could notice. Requiring a single clause
-// here is one condition instead of an emergent property of brace counting.
-func mergeIfContinueStmt(body []Stmt) ([]Stmt, bool) {
-	isGuard := func(s Stmt) (*Construct, bool) {
-		c := asConstruct(s)
-		if c == nil || !c.isIf() || len(c.Clauses) != 1 {
-			return nil, false
-		}
-		if !singleStmtIs(c.body(), "continue;") || c.cond() == "" {
-			return nil, false
-		}
-		return c, true
-	}
-	for i := range body {
-		first, ok := isGuard(body[i])
-		if !ok {
-			continue
-		}
-		conds := []string{first.cond()}
-		j := i + 1
-		for j < len(body) {
-			if !isCode(body[j]) {
-				break
-			}
-			c, ok := isGuard(body[j])
-			if !ok {
-				break
-			}
-			conds = append(conds, c.cond())
-			j++
-		}
-		if len(conds) < 2 {
-			continue
-		}
-		merged := &Construct{
-			Ind:    first.Ind,
-			Closer: "}",
-			Clauses: []Clause{{
-				Header: "if (" + strings.Join(conds, " || ") + ") {",
-				Body:   []Stmt{&Line{Ind: first.Ind + 1, Text: "continue;"}},
-			}},
-		}
-		out := append([]Stmt{}, body[:i]...)
-		out = append(out, merged)
-		out = append(out, body[j:]...)
 		return out, true
 	}
 	return body, false

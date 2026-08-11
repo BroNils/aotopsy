@@ -19,8 +19,18 @@ type LiftState struct {
 	HasCmp  bool
 }
 
-func newLiftState() *LiftState {
-	return &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
+// newLiftState seeds the registers that hold a known value for the whole of
+// generated code. nullReg is FuncIR.NullReg: on ARM64 the SDK reserves R22 to
+// cache Object::null(), so seeding it means every read renders as `null`
+// rather than `x22` -- in conditions, arguments and field bases alike. Pass
+// "" where the architecture has no such register (x86_64, which loads null
+// from the object pool instead).
+func newLiftState(nullReg string) *LiftState {
+	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
+	if nullReg != "" {
+		s.Regs[nullReg] = "null"
+	}
+	return s
 }
 
 // Clone returns a deep-enough copy for the emitter's "try branch A with a
@@ -398,6 +408,10 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 					}
 				}
 			}
+			if v, ok := boolFromNullOffset(fir, mnemonic, lhs, ops[2]); ok {
+				s.Regs[dst] = v
+				break
+			}
 			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
 		} else if len(ops) == 2 {
 			// x86 two-operand form: dst is also the first source.
@@ -704,3 +718,50 @@ func simplifyBinExpr(mnemonic, lhs, rhs string) string {
 	}
 	return fmt.Sprintf("(%s %s %s)", lhs, op, rhs)
 }
+
+// boolFromNullOffset recognises the Dart AOT idiom that materialises `true`
+// and `false` as fixed offsets from the null object:
+//
+//	ADD Xd, NULL_REG, #32   ->  true
+//	ADD Xd, NULL_REG, #48   ->  false
+//
+// The SDK decodes exactly this in runtime/vm/instructions_arm64.cc:
+//
+//	if (instr->IsAddSubImmOp() && ... (instr->RnField() == NULL_REG)) {
+//	  if (imm == kTrueOffsetFromNull)  { *obj = Object::bool_true().ptr(); ... }
+//	  else if (imm == kFalseOffsetFromNull) { *obj = Object::bool_false().ptr(); ... }
+//
+// and runtime/vm/pointer_tagging.h fixes the offsets, unchanged at 2.12.0,
+// 3.1.0 and 3.9.2:
+//
+//	kObjectAlignment     = 2 * word_size          // 16 on 64-bit
+//	kTrueOffsetFromNull  = kObjectAlignment * 2   // 32
+//	kFalseOffsetFromNull = kObjectAlignment * 3   // 48
+//
+// Without this the pseudocode reads `null + 32`, which looks like arithmetic
+// on null and is not what the instruction means.
+func boolFromNullOffset(fir *FuncIR, mnemonic, lhs, imm string) (string, bool) {
+	// lhs is the RESOLVED left operand, not the register token, so the
+	// idiom is still recognised when null reached the register by a copy.
+	if fir.NullReg == "" || mnemonic != "add" || strings.TrimSpace(lhs) != "null" {
+		return "", false
+	}
+	v, ok := parseImm(imm)
+	if !ok {
+		return "", false
+	}
+	switch v {
+	case kTrueOffsetFromNull:
+		return "true", true
+	case kFalseOffsetFromNull:
+		return "false", true
+	}
+	return "", false
+}
+
+// Offsets of the canonical bool objects from null, in bytes. See
+// boolFromNullOffset for the SDK references.
+const (
+	kTrueOffsetFromNull  = 32
+	kFalseOffsetFromNull = 48
+)

@@ -264,7 +264,7 @@ func TestEmitPseudocode_ParamTypeNames_QuestionMarkFallsBackPerArgument(t *testi
 // defined in branch A must be visible in branch B. Deep-copying Locals
 // would break this contract.
 func TestLiftStateClone_LocalsShared(t *testing.T) {
-	s := newLiftState()
+	s := newLiftState("")
 	s.Locals[0x10] = "var_a"
 	s.Regs["x0"] = "expr_x0"
 
@@ -320,7 +320,7 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newLiftState()
+			s := newLiftState("")
 			ins := Instr{Addr: 0x1000, Op: OpOther, Src: tt.src}
 			ApplyOther(fir, s, ins)
 			got := s.lookupReg(tt.reg)

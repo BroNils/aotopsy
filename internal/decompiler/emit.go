@@ -205,7 +205,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		fir:        fir,
 		symbols:    symbols,
 		pool:       pool,
-		state:      newLiftState(),
+		state:      newLiftState(fir.NullReg),
 		active:     make(map[int]bool),
 		visits:     make(map[int]int),
 		omittedSet: make(map[int]bool),
@@ -518,12 +518,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if fir.LocalTypeHints != nil {
 		source = applyLocalTypeHints(source, fir.LocalTypeHints)
 	}
-	// A5: For-loop recovery (post-emit text pass: while(cond) → for(init;cond;incr))
-	source = forLoopRecovery(source)
-	// A6: Null-check hoisting (annotate null-check guards at function entry)
-	source = nullCheckHoisting(source)
-	// A7: Range-guard merging (merge consecutive range checks)
-	source = rangeGuardMerging(source)
+	// For-loop recovery, guard merging and null-check annotation now run
+	// inside compactLines, on the statement tree -- see stmt_loops.go, which
+	// records what each of them used to get wrong as a text pass.
 	// Arg renaming with type hints (from flutterdec naming.rs). Uses the
 	// types the signature actually displayed, so a name never implies a type
 	// the trust gate rejected.
@@ -1056,7 +1053,7 @@ func (e *emitter) appendHelperFunctions() {
 		}
 		seen[id] = true
 
-		sub := &emitter{fir: e.fir, symbols: e.symbols, pool: e.pool, state: newLiftState(),
+		sub := &emitter{fir: e.fir, symbols: e.symbols, pool: e.pool, state: newLiftState(e.fir.NullReg),
 			active: make(map[int]bool), visits: make(map[int]int), omittedSet: make(map[int]bool),
 			blockTryRegion: e.blockTryRegion,
 			tryMarked:      e.tryMarked,

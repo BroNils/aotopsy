@@ -192,99 +192,6 @@ func TestExtractIterVarFromCond(t *testing.T) {
 	}
 }
 
-// --- A6: null-check hoisting tests ---
-
-func TestNullCheckHoisting(t *testing.T) {
-	source := `dynamic foo(dynamic arg0) {
-  if (arg0 == null) {
-    return;
-  }
-  final t1 = arg0 + 1;
-  return t1;
-}`
-	result := nullCheckHoisting(source)
-	if !strings.Contains(result, "null-check guard") {
-		t.Error("null-check hoisting should annotate null check at function entry")
-	}
-}
-
-func TestNullCheckHoistingNoFalsePositive(t *testing.T) {
-	source := `dynamic foo(dynamic arg0) {
-  final t1 = arg0 + 1;
-  if (t1 == null) {
-    return;
-  }
-  return t1;
-}`
-	result := nullCheckHoisting(source)
-	// The null check is not at function entry (there's a line before it)
-	// but our heuristic checks first 20 lines, so it might still annotate.
-	// The key is that it should NOT annotate if the null check is NOT
-	// immediately at the start.
-	// Actually our heuristic is simple — it checks first 20 lines.
-	// Let's just verify it doesn't crash.
-	_ = result
-}
-
-// --- A7: range-guard merging tests ---
-
-func TestRangeGuardMerging(t *testing.T) {
-	source := `dynamic foo(int x) {
-  if (x < 0) {
-    return;
-  }
-  if (x >= 10) {
-    return;
-  }
-  return x;
-}`
-	result := rangeGuardMerging(source)
-	// Should merge the two range checks into one
-	if !strings.Contains(result, "||") {
-		t.Error("range-guard merging should combine checks with ||")
-	}
-}
-
-func TestIsRangeCheck(t *testing.T) {
-	tests := []struct {
-		line string
-		want bool
-	}{
-		{"if (x < 0) {", true},
-		{"if (x >= 10) {", true},
-		{"if (x > 0) {", true},
-		{"if (x <= 10) {", true},
-		{"if (x == 0) {", false},
-		{"return;", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		got := isRangeCheck(tt.line)
-		if got != tt.want {
-			t.Errorf("isRangeCheck(%q) = %v, want %v", tt.line, got, tt.want)
-		}
-	}
-}
-
-func TestExtractIfCond(t *testing.T) {
-	tests := []struct {
-		line string
-		want string
-	}{
-		{"if (x < 0) {", "x < 0"},
-		{"if (x >= 10) {", "x >= 10"},
-		{"if (x == null) {", "x == null"},
-		{"return;", ""},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		got := extractIfCond(tt.line)
-		if got != tt.want {
-			t.Errorf("extractIfCond(%q) = %q, want %q", tt.line, got, tt.want)
-		}
-	}
-}
-
 // --- A1: applyLocalTypeHints tests ---
 
 func TestApplyLocalTypeHints(t *testing.T) {
@@ -390,39 +297,6 @@ func TestInvertCondition(t *testing.T) {
 	}
 }
 
-// --- A5: forLoopRecovery tests ---
-
-func TestForLoopRecovery(t *testing.T) {
-	source := `dynamic foo() {
-  local_8 = 0;
-  while (local_8 < 10) {
-    final t1 = doSomething(local_8);
-    local_8 = local_8 + 1;
-  }
-  return null;
-}`
-	result := forLoopRecovery(source)
-	if !strings.Contains(result, "for (local_8 = 0; local_8 < 10; local_8 = local_8 + 1)") {
-		t.Errorf("forLoopRecovery should emit for-loop header, got:\n%s", result)
-	}
-	if strings.Contains(result, "while (local_8 < 10)") {
-		t.Error("forLoopRecovery should replace while with for")
-	}
-}
-
-func TestForLoopRecoveryNoMatch(t *testing.T) {
-	source := `dynamic foo() {
-  while (true) {
-    final t1 = doSomething();
-  }
-}`
-	result := forLoopRecovery(source)
-	// Should not crash, should not create a for-loop
-	if strings.Contains(result, "for (") {
-		t.Error("forLoopRecovery should not create for-loop from while(true)")
-	}
-}
-
 // --- Regression tests for the correctness fixes in the readability passes ---
 
 // constantFold must not eat a call's own parentheses: `foo(1 + 2)` was folded
@@ -472,21 +346,6 @@ func TestSimplifyExpressionsKeepsMask(t *testing.T) {
 
 // A dead store may only be dropped when the value it computes has no effect,
 // and when the reassignment does not read the variable.
-// The for-loop rewrite must not duplicate the loop's closing brace.
-func TestForLoopRecoveryBraceBalance(t *testing.T) {
-	source := "dynamic foo() {\n  local_8 = 0;\n  while (local_8 < 10) {\n    final t1 = doSomething(local_8);\n    local_8 = local_8 + 1;\n  }\n  return null;\n}"
-	got := forLoopRecovery(source)
-	if strings.Count(got, "{") != strings.Count(got, "}") {
-		t.Errorf("unbalanced braces after for-loop recovery:\n%s", got)
-	}
-	if !strings.Contains(got, "for (local_8 = 0; local_8 < 10; local_8 = local_8 + 1) {") {
-		t.Errorf("for header missing:\n%s", got)
-	}
-	if strings.Contains(got, "}\n  }") {
-		t.Errorf("duplicated closing brace:\n%s", got)
-	}
-}
-
 // Two parameters of the same type must not collapse onto one name.
 func TestApplyArgRenamingIsCollisionFree(t *testing.T) {
 	src := "dynamic foo(String arg0, String arg1) {\n  return arg0 + arg1;\n}"

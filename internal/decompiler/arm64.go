@@ -21,6 +21,20 @@ const (
 	arm64FrameReg  = "x29"
 	arm64LinkReg   = "x30"
 	arm64ReturnReg = "x0"
+	// arm64NullReg holds Object::null() for the whole of generated code.
+	// dart-lang/sdk's runtime/vm/constants_arm64.h declares
+	//   const Register NULL_REG = R22;  // Caches NullObject() value.
+	// unchanged at tags 2.12.0, 3.1.0 and 3.9.2. There is no x64
+	// equivalent -- constants_x64.h defines no NULL_REG, and x86_64 loads
+	// null from the object pool instead -- so this is ARM64-only.
+	//
+	// Checked against the samples before relying on it: across 65113
+	// disassembled 2.12 instructions nothing writes X22 at all, and the
+	// only four writes in 77611 instructions of the 3.x sample are
+	// `LDR X22, [X26,#120]` (THR.object_null) in FFI trampolines, which
+	// restore the same value. So the register holds null everywhere it is
+	// read, and reading it as `null` is not an inference.
+	arm64NullReg = "x22"
 )
 
 // arm64ArgRegs is a DISPLAY convention (arg0..arg7 = x0..x7), not a
@@ -52,6 +66,7 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.LinkReg = arm64LinkReg
 	fir.PoolReg = arm64PoolReg
 	fir.ThreadReg = arm64ThreadReg
+	fir.NullReg = arm64NullReg
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}

@@ -81,6 +81,12 @@ type FuncIR struct {
 	LinkReg   string   // return-address register alias name, if any (ARM64: x30; x86_64: "" -- on the stack)
 	PoolReg   string   // object-pool base register (ARM64: x27; x86_64: r15)
 	ThreadReg string   // Dart Thread*-holding register (ARM64: x26/THR; x86_64: r14)
+	// NullReg is the register that permanently caches Object::null(), so
+	// every read of it is the literal `null`. ARM64 only (NULL_REG = R22);
+	// empty on x86_64, which has no such register and loads null from the
+	// object pool instead. See arm64NullReg for the SDK reference and the
+	// sample check behind it.
+	NullReg string
 
 	// ArgRegIndices holds the real declared arity, resolved empirically
 	// from cross-function call-site aggregation (see
