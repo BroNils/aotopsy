@@ -321,6 +321,9 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if !op.hasDisp {
 		return baseExpr
 	}
+	if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
+		return expr
+	}
 	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
 }
 
@@ -343,6 +346,36 @@ func localName(off int64) string {
 // When resolver is non-nil, it is consulted to replace the synthetic
 // fNN/mNN name with the real Dart field name from the class layout
 // (e.g. base.name instead of base.f8).
+// cachedVMObjectValues are the Thread fields that cache a VM OBJECT rather
+// than an address, so loading one yields that object itself.
+//
+// dart-lang/sdk's thread.h lists them in CACHED_VM_OBJECTS_LIST alongside the
+// stub entry points; these three are the ones with a spelling in source.
+// x86_64 reaches null this way because constants_x64.h defines no NULL_REG --
+// where ARM64 reads R22, x64 reads Thread.
+var cachedVMObjectValues = map[string]string{
+	"object_null": "null",
+	"bool_true":   "true",
+	"bool_false":  "false",
+}
+
+// threadFieldExpr renders a Thread-relative access using the SDK-derived
+// field table, reporting ok=false when the base is not THR or the offset is
+// not in the table (in which case the caller falls back to THR.fNN).
+func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
+	if baseReg != fir.ThreadReg || fir.ThreadFieldNames == nil {
+		return "", false
+	}
+	name, ok := fir.ThreadFieldNames[off]
+	if !ok {
+		return "", false
+	}
+	if v, isValue := cachedVMObjectValues[name]; isValue {
+		return v, true
+	}
+	return "THR." + name, true
+}
+
 // dartFieldResolver returns the Dart field-name resolver for a memory access
 // off baseReg, or nil when naming that base's offsets as Dart fields would be
 // a fabrication.

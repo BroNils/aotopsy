@@ -112,6 +112,24 @@ type FuncIR struct {
 	// field access (THR.fNN) same as before this feature existed.
 	ThreadStubOffsets map[int64]string
 
+	// ThreadFieldNames maps a THR-relative byte displacement to the Thread
+	// field it names, from the same SDK-derived tables as ThreadStubOffsets
+	// (internal/disasm.THRFields) but covering every field rather than only
+	// the cached stub entry points.
+	//
+	// Three of those fields cache VM OBJECTS rather than addresses --
+	// object_null, bool_true and bool_false -- so a load of one yields
+	// exactly `null`, `true` or `false`. That is how x86_64 materialises
+	// them: constants_x64.h has no NULL_REG, so where ARM64 reads R22, x64
+	// reads Thread. Rendering them as values is the x64 counterpart of the
+	// ARM64 NULL_REG decode.
+	//
+	// Nil leaves THR accesses as THR.fNN, which is what they were before
+	// this existed. They must never be resolved through the Dart class
+	// field-name map: Thread is a VM struct, and doing so invented names
+	// like THR.radius. See dartFieldResolver.
+	ThreadFieldNames map[int64]string
+
 	// ParamTypeNames holds real per-parameter type names (e.g. "int",
 	// "String"), resolved from FunctionType.parameter_types by the
 	// caller (see pipeline.TypeParamResolver) BEFORE EmitPseudocode

@@ -570,6 +570,11 @@ func cmdDecompileNative(args []string) error {
 			}
 		}
 		fir.ThreadStubOffsets = disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
+		// Every Thread field, not just the cached stub entry points. This is
+		// what lets object_null / bool_true / bool_false render as null /
+		// true / false -- the way x86_64 materialises them, since it has no
+		// NULL_REG.
+		fir.ThreadFieldNames = threadFieldOffsets(info.Version.DartVersion, isARM64, info.Version)
 		fir.ParamTypeNames = paramTypeNamesFor(r)
 		fir.TypeParamNames = genericParamNamesFor(r)
 		fir.FieldNameResolver = fieldNameResolver
