@@ -35,22 +35,30 @@ type PoolLookups struct {
 	VmRefToNamed   map[int]*cluster.NamedObject
 	CT             *snapshot.CIDTable
 	BaseObjLimit   int
+	// BaseObjectNames holds the SDK's own display names for the VM-isolate
+	// base objects, indexed from 0 so entry i is reference ID i+1. Nil when
+	// the Dart version is outside the verified table, in which case those
+	// refs simply stay unnamed. See snapshot.BaseObjectNames.
+	BaseObjectNames []string
 }
 
 // BuildPoolLookups builds the lookup maps from a fill result.
 // vmResult is optional — if non-nil, VM snapshot strings/names are used to resolve base object refs.
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool) *PoolLookups {
+// dartVersion selects the VM-isolate base object name table; pass "" to leave
+// those references unnamed.
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *PoolLookups {
 	l := &PoolLookups{
-		RefToStr:       make(map[int]string),
-		RefToNamed:     make(map[int]*cluster.NamedObject),
-		RefCID:         make(map[int]int),
-		CodeRefDisplay: make(map[int]string),
-		VmRefToStr:     make(map[int]string),
-		VmRefCID:       make(map[int]int),
-		VmRefToNamed:   make(map[int]*cluster.NamedObject),
-		CT:             ct,
-		BaseObjLimit:   int(result.Header.NumBaseObjects) + 1,
+		RefToStr:        make(map[int]string),
+		RefToNamed:      make(map[int]*cluster.NamedObject),
+		RefCID:          make(map[int]int),
+		CodeRefDisplay:  make(map[int]string),
+		VmRefToStr:      make(map[int]string),
+		VmRefCID:        make(map[int]int),
+		VmRefToNamed:    make(map[int]*cluster.NamedObject),
+		CT:              ct,
+		BaseObjLimit:    int(result.Header.NumBaseObjects) + 1,
+		BaseObjectNames: snapshot.BaseObjectNames(dartVersion),
 	}
 
 	for _, ps := range result.Strings {
@@ -374,6 +382,22 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 	return fmt.Sprintf("<cid:%d>", cid)
 }
 
+// baseObjectName returns the SDK display name for a base-object reference,
+// or "" when the ref is not one or the Dart version is not in the table.
+//
+// `null` is ref 1 in every version from 2.12 to 3.12, so it resolves even
+// without a table entry; everything else needs one, because the ordering
+// shifts between versions.
+func (l *PoolLookups) baseObjectName(refID int) string {
+	if refID == 1 {
+		return "null"
+	}
+	if refID < 1 || refID > len(l.BaseObjectNames) {
+		return ""
+	}
+	return l.BaseObjectNames[refID-1]
+}
+
 // ResolvePoolDisplay builds a map from pool entry index to display string.
 func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string {
 	display := make(map[int]string, len(pool))
@@ -444,8 +468,17 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				} else {
 					display[pe.Index] = fmt.Sprintf("<Instance_%d>", cidNum)
 				}
-			} else if pe.RefID == 1 {
-				display[pe.Index] = "null"
+			} else if name := l.baseObjectName(pe.RefID); name != "" {
+				// A VM-isolate base object. These are never written into the
+				// snapshot -- the deserializer assigns them reference IDs in
+				// a fixed order first -- so the reference ID IS the identity,
+				// and the SDK's AddBaseObjects supplies the display name.
+				//
+				// Only `null` (always ref 1) used to be handled here, which
+				// is why x86_64 output contained zero `false`: on that
+				// architecture bools reach the code through the object pool
+				// rather than through a null-register offset.
+				display[pe.Index] = name
 			} else if pe.RefID > 0 && pe.RefID < l.BaseObjLimit {
 				// Try resolving from VM snapshot lookups.
 				// H-4 fix: check VmRefCID before quoting as string, same as
@@ -875,9 +908,9 @@ func BuildTypeArguments(result *cluster.Result) []TypeArgumentsRecord {
 
 // ExceptionHandlerRecord is one ExceptionHandlers entry in exception_handlers.jsonl.
 type ExceptionHandlerRecord struct {
-	RefID           int                      `json:"ref_id"`
-	HandledTypesRef int                      `json:"handled_types_ref,omitempty"`
-	Handlers        []ExceptionHandlerEntry  `json:"handlers,omitempty"`
+	RefID           int                     `json:"ref_id"`
+	HandledTypesRef int                     `json:"handled_types_ref,omitempty"`
+	Handlers        []ExceptionHandlerEntry `json:"handlers,omitempty"`
 }
 
 // ExceptionHandlerEntry is one handler in an ExceptionHandlerRecord.

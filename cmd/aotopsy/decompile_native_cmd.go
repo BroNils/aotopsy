@@ -135,7 +135,7 @@ func cmdDecompileNative(args []string) error {
 		}
 	}
 
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	poolDisplay := resolvePoolDisplay(result.Pool, pl)
 
 	// Build class layouts for field-name resolution in the decompiler.

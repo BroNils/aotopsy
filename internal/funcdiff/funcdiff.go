@@ -108,7 +108,7 @@ func Load(libPath string) (descriptors map[FuncDescriptor]int, dartVersion strin
 		}
 	}
 
-	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	descriptors = Build(result, pl, info.Version.CIDs)
 	return descriptors, info.Version.DartVersion, nil
 }

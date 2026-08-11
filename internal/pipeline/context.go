@@ -147,7 +147,7 @@ func LoadContext(libPath string) (*Context, error) {
 		}
 	}
 
-	pl := BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	poolDisplay := ResolvePoolDisplay(result.Pool, pl)
 
 	symbolNames := make(map[uint64]string, len(ranges))

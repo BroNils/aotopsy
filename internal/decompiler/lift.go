@@ -230,6 +230,42 @@ func parseImm(s string) (int64, bool) {
 	return v, true
 }
 
+// shiftedOperand resolves operand i, applying the ARM64 shifted-register
+// suffix that may follow it ("lsr #32", "asr #2", "lsl #3").
+//
+// ok is false when a suffix is present but is not a shift this can render.
+// Callers use it to clear HasCmp, so the emitter falls back to its
+// placeholder instead of printing a condition that omits part of what the
+// instruction tests -- silence beats a confident wrong answer.
+func shiftedOperand(fir *FuncIR, s *LiftState, ops []string, i int) (string, bool) {
+	expr := operandExpr(fir, s, ops[i])
+	if len(ops) <= i+1 {
+		return expr, true
+	}
+	spec := strings.ToLower(strings.TrimSpace(ops[i+1]))
+	idx := strings.Index(spec, "#")
+	if idx < 0 {
+		return expr, false
+	}
+	amt := strings.TrimSpace(spec[idx+1:])
+	switch {
+	case strings.HasPrefix(spec, "lsr"), strings.HasPrefix(spec, "asr"):
+		return fmt.Sprintf("(%s >> %s)", expr, amt), true
+	case strings.HasPrefix(spec, "lsl"):
+		return fmt.Sprintf("(%s << %s)", expr, amt), true
+	}
+	return expr, false
+}
+
+// negateExpr renders the arithmetic negation of an operand expression,
+// folding the sign into a literal where it can.
+func negateExpr(expr string) string {
+	if v, ok := parseImm(expr); ok {
+		return strconv.FormatInt(-v, 10)
+	}
+	return "-" + expr
+}
+
 // lookupReg resolves a register token to its current symbolic expression,
 // falling back to the register name itself if unknown (matching
 // flutterdec's lookup_reg).
@@ -285,15 +321,7 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if !op.hasDisp {
 		return baseExpr
 	}
-	var resolver func(int64, int64) string
-	if fir.FieldNameResolver != nil {
-		// A2: Pass ReceiverClassID to FieldNameResolver for per-class
-		// field name resolution. When ReceiverClassID > 0, the resolver
-		// can use the per-class field name map instead of the global map.
-		rcid := fir.ReceiverClassID
-		resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
-	}
-	return fieldExpr(baseExpr, op.memDisp, resolver)
+	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
 }
 
 // localName renders a frame-relative byte offset as a valid Dart
@@ -315,6 +343,32 @@ func localName(off int64) string {
 // When resolver is non-nil, it is consulted to replace the synthetic
 // fNN/mNN name with the real Dart field name from the class layout
 // (e.g. base.name instead of base.f8).
+// dartFieldResolver returns the Dart field-name resolver for a memory access
+// off baseReg, or nil when naming that base's offsets as Dart fields would be
+// a fabrication.
+//
+// THR is the case that matters. The Thread structure is a VM struct, not a
+// Dart object, so its offsets have nothing to do with any class's field
+// layout -- but fieldExpr was handed the resolver for every base, and the
+// resolver's offset-only fallback names any offset that happens to carry the
+// same field name in every Dart class that has one there. The result was
+// confident nonsense: 43528 `THR.radius` in the x86_64 sample, plus
+// `THR.orientation` and `THR.tilt`. Thread has no such fields.
+//
+// Rendering `THR.f88` instead says only what is known. THR offsets that ARE
+// identified come from the SDK-derived tables in internal/disasm
+// (thrfields.go / thrfields_x64.go), applied by the annotator, not from
+// class layouts.
+func dartFieldResolver(fir *FuncIR, baseReg string) func(int64, int64) string {
+	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg || baseReg == fir.PoolReg {
+		return nil
+	}
+	// A2: pass ReceiverClassID so the resolver can use the per-class field
+	// map rather than the offset-only fallback.
+	rcid := fir.ReceiverClassID
+	return func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
+}
+
 func fieldExpr(base string, off int64, resolver func(int64, int64) string) string {
 	if resolver != nil {
 		if name := resolver(0, off); name != "" {
@@ -477,19 +531,55 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			s.Regs[dst] = operandExpr(fir, s, ops[1])
 		}
-	case "cmp", "cmn":
+	// The three flag-setting compares. dart-lang/sdk's
+	// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
+	// in terms of the operation whose flags it takes:
+	//
+	//	cmp(rn, o) -> subs(ZR, rn, o)   flags from rn - o   =>  rn == o
+	//	cmn(rn, o) -> adds(ZR, rn, o)   flags from rn + o   =>  rn == -o
+	//	tst(rn, o) -> ands(ZR, rn, o)   flags from rn & o   =>  (rn & o) == 0
+	//
+	// `o` is a shifted-register Operand, which is why a third token can be
+	// present. Dropping it, or conflating cmn with cmp, states a condition
+	// the binary does not test.
+	case "cmp":
 		if len(ops) >= 2 {
-			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
-			s.HasCmp = true
+			rhs, ok := shiftedOperand(fir, s, ops, 1)
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), rhs}
+			s.HasCmp = ok
+		}
+	case "cmn":
+		// Flags come from rn + o, so equality means rn == -o. Sharing the
+		// cmp path, as this used to, reported the wrong sign.
+		if len(ops) >= 2 {
+			rhs, ok := shiftedOperand(fir, s, ops, 1)
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), negateExpr(rhs)}
+			s.HasCmp = ok
 		}
 	case "test", "tst":
-		// TEST/TST performs a bitwise AND (not subtraction) and sets ZF
-		// if the result is zero. For the common "test r, r; je" null-check
-		// idiom, the condition is "r == 0", not "r == r". Store 0 as the
-		// second operand so JE produces "r == 0" and JNE produces "r != 0".
+		// The condition is `(a & b) == 0`, not `a == 0`. Storing [a, "0"]
+		// unconditionally is only right for the self-test idiom `test r, r`,
+		// and on this corpus that idiom is the rare case: 878 of 878 ARM64
+		// TST and 1556 of 1612 x86_64 TEST instructions have DISTINCT
+		// operands, so the second one was being dropped almost everywhere.
+		// The write-barrier check
+		//
+		//	AND X16, X17, X16, LSR #2
+		//	TST X16, X28              ; X28 = HEAP_BITS
+		//	B EQ, ...
+		//
+		// rendered as `(x17 & x16) == 0`, losing the `& X28` that is the
+		// whole point of the test.
 		if len(ops) >= 2 {
-			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), "0"}
-			s.HasCmp = true
+			lhs := operandExpr(fir, s, ops[0])
+			rhs, ok := shiftedOperand(fir, s, ops, 1)
+			if rhs == lhs {
+				// `x & x` is zero exactly when x is; say that instead.
+				s.LastCmp = [2]string{lhs, "0"}
+			} else {
+				s.LastCmp = [2]string{fmt.Sprintf("(%s & %s)", lhs, rhs), "0"}
+			}
+			s.HasCmp = ok
 		}
 	case "str", "stur":
 		if len(ops) >= 2 {
@@ -652,12 +742,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
-		var resolver func(int64, int64) string
-		if fir.FieldNameResolver != nil {
-			rcid := fir.ReceiverClassID
-			resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
-		}
-		lhs = fieldExpr(baseExpr, op.memDisp, resolver)
+		lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
 		// found testing against a real libapp.so where a computed

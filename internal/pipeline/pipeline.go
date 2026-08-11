@@ -204,7 +204,7 @@ func Run(opts Opts) (*Result, error) {
 	}
 
 	// Build name lookups and pool display map.
-	pl := BuildPoolLookups(clResult, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := BuildPoolLookups(clResult, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	poolDisplay := ResolvePoolDisplay(clResult.Pool, pl)
 
 	// Build and write class layouts.

@@ -90,7 +90,7 @@ func cmdRefInfo(args []string) error {
 		}
 	}
 
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	ct := info.Version.CIDs
 
 	// RefCID only covers Named/Class clusters via cm.StartRef..StopRef in

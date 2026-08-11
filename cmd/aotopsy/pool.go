@@ -9,8 +9,8 @@ import (
 
 type poolLookups = pipeline.PoolLookups
 
-func buildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool) *poolLookups {
-	return pipeline.BuildPoolLookups(result, ct, vmResult, codeIndexOneBased)
+func buildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *poolLookups {
+	return pipeline.BuildPoolLookups(result, ct, vmResult, codeIndexOneBased, dartVersion)
 }
 
 func resolvePoolDisplay(pool []cluster.PoolEntry, l *poolLookups) map[int]string {
