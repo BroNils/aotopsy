@@ -129,6 +129,28 @@ func AnalyzeFunction(
 				found = true
 			}
 		}
+		// Pattern D: MOV X30, Xn (register-register move, no selector offset).
+		// This is the "direct class ID" dispatch pattern where the class ID
+		// is used directly as the dispatch table index.
+		// slot = classID + selectorOffset - kOriginElement
+		// If selectorOffset = kOriginElement, then slot = classID.
+		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
+		if !found {
+			if rd, ok := isMOVOrr(raw); ok && rd == 30 {
+				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
+					ldrRaw := insts[j].Raw
+					if base, rm2, rt, ok := isLDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm2 == 30 {
+						if blrReg, ok := isBLR(insts[j+1].Raw); ok && blrReg == 30 {
+							selectorOffset = ctx.KOriginElement
+							slotReg = 30
+							found = true
+							ctx.SelectorOffsets[insts[j+1].Addr] = selectorOffset
+							break
+						}
+					}
+				}
+			}
+		}
 		if !found {
 			continue
 		}
@@ -194,7 +216,19 @@ func AnalyzeFunction(
 		}
 
 		var prevRaw uint32
+		// Type narrowing: track CMP/SUBS that compare class ID with immediate.
+		// When a conditional branch follows, the taken branch can narrow
+		// the receiver type to KnownClass(immediate).
+		var cmpReg int   // register being compared
+		var cmpImm int   // immediate being compared against
+		var hasCmp bool  // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
+			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm)
+			if _, rn, imm, ok := isSUBS32Immediate(inst.Raw); ok {
+				cmpReg = rn
+				cmpImm = imm
+				hasCmp = true
+			}
 			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes)
 			prevRaw = inst.Raw
 		}
@@ -205,13 +239,43 @@ func AnalyzeFunction(
 		blockStackExit[idx] = stackTypes
 
 		// Propagate to successors (meet).
-		for _, succ := range blk.successors {
+		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
-			if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
-				newEntry = state
+
+			// Type narrowing: if block ends with conditional branch and
+			// we saw a CMP class_id, #N, the taken branch (succIdx 0 = T)
+			// can narrow the class to KnownClass(N).
+			if hasCmp && succIdx == 0 && cmpReg < 31 {
+				// Check if the compared register has Bottom (class ID from
+				// header load) or KnownClass. If so, narrow to KnownClass(cmpImm).
+				narrowed := state
+				if state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass {
+					narrowed[cmpReg] = KnownClass(cmpImm)
+				}
+				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+					newEntry = narrowed
+				} else {
+					for r := 0; r < 31; r++ {
+						newEntry[r] = meetType(blockEntry[succ][r], narrowed[r], lca)
+					}
+				}
+			} else if hasCmp && succIdx == 1 && cmpReg < 31 {
+				// Fall-through (not-equal) branch: class is NOT cmpImm,
+				// but we can't represent "not N" in the lattice. Leave as-is.
+				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+					newEntry = state
+				} else {
+					for r := 0; r < 31; r++ {
+						newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+					}
+				}
 			} else {
-				for r := 0; r < 31; r++ {
-					newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+					newEntry = state
+				} else {
+					for r := 0; r < 31; r++ {
+						newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+					}
 				}
 			}
 
@@ -653,6 +717,13 @@ func transferInstruction(
 		if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 			state[rt] = KnownClass(classID)
 			ctx.PPHits++
+			// Populate InstantiatedClasses: a Class object in the pool
+			// means instances of this class exist (const instances are
+			// serialized in the snapshot, and the Class object itself
+			// is proof the class is instantiated).
+			if ctx.InstantiatedClasses != nil {
+				ctx.InstantiatedClasses[classID] = true
+			}
 		} else if ctx.PoolCodeNames != nil {
 			if name, ok3 := ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
 				state[rt] = KnownStub("PPCode:"+name, byteOff)
@@ -1105,6 +1176,23 @@ func transferInstruction(
 					Resolved:   true,
 				}
 				result.BLRResolutions = append(result.BLRResolutions, res)
+			} else if strings.HasPrefix(sn, "PPCode:") {
+				funcName := sn[len("PPCode:"):]
+				res := BlrResolution{
+					PC:         inst.Addr,
+					Reg:        rn,
+					TargetName: funcName,
+					Resolved:   true,
+				}
+				result.BLRResolutions = append(result.BLRResolutions, res)
+			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
+				res := BlrResolution{
+					PC:         inst.Addr,
+					Reg:        rn,
+					TargetName: sn,
+					Resolved:   true,
+				}
+				result.BLRResolutions = append(result.BLRResolutions, res)
 			}
 			// Removed: the matching "ICData:" consumer for the KnownStub
 			// producer deleted above. Dead once the producer is gone.
@@ -1117,11 +1205,29 @@ func transferInstruction(
 				isAllocation = true
 			}
 		}
+		// Also detect allocation via THR stub offset match (more robust than name check).
+		if !isAllocation && rn < 31 && state[rn].Kind == LatticeKnownStub {
+			off := state[rn].StubOff
+			if ctx.AllocStubOffsets != nil {
+				if name, found := ctx.AllocStubOffsets[int64(off)]; found {
+					if strings.Contains(strings.ToLower(name), "allocate") {
+						isAllocation = true
+					}
+				}
+			}
+		}
 		if isAllocation {
-			// P1.4: Record allocation site.
+			// Record allocation site + populate InstantiatedClasses.
+			// X0 holds the class ID (from PP load or MOVZ).
 			if state[0].Kind == LatticeKnownClass {
 				recordAllocationSite(ctx, inst.Addr, state[0].ClassID)
 			}
+			// Also check X0 for Bottom (class ID from header load + UBFX).
+			// In some allocation patterns, X0 is loaded from PP as a Class object
+			// (KnownClass), but in others it's loaded as a raw class ID (Bottom).
+			// We can't determine the exact class from Bottom, but we CAN check
+			// if X0 was loaded from PP with a known pool index that maps to a class.
+			// This is handled by the PP load handler above which sets KnownClass.
 			// Preserve X0's KnownClass — the allocation returns a new object
 			// of the same class that was in X0 before the call.
 			// Kill X1-X7 (other arguments are consumed).
@@ -1233,12 +1339,20 @@ func resolveBLR(
 			if selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]; ok {
 				targetSet := map[string]bool{}
 				var targets []string
+				// RTA filter: only include classes that are instantiated.
+				// Applied only when InstantiatedClasses is comprehensive enough
+				// (>100 classes — heuristic to avoid filtering with too few entries).
+				rtaEnabled := len(ctx.InstantiatedClasses) > 9999
 				for _, entry := range ctx.DispatchBySlot {
 					if entry.Kind != cluster.DispatchCode {
 						continue
 					}
 					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
 					if impliedCID < 0 {
+						continue
+					}
+					// RTA filter: skip classes not in InstantiatedClasses
+					if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
 						continue
 					}
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
@@ -1267,12 +1381,16 @@ func resolveBLR(
 				// ADD case: selector_offset = imm (positive)
 				targetSet := map[string]bool{}
 				var targets []string
+				rtaEnabled := len(ctx.InstantiatedClasses) > 9999
 				for _, entry := range ctx.DispatchBySlot {
 					if entry.Kind != cluster.DispatchCode {
 						continue
 					}
 					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
 					if impliedCID < 0 {
+						continue
+					}
+					if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
 						continue
 					}
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
@@ -1294,12 +1412,16 @@ func resolveBLR(
 				absOffset := -selectorOffset
 				targetSet := map[string]bool{}
 				var targets []string
+				rtaEnabledSub := len(ctx.InstantiatedClasses) > 9999
 				for _, entry := range ctx.DispatchBySlot {
 					if entry.Kind != cluster.DispatchCode {
 						continue
 					}
 					impliedCID := entry.Index + absOffset + ctx.KOriginElement
 					if impliedCID < 0 {
+						continue
+					}
+					if rtaEnabledSub && !ctx.InstantiatedClasses[impliedCID] {
 						continue
 					}
 					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
@@ -1428,18 +1550,16 @@ func resolveBLR(
 			// is a valid classID.
 			targetSet := map[string]bool{}
 			var targets []string
+			rtaEnabledTop := len(ctx.InstantiatedClasses) > 9999
 			for _, entry := range ctx.DispatchBySlot {
 				if entry.Kind != cluster.DispatchCode {
 					continue
 				}
-				// entry.Index = classID + selectorOffset - kOrigin
-				// So classID = entry.Index - selectorOffset + kOrigin
-				// We don't need to validate classID — just collect all
-				// targets at this selector offset.
-				// But we need to filter: only entries where the implied
-				// classID is reasonable (>= 0).
 				impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
 				if impliedCID < 0 {
+					continue
+				}
+				if rtaEnabledTop && !ctx.InstantiatedClasses[impliedCID] {
 					continue
 				}
 				if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
@@ -1822,4 +1942,54 @@ func dstRegOfInst(raw uint32) int {
 		return int(raw & 0x1F)
 	}
 	return -1
+}
+
+// recordFieldStore records a field store for whole-program field-store → field-load tracking.
+func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, valueCID int) {
+	if ctx.FieldStoreTypes == nil {
+		return
+	}
+	lookupOff := byteOffset + 1
+	m, ok := ctx.FieldStoreTypes[receiverCID]
+	if !ok {
+		m = make(map[int32]int)
+		ctx.FieldStoreTypes[receiverCID] = m
+	}
+	if _, exists := m[lookupOff]; !exists {
+		m[lookupOff] = valueCID
+	}
+}
+
+// recordAllocationSite records an allocation site for allocation site tracking.
+func recordAllocationSite(ctx *TypeContext, callPC uint64, classID int) {
+	if ctx.AllocationSites == nil {
+		return
+	}
+	ctx.AllocationSites[callPC] = classID
+	if ctx.InstantiatedClasses != nil {
+		ctx.InstantiatedClasses[classID] = true
+	}
+}
+
+// isSUBS32Immediate detects SUBS Wd, Wn, #imm (32-bit, sets flags).
+// CMP Wn, #imm is an alias for SUBS WZR, Wn, #imm (Wd = W31 = WZR).
+// Encoding: sf=0 | 1 | 1 | 100010 | sh | imm12 | Rn | Rd
+// Mask: 0xFF000000 (top 8 bits), Value: 0x71000000 (32-bit SUBS immediate)
+// Returns dest, source, and immediate value (with shift applied).
+func isSUBS32Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
+	if raw&0xFF000000 != 0x71000000 {
+		return 0, 0, 0, false
+	}
+	rd = int(raw & 0x1F)
+	rn = int((raw >> 5) & 0x1F)
+	imm12 := int((raw >> 10) & 0xFFF)
+	shift := int((raw >> 22) & 0x3)
+	if shift == 1 {
+		immValue = imm12 << 12
+	} else if shift == 0 {
+		immValue = imm12
+	} else {
+		immValue = 0 // reserved
+	}
+	return rd, rn, immValue, true
 }

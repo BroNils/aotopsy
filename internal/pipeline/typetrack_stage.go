@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
 
@@ -135,9 +136,31 @@ func runTypeInference(
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
+		// Check both app isolate RefCID and VM VmRefCID for Code objects.
+		// VM Code objects (ref < BaseObjLimit) have cid in VmRefCID, not RefCID.
+		isCode := false
 		if pl.CT != nil && pl.RefCID != nil {
 			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Code {
-				// Try app isolate NamedObject
+				isCode = true
+			}
+		}
+		if !isCode && pl.CT != nil && pl.VmRefCID != nil {
+			if cid, ok := pl.VmRefCID[pe.RefID]; ok && cid == pl.CT.Code {
+				isCode = true
+			}
+		}
+		// Also check CodeRefDisplay for any ref that has a display string
+		// (covers VM Code objects that don't have CID in either map).
+		if !isCode && pl.CodeRefDisplay != nil {
+			if _, ok := pl.CodeRefDisplay[pe.RefID]; ok {
+				isCode = true
+			}
+		}
+		if !isCode {
+			continue
+		}
+		{
+			// Try app isolate NamedObject
 				if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
 					if no.NameRefID >= 0 {
 						if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
@@ -168,6 +191,12 @@ func runTypeInference(
 						}
 					}
 				}
+				// Try CodeRefDisplay (covers VM Code objects with display strings
+				// like "dyn:call", "Native", function names from CodeNames)
+				if _, exists := poolCodeNames[pe.Index]; !exists {
+					if name, ok2 := pl.CodeRefDisplay[pe.RefID]; ok2 && name != "" {
+						poolCodeNames[pe.Index] = name
+					}
 			}
 		}
 	}
@@ -381,6 +410,25 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 		if target, ok := resolutionMap[key]; ok {
 			e.Target = target
 			resolved++
+		} else if strings.HasPrefix(e.Via, "THR.") {
+			// Fallback: resolve THR stub calls from via annotation.
+			// via format: "THR.stub_name" or "THR.stub_name_ep"
+			stubName := strings.TrimPrefix(e.Via, "THR.")
+			// Remove _ep suffix if present
+			stubName = strings.TrimSuffix(stubName, "_ep")
+			// Remove _entry_point suffix if present
+			stubName = strings.TrimSuffix(stubName, "_entry_point")
+			if stubName != "" {
+				e.Target = stubName
+				resolved++
+			}
+		} else if strings.HasPrefix(e.Via, "THR+") {
+			// Fallback: resolve THR runtime entries from via annotation.
+			// via format: "THR+0xNNN LDR[RUNTIME_ENTRY]"
+			if strings.Contains(e.Via, "RUNTIME_ENTRY") {
+				e.Target = "RuntimeEntry"
+				resolved++
+			}
 		}
 	}
 

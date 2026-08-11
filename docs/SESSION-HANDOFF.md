@@ -1668,15 +1668,15 @@ exact whitespace.
 ## 33. Repo state after BLR investigation sessions
 
 - HEAD: latest commit on future-works branch
-- Branch: future-works
-- Not pushed (per user request)
-- All tests pass (4 unit packages + 3 integration tests)
+- Branch: future-works (tracking origin/future-works, pushed)
+- All tests pass (220 test functions: 4 unit packages + 5 integration tests)
 - 8 version/arch combinations verified
+- BLR: 45% (3.9.2 ARM64) — up from 6% initially
 
-BLR resolution summary (final):
+BLR resolution summary (final, after THR stub resolution):
 | Version | Arch | BLR | Notes |
 |---|---|---|---|
-| 3.9.2 | ARM64 | 2050 (38%) | Best result |
+| 3.9.2 | ARM64 | 2433 (45%) | Best result — THR stubs resolved |
 | 2.12.0 | ARM64 | 1 (0%) | Data limitation (65 DT entries, VM stubs unnamed) |
 | 3.10.7 | ARM64 | 1274 (23%) | Dense DT |
 | 3.10.7 | x86_64 | 3103 (26%) | Better than ARM64 same version |
@@ -1684,3 +1684,180 @@ BLR resolution summary (final):
 | 3.11.0 | x86_64 | 3111 (26%) | |
 | 3.12.2 | ARM64 | 1004 (18%) | Dense DT (393 targets/selector) |
 | 3.12.2 | x86_64 | 3131 (26%) | Better than ARM64 same version |
+
+## 34. Session 4+ — BLR deep improvement, signal expansion, decompiler quality, tests
+
+### BLR Resolution: 39% → 45%
+
+#### THR stub resolution (+325)
+- **KnownStub BLR handler**: saat BLR register adalah KnownStub dengan stub name
+  (bukan UnlinkedCall/PPCode/Allocate), resolve ke stub name. +286 resolutions.
+- **THR via fallback**: di `rewriteCallEdges`, jika BLR tidak ter-resolve oleh
+  typetrack tapi `via` dimulai dengan "THR.", extract stub name (strip `_ep`/
+  `_entry_point` suffix) dan resolve. +39 resolutions.
+- **PPCode BLR handler**: saat BLR register adalah KnownStub dengan "PPCode:"
+  prefix, resolve ke function name.
+
+#### Approaches implemented but no BLR improvement
+- **RTA dari allocation stubs**: `recordAllocationSite` enhanced dengan THR
+  offset match (bukan hanya stub name). `InstantiatedClasses` populated dari
+  class table (1859 classes), Instance CIDs (308), PP loads, dan field values.
+  RTA filter re-enabled dengan threshold >9999 (tidak aktif karena
+  InstantiatedClasses terlalu comprehensive — semua classes di-mark sebagai
+  instantiated).
+- **Closure invocation resolution**: `PoolCodeNames` di-populate dari
+  `ClosureDataByClosure` → parent function name. Tapi object_field BLR
+  (1460) tidak melalui PP load — Closure di-load dari stack/field.
+- **Type narrowing dari CMP**: `isSUBS32Immediate` decoder + narrowed state
+  di taken branch (succIdx 0). CMP untuk class ID jarang di sample ini.
+- **MOV X30 pattern**: pre-scan untuk `MOV X30, Xn` → `LDR X30, [X21, X30,
+  LSL #3]` → `BLR X30` (selector offset = kOriginElement). Dispatch table
+  scan polymorphic (11490 targets).
+- **Interprocedural propagation**: sudah berjalan (10 iterations,
+  BLCallSiteTypes + CalleeAllExitTypes). Tidak ada peningkatan tambahan.
+- **CodeRefDisplay untuk VM Code**: PoolCodeNames di-enhanced dengan
+  VmRefCID check dan CodeRefDisplay fallback. VM Code objects di PP tidak
+  punya entries di CodeRefDisplay (mereka adalah base objects, tidak
+  di-serialize di app isolate).
+
+#### Remaining 2921 unresolved (genuine data limitations)
+- **1460 object_field**: VM Code objects di PP (PP[3], PP[81]) tidak punya
+  names di snapshot data. VM snapshot Code cluster tidak di-parse. Perlu
+  parse VM snapshot Code cluster atau emulation.
+- **1204 GDT**: receiver class ID tidak diketahui (Top dari argument/stack).
+  Type narrowing tidak fire karena CMP jarang untuk class ID.
+- **257 none**: register X9 (598) dan X30 (13) tidak ter-trace. X9 adalah
+  register yang tidak di-track oleh typetrack (bukan arg reg, bukan PP/THR).
+
+### Signal Analysis Expansion (Fase 1 — 9 items)
+
+All 9 signal analysis features implemented and verified with
+`signal_ground_truth.dart` test file:
+
+| # | Feature | Output file | Entries | Implementation |
+|---|---|---|---|---|
+| 1 | Crypto algorithm identification | `crypto_findings.jsonl` | 12 | Binary scan for crypto constants (AES Rcon, ChaCha20, Keccak). Pool immediates scan also. |
+| 2 | Method Channel enumeration | `method_channels.jsonl` | 25 | Pattern matching: `MethodChannel("name")`, `dev.flutter/*`, `flutter/platform`, BinaryMessenger, PlatformChannel, BasicMessageChannel |
+| 3 | Plugin enumeration | `plugins.jsonl` | 18 | Pattern matching: video_player, path_provider, shared_preferences, firebase, camera, geolocator, MissingPluginException, package:stack_trace, PluginRegistry, FlutterPlugin |
+| 4 | String deobfuscation | `deobfuscation.jsonl` | 177 | Base64 pattern detection (`^[A-Za-z0-9+/]{12,}={0,2}$`) with decode attempt. XOR pattern detection (non-printable char ratio). |
+| 5 | Network endpoint extraction | `network_endpoints.jsonl` | 57 | URL regex, IP regex (skip 0.0.0.0/127.0.0.1), domain regex (skip file extensions, Dart type prefixes) |
+| 6 | Packed/encrypted section detection | `entropy_findings.jsonl` | 1 | Shannon entropy per ELF section. >7.5 = encrypted, >7.0 = packed. |
+| 7 | Data flow / taint analysis | `taint_findings.jsonl` | 196 | 3 patterns: same-function (source+sink in same func), cross-function (source func calls sink func), 2-hop (source → intermediate → sink). Source patterns: imei, android_id, token, password, location. Sink patterns: http, socket, MethodChannel, writeFile, analytics. |
+| 8 | YARA-style malware matching | `yara_findings.jsonl` | 14 | 15 YARA rules: root_check_magisk, root_check_supersu, root_check_xposed, root_check_frida, root_check_su, anti_debug_ptrace, anti_debug_debugger, ssl_pinning_cert, ssl_pinning_sha, keylogger_accessibility, screen_capture, data_exfil_http, crypto_mining, banking_trojan, ad_fraud. |
+| 9 | Call-graph behavioral analysis | `behavioral_findings.jsonl` | 10 | 5 patterns: root_check→anti_debug, credential→network, location→network, crypto→network, category counts. Function name patterns chosen to avoid false positives (e.g. _RootZone does NOT match root_check). |
+
+New files: `internal/signal/crypto_id.go`, `internal/signal/entropy.go`,
+`internal/signal/behavioral.go`. Pipeline integration in `pipeline.go`
+steps 5.1-5.4. Signal expansion JSONL writing in `signal_stage.go`.
+
+`signal_ground_truth.dart` created with all 9 signal analysis scenarios
+for testing. Built and verified against real binary.
+
+### Decompiler Quality (Fase 5 — 9 items)
+
+| # | Feature | Implementation | Evidence |
+|---|---|---|---|
+| 1 | CSE | `commonSubexpressionElimination` pass: track `final tN = <expr>` declarations, replace subsequent occurrences with `tN`. Word boundary checking via `replaceExactSubstring`. | Added to compactOnePass as pass c11 |
+| 2 | FFI call decompilation | `ffi_call(args)` with arg count via `countArgs`. Replaces `nativeCall(args)`. | 18 ffi_call references in 200-fn sweep |
+| 3 | Enum reconstruction | `enumReconstruction` pass: detect `if (x == N) { return 'Name'; }` chains (≥3 cases). Emit annotation. | Detection ready, 0 in sample |
+| 4 | maxStepsPerEmitter configurable | `SetMaxStepsPerEmitter(n)` API + `--max-steps` flag. `defaultMaxStepsPerEmitter=20000`. | Configurable via CLI |
+| 5 | Generator recovery | `IsSyncStar`/`IsAsyncStar` fields. Detection via `InitSyncStar`/`YieldAsyncStar`/`SuspendSyncStarAtStart`/`SuspendSyncStarAtYield` stub names. `sync*`/`async*` signature prefix + post-walk patching. | SDK verified: kInitSyncStar, kYieldAsyncStar, kSuspendSyncStarAtStart, kSuspendSyncStarAtYield |
+| 6 | Local variable type inference | `localTypeInference` pass: infer from `local_NN = arg0` mapping and `final tN = <literal>` type detection (int/double/String/bool). | 6 functions with inferred types |
+| 7 | Null-safety annotation | `nullSafetyAnnotation` pass: detect `if (x == null)` and `x != null` patterns. Emit `// null-safety: nullable variables: x, y` annotation. | Detection ready |
+| 8 | Helper functions: pass live state | `omittedStates` map captures `LiftState.Clone()` at extraction point. Sub-emitter receives cloned state. | Helpers now have register aliases from caller |
+| 9 | Expression simplification | `simplifyExpressions` pass: 13 algebraic identity rules (a*1→a, a*0→0, a+0→a, a-0→a, a>>0→a, a<<0→a, a|0→a, a&0xFFFFFFFF→a, (a|0)→a, !!a→a). | Added to emit pipeline |
+
+New files: `internal/decompiler/compact_extra.go` (extended),
+`internal/decompiler/call.go` (countArgs), `internal/decompiler/emit.go`
+(SetMaxStepsPerEmitter, omittedStates, generator detection).
+
+### Field Name Resolution (major improvement)
+
+- **VmRefToStr fallback** in `BuildClassLayouts`: field names dari VM snapshot
+  strings. 209 real field names (was 0).
+- **Majority-vote global map** + **per-class map** in `decompile_native_cmd.go`:
+  replaces unanimous-only map. 12 object field name references in decompiler
+  output (was 0). Field names: `.tilt`, `.synthesized`, `.radiusMax`,
+  `.orientation`, `.radiusMinor`, `.radiusMin`, `.transform`, `.original`,
+  `.pan`, `.panDelta`, `.fadeIn`, `.modalBarrier`, `.modalScope`.
+- **String CID fix** in `ResolvePoolDisplay`: `cid == l.CT.String` added
+  (was only OneByteString/TwoByteString). 2797 PP entries with quotes (was 0).
+  1338 string_value_xref entries (was 0). 5455 string_refs (was 0).
+
+### Cross-Referencing Fixes
+
+- `string_value_xref.jsonl`: 0 → 1338 entries (VmRefToStr + String CID fix)
+- `selector_dispatch_xref.jsonl`: MISSING → 16993 entries (pipeline order
+  fix: typetrack before xref + JSONL format fix: `dtJSONL` struct matching
+  `WriteDispatchTable` output format)
+- `writeJSONLFile`: added missing type cases (YaraFinding, TaintFinding,
+  BehavioralFinding, EntropyFinding) — was silently producing 0-byte files
+
+### dataImageAlignment Fix
+
+- `ObjectAlignment` field removed from `VersionProfile`.
+- `dataImageAlignment` derives from `DartVersion` string via
+  `dartVersionAtLeast(version, "2.19.0")`. Cutoff at 2.19.0:
+  ≤2.18 = 16 (kMaxObjectAlignment), ≥2.19 = 64 (kObjectStartAlignment).
+- SDK verified via gh api: snapshot.h DataImage() at tags 2.12.0, 2.18.0
+  uses kMaxObjectAlignment; 2.19.0, 3.9.2 uses kObjectStartAlignment.
+- `extractRODataStrings` alignShift fixed to `uint(4)` (log2(16) = kObjectAlignment)
+  for all versions, not dataImageAlignment (which is the image BASE alignment).
+- `isVM` header adjust removed (was +16 fudge, no longer needed with correct
+  alignment).
+
+### ssa.go Removed (dead code)
+
+`internal/typetrack/ssa.go` was infrastructure-only (SSABlock, SSAValue,
+SSAPhi, SSAState, BuildDominators, ComputeDominanceFrontier, InsertPhis,
+Rename, ResolvePhiType) — never integrated into `AnalyzeFunction`, never
+called from anywhere. Riset #4 proved SSA integration would NOT improve
+BLR (per-register worklist = SSA phi for type tracking). File deleted.
+`recordFieldStore` and `recordAllocationSite` moved to `intraproc.go`.
+
+### Regression Tests (197 → 220 test functions)
+
+| Test file | Tests | Coverage |
+|---|---|---|
+| `alignment_version_test.go` | 3 functions, 31 cases | dartVersionAtLeast (12 cases), parseDartVersion (8 cases), dataImageAlignment (11 version cutoffs) |
+| `signal_expansion_test.go` | 8 functions | ShannonEntropy, crypto binary scan, method channels, plugins, network endpoints, deobfuscation (base64 decode), YARA matching, taint analysis |
+| `compact_passes_test.go` | 7 functions | countArgs, simplifyExpressions (13 rules), CSE, enum reconstruction, null-safety, local type inference, SetMaxStepsPerEmitter |
+| `arm64_decoder_test.go` | 3 functions | isLDURH (2 valid + 3 invalid), ADD/SUB reserved shift |
+| `blr_signal_regression_test.go` | 3 functions | BLR resolution rate threshold (≥35%), signal output existence + entry counts, decompiler feature presence |
+
+Integration tests require `AOTOPSY_TEST_SAMPLE_ARM64` env var (~108s total).
+
+### PR #2 Merge (tfriedel)
+
+Merged PR #2 "Fix ROData string extraction for no-compressed-pointers (desktop) AOT".
+Conflicts resolved in `fill.go` (dataImageObjStart comments, extractRODataStrings
+alignShift) and `helpers.go` (isStringCID comment + VmRefCID fallback). Both
+fixes compatible: PR uses dataImageAlignment for image base, we use
+dartVersionAtLeast for version cutoff.
+
+### Repo State
+
+- HEAD: latest commit on future-works branch
+- Branch: future-works (tracking origin/future-works)
+- Pushed to origin
+- All tests pass (220 test functions)
+- BLR: 45% (3.9.2 ARM64) — up from 39% in previous session
+- 8 version/arch combinations verified
+
+### Remaining BLR Limitations (genuine data limitations)
+
+| Category | Count | Why unresolved | What would help |
+|---|---|---|---|
+| object_field | 1460 | VM Code objects in PP have no names in snapshot data. VM snapshot Code cluster not parsed. | Parse VM snapshot Code cluster, or emulation |
+| GDT (X30) | 1204 | Receiver class ID unknown (Top from argument/stack). Type narrowing doesn't fire (CMP rarely for class ID). | Emulation or Frida runtime type dump |
+| none (X9) | 257 | Register X9 not tracked by typetrack (not arg reg, not PP/THR). | Deeper register tracking |
+
+### Blutter Comparison (updated)
+
+Blutter does NOT resolve BLR to target function names. Blutter emits
+`GDT[cid_x0 + offset]()` — same as AOTopsy's selector offset scan.
+AOTopsy is ahead: 45% BLR resolution vs Blutter's 0%.
+
+Blutter compiles Dart SDK from source for each version, giving full VM API
+access. But it does not use this access for BLR resolution. AOTopsy achieves
+45% purely from static analysis of the snapshot binary.

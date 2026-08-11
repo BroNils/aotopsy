@@ -191,7 +191,8 @@ func cmdDecompileNative(args []string) error {
 	}
 
 	fieldNameResolver := func(classID int, byteOffset int64) string {
-		// Try per-class resolution first (when classID is known)
+		// Try per-class resolution first (when classID is known).
+		// classID can come from ReceiverClassID (A2) or from typetrack.
 		if classID > 0 {
 			if classFields, ok := perClassFieldNames[int32(classID)]; ok {
 				if name, ok2 := classFields[int32(byteOffset)]; ok2 {
@@ -512,6 +513,33 @@ func cmdDecompileNative(args []string) error {
 		return out
 	}
 
+	// A2: Build classByRef and codeRefToReceiverClassID BEFORE buildFuncIR
+	// so that ReceiverClassID can be set inside buildFuncIR.
+	ctEarly := info.Version.CIDs
+	classByRef := make(map[int]cluster.ClassInfo, len(result.Classes))
+	for _, ci := range result.Classes {
+		classByRef[ci.RefID] = ci
+	}
+	byCodeIndexForReceiver := pipeline.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
+	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
+		effectiveClass := funcObj.OwnerRefID
+		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
+			effectiveClass = owner.OwnerRefID
+		}
+		return effectiveClass
+	}
+	codeRefToReceiverClassID := make(map[int]int, len(result.Codes))
+	for _, ce := range result.Codes {
+		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndexForReceiver); ok && owner != nil {
+			classRef := effectiveOwnerClassRef(owner)
+			if classRef > 0 {
+				if ci, ok2 := classByRef[classRef]; ok2 {
+					codeRefToReceiverClassID[ce.RefID] = int(ci.ClassID)
+				}
+			}
+		}
+	}
+
 	buildFuncIR := func(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		funcStart := uint64(r.PCOffset) - codeOff
 		funcEnd := funcStart + uint64(r.Size)
@@ -542,6 +570,24 @@ func cmdDecompileNative(args []string) error {
 		fir.ParamTypeNames = paramTypeNamesFor(r)
 		fir.TypeParamNames = genericParamNamesFor(r)
 		fir.FieldNameResolver = fieldNameResolver
+
+		// A1: Local variable type inference — populate LocalTypeHints from
+		// ParamTypeNames (arg0 → "int", arg1 → "String", etc.).
+		// Also resolve receiver class ID for per-class field name resolution (A2).
+		if len(fir.ParamTypeNames) > 0 {
+			fir.LocalTypeHints = make(map[string]string)
+			for i, typeName := range fir.ParamTypeNames {
+				if typeName != "" {
+					fir.LocalTypeHints[fmt.Sprintf("arg%d", i)] = typeName
+				}
+			}
+		}
+		// A2: Set ReceiverClassID from codeRefToReceiverClassID map.
+		if r.RefID >= 0 {
+			if cid, ok := codeRefToReceiverClassID[r.RefID]; ok && cid > 0 {
+				fir.ReceiverClassID = cid
+			}
+		}
 		if len(closureParents) > 0 && r.RefID >= 0 {
 			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
 			if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok {
@@ -734,10 +780,6 @@ func cmdDecompileNative(args []string) error {
 	// more level to wrapped_class, mirroring internal/funcdiff's owner
 	// resolution) -> ClassInfo.LibraryRefID -> Library.url string.
 	ct := info.Version.CIDs
-	classByRef := make(map[int]cluster.ClassInfo, len(result.Classes))
-	for _, ci := range result.Classes {
-		classByRef[ci.RefID] = ci
-	}
 	// Resolved via pipeline.ResolveCodeOwner rather than trusting
 	// ce.OwnerRef directly -- Code.OwnerRef is confirmed unreliable on
 	// some real snapshots (Dart 3.7.0 x86_64: ~5.4% of functions get a
@@ -749,17 +791,6 @@ func cmdDecompileNative(args []string) error {
 		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndex); ok {
 			codeOwnerFunc[ce.RefID] = owner.RefID
 		}
-	}
-	// effectiveOwnerClassRef resolves a Function NamedObject's real owner
-	// Class ref, hopping one level through PatchClass when present
-	// (mirrors internal/funcdiff's resolveEffectiveOwnerName, but returns
-	// the ref itself rather than a resolved name string).
-	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
-		effectiveClass := funcObj.OwnerRefID
-		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ct.PatchClass {
-			effectiveClass = owner.OwnerRefID
-		}
-		return effectiveClass
 	}
 	libraryURLForClassRef := func(classRef int) string {
 		classInfo, ok := classByRef[classRef]

@@ -65,6 +65,7 @@ type Block struct {
 	Instrs  []Instr
 	Succs   []Succ
 	IsTerm  bool // ends in RET or a branch out of the function
+	Preds   []int // predecessor block IDs (computed by ComputePreds)
 }
 
 // FuncIR is one function's arch-neutral intermediate representation, the
@@ -202,6 +203,19 @@ type FuncIR struct {
 	// `switch (index) { case 0: ... }` instead of a comment.
 	// Populated by the caller from jump-table TypedData in the object pool.
 	SwitchCases []SwitchCase `json:"-"`
+
+	// LocalTypeHints maps register/local names to inferred Dart type names.
+	// Populated by the caller from typetrack results (KnownClass → class name)
+	// or from ParamTypeNames. When non-nil, the emitter annotates local
+	// variable declarations with their inferred type.
+	// Key format: "arg0", "arg1", "local_8", "local_m16", "t1", "x0", etc.
+	// Value: Dart type name like "int", "String", "List", "MyClass".
+	LocalTypeHints map[string]string `json:"-"`
+
+	// ReceiverClassID is the KnownClass ID of the receiver (arg0/this) for
+	// instance methods, resolved from typetrack's FuncOwnerClass. When > 0,
+	// FieldNameResolver can use it for per-class field name resolution.
+	ReceiverClassID int `json:"-"`
 }
 
 // SwitchCase is one case in a recovered switch dispatch.
@@ -339,6 +353,21 @@ func newFuncIR(name string, entryVA uint64) *FuncIR {
 func (f *FuncIR) addBlock(b Block) {
 	f.blockByVA[b.StartVA] = len(f.Blocks)
 	f.Blocks = append(f.Blocks, b)
+}
+
+// ComputePreds populates Preds for each block from Succs.
+// Must be called after all blocks and successors are finalized.
+func (f *FuncIR) ComputePreds() {
+	for i := range f.Blocks {
+		f.Blocks[i].Preds = nil
+	}
+	for i := range f.Blocks {
+		for _, s := range f.Blocks[i].Succs {
+			if s.BlockID >= 0 && s.BlockID < len(f.Blocks) {
+				f.Blocks[s.BlockID].Preds = append(f.Blocks[s.BlockID].Preds, i)
+			}
+		}
+	}
 }
 
 // SymbolLookup resolves an absolute VA to a symbol name, if known.

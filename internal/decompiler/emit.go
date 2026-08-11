@@ -199,6 +199,7 @@ func (e *emitter) annotateBlockTry(id, indent int) {
 // loop headers (blocks that are targets of back-edges) and wraps loop
 // bodies in `while (true) { ... break; }` instead of bare `continue;`.
 func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact {
+	fir.ComputePreds() // A3: compute predecessors for if/else inlining
 	e := &emitter{
 		fir:        fir,
 		symbols:    symbols,
@@ -345,7 +346,18 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		asyncPrefix = "async* "
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
-	e.lines = append(e.lines, fmt.Sprintf("%sdynamic %s(%s) {", asyncPrefix, sig, strings.Join(argList, ", ")))
+	// A1: Use LocalTypeHints for typed return when available, otherwise
+	// infer from function name heuristic.
+	returnType := "dynamic"
+	if fir.LocalTypeHints != nil {
+		if hint, ok := fir.LocalTypeHints["return"]; ok && hint != "" {
+			returnType = hint
+		}
+	}
+	if returnType == "dynamic" {
+		returnType = inferReturnTypeFromName(fir.Name)
+	}
+	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
 	e.state.Regs[fir.ThreadReg] = "THR"
 	e.state.Regs[fir.PoolReg] = "PP"
 
@@ -478,8 +490,18 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = enumReconstruction(source)
 	// Null-safety annotation (detect null-check patterns)
 	source = nullSafetyAnnotation(source)
-	// Local variable type inference (heuristic)
+	// A1: Local variable type inference — use LocalTypeHints from typetrack
+	// (IR-level) plus heuristic text-based inference from ParamTypeNames.
 	source = localTypeInference(source, fir.ParamTypeNames)
+	if fir.LocalTypeHints != nil {
+		source = applyLocalTypeHints(source, fir.LocalTypeHints)
+	}
+	// A5: For-loop recovery (post-emit text pass: while(cond) → for(init;cond;incr))
+	source = forLoopRecovery(source)
+	// A6: Null-check hoisting (annotate null-check guards at function entry)
+	source = nullCheckHoisting(source)
+	// A7: Range-guard merging (merge consecutive range checks)
+	source = rangeGuardMerging(source)
 	// Arg renaming with type hints (from flutterdec naming.rs)
 	source = applyArgRenaming(source, fir.ParamTypeNames)
 	source = applyNamingPass(source, fir)
@@ -619,8 +641,12 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 // (which have already fired for this block).
 func (e *emitter) emitBlockBody(id, indent, depth int) {
 	blk := &e.fir.Blocks[id]
-	// Emit block label for goto targets (non-last branches).
-	e.emit(indent, "block_%d:;", id)
+	// A3: Only emit block label if this block has multiple predecessors
+	// (it's a goto target). Single-pred blocks inlined into if/else
+	// don't need labels.
+	if len(blk.Preds) > 1 {
+		e.emit(indent, "block_%d:;", id)
+	}
 	e.annotateInlineFrames(blk.StartVA, indent)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
@@ -642,21 +668,48 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			if isLast {
 				e.emitBranch(blk, ins, indent, depth)
 			} else {
-				// Non-last branch: emit a real conditional goto.
-				// This preserves the control-flow edge that was previously
-				// silently dropped as a comment.
+				// A3: Non-last branch — emit real if/else when possible.
+				// If the taken successor has only this block as predecessor,
+				// inline its body. Otherwise fall back to goto.
 				cond, ok := e.buildCondition(ins)
 				if !ok {
 					cond = "/* cond */"
 				}
 				var takenID = -1
+				var fallID = -1
 				for _, s := range blk.Succs {
 					if s.Cond == "T" {
 						takenID = s.BlockID
-						break
+					} else if s.Cond == "F" || s.Cond == "" {
+						fallID = s.BlockID
 					}
 				}
-				if takenID >= 0 {
+				// Check if taken successor can be inlined (only 1 pred = this block, not yet visited)
+				canInlineTaken := takenID >= 0 && takenID < len(e.fir.Blocks) &&
+					len(e.fir.Blocks[takenID].Preds) == 1 && e.visits[takenID] == 0
+				canInlineFall := fallID >= 0 && fallID < len(e.fir.Blocks) &&
+					len(e.fir.Blocks[fallID].Preds) == 1 && e.visits[fallID] == 0
+
+				if canInlineTaken && canInlineFall {
+					// Both branches can be inlined — emit real if/else
+					e.emit(indent, "if (%s) {", cond)
+					e.emitBlockBody(takenID, indent+1, depth+1)
+					e.visits[takenID]++
+					e.emit(indent, "} else {")
+					e.emitBlockBody(fallID, indent+1, depth+1)
+					e.visits[fallID]++
+					e.emit(indent, "}")
+				} else if canInlineTaken {
+					// Only taken branch can be inlined
+					e.emit(indent, "if (%s) {", cond)
+					e.emitBlockBody(takenID, indent+1, depth+1)
+					e.visits[takenID]++
+					e.emit(indent, "}")
+					if fallID >= 0 {
+						e.emit(indent, "goto block_%d;", fallID)
+					}
+				} else if takenID >= 0 {
+					// Fall back to goto
 					e.emit(indent, "if (%s) { goto block_%d; }", cond, takenID)
 				} else {
 					e.emit(indent, "// non-last branch (cond=%s %s)", ins.CondKind, ins.CondOp)
@@ -722,11 +775,19 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		e.emit(indent, "continue;")
 		return
 	}
-	// Fase 7 TASK 2: if target is a loop header and not yet visited,
-	// emit while (true) { wrapper.
+	// A4: While-loop pattern recovery. If target is a loop header and not
+	// yet visited, try to extract the loop condition from the header's
+	// branch instruction. Emit `while (cond) { ... }` instead of
+	// `while (true) { ... }` when the condition can be recovered.
 	isLoopHeader := e.loopHeaders[id]
 	if isLoopHeader && e.visits[id] == 0 {
-		e.emit(indent, "while (true) {")
+		// A4: Try while-loop condition (for-loop is a post-emit pass)
+		loopCond := e.extractLoopCondition(id)
+		if loopCond != "" {
+			e.emit(indent, "while (%s) {", loopCond)
+		} else {
+			e.emit(indent, "while (true) {")
+		}
 		if e.canInline(id, depth) {
 			e.emitBlock(id, indent+1, depth+1)
 			e.emit(indent, "}")
@@ -989,4 +1050,323 @@ func (e *emitter) appendHelperFunctions() {
 			}
 		}
 	}
+}
+
+// extractLoopCondition tries to recover the loop condition from a loop
+// header block's branch instruction. Returns "" if the condition cannot
+// be recovered (falls back to `while (true)`).
+//
+// Pattern: loop header block ends with a conditional branch where:
+//   - taken (T) successor is NOT a back-edge (continues into loop body)
+//   - fall-through (F) successor exits the loop (not a back-edge)
+//
+// If the taken branch continues the loop, the condition is used as-is.
+// If the taken branch EXITS the loop (taken is back-edge or exit), the
+// condition is inverted (negated) so `while (!cond)` becomes `while (cond)`.
+//
+// Stack overflow checks (CMP SP, THR.stack_limit) are skipped — they are
+// not real loop conditions.
+func (e *emitter) extractLoopCondition(id int) string {
+	if id < 0 || id >= len(e.fir.Blocks) {
+		return ""
+	}
+	blk := &e.fir.Blocks[id]
+	if len(blk.Instrs) == 0 {
+		return ""
+	}
+	lastInst := blk.Instrs[len(blk.Instrs)-1]
+	if lastInst.Op != OpBranch {
+		return ""
+	}
+	// Build the condition expression
+	cond, ok := e.buildCondition(lastInst)
+	if !ok || cond == "" || cond == "/* cond */" {
+		return ""
+	}
+	// Skip stack overflow checks — they are not real loop conditions.
+	// Pattern: "x15 <= THR.f56" or similar comparisons involving THR
+	// and the stack pointer register.
+	if strings.Contains(cond, "THR.") && (strings.Contains(cond, "x15") ||
+		strings.Contains(cond, "SP") || strings.Contains(cond, "stack_limit")) {
+		return ""
+	}
+
+	// Determine which successor continues the loop vs exits.
+	// If taken (T) continues into loop body (not a back-edge), cond is as-is.
+	// If taken (T) exits (back-edge or exit block), invert cond.
+	takenID := -1
+	for _, s := range blk.Succs {
+		if s.Cond == "T" {
+			takenID = s.BlockID
+		}
+	}
+
+	// Check if taken successor is a back-edge (exits loop by branching back)
+	takenIsBackEdge := false
+	if takenID >= 0 && takenID < len(e.fir.Blocks) {
+		target := &e.fir.Blocks[takenID]
+		if target.StartVA <= blk.StartVA {
+			takenIsBackEdge = true
+		}
+	}
+
+	if takenIsBackEdge {
+		// Taken = back-edge (exit loop), fall-through = continue.
+		// Invert the condition: while(!cond) means "continue while cond is false"
+		// → emit while(invert(cond))
+		return invertCondition(cond)
+	}
+
+	// Taken = continue loop (forward edge). Condition is as-is.
+	// But verify taken is NOT a back-edge.
+	if takenID >= 0 && takenID < len(e.fir.Blocks) {
+		target := &e.fir.Blocks[takenID]
+		if target.StartVA <= blk.StartVA {
+			return "" // do-while pattern
+		}
+	}
+
+	return cond
+}
+
+// invertCondition negates a Dart boolean condition expression.
+// Handles simple comparisons by flipping the operator, and wraps
+// complex expressions with !(...).
+func invertCondition(cond string) string {
+	// Try to flip comparison operators
+	flips := map[string]string{
+		"==": "!=",
+		"!=": "==",
+		"<":  ">=",
+		">=": "<",
+		">":  "<=",
+		"<=": ">",
+	}
+	for op, inv := range flips {
+		if idx := strings.Index(cond, " "+op+" "); idx >= 0 {
+			return cond[:idx] + " " + inv + " " + cond[idx+len(op)+2:]
+		}
+	}
+	// Can't flip — wrap with !()
+	return "!(" + cond + ")"
+}
+
+// extractIterVarFromCond extracts the iterator variable name from a condition
+// like "local_8 < 10" or "local_m8 != arg0".
+func extractIterVarFromCond(cond string) string {
+	// Look for local_NN or local_mNN at the start of the condition
+	for _, op := range []string{" < ", " <= ", " != ", " > ", " >= ", " == "} {
+		idx := strings.Index(cond, op)
+		if idx > 0 {
+			left := strings.TrimSpace(cond[:idx])
+			if strings.HasPrefix(left, "local_") {
+				return left
+			}
+		}
+	}
+	return ""
+}
+
+// inferReturnTypeFromName infers a Dart function's return type from its name
+// using Dart naming conventions. Returns "dynamic" when unknown.
+//
+// Conventions:
+//   - "get:foo" → dynamic (getter, type depends on field — can't infer from name alone)
+//   - "set:foo" → void (setter)
+//   - "is_foo" / "isFoo" → bool (type check / predicate)
+//   - "toFoo" / "to_Foo" → dynamic (conversion, type depends)
+//   - "operator ==" → bool
+//   - "operator <" → bool
+//   - "operator +" → same as receiver (dynamic)
+//   - "hashCode" → int
+//   - "toString" → String
+//   - "noSuchMethod" → dynamic
+//   - "runtimeType" → Type
+//   - "length" → int
+//   - "isEmpty" → bool
+//   - "isNotEmpty" → bool
+//   - "contains" → bool
+//   - "startsWith" → bool
+//   - "endsWith" → bool
+//   - "indexOf" → int
+//   - "lastIndexOf" → int
+//   - "compareTo" → int
+//   - "forEach" → void
+//   - "add" → void (List.add)
+//   - "remove" → bool (List.remove) or void (Set.remove)
+//   - "clear" → void
+//   - "sort" → void
+//   - "map" → Iterable
+//   - "where" → Iterable
+//   - "filter" → Iterable
+//   - "fold" → dynamic
+//   - "reduce" → dynamic
+//   - "any" → bool
+//   - "every" → bool
+//   - "firstWhere" → dynamic
+//   - "lastWhere" → dynamic
+//   - "singleWhere" → dynamic
+//   - "elementAt" → dynamic
+//   - "getRange" → Iterable
+//   - "sublist" → List
+//   - "join" → String
+//   - "toString" → String
+//   - "hashCode" → int
+func inferReturnTypeFromName(name string) string {
+	// Strip library/class prefix for pattern matching
+	short := name
+	if idx := strings.LastIndex(short, "."); idx >= 0 {
+		short = short[idx+1:]
+	}
+	// Strip @NNNNNN suffix (library hash)
+	if idx := strings.Index(short, "@"); idx >= 0 {
+		short = short[:idx]
+	}
+	// Strip _NNNN suffix (function hash)
+	if idx := strings.LastIndex(short, "_"); idx >= 0 {
+		suffix := short[idx+1:]
+		if isAllDigits(suffix) && len(suffix) >= 4 {
+			short = short[:idx]
+		}
+	}
+
+	// Check specific method names
+	switch short {
+	case "set", "set:":
+		return "void"
+	case "toString", "toStringDeep", "toStringShallow":
+		return "String"
+	case "hashCode", "length", "offset", "index", "count", "size",
+		"numberOfArguments", "parameterCount", "arity",
+		"microsecondsSinceEpoch", "millisecondsSinceEpoch":
+		return "int"
+	case "isEmpty", "isNotEmpty", "isFinite", "isInfinite", "isNaN",
+		"isEven", "isOdd", "isLowerCase", "isUpperCase",
+		"contains", "startsWith", "endsWith", "matches",
+		"any", "every", "equals", "isEqual",
+		"hasNext", "hasMore", "isRegistered", "isAttached",
+		"isMounted", "isCurrent", "isDisposed", "isListening":
+		return "bool"
+	case "forEach", "add", "clear", "sort", "removeWhere",
+		"retainWhere", "insertAll", "setAll", "fillRange",
+		"setRange", "writeTo", "writeAsString":
+		return "void"
+	case "map", "where", "filter", "expand", "skip", "take",
+		"getRange", "followedBy", "distinct", "reversed":
+		return "Iterable"
+	case "sublist", "toList":
+		return "List"
+	case "join":
+		return "String"
+	case "runtimeType":
+		return "Type"
+	case "first", "last", "single":
+		return "dynamic" // element type, can't infer from name
+	case "firstWhere", "lastWhere", "singleWhere",
+		"elementAt", "fold", "reduce", "min", "max":
+		return "dynamic"
+	case "indexOf", "lastIndexOf", "compareTo":
+		return "int"
+	case "keys":
+		return "Iterable"
+	case "values":
+		return "Iterable"
+	case "entries":
+		return "Iterable"
+	case "putIfAbsent":
+		return "dynamic"
+	case "containsKey", "containsValue":
+		return "bool"
+	}
+
+	// Check prefixes
+	if strings.HasPrefix(short, "get:") {
+		return "dynamic" // getter — type depends on field
+	}
+	if strings.HasPrefix(short, "set:") {
+		return "void"
+	}
+	if strings.HasPrefix(short, "is") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
+		return "bool"
+	}
+	if strings.HasPrefix(short, "has") && len(short) > 3 && short[3] >= 'A' && short[3] <= 'Z' {
+		return "bool"
+	}
+	if strings.HasPrefix(short, "can") && len(short) > 3 && short[3] >= 'A' && short[3] <= 'Z' {
+		return "bool"
+	}
+	if strings.HasPrefix(short, "to") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
+		// toList, toSet, toMap, etc.
+		suffix := short[2:]
+		switch suffix {
+		case "String":
+			return "String"
+		case "List":
+			return "List"
+		case "Set":
+			return "Set"
+		case "Map":
+			return "Map"
+		case "Int":
+			return "int"
+		case "Double":
+			return "double"
+		case "Bool":
+			return "bool"
+		}
+		return "dynamic"
+	}
+	if strings.HasPrefix(short, "as") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
+		// asString, asInt, etc.
+		suffix := short[2:]
+		switch suffix {
+		case "String":
+			return "String"
+		case "Int":
+			return "int"
+		case "Double":
+			return "double"
+		case "Bool":
+			return "bool"
+		case "List":
+			return "List"
+		case "Map":
+			return "Map"
+		case "Set":
+			return "Set"
+		}
+		return "dynamic"
+	}
+	if strings.HasPrefix(short, "operator ") {
+		op := strings.TrimSpace(strings.TrimPrefix(short, "operator "))
+		switch op {
+		case "==", "!=", "<", "<=", ">", ">=":
+			return "bool"
+		case "[]", "[]=":
+			return "dynamic"
+		case "~/", "%":
+			return "int"
+		case "&&", "||":
+			return "bool"
+		case "unary-":
+			return "dynamic" // same type as receiver
+		case "~":
+			return "int"
+		}
+		return "dynamic"
+	}
+
+	return "dynamic"
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

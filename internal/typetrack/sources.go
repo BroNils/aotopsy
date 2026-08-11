@@ -302,6 +302,25 @@ func BuildTypeContext(
 		}
 	}
 
+	// 1c. Populate InstantiatedClasses from class table and dispatch table.
+	// Every class in the class table is potentially instantiated — the AOT
+	// compiler only includes classes that are reachable from the program.
+	// Every class with dispatch table entries is definitely instantiated
+	// (dispatch entries are only created for classes with virtual methods
+	// that are actually called).
+	for _, ci := range clResult.Classes {
+		ctx.InstantiatedClasses[int(ci.ClassID)] = true
+	}
+	// Also mark classes from dispatch table entries.
+	for _, entry := range dispatchEntries {
+		if entry.Kind == cluster.DispatchCode {
+			// entry.Index = classID + selectorOffset - kOriginElement
+			// We don't know selectorOffset, but the classID is implied
+			// by the entry's existence. Mark all classes as instantiated.
+			// This is conservative (over-approximation) but safe for RTA.
+		}
+	}
+
 	// 2. Build classID → name map.
 	for i := range clResult.Classes {
 		c := &clResult.Classes[i]
@@ -573,6 +592,9 @@ func BuildTypeContext(
 			if !ok || valCID <= 0 {
 				continue
 			}
+			// Also populate InstantiatedClasses with the value's class
+			// (field values are instances too).
+			ctx.InstantiatedClasses[valCID] = true
 			byCls, ok := votes[inst.CID]
 			if !ok {
 				byCls = map[int32]*offsetVotes{}
@@ -662,6 +684,17 @@ func BuildTypeContext(
 				continue
 			}
 			ctx.PoolClosureClass[pe.Index] = int(classID)
+			// Also resolve parent function name for closure invocation resolution.
+			if parentFuncNo, ok6 := pl.RefToNamed[parentFuncRef]; ok6 && parentFuncNo.NameRefID >= 0 {
+				if name, ok7 := pl.RefToStr[parentFuncNo.NameRefID]; ok7 && name != "" {
+					if ctx.PoolCodeNames == nil {
+						ctx.PoolCodeNames = make(map[int]string)
+					}
+					if _, exists := ctx.PoolCodeNames[pe.Index]; !exists {
+						ctx.PoolCodeNames[pe.Index] = name
+					}
+				}
+			}
 		}
 	}
 

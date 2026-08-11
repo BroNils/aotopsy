@@ -277,7 +277,11 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	}
 	var resolver func(int64, int64) string
 	if fir.FieldNameResolver != nil {
-		resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(0, off) }
+		// A2: Pass ReceiverClassID to FieldNameResolver for per-class
+		// field name resolution. When ReceiverClassID > 0, the resolver
+		// can use the per-class field name map instead of the global map.
+		rcid := fir.ReceiverClassID
+		resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
 	}
 	return fieldExpr(baseExpr, op.memDisp, resolver)
 }
@@ -636,7 +640,8 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	if op.hasDisp {
 		var resolver func(int64, int64) string
 		if fir.FieldNameResolver != nil {
-			resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(0, off) }
+			rcid := fir.ReceiverClassID
+			resolver = func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
 		}
 		lhs = fieldExpr(baseExpr, op.memDisp, resolver)
 	} else if !isSimpleLvalueExpr(baseExpr) {
