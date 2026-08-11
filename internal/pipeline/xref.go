@@ -21,8 +21,13 @@ type StringValueXref struct {
 }
 
 // FieldAccessorXref maps a class+field offset to all functions that access it.
+//
+// ClassID is part of the record, not just the name: two classes in different
+// libraries routinely share a short name (State, Node, Entry), so the name
+// alone identifies neither the row nor a stable sort order.
 type FieldAccessorXref struct {
 	ClassName  string   `json:"class_name"`
+	ClassID    int      `json:"class_id"`
 	ByteOffset int      `json:"byte_offset"`
 	FieldName  string   `json:"field_name,omitempty"`
 	Readers    []string `json:"readers"`

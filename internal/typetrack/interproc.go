@@ -295,8 +295,15 @@ func RunInterprocedural(
 
 		// Re-run intra-procedural analysis with updated parameter types.
 		// M-6 fix: only iterate the map for the active architecture.
+		//
+		// Sorted, for the same reason as the initial pass above:
+		// AnalyzeFunction writes into the shared TypeContext, so the order
+		// functions are re-analysed in changes what later ones see. Sorting
+		// only the first pass left this one random, and call_edges.jsonl
+		// still differed between runs of the same binary.
 		if isARM64 {
-			for name, insts := range funcInstsARM64 {
+			for _, name := range sortedKeysInsts(funcInstsARM64) {
+				insts := funcInstsARM64[name]
 				entry := calleeParamTypes[name]
 				if allTop(entry) {
 					for i := range entry {
@@ -314,7 +321,8 @@ func RunInterprocedural(
 				result.Functions[name].Intra = intra
 			}
 		} else {
-			for name, insts := range funcInstsX86 {
+			for _, name := range sortedKeysX86(funcInstsX86) {
+				insts := funcInstsX86[name]
 				entry := calleeParamTypes[name]
 				if allTop(entry) {
 					for i := range entry {

@@ -248,11 +248,30 @@ func runTypeInference(
 
 	// Build class name → class ID lookup from ClassIDToName.
 	// ClassIDToName is built from ClassInfo.ClassID (Dart runtime CID).
+	//
+	// Class names are NOT unique -- a Flutter build has many same-named
+	// classes across libraries (State, Node, Entry, _Sink...). Iterating the
+	// map and letting the last writer win therefore picked a random CID for
+	// those names on every run. That CID becomes the receiver type
+	// (ctx.FuncOwnerClass) seeded into the intra-procedural analysis, so a
+	// dispatch-table BLR in e.g. TextStyle.compareTo resolved to a target in
+	// one run and stayed unresolved in the next.
+	//
+	// Ambiguous names are dropped instead: no receiver type at all is
+	// correct-but-weaker, whereas a coin-flip between two classes is wrong
+	// half the time and unreproducible either way.
+	nameCount := make(map[string]int, len(ctx.ClassIDToName))
+	for _, name := range ctx.ClassIDToName {
+		if name != "" {
+			nameCount[name]++
+		}
+	}
 	classNameToID := make(map[string]int, len(ctx.ClassIDToName))
 	for cid, name := range ctx.ClassIDToName {
-		if name != "" {
-			classNameToID[name] = cid
+		if name == "" || nameCount[name] > 1 {
+			continue
 		}
+		classNameToID[name] = cid
 	}
 
 	// Write dispatch table for debugging.
@@ -481,6 +500,7 @@ func writeFieldAccessorXref(
 	for k := range keys {
 		e := FieldAccessorXref{
 			ClassName:  ctx.ClassIDToName[k.classID],
+			ClassID:    k.classID,
 			ByteOffset: int(k.offset),
 			Readers:    sortedNames(readers[k]),
 			Writers:    sortedNames(writers[k]),
@@ -493,10 +513,17 @@ func writeFieldAccessorXref(
 		}
 		entries = append(entries, e)
 	}
+	// Sort by (name, class ID, offset). Class ID is what makes this a TOTAL
+	// order: without it, two distinct classes sharing a name produced ties,
+	// sort.Slice is not stable, and the file came out in a different order on
+	// every run.
 	sort.Slice(entries, func(i, j int) bool {
 		a, b := entries[i].(FieldAccessorXref), entries[j].(FieldAccessorXref)
 		if a.ClassName != b.ClassName {
 			return a.ClassName < b.ClassName
+		}
+		if a.ClassID != b.ClassID {
+			return a.ClassID < b.ClassID
 		}
 		return a.ByteOffset < b.ByteOffset
 	})

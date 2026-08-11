@@ -1,0 +1,35 @@
+{
+  "sample": "compare_sample_arm64",
+  "input_sha256": "f70c4ff9b5c5b84fa34fed0d0a968b78037603bfd8a3f6d3b82776afb8dba774",
+  "dart_version": "3.9.2",
+  "func_count": 8045,
+  "class_count": 1859,
+  "lines": {
+    "address_callers_xref.jsonl": 4812,
+    "call_edges.jsonl": 39853,
+    "classes.jsonl": 1859,
+    "dispatch_table.jsonl": 28930,
+    "field_accessor_xref.jsonl": 1706,
+    "functions.jsonl": 8045,
+    "index.jsonl": 8045,
+    "pool_immediates.jsonl": 165,
+    "string_refs.jsonl": 2758,
+    "string_value_xref.jsonl": 1400,
+    "typetrack_report.json": 10,
+    "unresolved_thr.jsonl": 137
+  },
+  "sha256": {
+    "address_callers_xref.jsonl": "cfa4a50f35e29a6a6e981ffdca200d6fe14e4503d6426da0441e5cb451342464",
+    "call_edges.jsonl": "d6b16e7e460a62523072e72e8cbaf515df613fa46240949f36a39f962c6f1905",
+    "classes.jsonl": "b7c0de322fd5c770e11852194bcc2d6a05b7b54bc5db3b8bf177d057594cc2eb",
+    "dispatch_table.jsonl": "939a8a26d8119057db0148f0d574222d301de6328f71a53b41e12c4d5d8d16eb",
+    "field_accessor_xref.jsonl": "730543e49bd1859b9f617bc8de7b1f0a8c7e2f0d19dbe8876bbbe379606cf096",
+    "functions.jsonl": "86831fc62eafa1a472edd0bc93ce8ee484d5185f0c97e429a750b1bc3fa6f6b5",
+    "index.jsonl": "8b8072cbded3abceb921ad27d9397112ebd3995445e169ff501156f452f93cf7",
+    "pool_immediates.jsonl": "e74928179374c3bfda1f765827f715603e7a5169235df35cdbca18cf8bc9360a",
+    "string_refs.jsonl": "c8f19b8e67f630ac93551db5476f5fb515f782c48892e41d474eaa9928952c59",
+    "string_value_xref.jsonl": "8636190c0f61106b440a65577e510b63bab7f817510177ffa9450b3efb718a04",
+    "typetrack_report.json": "a8ab4a0507e85114e67374594b715535088fe8782a0f88268e5c54e4248a31f8",
+    "unresolved_thr.jsonl": "802c434e42294005cc24402e3506038b61430bbf22a2942c3c7dc97dba106bc2"
+  }
+}

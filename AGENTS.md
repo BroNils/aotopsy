@@ -181,6 +181,50 @@ kalau file sudah berubah ia tetap menulis, dan CRLF/escape diam-diam rusak.
 - **Root cause analysis harus mendalam.** Gunakan gh search + gh api ke SDK source untuk verify setiap assumption. Jangan menebak. Contoh: ObjectStoreAOTFieldCount salah karena hanya count RW fields, padahal ada CW, FW, LAZY_CORE, LAZY_FFI, dll.
 - **"Data limitation" bukan akhir riset.** Jika BLR rendah, cari alternative resolution paths (PP-loaded Code, THR stubs, object field calls). Jangan berhenti di "dispatch table too small".
 
+## Dua gate yang harus tetap hijau
+
+Keduanya ada karena bug yang lolos berbulan-bulan: indeks object pool meleset
+dua slot, sementara test regresi hanya mengecek rentang longgar ("50-300
+signal", "20000-50000 edge"). Total tetap masuk akal, tiap barisnya salah.
+
+### 1. Golden output (`internal/pipeline/golden_test.go`)
+
+SHA-256 per file output dibandingkan dengan rekaman di
+`internal/pipeline/testdata/golden/`. Kuncinya SHA-256 binary input, jadi
+menunjuk `libapp.so` lain akan SKIP (bukan gagal).
+
+```bash
+go test ./internal/pipeline/ -run Golden                    # verifikasi
+AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # rekam ulang
+```
+
+Kalau gagal: **jangan langsung rekam ulang**. Cari dulu apa yang berubah;
+rekam ulang hanya setelah perubahan itu dipahami dan disengaja.
+
+`TestGoldenOutputIsDeterministic` menjalankan pipeline dua kali dan menuntut
+byte identik — golden tidak ada artinya kalau outputnya sendiri goyang. Setiap
+`for k := range someMap` yang menulis ke state bersama, atau `sort.Slice`
+dengan kunci yang tidak total, akan tertangkap di sini.
+
+### 2. SDK drift (`tools/extract_thr.go`)
+
+Tabel offset Thread dan `ObjectStoreAOTFieldCount` tidak bisa divalidasi oleh
+test lokal apa pun: offset yang salah menghasilkan anotasi yang kelihatan
+wajar (`THR.allocate_object_stub`) tapi menunjuk field lain. Satu-satunya
+kebenaran adalah header SDK yang menghasilkannya.
+
+```bash
+go run tools/extract_thr.go -check              # tabel THR vs SDK
+go run tools/extract_thr.go -check-objectstore  # jumlah field ObjectStore vs SDK
+go run tools/extract_thr.go -write              # tulis ulang tabel dari SDK
+AOTOPSY_TEST_SDK=1 go test ./internal/disasm/ -run MatchSDK   # keduanya, sebagai test
+```
+
+Tabel THR di `internal/disasm/thrfields*.go` adalah kode generated: ubah lewat
+`-write`, jangan diketik tangan. Field yang memang tidak diekspor SDK
+(`empty_array`, `dynamic_type`, dst — lihat `handDerivedFields`) didaftar
+eksplisit di tool, bukan ditoleransi diam-diam.
+
 ## Source of Truth: SDK Verification
 
 Two techniques for verifying against Dart SDK source:

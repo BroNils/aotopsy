@@ -5,18 +5,30 @@
 //
 //	go run tools/extract_thr.go -tag 3.9.2 -arch x64 -compressed
 //	go run tools/extract_thr.go -tag 2.12.0 -arch arm64 -nocompressed
-//	go run tools/extract_thr.go -all  # extract all known versions
+//	go run tools/extract_thr.go -all    # extract all known versions
+//	go run tools/extract_thr.go -check  # verify the committed tables
 //
 // Outputs Go map literals suitable for pasting into thrfields.go.
+//
+// -check re-extracts every target and compares it against the tables
+// committed in internal/disasm/thrfields*.go, exiting non-zero on any
+// unexplained difference. Without it, a new Dart SDK version silently
+// shifts Thread offsets and every THR annotation the tool prints becomes
+// wrong with no signal at all -- these tables cannot be validated by any
+// amount of local testing, only against the SDK that produced them.
 package main
 
 import (
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -50,6 +62,9 @@ var allTargets = []extractTarget{
 	{"3.11.0", "arm64", true, true},
 	{"3.12.2", "arm64", true, true},
 	// ARM64 + non-compressed + PRODUCT (v2.x)
+	{"2.10.0", "arm64", false, true},
+	// 3.x desktop AOT (uncompressed) -- same reason as the x64 entry below.
+	{"3.9.2", "arm64", false, true},
 	{"2.12.0", "arm64", false, true},
 	{"2.13.0", "arm64", false, true},
 	{"2.14.0", "arm64", false, true},
@@ -183,12 +198,18 @@ func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 		name   string
 	}
 	seen := map[int]string{} // deduplicate
+	var wbEntries []struct {
+		offset int
+		name   string
+	}
 
 	hasCompressedSections := strings.Contains(header, "DART_COMPRESSED_POINTERS")
 
 	reSingle := regexp.MustCompile(`Thread_(\w+)_offset\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
 	reMulti := regexp.MustCompile(`Thread_(\w+)_offset\s*=\s*$`)
 	reHex := regexp.MustCompile(`^\s*(0x[0-9a-fA-F]+|\d+)\s*;`)
+	reWBArray := regexp.MustCompile(`Thread_write_barrier_wrappers_thread_offset\[\]`)
+	reWBValue := regexp.MustCompile(`-1|0x[0-9a-fA-F]+|\b\d+\b`)
 
 	// runtime_offsets_extracted.h comes in TWO layouts, and the extractor has
 	// to handle both. Verified by fetching the real headers:
@@ -348,6 +369,44 @@ func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 			continue
 		}
 
+		// Write-barrier wrappers are exported as an ARRAY indexed by register
+		// number, not as one scalar per field:
+		//
+		//   AOT_Thread_write_barrier_wrappers_thread_offset[] = {
+		//       0x678, 0x680, ..., -1, -1, -1, 0x6f0, ...};
+		//
+		// -1 means that register has no wrapper. The scalar regexes above
+		// cannot see any of this, so these offsets used to be hand-added to
+		// the ARM64 tables (and were simply missing from the x64 ones).
+		if reWBArray.MatchString(line) {
+			var body strings.Builder
+			for j := i; j < len(lines); j++ {
+				body.WriteString(lines[j])
+				if strings.Contains(lines[j], "}") {
+					break
+				}
+			}
+			// Scan from the opening brace so nothing before it (the type,
+			// the name) is mistaken for an element.
+			text := body.String()
+			if b := strings.Index(text, "{"); b >= 0 {
+				text = text[b+1:]
+			}
+			for reg, v := range reWBValue.FindAllString(text, -1) {
+				if v == "-1" {
+					continue
+				}
+				// Merged after the scan, so an explicitly named scalar field
+				// at the same offset always wins regardless of which appears
+				// first in the header.
+				wbEntries = append(wbEntries, struct {
+					offset int
+					name   string
+				}{parseOffset(v), fmt.Sprintf("wb_wrapper_R%d", reg)})
+			}
+			continue
+		}
+
 		// Try multi-line match
 		if m := reMulti.FindStringSubmatch(line); m != nil {
 			name := m[1]
@@ -365,6 +424,14 @@ func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 				}
 			}
 		}
+	}
+
+	for _, e := range wbEntries {
+		if _, exists := seen[e.offset]; exists {
+			continue
+		}
+		seen[e.offset] = e.name
+		results = append(results, e)
 	}
 
 	return results, nil
@@ -408,6 +475,542 @@ func generateGoMap(tag, arch string, compressed, product bool, entries []struct 
 	return b.String()
 }
 
+// thrTableFiles are the sources holding the committed THR tables.
+var thrTableFiles = []string{
+	"internal/disasm/thrfields.go",
+	"internal/disasm/thrfields_x64.go",
+}
+
+// handDerivedFields are Thread fields that runtime_offsets_extracted.h does
+// NOT export, so -check cannot confirm them and must not fail on them.
+//
+// They are real fields -- runtime/vm/thread.h declares them in
+// CACHED_NON_VM_STUB_LIST / CACHED_VM_OBJECTS_LIST, contiguously and in
+// declaration order right after object_null_/bool_true_/bool_false_ -- but
+// the offsets are only exported for fields the compiler needs, so these were
+// derived by hand from that declaration order.
+//
+// Anything NOT on this list must match the SDK exactly.
+var handDerivedFields = map[string]string{
+	"empty_array":                  "thread.h CACHED_NON_VM_STUB_LIST, follows bool_false_",
+	"empty_type_arguments":         "thread.h CACHED_NON_VM_STUB_LIST, follows empty_array_",
+	"dynamic_type":                 "thread.h CACHED_NON_VM_STUB_LIST, follows empty_type_arguments_",
+	"object_sentinel":              "thread.h CACHED_VM_OBJECTS_LIST",
+	"deferred_marking_stack_block": "thread.h, not exported for the compiler",
+}
+
+// committedNameOverrides maps a generated variable name to the name actually
+// used in internal/disasm. The ARM64 v2.x tables predate the naming
+// convention generateGoMap follows: they omit the "_nocompress" suffix (those
+// versions have no compressed variant at all) and 2.17.6 is spelled "thrV217".
+// Without these, -check would report the tables as "NOT CHECKED" -- i.e.
+// silently unverified, which is the failure mode this tool exists to prevent.
+var committedNameOverrides = map[string]string{
+	"thrV2100_nocompress": "thrV2100",
+	"thrV2120_nocompress": "thrV2120",
+	"thrV2130_nocompress": "thrV2130",
+	"thrV2140_nocompress": "thrV2140",
+	"thrV2150_nocompress": "thrV2150",
+	"thrV2160_nocompress": "thrV2160",
+	"thrV2176_nocompress": "thrV217",
+}
+
+// mapName mirrors generateGoMap's naming so a target can be matched to the
+// committed variable it is supposed to equal.
+func mapName(tag, arch string, compressed, product bool) string {
+	name := "thrV" + strings.ReplaceAll(tag, ".", "")
+	if arch == "x64" {
+		name += "_x64"
+	}
+	if !compressed {
+		name += "_nocompress"
+	}
+	if !product {
+		name += "_nonproduct"
+	}
+	if override, ok := committedNameOverrides[name]; ok {
+		return override
+	}
+	return name
+}
+
+// parseCommittedTables reads `var thrXXX = map[int]string{...}` literals out
+// of the given Go files. Parsing the AST rather than grepping means a
+// reformat, a comment, or a line split cannot quietly change what -check
+// believes is committed.
+func parseCommittedTables(files []string) (map[string]map[int]string, error) {
+	out := map[string]map[int]string{}
+	fset := token.NewFileSet()
+	for _, path := range files {
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+					continue
+				}
+				name := vs.Names[0].Name
+				if !strings.HasPrefix(name, "thrV") {
+					continue
+				}
+				lit, ok := vs.Values[0].(*ast.CompositeLit)
+				if !ok {
+					continue
+				}
+				entries := map[int]string{}
+				for _, el := range lit.Elts {
+					kv, ok := el.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					kb, ok := kv.Key.(*ast.BasicLit)
+					if !ok || kb.Kind != token.INT {
+						continue
+					}
+					vb, ok := kv.Value.(*ast.BasicLit)
+					if !ok || vb.Kind != token.STRING {
+						continue
+					}
+					off, err := strconv.ParseInt(kb.Value, 0, 64)
+					if err != nil {
+						continue
+					}
+					val, err := strconv.Unquote(vb.Value)
+					if err != nil {
+						continue
+					}
+					entries[int(off)] = val
+				}
+				out[name] = entries
+			}
+		}
+	}
+	return out, nil
+}
+
+// extractAll re-extracts every target, returning committed-variable-name →
+// offset → field name, plus the names it could not produce.
+func extractAll() (map[string]map[int]string, []string) {
+	headers := map[string]string{}
+	out := map[string]map[int]string{}
+	var failed []string
+	for _, t := range allTargets {
+		header, ok := headers[t.tag]
+		if !ok {
+			h, err := fetchHeader(t.tag)
+			if err != nil {
+				failed = append(failed, fmt.Sprintf("%s: fetch: %v", t.tag, err))
+				continue
+			}
+			headers[t.tag] = h
+			header = h
+		}
+		entries, err := extractTHRFields(header, t.arch, t.compressed, t.product)
+		if err != nil || len(entries) == 0 {
+			failed = append(failed, fmt.Sprintf("%s %s compressed=%v product=%v: no entries",
+				t.tag, t.arch, t.compressed, t.product))
+			continue
+		}
+		m := map[int]string{}
+		for _, e := range entries {
+			m[e.offset] = e.name
+		}
+		out[mapName(t.tag, t.arch, t.compressed, t.product)] = m
+	}
+	return out, failed
+}
+
+// runWrite rewrites every committed `var thrV... = map[int]string{...}` block
+// in place with freshly extracted SDK values, preserving the surrounding
+// hand-written code (selection logic, runtime-entry lists, init merges) and
+// each table's existing variable name.
+//
+// Rewriting the literal's own source range -- located via the AST, not by
+// pattern-matching text -- is what makes it safe to regenerate these 5000-odd
+// lines without touching anything else in the file.
+func runWrite() int {
+	sdk, failed := extractAll()
+	for _, f := range failed {
+		fmt.Fprintf(os.Stderr, "write: SKIP %s\n", f)
+	}
+	rewritten, skipped := 0, 0
+	for _, path := range thrTableFiles {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write: %v\n", err)
+			return 1
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, src, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write: parse %s: %v\n", path, err)
+			return 1
+		}
+		type edit struct {
+			start, end int
+			text       string
+		}
+		var edits []edit
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+					continue
+				}
+				name := vs.Names[0].Name
+				if !strings.HasPrefix(name, "thrV") {
+					continue
+				}
+				lit, ok := vs.Values[0].(*ast.CompositeLit)
+				if !ok {
+					continue
+				}
+				entries, ok := sdk[name]
+				if !ok {
+					skipped++
+					continue
+				}
+				// Preserve hand-derived fields the SDK header never exports.
+				merged := map[int]string{}
+				for off, n := range entries {
+					merged[off] = n
+				}
+				for _, el := range lit.Elts {
+					kv, ok := el.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					kb, kok := kv.Key.(*ast.BasicLit)
+					vb, vok := kv.Value.(*ast.BasicLit)
+					if !kok || !vok {
+						continue
+					}
+					off, err1 := strconv.ParseInt(kb.Value, 0, 64)
+					val, err2 := strconv.Unquote(vb.Value)
+					if err1 != nil || err2 != nil {
+						continue
+					}
+					if _, isHand := handDerivedFields[val]; isHand {
+						if _, taken := merged[int(off)]; !taken {
+							merged[int(off)] = val
+						}
+					}
+				}
+				offs := make([]int, 0, len(merged))
+				for off := range merged {
+					offs = append(offs, off)
+				}
+				sort.Ints(offs)
+				var b strings.Builder
+				b.WriteString("map[int]string{\n")
+				for _, off := range offs {
+					fmt.Fprintf(&b, "\t0x%x: %q,\n", off, merged[off])
+				}
+				b.WriteString("}")
+				edits = append(edits, edit{
+					start: fset.Position(lit.Pos()).Offset,
+					end:   fset.Position(lit.End()).Offset,
+					text:  b.String(),
+				})
+				rewritten++
+			}
+		}
+		sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+		out := string(src)
+		for _, e := range edits {
+			out = out[:e.start] + e.text + out[e.end:]
+		}
+		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "write: %v\n", err)
+			return 1
+		}
+	}
+	fmt.Fprintf(os.Stderr, "write: %d table(s) rewritten, %d left untouched (no SDK target)\n", rewritten, skipped)
+	fmt.Fprintln(os.Stderr, "write: run gofmt on internal/disasm/ afterwards")
+	return 0
+}
+
+// --- ObjectStoreAOTFieldCount verification ---
+
+const versionProfilePath = "internal/snapshot/version.go"
+
+// objectStoreFieldCount counts the ObjectStore roots an AOT snapshot writes
+// for one SDK tag.
+//
+// ProgramSerializationRoots::WriteRoots (runtime/vm/app_snapshot.cc, and
+// clustered_snapshot.cc before 2.17) writes exactly:
+//
+//	ObjectPtr* from = object_store_->from();
+//	ObjectPtr* to = object_store_->to_snapshot(s->kind());
+//	for (ObjectPtr* p = from; p <= to; p++) { s->WriteRootRef(*p, ...); }
+//
+// -- inclusive, ObjectStore only. IsolateObjectStore is NOT part of it, which
+// is why any "+ N isolate fields" adjustment is wrong. The field order is the
+// order OBJECT_STORE_FIELD_LIST expands in, and to_snapshot(kFullAOT) returns
+// &slow_tts_stub_ on every supported version.
+//
+// Getting this count wrong desynchronises the stream right before the
+// dispatch table, so the dispatch table parses as garbage and BLR resolution
+// silently collapses to zero.
+func objectStoreFieldCount(tag string) (int, string, error) {
+	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
+		fmt.Sprintf("repos/dart-lang/sdk/contents/runtime/vm/object_store.h?ref=%s", tag))
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, "", fmt.Errorf("gh api object_store.h@%s: %w", tag, err)
+	}
+	src := string(out)
+
+	// The OBJECT_STORE_FIELD_LIST macros are defined near the top of the
+	// file, well before the class, so they are looked up in the whole
+	// source; from()/to_snapshot and the DECLARE_ expansion order are read
+	// from the ObjectStore class body only, so IsolateObjectStore's own
+	// from() and field list cannot be picked up instead.
+	body := src
+	if i := strings.Index(src, "class ObjectStore {"); i >= 0 {
+		body = src[i:]
+	} else if i := strings.Index(src, "class ObjectStore :"); i >= 0 {
+		body = src[i:]
+	}
+
+	fieldRe := regexp.MustCompile(`^\s*(R_|RW|CW|FW|ARW_RELAXED|ARW_AR|LAZY_[A-Z]+)\(\s*[\w:]+\s*,\s*(\w+)\s*\)`)
+	macroList := func(macro string) []string {
+		i := strings.Index(src, "#define "+macro)
+		if i < 0 {
+			return nil
+		}
+		var names []string
+		for _, ln := range strings.Split(src[i:], "\n")[1:] {
+			if m := fieldRe.FindStringSubmatch(ln); m != nil {
+				names = append(names, m[2])
+			}
+			if !strings.HasSuffix(strings.TrimSpace(ln), "\\") {
+				break
+			}
+		}
+		return names
+	}
+
+	// Which field lists the declaration block expands, in order.
+	declRe := regexp.MustCompile(`(?s)#define DECLARE_OBJECT_STORE_FIELD.*?\n((?:[^\n]*_FIELD_LIST\([^\n]*\n)+)`)
+	var order []string
+	if m := declRe.FindStringSubmatch(body); m != nil {
+		for _, mm := range regexp.MustCompile(`([A-Z_0-9]+_FIELD_LIST)\(`).FindAllStringSubmatch(m[1], -1) {
+			order = append(order, mm[1])
+		}
+	}
+	if len(order) == 0 {
+		order = []string{"OBJECT_STORE_FIELD_LIST"}
+	}
+	var names []string
+	for _, macro := range order {
+		names = append(names, macroList(macro)...)
+	}
+
+	fromRe := regexp.MustCompile(`ObjectPtr\* from\(\)\s*\{\s*return[^&]*&(\w+)_\)`)
+	aotRe := regexp.MustCompile(`kFullAOT:\s*\n?\s*return[^&]*&(\w+)_\)`)
+	fm, am := fromRe.FindStringSubmatch(body), aotRe.FindStringSubmatch(body)
+	if fm == nil || am == nil {
+		return 0, "", fmt.Errorf("%s: could not locate from()/to_snapshot(kFullAOT)", tag)
+	}
+	idx := func(name string) int {
+		for i, n := range names {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+	i0, i1 := idx(fm[1]), idx(am[1])
+	if i0 < 0 || i1 < 0 {
+		return 0, "", fmt.Errorf("%s: from=%q(%d) aot=%q(%d) not found among %d fields",
+			tag, fm[1], i0, am[1], i1, len(names))
+	}
+	return i1 - i0 + 1, fmt.Sprintf("from=%s to=%s", fm[1], am[1]), nil
+}
+
+// committedFieldCounts parses DartVersion -> ObjectStoreAOTFieldCount out of
+// the version profile table.
+func committedFieldCounts() (map[string]int, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, versionProfilePath, nil, 0)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", versionProfilePath, err)
+	}
+	out := map[string]int{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		version, count, haveCount := "", 0, false
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			bl, ok := kv.Value.(*ast.BasicLit)
+			if !ok {
+				continue
+			}
+			switch key.Name {
+			case "DartVersion":
+				if s, err := strconv.Unquote(bl.Value); err == nil {
+					version = s
+				}
+			case "ObjectStoreAOTFieldCount":
+				if v, err := strconv.Atoi(bl.Value); err == nil {
+					count, haveCount = v, true
+				}
+			}
+		}
+		if version != "" && haveCount {
+			out[version] = count
+		}
+		return true
+	})
+	return out, nil
+}
+
+// runCheckObjectStore verifies every profile's ObjectStoreAOTFieldCount
+// against the SDK. Returns the number of mismatches.
+func runCheckObjectStore() int {
+	committed, err := committedFieldCounts()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "check-objectstore: %v\n", err)
+		return 1
+	}
+	versions := make([]string, 0, len(committed))
+	for v := range committed {
+		versions = append(versions, v)
+	}
+	sort.Strings(versions)
+
+	bad, checked := 0, 0
+	for _, v := range versions {
+		// "3.12.0-dev" and friends have no SDK tag of their own.
+		tag := v
+		if i := strings.IndexByte(tag, '-'); i >= 0 {
+			fmt.Fprintf(os.Stderr, "  %-12s SKIP (pre-release, no SDK tag)\n", v)
+			continue
+		}
+		got, where, err := objectStoreFieldCount(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %-12s SKIP (%v)\n", v, err)
+			continue
+		}
+		checked++
+		if got == committed[v] {
+			fmt.Fprintf(os.Stderr, "  %-12s OK %d (%s)\n", v, got, where)
+			continue
+		}
+		bad++
+		fmt.Fprintf(os.Stderr, "  %-12s MISMATCH: committed %d, SDK %d (%s)\n", v, committed[v], got, where)
+	}
+	fmt.Fprintf(os.Stderr, "check-objectstore: %d version(s) verified, %d mismatch(es)\n", checked, bad)
+	return bad
+}
+
+// runCheck re-extracts every target and diffs it against the committed
+// tables. Returns the number of tables with unexplained differences.
+func runCheck() int {
+	committed, err := parseCommittedTables(thrTableFiles)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "check: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "check: %d committed THR table(s) found in %s\n",
+		len(committed), strings.Join(thrTableFiles, ", "))
+
+	headers := map[string]string{}
+	bad, checked, skipped := 0, 0, 0
+	covered := map[string]bool{}
+
+	for _, t := range allTargets {
+		name := mapName(t.tag, t.arch, t.compressed, t.product)
+		want, ok := committed[name]
+		if !ok {
+			continue // target has no committed table (e.g. non-PRODUCT)
+		}
+		covered[name] = true
+		header, ok := headers[t.tag]
+		if !ok {
+			h, err := fetchHeader(t.tag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  %-38s SKIP (fetch: %v)\n", name, err)
+				skipped++
+				continue
+			}
+			headers[t.tag] = h
+			header = h
+		}
+		entries, err := extractTHRFields(header, t.arch, t.compressed, t.product)
+		if err != nil || len(entries) == 0 {
+			fmt.Fprintf(os.Stderr, "  %-38s SKIP (no entries extracted)\n", name)
+			skipped++
+			continue
+		}
+		got := map[int]string{}
+		for _, e := range entries {
+			got[e.offset] = e.name
+		}
+
+		var problems []string
+		for off, sdkName := range got {
+			repoName, present := want[off]
+			switch {
+			case !present:
+				problems = append(problems, fmt.Sprintf("missing 0x%x %q", off, sdkName))
+			case repoName != sdkName:
+				problems = append(problems, fmt.Sprintf("0x%x: committed %q, SDK %q", off, repoName, sdkName))
+			}
+		}
+		for off, repoName := range want {
+			if _, present := got[off]; present {
+				continue
+			}
+			if _, allowed := handDerivedFields[repoName]; allowed {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf("extra 0x%x %q (not in SDK header)", off, repoName))
+		}
+		sort.Strings(problems)
+		checked++
+		if len(problems) == 0 {
+			fmt.Fprintf(os.Stderr, "  %-38s OK (%d entries)\n", name, len(want))
+			continue
+		}
+		bad++
+		fmt.Fprintf(os.Stderr, "  %-38s %d PROBLEM(S)\n", name, len(problems))
+		for _, p := range problems {
+			fmt.Fprintf(os.Stderr, "      %s\n", p)
+		}
+	}
+
+	for name := range committed {
+		if !covered[name] {
+			fmt.Fprintf(os.Stderr, "  %-38s NOT CHECKED (no target in allTargets)\n", name)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "check: %d table(s) verified, %d with problems, %d skipped\n", checked, bad, skipped)
+	return bad
+}
+
 func main() {
 	tagFlag := flag.String("tag", "", "Dart SDK version tag (e.g., 3.9.2)")
 	archFlag := flag.String("arch", "arm64", "architecture: arm64 or x64")
@@ -416,7 +1019,31 @@ func main() {
 	productFlag := flag.Bool("product", false, "PRODUCT build mode (default)")
 	nonproductFlag := flag.Bool("nonproduct", false, "non-PRODUCT build mode (Debug/Profile)")
 	allFlag := flag.Bool("all", false, "extract all known versions")
+	checkFlag := flag.Bool("check", false, "verify the committed THR tables against the SDK headers; exit 1 on any unexplained difference")
+	writeFlag := flag.Bool("write", false, "rewrite the committed THR tables in place from the SDK headers (run gofmt afterwards)")
+	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *checkObjectStoreFlag {
+		if runCheckObjectStore() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *writeFlag {
+		if runWrite() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkFlag {
+		if runCheck() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *allFlag {
 		for _, t := range allTargets {

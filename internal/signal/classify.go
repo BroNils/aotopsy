@@ -440,7 +440,7 @@ func IsMundaneTHR(name string) bool {
 		"store_buffer",
 		"type_test",
 		"subtype_check",
-		"call_to_runtime_ep",
+		"call_to_runtime", // matches both the SDK name and the old _ep spelling
 		"stack_overflow",
 		"null_error",
 		"range_error",

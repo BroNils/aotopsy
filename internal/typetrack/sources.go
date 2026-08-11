@@ -205,7 +205,19 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 	if pl.RefToNamed == nil || pl.CT == nil {
 		return m
 	}
-	for refID, no := range pl.RefToNamed {
+	// Iterate ref IDs in order. RefToNamed is a map, so appending while
+	// ranging it left each name's ref-ID list in a random order -- and
+	// setEntryFromParamTypes takes "the FIRST refID that has param types",
+	// so an overloaded method name seeded different parameter types on
+	// different runs. Downstream that surfaced as a field access whose
+	// receiver class was resolved in some runs and not others.
+	refIDs := make([]int, 0, len(pl.RefToNamed))
+	for refID := range pl.RefToNamed {
+		refIDs = append(refIDs, refID)
+	}
+	sort.Ints(refIDs)
+	for _, refID := range refIDs {
+		no := pl.RefToNamed[refID]
 		if no == nil || no.CID != pl.CT.Function {
 			continue
 		}
