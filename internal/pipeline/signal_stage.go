@@ -205,6 +205,25 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			}
 		}
 	}
+	// Binary-level obfuscation measure. Reported once for the whole binary
+	// rather than per string: see signal.ObfuscationRatio for why a single
+	// short name is not evidence of anything.
+	{
+		values := make([]string, 0, len(stringRefs))
+		for _, sr := range stringRefs {
+			values = append(values, sr.Value)
+		}
+		ratio, considered, samples := signal.ObfuscationRatio(values)
+		if considered >= 50 && ratio >= signal.ObfuscationThreshold {
+			logf("  %sobfuscated identifiers:%s %.0f%% of %d name-like strings (e.g. %s)\n",
+				cli.Muted, cli.Reset, ratio*100, considered, strings.Join(samples, ", "))
+			findings = append(findings, output.SignalFinding{
+				Category:    signal.CatObfuscation,
+				StringValue: fmt.Sprintf("%.0f%% of %d identifier-like strings look obfuscated", ratio*100, considered),
+			})
+		}
+	}
+
 	if len(findings) > 0 {
 		if err := output.WriteSARIF(inDir, findings, "1.0.0"); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)

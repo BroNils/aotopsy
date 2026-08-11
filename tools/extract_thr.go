@@ -2,9 +2,10 @@
 // runtime_offsets_extracted.h for all supported Dart versions and architectures.
 //
 // Usage:
-//   go run tools/extract_thr.go -tag 3.9.2 -arch x64 -compressed
-//   go run tools/extract_thr.go -tag 2.12.0 -arch arm64 -nocompressed
-//   go run tools/extract_thr.go -all  # extract all known versions
+//
+//	go run tools/extract_thr.go -tag 3.9.2 -arch x64 -compressed
+//	go run tools/extract_thr.go -tag 2.12.0 -arch arm64 -nocompressed
+//	go run tools/extract_thr.go -all  # extract all known versions
 //
 // Outputs Go map literals suitable for pasting into thrfields.go.
 package main
@@ -72,12 +73,19 @@ var allTargets = []extractTarget{
 	{"3.11.0", "x64", true, true},
 	{"3.12.2", "x64", true, true},
 	// x86_64 + non-compressed + PRODUCT (v2.x)
+	{"2.10.0", "x64", false, true},
 	{"2.12.0", "x64", false, true},
 	{"2.13.0", "x64", false, true},
 	{"2.14.0", "x64", false, true},
 	{"2.15.0", "x64", false, true},
 	{"2.16.0", "x64", false, true},
 	{"2.17.6", "x64", false, true},
+	// x86_64 + non-compressed + PRODUCT (3.x desktop AOT). Compressed
+	// pointers are the Android/iOS default, but a desktop `dart compile exe`
+	// / Flutter desktop build is 64-bit uncompressed, and thrfields_x64.go
+	// carries a table for it -- so it must be regenerable and checkable
+	// like every other one.
+	{"3.9.2", "x64", false, true},
 	// ARM64 + compressed + non-PRODUCT (v2.18+)
 	{"2.18.0", "arm64", true, false},
 	{"2.19.0", "arm64", true, false},

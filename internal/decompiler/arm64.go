@@ -239,9 +239,9 @@ func isARM64PoolLoad(operands string) bool {
 }
 
 // arm64PoolIndex extracts the #imm offset from a "[x27, #imm]" operand
-// and converts it to a pool slot index (each slot is 8 bytes on ARM64
-// with compressed pointers, matching this project's own established
-// pool-offset/8 = pool-index convention).
+// and converts it to a pool slot index via disasm.ARM64PoolIndex, which
+// carries the SDK layout constants (elements start at +16, 8 bytes each,
+// PP untagged on ARM64).
 func arm64PoolIndex(operands string) int {
 	i := strings.Index(operands, "#")
 	if i < 0 {
@@ -263,5 +263,9 @@ func arm64PoolIndex(operands string) int {
 	if err != nil || v < 0 {
 		return -1
 	}
-	return int(v / 8)
+	idx, ok := disasm.ARM64PoolIndex(int(v))
+	if !ok {
+		return -1
+	}
+	return idx
 }

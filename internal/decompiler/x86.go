@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
+
+	"aotopsy/internal/disasm"
 )
 
 // x86_64 Dart AOT reserved-register convention (confirmed empirically
@@ -339,8 +341,8 @@ func x86PoolIndex(in x86Inst) int {
 		if !ok || strings.ToLower(mem.Base.String()) != x86PoolReg {
 			continue
 		}
-		idx := int(mem.Disp/8) - 2
-		if idx < 0 {
+		idx, idxOK := disasm.X64PoolIndex(mem.Disp)
+		if !idxOK {
 			return -1
 		}
 		return idx

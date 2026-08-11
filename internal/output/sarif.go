@@ -13,12 +13,13 @@ import (
 // Spec: https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0-os.html
 
 type sarifLog struct {
-	Version string      `json:"version"`
-	Runs    []sarifRun  `json:"runs"`
+	Schema  string     `json:"$schema"`
+	Version string     `json:"version"`
+	Runs    []sarifRun `json:"runs"`
 }
 
 type sarifRun struct {
-	Tool    sarifTool    `json:"tool"`
+	Tool    sarifTool     `json:"tool"`
 	Results []sarifResult `json:"results"`
 }
 
@@ -27,20 +28,22 @@ type sarifTool struct {
 }
 
 type sarifDriver struct {
-	Name           string       `json:"name"`
-	Version        string       `json:"version"`
-	InformationURI string       `json:"informationUri"`
-	Rules          []sarifRule  `json:"rules"`
+	Name           string      `json:"name"`
+	Version        string      `json:"version"`
+	InformationURI string      `json:"informationUri"`
+	Rules          []sarifRule `json:"rules"`
 }
 
 type sarifRule struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	ShortDescription sarifDescription  `json:"shortDescription"`
-	FullDescription  sarifDescription  `json:"fullDescription,omitempty"`
-	HelpURI          string            `json:"helpUri,omitempty"`
-	DefaultConfig    sarifRuleConfig   `json:"defaultConfiguration"`
-	Properties       map[string]string `json:"properties,omitempty"`
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	ShortDescription sarifDescription `json:"shortDescription"`
+	// Pointer so an absent description is omitted: `omitempty` on a
+	// struct value has no effect and emitted {"text":""}.
+	FullDescription *sarifDescription `json:"fullDescription,omitempty"`
+	HelpURI         string            `json:"helpUri,omitempty"`
+	DefaultConfig   sarifRuleConfig   `json:"defaultConfiguration"`
+	Properties      map[string]string `json:"properties,omitempty"`
 }
 
 type sarifDescription struct {
@@ -52,10 +55,10 @@ type sarifRuleConfig struct {
 }
 
 type sarifResult struct {
-	RuleID          string          `json:"ruleId"`
-	Level           string          `json:"level"`
-	Message         sarifDescription `json:"message"`
-	Locations       []sarifLocation  `json:"locations"`
+	RuleID              string            `json:"ruleId"`
+	Level               string            `json:"level"`
+	Message             sarifDescription  `json:"message"`
+	Locations           []sarifLocation   `json:"locations"`
 	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
 }
 
@@ -73,9 +76,9 @@ type sarifArtifactLocation struct {
 }
 
 type sarifRegion struct {
-	StartLine   int    `json:"startLine"`
-	StartColumn int    `json:"startColumn,omitempty"`
-	Snippet     sarifSnippet `json:"snippet,omitempty"`
+	StartLine   int           `json:"startLine"`
+	StartColumn int           `json:"startColumn,omitempty"`
+	Snippet     *sarifSnippet `json:"snippet,omitempty"`
 }
 
 type sarifSnippet struct {
@@ -203,7 +206,7 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 						},
 						Region: sarifRegion{
 							StartLine: 1,
-							Snippet: sarifSnippet{
+							Snippet: &sarifSnippet{
 								Text: fmt.Sprintf("Function: %s at %s — String: %q", f.Function, f.PC, f.StringValue),
 							},
 						},
@@ -217,6 +220,7 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 	}
 
 	log := sarifLog{
+		Schema:  "https://json.schemastore.org/sarif-2.1.0.json",
 		Version: "2.1.0",
 		Runs: []sarifRun{{
 			Tool: sarifTool{

@@ -326,8 +326,9 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 //	DataImage() = Addr() + RoundUp(length(), kMaxObjectAlignment)
 //
 // where Addr() is the start of the snapshot blob (including magic),
-// length() is the stored length (excluding the 4-byte magic), and
-// kMaxObjectAlignment = 2 * word_size = 16 on 64-bit.
+// length() is the size of that whole blob -- the stored length field plus the
+// 4-byte magic, see large_length() -- and kMaxObjectAlignment = 2 * word_size
+// = 16 on 64-bit (kObjectStartAlignment = 64 from 2.19.0 on).
 //
 // Objects within the data image start at DataImage + kHeaderSize, where
 // kHeaderSize = kMaxObjectAlignment = 16 (verified against dart-lang/sdk
@@ -357,8 +358,18 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	if align <= 0 {
 		align = 16
 	}
-	// length() = snapshotSize - 4 (exclude magic bytes).
-	lengthVal := snapshotSize - 4
+	// The SDK's length() INCLUDES the magic (runtime/vm/snapshot.h):
+	//
+	//   int64_t large_length() const {
+	//     return Read<int64_t>(kLengthOffset) + kMagicSize;   // + 4
+	//   }
+	//
+	// set_length writes `value - kMagicSize`, so the stored field excludes
+	// the magic and length() adds it back: length() == the whole snapshot
+	// blob's size == Header.TotalSize here. Rounding up TotalSize-4 instead
+	// lands `align` bytes too low whenever the two straddle an alignment
+	// boundary (~6% of snapshots at align=64).
+	lengthVal := snapshotSize
 	if lengthVal <= 0 {
 		return 0
 	}

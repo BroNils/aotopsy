@@ -3,6 +3,7 @@ package signal
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"aotopsy/internal/disasm"
@@ -10,31 +11,51 @@ import (
 
 // TaintFinding represents a potential source→sink data flow.
 type TaintFinding struct {
-	Source    string `json:"source"`
-	Sink      string `json:"sink"`
-	SourceFn  string `json:"source_func,omitempty"`
-	SinkFn    string `json:"sink_func,omitempty"`
-	FlowType  string `json:"flow_type"` // "imei_to_network", "token_to_storage", etc.
+	Source     string `json:"source"`
+	Sink       string `json:"sink"`
+	SourceFn   string `json:"source_func,omitempty"`
+	SinkFn     string `json:"sink_func,omitempty"`
+	FlowType   string `json:"flow_type"` // "imei_to_network", "token_to_storage", etc.
 	Confidence string `json:"confidence"`
 }
 
 // Source patterns: functions/APIs that read sensitive data.
+// Patterns are matched with strings.Contains on the lowercased string value,
+// so each one must be specific enough to not fire on ordinary vocabulary.
+// The generic forms that were here first all had common false positives:
+// "serial" is inside serialize/serialization/deserializer, "location" inside
+// allocation/relocation, "token" inside tokenizer/tokenize, "session" inside
+// sessionstorage-unrelated words. They are replaced by the qualified spellings.
 var sourcePatterns = map[string]string{
-	"imei":           "device_imei",
-	"android_id":     "device_android_id",
-	"serial":         "device_serial",
-	"mac_address":    "device_mac",
-	"advertising_id": "device_adid",
-	"phone_number":   "device_phone",
-	"email":          "user_email",
-	"password":       "user_password",
-	"token":          "auth_token",
-	"session":        "session_id",
-	"location":       "device_location",
-	"contact":        "user_contacts",
-	"camera":         "camera_access",
-	"microphone":     "microphone_access",
-	"biometric":      "biometric_data",
+	"imei":            "device_imei",
+	"android_id":      "device_android_id",
+	"serialnumber":    "device_serial",
+	"getserial":       "device_serial",
+	"deviceserial":    "device_serial",
+	"mac_address":     "device_mac",
+	"macaddress":      "device_mac",
+	"advertising_id":  "device_adid",
+	"advertisingid":   "device_adid",
+	"phone_number":    "device_phone",
+	"phonenumber":     "device_phone",
+	"email":           "user_email",
+	"password":        "user_password",
+	"authtoken":       "auth_token",
+	"accesstoken":     "auth_token",
+	"idtoken":         "auth_token",
+	"refreshtoken":    "auth_token",
+	"sessionid":       "session_id",
+	"sessiontoken":    "session_id",
+	"getlocation":     "device_location",
+	"currentlocation": "device_location",
+	"locationmanager": "device_location",
+	"geolocator":      "device_location",
+	"latitude":        "device_location",
+	"contacts":        "user_contacts",
+	"addressbook":     "user_contacts",
+	"camera":          "camera_access",
+	"microphone":      "microphone_access",
+	"biometric":       "biometric_data",
 }
 
 // Sink patterns: functions/APIs that send/store data.
@@ -45,22 +66,24 @@ var sourcePatterns = map[string]string{
 // catalog, algorithm, fingerprint, blueprint, sprint), so they use the
 // call-site form "log(" / "print(" or the Dart-specific API names instead.
 var sinkPatterns = map[string]string{
-	"http":           "network_http",
-	"https":          "network_https",
-	"socket":         "network_socket",
-	"MethodChannel":  "platform_channel",
-	"writeFile":      "file_write",
-	"writeAsString":  "file_write",
+	"http":              "network_http",
+	"https":             "network_https",
+	"socket":            "network_socket",
+	"MethodChannel":     "platform_channel",
+	"writeFile":         "file_write",
+	"writeAsString":     "file_write",
 	"SharedPreferences": "shared_prefs",
-	"sqflite":        "sqlite_db",
-	"hive":           "hive_box",
-	"log(":           "logging",
-	"print(":         "console_output",
-	"debugprint":     "console_output",
-	"developer.log":  "logging",
-	"analytics":      "analytics_send",
-	"crashlytics":    "crash_report",
-	"firebase":       "firebase_upload",
+	"sqflite":           "sqlite_db",
+	// "hive" alone matched "archive"/"Archive"; the box API is the real signal.
+	"hive.init":     "hive_box",
+	"openbox":       "hive_box",
+	"log(":          "logging",
+	"print(":        "console_output",
+	"debugprint":    "console_output",
+	"developer.log": "logging",
+	"analytics":     "analytics_send",
+	"crashlytics":   "crash_report",
+	"firebase":      "firebase_upload",
 }
 
 // WriteTaintFindings performs taint analysis by identifying functions that
@@ -198,6 +221,25 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 	if len(findings) == 0 {
 		return nil
 	}
+	// Findings are discovered by iterating maps, so sort before writing:
+	// otherwise the same binary produces a differently-ordered file on every
+	// run, which breaks diffing two reports.
+	sort.Slice(findings, func(i, j int) bool {
+		a, b := findings[i], findings[j]
+		if a.SourceFn != b.SourceFn {
+			return a.SourceFn < b.SourceFn
+		}
+		if a.SinkFn != b.SinkFn {
+			return a.SinkFn < b.SinkFn
+		}
+		if a.Source != b.Source {
+			return a.Source < b.Source
+		}
+		if a.Sink != b.Sink {
+			return a.Sink < b.Sink
+		}
+		return a.FlowType < b.FlowType
+	})
 	return writeJSONLFile(filepath.Join(outDir, "taint_findings.jsonl"), findings)
 }
 
@@ -274,6 +316,9 @@ func WriteYaraFindings(outDir string, stringRefs []disasm.StringRefRecord) error
 			}
 		}
 		if len(matchedStrings) > 0 {
+			// stringFuncs is a map, so both slices come out in random order.
+			sort.Strings(matchedStrings)
+			sort.Strings(matchedFuncs)
 			findings = append(findings, YaraFinding{
 				RuleName:  rule.Name,
 				Category:  rule.Category,
@@ -522,6 +567,15 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 	if len(findings) == 0 {
 		return nil
 	}
+	// funcCategory and callerCallees are maps: sort so the output file is
+	// reproducible across runs.
+	sort.Slice(findings, func(i, j int) bool {
+		a, b := findings[i], findings[j]
+		if a.Pattern != b.Pattern {
+			return a.Pattern < b.Pattern
+		}
+		return strings.Join(a.Functions, ",") < strings.Join(b.Functions, ",")
+	})
 	return writeJSONLFile(filepath.Join(outDir, "behavioral_findings.jsonl"), findings)
 }
 

@@ -155,6 +155,24 @@ grep for known symbols instead.
 - Shell commands (`exec`) are for running builds, tests, git, and one-off diagnostics — NOT for file content modification.
 - If `edit` fails with "String not found", read the file again to get the exact current content (tabs, spaces, line endings) before retrying. Do NOT fall back to `sed` or python scripts.
 
+**Kenapa aturan ini ada (jangan diakali):** setiap harness (Claude Code, Devin,
+Codex, dll) punya tool edit/write sendiri yang bekerja seperti git — butuh
+`old_string` yang cocok persis, menolak match ganda, dan gagal keras kalau
+konteksnya sudah berubah. Itulah pengamannya. `sed`/`python replace()` tidak
+punya pengaman apa pun: kalau string muncul dua kali ia mengganti dua-duanya,
+kalau file sudah berubah ia tetap menulis, dan CRLF/escape diam-diam rusak.
+
+- Ini berlaku untuk SEMUA cara memanggil python/sed, termasuk `python3 - <<'PY'`
+  yang membaca file lalu `open(...,'w').write(...)`. Bentuk itu terlihat rapi
+  tapi tetap menulis tanpa verifikasi — dilarang.
+- Bulk edit bukan alasan: pecah jadi beberapa panggilan `edit`, atau `read`
+  seluruh file lalu `write` ulang.
+- Python/sed BOLEH dipakai untuk hal yang tidak menulis file sumber:
+  menghitung, mem-parse output, analisis JSONL/JSON hasil run, menulis skrip
+  bantu di `/tmp`. Batasnya jelas — jangan menyentuh file di dalam repo.
+- Formatter (`gofmt -w`) tetap boleh: itu tool bahasa yang memang bertugas
+  menulis ulang file secara deterministik, bukan substitusi teks ad-hoc.
+
 ## Engineering Philosophy
 
 - **Jangan ambil jalan termudah.** Jika fix yang benar butuh refactor besar atau signature change, lakukan. Contoh: `transferInstruction` signature diubah untuk pass `prevRaw` — ini key untuk UBFX fix. "Changing the signature would require many changes" → DO IT ANYWAY.

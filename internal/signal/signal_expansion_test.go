@@ -68,10 +68,15 @@ func TestIdentifyCryptoFromBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IdentifyCryptoFromBinary: %v", err)
 	}
-	if len(findings) < 2 {
-		t.Errorf("expected at least 2 crypto findings, got %d", len(findings))
+	if len(findings) < 1 {
+		t.Errorf("expected at least 1 crypto finding, got %d", len(findings))
 	}
-	// Check that AES Rcon[0] and ChaCha20 'expa' were found
+	// ChaCha20's constant is distinctive and must be found.
+	// AES Rcon[0] must NOT be: its little-endian bytes are 00 00 00 01,
+	// which occur in every binary (any `MOV #1`, any length-1 array, any
+	// zero-padded word). Reporting "AES detected" from that byte run is a
+	// guaranteed false positive, so the raw-byte scan skips non-distinctive
+	// constants -- see isDistinctiveConstant.
 	foundAES := false
 	foundChaCha := false
 	for _, f := range findings {
@@ -82,11 +87,28 @@ func TestIdentifyCryptoFromBinary(t *testing.T) {
 			foundChaCha = true
 		}
 	}
-	if !foundAES {
-		t.Error("AES Rcon[0] not found in binary scan")
+	if foundAES {
+		t.Error("AES Rcon[0] must not be reported from a raw byte scan (00 00 00 01 is not evidence)")
 	}
 	if !foundChaCha {
 		t.Error("ChaCha20 'expa' not found in binary scan")
+	}
+}
+
+func TestIsDistinctiveConstant(t *testing.T) {
+	distinctive := []string{"0x61707865", "0x428a2f98", "0xedb88320", "0x9e3779b9",
+		"0x428a2f98d728ae22"}
+	trivial := []string{"0x01000000", "0x02000000", "0x80000000",
+		"0x0000000000000001", "0x8000000080008000"}
+	for _, h := range distinctive {
+		if !isDistinctiveConstant(h) {
+			t.Errorf("isDistinctiveConstant(%s) = false, want true", h)
+		}
+	}
+	for _, h := range trivial {
+		if isDistinctiveConstant(h) {
+			t.Errorf("isDistinctiveConstant(%s) = true, want false", h)
+		}
 	}
 }
 
@@ -219,7 +241,9 @@ func TestYaraMatching(t *testing.T) {
 func TestTaintAnalysis(t *testing.T) {
 	tmpDir := t.TempDir()
 	refs := []disasm.StringRefRecord{
-		{Value: "token:abc123", Func: "getCredential"},
+		// A qualified token name: bare "token" is not a source pattern any
+		// more because it also matches tokenizer/tokenize in ordinary code.
+		{Value: "authToken:abc123", Func: "getCredential"},
 		{Value: "https://api.example.com/upload", Func: "sendData"},
 		{Value: "password:secret", Func: "getPassword"},
 		{Value: "writeFile:passwords.txt", Func: "saveData"},
@@ -309,4 +333,93 @@ func readTaintFindings(path string) ([]TaintFinding, error) {
 		}
 	}
 	return findings, nil
+}
+
+// --- Regression tests for the classification fixes ---
+
+// containsKeyword matches against normalizeForMatch(value), which strips
+// '_', '-', ' ' and '.'. A keyword still containing one of those can never
+// match; these were all dead until the lists were normalized at init.
+func TestSecurityKeywordsAreNormalized(t *testing.T) {
+	for _, list := range [][]string{
+		rootingKeywords, antiAnalysisKeywords, sslPinningKeywords,
+		accessibilityKeywords, fraudKeywords, dynamicLoadKeywords,
+		ipcKeywords, covertChannelKeywords, drmBypassKeywords, pluginKeywords,
+	} {
+		for _, kw := range list {
+			if kw != normalizeForMatch(kw) {
+				t.Errorf("keyword %q is not in normalized form (%q) and can never match", kw, normalizeForMatch(kw))
+			}
+		}
+	}
+}
+
+func TestSecurityCategoriesFireOnRealStrings(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"frida-server", CatRooting},
+		{"ro.debuggable", CatRooting},
+		{"which su", CatRooting},
+		{"network_security_config", CatSSLPinning},
+		{"android.os.Debug", CatAntiAnalysis},
+	}
+	for _, tt := range tests {
+		if !containsCat(ClassifyString(tt.value), tt.want) {
+			t.Errorf("ClassifyString(%q) = %v, want it to contain %q", tt.value, ClassifyString(tt.value), tt.want)
+		}
+	}
+}
+
+// Ordinary Flutter/Dart vocabulary must not be classified as malicious.
+func TestSecurityCategoriesNoFalsePositives(t *testing.T) {
+	clean := []string{
+		"Iterator", "Constructor", "easeInCubic", "Cubic", "Vector3",
+		"transaction", "reflectance", "()", "::", "{}", "->",
+		"serialize", "deserializer", "allocation", "relocation", "tokenizer",
+	}
+	for _, v := range clean {
+		cats := ClassifyString(v)
+		for _, bad := range []string{CatCovertChannel, CatFraud, CatIPC, CatObfuscation, CatDynamicLoad} {
+			if containsCat(cats, bad) {
+				t.Errorf("ClassifyString(%q) = %v, must not contain %q", v, cats, bad)
+			}
+		}
+	}
+}
+
+// Obfuscation is a whole-binary property; a single short name is not evidence.
+func TestObfuscationRatio(t *testing.T) {
+	clean := []string{"buildContext", "onPressed", "gtk", "widget", "render", "state"}
+	if r, n, _ := ObfuscationRatio(clean); n == 0 || r >= ObfuscationThreshold {
+		t.Errorf("clean identifier set reported as obfuscated: ratio=%.2f considered=%d", r, n)
+	}
+	obf := []string{"aB", "cD", "xY", "zQ", "mN", "buildContext"}
+	if r, _, _ := ObfuscationRatio(obf); r < ObfuscationThreshold {
+		t.Errorf("obfuscated identifier set not detected: ratio=%.2f", r)
+	}
+}
+
+// Every real domain must survive the file-extension filter: the earlier
+// Contains(".c") test threw away every .com host.
+func TestExtractNetworkEndpointsKeepsRealDomains(t *testing.T) {
+	refs := []StringRefRecord{
+		{Value: "google.com", Func: "f"},
+		{Value: "api.example.co.id", Func: "f"},
+		{Value: "cdn.social", Func: "f"},
+		{Value: "package:flutter/src/widgets/framework.dart", Func: "f"},
+	}
+	got := map[string]bool{}
+	for _, f := range ExtractNetworkEndpoints(refs) {
+		got[f.Value] = true
+	}
+	for _, want := range []string{"google.com", "api.example.co.id", "cdn.social"} {
+		if !got[want] {
+			t.Errorf("domain %q was dropped", want)
+		}
+	}
+	if got["framework.dart"] || got["src.widgets"] {
+		t.Errorf("a .dart path was reported as a domain: %v", got)
+	}
 }

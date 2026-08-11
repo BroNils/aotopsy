@@ -5,16 +5,17 @@ import (
 	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 	"golang.org/x/arch/x86/x86asm"
 )
 
 // x86_64 register constants (matching dart-lang/sdk constants_x64.h).
 const (
-	x86RegPP    = 15 // R15 = object pool pointer
-	x86RegTHR   = 14 // R14 = thread pointer
-	x86RegRCX   = 1  // kClassIdReg (DispatchTableNullErrorABI)
-	x86RegRAX   = 0  // return value / allocation result
-	x86RegRDI   = 7  // SysV arg 0 (receiver for instance methods)
+	x86RegPP  = 15 // R15 = object pool pointer
+	x86RegTHR = 14 // R14 = thread pointer
+	x86RegRCX = 1  // kClassIdReg (DispatchTableNullErrorABI)
+	x86RegRAX = 0  // return value / allocation result
+	x86RegRDI = 7  // SysV arg 0 (receiver for instance methods)
 )
 
 // x86ArgRegCanon lists the SysV AMD64 ABI integer argument registers
@@ -44,8 +45,17 @@ func AnalyzeFunctionX86(
 	//   MOV RAX, [R14 + dispatch_table_array_offset]  (LoadDispatchTable)
 	//   CALL [RAX + RCX*8 + disp32]                    (dispatch table call)
 	// disp32 = (selector_offset - kOriginElement) * kWordSize
-	// selector_offset = disp32/kWordSize + kOriginElement
-	// We store the selector offset keyed by the CALL's address.
+	//
+	// SelectorOffsets stores the SELECTOR IMMEDIATE -- the same quantity the
+	// ARM64 side records, i.e. `selector_offset - kOriginElement`, which here
+	// is simply disp32/kWordSize. It must NOT have kOriginElement added back:
+	// the consumer (TypeContext.selectorCandidates) computes
+	// `cid = slotKey - imm`, where slotKey is already register-relative
+	// (DispatchBySlot is keyed by entry.Index - kOriginElement, and the
+	// dispatch-table register points at array[kOriginElement] --
+	// DispatchTable::ArrayOrigin()). Adding the origin here shifted every
+	// implied class ID by kOriginElement.
+	// We store it keyed by the CALL's address.
 	for i := 0; i < len(insts); i++ {
 		inst := insts[i]
 		if inst.Inst.Op != x86asm.CALL {
@@ -59,9 +69,7 @@ func AnalyzeFunctionX86(
 		idxReg := canonX86RegLocal(mem.Index)
 		// Check: CALL [RAX + RCX*8 + disp32]
 		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
-			// selector_offset = disp/8 + kOriginElement
-			selectorOffset := int(mem.Disp/8) + ctx.KOriginElement
-			ctx.SelectorOffsets[inst.Addr] = selectorOffset
+			ctx.SelectorOffsets[inst.Addr] = int(mem.Disp / 8)
 		}
 	}
 
@@ -436,7 +444,10 @@ func transferInstructionX86(
 			baseIdx := canonX86RegLocal(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
 			if baseIdx == x86RegPP {
-				poolIdx := int(mem.Disp / 8)
+				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
+				if !poolIdxOK {
+					return
+				}
 				if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 					state[dstIdx] = KnownClass(classID)
 					ctx.PPHits++
@@ -780,38 +791,18 @@ func resolveX86DispatchSelectorOffset(
 	ctx *TypeContext,
 	result *IntraResult,
 ) {
-	selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]
+	selectorImm, ok := ctx.SelectorOffsets[inst.Addr]
 	if !ok {
 		return
 	}
-	targetSet := map[string]bool{}
-	var targets []string
-	for _, entry := range ctx.DispatchBySlot {
-		if entry.Kind != cluster.DispatchCode {
-			continue
-		}
-		impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
-		if impliedCID < 0 {
-			continue
-		}
-		if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-			if !targetSet[name] {
-				targetSet[name] = true
-				targets = append(targets, name)
-			}
-		}
-	}
+	// Same arithmetic and the same candidate cap as the ARM64 path: this
+	// used to be a second copy with its own (wrong) implied-CID formula and
+	// an unbounded " | "-join of every match.
 	res := BlrResolution{
 		PC:        inst.Addr,
 		SlotIndex: -1,
 	}
-	if len(targets) == 1 {
-		res.TargetName = targets[0]
-		res.Resolved = true
-	} else if len(targets) > 1 {
-		res.TargetName = strings.Join(targets, " | ")
-		res.Resolved = true
-	}
+	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
 

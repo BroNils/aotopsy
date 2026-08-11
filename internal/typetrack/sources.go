@@ -1,6 +1,8 @@
 package typetrack
 
 import (
+	"sort"
+
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/snapshot"
 )
@@ -187,9 +189,9 @@ type TypeContext struct {
 	InstanceFieldHits int
 	PPHits            int
 	HeaderHits        int
-	UBFXHits     int
-	ADDClassHits int
-	DispatchHits int
+	UBFXHits          int
+	ADDClassHits      int
+	DispatchHits      int
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -229,14 +231,14 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 // PoolLookupData is the subset of pipeline.PoolLookups needed by typetrack.
 // Passed as a struct to avoid importing the pipeline package (import cycle).
 type PoolLookupData struct {
-	RefToStr       map[int]string               // ref ID → string value
-	RefToNamed     map[int]*cluster.NamedObject // ref ID → NamedObject
-	RefCID         map[int]int                  // ref ID → CID (class ID of the object)
-	CT             *snapshot.CIDTable           // CID table (for Class/Function CID checks)
-	CodeRefToName  map[int]string               // code ref ID → function name
-	VmRefToStr     map[int]string               // VM snapshot strings by ref ID
-	VmRefToNamed   map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
-	PoolCodeNames  map[int]string               // PP index → function name for Code objects
+	RefToStr      map[int]string               // ref ID → string value
+	RefToNamed    map[int]*cluster.NamedObject // ref ID → NamedObject
+	RefCID        map[int]int                  // ref ID → CID (class ID of the object)
+	CT            *snapshot.CIDTable           // CID table (for Class/Function CID checks)
+	CodeRefToName map[int]string               // code ref ID → function name
+	VmRefToStr    map[int]string               // VM snapshot strings by ref ID
+	VmRefToNamed  map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	PoolCodeNames map[int]string               // PP index → function name for Code objects
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,
@@ -275,21 +277,21 @@ func BuildTypeContext(
 		KOriginElement:          kOriginElement,
 		THRFields:               thrFields,
 		AllocStubOffsets:        allocStubOffsets,
-		CalleeExitTypes:         make(map[uint64]TypeLattice), // Fase 7 PART A
+		CalleeExitTypes:         make(map[uint64]TypeLattice),     // Fase 7 PART A
 		CalleeAllExitTypes:      make(map[uint64][31]TypeLattice), // Full exit types
 		// M-14 fix: nil check for pl.CT
-	MinAppClassID:           minAppClassIDSafe(pl.CT),
-		MethodNameToRefIDs:      buildMethodNameToRefIDs(pl),
-		InstanceFieldTypes:      make(map[int]map[int32]int),
-		FieldStoreTypes:         make(map[int]map[int32]int),
-		AllocationSites:         make(map[uint64]int),
-		InstantiatedClasses:     make(map[int]bool),
-		ClosureDataByClosure:    make(map[int]int),
-		ClosureDataByParent:     make(map[int][]int),
-		PoolClosureClass:        make(map[int]int),
-		PoolCodeNames:           make(map[int]string),
-		SelectorOffsets:         make(map[uint64]int),
-		Subclasses:              make(map[int][]int),
+		MinAppClassID:        minAppClassIDSafe(pl.CT),
+		MethodNameToRefIDs:   buildMethodNameToRefIDs(pl),
+		InstanceFieldTypes:   make(map[int]map[int32]int),
+		FieldStoreTypes:      make(map[int]map[int32]int),
+		AllocationSites:      make(map[uint64]int),
+		InstantiatedClasses:  make(map[int]bool),
+		ClosureDataByClosure: make(map[int]int),
+		ClosureDataByParent:  make(map[int][]int),
+		PoolClosureClass:     make(map[int]int),
+		PoolCodeNames:        make(map[int]string),
+		SelectorOffsets:      make(map[uint64]int),
+		Subclasses:           make(map[int][]int),
 	}
 
 	// 1. Build class hierarchy for LCA.
@@ -300,6 +302,12 @@ func BuildTypeContext(
 		if parent >= 0 {
 			ctx.Subclasses[parent] = append(ctx.Subclasses[parent], cid)
 		}
+	}
+	// SuperClass is a map, so the subclass lists come out in a random order.
+	// CHA resolution takes the FIRST subclass whose dispatch slot resolves,
+	// which made call_edges.jsonl differ between runs of the same binary.
+	for parent := range ctx.Subclasses {
+		sort.Ints(ctx.Subclasses[parent])
 	}
 
 	// 1c. Populate InstantiatedClasses from class table and dispatch table.

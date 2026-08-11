@@ -9,8 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +38,8 @@ func cmdDecompileNative(args []string) error {
 	fromMain := fs.Bool("from-main", false, "decompile the app's own code reachable from its main() entry point, transitively following direct call sites (plus a class-touch expansion for canonicalized const instances seen via the object pool), writing one combined.dart file under --out -- unlike --all+--filter, this needs NO class/package name known in advance: reachability is determined by walking the call graph from main(), and any function whose owning Dart library resolves to dart:* or package:flutter* is skipped (not decompiled, not descended into) rather than matched by name. CONFIRMED LIMITATION: virtual/polymorphic dispatch (Widget.build(), State.initState(), UI callbacks) is invisible to a direct-call-graph walk, same as any other static call-graph tool -- class-touch expansion recovers some of these cases but is a documented over-approximation, not a proof of reachability. See ARCHITECTURE.md for the full analysis, including cases where an entry function's own argument is supplied by the Dart VM's isolate-startup machinery rather than any disassemblable instruction -- use --gen-frida to confirm reachability/argument values dynamically when static analysis alone hits this wall. Use --filter for a name-based sweep when you already know a class name.")
 	genFrida := fs.Bool("gen-frida", false, "also emit a ready-to-run Frida script (see https://frida.re/docs/javascript-api/) hooking every function this invocation decompiles, dumping argument registers (only the REAL declared arity when confidently resolved, see the arity-inference note in ARCHITECTURE.md -- falls back to the full raw register set otherwise) + return value at runtime, PLUS a second set of probes at every still-unresolved indirect-call site (dynamicCall(indirectTarget_xN, ...) in the pseudocode) that reads the actual runtime call target and logs its module-relative offset -- the natural next step when static analysis alone can't resolve something (virtual dispatch, VM-supplied arguments, etc.). Probes are capped (maxFridaProbes in frida_gen.go) and skip memory-operand dispatch-table call shapes (not a single register to read) -- narrow with --filter/--func if you hit the cap.")
 	genFridaOut := fs.String("gen-frida-out", "", "output path for the generated Frida script (default: <out>/hooks.js in --all/--from-main mode, or stdout after the pseudocode in --func mode)")
+	genFridaStalker := fs.Bool("gen-frida-stalker", false, "add Stalker call tracing to the --gen-frida script: follows every non-VM-internal thread and prints a periodic per-target call summary (module+offset), which catches calls that no hook covers -- virtual dispatch, VM-initiated entry points, work done on threads you did not know existed. Stalker rewrites and re-executes every basic block of every followed thread, so expect a large slowdown and use --gen-frida-stalker-min to cut the noise. Off by default.")
+	genFridaStalkerMin := fs.Int("gen-frida-stalker-min", 10, "with --gen-frida-stalker, suppress call targets seen fewer than this many times within one summary window (0 = report every target)")
 	findSubstr := fs.String("find", "", "list VA + resolved name for every function whose name contains this substring, WITHOUT decompiling any of them -- cheap, safe way to locate a target address before using --func")
 	outDir := fs.String("out", "", "output directory for --all mode -- writes ONE combined.dart file inside it (not one file per function; avoids thousands of small file-create syscalls, which correlated with real host crashes during this tool's own testing)")
 	maxFuncs := fs.Int("max", 500, "max functions to emit in --all mode (0 = unlimited -- can be very slow/memory-heavy on a real app with tens of thousands of functions; prefer a bounded value)")
@@ -140,20 +142,28 @@ func cmdDecompileNative(args []string) error {
 	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
 	// instead of base.fNN.
 	//
-	// The lifter does not know the receiver's class ID at fieldExpr time
-	// (that would require integrating typetrack's KnownClass into the
-	// lifter). Instead, we build a per-class field name map AND a global
-	// fallback map. The resolver tries per-class first (when classID is
-	// known from typetrack), then falls back to a majority-vote global
-	// map: the most common field name at each offset across all classes.
-	// This handles the common case where many classes share the same
-	// field name at the same offset (e.g. _hash at offset 28).
+	// The lifter does not always know the receiver's class ID at fieldExpr
+	// time. So there are two maps: a per-class one (exact -- used whenever
+	// FuncIR.ReceiverClassID resolved the receiver) and a global fallback
+	// keyed by byte offset alone.
+	//
+	// The global fallback requires the name to be UNANIMOUS across every
+	// class that has a field at that offset. A previous revision relaxed it
+	// to a >50% majority vote, which is a name-fabricating rule: Dart field
+	// offsets are per-class, so offset 28 being `_hash` in six classes and
+	// `_length` in five means the six win and all eleven get printed as
+	// `_hash` -- five of them wrong, and indistinguishable in the output
+	// from a correctly resolved name. Emitting `f28` there is not a
+	// limitation to be papered over; it is the honest answer, and it is what
+	// the surrounding code's own rule for observed field types says
+	// ("a wrong concrete type is worse than no type, because callers treat
+	// KnownClass as authoritative" -- typetrack.InstanceFieldTypes).
 	classLayouts := pipeline.BuildClassLayouts(result, pl, info.Version.CompressedPointers)
 
 	// Per-class field name map: classID → byteOffset → fieldName
 	perClassFieldNames := map[int32]map[int32]string{}
-	// Global vote map: byteOffset → name → count
-	offsetVotes := map[int32]map[string]int{}
+	// Global map: byteOffset → set of distinct names seen at that offset.
+	offsetNames := map[int32]map[string]bool{}
 	for _, cl := range classLayouts {
 		if perClassFieldNames[cl.ClassID] == nil {
 			perClassFieldNames[cl.ClassID] = map[int32]string{}
@@ -164,29 +174,21 @@ func cmdDecompileNative(args []string) error {
 				continue
 			}
 			perClassFieldNames[cl.ClassID][f.ByteOffset] = f.Name
-			if offsetVotes[f.ByteOffset] == nil {
-				offsetVotes[f.ByteOffset] = map[string]int{}
+			if offsetNames[f.ByteOffset] == nil {
+				offsetNames[f.ByteOffset] = map[string]bool{}
 			}
-			offsetVotes[f.ByteOffset][f.Name]++
+			offsetNames[f.ByteOffset][f.Name] = true
 		}
 	}
 
-	// Build majority-vote global map: byteOffset → most common name
+	// Global map: only offsets where every class agrees on the name.
 	globalFieldNames := map[int32]string{}
-	for off, votes := range offsetVotes {
-		bestName := ""
-		bestCount := 0
-		total := 0
-		for name, count := range votes {
-			total += count
-			if count > bestCount {
-				bestCount = count
-				bestName = name
-			}
+	for off, names := range offsetNames {
+		if len(names) != 1 {
+			continue // ambiguous across classes -- emit fNN instead
 		}
-		// Use majority name if it has >50% of votes, or if it's the only name
-		if total > 0 && (bestCount*2 > total || len(votes) == 1) {
-			globalFieldNames[off] = bestName
+		for name := range names {
+			globalFieldNames[off] = name
 		}
 	}
 
@@ -200,7 +202,8 @@ func cmdDecompileNative(args []string) error {
 				}
 			}
 		}
-		// Fall back to majority-vote global map
+		// Fall back to the offset-only map, which only holds offsets whose
+		// name is the same in every class that has a field there.
 		if name, ok := globalFieldNames[int32(byteOffset)]; ok {
 			return name
 		}
@@ -950,7 +953,8 @@ func cmdDecompileNative(args []string) error {
 		if *genFrida {
 			hook := fridaHook{VA: targetVA, Name: art.FunctionName, ArgRegs: realArgRegs(fir)}
 			probes := collectIndirectCallProbes(fir)
-			script := generateFridaScript(*libapp, isARM64, []fridaHook{hook}, probes)
+			script := generateFridaScriptWithOptions(*libapp, isARM64, []fridaHook{hook}, probes,
+				fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin})
 			if *genFridaOut == "" {
 				fmt.Println("\n// --- Frida script (--gen-frida) ---")
 				fmt.Println(script)
@@ -1050,6 +1054,7 @@ func cmdDecompileNative(args []string) error {
 			isARM64:                   isARM64,
 			genFrida:                  *genFrida,
 			genFridaOut:               *genFridaOut,
+			fridaOpts:                 fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
 			libPath:                   *libapp,
 			outDir:                    *outDir,
 		})
@@ -1224,7 +1229,8 @@ func cmdDecompileNative(args []string) error {
 		if fridaProbesDropped > 0 {
 			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", fridaProbesDropped, maxFridaProbes)
 		}
-		if err := writeFridaScript(*genFridaOut, *outDir, *libapp, isARM64, fridaHooks, fridaProbes); err != nil {
+		if err := writeFridaScript(*genFridaOut, *outDir, *libapp, isARM64, fridaHooks, fridaProbes,
+			fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin}); err != nil {
 			return err
 		}
 	}

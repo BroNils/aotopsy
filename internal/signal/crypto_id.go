@@ -74,10 +74,10 @@ type PoolImmediateRecord struct {
 
 // CryptoFinding is a crypto algorithm identification finding.
 type CryptoFinding struct {
-	Algorithm  string `json:"algorithm"`
-	Constant   string `json:"constant"`
-	PoolIndex  int    `json:"pool_index"`
-	Value      string `json:"value"`
+	Algorithm string `json:"algorithm"`
+	Constant  string `json:"constant"`
+	PoolIndex int    `json:"pool_index"`
+	Value     string `json:"value"`
 }
 
 // IdentifyCryptoFromPoolImmediates reads pool_immediates.jsonl and identifies
@@ -110,6 +110,45 @@ func IdentifyCryptoFromPoolImmediates(inDir string) ([]CryptoFinding, error) {
 	return findings, nil
 }
 
+// isDistinctiveConstant reports whether a constant's raw bytes are unusual
+// enough that finding them in a binary is evidence of anything.
+//
+// A constant qualifies when at least three of its bytes are non-zero, no byte
+// value repeats more than twice, and it is not a power of two. That rejects
+// the AES Rcon table (0x01000000, 0x02000000 … 0x80000000) and Keccak
+// RC[0]/RC[1] while keeping SHA/MD5/CRC/ChaCha/BLAKE constants.
+func isDistinctiveConstant(hex string) bool {
+	var val uint64
+	if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
+		return false
+	}
+	width := 4
+	if len(strings.TrimPrefix(hex, "0x")) > 8 {
+		width = 8
+	}
+	var counts [256]int
+	nonZero := 0
+	for i := 0; i < width; i++ {
+		b := byte(val >> (8 * uint(i)))
+		counts[b]++
+		if b != 0 {
+			nonZero++
+		}
+	}
+	if nonZero < 3 {
+		return false
+	}
+	for _, c := range counts {
+		if c > 2 {
+			return false
+		}
+	}
+	if val != 0 && val&(val-1) == 0 {
+		return false // power of two
+	}
+	return true
+}
+
 // IdentifyCryptoFromBinary scans the raw ELF binary for crypto constant bytes.
 // Dart AOT compiles integer constants to MOVZ/MOVK instructions (ARM64) or
 // MOV imm (x86_64), so they appear as raw bytes in the .text section, not
@@ -127,12 +166,22 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 	// Build a lookup: hex string → algorithm name
 	// Also build byte patterns for searching
 	type cryptoPattern struct {
-		algo string
-		hex  string
+		algo  string
+		hex   string
 		bytes []byte
 	}
 	var patterns []cryptoPattern
 	for hex, algo := range cryptoAlgorithmID {
+		// Skip constants whose byte pattern is not distinctive. A 4-byte LE
+		// search for AES Rcon[0] (0x01000000 → 00 00 00 01) matches in every
+		// binary ever built -- it is three zero bytes and a 1. Reporting
+		// "AES Rcon[0] found" from that is a guaranteed false positive, so
+		// only high-entropy constants are searched in raw bytes. (The pool
+		// scan in IdentifyCryptoFromPoolImmediates still reports them: there
+		// the value is a real declared constant, not an accidental byte run.)
+		if !isDistinctiveConstant(hex) {
+			continue
+		}
 		// Parse hex to bytes
 		var val uint64
 		if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
@@ -173,10 +222,10 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 			if !seen[key] {
 				seen[key] = true
 				findings = append(findings, CryptoFinding{
-					Algorithm:  pat.algo,
-					Constant:   pat.hex,
-					PoolIndex:  -1, // not from pool — from binary
-					Value:      fmt.Sprintf("binary_offset=0x%x", absOffset),
+					Algorithm: pat.algo,
+					Constant:  pat.hex,
+					PoolIndex: -1, // not from pool — from binary
+					Value:     fmt.Sprintf("binary_offset=0x%x", absOffset),
 				})
 			}
 			offset = absOffset + len(pat.bytes)
@@ -308,16 +357,74 @@ func EnumeratePlugins(stringRefs []StringRefRecord) []PluginFinding {
 
 // NetworkEndpointFinding is a network endpoint extraction finding.
 type NetworkEndpointFinding struct {
-	Type    string `json:"type"` // "url", "ip", "domain"
-	Value   string `json:"value"`
-	Func    string `json:"func,omitempty"`
+	Type  string `json:"type"` // "url", "ip", "domain"
+	Value string `json:"value"`
+	Func  string `json:"func,omitempty"`
 }
 
 var (
-	urlRe      = regexp.MustCompile(`https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+`)
-	ipRe       = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	domainRe   = regexp.MustCompile(`\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+\b`)
+	urlRe    = regexp.MustCompile(`https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+`)
+	ipRe     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	domainRe = regexp.MustCompile(`\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+\b`)
 )
+
+// fileExtensions are suffixes that mean the match is a file name, not a host.
+var fileExtensions = []string{
+	".dart", ".go", ".json", ".txt", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+	".class", ".java", ".xml", ".so", ".h", ".c", ".cc", ".cpp", ".py", ".js",
+	".ts", ".html", ".css", ".md", ".yaml", ".yml", ".gradle", ".properties",
+	".kt", ".swift", ".dill", ".jar", ".aar", ".plist", ".pb", ".proto",
+}
+
+// dartTypePrefixes are core-library type names; `Iterable.first` and friends
+// match the domain regex but are member accesses.
+var dartTypePrefixes = []string{
+	"int", "double", "string", "bool", "list", "map", "set", "object",
+	"iterable", "future", "stream", "duration", "datetime", "num", "regexp",
+	"symbol", "enum", "type", "dynamic", "void", "null", "uri", "error",
+	"exception", "function", "comparable", "pattern", "match", "runes",
+	"stringbuffer", "bigint", "stopwatch", "invocation",
+}
+
+// isNotADomain reports whether a domain-regex match should be discarded.
+//
+// The extension test is a SUFFIX test on purpose. The earlier version used
+// strings.Contains for each extension, which meant ".c" matched "google.com",
+// ".so" matched "cdn.social" and ".h" matched anything with ".h" in it --
+// i.e. essentially every real domain was thrown away, and the file that this
+// analysis exists to produce came out empty.
+func isNotADomain(m string) bool {
+	lower := strings.ToLower(m)
+	for _, ext := range fileExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	// `Type.member` — the label before the first dot is a Dart core type.
+	head := lower
+	if i := strings.Index(head, "."); i >= 0 {
+		head = head[:i]
+	}
+	for _, p := range dartTypePrefixes {
+		if head == p {
+			return true
+		}
+	}
+	// A real host's last label (the TLD) is alphabetic and at least 2 chars.
+	tld := lower
+	if i := strings.LastIndex(tld, "."); i >= 0 {
+		tld = tld[i+1:]
+	}
+	if len(tld) < 2 {
+		return true
+	}
+	for i := 0; i < len(tld); i++ {
+		if tld[i] < 'a' || tld[i] > 'z' {
+			return true
+		}
+	}
+	return false
+}
 
 // ExtractNetworkEndpoints scans string refs for URLs, IPs, and domains.
 func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFinding {
@@ -359,32 +466,8 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 			if len(m) < 5 || m[0] >= '0' && m[0] <= '9' {
 				continue
 			}
-			// Skip common false positives
-			lower := strings.ToLower(m)
-			if strings.Contains(lower, ".dart") || strings.Contains(lower, ".go") ||
-				strings.Contains(lower, ".json") || strings.Contains(lower, ".txt") ||
-				strings.Contains(lower, ".png") || strings.Contains(lower, ".jpg") ||
-				strings.Contains(lower, ".class") || strings.Contains(lower, ".java") ||
-				strings.Contains(lower, ".xml") || strings.Contains(lower, ".so") ||
-				strings.Contains(lower, ".h") || strings.Contains(lower, ".c") ||
-				strings.Contains(lower, ".cc") || strings.Contains(lower, ".cpp") ||
-				strings.Contains(lower, ".py") || strings.Contains(lower, ".js") ||
-				strings.Contains(lower, ".ts") || strings.Contains(lower, ".html") ||
-				strings.Contains(lower, ".css") || strings.Contains(lower, ".md") ||
-				strings.Contains(lower, ".yaml") || strings.Contains(lower, ".yml") ||
-				strings.Contains(lower, ".gradle") || strings.Contains(lower, ".properties") ||
-				strings.Contains(lower, ".kt") || strings.Contains(lower, ".swift") ||
-				strings.Contains(lower, "int.") ||
-				strings.Contains(lower, "double.") || strings.Contains(lower, "string.") ||
-				strings.Contains(lower, "bool.") || strings.Contains(lower, "list.") ||
-				strings.Contains(lower, "map.") || strings.Contains(lower, "set.") ||
-				strings.Contains(lower, "object.") || strings.Contains(lower, "iterable.") ||
-				strings.Contains(lower, "future.") || strings.Contains(lower, "stream.") ||
-				strings.Contains(lower, "duration.") || strings.Contains(lower, "datetime.") ||
-				strings.Contains(lower, "num.") || strings.Contains(lower, "regexp.") ||
-				strings.Contains(lower, "symbol.") || strings.Contains(lower, "enum.") ||
-				strings.Contains(lower, "type.") || strings.Contains(lower, "dynamic.") ||
-				strings.Contains(lower, "void.") || strings.Contains(lower, "null.") {
+			// Skip common false positives.
+			if isNotADomain(m) {
 				continue
 			}
 			key := "domain:" + m
@@ -611,6 +694,10 @@ func writeJSONLFile(path string, entries interface{}) error {
 				return err
 			}
 		}
+	default:
+		// Without this, a finding type added later silently produced an
+		// empty file instead of an error.
+		return fmt.Errorf("writeJSONLFile: unsupported entry type %T for %s", entries, path)
 	}
 	return nil
 }

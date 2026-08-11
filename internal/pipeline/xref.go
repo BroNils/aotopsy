@@ -178,86 +178,12 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, fu
 		}
 	}
 
-	// 4. field_accessor_xref.jsonl — class+offset → accessor functions
-	// Built from class layouts + string_refs (which functions access which pool entries).
-	// A field accessor is a function that loads/stores at a known field offset.
-	// We approximate by matching pool-loaded class instances to their accessing functions.
-	if len(clResult.Classes) > 0 && len(clResult.Instances) > 0 {
-		classByName := map[string]*cluster.ClassInfo{}
-		for i := range clResult.Classes {
-			ci := &clResult.Classes[i]
-			name := ""
-			if s, ok := pl.RefToStr[ci.NameRefID]; ok {
-				name = s
-			}
-			if name != "" {
-				classByName[name] = ci
-			}
-		}
-
-		// Build instance CID → (offset → ref) map
-		instanceFields := map[int]map[int]int{} // cid → offset → refID
-		for _, inst := range clResult.Instances {
-			if instanceFields[inst.CID] == nil {
-				instanceFields[inst.CID] = map[int]int{}
-			}
-			for _, f := range inst.Fields {
-				instanceFields[inst.CID][int(f.ByteOffset)] = f.Ref
-			}
-		}
-
-		// For each class, list its field offsets
-		type fieldKey struct {
-			className string
-			offset    int
-		}
-		fieldReaders := map[fieldKey]map[string]bool{}
-		for _, ci := range clResult.Classes {
-			name := ""
-			if s, ok := pl.RefToStr[ci.NameRefID]; ok {
-				name = s
-			}
-			if name == "" {
-				continue
-			}
-			// Get field offsets from class layout. HostOffset is a ref ID into
-			wordSize := int32(8); if compressedPtrs { wordSize = 4 }; for _, fi := range clResult.Fields { // HostOffset is a MintValues ref ID (word offset), not a byte offset
-				if fi.OwnerRefID == ci.RefID {
-					fname := ""
-					if s, ok := pl.RefToStr[fi.NameRefID]; ok {
-						fname = s
-					}
-					wordOff, ok := clResult.MintValues[int(fi.HostOffset)]; if !ok { continue }; key := fieldKey{className: name, offset: int(int32(wordOff) * wordSize)} //nolint:gosec
-					if fieldReaders[key] == nil {
-						fieldReaders[key] = map[string]bool{}
-					}
-					_ = fname // field name available if needed
-				}
-			}
-		}
-
-		// We don't have per-function field access records from disasm,
-		// so we emit the class→field mapping as a reference.
-		if err := writeJSONL(filepath.Join(outDir, "field_accessor_xref.jsonl"), func() []interface{} {
-			var out []interface{}
-			for key := range fieldReaders {
-				out = append(out, FieldAccessorXref{
-					ClassName:  key.className,
-					ByteOffset: key.offset,
-				})
-			}
-			sort.Slice(out, func(i, j int) bool {
-				a, b := out[i].(FieldAccessorXref), out[j].(FieldAccessorXref)
-				if a.ClassName != b.ClassName {
-					return a.ClassName < b.ClassName
-				}
-				return a.ByteOffset < b.ByteOffset
-			})
-			return out
-		}()); err != nil {
-			return fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
-		}
-	}
+	// 4. field_accessor_xref.jsonl is written by the type-inference stage
+	// (writeFieldAccessorXref in typetrack_stage.go), which is where the
+	// per-function field-access records live. What stood here built the same
+	// file from class layouts alone, with Readers and Writers ALWAYS empty and
+	// the field name computed and then thrown away -- a cross-reference file
+	// containing no cross-references.
 
 	return nil
 }

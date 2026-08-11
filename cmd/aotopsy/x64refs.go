@@ -11,6 +11,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/snapshot"
 )
@@ -259,7 +260,7 @@ func cmdX64Refs(args []string) error {
 					if !ok || mem.Base != x86asm.R15 {
 						continue
 					}
-					poolIdx := int(mem.Disp/8) - 2
+					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 					display, resolved := poolDisplay[poolIdx]
 					if !resolved {
 						continue
@@ -328,7 +329,7 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 			for _, arg := range inst.Args {
 				if mem, ok := arg.(x86asm.Mem); ok {
 					if mem.Base == x86asm.R15 {
-						poolIdx := int(mem.Disp/8) - 2
+						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
 						} else {

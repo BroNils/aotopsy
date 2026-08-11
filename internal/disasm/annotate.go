@@ -64,7 +64,10 @@ func PPAnnotator(pool map[int]string) Annotator {
 		if !ok || baseReg != regPP {
 			return ""
 		}
-		idx := byteOff / 8
+		idx, idxOK := ARM64PoolIndex(byteOff)
+		if !idxOK {
+			return ""
+		}
 		if s, found := pool[idx]; found {
 			return fmt.Sprintf("PP[%d] %s", idx, s)
 		}
@@ -249,11 +252,12 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 		baseReg, ldrOff, ldrOK := isLDR64UnsignedOffset(inst.Raw)
 		if ldrOK && baseReg == p.addDestReg {
 			combined := p.addImm + ldrOff
-			idx := combined / 8
-			if s, found := p.pool[idx]; found {
-				result = fmt.Sprintf("PP[%d] %s", idx, s)
-			} else {
-				result = fmt.Sprintf("PP[%d]", idx)
+			if idx, idxOK := ARM64PoolIndex(combined); idxOK {
+				if s, found := p.pool[idx]; found {
+					result = fmt.Sprintf("PP[%d] %s", idx, s)
+				} else {
+					result = fmt.Sprintf("PP[%d]", idx)
+				}
 			}
 			p.addValid = false // consumed
 		}

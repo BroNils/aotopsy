@@ -233,8 +233,8 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				// call pattern in Dart AOT x86_64 code.
 				baseNote = "dispatch_table"
 			case x86RegPP:
-				poolIdx := int(mem.Disp/8) - 2
-				if disp, ok := poolDisplay[poolIdx]; ok {
+				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
+				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
 				} else {
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)

@@ -2,6 +2,7 @@ package decompiler
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"aotopsy/internal/strutil"
@@ -66,23 +67,23 @@ func SetMaxStepsPerEmitter(n int) {
 }
 
 type emitter struct {
-	fir         *FuncIR
-	symbols     SymbolLookup
-	pool        PoolLookup
-	lines       []string
-	state       *LiftState
-	active      map[int]bool
-	visits      map[int]int
-	omitted     []int
-	omittedSet  map[int]bool
+	fir        *FuncIR
+	symbols    SymbolLookup
+	pool       PoolLookup
+	lines      []string
+	state      *LiftState
+	active     map[int]bool
+	visits     map[int]int
+	omitted    []int
+	omittedSet map[int]bool
 	// omittedStates stores register state snapshots at extraction points,
 	// so helper sub-emitters can receive live register aliases as parameters.
 	omittedStates map[int]*LiftState
-	callIdx     int
-	steps       int
-	budgetHit   bool
-	stats       Stats
-	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	callIdx       int
+	steps         int
+	budgetHit     bool
+	stats         Stats
+	loopHeaders   map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -247,10 +248,17 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	trustParamTypes := len(fir.ArgRegIndices) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
 
 	argList := make([]string, len(argRegIdx))
+	// effectiveParamTypes holds exactly the types the signature displays:
+	// "" wherever the emitter fell back to dynamic. Downstream passes
+	// (type annotation, arg renaming) MUST use this rather than the raw
+	// ParamTypeNames, or they would leak types through the trust gate that
+	// the signature itself refused to show.
+	effectiveParamTypes := make([]string, len(argRegIdx))
 	for i, ri := range argRegIdx {
 		typeName := "dynamic"
 		if trustParamTypes && fir.ParamTypeNames[i] != "" && fir.ParamTypeNames[i] != "?" {
 			typeName = fir.ParamTypeNames[i]
+			effectiveParamTypes[i] = typeName
 		}
 		argList[i] = fmt.Sprintf("%s arg%d", typeName, i)
 		if ri >= 0 && ri < len(fir.ArgRegs) {
@@ -337,13 +345,18 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if fir.EnclosingFunction != "" {
 		e.lines = append(e.lines, fmt.Sprintf("// closure declared in: %s", fir.EnclosingFunction))
 	}
+	// Most specific modifier wins. An async* body calls
+	// _SuspendState._yieldAsyncStar, which also matches the "_SuspendState +
+	// _yield" rule that sets IsAsync -- so testing IsAsync first labelled
+	// every async* function `async`. Same for sync*, whose Resume stub use
+	// matches the `_resume` rule.
 	asyncPrefix := ""
-	if fir.IsAsync {
-		asyncPrefix = "async "
+	if fir.IsAsyncStar {
+		asyncPrefix = "async* "
 	} else if fir.IsSyncStar {
 		asyncPrefix = "sync* "
-	} else if fir.IsAsyncStar {
-		asyncPrefix = "async* "
+	} else if fir.IsAsync {
+		asyncPrefix = "async "
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
 	// A1: Use LocalTypeHints for typed return when available, otherwise
@@ -453,23 +466,31 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		e.emitBlock(entryID, 1, 0)
 	}
 
-	// P7: Post-walk async patch. If IsAsync was set during block walking
-	// (by emitIndirectCall detecting a THR stub like suspend_state_init_async),
-	// the signature line was already emitted without `async`. Patch it now.
-	if fir.IsAsync && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
-		if !strings.HasPrefix(e.lines[sigLineIdx], "async ") {
-			e.lines[sigLineIdx] = "async " + e.lines[sigLineIdx]
+	// P7: Post-walk modifier patch. IsAsync/IsSyncStar/IsAsyncStar can be set
+	// during block walking (emitIndirectCall detecting a THR stub such as
+	// suspend_state_init_async), after the signature line was emitted.
+	//
+	// This is ONE patch, not three: the three separate ones each tested
+	// `HasPrefix` against their own modifier, so a line already carrying
+	// "async* " did not match "async " and got a second prefix -- producing
+	// `async async* dynamic foo()`. The precedence matches the pre-walk
+	// selection above (most specific first).
+	if sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
+		modifier := ""
+		switch {
+		case fir.IsAsyncStar:
+			modifier = "async* "
+		case fir.IsSyncStar:
+			modifier = "sync* "
+		case fir.IsAsync:
+			modifier = "async "
 		}
-	}
-	// Generator post-walk patching (same as async).
-	if fir.IsSyncStar && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
-		if !strings.HasPrefix(e.lines[sigLineIdx], "sync* ") {
-			e.lines[sigLineIdx] = "sync* " + e.lines[sigLineIdx]
-		}
-	}
-	if fir.IsAsyncStar && sigLineIdx >= 0 && sigLineIdx < len(e.lines) {
-		if !strings.HasPrefix(e.lines[sigLineIdx], "async* ") {
-			e.lines[sigLineIdx] = "async* " + e.lines[sigLineIdx]
+		if modifier != "" {
+			line := e.lines[sigLineIdx]
+			if !strings.HasPrefix(line, "async ") && !strings.HasPrefix(line, "async* ") &&
+				!strings.HasPrefix(line, "sync* ") {
+				e.lines[sigLineIdx] = modifier + line
+			}
 		}
 	}
 
@@ -478,6 +499,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	e.appendHelperFunctions() // appends sibling "_block_N()" top-level functions, if any
 
 	source := strings.Join(e.lines, "\n")
+	source = dropUnusedLabels(source)
 	source = compactLines(source)
 	// Expression cleanup passes (from flutterdec expr_cleanup.rs)
 	source = constantFold(source)
@@ -492,7 +514,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = nullSafetyAnnotation(source)
 	// A1: Local variable type inference — use LocalTypeHints from typetrack
 	// (IR-level) plus heuristic text-based inference from ParamTypeNames.
-	source = localTypeInference(source, fir.ParamTypeNames)
+	source = localTypeInference(source, effectiveParamTypes)
 	if fir.LocalTypeHints != nil {
 		source = applyLocalTypeHints(source, fir.LocalTypeHints)
 	}
@@ -502,11 +524,61 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = nullCheckHoisting(source)
 	// A7: Range-guard merging (merge consecutive range checks)
 	source = rangeGuardMerging(source)
-	// Arg renaming with type hints (from flutterdec naming.rs)
-	source = applyArgRenaming(source, fir.ParamTypeNames)
+	// Arg renaming with type hints (from flutterdec naming.rs). Uses the
+	// types the signature actually displayed, so a name never implies a type
+	// the trust gate rejected.
+	source = applyArgRenaming(source, effectiveParamTypes)
 	source = applyNamingPass(source, fir)
 
 	return Artifact{FunctionName: fir.Name, Source: source, Stats: e.stats}
+}
+
+// labelDeclRe matches an emitted block label line, gotoRe a reference to one.
+var (
+	labelDeclRe = regexp.MustCompile(`^\s*block_(\d+):;$`)
+	gotoRefRe   = regexp.MustCompile(`goto block_(\d+);`)
+)
+
+// dropUnusedLabels reconciles block labels and gotos so the emitted text is
+// internally consistent:
+//
+//   - a `block_N:;` label that no `goto block_N;` refers to is removed (labels
+//     are emitted for every block, then pruned here, which avoids having to
+//     predict at emit time which blocks get jumped to);
+//   - a `goto block_N;` whose target block was never emitted -- it can be
+//     unreachable from the walk, or dropped by the step budget -- becomes a
+//     comment, rather than naming a label that does not exist.
+func dropUnusedLabels(source string) string {
+	lines := strings.Split(source, "\n")
+	used := map[string]bool{}
+	declared := map[string]bool{}
+	for _, line := range lines {
+		for _, m := range gotoRefRe.FindAllStringSubmatch(line, -1) {
+			used[m[1]] = true
+		}
+		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+			declared[m[1]] = true
+		}
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+			if !used[m[1]] {
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+		line = gotoRefRe.ReplaceAllStringFunc(line, func(g string) string {
+			m := gotoRefRe.FindStringSubmatch(g)
+			if declared[m[1]] {
+				return g
+			}
+			return "/* goto block_" + m[1] + ": block not emitted */"
+		})
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func safeFuncName(name string) string {
@@ -641,12 +713,12 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 // (which have already fired for this block).
 func (e *emitter) emitBlockBody(id, indent, depth int) {
 	blk := &e.fir.Blocks[id]
-	// A3: Only emit block label if this block has multiple predecessors
-	// (it's a goto target). Single-pred blocks inlined into if/else
-	// don't need labels.
-	if len(blk.Preds) > 1 {
-		e.emit(indent, "block_%d:;", id)
-	}
+	// A3: Emit a label for every block, then drop the unreferenced ones in a
+	// post-pass (dropUnusedLabels). Deciding here from Preds alone was wrong:
+	// a single-predecessor block still gets `goto block_N;` when it was
+	// already visited, and the label it needed was never emitted -- a
+	// dangling goto.
+	e.emit(indent, "block_%d:;", id)
 	e.annotateInlineFrames(blk.StartVA, indent)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
@@ -720,9 +792,16 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			if isLast {
 				e.emitJump(blk, ins, indent, depth)
 			} else {
-				// Non-last jump: emit a real goto.
-				if ins.Target != "" && strings.HasPrefix(ins.Target, "0x") {
-					e.emit(indent, "goto block_%s;", strings.TrimPrefix(ins.Target, "0x"))
+				// Non-last jump: emit a real goto. Targets are block IDs --
+				// the VA must be mapped through BlockByVA first. Emitting
+				// `goto block_<hex VA>;` (as this did) named a label that
+				// never exists, since labels are `block_<block ID>`.
+				if va, okVA := parseHexVA(ins.Target); okVA {
+					if bid, okB := e.fir.BlockByVA(va); okB {
+						e.emit(indent, "goto block_%d;", bid)
+					} else {
+						e.emit(indent, "// non-last jump to %s (no block at that VA)", ins.Target)
+					}
 				} else if len(blk.Succs) > 0 {
 					e.emit(indent, "goto block_%d;", blk.Succs[0].BlockID)
 				} else {
@@ -1026,29 +1105,41 @@ func (e *emitter) appendHelperFunctions() {
 		e.stats.NonLastBranch += sub.stats.NonLastBranch
 	}
 
-	// Replace `return _block_N();` calls with inlined body where available.
+	// Replace `return _block_N();` calls with the inlined body where the
+	// helper was small enough.
+	//
+	// This builds a fresh slice in one pass. The previous version mutated
+	// e.lines from inside `for i, line := range e.lines`: range captured the
+	// original slice, so after the first splice every later index was stale
+	// and bodies were inserted at the wrong offsets.
 	if len(inlined) > 0 {
-		for i, line := range e.lines {
-			t := strings.TrimSpace(line)
-			for id, body := range inlined {
-				callPattern := fmt.Sprintf("return _block_%d();", id)
-				if t == callPattern {
-					// Replace with inlined body (as a block).
-					e.lines[i] = strings.Repeat("  ", leadingIndent(line)) + "// inlined _block_" + fmt.Sprintf("%d", id)
-					// Insert body lines after this line.
-
-	
-				newLines := make([]string, 0, len(e.lines)+len(body))
-					newLines = append(newLines, e.lines[:i+1]...)
-					bodyIndent := 0; if len(body) > 0 { bodyIndent = leadingIndent(body[0]) }; for _, bl := range body {
-						rel := leadingIndent(bl) - bodyIndent; indent := leadingIndent(line) + 1 + rel; if indent < 0 { indent = 0 }; newLines = append(newLines, strings.Repeat("  ", indent)+strings.TrimSpace(bl))
-					}
-					newLines = append(newLines, e.lines[i+1:]...)
-					e.lines = newLines
-					break
+		callSite := make(map[string]int, len(inlined))
+		for id := range inlined {
+			callSite[fmt.Sprintf("return _block_%d();", id)] = id
+		}
+		out := make([]string, 0, len(e.lines))
+		for _, line := range e.lines {
+			id, ok := callSite[strings.TrimSpace(line)]
+			if !ok {
+				out = append(out, line)
+				continue
+			}
+			body := inlined[id]
+			callIndent := leadingIndent(line)
+			out = append(out, strings.Repeat("  ", callIndent)+fmt.Sprintf("// inlined _block_%d", id))
+			bodyIndent := 0
+			if len(body) > 0 {
+				bodyIndent = leadingIndent(body[0])
+			}
+			for _, bl := range body {
+				indent := callIndent + 1 + leadingIndent(bl) - bodyIndent
+				if indent < 0 {
+					indent = 0
 				}
+				out = append(out, strings.Repeat("  ", indent)+strings.TrimSpace(bl))
 			}
 		}
+		e.lines = out
 	}
 }
 
@@ -1132,20 +1223,30 @@ func (e *emitter) extractLoopCondition(id int) string {
 // invertCondition negates a Dart boolean condition expression.
 // Handles simple comparisons by flipping the operator, and wraps
 // complex expressions with !(...).
+// A single comparison, and nothing else: `<operand> <op> <operand>`. Operands
+// may not contain spaces, parentheses or logical operators, so a compound
+// condition never matches.
+var singleCmpRe = regexp.MustCompile(`^([A-Za-z0-9_.$\[\]']+) (>=|<=|==|!=|>|<) ([A-Za-z0-9_.$\[\]'-]+)$`)
+
+var cmpFlips = map[string]string{
+	"==": "!=",
+	"!=": "==",
+	"<":  ">=",
+	">=": "<",
+	">":  "<=",
+	"<=": ">",
+}
+
 func invertCondition(cond string) string {
-	// Try to flip comparison operators
-	flips := map[string]string{
-		"==": "!=",
-		"!=": "==",
-		"<":  ">=",
-		">=": "<",
-		">":  "<=",
-		"<=": ">",
-	}
-	for op, inv := range flips {
-		if idx := strings.Index(cond, " "+op+" "); idx >= 0 {
-			return cond[:idx] + " " + inv + " " + cond[idx+len(op)+2:]
-		}
+	// Flip the operator only when the WHOLE condition is one comparison.
+	//
+	// The previous version scanned an unordered map for the first operator
+	// found anywhere in the string. That made the result depend on Go's map
+	// iteration order, and on a compound condition like `a == b || c != d`
+	// it flipped a single operator -- which is not the negation of the
+	// expression. Anything that is not one bare comparison is wrapped.
+	if m := singleCmpRe.FindStringSubmatch(strings.TrimSpace(cond)); m != nil {
+		return m[1] + " " + cmpFlips[m[2]] + " " + m[3]
 	}
 	// Can't flip — wrap with !()
 	return "!(" + cond + ")"

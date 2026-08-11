@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -122,15 +123,40 @@ func runTypeInference(
 	for i := range clResult.Codes {
 		codeByRef[clResult.Codes[i].RefID] = &clResult.Codes[i]
 	}
-	// Build VA → function name from ranges
-	vaToName := make(map[uint64]string)
+	// Build a sorted [start,end) → function name index from ranges, so a VA
+	// can be mapped to the function that actually CONTAINS it.
+	//
+	// This replaces a `for funcVA, name := range vaToName { if funcVA <= va &&
+	// va < funcVA+0x10000 }` scan: iterating a map returns entries in random
+	// order, so that loop picked an arbitrary function starting within 64 KB
+	// below the address -- a different, and usually wrong, one on each run.
+	type funcSpan struct {
+		start, end uint64
+		name       string
+	}
+	spans := make([]funcSpan, 0, len(ranges))
 	for _, r := range ranges {
-		if r.RefID >= 0 {
-			if ci, ok := pl.CodeNames[r.RefID]; ok {
-				funcStart := uint64(r.PCOffset) - codeOff
-				vaToName[codeVA+funcStart] = ci.FuncName
-			}
+		if r.RefID < 0 || r.Size == 0 {
+			continue
 		}
+		ci, ok := pl.CodeNames[r.RefID]
+		if !ok || ci.FuncName == "" {
+			continue
+		}
+		start := codeVA + uint64(r.PCOffset) - codeOff
+		spans = append(spans, funcSpan{start: start, end: start + uint64(r.Size), name: ci.FuncName})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	funcNameAt := func(va uint64) (string, bool) {
+		i := sort.Search(len(spans), func(i int) bool { return spans[i].start > va })
+		if i == 0 {
+			return "", false
+		}
+		s := spans[i-1]
+		if va < s.start || va >= s.end {
+			return "", false
+		}
+		return s.name, true
 	}
 	for _, pe := range clResult.Pool {
 		if pe.Kind != cluster.PoolTagged {
@@ -161,55 +187,51 @@ func runTypeInference(
 		}
 		{
 			// Try app isolate NamedObject
-				if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
+			if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
+				if no.NameRefID >= 0 {
+					if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
+						poolCodeNames[pe.Index] = name
+					}
+				}
+			}
+			// Try VM isolate NamedObject
+			if _, exists := poolCodeNames[pe.Index]; !exists && pl.VmRefToNamed != nil {
+				if no, ok2 := pl.VmRefToNamed[pe.RefID]; ok2 {
 					if no.NameRefID >= 0 {
-						if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
+						if name, ok3 := pl.VmRefToStr[no.NameRefID]; ok3 && name != "" {
 							poolCodeNames[pe.Index] = name
 						}
 					}
 				}
-				// Try VM isolate NamedObject
-				if _, exists := poolCodeNames[pe.Index]; !exists && pl.VmRefToNamed != nil {
-					if no, ok2 := pl.VmRefToNamed[pe.RefID]; ok2 {
-						if no.NameRefID >= 0 {
-							if name, ok3 := pl.VmRefToStr[no.NameRefID]; ok3 && name != "" {
-								poolCodeNames[pe.Index] = name
-							}
-						}
-					}
-				}
-				// Try matching by TextOffset → VA → function name
-				if _, exists := poolCodeNames[pe.Index]; !exists {
-					if ce, ok2 := codeByRef[pe.RefID]; ok2 && ce.TextOffset > 0 {
-						va := codeVA + uint64(ce.TextOffset) - codeOff
-						// Find function whose range contains this VA
-						for funcVA, name := range vaToName {
-							if funcVA <= va && va < funcVA+0x10000 { // within 64KB
-								poolCodeNames[pe.Index] = name
-								break
-							}
-						}
-					}
-				}
-				// Try CodeRefDisplay (covers VM Code objects with display strings
-				// like "dyn:call", "Native", function names from CodeNames)
-				if _, exists := poolCodeNames[pe.Index]; !exists {
-					if name, ok2 := pl.CodeRefDisplay[pe.RefID]; ok2 && name != "" {
+			}
+			// Try matching by TextOffset → VA → function name
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if ce, ok2 := codeByRef[pe.RefID]; ok2 && ce.TextOffset > 0 {
+					va := codeVA + uint64(ce.TextOffset) - codeOff
+					if name, ok3 := funcNameAt(va); ok3 {
 						poolCodeNames[pe.Index] = name
 					}
+				}
+			}
+			// Try CodeRefDisplay (covers VM Code objects with display strings
+			// like "dyn:call", "Native", function names from CodeNames)
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if name, ok2 := pl.CodeRefDisplay[pe.RefID]; ok2 && name != "" {
+					poolCodeNames[pe.Index] = name
+				}
 			}
 		}
 	}
 
 	poolData := &typetrack.PoolLookupData{
-		RefToStr:       pl.RefToStr,
-		RefToNamed:     pl.RefToNamed,
-		RefCID:         pl.RefCID,
-		CT:             pl.CT,
-		CodeRefToName:  codeRefToName,
-		VmRefToStr:     pl.VmRefToStr,
-		VmRefToNamed:   pl.VmRefToNamed,
-		PoolCodeNames:  poolCodeNames,
+		RefToStr:      pl.RefToStr,
+		RefToNamed:    pl.RefToNamed,
+		RefCID:        pl.RefCID,
+		CT:            pl.CT,
+		CodeRefToName: codeRefToName,
+		VmRefToStr:    pl.VmRefToStr,
+		VmRefToNamed:  pl.VmRefToNamed,
+		PoolCodeNames: poolCodeNames,
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.
@@ -366,8 +388,119 @@ func runTypeInference(
 		return 0, 0, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
 
+	// 6. field_accessor_xref.jsonl — (class, field) → the functions that read
+	// and write it, from the per-function field accesses the type analysis
+	// recorded.
+	if err := writeFieldAccessorXref(outDir, ctx, interResult, clResult, pl, info.Version.CompressedPointers); err != nil {
+		return resolved, total, ctx, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
+	}
+
 	// ctx is returned so the caller can report per-source hit counters.
 	return resolved, total, ctx, nil
+}
+
+// writeFieldAccessorXref writes field_accessor_xref.jsonl: for every instance
+// field the analysis saw touched, the functions that read it and the functions
+// that write it.
+//
+// The accesses come from typetrack.IntraResult.FieldAccesses, recorded at each
+// LDUR/STUR/STR whose receiver register held a resolved class. A previous
+// version of this file emitted the class→offset table with EMPTY readers and
+// writers and a comment saying per-function field access records did not
+// exist; they do now, so the file is an actual cross-reference.
+//
+// Offsets: the instruction displacement is relative to the TAGGED receiver
+// pointer, so the field at layout byte offset N is addressed as N-1
+// (kHeapObjectTag). Layout offsets are reported, and the tag is removed here.
+func writeFieldAccessorXref(
+	outDir string,
+	ctx *typetrack.TypeContext,
+	interResult *typetrack.InterResult,
+	clResult *cluster.Result,
+	pl *PoolLookups,
+	compressedPtrs bool,
+) error {
+	if interResult == nil || ctx == nil {
+		return nil
+	}
+
+	// class ID → (layout byte offset → field name)
+	fieldNames := map[int]map[int32]string{}
+	for _, layout := range BuildClassLayouts(clResult, pl, compressedPtrs) {
+		m := make(map[int32]string, len(layout.Fields))
+		for _, f := range layout.Fields {
+			m[f.ByteOffset] = f.Name
+		}
+		fieldNames[int(layout.ClassID)] = m
+	}
+
+	type key struct {
+		classID int
+		offset  int32
+	}
+	readers := map[key]map[string]bool{}
+	writers := map[key]map[string]bool{}
+	for name, fa := range interResult.Functions {
+		if fa == nil {
+			continue
+		}
+		for _, acc := range fa.Intra.FieldAccesses {
+			k := key{classID: acc.ClassID, offset: acc.ByteOffset + 1}
+			target := readers
+			if acc.IsStore {
+				target = writers
+			}
+			if target[k] == nil {
+				target[k] = map[string]bool{}
+			}
+			target[k][name] = true
+		}
+	}
+
+	keys := map[key]bool{}
+	for k := range readers {
+		keys[k] = true
+	}
+	for k := range writers {
+		keys[k] = true
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	sortedNames := func(set map[string]bool) []string {
+		out := make([]string, 0, len(set))
+		for n := range set {
+			out = append(out, n)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	entries := make([]interface{}, 0, len(keys))
+	for k := range keys {
+		e := FieldAccessorXref{
+			ClassName:  ctx.ClassIDToName[k.classID],
+			ByteOffset: int(k.offset),
+			Readers:    sortedNames(readers[k]),
+			Writers:    sortedNames(writers[k]),
+		}
+		if e.ClassName == "" {
+			e.ClassName = fmt.Sprintf("class_%d", k.classID)
+		}
+		if names, ok := fieldNames[k.classID]; ok {
+			e.FieldName = names[k.offset]
+		}
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].(FieldAccessorXref), entries[j].(FieldAccessorXref)
+		if a.ClassName != b.ClassName {
+			return a.ClassName < b.ClassName
+		}
+		return a.ByteOffset < b.ByteOffset
+	})
+	return writeJSONL(filepath.Join(outDir, "field_accessor_xref.jsonl"), entries)
 }
 
 // rewriteCallEdges reads call_edges.jsonl, updates BLR edges with resolved
@@ -422,14 +555,15 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 				e.Target = stubName
 				resolved++
 			}
-		} else if strings.HasPrefix(e.Via, "THR+") {
-			// Fallback: resolve THR runtime entries from via annotation.
-			// via format: "THR+0xNNN LDR[RUNTIME_ENTRY]"
-			if strings.Contains(e.Via, "RUNTIME_ENTRY") {
-				e.Target = "RuntimeEntry"
-				resolved++
-			}
 		}
+		// NOTE: there used to be a third branch here that matched
+		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
+		// "RuntimeEntry", counting it as resolved. That annotation is emitted
+		// precisely for THR offsets whose field name is NOT known
+		// (thrAnnotationLabel's classTag path in disasm/annotate.go), so no
+		// callee identity was recovered: "RuntimeEntry" is a category, not a
+		// target. It named no function, duplicated information already in
+		// Via, and inflated the resolved-BLR count. Removed.
 	}
 
 	// Write back.

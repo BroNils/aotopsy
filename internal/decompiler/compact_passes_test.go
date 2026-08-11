@@ -16,11 +16,11 @@ func TestCountArgs(t *testing.T) {
 		{"arg0", 1},
 		{"arg0, arg1", 2},
 		{"arg0, arg1, arg2", 3},
-		{"arg0, func(a, b), arg2", 3},     // nested parens
-		{"arg0, [a, b], arg2", 3},          // nested brackets
-		{"arg0, {a: b}, arg2", 3},          // nested braces
-		{"  arg0  ", 1},                    // whitespace
-		{"arg0, , arg2", 3},                // empty arg still counts
+		{"arg0, func(a, b), arg2", 3}, // nested parens
+		{"arg0, [a, b], arg2", 3},     // nested brackets
+		{"arg0, {a: b}, arg2", 3},     // nested braces
+		{"  arg0  ", 1},               // whitespace
+		{"arg0, , arg2", 3},           // empty arg still counts
 	}
 	for _, tt := range tests {
 		got := countArgs(tt.input)
@@ -197,8 +197,8 @@ func TestExtractIterVarFromCond(t *testing.T) {
 		{"local_8 < 10", "local_8"},
 		{"local_m8 != arg0", "local_m8"},
 		{"local_16 <= arg0", "local_16"},
-		{"arg0 < 10", ""},     // not local_
-		{"x == null", ""},     // no comparison operator with spaces
+		{"arg0 < 10", ""}, // not local_
+		{"x == null", ""}, // no comparison operator with spaces
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -437,5 +437,133 @@ func TestForLoopRecoveryNoMatch(t *testing.T) {
 	// Should not crash, should not create a for-loop
 	if strings.Contains(result, "for (") {
 		t.Error("forLoopRecovery should not create for-loop from while(true)")
+	}
+}
+
+// --- Regression tests for the correctness fixes in the readability passes ---
+
+// constantFold must not eat a call's own parentheses: `foo(1 + 2)` was folded
+// to `foo3`, silently deleting the call.
+func TestConstantFoldDoesNotEatCallParens(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"  final t1 = foo(1 + 2);", "  final t1 = foo(1 + 2);"},
+		{"  final t2 = bar(2 * 4);", "  final t2 = bar(2 * 4);"},
+		{"  final t3 = (1 << 12) + 1;", "  final t3 = 4096 + 1;"},
+		{"  final t4 = (2 * 4);", "  final t4 = 8;"},
+	}
+	for _, tt := range tests {
+		if got := constantFold(tt.in); got != tt.want {
+			t.Errorf("constantFold(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// Negating a compound condition is not a per-operator flip.
+func TestRewriteNegatedComparisonsSkipsCompound(t *testing.T) {
+	compound := "  if (!(a == b || c == d)) {"
+	if got := rewriteNegatedComparisons(compound); got != compound {
+		t.Errorf("compound condition must be left alone, got %q", got)
+	}
+	simple := "  if (!(a > b)) {"
+	if got := rewriteNegatedComparisons(simple); got != "  if (a <= b) {" {
+		t.Errorf("simple negation = %q", got)
+	}
+}
+
+// `x & 0xFFFFFFFF` is a 32-bit truncation on 64-bit Dart ints, not identity.
+func TestSimplifyExpressionsKeepsMask(t *testing.T) {
+	in := "  final t1 = x & 0xFFFFFFFF;"
+	if got := simplifyExpressions(in); got != in {
+		t.Errorf("mask must be preserved, got %q", got)
+	}
+}
+
+// A dead store may only be dropped when the value it computes has no effect,
+// and when the reassignment does not read the variable.
+func TestDeadStoreEliminationKeepsEffects(t *testing.T) {
+	keepCall := []string{"  x = sideEffect();", "  x = 10;"}
+	if out, changed := deadStoreElimination(keepCall); changed || len(out) != 2 {
+		t.Errorf("call must not be dropped: %q changed=%v", out, changed)
+	}
+	keepRead := []string{"  x = 5;", "  x = x + 1;"}
+	if out, changed := deadStoreElimination(keepRead); changed || len(out) != 2 {
+		t.Errorf("store read by its successor must be kept: %q changed=%v", out, changed)
+	}
+	drop := []string{"  x = 5;", "  x = 10;"}
+	if out, changed := deadStoreElimination(drop); !changed || len(out) != 1 {
+		t.Errorf("genuinely dead store should be dropped: %q changed=%v", out, changed)
+	}
+}
+
+// A copy may not be propagated past a mutation of its source.
+func TestCopyPropagationRespectsSourceMutation(t *testing.T) {
+	lines := []string{"  t1 = local_5;", "  local_5 = 7;", "  use(t1);"}
+	out, _ := copyPropagation(lines)
+	if strings.Contains(out[2], "local_5") {
+		t.Errorf("must not propagate past a reassignment of the source: %q", out[2])
+	}
+	ok := []string{"  t1 = arg0;", "  use(t1);"}
+	out2, changed := copyPropagation(ok)
+	if !changed || !strings.Contains(out2[1], "arg0") {
+		t.Errorf("stable copy should propagate: %q", out2)
+	}
+}
+
+// CSE may not reuse a temp whose expression's operands have changed.
+func TestCSERespectsOperandMutation(t *testing.T) {
+	lines := []string{
+		"final t1 = alpha + beta;",
+		"alpha = 5;",
+		"return alpha + beta;",
+	}
+	out, _ := commonSubexpressionElimination(lines)
+	if strings.Contains(out[2], "t1") {
+		t.Errorf("must not reuse t1 after alpha changed: %q", out[2])
+	}
+	stable := []string{"final t1 = alpha + beta;", "return alpha + beta;"}
+	out2, changed := commonSubexpressionElimination(stable)
+	if !changed || !strings.Contains(out2[1], "t1") {
+		t.Errorf("stable expression should be reused: %q", out2)
+	}
+}
+
+// The for-loop rewrite must not duplicate the loop's closing brace.
+func TestForLoopRecoveryBraceBalance(t *testing.T) {
+	source := "dynamic foo() {\n  local_8 = 0;\n  while (local_8 < 10) {\n    final t1 = doSomething(local_8);\n    local_8 = local_8 + 1;\n  }\n  return null;\n}"
+	got := forLoopRecovery(source)
+	if strings.Count(got, "{") != strings.Count(got, "}") {
+		t.Errorf("unbalanced braces after for-loop recovery:\n%s", got)
+	}
+	if !strings.Contains(got, "for (local_8 = 0; local_8 < 10; local_8 = local_8 + 1) {") {
+		t.Errorf("for header missing:\n%s", got)
+	}
+	if strings.Contains(got, "}\n  }") {
+		t.Errorf("duplicated closing brace:\n%s", got)
+	}
+}
+
+// Two parameters of the same type must not collapse onto one name.
+func TestApplyArgRenamingIsCollisionFree(t *testing.T) {
+	src := "dynamic foo(String arg0, String arg1) {\n  return arg0 + arg1;\n}"
+	got := applyArgRenaming(src, []string{"String", "String"})
+	if strings.Contains(got, "str + str") {
+		t.Errorf("two params collapsed onto one name:\n%s", got)
+	}
+	if strings.Contains(got, "arg0") || strings.Contains(got, "arg1") {
+		t.Errorf("signature and body disagree on parameter names:\n%s", got)
+	}
+}
+
+// invertCondition must be deterministic and must not flip one operator of a
+// compound condition.
+func TestInvertConditionCompound(t *testing.T) {
+	got := invertCondition("a == b || c != d")
+	if got != "!(a == b || c != d)" {
+		t.Errorf("compound negation = %q", got)
+	}
+	for i := 0; i < 20; i++ {
+		if invertCondition("x <= 10") != "x > 10" {
+			t.Fatal("invertCondition is not deterministic")
+		}
 	}
 }

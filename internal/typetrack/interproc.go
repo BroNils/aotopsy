@@ -1,10 +1,41 @@
 package typetrack
 
 import (
+	"sort"
 	"strings"
 
 	"aotopsy/internal/disasm"
 )
+
+// sortedKeysInsts, sortedKeysX86 and sortedEdgeKeys return map keys in a
+// stable order so that analysis passes that mutate the shared TypeContext
+// produce identical results on every run.
+func sortedKeysInsts(m FuncInstsARM64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysX86(m FuncInstsX86) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedEdgeKeys(m map[string][]BLEdge) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // isHexSuffix checks if s is a hex address suffix (e.g., "1c4", "1b7e54").
 func isHexSuffix(s string) bool {
@@ -178,8 +209,14 @@ func RunInterprocedural(
 		}
 	}
 
+	// Analyse functions in a deterministic order. AnalyzeFunction mutates the
+	// shared TypeContext (field-store types, instantiated classes, selector
+	// offsets), so what function A records is visible to function B: iterating
+	// the map directly made the resolved-BLR set differ between runs of the
+	// same binary.
 	if isARM64 {
-		for name, insts := range funcInstsARM64 {
+		for _, name := range sortedKeysInsts(funcInstsARM64) {
+			insts := funcInstsARM64[name]
 			var entry [31]TypeLattice
 			for i := range entry {
 				entry[i] = Top()
@@ -193,7 +230,8 @@ func RunInterprocedural(
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	} else {
-		for name, insts := range funcInstsX86 {
+		for _, name := range sortedKeysX86(funcInstsX86) {
+			insts := funcInstsX86[name]
 			var entry [31]TypeLattice
 			for i := range entry {
 				entry[i] = Top()
@@ -217,7 +255,8 @@ func RunInterprocedural(
 
 		calleeParamTypes := make(map[string][31]TypeLattice)
 
-		for caller, edges := range blEdges {
+		for _, caller := range sortedEdgeKeys(blEdges) {
+			edges := blEdges[caller]
 			callerAnalysis, ok := result.Functions[caller]
 			if !ok {
 				continue
@@ -269,8 +308,8 @@ func RunInterprocedural(
 						entry[receiverReg] = KnownClass(ownerCID)
 					}
 				}
-			// TARGET 1: Also update non-receiver params from FuncParamTypes.
-			setEntryFromParamTypes(name, &entry)
+				// TARGET 1: Also update non-receiver params from FuncParamTypes.
+				setEntryFromParamTypes(name, &entry)
 				intra := AnalyzeFunction(insts, ctx, entry)
 				result.Functions[name].Intra = intra
 			}
@@ -287,8 +326,8 @@ func RunInterprocedural(
 						entry[receiverReg] = KnownClass(ownerCID)
 					}
 				}
-			// TARGET 1: Also update non-receiver params from FuncParamTypes.
-			setEntryFromParamTypes(name, &entry)
+				// TARGET 1: Also update non-receiver params from FuncParamTypes.
+				setEntryFromParamTypes(name, &entry)
 				intra := AnalyzeFunctionX86(insts, ctx, entry)
 				result.Functions[name].Intra = intra
 			}

@@ -1,6 +1,8 @@
 package typetrack
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 
 	"aotopsy/internal/cluster"
@@ -16,11 +18,100 @@ const (
 
 // BlrResolution is one resolved BLR call site.
 type BlrResolution struct {
-	PC          uint64 // instruction address
-	Reg         int    // BLR register number (0-30)
-	SlotIndex   int    // dispatch table slot (if resolved)
-	TargetName  string // resolved function name (if any)
-	Resolved    bool   // true if we resolved a target
+	PC         uint64 // instruction address
+	Reg        int    // BLR register number (0-30)
+	SlotIndex  int    // dispatch table slot (if resolved)
+	TargetName string // resolved function name (if any)
+	Resolved   bool   // true if we resolved a target
+
+	// Polymorphic is true when TargetName lists more than one possible
+	// callee (a selector-offset scan across classes). Candidates is how many
+	// distinct names the scan found, which can exceed the number listed in
+	// TargetName -- see maxPolymorphicNames.
+	Polymorphic bool
+	Candidates  int
+}
+
+// maxPolymorphicNames bounds how many callee names a polymorphic resolution
+// lists. A selector-offset scan across every class in the dispatch table can
+// match hundreds of implementations; joining them all produced a single
+// multi-kilobyte "target" string in call_edges.jsonl.
+const maxPolymorphicNames = 8
+
+// joinCandidates renders a candidate list for BlrResolution.TargetName.
+func joinCandidates(targets []string) string {
+	if len(targets) <= maxPolymorphicNames {
+		return strings.Join(targets, " | ")
+	}
+	return strings.Join(targets[:maxPolymorphicNames], " | ") +
+		fmt.Sprintf(" | +%d more", len(targets)-maxPolymorphicNames)
+}
+
+// selectorCandidates returns the distinct callee names reachable through a
+// dispatch-table call whose class ID is unknown but whose selector immediate
+// is known.
+//
+// The SDK emits (flow_graph_compiler_arm64.cc, EmitDispatchTableCall):
+//
+//	const intptr_t offset = selector_offset - DispatchTable::kOriginElement;
+//	__ AddImmediate(LR, cid_reg, offset);
+//	__ Call(Address(DISPATCH_TABLE_REG, LR, UXTX, Scaled));
+//
+// so the runtime index off DISPATCH_TABLE_REG is `cid + imm`, where imm is the
+// signed immediate passed here. DispatchBySlot is keyed by that same
+// register-relative index (absolute entry.Index - kOriginElement), therefore:
+//
+//	cid = key - imm = (entry.Index - kOriginElement) - imm
+//
+// The earlier formula, `entry.Index - imm + kOriginElement`, had the origin
+// term on the wrong side and was off by 2*kOriginElement (8192 on ARM64), so
+// every implied class ID -- and thus the RTA filter built on it -- was wrong.
+func (ctx *TypeContext) selectorCandidates(imm int) []string {
+	seen := map[string]bool{}
+	var targets []string
+	// The RTA filter is only meaningful once enough instantiated classes have
+	// been observed; below that it would silently drop real targets.
+	rtaEnabled := len(ctx.InstantiatedClasses) >= rtaMinInstantiatedClasses
+	for key, entry := range ctx.DispatchBySlot {
+		if entry.Kind != cluster.DispatchCode {
+			continue
+		}
+		impliedCID := key - imm
+		if impliedCID < 0 {
+			continue
+		}
+		if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
+			continue
+		}
+		if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
+			if !seen[name] {
+				seen[name] = true
+				targets = append(targets, name)
+			}
+		}
+	}
+	// DispatchBySlot is a map: sort so the same binary yields the same
+	// candidate list (and the same call_edges.jsonl) on every run.
+	sort.Strings(targets)
+	return targets
+}
+
+// rtaMinInstantiatedClasses is the number of observed instantiated classes
+// below which the RTA filter is not applied. A previous value of 9999
+// disabled the filter on every sample in the corpus while the comment next
+// to it claimed the threshold was 100.
+const rtaMinInstantiatedClasses = 100
+
+// applySelectorCandidates fills res from a selector-offset scan.
+func applySelectorCandidates(res *BlrResolution, targets []string) {
+	if len(targets) == 0 {
+		return
+	}
+	res.Candidates = len(targets)
+	res.TargetName = joinCandidates(targets)
+	res.Resolved = true
+	res.SlotIndex = -1
+	res.Polymorphic = len(targets) > 1
 }
 
 // IntraResult holds the result of intra-procedural analysis for one function.
@@ -43,6 +134,38 @@ type IntraResult struct {
 	// passed to the callee, not the exit state. Used by inter-proc to
 	// propagate parameter types more accurately than ExitTypes.
 	BLCallSiteTypes map[uint64][31]TypeLattice
+
+	// FieldAccesses lists every instance-field read/write this function
+	// performs through a receiver whose class was resolved. It is what makes
+	// a real field cross-reference possible: (class, offset) -> the functions
+	// that touch it.
+	FieldAccesses []FieldAccess
+}
+
+// FieldAccess is one instance-field read or write with a known receiver class.
+type FieldAccess struct {
+	ClassID    int    // receiver's class ID
+	ByteOffset int32  // raw instruction displacement (tagged-pointer relative)
+	IsStore    bool   // true for a write, false for a read
+	PC         uint64 // instruction address
+}
+
+// recordFieldAccess appends one access, de-duplicated by PC.
+func recordFieldAccess(result *IntraResult, classID int, byteOffset int32, isStore bool, pc uint64) {
+	if result == nil || classID < 0 {
+		return
+	}
+	for i := range result.FieldAccesses {
+		if result.FieldAccesses[i].PC == pc {
+			return
+		}
+	}
+	result.FieldAccesses = append(result.FieldAccesses, FieldAccess{
+		ClassID:    classID,
+		ByteOffset: byteOffset,
+		IsStore:    isStore,
+		PC:         pc,
+	})
 }
 
 // AnalyzeFunction runs intra-procedural type dataflow on one function.
@@ -129,11 +252,15 @@ func AnalyzeFunction(
 				found = true
 			}
 		}
-		// Pattern D: MOV X30, Xn (register-register move, no selector offset).
-		// This is the "direct class ID" dispatch pattern where the class ID
-		// is used directly as the dispatch table index.
-		// slot = classID + selectorOffset - kOriginElement
-		// If selectorOffset = kOriginElement, then slot = classID.
+		// Pattern D: MOV X30, Xn (register-register move). The SDK emits this
+		// instead of an ADD when `selector_offset - kOriginElement == 0`, so
+		// the immediate is ZERO and the runtime index is the class ID itself.
+		//
+		// (This previously recorded kOriginElement as the "selector offset",
+		// mixing two different quantities in the same map: every other
+		// pattern stores the raw ADD/SUB immediate. The consumer subtracts
+		// that immediate from the slot key, so the mismatch shifted every
+		// implied class ID by kOriginElement.)
 		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
 		if !found {
 			if rd, ok := isMOVOrr(raw); ok && rd == 30 {
@@ -141,7 +268,7 @@ func AnalyzeFunction(
 					ldrRaw := insts[j].Raw
 					if base, rm2, rt, ok := isLDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm2 == 30 {
 						if blrReg, ok := isBLR(insts[j+1].Raw); ok && blrReg == 30 {
-							selectorOffset = ctx.KOriginElement
+							selectorOffset = 0
 							slotReg = 30
 							found = true
 							ctx.SelectorOffsets[insts[j+1].Addr] = selectorOffset
@@ -219,9 +346,9 @@ func AnalyzeFunction(
 		// Type narrowing: track CMP/SUBS that compare class ID with immediate.
 		// When a conditional branch follows, the taken branch can narrow
 		// the receiver type to KnownClass(immediate).
-		var cmpReg int   // register being compared
-		var cmpImm int   // immediate being compared against
-		var hasCmp bool  // whether we saw a CMP/SUBS in this block
+		var cmpReg int  // register being compared
+		var cmpImm int  // immediate being compared against
+		var hasCmp bool // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
 			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm)
 			if _, rn, imm, ok := isSUBS32Immediate(inst.Raw); ok {
@@ -504,6 +631,9 @@ func transferInstruction(
 	if base, rt, imm9, ok := isSTUR64(raw); ok {
 		if rt < 31 && base < 31 && base != 29 && base != 15 &&
 			base != regPP && base != regTHR && base != regDT {
+			if state[base].Kind == LatticeKnownClass {
+				recordFieldAccess(result, state[base].ClassID, int32(imm9), true, inst.Addr)
+			}
 			if state[base].Kind == LatticeKnownClass && state[rt].Kind == LatticeKnownClass {
 				key := state[base].ClassID*100000 + imm9
 				stackTypes[key+0x20000] = state[rt]
@@ -530,6 +660,9 @@ func transferInstruction(
 	if base, rt, imm9, ok := isSTUR32(raw); ok {
 		if rt < 31 && base < 31 && base != 29 && base != 15 &&
 			base != regPP && base != regTHR && base != regDT {
+			if state[base].Kind == LatticeKnownClass {
+				recordFieldAccess(result, state[base].ClassID, int32(imm9), true, inst.Addr)
+			}
 			if state[base].Kind == LatticeKnownClass && state[rt].Kind == LatticeKnownClass {
 				key := state[base].ClassID*100000 + imm9
 				stackTypes[key+0x20000] = state[rt]
@@ -698,7 +831,10 @@ func transferInstruction(
 		if rt >= 31 {
 			return // SP/XZR — not tracked
 		}
-		poolIdx := byteOff / 8
+		poolIdx, poolIdxOK := disasm.ARM64PoolIndex(byteOff)
+		if !poolIdxOK {
+			return
+		}
 		// SUPER FEATURE 3: Check if PP entry is UnlinkedCall with target_name.
 		if ctx.PoolUnlinkedCallNames != nil {
 			if name, ok3 := ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
@@ -820,12 +956,11 @@ func transferInstruction(
 			ctx.ADDClassHits++
 			return
 		} else if state[rn].Kind == LatticeBottom {
-			// P1.2: ADD on Bottom (class ID from header load with unknown receiver).
-			// imm is the selector offset. We don't know the class ID, but we
-			// know the selector offset. Store it as KnownDispatch with a
-			// special marker (DispatchIndex = -imm - 1, negative = unknown class).
-			// The BLR handler will use SelectorOffsets to resolve.
-			state[rd] = KnownDispatch(-imm - 1) // negative = unknown class, encode selector offset
+			// P1.2: ADD on Bottom (class ID from header load with unknown
+			// receiver). The class is unknown but the selector immediate is
+			// not: per flow_graph_compiler_arm64.cc EmitDispatchTableCall,
+			// this immediate is selector_offset - kOriginElement.
+			state[rd] = SelectorDispatch(imm)
 			ctx.ADDClassHits++
 			return
 		}
@@ -848,10 +983,10 @@ func transferInstruction(
 			ctx.ADDClassHits++
 			return
 		} else if state[rn].Kind == LatticeBottom {
-			// P1.2: SUB on Bottom (class ID from header load with unknown receiver).
-			// imm is |selector_offset| (SUB is used for negative offsets).
-			// selector_offset = -imm. Store as KnownDispatch with marker.
-			state[rd] = KnownDispatch(imm - 1) // positive = unknown class, encode |selector_offset|
+			// P1.2: SUB on Bottom -- same as the ADD case with a negative
+			// immediate (the SDK emits SUB when selector_offset <
+			// kOriginElement).
+			state[rd] = SelectorDispatch(-imm)
 			ctx.ADDClassHits++
 			return
 		}
@@ -914,6 +1049,7 @@ func transferInstruction(
 				ctx.HeaderHits++
 				return
 			}
+			recordFieldAccess(result, state[base].ClassID, int32(imm9), false, inst.Addr)
 			if classID, ok2 := ctx.FieldValueClass(state[base].ClassID, int32(imm9)); ok2 {
 				state[rt] = KnownClass(classID)
 				return
@@ -1326,122 +1462,25 @@ func resolveBLR(
 	t := state[rn]
 	switch t.Kind {
 	case LatticeKnownDispatchIndex:
-		// Direct slot lookup.
-		res.SlotIndex = t.DispatchIndex
-		ctx.DispatchHits++
-
-		// P1.2: If DispatchIndex is negative, this is an unknown-class
-		// dispatch with a known selector offset (from ADD/SUB on Bottom).
-		// DispatchIndex = -selectorOffset - 1 (ADD) or |selectorOffset| - 1 (SUB).
-		// Use SelectorOffsets map for the actual offset, or decode from index.
-		if t.DispatchIndex < 0 {
-			// Try SelectorOffsets first (from pre-scan)
-			if selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]; ok {
-				targetSet := map[string]bool{}
-				var targets []string
-				// RTA filter: only include classes that are instantiated.
-				// Applied only when InstantiatedClasses is comprehensive enough
-				// (>100 classes — heuristic to avoid filtering with too few entries).
-				rtaEnabled := len(ctx.InstantiatedClasses) > 9999
-				for _, entry := range ctx.DispatchBySlot {
-					if entry.Kind != cluster.DispatchCode {
-						continue
-					}
-					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
-					if impliedCID < 0 {
-						continue
-					}
-					// RTA filter: skip classes not in InstantiatedClasses
-					if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
-						continue
-					}
-					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-						if !targetSet[name] {
-							targetSet[name] = true
-							targets = append(targets, name)
-						}
-					}
-				}
-				if len(targets) == 1 {
-					res.TargetName = targets[0]
-					res.Resolved = true
-				} else if len(targets) > 1 {
-					res.TargetName = strings.Join(targets, " | ")
-					res.Resolved = true
-				}
-				result.BLRResolutions = append(result.BLRResolutions, res)
-				return
+		// P1.2: class unknown, selector immediate known -- scan the dispatch
+		// table at that selector across all classes.
+		if t.SelectorOnly {
+			ctx.DispatchHits++
+			res.SlotIndex = -1
+			imm := t.SelectorImm
+			// The pre-scan's per-BLR record is authoritative when present:
+			// it saw the actual ADD/SUB + LDR + BLR triple.
+			if fromPreScan, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+				imm = fromPreScan
 			}
-			// Fallback: decode selector offset from DispatchIndex
-			// ADD: DispatchIndex = -imm - 1 → selectorOffset = imm = -(DispatchIndex + 1)
-			// SUB: DispatchIndex = imm - 1 → selectorOffset = -imm = -(DispatchIndex + 1)
-			// Both: selectorOffset = -(DispatchIndex + 1)
-			selectorOffset := -(t.DispatchIndex + 1)
-			if selectorOffset > 0 {
-				// ADD case: selector_offset = imm (positive)
-				targetSet := map[string]bool{}
-				var targets []string
-				rtaEnabled := len(ctx.InstantiatedClasses) > 9999
-				for _, entry := range ctx.DispatchBySlot {
-					if entry.Kind != cluster.DispatchCode {
-						continue
-					}
-					impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
-					if impliedCID < 0 {
-						continue
-					}
-					if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
-						continue
-					}
-					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-						if !targetSet[name] {
-							targetSet[name] = true
-							targets = append(targets, name)
-						}
-					}
-				}
-				if len(targets) == 1 {
-					res.TargetName = targets[0]
-					res.Resolved = true
-				} else if len(targets) > 1 {
-					res.TargetName = strings.Join(targets, " | ")
-					res.Resolved = true
-				}
-			} else if selectorOffset < 0 {
-				// SUB case: selector_offset = -imm (negative)
-				absOffset := -selectorOffset
-				targetSet := map[string]bool{}
-				var targets []string
-				rtaEnabledSub := len(ctx.InstantiatedClasses) > 9999
-				for _, entry := range ctx.DispatchBySlot {
-					if entry.Kind != cluster.DispatchCode {
-						continue
-					}
-					impliedCID := entry.Index + absOffset + ctx.KOriginElement
-					if impliedCID < 0 {
-						continue
-					}
-					if rtaEnabledSub && !ctx.InstantiatedClasses[impliedCID] {
-						continue
-					}
-					if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-						if !targetSet[name] {
-							targetSet[name] = true
-							targets = append(targets, name)
-						}
-					}
-				}
-				if len(targets) == 1 {
-					res.TargetName = targets[0]
-					res.Resolved = true
-				} else if len(targets) > 1 {
-					res.TargetName = strings.Join(targets, " | ")
-					res.Resolved = true
-				}
-			}
+			applySelectorCandidates(&res, ctx.selectorCandidates(imm))
 			result.BLRResolutions = append(result.BLRResolutions, res)
 			return
 		}
+
+		// Direct slot lookup.
+		res.SlotIndex = t.DispatchIndex
+		ctx.DispatchHits++
 
 		if name, ok := ctx.ResolveDispatchTarget(t.DispatchIndex); ok {
 			res.TargetName = name
@@ -1541,45 +1580,10 @@ func resolveBLR(
 		// No type info — try selector offset from pre-scan.
 		// If we know the selector offset, scan ALL dispatch table entries
 		// at that offset across all class IDs to find unique targets.
-		if selectorOffset, ok := ctx.SelectorOffsets[inst.Addr]; ok {
-			// Scan all dispatch table entries at this selector offset.
-			// slot = classID + selectorOffset - kOriginElement
-			// We don't know classID, so scan all slots that match
-			// the pattern: entry.Index - selectorOffset + kOrigin = classID
-			// i.e., for each dispatch entry, check if (entry.Index + kOrigin - selectorOffset)
-			// is a valid classID.
-			targetSet := map[string]bool{}
-			var targets []string
-			rtaEnabledTop := len(ctx.InstantiatedClasses) > 9999
-			for _, entry := range ctx.DispatchBySlot {
-				if entry.Kind != cluster.DispatchCode {
-					continue
-				}
-				impliedCID := entry.Index - selectorOffset + ctx.KOriginElement
-				if impliedCID < 0 {
-					continue
-				}
-				if rtaEnabledTop && !ctx.InstantiatedClasses[impliedCID] {
-					continue
-				}
-				if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
-					if !targetSet[name] {
-						targetSet[name] = true
-						targets = append(targets, name)
-					}
-				}
-			}
-			if len(targets) == 1 {
-				res.TargetName = targets[0]
-				res.Resolved = true
-				res.SlotIndex = -1
-			} else if len(targets) > 1 {
-				// Multiple targets at this selector offset — polymorphic.
-				// List all unique targets.
-				res.TargetName = strings.Join(targets, " | ")
-				res.Resolved = true
-				res.SlotIndex = -1
-			}
+		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+			// Scan every class's slot at this selector immediate; see
+			// selectorCandidates for the index arithmetic and its SDK source.
+			applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 		}
 	case LatticeBottom:
 		res.Resolved = false
@@ -1777,7 +1781,9 @@ func isLDUR32(raw uint32) (base, rt int, imm9 int, ok bool) {
 
 // isLDURH detects LDURH Wt, [Xn, #imm9] (16-bit unscaled load).
 // Used in Dart 2.x for class ID extraction:
-//   LDURH Wt, [Xobj, #1] = load 2 bytes at obj+1+1 = obj+2 = class ID field
+//
+//	LDURH Wt, [Xobj, #1] = load 2 bytes at obj+1+1 = obj+2 = class ID field
+//
 // (kClassIdTagPos=16, kClassIdTagSize=16 in 2.x; vs 12/20 in 3.x)
 // Encoding: 01 111 000 01 0 imm9 00 Rn Rt (size=01, V=0, opc=01)
 // Base: 0x78400000, Mask: 0xFFE00C00
@@ -1806,7 +1812,7 @@ func isLDR32UnsignedOffset(raw uint32) (baseReg int, byteOffset int, ok bool) {
 	baseReg = int((raw >> 5) & 0x1F)
 	imm12 := int((raw >> 10) & 0xFFF)
 	byteOffset = imm12 * 4 // scaled by 4 for 32-bit load
-	_ = rt // rt is always valid (0-30 are real registers, 31 is WZR which we don't track but still valid)
+	_ = rt                 // rt is always valid (0-30 are real registers, 31 is WZR which we don't track but still valid)
 	return baseReg, byteOffset, true
 }
 

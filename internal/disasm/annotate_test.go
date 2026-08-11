@@ -94,24 +94,33 @@ func TestIsADD64Immediate(t *testing.T) {
 }
 
 func TestPPAnnotator(t *testing.T) {
+	// Displacement -> index uses the SDK layout: elements start at +16 and
+	// are 8 bytes each, PP untagged on ARM64 (see disasm.ARM64PoolIndex).
+	// So #0x120 (288) is index (288-16)/8 = 34, not 36.
 	pool := map[int]string{
-		36: `"hello world"`,
+		34: `"hello world"`,
 	}
 	ann := PPAnnotator(pool)
 
-	// LDR X0, [X27, #0x120] → PP[36] "hello world"
+	// LDR X0, [X27, #0x120] → PP[34] "hello world"
 	raw := uint32(0xF9400000 | (0x24 << 10) | (27 << 5) | 0)
 	got := ann(Inst{Raw: raw})
-	want := `PP[36] "hello world"`
+	want := `PP[34] "hello world"`
 	if got != want {
 		t.Errorf("PPAnnotator = %q, want %q", got, want)
 	}
 
-	// LDR X0, [X27, #0x128] → PP[37] (unknown index)
+	// LDR X0, [X27, #0x128] → PP[35] (unknown index)
 	raw2 := uint32(0xF9400000 | (0x25 << 10) | (27 << 5) | 0)
 	got2 := ann(Inst{Raw: raw2})
-	if got2 != "PP[37]" {
-		t.Errorf("PPAnnotator unknown = %q, want %q", got2, "PP[37]")
+	if got2 != "PP[35]" {
+		t.Errorf("PPAnnotator unknown = %q, want %q", got2, "PP[35]")
+	}
+
+	// A displacement below the first element cannot name a pool entry.
+	rawLow := uint32(0xF9400000 | (1 << 10) | (27 << 5) | 0) // #8
+	if got := ann(Inst{Raw: rawLow}); got != "" {
+		t.Errorf("PPAnnotator below first element = %q, want empty", got)
 	}
 
 	// LDR from non-PP register → empty
@@ -142,7 +151,7 @@ func TestTHRAnnotator(t *testing.T) {
 
 func TestPeepholeState(t *testing.T) {
 	pool := map[int]string{
-		0x800: `"large pool string"`,
+		2046: `"large pool string"`,
 	}
 	ps := NewPeepholeState(pool)
 
@@ -153,10 +162,10 @@ func TestPeepholeState(t *testing.T) {
 		t.Errorf("ADD alone should not annotate, got %q", got)
 	}
 
-	// LDR X1, [X0, #0] → combined offset = 0x4000, idx = 0x800
+	// LDR X1, [X0, #0] → combined offset = 0x4000, idx = (0x4000-16)/8 = 2046
 	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
 	got = ps.Annotate(Inst{Raw: ldrRaw})
-	want := `PP[2048] "large pool string"`
+	want := `PP[2046] "large pool string"`
 	if got != want {
 		t.Errorf("peephole = %q, want %q", got, want)
 	}

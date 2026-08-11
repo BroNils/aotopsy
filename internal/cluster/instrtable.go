@@ -34,8 +34,9 @@ type CodeRange struct {
 // dataImageAlignment returns the data image base alignment for a version.
 //
 // SDK source (snapshot.h DataImage()):
-//   ≤2.18: RoundUp(length(), kMaxObjectAlignment)  → 16 on 64-bit
-//   ≥2.19: RoundUp(length(), kObjectStartAlignment) → 64
+//
+//	≤2.18: RoundUp(length(), kMaxObjectAlignment)  → 16 on 64-bit
+//	≥2.19: RoundUp(length(), kObjectStartAlignment) → 64
 //
 // This is a compile-time constant change at Dart 2.19.0, not a per-version
 // value. The cutoff is derived from the DartVersion string, so no per-version
@@ -106,11 +107,24 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 	}
 
 	align := dataImageAlignment(profile)
-	// SDK formula: DataImage = Addr() + RoundUp(length(), align) where length()
-	// EXCLUDES the 4-byte magic. TotalSize = Length + 4, so round up Length.
-	// Using TotalSize crosses a rounding boundary for ~25% (align=16) / ~6%
-	// (align=64) of snapshots, placing the image `align` bytes too high.
-	diStart := roundUp(isoHeader.Length, align)
+	// SDK formula (runtime/vm/snapshot.h, verified at tags 2.12.0 and 3.9.2):
+	//
+	//   int64_t large_length() const {
+	//     return Read<int64_t>(kLengthOffset) + kMagicSize;   // + 4
+	//   }
+	//   intptr_t length() const { return large_length(); }
+	//   const uint8_t* DataImage() const {
+	//     uword offset = Utils::RoundUp(length(), <align>);
+	//     return Addr() + offset;
+	//   }
+	//
+	// So length() INCLUDES the 4-byte magic: the field stored in the buffer
+	// excludes it (set_length writes value - kMagicSize) and length() adds it
+	// back. Header.Length here is the stored field; Header.TotalSize is
+	// Length + 4 -- i.e. TotalSize is the SDK's length(), and it is what must
+	// be rounded up. A previous change swapped these on the opposite reading
+	// of the same code and placed the data image `align` bytes too low.
+	diStart := roundUp(isoHeader.TotalSize, align)
 	tableObjOff := diStart + hdr.InstructionTableDataOffset
 
 	// Minimum: oneByteStringHeader + Data header + 0 entries

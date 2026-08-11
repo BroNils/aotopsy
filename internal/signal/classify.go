@@ -34,19 +34,19 @@ const (
 	CatAttribution = "attribution" // Install referrer, campaign, organic, SDK tracking
 
 	// Security analysis categories (gap-analysis §4.1).
-	CatRooting     = "rooting"     // Root/jailbreak: magisk, supersu, xposed, frida-server
-	CatAntiAnalysis = "anti_analysis" // Anti-debug, anti-VM, anti-frida, emulator detection
-	CatSSLPinning  = "ssl_pinning" // Certificate pinning, X509TrustManager
-	CatAccessibility = "accessibility" // AccessibilityService, keylogger, screenCapture
-	CatFraud       = "fraud"       // Phishing, OTP, banking, card numbers
-	CatDynamicLoad = "dynamic_load" // DynamicLibrary.open, loadLibrary, mirrorSystem
-	CatIPC         = "ipc"         // Binder, ServiceManager, AIDL, ContentProvider
+	CatRooting       = "rooting"        // Root/jailbreak: magisk, supersu, xposed, frida-server
+	CatAntiAnalysis  = "anti_analysis"  // Anti-debug, anti-VM, anti-frida, emulator detection
+	CatSSLPinning    = "ssl_pinning"    // Certificate pinning, X509TrustManager
+	CatAccessibility = "accessibility"  // AccessibilityService, keylogger, screenCapture
+	CatFraud         = "fraud"          // Phishing, OTP, banking, card numbers
+	CatDynamicLoad   = "dynamic_load"   // DynamicLibrary.open, loadLibrary, mirrorSystem
+	CatIPC           = "ipc"            // Binder, ServiceManager, AIDL, ContentProvider
 	CatCovertChannel = "covert_channel" // Tor, socks5, proxychain, DNS tunnel
-	CatDRMBypass   = "drm_bypass"  // Widevine, FairPlay, PlayReady
-	CatObfuscation = "obfuscation" // Short meaningless names, identifier entropy
-	CatCryptoConst = "crypto_const" // AES S-box, SHA-256 K, crypto magic numbers
+	CatDRMBypass     = "drm_bypass"     // Widevine, FairPlay, PlayReady
+	CatObfuscation   = "obfuscation"    // Short meaningless names, identifier entropy
+	CatCryptoConst   = "crypto_const"   // AES S-box, SHA-256 K, crypto magic numbers
 	CatMethodChannel = "method_channel" // Flutter MethodChannel("name")
-	CatPlugin      = "plugin"      // Flutter plugin package names
+	CatPlugin        = "plugin"         // Flutter plugin package names
 )
 
 var (
@@ -190,7 +190,10 @@ var (
 		"placewager", "payout", "cashout",
 		"topup", "recharge",
 	}
-	reGambling = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(bet|wager|casino|slot|gamble|lottery|lotto|poker|roulette|jackpot|withdraw|deposit|reward|bonus|payout|cashout|spin)([^a-zA-Z]|$)`)
+	// NOTE: "slot" (singular) is absent on purpose -- it is Flutter framework
+	// vocabulary (Element.slot, insertRenderObjectChild(child, slot)), and it
+	// tagged _OverlayPortalElement as gambling code. "slots" is kept.
+	reGambling = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(bet|wager|casino|slots|gamble|lottery|lotto|poker|roulette|jackpot|withdraw|deposit|reward|bonus|payout|cashout|spin)([^a-zA-Z]|$)`)
 
 	attributionKeywords = []string{
 		// Install attribution
@@ -375,7 +378,7 @@ func ClassifyString(value string) []string {
 	}
 
 	// Fraud / phishing / banking
-	if containsKeyword(value, fraudKeywords) {
+	if containsKeyword(value, fraudKeywords) || reFraudShort.MatchString(value) {
 		cats = append(cats, CatFraud)
 	}
 
@@ -390,7 +393,7 @@ func ClassifyString(value string) []string {
 	}
 
 	// Covert channel (Tor, proxy, DNS tunnel)
-	if containsKeyword(value, covertChannelKeywords) {
+	if containsKeyword(value, covertChannelKeywords) || reCovertShort.MatchString(value) {
 		cats = append(cats, CatCovertChannel)
 	}
 
@@ -414,10 +417,15 @@ func ClassifyString(value string) []string {
 		cats = append(cats, CatPlugin)
 	}
 
-	// Obfuscation detection: short meaningless names
-	if isObfuscatedName(value) {
-		cats = append(cats, CatObfuscation)
-	}
+	// NOTE: CatObfuscation is deliberately NOT assigned here.
+	//
+	// The per-string test (2-3 characters, no vowel) cannot distinguish an
+	// obfuscated identifier from an ordinary short word: on the ground-truth
+	// sample it flagged "gtk" and "cvv" and nothing else, i.e. it was pure
+	// noise. Obfuscation is a property of the WHOLE binary -- Dart's
+	// --obfuscate renames every identifier, so what identifies it is the
+	// PROPORTION of short meaningless names, not any single one. That
+	// measurement is ObfuscationRatio, applied by the signal stage.
 
 	return cats
 }
@@ -565,8 +573,26 @@ func entropy(s string) float64 {
 	return ent
 }
 
-
 // --- Security analysis keyword lists ---
+//
+// containsKeyword matches against normalizeForMatch(value), which strips
+// '_', '-', ' ' and '.'. A keyword that still CONTAINS one of those
+// characters can therefore never match: "frida-server", "ro.debuggable",
+// "which su" and "network_security_config" were all dead on arrival.
+// normalizeSecurityKeywords (init below) normalizes every list in place so a
+// keyword written with separators still works; the entries are also kept in
+// normalized form here to match the convention documented above.
+func init() {
+	for _, list := range [][]string{
+		rootingKeywords, antiAnalysisKeywords, sslPinningKeywords,
+		accessibilityKeywords, fraudKeywords, dynamicLoadKeywords,
+		ipcKeywords, covertChannelKeywords, drmBypassKeywords, pluginKeywords,
+	} {
+		for i, kw := range list {
+			list[i] = normalizeForMatch(kw)
+		}
+	}
+}
 
 var rootingKeywords = []string{
 	"magisk", "supersu", "superuser", "xposed", "frida-server", "frida_server",
@@ -615,14 +641,20 @@ var accessibilityKeywords = []string{
 
 var fraudKeywords = []string{
 	"phishing", "phish", "credential_harvest", "credentialharvest",
-	"otp", "one_time_password", "otpbypass", "otp_bypass",
+	"one_time_password", "otpbypass", "otp_bypass",
 	"cardnumber", "card_number", "creditcard", "credit_card",
-	"cvv", "cvc", "cardverification", "card_verification",
-	"banking", "bank_account", "bankaccount", "iban", "bic",
+	"cardverification", "card_verification",
+	"banking", "bank_account", "bankaccount", "iban",
 	"identity_theft", "identitytheft",
-	"social_security", "socialsecurity", "ssn",
+	"social_security", "socialsecurity",
 	"skimmer", "card_skimming", "cardskimming",
 }
+
+// Three-letter finance abbreviations need word-boundary matching, exactly
+// like reCryptoShort above. As plain substrings they fire constantly on
+// ordinary Flutter code: "bic" is inside "cubic" (Curves.easeInCubic, the
+// Cubic curve class), "otp"/"cvc"/"ssn" inside arbitrary identifiers.
+var reFraudShort = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(otp|cvv|cvc|ssn|bic)([^a-zA-Z]|$)`)
 
 var dynamicLoadKeywords = []string{
 	"dynamiclibrary", "dynamic_library", "dynamiclibrary.open",
@@ -631,12 +663,16 @@ var dynamicLoadKeywords = []string{
 	"classloader", "class_loader", "dexclassloader", "dex_class_loader",
 	"pathclassloader", "path_class_loader",
 	"plugin_registry", "pluginregistry",
-	"reflect", "reflection", "invokemethod",
+	// "reflect" alone matched ordinary words (reflectance, reflected);
+	// the specific API names below are what actually indicate reflection.
+	"reflection", "invokemethod", "reflectclass",
 }
 
 var ipcKeywords = []string{
 	"binder", "ibinder", "service_manager", "servicemanager",
-	"aidl", "parcel", "transact",
+	// "parcel"/"transact" as bare substrings matched "parcelled" and every
+	// database "transaction"; the Android-specific forms are unambiguous.
+	"aidl", "parcelable", "writetoparcel", "ontransact",
 	"contentprovider", "content_provider", "contentresolver",
 	"content_resolver", "contenturis",
 	"activitymanager", "activity_manager",
@@ -647,7 +683,11 @@ var ipcKeywords = []string{
 }
 
 var covertChannelKeywords = []string{
-	"tor", "onion_router", "onionrouter", "tor_proxy",
+	// NOTE: bare "tor" is deliberately absent -- it is a substring of
+	// Iterator, Constructor, Vector, Monitor, Actor and Editor, i.e. it fired
+	// on most Dart core-library strings. It is matched by reCovertShort below
+	// with word boundaries instead.
+	"onion_router", "onionrouter", "tor_proxy", "torbrowser",
 	"socks5", "socks4", "socks_proxy",
 	"proxychain", "proxy_chain",
 	"dns_tunnel", "dnstunnel", "iodine", "dns2tcp",
@@ -656,11 +696,15 @@ var covertChannelKeywords = []string{
 	"cloudflare_tunnel", "ngrok", "localtunnel",
 }
 
+var reCovertShort = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(tor)([^a-zA-Z]|$)`)
+
 var drmBypassKeywords = []string{
 	"widevine", "fairplay", "playready",
 	"drm_info", "drminfo", "drm_session", "drmsession",
 	"media_drm", "mediadrm", "mediadrmmanager",
-	"provisioning", "license_request", "licenserequest",
+	// "provisioning" alone is generic app vocabulary; the DRM-specific
+	// spelling is what identifies the category.
+	"drm_provisioning", "license_request", "licenserequest",
 	"key_request", "keyrequest",
 	"decrypt_key", "decryptkey", "content_key", "contentkey",
 }
@@ -723,8 +767,65 @@ func isCryptoConstant(value string) bool {
 
 // isObfuscatedName detects short meaningless names typical of Dart --obfuscate.
 // Heuristic: 1-3 char names with no vowels, or names like "aA", "bB", "xY".
+// ObfuscationThreshold is the share of identifier-like strings that must look
+// obfuscated before a binary is reported as obfuscated. A non-obfuscated
+// Flutter app sits near zero (a handful of acronyms like "gtk"); a
+// --obfuscate build renames essentially every identifier.
+const ObfuscationThreshold = 0.30
+
+// ObfuscationRatio measures how obfuscated a binary's string pool looks.
+//
+// It considers only identifier-like values (a name-shaped string), and returns
+// the fraction of those that look like obfuscated names, the number examined,
+// and up to a few examples. Callers should ignore the ratio when the
+// considered count is small -- a 1-of-2 ratio says nothing.
+func ObfuscationRatio(values []string) (ratio float64, considered int, samples []string) {
+	for _, v := range values {
+		if !isIdentifierLike(v) || len(v) > 24 {
+			continue
+		}
+		considered++
+		if isObfuscatedName(v) {
+			if len(samples) < 10 {
+				samples = append(samples, v)
+			}
+			ratio++
+		}
+	}
+	if considered == 0 {
+		return 0, 0, nil
+	}
+	return ratio / float64(considered), considered, samples
+}
+
+// isIdentifierLike reports whether s could be a Dart identifier: it starts
+// with a letter or '_' and contains only letters, digits and '_'.
+func isIdentifierLike(s string) bool {
+	if s == "" {
+		return false
+	}
+	c := s[0]
+	if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_') {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func isObfuscatedName(value string) bool {
 	if len(value) < 1 || len(value) > 4 {
+		return false
+	}
+	// Only identifier-shaped strings can be obfuscated NAMES. Without this
+	// gate the vowel-less test flagged every short punctuation string the
+	// pool holds -- "()", "::", "{}", "->", ", " -- as obfuscation.
+	if !isIdentifierLike(value) {
 		return false
 	}
 	// All uppercase or all lowercase single char
