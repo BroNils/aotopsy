@@ -192,6 +192,10 @@ type TypeContext struct {
 	UBFXHits          int
 	ADDClassHits      int
 	DispatchHits      int
+	// NarrowHits counts flow-sensitive narrowings actually applied: a
+	// `CMP class_id, #N` whose equality edge turned the compared register
+	// into KnownClass(N). ARM64 only; x86 has no narrowing.
+	NarrowHits int
 
 	// x86_64 dispatch-call diagnosis. The SDK folds the dispatch slot into
 	// the CALL's addressing mode there --

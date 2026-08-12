@@ -374,9 +374,9 @@ func AnalyzeFunction(
 		}
 
 		var prevRaw uint32
-		// Type narrowing: track CMP/SUBS that compare class ID with immediate.
-		// When a conditional branch follows, the taken branch can narrow
-		// the receiver type to KnownClass(immediate).
+		// Type narrowing: track CMP/SUBS that compare a class ID with an
+		// immediate. Which SUCCESSOR that licenses depends on the branch --
+		// see equalitySuccessor.
 		var cmpReg int  // register being compared
 		var cmpImm int  // immediate being compared against
 		var hasCmp bool // whether we saw a CMP/SUBS in this block
@@ -397,18 +397,25 @@ func AnalyzeFunction(
 		blockStackExit[idx] = stackTypes
 
 		// Propagate to successors (meet).
+		//
+		// eqSucc is the successor index on which the compared register
+		// definitely EQUALS cmpImm, or -1 when the terminating branch
+		// licenses no such conclusion. Only that successor may be narrowed.
+		eqSucc := -1
+		if hasCmp && cmpReg < 31 && len(blk.insts) > 0 {
+			eqSucc = equalitySuccessor(blk.insts[len(blk.insts)-1].Raw, len(blk.successors))
+		}
 		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
 
-			// Type narrowing: if block ends with conditional branch and
-			// we saw a CMP class_id, #N, the taken branch (succIdx 0 = T)
-			// can narrow the class to KnownClass(N).
-			if hasCmp && succIdx == 0 && cmpReg < 31 {
-				// Check if the compared register has Bottom (class ID from
-				// header load) or KnownClass. If so, narrow to KnownClass(cmpImm).
+			if succIdx == eqSucc {
+				// The compared register holds a class ID (Bottom, from a
+				// header load) or an already-known class. On this edge the
+				// comparison succeeded, so it is exactly cmpImm.
 				narrowed := state
 				if state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass {
 					narrowed[cmpReg] = KnownClass(cmpImm)
+					ctx.NarrowHits++
 				}
 				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
 					newEntry = narrowed
@@ -417,17 +424,9 @@ func AnalyzeFunction(
 						newEntry[r] = meetType(blockEntry[succ][r], narrowed[r], lca)
 					}
 				}
-			} else if hasCmp && succIdx == 1 && cmpReg < 31 {
-				// Fall-through (not-equal) branch: class is NOT cmpImm,
-				// but we can't represent "not N" in the lattice. Leave as-is.
-				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
-					newEntry = state
-				} else {
-					for r := 0; r < 31; r++ {
-						newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
-					}
-				}
 			} else {
+				// Every other edge, including the "not equal" one: the
+				// lattice cannot express "not N", so nothing is learned.
 				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
 					newEntry = state
 				} else {
@@ -511,6 +510,56 @@ type basicBlock struct {
 	startAddr  uint64
 	insts      []disasm.Inst
 	successors []int // block indices
+}
+
+// equalitySuccessor reports which successor edge of a block ending in `last`
+// proves that a preceding `CMP reg, #imm` compared EQUAL, or -1 when no edge
+// does. numSuccs is the block's successor count.
+//
+// Successors are built target-first, fall-through-second (see buildBlocks),
+// so index 0 is the taken edge and index 1 the not-taken one -- but only when
+// both were resolvable, hence the numSuccs == 2 requirement. With one
+// successor the single entry may be either, and guessing is how this went
+// wrong before.
+//
+// This check did not exist. Narrowing was applied to successor 0 after ANY
+// conditional branch, which is right for B.EQ and wrong for everything else:
+// after B.NE, reaching the target proves the register is NOT the immediate,
+// and after B.LS/B.CS/B.HI/B.GE/B.LT/B.GT the test is a range, not an
+// equality.
+//
+// Measured on the 3.x ARM64 sample, the cost of that was small: narrowings
+// actually applied went 4148 -> 3983, so 165 (4%) had no grounds, and no
+// output changed at all -- call_edges.jsonl is byte-identical either way.
+// The disassembly-level distribution of CMP-then-branch is much worse than
+// that (1408 B.EQ against 1207 B.NE and ~1900 range branches), but most of
+// those compare ordinary integers, where the register is Top and no
+// narrowing fires whatever the branch says. Rate over the WRONG population.
+//
+// B.NE is not merely excluded, it is inverted usefully: reaching its
+// FALL-THROUGH proves equality, so that edge is narrowed instead.
+//
+// Known remaining limit: this does not verify that the CMP is what set the
+// flags the branch reads. Another flag-setting instruction between the two
+// would invalidate it. That is a smaller and separate hazard from the branch
+// condition, which is what the measurement above sized.
+func equalitySuccessor(last uint32, numSuccs int) int {
+	if numSuccs != 2 {
+		return -1
+	}
+	// Only B.cond reads the flags a CMP set. CBZ/CBNZ and TBZ/TBNZ test a
+	// register or a single bit directly, so a preceding CMP says nothing
+	// about which way they go.
+	if last&0xFF000010 != 0x54000000 {
+		return -1
+	}
+	switch last & 0xF {
+	case 0: // EQ: the taken edge is the equal one.
+		return 0
+	case 1: // NE: the taken edge proves inequality; the fall-through proves equality.
+		return 1
+	}
+	return -1
 }
 
 // buildBlocks constructs basic blocks from an instruction list.
