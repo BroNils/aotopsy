@@ -20,6 +20,7 @@ func compactTree(stmts []Stmt) ([]Stmt, bool) {
 		for _, fn := range []func([]Stmt) ([]Stmt, bool){
 			removeDeadCodeAfterTerminatorStmt,
 			removeEmptyElseStmt,
+			collapseElseIfStmt,
 			collapseRedundantGuardedReturnStmt,
 			collapseDuplicateReturnsStmt,
 			unwrapDeadWhileTrueStmt,
@@ -82,6 +83,74 @@ func removeDeadCodeAfterTerminatorStmt(body []Stmt) ([]Stmt, bool) {
 		return append(append([]Stmt{}, body[:i+1]...), kept...), true
 	}
 	return body, false
+}
+
+// collapseElseIfStmt rewrites an else branch whose whole body is one `if`
+// into an `else if` clause on the outer construct:
+//
+//	} else {          ->   } else if (c) {
+//	  if (c) {               ...
+//	    ...
+//	  }
+//	}
+//
+// The emitter nests instead of chaining, which costs a level of indentation
+// per alternative and buries long chains: 14357 of these on the 3.x ARM64
+// sample and 30993 on the x86_64 one.
+//
+// Only fires when the else body is EXACTLY one if-construct and nothing
+// else, so no statement or comment can be lost. The inner construct's own
+// else/else-if clauses come along, and its closing brace is dropped because
+// the outer one now closes the whole chain.
+func collapseElseIfStmt(body []Stmt) ([]Stmt, bool) {
+	changed := false
+	for _, s := range body {
+		c := asConstruct(s)
+		if c == nil || len(c.Clauses) == 0 {
+			continue
+		}
+		last := len(c.Clauses) - 1
+		if c.Clauses[last].Header != "} else {" {
+			continue
+		}
+		inner := onlyConstruct(c.Clauses[last].Body)
+		if inner == nil || !inner.isIf() {
+			continue
+		}
+		// The inner clauses move up one nesting level.
+		for i := range inner.Clauses {
+			for _, st := range inner.Clauses[i].Body {
+				st.shift(-1)
+			}
+		}
+		merged := make([]Clause, 0, last+len(inner.Clauses))
+		merged = append(merged, c.Clauses[:last]...)
+		merged = append(merged, Clause{
+			Header: "} else " + inner.Clauses[0].Header,
+			Body:   inner.Clauses[0].Body,
+		})
+		merged = append(merged, inner.Clauses[1:]...)
+		c.Clauses = merged
+		changed = true
+	}
+	return body, changed
+}
+
+// onlyConstruct returns the body's single statement when it is a Construct
+// and nothing else carries code, else nil.
+func onlyConstruct(body []Stmt) *Construct {
+	var found *Construct
+	for _, s := range body {
+		if !isCode(s) {
+			return nil // a comment or blank would be lost by merging
+		}
+		c := asConstruct(s)
+		if c == nil || found != nil {
+			return nil
+		}
+		found = c
+	}
+	return found
 }
 
 // removeEmptyElseStmt drops an else clause with no statements in it.
