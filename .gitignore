@@ -68,3 +68,8 @@ docs/SESSION_HANDOFF*.md
 # same change. That combination removed the only end-to-end regression suite AND
 # made re-adding it impossible without editing this file first. Restored; do not
 # re-ignore source or test files here -- this list is for build outputs.
+
+# Per-machine environment notes: sample binary paths, env var exports, memory
+# limits. The same role as a .env -- AGENTS.md is the shared contract, this is
+# one developer's local setup and is meaningless (and wrong) on another machine.
+AGENTS-local.md

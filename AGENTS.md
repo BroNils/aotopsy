@@ -7,6 +7,12 @@ info lokal (lokasi sample binaries, env vars) yang tidak didokumentasikan di
 sini. Sample `libapp.so` dan `ground_truth.dart` tidak ada di repo — ada di
 `~/dev/` (lihat AGENTS-local.md).
 
+File itu **sengaja tidak ada di git** (`.gitignore`), perannya sama seperti
+`.env`: isinya path dan env var satu mesin, yang salah kalau dipakai di mesin
+lain. Jadi clone baru tidak akan punya file ini — itu normal, bukan hilang.
+Kalau belum ada, buat sendiri berisi path sample dan env var integration test
+di mesin Anda.
+
 ## ⚠️ Host memory: 6 GB. Read this before running anything heavy.
 
 This dev box is a WSL2 VM with `memory=6GB` + 4 GB swap (`.wslconfig`). It has
