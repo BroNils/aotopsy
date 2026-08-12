@@ -101,3 +101,56 @@ func TestX86TestUsesBothOperands(t *testing.T) {
 		t.Errorf("test rax, rax -> %q == %q, want %q == %q", self[0], self[1], "rax", "0")
 	}
 }
+
+// Compressed-pointer decompression is a mechanical artifact with no source
+// counterpart, and it was the single largest source of noise in either
+// architecture's output: 33264 `+ (x28 << 32)` on 3.x ARM64 and 47041
+// `+ THR.heap_base` on x86_64.
+//
+// dart-lang/sdk emits both from inside `#if defined(DART_COMPRESSED_POINTERS)`:
+//
+//	assembler_arm64.h  add(dst, dst, Operand(HEAP_BITS, LSL, 32))
+//	assembler_x64.cc   movl(dest, slot); addq(dest, Address(THR, heap_base_offset()))
+func TestPointerDecompressionIsElided(t *testing.T) {
+	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
+		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg}
+	s := newLiftState(arm.NullReg)
+	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #32"})
+	if got := s.lookupReg("x0"); got != "x1" {
+		t.Errorf("ARM64 decompression should render as the operand alone, got %q", got)
+	}
+
+	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14",
+		ThreadFieldNames: map[int64]string{0x68: "heap_base"}}
+	sx := newLiftState("")
+	sx.Regs["rax"] = "obj"
+	ApplyOther(x64, sx, Instr{Src: "add rax, [r14+0x68]"})
+	if got := sx.lookupReg("rax"); got != "obj" {
+		t.Errorf("x86_64 decompression should leave the operand alone, got %q", got)
+	}
+}
+
+// A shift that is not by 32, or a Thread field that is not heap_base, is
+// ordinary arithmetic and must survive.
+func TestNonDecompressionAddsSurvive(t *testing.T) {
+	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
+		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg}
+	s := newLiftState(arm.NullReg)
+	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #16"})
+	if got := s.lookupReg("x0"); got == "x1" {
+		t.Errorf("a shift by 16 is not decompression, got %q", got)
+	}
+	ApplyOther(arm, s, Instr{Src: "add x2, x1, x3, lsl #32"})
+	if got := s.lookupReg("x2"); got == "x1" {
+		t.Errorf("only the heap-bits register marks decompression, got %q", got)
+	}
+
+	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14",
+		ThreadFieldNames: map[int64]string{0x68: "heap_base", 0x70: "stack_limit"}}
+	sx := newLiftState("")
+	sx.Regs["rax"] = "obj"
+	ApplyOther(x64, sx, Instr{Src: "add rax, [r14+0x70]"})
+	if got := sx.lookupReg("rax"); got == "obj" {
+		t.Errorf("adding a non-heap_base Thread field is real arithmetic, got %q", got)
+	}
+}

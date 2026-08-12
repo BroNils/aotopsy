@@ -35,6 +35,10 @@ const (
 	// restore the same value. So the register holds null everywhere it is
 	// read, and reading it as `null` is not an inference.
 	arm64NullReg = "x22"
+	// arm64HeapBitsReg holds `write_barrier_mask << 32 | heap_base >> 32`.
+	// constants_arm64.h: `const Register HEAP_BITS = R28;`. Shifted left by
+	// 32 it is heap_base, which is how compressed pointers are decompressed.
+	arm64HeapBitsReg = "x28"
 )
 
 // arm64ArgRegs is a DISPLAY convention (arg0..arg7 = x0..x7), not a
@@ -67,6 +71,7 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.PoolReg = arm64PoolReg
 	fir.ThreadReg = arm64ThreadReg
 	fir.NullReg = arm64NullReg
+	fir.HeapBitsReg = arm64HeapBitsReg
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}

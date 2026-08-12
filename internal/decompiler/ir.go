@@ -87,6 +87,11 @@ type FuncIR struct {
 	// object pool instead. See arm64NullReg for the SDK reference and the
 	// sample check behind it.
 	NullReg string
+	// HeapBitsReg is the register holding HEAP_BITS, whose left shift by 32
+	// yields heap_base and so marks a compressed-pointer decompression.
+	// ARM64 only; x86_64 adds Thread.heap_base instead. See
+	// isPointerDecompression.
+	HeapBitsReg string
 
 	// ArgRegIndices holds the real declared arity, resolved empirically
 	// from cross-function call-site aggregation (see

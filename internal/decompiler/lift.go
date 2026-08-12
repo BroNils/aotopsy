@@ -346,6 +346,57 @@ func localName(off int64) string {
 // When resolver is non-nil, it is consulted to replace the synthetic
 // fNN/mNN name with the real Dart field name from the class layout
 // (e.g. base.name instead of base.f8).
+// isPointerDecompression recognises the instruction that turns a 32-bit
+// compressed pointer back into a full address, so it can be rendered as the
+// object it produces rather than as arithmetic.
+//
+// Both architectures emit it from the same place in dart-lang/sdk, inside
+// `#if defined(DART_COMPRESSED_POINTERS)`:
+//
+//	ARM64  assembler_arm64.h  add(dst, dst, Operand(HEAP_BITS, LSL, 32))
+//	x86_64 assembler_x64.cc   movl(dest, slot);
+//	                          addq(dest, Address(THR, heap_base_offset()))
+//
+// On ARM64 that is `ADD Xd, Xn, X28, LSL #32`. HEAP_BITS holds
+// `write_barrier_mask << 32 | heap_base >> 32` (constants_arm64.h), so
+// shifting it left by 32 drops the mask off the top and leaves
+// `(heap_base >> 32) << 32`, which IS heap_base -- pointer_tagging.h's
+// kHeapBaseMask = ~(4GB-1) makes the heap 4GB-aligned, so the low bits it
+// clears are already zero. The register is reserved
+// (kReservedCpuRegisters includes HEAP_BITS) and its only other use shifts
+// RIGHT by 32 to recover the write-barrier mask, so a left shift by 32 is
+// unambiguous.
+//
+// On x86_64 it is an add of THR.heap_base, which P-5's Thread field naming
+// already renders by name.
+//
+// Measured before this: 33264 occurrences of `+ (x28 << 32)` in the 3.x
+// ARM64 output and 47041 of `THR.heap_base` on x86_64 -- the single largest
+// source of noise in either, and it says nothing a reader of Dart wants,
+// since compression is invisible at source level.
+// srcTok is the added operand and shiftTok its ARM64 shift suffix ("" when
+// there is none). The x86_64 form is two-operand (`add dst, [r14+off]`) and
+// the ARM64 form three-operand, so both call sites pass their own operands.
+func isPointerDecompression(fir *FuncIR, mnemonic, srcTok, shiftTok string) bool {
+	if mnemonic != "add" {
+		return false
+	}
+	// ARM64: the heap-bits register shifted left by 32.
+	if fir.HeapBitsReg != "" && strings.ToLower(strings.TrimSpace(srcTok)) == fir.HeapBitsReg {
+		spec := strings.ToLower(strings.TrimSpace(shiftTok))
+		i := strings.Index(spec, "#")
+		return strings.HasPrefix(spec, "lsl") && i >= 0 && strings.TrimSpace(spec[i+1:]) == "32"
+	}
+	// x86_64: an add of the Thread's heap_base field.
+	if fir.ThreadFieldNames != nil {
+		if op := parseOperand(srcTok); op.isMem && op.hasDisp &&
+			strings.ToLower(op.memBase) == fir.ThreadReg {
+			return fir.ThreadFieldNames[op.memDisp] == "heap_base"
+		}
+	}
+	return false
+}
+
 // cachedVMObjectValues are the Thread fields that cache a VM OBJECT rather
 // than an address, so loading one yields that object itself.
 //
@@ -477,6 +528,14 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 	case "add", "sub":
 		if len(ops) >= 3 {
 			dst := strings.ToLower(ops[0])
+			shiftTok := ""
+			if len(ops) >= 4 {
+				shiftTok = ops[3]
+			}
+			if isPointerDecompression(fir, mnemonic, ops[2], shiftTok) {
+				s.Regs[dst] = operandExpr(fir, s, ops[1])
+				break
+			}
 			lhs := operandExpr(fir, s, ops[1])
 			rhs := operandExpr(fir, s, ops[2])
 			// ARM64 shifted register operand: add x0, x1, x2, lsl #3
@@ -503,6 +562,9 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		} else if len(ops) == 2 {
 			// x86 two-operand form: dst is also the first source.
 			dst := strings.ToLower(ops[0])
+			if isPointerDecompression(fir, mnemonic, ops[1], "") {
+				break // dst already holds the compressed pointer
+			}
 			lhs := s.lookupReg(dst)
 			rhs := operandExpr(fir, s, ops[1])
 			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
