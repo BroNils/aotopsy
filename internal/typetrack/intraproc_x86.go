@@ -633,6 +633,24 @@ func transferInstructionX86(
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			idxReg := canonX86RegLocal(mem.Index)
 			baseReg := canonX86RegLocal(mem.Base)
+			// Diagnose the dispatch-call shape before trying to resolve it,
+			// so a failure says WHICH half was unknown. Resolving needs both
+			// the table register and cid_reg typed; the counters separate
+			// those two causes.
+			if idxReg == x86RegRCX && mem.Scale == 8 {
+				ctx.X86DispatchShape++
+				tableKnown := baseReg >= 0 && baseReg < 31 &&
+					state[baseReg].Kind == LatticeKnownDispatchIndex
+				classKnown := state[x86RegRCX].Kind == LatticeKnownClass
+				switch {
+				case tableKnown && classKnown:
+					ctx.X86DispatchResolved++
+				case !classKnown:
+					ctx.X86DispatchNoClass++
+				default:
+					ctx.X86DispatchNoTable++
+				}
+			}
 			// H-4 fix 5: Dispatch table call via LEA-computed base:
 			// CALL [lea_reg + RCX*8 + disp] where lea_reg has KnownDispatchIndex(0).
 			if baseReg >= 0 && baseReg < 31 && state[baseReg].Kind == LatticeKnownDispatchIndex {

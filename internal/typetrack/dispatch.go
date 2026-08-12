@@ -57,6 +57,13 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		UBFXHits          int `json:"ubfx_hits,omitempty"`
 		ADDClassHits      int `json:"add_class_hits,omitempty"`
 		InstanceFieldHits int `json:"instance_field_hits,omitempty"`
+		// x86_64 dispatch-call diagnosis; see TypeContext for what each
+		// counter separates. Absent on ARM64, which computes the slot with
+		// an ADD before the call rather than in the addressing mode.
+		X86DispatchShape    int `json:"x86_dispatch_shape,omitempty"`
+		X86DispatchNoTable  int `json:"x86_dispatch_no_table,omitempty"`
+		X86DispatchNoClass  int `json:"x86_dispatch_no_class,omitempty"`
+		X86DispatchResolved int `json:"x86_dispatch_resolved,omitempty"`
 		// InstantiatedClasses is the RTA universe: classes observed to be
 		// allocated anywhere in the program. RTAApplied says whether the
 		// selector-offset scan actually filtered candidates by it -- below
@@ -77,6 +84,10 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.HeaderHits = ctx.HeaderHits
 		report.DispatchHits = ctx.DispatchHits
 		report.UBFXHits = ctx.UBFXHits
+		report.X86DispatchShape = ctx.X86DispatchShape
+		report.X86DispatchNoTable = ctx.X86DispatchNoTable
+		report.X86DispatchNoClass = ctx.X86DispatchNoClass
+		report.X86DispatchResolved = ctx.X86DispatchResolved
 		report.ADDClassHits = ctx.ADDClassHits
 		report.InstanceFieldHits = ctx.InstanceFieldHits
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)

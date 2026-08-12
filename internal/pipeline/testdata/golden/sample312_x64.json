@@ -14,7 +14,7 @@
     "pool_immediates.jsonl": 214,
     "string_refs.jsonl": 2156,
     "string_value_xref.jsonl": 950,
-    "typetrack_report.json": 20,
+    "typetrack_report.json": 23,
     "unresolved_thr.jsonl": 0
   },
   "sha256": {
@@ -27,7 +27,7 @@
     "pool_immediates.jsonl": "94b79a6988313ae213a7ab8688a593344a1bc90dcd0398db608bc14d4c02b7b4",
     "string_refs.jsonl": "c43406eb55718ae5493b0ad45850ceb5331d6a981bd664998e55e19bd2329795",
     "string_value_xref.jsonl": "c8b3cf32566bf88df8cdaca307fe8d844eb5cd8702137f40442f687f24616769",
-    "typetrack_report.json": "80e9bbc02486ae1e462a39c99be4d82569ca83df8fe65a2e7437fb7d67b03bc8",
+    "typetrack_report.json": "6bcb6edffef12d6b83225c49a169adc35f79a7e066c79983880c6674d4cc74aa",
     "unresolved_thr.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }

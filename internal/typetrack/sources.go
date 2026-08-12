@@ -192,6 +192,18 @@ type TypeContext struct {
 	UBFXHits          int
 	ADDClassHits      int
 	DispatchHits      int
+
+	// x86_64 dispatch-call diagnosis. The SDK folds the dispatch slot into
+	// the CALL's addressing mode there --
+	// flow_graph_compiler_x64.cc: `call(Address(table_reg, cid_reg, TIMES_8,
+	// (selector_offset - kOriginElement) * kWordSize))` -- so resolving one
+	// needs BOTH the table register and the class-id register to be typed.
+	// These say which of the two is missing when it fails, instead of
+	// leaving the 39x dispatch_hits gap against ARM64 unexplained.
+	X86DispatchShape    int // CALL [base + cid_reg*8 + disp] matched
+	X86DispatchNoTable  int // ...but the base register is not a known dispatch table
+	X86DispatchNoClass  int // ...but cid_reg does not hold a KnownClass
+	X86DispatchResolved int // ...and both were known
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
