@@ -828,7 +828,20 @@ func transferInstructionX86(
 	}
 
 	// Default: if this instruction defines a register, kill its type.
-	if len(ins.Args) >= 1 {
+	//
+	// Args[0] is the destination for most x86 instructions, but NOT for the
+	// flag-only ones. CMP and TEST read both operands and write only the
+	// flags, and PUSH reads its operand -- killing Args[0] for those
+	// destroys a type the instruction never touched.
+	//
+	// CMP is the damaging case: `CMP cid, #N` is exactly how a class check
+	// is written, so this wiped the type of the very register the check was
+	// about, every time. Traced on the sequence at 0x213d6d in the x86_64
+	// sample -- header load sets Bottom, the SHR extract keeps it, and then
+	// the CMP resets it to Top one instruction before the branch that would
+	// have narrowed it. That is why narrowing found an untyped register at
+	// all 61428 opportunities.
+	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
 		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
 			dstIdx := canonX86RegLocal(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
@@ -836,6 +849,16 @@ func transferInstructionX86(
 			}
 		}
 	}
+}
+
+// x86ReadsOnlyFirstOperand reports whether an instruction reads its first
+// operand without writing it, so the default kill above must not apply.
+func x86ReadsOnlyFirstOperand(op x86asm.Op) bool {
+	switch op {
+	case x86asm.CMP, x86asm.TEST, x86asm.PUSH:
+		return true
+	}
+	return false
 }
 
 // resolveX86Dispatch resolves a dispatch table call to a target function.
