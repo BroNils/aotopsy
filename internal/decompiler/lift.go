@@ -324,6 +324,9 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
 		return expr
 	}
+	if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
+		return expr
+	}
 	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
 }
 
@@ -410,6 +413,24 @@ var cachedVMObjectValues = map[string]string{
 	"bool_false":  "false",
 }
 
+// stackSlotExpr renders a stack-pointer-relative access as a slot rather than
+// a field, reporting ok=false when the base is not the Dart stack pointer.
+//
+// The SDK names the register SPREG -- R15 on ARM64 ("SP in Dart code" in
+// constants_arm64.h), RSP on x86_64. A displacement off it is a stack slot,
+// so field notation misdescribes it: the output claimed `x15.m16` and
+// `rsp.f8` for stack traffic, and `rsp._tag` for an object header the stack
+// pointer does not have.
+func stackSlotExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
+	if fir.StackReg == "" || baseReg != fir.StackReg {
+		return "", false
+	}
+	if off < 0 {
+		return fmt.Sprintf("[SP-%d]", -off), true
+	}
+	return fmt.Sprintf("[SP+%d]", off), true
+}
+
 // threadFieldExpr renders a Thread-relative access using the SDK-derived
 // field table, reporting ok=false when the base is not THR or the offset is
 // not in the table (in which case the caller falls back to THR.fNN).
@@ -444,7 +465,8 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 // (thrfields.go / thrfields_x64.go), applied by the annotator, not from
 // class layouts.
 func dartFieldResolver(fir *FuncIR, baseReg string) func(int64, int64) string {
-	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg || baseReg == fir.PoolReg {
+	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg ||
+		baseReg == fir.PoolReg || baseReg == fir.StackReg {
 		return nil
 	}
 	// A2: pass ReceiverClassID so the resolver can use the per-class field
@@ -837,7 +859,13 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
-		lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+		if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
+			lhs = expr
+		} else if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
+			lhs = expr
+		} else {
+			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+		}
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
 		// found testing against a real libapp.so where a computed

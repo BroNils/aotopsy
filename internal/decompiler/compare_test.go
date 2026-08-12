@@ -154,3 +154,36 @@ func TestNonDecompressionAddsSurvive(t *testing.T) {
 		t.Errorf("adding a non-heap_base Thread field is real arithmetic, got %q", got)
 	}
 }
+
+// A displacement off the Dart stack pointer addresses a STACK SLOT, not a
+// field. The SDK names the register SPREG -- R15 on ARM64 ("SP in Dart code"
+// in constants_arm64.h), RSP on x86_64 -- and the output was claiming field
+// stores on it: `x15.m16 = framePointer`, `rsp.f8`, and even `rsp._tag`,
+// which asserts an object header the stack pointer does not have. 4588 such
+// renderings on the 3.x ARM64 sample and 5150 on x86_64.
+func TestStackSlotsAreNotFields(t *testing.T) {
+	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
+		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg, StackReg: arm64StackReg}
+	s := newLiftState(arm.NullReg)
+	ApplyOther(arm, s, Instr{Src: "ldr x0, [x15, #8]"})
+	if got := s.lookupReg("x0"); got != "[SP+8]" {
+		t.Errorf("ARM64 stack load = %q, want %q", got, "[SP+8]")
+	}
+	line, ok := ApplyOther(arm, s, Instr{Src: "str x1, [x15, #-16]"})
+	if !ok || line != "[SP-16] = x1;" {
+		t.Errorf("ARM64 stack store = %q (ok=%v), want %q", line, ok, "[SP-16] = x1;")
+	}
+
+	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14", StackReg: x86StackReg}
+	sx := newLiftState("")
+	ApplyOther(x64, sx, Instr{Src: "mov rax, [rsp+0x8]"})
+	if got := sx.lookupReg("rax"); got != "[SP+8]" {
+		t.Errorf("x86_64 stack load = %q, want %q", got, "[SP+8]")
+	}
+	// -1 is the object-header offset for real objects; the stack pointer has
+	// no header, so it must not render as ._tag.
+	ApplyOther(x64, sx, Instr{Src: "mov rcx, [rsp-0x1]"})
+	if got := sx.lookupReg("rcx"); got != "[SP-1]" {
+		t.Errorf("x86_64 [rsp-1] = %q, want %q -- never ._tag", got, "[SP-1]")
+	}
+}

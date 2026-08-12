@@ -21,6 +21,9 @@ const (
 	x86ThreadReg = "r14"
 	x86FrameReg  = "rbp"
 	x86ReturnReg = "rax"
+	// x86StackReg is the Dart stack pointer. constants_x64.h:
+	// `const Register SPREG = RSP;`.
+	x86StackReg = "rsp"
 )
 
 var x86ArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
@@ -78,6 +81,7 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	fir.ReturnReg = x86ReturnReg
 	fir.PoolReg = x86PoolReg
 	fir.ThreadReg = x86ThreadReg
+	fir.StackReg = x86StackReg
 
 	funcStart := insts[0].Addr
 	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative

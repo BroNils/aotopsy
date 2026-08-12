@@ -39,6 +39,11 @@ const (
 	// constants_arm64.h: `const Register HEAP_BITS = R28;`. Shifted left by
 	// 32 it is heap_base, which is how compressed pointers are decompressed.
 	arm64HeapBitsReg = "x28"
+	// arm64StackReg is the Dart stack pointer. constants_arm64.h spells it
+	// twice: `R15 = 15, // SP in Dart code` and `const Register SPREG = R15;`.
+	// The hardware SP (CSP) is a different register and is not used for Dart
+	// frames.
+	arm64StackReg = "x15"
 )
 
 // arm64ArgRegs is a DISPLAY convention (arg0..arg7 = x0..x7), not a
@@ -72,6 +77,7 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.ThreadReg = arm64ThreadReg
 	fir.NullReg = arm64NullReg
 	fir.HeapBitsReg = arm64HeapBitsReg
+	fir.StackReg = arm64StackReg
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}

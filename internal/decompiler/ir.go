@@ -93,6 +93,16 @@ type FuncIR struct {
 	// isPointerDecompression.
 	HeapBitsReg string
 
+	// StackReg is the Dart stack pointer -- SPREG in the SDK's terms:
+	// `const Register SPREG = R15;` on ARM64 (constants_arm64.h also spells
+	// R15 as "SP in Dart code") and `const Register SPREG = RSP;` on x86_64.
+	//
+	// A displacement off it addresses a STACK SLOT, not a field, so it must
+	// not be rendered with field notation. `x15.m16 = framePointer` claimed
+	// a field store on the stack pointer, and `rsp._tag` claimed the stack
+	// pointer carries an object header.
+	StackReg string
+
 	// ArgRegIndices holds the real declared arity, resolved empirically
 	// from cross-function call-site aggregation (see
 	// internal/disasm.inferCallArgRegMaskLocal and cmd/aotopsy's
