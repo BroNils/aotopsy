@@ -513,6 +513,23 @@ func transferInstructionX86(
 				ctx.HeaderHits++
 				return
 			}
+			// Header load with an UNKNOWN receiver type. ARM64 sets Bottom
+			// here (its "P1.2" rule) rather than Top, and that distinction
+			// is load-bearing: the SHR/AND handler below only recognises a
+			// class-ID extraction when its source is Bottom AND the previous
+			// instruction was a header load, which is what keeps the
+			// selector-offset scan alive when the receiver class is unknown.
+			//
+			// x86 had the consumer of that signal (isX86HeaderLoad plus the
+			// LatticeBottom branch) but never the producer -- this path fell
+			// through to Top, so the check could not fire. Measured
+			// consequence: 91.6% of x86_64 dispatch calls reach the call site
+			// with no class in cid_reg. See docs/roadmap/arch-parity.md P-1.
+			if mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
+				state[dstIdx] = Bottom()
+				ctx.HeaderHits++
+				return
+			}
 			// Other memory load — kill dst.
 			state[dstIdx] = Top()
 			return
