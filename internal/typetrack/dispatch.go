@@ -65,6 +65,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		X86DispatchNoClass  int `json:"x86_dispatch_no_class,omitempty"`
 		X86DispatchResolved int `json:"x86_dispatch_resolved,omitempty"`
 		NarrowHits          int `json:"narrow_hits,omitempty"`
+		NarrowShape         int `json:"narrow_shape,omitempty"`
+		NarrowNoType        int `json:"narrow_no_type,omitempty"`
 		// InstantiatedClasses is the RTA universe: classes observed to be
 		// allocated anywhere in the program. RTAApplied says whether the
 		// selector-offset scan actually filtered candidates by it -- below
@@ -90,6 +92,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.X86DispatchNoClass = ctx.X86DispatchNoClass
 		report.X86DispatchResolved = ctx.X86DispatchResolved
 		report.NarrowHits = ctx.NarrowHits
+		report.NarrowShape = ctx.NarrowShape
+		report.NarrowNoType = ctx.NarrowNoType
 		report.ADDClassHits = ctx.ADDClassHits
 		report.InstanceFieldHits = ctx.InstanceFieldHits
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)

@@ -196,6 +196,12 @@ type TypeContext struct {
 	// `CMP class_id, #N` whose equality edge turned the compared register
 	// into KnownClass(N). ARM64 only; x86 has no narrowing.
 	NarrowHits int
+	// NarrowShape / NarrowNoType diagnose why narrowing does or does not
+	// fire: how many block edges had the right shape (a CMP against an
+	// immediate, terminated by an equality branch), and how many of those
+	// had an untyped register so nothing could be narrowed.
+	NarrowShape  int
+	NarrowNoType int
 
 	// x86_64 dispatch-call diagnosis. The SDK folds the dispatch slot into
 	// the CALL's addressing mode there --

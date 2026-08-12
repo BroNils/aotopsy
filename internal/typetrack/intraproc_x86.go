@@ -118,7 +118,21 @@ func AnalyzeFunctionX86(
 		// x86_64 kills Bottom on the header load and the selector-offset-scan
 		// dispatch path never fires, explaining the BLR gap vs ARM64.
 		var prevInst *X86DecodedInst
+		// Flow-sensitive narrowing, the x86 counterpart of the ARM64 rule in
+		// intraproc.go: a `CMP reg, #imm` against a class id means that on
+		// the edge where the comparison SUCCEEDED, the register holds
+		// exactly that class. It is step 3 of the chain that turns a header
+		// load into a resolved dispatch -- header load gives Bottom, the
+		// SHR extract preserves it, the compare turns it into a real class,
+		// the dispatch call consumes it -- and x86 had steps 1, 2 and 4 but
+		// not this one, which is why supplying the Bottom producer alone
+		// moved nothing.
+		var cmpReg, cmpImm int
+		var hasCmp bool
 		for _, inst := range blk.insts {
+			if r, imm, ok := isX86CmpRegImm(inst); ok {
+				cmpReg, cmpImm, hasCmp = r, imm, true
+			}
 			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
 			prevInst = &inst
 		}
@@ -126,13 +140,32 @@ func AnalyzeFunctionX86(
 		blockExit[idx] = state
 		blockStackExit[idx] = stackTypes
 
-		for _, succ := range blk.successors {
+		// Which successor edge proves equality; -1 for none. Ported with the
+		// branch-condition check the ARM64 version originally lacked, rather
+		// than with the bug.
+		eqSucc := -1
+		if hasCmp && cmpReg >= 0 && cmpReg < 31 && len(blk.insts) > 0 {
+			eqSucc = x86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
+		}
+		if eqSucc >= 0 {
+			ctx.NarrowShape++
+			if state[cmpReg].Kind != LatticeBottom && state[cmpReg].Kind != LatticeKnownClass {
+				ctx.NarrowNoType++
+			}
+		}
+		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
+			narrowedState := state
+			if succIdx == eqSucc &&
+				(state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass) {
+				narrowedState[cmpReg] = KnownClass(cmpImm)
+				ctx.NarrowHits++
+			}
 			if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
-				newEntry = state
+				newEntry = narrowedState
 			} else {
 				for r := 0; r < 31; r++ {
-					newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+					newEntry[r] = meetType(blockEntry[succ][r], narrowedState[r], lca)
 				}
 			}
 
@@ -299,6 +332,52 @@ func x86RelTarget(d X86DecodedInst) (uint64, bool) {
 }
 
 // isX86CondJump returns true for conditional jump opcodes.
+// isX86CmpRegImm matches `CMP reg, imm`, returning the canonical register
+// index and the immediate. Intel order puts the compared register first.
+func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
+	if inst.Inst.Op != x86asm.CMP || len(inst.Inst.Args) < 2 {
+		return 0, 0, false
+	}
+	r, isReg := inst.Inst.Args[0].(x86asm.Reg)
+	if !isReg {
+		return 0, 0, false
+	}
+	idx := canonX86RegLocal(r)
+	if idx < 0 || idx >= 31 {
+		return 0, 0, false
+	}
+	v, isImm := inst.Inst.Args[1].(x86asm.Imm)
+	if !isImm {
+		return 0, 0, false
+	}
+	return idx, int(v), true
+}
+
+// x86EqualitySuccessor reports which successor edge of a block ending in op
+// proves that a preceding `CMP reg, imm` compared EQUAL, or -1 for none.
+//
+// Successors are built target-first, fall-through-second, so index 0 is the
+// taken edge -- but only when both resolved, hence numSuccs == 2.
+//
+// JE narrows the taken edge. JNE narrows the FALL-THROUGH, since that is
+// where its equality is proven. Every other condition is a magnitude test
+// (JA/JB/JG/JL and friends) or tests a flag a CMP did not set in a way that
+// implies equality, so nothing is learned. The ARM64 version of this shipped
+// without the condition check and narrowed the taken edge unconditionally;
+// that is fixed there, and deliberately not reproduced here.
+func x86EqualitySuccessor(op x86asm.Op, numSuccs int) int {
+	if numSuccs != 2 {
+		return -1
+	}
+	switch op {
+	case x86asm.JE:
+		return 0
+	case x86asm.JNE:
+		return 1
+	}
+	return -1
+}
+
 func isX86CondJump(op x86asm.Op) bool {
 	switch op {
 	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
