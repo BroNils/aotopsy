@@ -412,7 +412,7 @@ func runTypeInference(
 	interResult := typetrack.RunInterprocedural(ctx, funcInstsARM64, funcInstsX86, blEdges, maxIter, isARM64, blTargetToName)
 
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
-	bd, err := rewriteCallEdges(outDir, interResult)
+	bd, err := rewriteCallEdges(outDir, interResult, buildTTSCallTargets(clResult.Pool, pl))
 	if err != nil {
 		return bd, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
@@ -547,7 +547,7 @@ type BLRBreakdown = typetrack.BLRBreakdown
 // rewriteCallEdges reads call_edges.jsonl, fills in what the
 // inter-procedural analysis recovered for each indirect call site, writes it
 // back, and returns the breakdown.
-func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (BLRBreakdown, error) {
+func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPoolIndex map[int]string) (BLRBreakdown, error) {
 	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
 	edges, err := ReadJSONL[disasm.CallEdgeRecord](edgesPath)
@@ -596,6 +596,13 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (BLRBre
 				e.Candidates = res.Candidates
 				bd.Monomorphic++
 			}
+		} else if name := ttsCallTarget(e.Via, ttsByPoolIndex); name != "" {
+			// A call through a pool slot holding a Type invokes that type's
+			// testing stub -- GenerateIndirectTTSCall, see ttscall.go. One
+			// known callee, so it counts as a stub rather than a Dart-level
+			// monomorphic call.
+			e.Target = name
+			bd.Stub++
 		} else if strings.HasPrefix(e.Via, "THR.") {
 			// Fallback: resolve THR stub calls from via annotation.
 			// via format: "THR.stub_name" or "THR.stub_name_ep"

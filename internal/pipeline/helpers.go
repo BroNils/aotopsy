@@ -40,6 +40,12 @@ type PoolLookups struct {
 	// the Dart version is outside the verified table, in which case those
 	// refs simply stay unnamed. See snapshot.BaseObjectNames.
 	BaseObjectNames []string
+	// TypeTestingStubNames maps a Type's reference ID to the display name of
+	// the stub that tests it. Built once in BuildPoolLookups; used both to
+	// name the stub Codes themselves and to resolve indirect calls that
+	// invoke one. Nil on versions that cannot resolve a Type to its class.
+	// See buildTypeTestingStubNames.
+	TypeTestingStubNames map[int]string
 }
 
 // BuildPoolLookups builds the lookup maps from a fill result.
@@ -106,6 +112,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
 	ttsNames := buildTypeTestingStubNames(result, l, ct, typeClassIDIsRef)
+	l.TypeTestingStubNames = ttsNames
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
 		if !ok {
