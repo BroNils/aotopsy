@@ -100,7 +100,7 @@ func cmdObjects(args []string) error {
 	}
 
 	// Resolve pool entries.
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion)
+	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
 	poolDisplay := resolvePoolDisplay(result.Pool, pl)
 
 	fmt.Fprintf(os.Stderr, "pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))

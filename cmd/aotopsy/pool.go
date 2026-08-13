@@ -10,8 +10,8 @@ import (
 
 type poolLookups = pipeline.PoolLookups
 
-func buildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *poolLookups {
-	return pipeline.BuildPoolLookups(result, ct, vmResult, codeIndexOneBased, dartVersion)
+func buildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string, typeClassIDIsRef bool) *poolLookups {
+	return pipeline.BuildPoolLookups(result, ct, vmResult, codeIndexOneBased, dartVersion, typeClassIDIsRef)
 }
 
 // threadFieldOffsets adapts internal/disasm's Thread field table (keyed by

@@ -47,7 +47,11 @@ type PoolLookups struct {
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
 // dartVersion selects the VM-isolate base object name table; pass "" to leave
 // those references unnamed.
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *PoolLookups {
+// typeClassIDIsRef must be VersionProfile.TypeClassIdIsRef: on those versions
+// a Type cannot be resolved to its class, which disables type-testing-stub
+// naming rather than letting it emit confidently wrong labels. See
+// buildTypeTestingStubNames.
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string, typeClassIDIsRef bool) *PoolLookups {
 	l := &PoolLookups{
 		RefToStr:        make(map[int]string),
 		RefToNamed:      make(map[int]*cluster.NamedObject),
@@ -101,9 +105,18 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
+	ttsNames := buildTypeTestingStubNames(result, l, ct, typeClassIDIsRef)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
 		if !ok {
+			// A Code with no Function owner is not necessarily anonymous:
+			// the SDK gives a type-testing stub the tested Type as its
+			// owner (type_testing_stubs.cc, `code.set_owner(type)`), which
+			// is why these fail both the CodeIndex cross-reference and the
+			// RefToNamed lookup. See buildTypeTestingStubNames.
+			if name := ttsNames[ce.OwnerRef]; name != "" {
+				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
+			}
 			continue
 		}
 		// ResolveName only consults the app-isolate string table. A
