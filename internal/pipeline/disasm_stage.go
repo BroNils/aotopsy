@@ -48,6 +48,7 @@ func RunDisasmStage(
 	info *snapshot.Info,
 	table *cluster.InstructionsTable,
 	fmtOpts dartfmt.Options,
+	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
 	// Build symbol map for cross-references during disassembly.
 	symbols := make(map[uint64]string)
@@ -204,6 +205,9 @@ func RunDisasmStage(
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
 			name = QualifiedName(ownerName, funcName, r.PCOffset)
+			if funcName == "" {
+				name = elfStubName(elfFuncSyms, funcVA, name)
+			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 			name = funcName

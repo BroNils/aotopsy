@@ -103,6 +103,10 @@ func Run(opts Opts) (*Result, error) {
 	}
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
+	// Last-resort names for Codes the snapshot cannot name at all. nil on a
+	// stripped build, which is the normal production case. See
+	// elfx.FuncSymbols for why this must not go any further than that.
+	elfFuncSyms := ef.FuncSymbols()
 
 	info, err := snapshot.Extract(ef, fmtOpts)
 	if err != nil {
@@ -303,9 +307,9 @@ func Run(opts Opts) (*Result, error) {
 	// comment for exactly what it does and doesn't cover yet.
 	var disasmResult *DisasmResult
 	if isARM64 {
-		disasmResult, err = RunDisasmStage(&opts, pl, poolDisplay, clResult, ranges, code, codeOff, codeVA, thrFields, info, table, fmtOpts)
+		disasmResult, err = RunDisasmStage(&opts, pl, poolDisplay, clResult, ranges, code, codeOff, codeVA, thrFields, info, table, fmtOpts, elfFuncSyms)
 	} else {
-		disasmResult, err = RunDisasmStageX86(&opts, pl, poolDisplay, clResult, ranges, code, codeOff, codeVA, info, table, fmtOpts, thrFields)
+		disasmResult, err = RunDisasmStageX86(&opts, pl, poolDisplay, clResult, ranges, code, codeOff, codeVA, info, table, fmtOpts, thrFields, elfFuncSyms)
 	}
 	if err != nil {
 		return nil, err
