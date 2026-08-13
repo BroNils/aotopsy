@@ -74,8 +74,13 @@ type CodeEntry struct {
 	TextOffset           int64 // text_offset_delta from fill (v2.10-v2.15 only; 0 otherwise)
 	ExceptionHandlersRef int   // ref ID of ExceptionHandlers object (ref index 1); -1 if not captured
 	PcDescriptorsRef     int   // ref ID of PcDescriptors object (ref index 2); -1 if not captured
-	CodeSourceMapRef     int   // ref ID of CodeSourceMap object (ref index 5, AOT); -1 if not captured
-	InlinedFuncsRef      int   // ref ID of inlined_id_to_function Array (ref index 4); -1 if not captured
+	CodeSourceMapRef     int   // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.x AOT); -1 if not captured
+	InlinedFuncsRef      int   // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.x AOT); -1 if not captured
+	// CompressedStackMapsRef is the ref ID of the CompressedStackMaps object.
+	// In 2.x AOT (CodeNumRefs=7), compressed_stackmaps_ is a ref at index 4.
+	// In 3.x AOT (CodeNumRefs=6), compressed_stackmaps_ is null (not a ref).
+	// -1 if not captured or not present in this version's AOT format.
+	CompressedStackMapsRef int // ref ID of CompressedStackMaps object (ref index 4 in 2.x AOT); -1 if not captured
 }
 
 // PoolEntryKind distinguishes ObjectPool entry types.

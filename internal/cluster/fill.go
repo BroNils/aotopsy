@@ -1822,11 +1822,22 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 		var pcDescRef int = -1
 		var csmRef int = -1
 		var inlinedFuncsRef int = -1
+		var compressedStackMapsRef int = -1
 		if stateBitsAfterRef > 0 {
 			// Read first N refs (before state_bits) — all codes, including discarded.
+			// In v2.13, stateBitsAfterRef=1: ref 0 is compressed_stackmaps_
+			// (moved before state_bits so the discarded bit can be checked
+			// before reading the remaining refs). Verified against SDK
+			// clustered_snapshot.cc @2.12.0: compressed_stackmaps_ is the
+			// ref immediately before state_bits in the 2.13 interleaved layout.
 			for j := 0; j < stateBitsAfterRef; j++ {
-				if _, err := readRef(s, fillRefUnsigned); err != nil {
+				r, err := readRef(s, fillRefUnsigned)
+				if err != nil {
 					return codes, fmt.Errorf("code %d/%d ref %d: %w", i, cm.Count, j, err)
+				}
+				if j == 0 && numRefs == 7 {
+					// v2.13: ref 0 (before state_bits) is compressed_stackmaps_.
+					compressedStackMapsRef = int(r)
 				}
 			}
 			// Read state_bits (Read<int32_t> VLE).
@@ -1859,6 +1870,9 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				goto done
 			}
 			// Read remaining refs after state_bits.
+			// v2.13 ref order after state_bits: owner(1), exception_handlers(2),
+			// pc_descriptors(3), catch_entry(4), inlined_id_to_function(5),
+			// code_source_map(6).
 			for j := stateBitsAfterRef; j < numRefs; j++ {
 				r, err := readRef(s, fillRefUnsigned)
 				if err != nil {
@@ -1874,9 +1888,29 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				if j == stateBitsAfterRef+2 {
 					pcDescRef = int(r)
 				}
+				// In 2.x (numRefs==7), inlined_id_to_function_ is at ref 5
+				// and code_source_map_ at ref 6. In 3.x (numRefs==6) these
+				// are at ref 4 and 5 respectively, but 3.x does not use the
+				// stateBitsAfterRef path.
+				if numRefs == 7 {
+					if j == stateBitsAfterRef+4 {
+						inlinedFuncsRef = int(r)
+					}
+					if j == stateBitsAfterRef+5 {
+						csmRef = int(r)
+					}
+				}
 			}
 		} else if !discarded {
 			// v2.10, v2.14+: read all refs in order (no interleaved state_bits).
+			// v2.10/v2.12/v2.14-v2.15 (CodeNumRefs=7, 2.x AOT with bare_instructions):
+			//   owner(0), exception_handlers(1), pc_descriptors(2), catch_entry(3),
+			//   compressed_stackmaps(4), inlined_id_to_function(5), code_source_map(6).
+			//   Verified against SDK clustered_snapshot.cc @2.12.0.
+			// v3.x (CodeNumRefs=6, 3.x AOT):
+			//   owner(0), exception_handlers(1), pc_descriptors(2), catch_entry(3),
+			//   inlined_id_to_function(4), code_source_map(5).
+			//   object_pool and compressed_stackmaps are null (not refs) in 3.x AOT.
 			for j := 0; j < numRefs; j++ {
 				r, err := readRef(s, fillRefUnsigned)
 				if err != nil {
@@ -1891,17 +1925,26 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 				if j == 2 {
 					pcDescRef = int(r)
 				}
-				// inlined_id_to_function is ref 4: an Array of Functions that
-				// CodeSourceMap's PushFunction indices point into.
-				if j == 4 {
-					inlinedFuncsRef = int(r)
-				}
-				// code_source_map is ref 5 in AOT: owner(0),
-				// exception_handlers(1), pc_descriptors(2), catch_entry(3),
-				// inlined_id_to_function(4), code_source_map(5).
-				// object_pool and compressed_stackmaps are absent in AOT.
-				if j == 5 {
-					csmRef = int(r)
+				if numRefs == 7 {
+					// 2.x AOT: compressed_stackmaps_ is a ref at index 4,
+					// inlined_id_to_function_ at 5, code_source_map_ at 6.
+					if j == 4 {
+						compressedStackMapsRef = int(r)
+					}
+					if j == 5 {
+						inlinedFuncsRef = int(r)
+					}
+					if j == 6 {
+						csmRef = int(r)
+					}
+				} else {
+					// 3.x AOT: inlined_id_to_function_ at 4, code_source_map_ at 5.
+					if j == 4 {
+						inlinedFuncsRef = int(r)
+					}
+					if j == 5 {
+						csmRef = int(r)
+					}
 				}
 			}
 		}
@@ -1922,15 +1965,16 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 			fmt.Fprintf(os.Stderr, "  code[%d/%d] main=%d owner=%d discarded=%v endPos=0x%x\n", i, cm.Count, cm.MainCount, ownerRef, discarded, s.Position())
 		}
 		codes = append(codes, CodeEntry{
-			RefID:                ref,
-			OwnerRef:             ownerRef,
-			ClusterIndex:         clusterIndex,
-			PayloadInfo:          payloadInfo,
-			TextOffset:           textOff,
-			ExceptionHandlersRef: excHandlersRef,
-			PcDescriptorsRef:     pcDescRef,
-			CodeSourceMapRef:     csmRef,
-			InlinedFuncsRef:      inlinedFuncsRef,
+			RefID:                  ref,
+			OwnerRef:               ownerRef,
+			ClusterIndex:           clusterIndex,
+			PayloadInfo:            payloadInfo,
+			TextOffset:             textOff,
+			ExceptionHandlersRef:   excHandlersRef,
+			PcDescriptorsRef:       pcDescRef,
+			CodeSourceMapRef:       csmRef,
+			InlinedFuncsRef:        inlinedFuncsRef,
+			CompressedStackMapsRef: compressedStackMapsRef,
 		})
 		ref++
 	}

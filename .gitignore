@@ -73,3 +73,10 @@ docs/SESSION_HANDOFF*.md
 # limits. The same role as a .env -- AGENTS.md is the shared contract, this is
 # one developer's local setup and is meaningless (and wrong) on another machine.
 AGENTS-local.md
+
+# Golden test records: SHA-256 per output file, keyed by the input binary's
+# hash. These are per-machine — they depend on which sample binaries are
+# installed locally (see AGENTS-local.md). The test auto-creates them with
+# AOTOPSY_UPDATE_GOLDEN=1, and skips (never fails) when the env var points
+# at a different binary. Do NOT commit these.
+internal/pipeline/testdata/golden/*.json

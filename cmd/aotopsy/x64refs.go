@@ -538,14 +538,9 @@ func scanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 
 // qualifiedCodeNameLocal mirrors pipeline.QualifiedCodeName without importing
 // the pipeline package's disasm-stage machinery (this command is intentionally
-// standalone -- see file header).
+// standalone -- see file header). Uses ci.Qualified() so constructor names
+// are handled correctly (no owner prefix duplication).
 func qualifiedCodeNameLocal(refID int, pl *poolLookups, pcOffset uint32) string {
 	ci := pl.CodeNames[refID]
-	if ci.FuncName == "" {
-		return fmt.Sprintf("sub_%x", pcOffset)
-	}
-	if ci.OwnerName != "" {
-		return ci.OwnerName + "." + ci.FuncName
-	}
-	return ci.FuncName
+	return ci.Qualified(pcOffset)
 }
