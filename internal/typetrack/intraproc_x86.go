@@ -4,16 +4,18 @@ import (
 	"sort"
 	"strings"
 
+	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 	"golang.org/x/arch/x86/x86asm"
 )
 
 // x86_64 register constants (matching dart-lang/sdk constants_x64.h).
 const (
-	x86RegPP    = 15 // R15 = object pool pointer
-	x86RegTHR   = 14 // R14 = thread pointer
-	x86RegRCX   = 1  // kClassIdReg (DispatchTableNullErrorABI)
-	x86RegRAX   = 0  // return value / allocation result
-	x86RegRDI   = 7  // SysV arg 0 (receiver for instance methods)
+	x86RegPP  = 15 // R15 = object pool pointer
+	x86RegTHR = 14 // R14 = thread pointer
+	x86RegRCX = 1  // kClassIdReg (DispatchTableNullErrorABI)
+	x86RegRAX = 0  // return value / allocation result
+	x86RegRDI = 7  // SysV arg 0 (receiver for instance methods)
 )
 
 // x86ArgRegCanon lists the SysV AMD64 ABI integer argument registers
@@ -36,6 +38,39 @@ func AnalyzeFunctionX86(
 ) *IntraResult {
 	result := &IntraResult{
 		EntryTypes: entryTypes,
+	}
+
+	// Pre-scan: find x86_64 dispatch table call patterns.
+	// Pattern from SDK (flow_graph_compiler_x64.cc):
+	//   MOV RAX, [R14 + dispatch_table_array_offset]  (LoadDispatchTable)
+	//   CALL [RAX + RCX*8 + disp32]                    (dispatch table call)
+	// disp32 = (selector_offset - kOriginElement) * kWordSize
+	//
+	// SelectorOffsets stores the SELECTOR IMMEDIATE -- the same quantity the
+	// ARM64 side records, i.e. `selector_offset - kOriginElement`, which here
+	// is simply disp32/kWordSize. It must NOT have kOriginElement added back:
+	// the consumer (TypeContext.selectorCandidates) computes
+	// `cid = slotKey - imm`, where slotKey is already register-relative
+	// (DispatchBySlot is keyed by entry.Index - kOriginElement, and the
+	// dispatch-table register points at array[kOriginElement] --
+	// DispatchTable::ArrayOrigin()). Adding the origin here shifted every
+	// implied class ID by kOriginElement.
+	// We store it keyed by the CALL's address.
+	for i := 0; i < len(insts); i++ {
+		inst := insts[i]
+		if inst.Inst.Op != x86asm.CALL {
+			continue
+		}
+		mem, ok := inst.Inst.Args[0].(x86asm.Mem)
+		if !ok {
+			continue
+		}
+		baseReg := canonX86RegLocal(mem.Base)
+		idxReg := canonX86RegLocal(mem.Index)
+		// Check: CALL [RAX + RCX*8 + disp32]
+		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
+			ctx.SelectorOffsets[inst.Addr] = int(mem.Disp / 8)
+		}
 	}
 
 	blocks := buildBlocksX86(insts)
@@ -76,20 +111,61 @@ func AnalyzeFunctionX86(
 			stackTypes[k] = v
 		}
 
+		// prevInst is the previous instruction in this block (nil at block
+		// start). Used by the SHR/AND handler to detect the header-load →
+		// class-ID-extract pattern and preserve Bottom, mirroring ARM64's
+		// prevRaw UBFX fix (which unlocked 11550 field hits). Without this,
+		// x86_64 kills Bottom on the header load and the selector-offset-scan
+		// dispatch path never fires, explaining the BLR gap vs ARM64.
+		var prevInst *X86DecodedInst
+		// Flow-sensitive narrowing, the x86 counterpart of the ARM64 rule in
+		// intraproc.go: a `CMP reg, #imm` against a class id means that on
+		// the edge where the comparison SUCCEEDED, the register holds
+		// exactly that class. It is step 3 of the chain that turns a header
+		// load into a resolved dispatch -- header load gives Bottom, the
+		// SHR extract preserves it, the compare turns it into a real class,
+		// the dispatch call consumes it -- and x86 had steps 1, 2 and 4 but
+		// not this one, which is why supplying the Bottom producer alone
+		// moved nothing.
+		var cmpReg, cmpImm int
+		var hasCmp bool
 		for _, inst := range blk.insts {
-			transferInstructionX86(&state, inst, ctx, result, lca, stackTypes)
+			if r, imm, ok := isX86CmpRegImm(inst); ok {
+				cmpReg, cmpImm, hasCmp = r, imm, true
+			}
+			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
+			prevInst = &inst
 		}
 
 		blockExit[idx] = state
 		blockStackExit[idx] = stackTypes
 
-		for _, succ := range blk.successors {
+		// Which successor edge proves equality; -1 for none. Ported with the
+		// branch-condition check the ARM64 version originally lacked, rather
+		// than with the bug.
+		eqSucc := -1
+		if hasCmp && cmpReg >= 0 && cmpReg < 31 && len(blk.insts) > 0 {
+			eqSucc = x86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
+		}
+		if eqSucc >= 0 {
+			ctx.NarrowShape++
+			if state[cmpReg].Kind != LatticeBottom && state[cmpReg].Kind != LatticeKnownClass {
+				ctx.NarrowNoType++
+			}
+		}
+		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
+			narrowedState := state
+			if succIdx == eqSucc &&
+				(state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass) {
+				narrowedState[cmpReg] = KnownClass(cmpImm)
+				ctx.NarrowHits++
+			}
 			if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
-				newEntry = state
+				newEntry = narrowedState
 			} else {
 				for r := 0; r < 31; r++ {
-					newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+					newEntry[r] = meetType(blockEntry[succ][r], narrowedState[r], lca)
 				}
 			}
 
@@ -256,6 +332,52 @@ func x86RelTarget(d X86DecodedInst) (uint64, bool) {
 }
 
 // isX86CondJump returns true for conditional jump opcodes.
+// isX86CmpRegImm matches `CMP reg, imm`, returning the canonical register
+// index and the immediate. Intel order puts the compared register first.
+func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
+	if inst.Inst.Op != x86asm.CMP || len(inst.Inst.Args) < 2 {
+		return 0, 0, false
+	}
+	r, isReg := inst.Inst.Args[0].(x86asm.Reg)
+	if !isReg {
+		return 0, 0, false
+	}
+	idx := canonX86RegLocal(r)
+	if idx < 0 || idx >= 31 {
+		return 0, 0, false
+	}
+	v, isImm := inst.Inst.Args[1].(x86asm.Imm)
+	if !isImm {
+		return 0, 0, false
+	}
+	return idx, int(v), true
+}
+
+// x86EqualitySuccessor reports which successor edge of a block ending in op
+// proves that a preceding `CMP reg, imm` compared EQUAL, or -1 for none.
+//
+// Successors are built target-first, fall-through-second, so index 0 is the
+// taken edge -- but only when both resolved, hence numSuccs == 2.
+//
+// JE narrows the taken edge. JNE narrows the FALL-THROUGH, since that is
+// where its equality is proven. Every other condition is a magnitude test
+// (JA/JB/JG/JL and friends) or tests a flag a CMP did not set in a way that
+// implies equality, so nothing is learned. The ARM64 version of this shipped
+// without the condition check and narrowed the taken edge unconditionally;
+// that is fixed there, and deliberately not reproduced here.
+func x86EqualitySuccessor(op x86asm.Op, numSuccs int) int {
+	if numSuccs != 2 {
+		return -1
+	}
+	switch op {
+	case x86asm.JE:
+		return 0
+	case x86asm.JNE:
+		return 1
+	}
+	return -1
+}
+
 func isX86CondJump(op x86asm.Op) bool {
 	switch op {
 	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
@@ -306,13 +428,43 @@ func canonX86RegLocal(r x86asm.Reg) int {
 	return -1
 }
 
+// isX86HeaderLoad reports whether prev was a header load writing dstIdx:
+// `MOV dstReg, [base-1]` where -1 is kHeapObjectTag. This is the x86_64
+// equivalent of ARM64's `LDUR Xt, [Xn, #-1]`, used to detect the header-load →
+// class-ID-extract pattern so a subsequent SHR/AND preserves Bottom.
+func isX86HeaderLoad(prev *X86DecodedInst, dstIdx int) bool {
+	if prev == nil {
+		return false
+	}
+	p := prev.Inst
+	if p.Op != x86asm.MOV || len(p.Args) < 2 {
+		return false
+	}
+	dstReg, ok := p.Args[0].(x86asm.Reg)
+	if !ok {
+		return false
+	}
+	if canonX86RegLocal(dstReg) != dstIdx {
+		return false
+	}
+	mem, ok := p.Args[1].(x86asm.Mem)
+	if !ok {
+		return false
+	}
+	return mem.Disp == -1
+}
+
 // transferInstructionX86 updates the register type state for one x86_64 instruction.
 // H-4 fix: added stack type tracking, field type lookup, LEA dispatch slot
 // computation, and fixed allocation stub detection.
 // L-3 fix: stackTypes is now passed as a parameter instead of using a package global.
+// prevInst is the previous instruction in the block (nil at block start); used
+// by the SHR/AND handler to detect the header-load → class-ID-extract pattern
+// and preserve Bottom, mirroring ARM64's prevRaw UBFX fix.
 func transferInstructionX86(
 	state *[31]TypeLattice,
 	inst X86DecodedInst,
+	prevInst *X86DecodedInst,
 	ctx *TypeContext,
 	result *IntraResult,
 	lca func(int, int) int,
@@ -371,10 +523,22 @@ func transferInstructionX86(
 			baseIdx := canonX86RegLocal(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
 			if baseIdx == x86RegPP {
-				poolIdx := int(mem.Disp / 8)
+				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
+				if !poolIdxOK {
+					return
+				}
 				if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 					state[dstIdx] = KnownClass(classID)
 					ctx.PPHits++
+				} else if ctx.PoolClosureClass != nil {
+					// Closure consumer: same as ARM64, resolve Closure →
+					// ClosureData.parent_function → owner class.
+					if classID, ok3 := ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
+						state[dstIdx] = KnownClass(classID)
+						ctx.PPHits++
+						return
+					}
+					state[dstIdx] = Top()
 				} else {
 					state[dstIdx] = Top()
 				}
@@ -394,6 +558,14 @@ func transferInstructionX86(
 						stubName = name
 					}
 				}
+				// Dispatch table array load: MOV reg, [THR + dispatch_table_array_offset]
+				// SDK (flow_graph_compiler_x64.cc): LoadDispatchTable = movq(dst, [THR + offset])
+				// This is a MOV, not LEA — so the LEA handler below never fires.
+				// Set KnownDispatch(0) so subsequent CALL [reg + RCX*8 + disp] can resolve.
+				if stubName == "dispatch_table_array" {
+					state[dstIdx] = KnownDispatch(0)
+					return
+				}
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
 			}
@@ -407,17 +579,33 @@ func transferInstructionX86(
 					ctx.HeaderHits++
 					return
 				}
-				// Field type lookup via FieldByOwnerOffset.
-				if fields, ok2 := ctx.FieldByOwnerOffset[state[baseIdx].ClassID]; ok2 {
-					if fieldRefID, ok3 := fields[int32(mem.Disp)]; ok3 {
-						if classID, ok4 := ctx.FieldTypes[fieldRefID]; ok4 && classID >= 0 {
-							state[dstIdx] = KnownClass(classID)
-							return
-						}
-					}
+				// Field type: declared type first, then the type observed in
+				// const Instance objects. Shared with the ARM64 handlers via
+				// TypeContext.FieldValueClass so the precedence rule has one
+				// definition.
+				if classID, ok2 := ctx.FieldValueClass(state[baseIdx].ClassID, int32(mem.Disp)); ok2 {
+					state[dstIdx] = KnownClass(classID)
+					return
 				}
 				// Unknown field — keep KnownClass as approximation.
 				state[dstIdx] = KnownClass(state[baseIdx].ClassID)
+				ctx.HeaderHits++
+				return
+			}
+			// Header load with an UNKNOWN receiver type. ARM64 sets Bottom
+			// here (its "P1.2" rule) rather than Top, and that distinction
+			// is load-bearing: the SHR/AND handler below only recognises a
+			// class-ID extraction when its source is Bottom AND the previous
+			// instruction was a header load, which is what keeps the
+			// selector-offset scan alive when the receiver class is unknown.
+			//
+			// x86 had the consumer of that signal (isX86HeaderLoad plus the
+			// LatticeBottom branch) but never the producer -- this path fell
+			// through to Top, so the check could not fire. Measured
+			// consequence: 91.6% of x86_64 dispatch calls reach the call site
+			// with no class in cid_reg. See docs/roadmap/arch-parity.md P-1.
+			if mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
+				state[dstIdx] = Bottom()
 				ctx.HeaderHits++
 				return
 			}
@@ -482,6 +670,13 @@ func transferInstructionX86(
 
 	// SHR/AND reg, imm — bitfield extract (class ID extraction from header).
 	// If the source has KnownClass, preserve it (same as ARM64 UBFX).
+	// If the source is Bottom AND the previous instruction was a header load
+	// (MOV reg, [base-1], the x86 equivalent of ARM64's LDUR Xt, [Xn, #-1]),
+	// preserve Bottom — the SHR/AND extracts the class ID from an unknown
+	// receiver, and Bottom lets the selector-offset-scan dispatch path fire.
+	// This mirrors the ARM64 prevRaw UBFX fix that unlocked 11550 field hits;
+	// without it x86_64 killed Bottom here and dispatch resolution was
+	// severely degraded vs ARM64.
 	if (ins.Op == x86asm.SHR || ins.Op == x86asm.AND) && len(ins.Args) >= 2 {
 		dstReg, dstOK := ins.Args[0].(x86asm.Reg)
 		if !dstOK {
@@ -493,11 +688,23 @@ func transferInstructionX86(
 		}
 		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
 			srcIdx := canonX86RegLocal(srcReg)
-			if srcIdx >= 0 && srcIdx < 31 && state[srcIdx].Kind == LatticeKnownClass {
-				// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
-				state[dstIdx] = state[srcIdx]
-				ctx.UBFXHits++
-				return
+			if srcIdx >= 0 && srcIdx < 31 {
+				if state[srcIdx].Kind == LatticeKnownClass {
+					// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
+					state[dstIdx] = state[srcIdx]
+					ctx.UBFXHits++
+					return
+				}
+				if state[srcIdx].Kind == LatticeBottom && prevInst != nil {
+					// Check if prevInst was a header load: MOV srcReg, [base-1].
+					// The x86 header load pattern is MOV reg, [reg-1] where -1
+					// is kHeapObjectTag (same as ARM64 LDUR Xt, [Xn, #-1]).
+					if isX86HeaderLoad(prevInst, srcIdx) {
+						state[dstIdx] = Bottom()
+						ctx.UBFXHits++
+						return
+					}
+				}
 			}
 		}
 		state[dstIdx] = Top()
@@ -522,17 +729,42 @@ func transferInstructionX86(
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			idxReg := canonX86RegLocal(mem.Index)
 			baseReg := canonX86RegLocal(mem.Base)
+			// Diagnose the dispatch-call shape before trying to resolve it,
+			// so a failure says WHICH half was unknown. Resolving needs both
+			// the table register and cid_reg typed; the counters separate
+			// those two causes.
+			if idxReg == x86RegRCX && mem.Scale == 8 {
+				ctx.X86DispatchShape++
+				tableKnown := baseReg >= 0 && baseReg < 31 &&
+					state[baseReg].Kind == LatticeKnownDispatchIndex
+				classKnown := state[x86RegRCX].Kind == LatticeKnownClass
+				switch {
+				case tableKnown && classKnown:
+					ctx.X86DispatchResolved++
+				case !classKnown:
+					ctx.X86DispatchNoClass++
+				default:
+					ctx.X86DispatchNoTable++
+				}
+			}
 			// H-4 fix 5: Dispatch table call via LEA-computed base:
 			// CALL [lea_reg + RCX*8 + disp] where lea_reg has KnownDispatchIndex(0).
 			if baseReg >= 0 && baseReg < 31 && state[baseReg].Kind == LatticeKnownDispatchIndex {
 				if idxReg == x86RegRCX && state[x86RegRCX].Kind == LatticeKnownClass {
 					slot := int(state[x86RegRCX].ClassID) + int(mem.Disp/8)
 					resolveX86Dispatch(state, slot, inst, ctx, result)
+				} else if idxReg == x86RegRCX {
+					// P2.1: RCX is Bottom or Top — try selector offset scan.
+					resolveX86DispatchSelectorOffset(state, inst, ctx, result)
 				}
 			} else if idxReg == x86RegRCX && state[x86RegRCX].Kind == LatticeKnownClass {
 				// Direct dispatch table call: CALL [reg + RCX*8 + disp].
 				slot := int(state[x86RegRCX].ClassID) + int(mem.Disp/8)
 				resolveX86Dispatch(state, slot, inst, ctx, result)
+			} else if idxReg == x86RegRCX && mem.Scale == 8 {
+				// P2.1: RCX is Bottom or Top, but pattern matches dispatch table call.
+				// Try selector offset scan.
+				resolveX86DispatchSelectorOffset(state, inst, ctx, result)
 			}
 			// Kill return value + arg regs.
 			state[x86RegRAX] = Top()
@@ -596,7 +828,20 @@ func transferInstructionX86(
 	}
 
 	// Default: if this instruction defines a register, kill its type.
-	if len(ins.Args) >= 1 {
+	//
+	// Args[0] is the destination for most x86 instructions, but NOT for the
+	// flag-only ones. CMP and TEST read both operands and write only the
+	// flags, and PUSH reads its operand -- killing Args[0] for those
+	// destroys a type the instruction never touched.
+	//
+	// CMP is the damaging case: `CMP cid, #N` is exactly how a class check
+	// is written, so this wiped the type of the very register the check was
+	// about, every time. Traced on the sequence at 0x213d6d in the x86_64
+	// sample -- header load sets Bottom, the SHR extract keeps it, and then
+	// the CMP resets it to Top one instruction before the branch that would
+	// have narrowed it. That is why narrowing found an untyped register at
+	// all 61428 opportunities.
+	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
 		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
 			dstIdx := canonX86RegLocal(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
@@ -604,6 +849,16 @@ func transferInstructionX86(
 			}
 		}
 	}
+}
+
+// x86ReadsOnlyFirstOperand reports whether an instruction reads its first
+// operand without writing it, so the default kill above must not apply.
+func x86ReadsOnlyFirstOperand(op x86asm.Op) bool {
+	switch op {
+	case x86asm.CMP, x86asm.TEST, x86asm.PUSH:
+		return true
+	}
+	return false
 }
 
 // resolveX86Dispatch resolves a dispatch table call to a target function.
@@ -622,7 +877,71 @@ func resolveX86Dispatch(
 		res.TargetName = name
 		res.Resolved = true
 		ctx.DispatchHits++
+	} else {
+		// P4 reverse dispatch scan: if the slot doesn't directly resolve,
+		// scan nearby slots for monomorphic targets (same as ARM64).
+		// This handles cases where the dispatch table entry is null/stub
+		// but a nearby slot has a valid Code target.
+		if ctx.DispatchBySlot != nil {
+			candidates := 0
+			var candidateName string
+			var allCandidates []string
+			for offset := 0; offset < 128; offset++ {
+				s := slot + offset
+				entry, ok := ctx.DispatchBySlot[s]
+				if !ok || entry.Kind != cluster.DispatchCode {
+					continue
+				}
+				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
+					candidates++
+					candidateName = name
+					allCandidates = append(allCandidates, name)
+				}
+			}
+			if candidates == 1 {
+				res.TargetName = candidateName
+				res.Resolved = true
+				res.Candidates = 1
+			} else if candidates > 1 {
+				// Same rule as the ARM64 path: identical names collapse to a
+				// monomorphic resolution, otherwise it is a candidate set.
+				uniqueNames := map[string]bool{}
+				var unique []string
+				for _, n := range allCandidates {
+					if !uniqueNames[n] {
+						uniqueNames[n] = true
+						unique = append(unique, n)
+					}
+				}
+				sort.Strings(unique)
+				applySelectorCandidates(&res, unique)
+			}
+		}
 	}
+	result.BLRResolutions = append(result.BLRResolutions, res)
+}
+
+// resolveX86DispatchSelectorOffset resolves a dispatch table call using
+// the pre-scanned selector offset, without needing the receiver class ID.
+// Scans all dispatch table entries at the selector offset to find unique targets.
+func resolveX86DispatchSelectorOffset(
+	state *[31]TypeLattice,
+	inst X86DecodedInst,
+	ctx *TypeContext,
+	result *IntraResult,
+) {
+	selectorImm, ok := ctx.SelectorOffsets[inst.Addr]
+	if !ok {
+		return
+	}
+	// Same arithmetic and the same candidate cap as the ARM64 path: this
+	// used to be a second copy with its own (wrong) implied-CID formula and
+	// an unbounded " | "-join of every match.
+	res := BlrResolution{
+		PC:        inst.Addr,
+		SlotIndex: -1,
+	}
+	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
 

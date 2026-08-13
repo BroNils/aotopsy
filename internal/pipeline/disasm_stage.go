@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"aotopsy/internal/callgraph"
 	"aotopsy/internal/cli"
@@ -46,6 +48,7 @@ func RunDisasmStage(
 	info *snapshot.Info,
 	table *cluster.InstructionsTable,
 	fmtOpts dartfmt.Options,
+	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
 	// Build symbol map for cross-references during disassembly.
 	symbols := make(map[uint64]string)
@@ -72,7 +75,6 @@ func RunDisasmStage(
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
-	peephole := disasm.NewPeepholeState(poolDisplay)
 
 	opts.stagef("disasm", "%s%d%s functions, pool %s%d%s entries (%d resolved)",
 		cli.Gold, len(ranges), cli.Reset, cli.Gold, len(clResult.Pool), cli.Reset, len(poolDisplay))
@@ -139,60 +141,103 @@ func RunDisasmStage(
 	dr := &DisasmResult{}
 	var funcInfos []callgraph.FuncInfo
 
-	for i := 0; i < n; i++ {
-		r := &ranges[i]
-		if r.Size == 0 {
-			continue
-		}
+	// Disassembly runs in parallel (each function is independent: read-only
+	// code slice, read-only lookup), but every SHARED output is written by
+	// the main goroutine in input order.
+	//
+	// The first parallel version had each worker take a mutex and write
+	// directly to the shared encoders. That made functions.jsonl,
+	// call_edges.jsonl, string_refs.jsonl, index.jsonl and unresolved_thr.jsonl
+	// come out in whatever order the workers happened to finish -- a different
+	// order on every run of the same binary, which breaks report diffing and
+	// funcdiff. It also read `disasmErr` outside the mutex, a data race.
+	//
+	// Instead the work is done in chunks: a chunk is computed in parallel,
+	// then drained in order. The chunk bounds how many decoded functions are
+	// live at once, which matters on the 6 GB host (AGENTS.md).
+	workers := runtime.NumCPU()
+	if workers > 4 {
+		workers = 4
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	const chunkPerWorker = 8
+	chunkSize := workers * chunkPerWorker
 
-		// Slice code bytes for this function.
+	// Per-function computed output, held only until its chunk is drained.
+	type funcOutput struct {
+		skip       bool
+		filename   string
+		entry      DisasmIndexEntry
+		funcRec    disasm.FuncRecord
+		name       string
+		edgeRecs   []disasm.CallEdgeRecord
+		edgeKinds  []string // parallel to edgeRecs: "bl"/"blr"/...
+		edges      []disasm.CallEdge
+		stringRefs []disasm.StringRefRecord
+		thrRecs    []disasm.UnresolvedTHRRecord
+		cfgDot     string
+		cfgPath    string
+		err        error
+	}
+
+	compute := func(r *cluster.CodeRange, out *funcOutput, peep *disasm.PeepholeState) {
+		if r.Size == 0 {
+			out.skip = true
+			return
+		}
 		funcStart := uint64(r.PCOffset) - codeOff
 		funcEnd := funcStart + uint64(r.Size)
 		if funcEnd > uint64(len(code)) {
 			funcEnd = uint64(len(code))
 		}
 		if funcStart >= funcEnd {
-			continue
+			out.skip = true
+			return
 		}
 		funcCode := code[funcStart:funcEnd]
 		funcVA := codeVA + funcStart
 
-		// Resolve name.
 		var funcName, ownerName, name string
 		if r.RefID >= 0 {
 			ci := pl.CodeNames[r.RefID]
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
-			name = QualifiedName(ownerName, funcName, r.PCOffset)
+			name = ci.Qualified(r.PCOffset)
+			if funcName == "" {
+				name = elfStubName(elfFuncSyms, funcVA, name)
+			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 			name = funcName
 		}
+		out.name = name
 
-		// Disassemble.
-		peephole.Reset()
+		peep.Reset()
 		insts := disasm.Disassemble(funcCode, disasm.Options{
 			BaseAddr: funcVA,
 			Symbols:  lookup,
 		})
 
-		// Build per-function annotators.
 		thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
-		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, peephole.Annotate}
+		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, peep.Annotate}
 
-		// Write asm file.
 		filename := FuncRelPath(ownerName, funcName, r.PCOffset)
+		out.filename = filename
+
+		// Per-function files live at unique paths, so they can be written
+		// here: their content and location do not depend on ordering.
 		if err := output.WriteASM(opts.OutDir, filename, insts, lookup, annotators...); err != nil {
-			return nil, fmt.Errorf("write asm %s: %w", filename, err)
+			out.err = fmt.Errorf("write asm %s: %w", filename, err)
+			return
 		}
-
-		// Write raw bytes for CFG construction.
 		if err := output.WriteBin(opts.OutDir, filename, funcCode); err != nil {
-			return nil, fmt.Errorf("write bin %s: %w", filename, err)
+			out.err = fmt.Errorf("write bin %s: %w", filename, err)
+			return
 		}
 
-		// Write index entry.
-		entry := DisasmIndexEntry{
+		out.entry = DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,
@@ -201,32 +246,21 @@ func RunDisasmStage(
 			Size:      r.Size,
 			File:      filepath.ToSlash(filepath.Join("asm", filename+".txt")),
 		}
-		if err := enc.Encode(entry); err != nil {
-			return nil, fmt.Errorf("write index: %w", err)
-		}
 
-		// Emit functions.jsonl entry.
 		var paramCount int
 		if r.RefID >= 0 {
 			paramCount = pl.CodeNames[r.RefID].ParamCount
 		}
-		funcRec := disasm.FuncRecord{
+		out.funcRec = disasm.FuncRecord{
 			PC:         fmt.Sprintf("0x%x", funcVA),
 			Size:       int(r.Size),
 			Name:       name,
 			Owner:      ownerName,
 			ParamCount: paramCount,
 		}
-		if err := funcsEnc.Encode(funcRec); err != nil {
-			return nil, fmt.Errorf("write functions.jsonl: %w", err)
-		}
 
-		// Extract call edges. CFG-wide provenance (ExtractCallEdgesCFG)
-		// instead of the old fixed W=8 sliding window: propagates
-		// register provenance along real control-flow edges, so it
-		// isn't lost just because a PP/THR load happened more than 8
-		// instructions before its use.
 		edges := disasm.ExtractCallEdgesCFG(name, insts, lookup, annotators)
+		out.edges = edges
 		for _, e := range edges {
 			rec := disasm.CallEdgeRecord{
 				FromFunc: name,
@@ -242,53 +276,22 @@ func RunDisasmStage(
 					rec.Target = fmt.Sprintf("0x%x", e.TargetPC)
 				}
 			}
-			if err := edgesEnc.Encode(rec); err != nil {
-				return nil, fmt.Errorf("write call_edges.jsonl: %w", err)
-			}
-			dr.TotalEdges++
-			if e.Kind == "blr" {
-				dr.TotalBLR++
-				if e.Via != "" {
-					dr.BLRAnnotated++
-				} else {
-					dr.BLRUnannotated++
-				}
-			}
+			out.edgeRecs = append(out.edgeRecs, rec)
+			out.edgeKinds = append(out.edgeKinds, e.Kind)
 		}
 
-		// Build per-function CFG DOT and accumulate for call graph.
 		if opts.Graph {
 			lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
 			if nblocks > 1 {
 				g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
-				dot := render.DOTCFG(g, name)
-				dotPath := filepath.Join(cfgDir, filename+".dot")
-				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
-					return nil, fmt.Errorf("mkdir cfg: %w", err)
-				}
-				if err := os.WriteFile(dotPath, []byte(dot), 0644); err != nil {
-					return nil, fmt.Errorf("write cfg dot %s: %w", filename, err)
-				}
-				dr.CFGCount++
+				out.cfgDot = render.DOTCFG(g, name)
+				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
 			}
-			funcInfos = append(funcInfos, callgraph.FuncInfo{
-				Name:      name,
-				CallEdges: edges,
-			})
 		}
 
-		// Extract string references from PP loads.
-		stringRefs := ExtractStringRefs(insts, poolDisplay, name)
-		for _, sr := range stringRefs {
-			if err := stringRefsEnc.Encode(sr); err != nil {
-				return nil, fmt.Errorf("write string_refs.jsonl: %w", err)
-			}
-			dr.TotalStringRefs++
-		}
+		out.stringRefs = ExtractStringRefs(insts, poolDisplay, name)
 
-		// Extract unresolved THR accesses.
-		thrAccesses := disasm.ExtractTHRAccesses(insts, thrFields)
-		for _, a := range thrAccesses {
+		for _, a := range disasm.ExtractTHRAccesses(insts, thrFields) {
 			if a.Resolved {
 				continue
 			}
@@ -312,13 +315,97 @@ func RunDisasmStage(
 					continue
 				}
 			}
-			if err := unresTHREnc.Encode(rec); err != nil {
-				return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
-			}
-			dr.TotalUnresTHR++
+			out.thrRecs = append(out.thrRecs, rec)
 		}
+	}
 
-		dr.Written++
+	// One peephole state per worker: it is stateful across the instructions
+	// of a single function and must not be shared between goroutines.
+	peepholes := make([]*disasm.PeepholeState, workers)
+	for i := range peepholes {
+		peepholes[i] = disasm.NewPeepholeState(poolDisplay)
+	}
+	outputs := make([]funcOutput, chunkSize)
+
+	for base := 0; base < n; base += chunkSize {
+		end := base + chunkSize
+		if end > n {
+			end = n
+		}
+		for i := range outputs[:end-base] {
+			outputs[i] = funcOutput{}
+		}
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				for i := base + w; i < end; i += workers {
+					compute(&ranges[i], &outputs[i-base], peepholes[w])
+				}
+			}(w)
+		}
+		wg.Wait()
+
+		// Drain in input order -- this is what makes the JSONL outputs
+		// reproducible.
+		for i := base; i < end; i++ {
+			o := &outputs[i-base]
+			if o.err != nil {
+				return nil, o.err
+			}
+			if o.skip {
+				continue
+			}
+			if err := enc.Encode(o.entry); err != nil {
+				return nil, fmt.Errorf("write index: %w", err)
+			}
+			if err := funcsEnc.Encode(o.funcRec); err != nil {
+				return nil, fmt.Errorf("write functions.jsonl: %w", err)
+			}
+			for ei, rec := range o.edgeRecs {
+				if err := edgesEnc.Encode(rec); err != nil {
+					return nil, fmt.Errorf("write call_edges.jsonl: %w", err)
+				}
+				dr.TotalEdges++
+				if o.edgeKinds[ei] == "blr" {
+					dr.TotalBLR++
+					if rec.Via != "" {
+						dr.BLRAnnotated++
+					} else {
+						dr.BLRUnannotated++
+					}
+				}
+			}
+			if opts.Graph {
+				if o.cfgPath != "" {
+					if err := os.MkdirAll(filepath.Dir(o.cfgPath), 0755); err != nil {
+						return nil, fmt.Errorf("mkdir cfg: %w", err)
+					}
+					if err := os.WriteFile(o.cfgPath, []byte(o.cfgDot), 0644); err != nil {
+						return nil, fmt.Errorf("write cfg dot %s: %w", o.filename, err)
+					}
+					dr.CFGCount++
+				}
+				funcInfos = append(funcInfos, callgraph.FuncInfo{
+					Name:      o.name,
+					CallEdges: o.edges,
+				})
+			}
+			for _, sr := range o.stringRefs {
+				if err := stringRefsEnc.Encode(sr); err != nil {
+					return nil, fmt.Errorf("write string_refs.jsonl: %w", err)
+				}
+				dr.TotalStringRefs++
+			}
+			for _, rec := range o.thrRecs {
+				if err := unresTHREnc.Encode(rec); err != nil {
+					return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
+				}
+				dr.TotalUnresTHR++
+			}
+			dr.Written++
+		}
 	}
 
 	opts.logf("  %sfunctions:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.Written, cli.Blue, asmDir, cli.Reset)
@@ -357,8 +444,8 @@ func ExtractStringRefs(insts []disasm.Inst, poolDisplay map[int]string, funcName
 		// for ARM64 input (pipeline.Run rejects x86_64 before this stage
 		// runs), so 27 is not a magic number that needs to vary by arch.
 		if baseReg, byteOff, ok := disasm.IsLDR64UnsignedOffsetExported(inst.Raw); ok && baseReg == 27 {
-			idx := byteOff / 8
-			if s, found := poolDisplay[idx]; found && len(s) > 0 && s[0] == '"' {
+			idx, idxOK := disasm.ARM64PoolIndex(byteOff)
+			if s, found := poolDisplay[idx]; idxOK && found && len(s) > 0 && s[0] == '"' {
 				val, err := strconv.Unquote(s)
 				if err == nil {
 					refs = append(refs, disasm.StringRefRecord{

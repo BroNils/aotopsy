@@ -95,6 +95,35 @@ func (h *Header) HasFeature(name string) bool {
 	return false
 }
 
+// hasFeature checks if a feature string contains the given feature name.
+// Works on the raw features string (space-separated). Matches whole tokens
+// only, so "product" does not match Dart's "no-product" spelling.
+func hasFeature(features, name string) bool {
+	for _, f := range strings.Split(features, " ") {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// buildModeFromFeatures maps a snapshot features string to a BuildMode.
+//
+// Split out of Extract so it is unit-testable: see
+// TestBuildModeFromFeatures, which pins the exact token set Dart emits.
+// Unrecognised or empty input keeps the BuildProduct default.
+func buildModeFromFeatures(features string) BuildMode {
+	switch {
+	case hasFeature(features, "product"):
+		return BuildProduct
+	case hasFeature(features, "release"):
+		return BuildRelease
+	case hasFeature(features, "debug"):
+		return BuildDebug
+	}
+	return BuildProduct
+}
+
 // Info aggregates all extracted snapshot information.
 type Info struct {
 	VmData              Region          `json:"vm_data"`
@@ -202,10 +231,40 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	}
 
 	// Propagate compressed pointers flag from features to version profile.
+	// Also detect build mode (PRODUCT vs Debug/Profile) from features.
 	if info.Version != nil {
 		if (info.IsolateHeader != nil && info.IsolateHeader.HasFeature("compressed-pointers")) ||
 			(info.VmHeader != nil && info.VmHeader.HasFeature("compressed-pointers")) {
 			info.Version.CompressedPointers = true
+		}
+
+		// Detect build mode from the features string. Dart::FeaturesString
+		// writes exactly one of "debug" / "product" / "release" as the FIRST
+		// token; there is no "profile" token (see BuildMode's doc comment).
+		//
+		// Absence of all three means we could not read a features string at
+		// all, in which case we keep the BuildProduct default rather than
+		// guessing debug -- a release APK is overwhelmingly the common case,
+		// and the previous "anything that isn't product is debug" fallback
+		// mislabelled both "release" builds and unreadable headers.
+		features := ""
+		if info.IsolateHeader != nil {
+			features = info.IsolateHeader.Features
+		} else if info.VmHeader != nil {
+			features = info.VmHeader.Features
+		}
+		info.Version.BuildMode = buildModeFromFeatures(features)
+
+		// Warn loudly on non-PRODUCT: this is not a "reduced fidelity" mode,
+		// it is unsupported. Code objects gain return_address_metadata_ and
+		// comments_ refs that CodeNumRefs does not model, which desyncs the
+		// fill stream at the first Code cluster.
+		if !info.Version.BuildMode.IsProduct() {
+			diags.Addf(0, dartfmt.DiagInvalid,
+				"non-PRODUCT build detected (features mode %q); only PRODUCT "+
+					"snapshots are supported -- Code fill has 2 extra refs in "+
+					"!defined(PRODUCT) builds and will desync",
+				info.Version.BuildMode.String())
 		}
 	}
 

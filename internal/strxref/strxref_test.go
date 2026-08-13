@@ -12,11 +12,12 @@ var arm64Ret = []byte{0xC0, 0x03, 0x5F, 0xD6}
 
 // TestFindPoolReferences_FindsMatchingLoad verifies the core mechanics:
 // a synthetic function with a real OpLoadPool instruction (an actual
-// ARM64 "ldr x0, [x27, #0]" -- pool index 0, matching the "pool index =
-// byte_offset / 8" convention) is found when its pool index is targeted.
+// ARM64 "ldr x0, [x27, #24]" -- pool index 1 under the SDK layout
+// (elements start at +16, 8 bytes each; see disasm.ARM64PoolIndex) is
+// found when its pool index is targeted.
 func TestFindPoolReferences_FindsMatchingLoad(t *testing.T) {
 	code := []byte{
-		0x60, 0x07, 0x40, 0xF9, // ldr x0, [x27, #8]  (pool index 1)
+		0x60, 0x0F, 0x40, 0xF9, // ldr x0, [x27, #24] (pool index 1)
 		0xC0, 0x03, 0x5F, 0xD6, // ret
 	}
 	ctx := &pipeline.Context{
@@ -46,7 +47,7 @@ func TestFindPoolReferences_FindsMatchingLoad(t *testing.T) {
 // of an UNTARGETED index produces no false positive.
 func TestFindPoolReferences_NoMatchForUnrelatedIndex(t *testing.T) {
 	code := []byte{
-		0x60, 0x07, 0x40, 0xF9, // ldr x0, [x27, #8]  (pool index 1)
+		0x60, 0x0F, 0x40, 0xF9, // ldr x0, [x27, #24] (pool index 1)
 		0xC0, 0x03, 0x5F, 0xD6, // ret
 	}
 	ctx := &pipeline.Context{

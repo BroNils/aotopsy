@@ -171,6 +171,24 @@ func findDynamicLibraryCalls(ctx *pipeline.Context, fir *decompiler.FuncIR, func
 				continue
 			}
 			if !strings.HasPrefix(ins.Target, "0x") {
+				// Pre-resolved callee name (not a hex VA). If it already
+				// looks like an ffi DynamicLibrary.open / lookupFunction
+				// call site, record it directly without needing a symbol
+				// lookup -- the decompiler resolved the target name already.
+				if looksLikeFfiOpenOrLookup(ins.Target) {
+					f := Finding{
+						CallerFunc: fir.Name,
+						CallerVA:   funcVA,
+						CallSitePC: ins.Addr,
+						Kind:       "dynamic_library_call",
+						CalleeName: ins.Target,
+					}
+					if haveLiteral {
+						f.LiteralArg = lastPoolLiteral
+						f.Resolved = true
+					}
+					out = append(out, f)
+				}
 				continue // indirect call (register target) -- not a directly-resolved callee name
 			}
 			va, err := strconv.ParseUint(strings.TrimPrefix(ins.Target, "0x"), 16, 64)

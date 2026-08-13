@@ -8,18 +8,21 @@ import (
 func TestRuntimeEntryMerge(t *testing.T) {
 	fields := THRFields("3.10.7", true)
 
-	// Check a few runtime entry offsets.
+	// Check a few runtime entry offsets. The suffix is "_entry_point", the
+	// same spelling runtime_offsets_extracted.h uses for the entry-point
+	// fields it exports -- see mergeRuntimeEntries for why the old "_ep"
+	// abbreviation was dropped.
 	checks := []struct {
 		off  int
 		want string
 	}{
-		{0x2e8, "AllocateArray_ep"},
-		{0x2f0, "AllocateMint_ep"},
-		{0x2f8, "AllocateDouble_ep"},
-		{0x468, "ArgumentErrorUnboxedInt64_ep"},
-		{0x470, "IntegerDivisionByZeroException_ep"},
-		{0x478, "ReThrow_ep"},
-		{0x568, "InitializeSharedField_ep"},
+		{0x2e8, "AllocateArray_entry_point"},
+		{0x2f0, "AllocateMint_entry_point"},
+		{0x2f8, "AllocateDouble_entry_point"},
+		{0x468, "ArgumentErrorUnboxedInt64_entry_point"},
+		{0x470, "IntegerDivisionByZeroException_entry_point"},
+		{0x478, "ReThrow_entry_point"},
+		{0x568, "InitializeSharedField_entry_point"},
 	}
 	for _, c := range checks {
 		t.Run(fmt.Sprintf("0x%x", c.off), func(t *testing.T) {
@@ -49,12 +52,12 @@ func TestRuntimeEntryV217Merge(t *testing.T) {
 		off  int
 		want string
 	}{
-		{0x2d8, "AllocateArray_ep"},
-		{0x2e0, "AllocateMint_ep"},
-		{0x488, "NotLoaded_ep"},
+		{0x2d8, "AllocateArray_entry_point"},
+		{0x2e0, "AllocateMint_entry_point"},
+		{0x488, "NotLoaded_entry_point"},
 		// LEAF entries
-		{0x490, "DeoptimizeCopyFrame_ep"},
-		{0x580, "TsanStoreRelease_ep"},
+		{0x490, "DeoptimizeCopyFrame_entry_point"},
+		{0x580, "TsanStoreRelease_entry_point"},
 	}
 	for _, c := range checks {
 		t.Run(fmt.Sprintf("0x%x", c.off), func(t *testing.T) {
@@ -74,7 +77,7 @@ func TestRuntimeEntryV217Merge(t *testing.T) {
 func TestTHRContextAnnotator_RuntimeEntry(t *testing.T) {
 	fields := THRFields("3.10.7", true)
 
-	// LDR X5, [X26,#1128] → 0x468 → ArgumentErrorUnboxedInt64_ep
+	// LDR X5, [X26,#1128] → 0x468 → ArgumentErrorUnboxedInt64_entry_point
 	// Raw encoding: 45 37 42 f9 = 0xf9423745
 	raw := uint32(0xf9423745)
 
@@ -86,7 +89,7 @@ func TestTHRContextAnnotator_RuntimeEntry(t *testing.T) {
 
 	ann := THRContextAnnotator(insts, fields)
 	got := ann(insts[1])
-	want := "THR.ArgumentErrorUnboxedInt64_ep"
+	want := "THR.ArgumentErrorUnboxedInt64_entry_point"
 	if got != want {
 		t.Errorf("THRContextAnnotator(0x468) = %q, want %q", got, want)
 	}

@@ -47,6 +47,7 @@ type fromMainDeps struct {
 	isARM64                   bool
 	genFrida                  bool
 	genFridaOut               string
+	fridaOpts                 fridaOptions
 	libPath                   string
 	outDir                    string
 }
@@ -199,6 +200,10 @@ func runFromMain(d fromMainDeps) error {
 			agg.PlaceholderIfs += art.Stats.PlaceholderIfs
 			agg.UnresolvedCF += art.Stats.UnresolvedCF
 			agg.RawRegisterCalls += art.Stats.RawRegisterCalls
+			// Same three missing fields as in --all's fold; kept in sync.
+			agg.NonLastBranch += art.Stats.NonLastBranch
+			agg.TryBlocks += art.Stats.TryBlocks
+			agg.CatchHandlers += art.Stats.CatchHandlers
 			emitted++
 			if d.genFrida {
 				fridaHooks = append(fridaHooks, fridaHook{VA: va, Name: art.FunctionName, ArgRegs: realArgRegs(fir)})
@@ -269,7 +274,7 @@ func runFromMain(d fromMainDeps) error {
 		if fridaProbesDropped > 0 {
 			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes)\n", fridaProbesDropped, maxFridaProbes)
 		}
-		if err := writeFridaScript(d.genFridaOut, d.outDir, d.libPath, d.isARM64, fridaHooks, fridaProbes); err != nil {
+		if err := writeFridaScript(d.genFridaOut, d.outDir, d.libPath, d.isARM64, fridaHooks, fridaProbes, d.fridaOpts); err != nil {
 			return err
 		}
 	}

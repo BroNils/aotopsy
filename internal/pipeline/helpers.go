@@ -21,6 +21,9 @@ type CodeNameInfo struct {
 	FuncName   string
 	OwnerName  string
 	ParamCount int // total visible parameters (fixed + optional, excluding implicit 'this')
+	// IsConstructor marks a generative constructor or factory, recovered
+	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
+	IsConstructor bool
 }
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
@@ -35,22 +38,40 @@ type PoolLookups struct {
 	VmRefToNamed   map[int]*cluster.NamedObject
 	CT             *snapshot.CIDTable
 	BaseObjLimit   int
+	// BaseObjectNames holds the SDK's own display names for the VM-isolate
+	// base objects, indexed from 0 so entry i is reference ID i+1. Nil when
+	// the Dart version is outside the verified table, in which case those
+	// refs simply stay unnamed. See snapshot.BaseObjectNames.
+	BaseObjectNames []string
+	// TypeTestingStubNames maps a Type's reference ID to the display name of
+	// the stub that tests it. Built once in BuildPoolLookups; used both to
+	// name the stub Codes themselves and to resolve indirect calls that
+	// invoke one. Nil on versions that cannot resolve a Type to its class.
+	// See buildTypeTestingStubNames.
+	TypeTestingStubNames map[int]string
 }
 
 // BuildPoolLookups builds the lookup maps from a fill result.
 // vmResult is optional — if non-nil, VM snapshot strings/names are used to resolve base object refs.
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool) *PoolLookups {
+// dartVersion selects the VM-isolate base object name table; pass "" to leave
+// those references unnamed.
+// typeClassIDIsRef must be VersionProfile.TypeClassIdIsRef: on those versions
+// a Type cannot be resolved to its class, which disables type-testing-stub
+// naming rather than letting it emit confidently wrong labels. See
+// buildTypeTestingStubNames.
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string, typeClassIDIsRef bool) *PoolLookups {
 	l := &PoolLookups{
-		RefToStr:       make(map[int]string),
-		RefToNamed:     make(map[int]*cluster.NamedObject),
-		RefCID:         make(map[int]int),
-		CodeRefDisplay: make(map[int]string),
-		VmRefToStr:     make(map[int]string),
-		VmRefCID:       make(map[int]int),
-		VmRefToNamed:   make(map[int]*cluster.NamedObject),
-		CT:             ct,
-		BaseObjLimit:   int(result.Header.NumBaseObjects) + 1,
+		RefToStr:        make(map[int]string),
+		RefToNamed:      make(map[int]*cluster.NamedObject),
+		RefCID:          make(map[int]int),
+		CodeRefDisplay:  make(map[int]string),
+		VmRefToStr:      make(map[int]string),
+		VmRefCID:        make(map[int]int),
+		VmRefToNamed:    make(map[int]*cluster.NamedObject),
+		CT:              ct,
+		BaseObjLimit:    int(result.Header.NumBaseObjects) + 1,
+		BaseObjectNames: snapshot.BaseObjectNames(dartVersion),
 	}
 
 	for _, ps := range result.Strings {
@@ -93,20 +114,71 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
+	ttsNames := buildTypeTestingStubNames(result, l, ct, typeClassIDIsRef)
+	l.TypeTestingStubNames = ttsNames
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
 		if !ok {
+			// A Code with no Function owner is not necessarily anonymous:
+			// the SDK gives a type-testing stub the tested Type as its
+			// owner (type_testing_stubs.cc, `code.set_owner(type)`), which
+			// is why these fail both the CodeIndex cross-reference and the
+			// RefToNamed lookup. See buildTypeTestingStubNames.
+			if name := ttsNames[ce.OwnerRef]; name != "" {
+				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
+			}
 			continue
 		}
+		// ResolveName only consults the app-isolate string table. A
+		// Function's NameRefID can point into the VM-isolate base-object
+		// region instead -- shared objects and strings common to every app
+		// built with this Dart SDK -- and that is the SAME gap already
+		// fixed in ResolvePoolDisplay below and in refinfo.go's
+		// listToplevelFunctions, both of which try ResolveVMName second.
+		// This call site never did, so those Codes fell through to the
+		// `sub_<pcOffset>` placeholder in qualifiedCodeNameLocal.
+		//
+		// Measured before changing anything: of the ranges whose name came
+		// back empty, the ones where an owner WAS resolved are 910 of 1335
+		// on the 3.12 x86_64 sample and 877 of 1286 on 3.x ARM64 -- and
+		// every single one of them, 910 of 910 and 877 of 877, resolves
+		// through the VM table.
+		funcName := l.ResolveName(owner)
+		if funcName == "" {
+			funcName = l.ResolveVMName(owner)
+		}
 		ci := CodeNameInfo{
-			FuncName:  l.ResolveName(owner),
+			FuncName:  funcName,
 			OwnerName: l.ResolveOwnerName(owner),
+		}
+		// Dart names a constructor after its class -- `Duration`,
+		// `_GrowableList.of` -- so without UntaggedFunction::Kind it is
+		// indistinguishable from an ordinary method. 1231 of the 8346
+		// functions on the 3.12.2 x86_64 sample are constructors, and every
+		// one of them read as a plain method. The SDK's own symbol names
+		// spell it `new Duration`; this matches that.
+		if owner.IsConstructor() && funcName != "" {
+			ci.FuncName = "new " + funcName
+			ci.IsConstructor = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
 			}
+		}
+		// Dart 2.x keeps arity on the Function object instead
+		// (UntaggedFunction.packed_fields_), so the signature chain above
+		// yields nothing there and ParamCount came out 0 for EVERY 2.x
+		// function. num_fixed_parameters counts the implicit receiver, and
+		// kind_tag_ says whether there is one, so the visible count is
+		// fixed + optional minus the receiver for instance methods.
+		if ci.ParamCount == 0 && owner.NumFixedParams >= 0 {
+			visible := owner.NumFixedParams + owner.NumOptionalParams
+			if owner.HasKindTag && !owner.IsStatic && visible > 0 {
+				visible--
+			}
+			ci.ParamCount = visible
 		}
 		l.CodeNames[ce.RefID] = ci
 	}
@@ -213,6 +285,44 @@ func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
 	return ""
 }
 
+// StringForRef resolves a ref ID to a string, falling back to the VM
+// snapshot's strings for base-object refs.
+//
+// Both maps are needed. The app isolate's snapshot only holds strings the app
+// itself introduced; short, universally-shared strings live in the VM isolate
+// snapshot as base objects (ref < BaseObjLimit). Generic type parameter names
+// are exactly that case -- dart:async's `runUnaryGuarded<T>` stores its name
+// "T" at ref 450 on a compare_sample build whose BaseObjLimit is far above it,
+// so an isolate-only lookup resolves 12 of 84 generic FunctionTypes while this
+// resolves them all.
+//
+// VmRefCID is checked before trusting VmRefToStr, mirroring the H-4 fix in
+// resolvePoolDisplay: a non-string VM base object can carry a VmRefToStr entry
+// and must not be returned as a string.
+func (l *PoolLookups) StringForRef(ref int) (string, bool) {
+	if ref <= cluster.RefNull {
+		return "", false
+	}
+	if s, ok := l.RefToStr[ref]; ok {
+		return s, true
+	}
+	if ref < l.BaseObjLimit {
+		if cid, ok := l.VmRefCID[ref]; ok && l.CT != nil && !isStringCID(cid, l.CT) {
+			return "", false
+		}
+		if s, ok := l.VmRefToStr[ref]; ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// isStringCID reports whether a CID is one of the String subclasses.
+func isStringCID(cid int, ct *snapshot.CIDTable) bool {
+	return cid == ct.OneByteString || cid == ct.TwoByteString ||
+		(ct.String != 0 && cid == ct.String)
+}
+
 func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 	if no.OwnerRefID < 0 {
 		return ""
@@ -226,7 +336,7 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 // QualifiedCodeName returns "Owner.Func_hexaddr" for a code refID using PoolLookups.
 func QualifiedCodeName(refID int, pl *PoolLookups, pcOffset uint32) string {
 	ci := pl.CodeNames[refID]
-	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
+	return ci.Qualified(pcOffset)
 }
 
 // TypeParamResolver resolves a FunctionType's real per-parameter type
@@ -323,6 +433,22 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 	return fmt.Sprintf("<cid:%d>", cid)
 }
 
+// baseObjectName returns the SDK display name for a base-object reference,
+// or "" when the ref is not one or the Dart version is not in the table.
+//
+// `null` is ref 1 in every version from 2.12 to 3.12, so it resolves even
+// without a table entry; everything else needs one, because the ordering
+// shifts between versions.
+func (l *PoolLookups) baseObjectName(refID int) string {
+	if refID == 1 {
+		return "null"
+	}
+	if refID < 1 || refID > len(l.BaseObjectNames) {
+		return ""
+	}
+	return l.BaseObjectNames[refID-1]
+}
+
 // ResolvePoolDisplay builds a map from pool entry index to display string.
 func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string {
 	display := make(map[int]string, len(pool))
@@ -344,10 +470,14 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 					// so ROData strings (the common case for desktop AOT) resolve
 					// to their actual value instead of a "<String>" placeholder.
 					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
+				} else if cid, ok := l.VmRefCID[pe.RefID]; ok {
+					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
 				}
 			}
 			if isStringCID {
 				if s, ok := l.RefToStr[pe.RefID]; ok {
+					display[pe.Index] = fmt.Sprintf("%q", s)
+				} else if s, ok := l.VmRefToStr[pe.RefID]; ok {
 					display[pe.Index] = fmt.Sprintf("%q", s)
 				}
 			} else if no, ok := l.RefToNamed[pe.RefID]; ok {
@@ -389,8 +519,17 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				} else {
 					display[pe.Index] = fmt.Sprintf("<Instance_%d>", cidNum)
 				}
-			} else if pe.RefID == 1 {
-				display[pe.Index] = "null"
+			} else if name := l.baseObjectName(pe.RefID); name != "" {
+				// A VM-isolate base object. These are never written into the
+				// snapshot -- the deserializer assigns them reference IDs in
+				// a fixed order first -- so the reference ID IS the identity,
+				// and the SDK's AddBaseObjects supplies the display name.
+				//
+				// Only `null` (always ref 1) used to be handled here, which
+				// is why x86_64 output contained zero `false`: on that
+				// architecture bools reach the code through the object pool
+				// rather than through a null-register offset.
+				display[pe.Index] = name
 			} else if pe.RefID > 0 && pe.RefID < l.BaseObjLimit {
 				// Try resolving from VM snapshot lookups.
 				// H-4 fix: check VmRefCID before quoting as string, same as
@@ -513,6 +652,11 @@ func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs b
 					}
 				}
 				if fieldName == "" {
+					if s, ok := pl.VmRefToStr[rf.nameRefID]; ok {
+						fieldName = s
+					}
+				}
+				if fieldName == "" {
 					fieldName = fmt.Sprintf("field_0x%x", rf.byteOffset)
 				}
 				layout.Fields = append(layout.Fields, DartFieldLayout{
@@ -537,6 +681,380 @@ func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs b
 		layouts = append(layouts, layout)
 	}
 	return layouts
+}
+
+// --- Phase 1: Captured data builders (Script, LoadingUnit, KernelProgramInfo) ---
+
+// ScriptRecord is one Script entry in scripts.jsonl.
+type ScriptRecord struct {
+	RefID             int    `json:"ref_id"`
+	URL               string `json:"url"`
+	LineOffset        int32  `json:"line_offset,omitempty"`
+	ColOffset         int32  `json:"col_offset,omitempty"`
+	KernelScriptIndex int32  `json:"kernel_script_index,omitempty"`
+}
+
+// BuildScripts joins cluster.ScriptInfo + PoolLookups string table → script records.
+func BuildScripts(result *cluster.Result, pl *PoolLookups) []ScriptRecord {
+	var records []ScriptRecord
+	for _, si := range result.Scripts {
+		url := pl.RefToStr[si.URLRef]
+		rec := ScriptRecord{
+			RefID:             si.RefID,
+			URL:               url,
+			LineOffset:        si.LineOffset,
+			ColOffset:         si.ColOffset,
+			KernelScriptIndex: si.KernelScriptIndex,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// RefNull re-exports cluster.RefNull for readability at call sites here.
+const RefNull = cluster.RefNull
+
+// LoadingUnitRecord is one LoadingUnit entry in loading_units.jsonl.
+type LoadingUnitRecord struct {
+	RefID     int   `json:"ref_id"`
+	ParentRef int   `json:"parent_ref,omitempty"`
+	UnitID    int32 `json:"unit_id,omitempty"`
+	// IsRoot is true when parent_ is null, i.e. this is the base unit whose
+	// Code objects live in the snapshot we just parsed.
+	IsRoot bool `json:"is_root,omitempty"`
+	// MainCodeCount / DeferredCodeCount describe the Code partition. Only set
+	// on the root unit -- see PartitionCodesByLoadingUnit for why a non-root
+	// unit's codes are not in this snapshot at all.
+	MainCodeCount     int `json:"main_code_count,omitempty"`
+	DeferredCodeCount int `json:"deferred_code_count,omitempty"`
+}
+
+// LoadingUnitPartition is the Code-to-loading-unit attribution for one snapshot.
+//
+// This implements the "partition Codes by loading unit" half of the LoadingUnit
+// gap. What it can and cannot say is a property of split AOT, not a shortcut:
+//
+// Dart's deferred loading splits an app into a root unit plus one unit per
+// deferred import, and each unit gets its OWN snapshot blob (app.so,
+// app-2.part.so, ...). The Code cluster inside a single blob is written in two
+// sections -- see CodeDeserializationCluster::ReadAlloc, which reads `count`
+// main codes and then `deferred_count` deferred ones. The main section is the
+// code this blob defines; the deferred section is a set of Code objects that
+// this blob references but whose instructions live in another unit's blob
+// (ReadInstructions early-returns for them, which is why our reader leaves
+// ClusterIndex == -1).
+//
+// So per-blob the honest partition is exactly two buckets: "defined here"
+// (root unit) and "defined in some other unit" (deferred). Attributing a
+// deferred Code to a SPECIFIC unit id requires loading that unit's blob too,
+// which is a multi-file input this tool does not take yet.
+type LoadingUnitPartition struct {
+	// RootUnitID is the id of the unit this snapshot defines, or 0 if no
+	// LoadingUnit cluster was present.
+	RootUnitID int32
+	// UnitCount is the number of LoadingUnit objects described in this
+	// snapshot (including non-root ones, which are metadata-only here).
+	UnitCount int
+	// MainCodeRefs are Code ref IDs defined by the root unit.
+	MainCodeRefs []int
+	// DeferredCodeRefs are Code ref IDs referenced here but defined in
+	// another loading unit's blob.
+	DeferredCodeRefs []int
+	// Degenerate is true when there is at most one unit and no deferred
+	// codes, i.e. the app uses no deferred imports and the partition carries
+	// no information. Callers should say so rather than presenting a
+	// single-bucket split as a result.
+	Degenerate bool
+}
+
+// PartitionCodesByLoadingUnit splits result.Codes into root-unit and deferred
+// buckets and pairs that with the LoadingUnit metadata.
+func PartitionCodesByLoadingUnit(result *cluster.Result) *LoadingUnitPartition {
+	p := &LoadingUnitPartition{UnitCount: len(result.LoadingUnits)}
+	for _, lui := range result.LoadingUnits {
+		if lui.ParentRef == RefNull {
+			p.RootUnitID = lui.UnitID
+			break
+		}
+	}
+	for _, ce := range result.Codes {
+		if ce.ClusterIndex >= 0 {
+			p.MainCodeRefs = append(p.MainCodeRefs, ce.RefID)
+		} else {
+			p.DeferredCodeRefs = append(p.DeferredCodeRefs, ce.RefID)
+		}
+	}
+	p.Degenerate = p.UnitCount <= 1 && len(p.DeferredCodeRefs) == 0
+	return p
+}
+
+// UnitOf reports which bucket a Code ref belongs to: the root unit id when the
+// Code is defined in this snapshot, or 0 with deferred=true when it is defined
+// in another unit. found is false for a ref that is not a Code at all.
+func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int32, deferred, found bool) {
+	for _, r := range p.MainCodeRefs {
+		if r == codeRef {
+			return p.RootUnitID, false, true
+		}
+	}
+	for _, r := range p.DeferredCodeRefs {
+		if r == codeRef {
+			return 0, true, true
+		}
+	}
+	return 0, false, false
+}
+
+// BuildLoadingUnits converts cluster.LoadingUnitInfo → output records, with the
+// Code partition folded onto the root unit.
+func BuildLoadingUnits(result *cluster.Result) []LoadingUnitRecord {
+	part := PartitionCodesByLoadingUnit(result)
+	var records []LoadingUnitRecord
+	for _, lui := range result.LoadingUnits {
+		rec := LoadingUnitRecord{
+			RefID:     lui.RefID,
+			ParentRef: lui.ParentRef,
+			UnitID:    lui.UnitID,
+			IsRoot:    lui.ParentRef == RefNull,
+		}
+		if rec.IsRoot {
+			rec.MainCodeCount = len(part.MainCodeRefs)
+			rec.DeferredCodeCount = len(part.DeferredCodeRefs)
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// KPIRecord is one KernelProgramInfo entry in kpi.jsonl.
+type KPIRecord struct {
+	RefID              int `json:"ref_id"`
+	KernelComponentRef int `json:"kernel_component_ref,omitempty"`
+	StringOffsetsRef   int `json:"string_offsets_ref,omitempty"`
+	StringDataRef      int `json:"string_data_ref,omitempty"`
+	CanonicalNamesRef  int `json:"canonical_names_ref,omitempty"`
+	ConstantsRef       int `json:"constants_ref,omitempty"`
+	ConstantsTableRef  int `json:"constants_table_ref,omitempty"`
+}
+
+// BuildKPI converts cluster.KernelProgramInfoRef → output records.
+func BuildKPI(result *cluster.Result) []KPIRecord {
+	var records []KPIRecord
+	for _, kpi := range result.KernelProgramInfo {
+		rec := KPIRecord{
+			RefID:              kpi.RefID,
+			KernelComponentRef: kpi.KernelComponentRef,
+			StringOffsetsRef:   kpi.StringOffsetsRef,
+			StringDataRef:      kpi.StringDataRef,
+			CanonicalNamesRef:  kpi.CanonicalNamesRef,
+			ConstantsRef:       kpi.ConstantsRef,
+			ConstantsTableRef:  kpi.ConstantsTableRef,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// InstanceFieldRecord is one captured pointer field of an instance.
+type InstanceFieldRecord struct {
+	Offset int    `json:"offset"`
+	Ref    int    `json:"ref"`
+	Name   string `json:"name,omitempty"` // field name when the offset maps to a known layout slot
+}
+
+// InstanceRecord is one Instance entry in instances.jsonl.
+type InstanceRecord struct {
+	RefID int `json:"ref_id"`
+	CID   int `json:"cid"`
+	// SlotCount is the number of field slots the object has, including unboxed
+	// ones that produce no entry in Fields.
+	SlotCount int                   `json:"slot_count,omitempty"`
+	Fields    []InstanceFieldRecord `json:"fields,omitempty"`
+}
+
+// BuildInstances converts cluster.InstanceInfo → output records, naming each
+// field offset via the class layout where possible.
+//
+// The old shape was a bare "field_refs":[...] list with no offsets, which was
+// not usable: the position of a ref in that list is not its field index once
+// any unboxed field is present. Offsets now come from the capture itself.
+func BuildInstances(result *cluster.Result, layouts []DartClassLayout) []InstanceRecord {
+	// classID -> byteOffset -> field name.
+	nameByCIDOffset := make(map[int32]map[int32]string, len(layouts))
+	for _, l := range layouts {
+		m := make(map[int32]string, len(l.Fields))
+		for _, f := range l.Fields {
+			m[f.ByteOffset] = f.Name
+		}
+		nameByCIDOffset[l.ClassID] = m
+	}
+
+	records := make([]InstanceRecord, 0, len(result.Instances))
+	for _, ii := range result.Instances {
+		rec := InstanceRecord{
+			RefID:     ii.RefID,
+			CID:       ii.CID,
+			SlotCount: ii.NumFieldSlots,
+		}
+		names := nameByCIDOffset[int32(ii.CID)]
+		for _, f := range ii.Fields {
+			fr := InstanceFieldRecord{Offset: int(f.ByteOffset), Ref: f.Ref}
+			if names != nil {
+				fr.Name = names[f.ByteOffset]
+			}
+			rec.Fields = append(rec.Fields, fr)
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// ContextRecord is one Context entry in contexts.jsonl.
+type ContextRecord struct {
+	RefID     int   `json:"ref_id"`
+	ParentRef int   `json:"parent_ref,omitempty"`
+	VarRefs   []int `json:"var_refs,omitempty"`
+}
+
+// BuildContexts converts cluster.ContextInfo → output records.
+func BuildContexts(result *cluster.Result) []ContextRecord {
+	var records []ContextRecord
+	for _, ci := range result.Contexts {
+		rec := ContextRecord{
+			RefID:     ci.RefID,
+			ParentRef: ci.ParentRef,
+			VarRefs:   ci.VarRefs,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// TypeArgumentsRecord is one TypeArguments entry in type_arguments.jsonl.
+type TypeArgumentsRecord struct {
+	RefID          int   `json:"ref_id"`
+	Length         int   `json:"length"`
+	TypeRefs       []int `json:"type_refs,omitempty"`
+	Instantiations int   `json:"instantiations_ref,omitempty"`
+	Hash           int32 `json:"hash,omitempty"`
+	Nullability    int   `json:"nullability,omitempty"`
+}
+
+// BuildTypeArguments converts cluster.TypeArgumentsInfo → output records.
+func BuildTypeArguments(result *cluster.Result) []TypeArgumentsRecord {
+	var records []TypeArgumentsRecord
+	for _, ta := range result.TypeArguments {
+		rec := TypeArgumentsRecord{
+			RefID:          ta.RefID,
+			Length:         ta.Length,
+			TypeRefs:       ta.TypeRefs,
+			Instantiations: ta.Instantiations,
+			Hash:           ta.Hash,
+			Nullability:    ta.Nullability,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// ExceptionHandlerRecord is one ExceptionHandlers entry in exception_handlers.jsonl.
+type ExceptionHandlerRecord struct {
+	RefID           int                     `json:"ref_id"`
+	HandledTypesRef int                     `json:"handled_types_ref,omitempty"`
+	Handlers        []ExceptionHandlerEntry `json:"handlers,omitempty"`
+}
+
+// ExceptionHandlerEntry is one handler in an ExceptionHandlerRecord.
+type ExceptionHandlerEntry struct {
+	PCOffset        int32 `json:"pc_offset"`
+	OuterTryIndex   int16 `json:"outer_try_index,omitempty"`
+	NeedsStacktrace bool  `json:"needs_stacktrace,omitempty"`
+	HasCatchAll     bool  `json:"has_catch_all,omitempty"`
+	IsGenerated     bool  `json:"is_generated,omitempty"`
+}
+
+// BuildExceptionHandlers converts cluster.ExceptionHandlerInfo → output records.
+func BuildExceptionHandlers(result *cluster.Result) []ExceptionHandlerRecord {
+	var records []ExceptionHandlerRecord
+	for _, eh := range result.ExceptionHandlers {
+		rec := ExceptionHandlerRecord{
+			RefID:           eh.RefID,
+			HandledTypesRef: eh.HandledTypesRef,
+		}
+		for _, h := range eh.Handlers {
+			rec.Handlers = append(rec.Handlers, ExceptionHandlerEntry{
+				PCOffset:        h.PCOffset,
+				OuterTryIndex:   h.OuterTryIndex,
+				NeedsStacktrace: h.NeedsStacktrace,
+				HasCatchAll:     h.HasCatchAll,
+				IsGenerated:     h.IsGenerated,
+			})
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// ICDataRecord is one ICData entry in icdata.jsonl.
+//
+// Emitted only if an ICData cluster is ever present; AOT snapshots have none
+// (see cluster.ICDataInfo). The fields track ICData's ReadFromTo order --
+// the old single "owner_ref" field did not correspond to any ICData ref slot.
+type ICDataRecord struct {
+	RefID         int `json:"ref_id"`
+	TargetNameRef int `json:"target_name_ref,omitempty"`
+	ArgsDescRef   int `json:"args_desc_ref,omitempty"`
+	EntriesRef    int `json:"entries_ref,omitempty"`
+}
+
+// BuildICData converts cluster.ICDataInfo → output records.
+func BuildICData(result *cluster.Result) []ICDataRecord {
+	var records []ICDataRecord
+	for _, icd := range result.ICData {
+		rec := ICDataRecord{
+			RefID:         icd.RefID,
+			TargetNameRef: icd.TargetNameRef,
+			ArgsDescRef:   icd.ArgsDescRef,
+			EntriesRef:    icd.EntriesRef,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// ClosureDataRecord is one ClosureData entry in closure_data.jsonl.
+type ClosureDataRecord struct {
+	RefID             int `json:"ref_id"`
+	ParentFunctionRef int `json:"parent_function_ref,omitempty"`
+	ClosureRef        int `json:"closure_ref,omitempty"`
+}
+
+// BuildClosureData converts cluster.ClosureDataInfo → output records.
+func BuildClosureData(result *cluster.Result) []ClosureDataRecord {
+	var records []ClosureDataRecord
+	for _, cd := range result.ClosureData {
+		rec := ClosureDataRecord{
+			RefID:             cd.RefID,
+			ParentFunctionRef: cd.ParentFunctionRef,
+			ClosureRef:        cd.ClosureRef,
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// Qualified renders this code's display name.
+//
+// A constructor's Function name already carries the class -- Dart names them
+// `_GrowableList.of`, `Duration`, `PlatformDispatcher._` -- so prepending the
+// owner as well produces `_GrowableList.new _GrowableList.of`. The owner is
+// still reported separately in functions.jsonl; it is only the qualified name
+// that must not repeat it.
+func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
+	if ci.IsConstructor {
+		return QualifiedName("", ci.FuncName, pcOffset)
+	}
+	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
 }
 
 // QualifiedName builds "Owner.FuncName_hexaddr" like blutter.

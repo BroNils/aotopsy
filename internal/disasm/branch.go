@@ -5,9 +5,10 @@ package disasm
 
 // BranchInfo describes a decoded branch instruction.
 type BranchInfo struct {
-	Target uint64 // absolute target address (0 if RET)
-	Cond   bool   // true if conditional (has fallthrough)
-	IsRet  bool   // true if RET
+	Target     uint64 // absolute target address (0 if RET or indirect)
+	Cond       bool   // true if conditional (has fallthrough)
+	IsRet      bool   // true if RET
+	IsIndirect bool   // true if BR (indirect branch — jump table, tail call)
 }
 
 // DecodeBranch attempts to decode a branch instruction from raw encoding at the given PC.
@@ -16,6 +17,12 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 	// RET (0xD65F03C0 exactly, or RET Xn = 0xD65F0000 | Rn<<5)
 	if raw&0xFFFFFC1F == 0xD65F0000 {
 		return &BranchInfo{IsRet: true}
+	}
+
+	// BR xN (indirect branch): 1101011 0 0 00 11111 000000 Rn 00000
+	// Encoding: 0xD61F0000 | Rn<<5
+	if raw&0xFFFFFC1F == 0xD61F0000 {
+		return &BranchInfo{IsIndirect: true}
 	}
 
 	// B (unconditional): 000101 imm26
@@ -29,6 +36,21 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 	if raw&0xFF000010 == 0x54000000 {
 		imm19 := (raw >> 5) & 0x7FFFF
 		offset := signExtend(imm19, 19) * 4
+		// cond 0b1110 (AL) and 0b1111 (NV) always branch, so despite using
+		// the B.cond encoding these are UNCONDITIONAL. dart-lang/sdk's
+		// runtime/vm/constants_arm64.h at 3.9.2 names them
+		//   AL = 14,  // always (unconditional)
+		//   NV = 15,  // special condition (refer to section C1.2.3)
+		// and C1.2.3 defines the 0b1111 encoding to behave as always.
+		//
+		// Reporting them as conditional cost twice: the CFG grew a
+		// fallthrough edge that cannot be taken, and the decompiler rendered
+		// the branch as a comparison whose operator was the literal string
+		// "true" -- `if ((x15 - 16) true THR.f64)`, which is not Dart. That
+		// appeared 28148 times in the 2.12 sample and never in the 3.x ones.
+		if cond := raw & 0xF; cond == 14 || cond == 15 {
+			return &BranchInfo{Target: uint64(int64(pc) + int64(offset))}
+		}
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset)), Cond: true}
 	}
 
