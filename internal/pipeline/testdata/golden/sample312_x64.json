@@ -5,7 +5,7 @@
   "func_count": 8173,
   "class_count": 1913,
   "lines": {
-    "address_callers_xref.jsonl": 4739,
+    "address_callers_xref.jsonl": 4751,
     "call_edges.jsonl": 40610,
     "classes.jsonl": 1913,
     "dispatch_table.jsonl": 26474,
@@ -18,8 +18,8 @@
     "unresolved_thr.jsonl": 0
   },
   "sha256": {
-    "address_callers_xref.jsonl": "7f1ce4050c0aa68c0a4054f36b6f34e45625d53479c9f3d86e3ffc0dcac1f6c5",
-    "call_edges.jsonl": "827528b933e9ef3ed1bf9e81de1a1676972dae7c253c205186faadd954543cd8",
+    "address_callers_xref.jsonl": "ee12553b0c55f247f4c92972e751161561ce88a49f9fc284f27b4fff2a83a048",
+    "call_edges.jsonl": "71a104c5b67bd6f6e2ae79788cae434d7c51626f2406c9a1305ce097e7714862",
     "classes.jsonl": "5352d545002706b05e15bbbf6426fe31adf3b6750a44f9f6db07b0552ff3fa72",
     "dispatch_table.jsonl": "8c35faa12b8993f34a62038f9a53048f2c6cdda6183221eea9271c14b3f17f61",
     "functions.jsonl": "72bea1c462dede266586c00867d5c1df7cfa3e3fe48adbf6c58c84610afe5e68",
@@ -27,7 +27,7 @@
     "pool_immediates.jsonl": "94b79a6988313ae213a7ab8688a593344a1bc90dcd0398db608bc14d4c02b7b4",
     "string_refs.jsonl": "0453b88913c59e1beceb652106edbd0cb6c666585f3dedb544d02ec7e59f043d",
     "string_value_xref.jsonl": "c599143abd1520a4792d45edb0fb4cf0dcc7e07f8ff103106e86eb86b4f1a036",
-    "typetrack_report.json": "aaf51a29a49b5228f39cf602e67f8ef1684057b66d673e547f4c623183a1a89b",
+    "typetrack_report.json": "d47914462886cd824b29f66cc05fc77a1b4c070876403a344adf1167b73f8336",
     "unresolved_thr.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }

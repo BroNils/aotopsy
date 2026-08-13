@@ -190,7 +190,7 @@ func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
 	return mask
 }
 
-func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string) CallEdge {
+func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
 	e := CallEdge{FromPC: addr, Kind: "call"}
 	for _, arg := range inst.Args {
 		if arg == nil {
@@ -227,11 +227,41 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			var baseNote string
 			switch canonX86Reg(mem.Base) {
 			case x86RegTHR:
-				// THR-relative calls are dispatch table calls regardless of
-				// whether an index register is present. The indexed form
-				// (call [R14 + RCX*8 + disp]) is the primary dispatch table
-				// call pattern in Dart AOT x86_64 code.
-				baseNote = "dispatch_table"
+				// A THR-relative call with NO index register is a call
+				// through a Thread slot -- a stub entry point -- not a
+				// dispatch-table call. This used to claim `dispatch_table`
+				// for both shapes, on the reasoning that "THR-relative calls
+				// are dispatch table calls regardless of whether an index
+				// register is present". The disassembly says otherwise: the
+				// x86_64 dispatch sequence loads the table out of Thread
+				// first and then indexes the LOADED register,
+				//
+				//	MOV  RAX, [R14+0x70]        ; THR.dispatch_table_array
+				//	CALL [RAX+8*RCX+0xd700]     ; the dispatch call
+				//
+				// so the base register at a real dispatch call is RAX, never
+				// R14. On the 3.12.2 x86_64 sample all 3371 dispatch calls
+				// have that shape, and all 6348 `CALL [R14+disp]` sites had
+				// no index at all -- yet every one was labelled
+				// `dispatch_table` and resolved to nothing. 5979 of them are
+				// a single displacement, the stack-overflow check stub that
+				// sits in almost every function prologue.
+				//
+				// Naming them off the Thread field table is the same thing
+				// the MOV path next door already does (dataflow_x86.go), and
+				// it makes them resolve as stubs, which is what ARM64's
+				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
+				if mem.Index == 0 {
+					if name, ok := thrFields[int(mem.Disp)]; ok {
+						baseNote = "THR." + name
+					} else {
+						// An offset the table does not cover names nothing.
+						// Report the slot rather than inventing a category.
+						baseNote = fmt.Sprintf("THR+0x%x", mem.Disp)
+					}
+				} else {
+					baseNote = "dispatch_table"
+				}
 			case x86RegPP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {

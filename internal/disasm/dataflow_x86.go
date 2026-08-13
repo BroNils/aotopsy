@@ -147,7 +147,7 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		for i := blk.Start; i < blk.End; i++ {
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
-				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay)
+				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay, thrFields)
 				if e.TargetPC != 0 {
 					argMask := inferX86CallArgRegMaskLocal(insts, i)
 					e.ArgRegMask = argMask
