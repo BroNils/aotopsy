@@ -192,6 +192,16 @@ tidak cocok. Itulah gunanya.
 Aturan praktis: kalau tergoda menulis `python3 - <<'PY'` yang memuat
 `open(...,'w')`, berhenti. Pakai `edit` beberapa kali, atau `read` + `write`.
 
+**Dan CRLF bukan alasan untuk menghindari `edit`.** Sesi berikutnya sempat
+ragu menyentuh `ir.go`/`lift.go`/`emit.go`/`arm64.go` yang semuanya CRLF,
+lalu mengukurnya: `edit` menyisipkan blok multi-baris (ditulis dengan `\n`)
+dan file tetap **436/436 baris CRLF** — sisipannya dinormalkan mengikuti
+file. Jadi bahaya CRLF itu khusus python/sed, bukan sifat filenya. Catatan
+tambahan: `gofmt -l` menandai semua file CRLF sebagai "belum terformat"
+(`call.go`, `tryregion_test.go`, dst. sudah begitu sejak awal) — itu derau
+baseline, jangan dikira ulah edit Anda, dan **jangan** menjalankan
+`gofmt -w` untuk "membereskan" karena ia mengubah seluruh file ke LF.
+
 ## Engineering Philosophy
 
 - **Jangan ambil jalan termudah.** Jika fix yang benar butuh refactor besar atau signature change, lakukan. Contoh: `transferInstruction` signature diubah untuk pass `prevRaw` — ini key untuk UBFX fix. "Changing the signature would require many changes" → DO IT ANYWAY.

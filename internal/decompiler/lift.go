@@ -17,6 +17,11 @@ type LiftState struct {
 	Locals  map[int64]string  // frame-relative byte offset -> local var name
 	LastCmp [2]string
 	HasCmp  bool
+	// Pool resolves an object-pool index to its display text. Set by the
+	// emitter, which is the only layer that has the deserialized pool; nil
+	// in unit tests that lift instructions in isolation, in which case a
+	// pool operand renders as `pool[N]` rather than its contents.
+	Pool PoolLookup
 }
 
 // newLiftState seeds the registers that hold a known value for the whole of
@@ -48,7 +53,7 @@ func newLiftState(nullReg string) *LiftState {
 // frame-global (a stack slot is the same slot regardless of which branch
 // wrote to it).
 func (s *LiftState) Clone() *LiftState {
-	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, LastCmp: s.LastCmp, HasCmp: s.HasCmp}
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
 	for k, v := range s.Regs {
 		c.Regs[k] = v
 	}
@@ -315,7 +320,7 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 		return localName(op.memDisp)
 	}
 	if base == fir.PoolReg {
-		return "pool[?]" // overridden by OpLoadPool handling in the emitter when PoolIndex is known
+		return poolOperandExpr(fir, s, op)
 	}
 	baseExpr := s.lookupReg(base)
 	if !op.hasDisp {

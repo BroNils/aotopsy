@@ -93,6 +93,22 @@ type FuncIR struct {
 	// isPointerDecompression.
 	HeapBitsReg string
 
+	// PoolIndexOf turns a byte displacement off PoolReg into an object-pool
+	// index. The arithmetic differs per architecture -- the ARM64 pool
+	// register is untagged and the x86_64 one is tagged, so the same slot
+	// sits at a displacement one byte apart -- which is why this is a
+	// function supplied by the lifter rather than a constant here. See
+	// disasm.ARM64PoolIndex / disasm.X64PoolIndex.
+	//
+	// Loads through the pool are recognised as OpLoadPool and resolved by
+	// the emitter. This field exists for every OTHER instruction that names
+	// a pool slot: x86_64 can compare directly against memory, so
+	// `cmp eax, [r15+0x3f]` reads a pool entry without ever loading it, and
+	// such operands used to render as the literal `pool[?]`. ARM64 has no
+	// such shape -- it must load first -- which is why the placeholder was
+	// invisible there and showed up only on x64 samples.
+	PoolIndexOf func(disp int64) (int, bool)
+
 	// StackReg is the Dart stack pointer -- SPREG in the SDK's terms:
 	// `const Register SPREG = R15;` on ARM64 (constants_arm64.h also spells
 	// R15 as "SP in Dart code") and `const Register SPREG = RSP;` on x86_64.

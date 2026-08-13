@@ -74,6 +74,8 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.ReturnReg = arm64ReturnReg
 	fir.LinkReg = arm64LinkReg
 	fir.PoolReg = arm64PoolReg
+	// PP is untagged on ARM64, so the displacement is a plain 16+8*index.
+	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
 	fir.ThreadReg = arm64ThreadReg
 	fir.NullReg = arm64NullReg
 	fir.HeapBitsReg = arm64HeapBitsReg

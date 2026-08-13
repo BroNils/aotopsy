@@ -210,6 +210,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		visits:     make(map[int]int),
 		omittedSet: make(map[int]bool),
 	}
+	// The pool is reachable from the lift layer too: instructions that name
+	// a pool slot without loading it (x86_64 compare-against-memory) resolve
+	// through operandExpr, not emitLoadPool. See poolOperandExpr.
+	e.state.Pool = pool
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
@@ -1060,6 +1064,7 @@ func (e *emitter) appendHelperFunctions() {
 			inlineMarked:   e.inlineMarked,
 			tryOpened:      e.tryOpened,
 			handlerBlocks:  e.handlerBlocks}
+		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,
 		// THR, PP) that were live when the helper was extracted.

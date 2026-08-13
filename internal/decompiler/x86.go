@@ -80,6 +80,9 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	fir.FrameReg = x86FrameReg
 	fir.ReturnReg = x86ReturnReg
 	fir.PoolReg = x86PoolReg
+	// PP is tagged on x86_64, so FieldAddress has already subtracted the
+	// heap-object tag and the displacement is 16+8*index-1.
+	fir.PoolIndexOf = disasm.X64PoolIndex
 	fir.ThreadReg = x86ThreadReg
 	fir.StackReg = x86StackReg
 
