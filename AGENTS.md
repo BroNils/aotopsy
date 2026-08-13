@@ -200,6 +200,50 @@ Aturan praktis: kalau tergoda menulis `python3 - <<'PY'` yang memuat
 - **Root cause analysis harus mendalam.** Gunakan gh search + gh api ke SDK source untuk verify setiap assumption. Jangan menebak. Contoh: ObjectStoreAOTFieldCount salah karena hanya count RW fields, padahal ada CW, FW, LAZY_CORE, LAZY_FFI, dll.
 - **"Data limitation" bukan akhir riset.** Jika BLR rendah, cari alternative resolution paths (PP-loaded Code, THR stubs, object field calls). Jangan berhenti di "dispatch table too small".
 
+### Urutan kerja yang terbukti: cek SDK → hitung → lacak → ubah
+
+Ini bukan preferensi. Di codebase ini **membaca kode menghasilkan hipotesis,
+bukan temuan** — terukur pada satu penyelidikan: empat kesimpulan dari
+membaca kode, keempatnya salah; jawabannya datang dari sebuah `println` yang
+justru tidak menyala.
+
+1. **Cek ketersediaan data di SDK sebelum merencanakan.** Dua rencana besar
+   dibatalkan sebelum satu baris ditulis, karena field-nya memang tidak ada
+   di snapshot AOT rilis: `allocation_stub_` (di luar `to_snapshot(kFullAOT)`)
+   dan `var_descriptors` (`NOT_IN_PRODUCT`). Keduanya akan jadi hari-hari
+   terbuang kalau langsung dikerjakan.
+2. **Hitung SEMUA mode kegagalan sebelum memilih satu.** Contoh yang bekerja:
+   1.335 range tak bernama dipecah jadi 910 "owner ketemu, nama kosong" +
+   425 "owner tak ketemu", lalu diukur bahwa 910 dari 910 bisa diselesaikan
+   lewat tabel string VM. Perbaikannya jadi kepastian, bukan tebakan — dan
+   hasilnya persis angka yang diprediksi.
+3. **Lacak dengan tes yang memutar ulang instruksi aslinya** sebelum
+   mengubah kode. Bug "CMP menghapus register yang dibandingkannya" ketemu
+   begitu, dalam satu jalan, setelah empat putaran penalaran gagal.
+
+### Counter lintas arsitektur belum tentu sebanding
+
+Sebelum menyimpulkan dari selisih angka, pastikan kedua sisi mengukur
+populasi yang sama. Tiga jebakan nyata:
+
+- `add_class_hits` 58× lebih rendah di x86_64 — **memang seharusnya**:
+  `flow_graph_compiler_x64.cc` melipat aritmetika slot ke dalam mode
+  pengalamatan `CALL`, sementara ARM64 memancarkan `AddImmediate` dulu.
+- `header_hits` 3× lebih rendah — ARM64 menghitung cabang bertipe *dan* tak
+  bertipe, x86 hanya yang bertipe.
+- Golden dengan `wc -l` identik — 93 record di dalamnya berubah.
+
+Rasio yang dihitung dari populasi yang salah juga menyesatkan: "70 % situs
+penyempitan tak berdasar" ternyata 4 %, karena dihitung dari distribusi
+`CMP` di disassembly, bukan dari situs yang benar-benar menyala.
+
+### Jangan kirim perubahan tanpa hasil terukur
+
+Perubahan yang benar secara faktual tapi nol dampak pada output lebih baik
+dibatalkan daripada dikirim. Perbaikan korektnes yang menghapus klaim tanpa
+dasar tetap layak kirim walau output belum berubah — tapi **katakan terus
+terang** bahwa ia tidak membeli apa-apa.
+
 ## Batas yang sudah diketahui (jangan diklaim selesai)
 
 - **Resolusi dispatch di Dart 2.x rendah** (2.12: 129 single-callee dari 5504
