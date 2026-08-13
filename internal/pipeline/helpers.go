@@ -21,6 +21,9 @@ type CodeNameInfo struct {
 	FuncName   string
 	OwnerName  string
 	ParamCount int // total visible parameters (fixed + optional, excluding implicit 'this')
+	// IsConstructor marks a generative constructor or factory, recovered
+	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
+	IsConstructor bool
 }
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
@@ -147,6 +150,16 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		ci := CodeNameInfo{
 			FuncName:  funcName,
 			OwnerName: l.ResolveOwnerName(owner),
+		}
+		// Dart names a constructor after its class -- `Duration`,
+		// `_GrowableList.of` -- so without UntaggedFunction::Kind it is
+		// indistinguishable from an ordinary method. 1231 of the 8346
+		// functions on the 3.12.2 x86_64 sample are constructors, and every
+		// one of them read as a plain method. The SDK's own symbol names
+		// spell it `new Duration`; this matches that.
+		if owner.IsConstructor() && funcName != "" {
+			ci.FuncName = "new " + funcName
+			ci.IsConstructor = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
 		if owner.SignatureRefID > 0 {
@@ -323,7 +336,7 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 // QualifiedCodeName returns "Owner.Func_hexaddr" for a code refID using PoolLookups.
 func QualifiedCodeName(refID int, pl *PoolLookups, pcOffset uint32) string {
 	ci := pl.CodeNames[refID]
-	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
+	return ci.Qualified(pcOffset)
 }
 
 // TypeParamResolver resolves a FunctionType's real per-parameter type
@@ -1028,6 +1041,20 @@ func BuildClosureData(result *cluster.Result) []ClosureDataRecord {
 		records = append(records, rec)
 	}
 	return records
+}
+
+// Qualified renders this code's display name.
+//
+// A constructor's Function name already carries the class -- Dart names them
+// `_GrowableList.of`, `Duration`, `PlatformDispatcher._` -- so prepending the
+// owner as well produces `_GrowableList.new _GrowableList.of`. The owner is
+// still reported separately in functions.jsonl; it is only the qualified name
+// that must not repeat it.
+func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
+	if ci.IsConstructor {
+		return QualifiedName("", ci.FuncName, pcOffset)
+	}
+	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
 }
 
 // QualifiedName builds "Owner.FuncName_hexaddr" like blutter.

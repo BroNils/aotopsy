@@ -323,7 +323,7 @@ func runTypeInference(
 		var ownerName string
 		if r.RefID >= 0 {
 			ci := pl.CodeNames[r.RefID]
-			name = QualifiedName(ci.OwnerName, ci.FuncName, r.PCOffset)
+			name = ci.Qualified(r.PCOffset)
 			ownerName = ci.OwnerName
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)

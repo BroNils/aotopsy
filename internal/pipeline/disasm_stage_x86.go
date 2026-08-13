@@ -145,7 +145,7 @@ func RunDisasmStageX86(
 			ci := pl.CodeNames[r.RefID]
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
-			name = QualifiedName(ownerName, funcName, r.PCOffset)
+			name = ci.Qualified(r.PCOffset)
 			if funcName == "" {
 				name = elfStubName(elfFuncSyms, funcVA, name)
 			}
