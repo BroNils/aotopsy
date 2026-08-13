@@ -106,8 +106,26 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		if !ok {
 			continue
 		}
+		// ResolveName only consults the app-isolate string table. A
+		// Function's NameRefID can point into the VM-isolate base-object
+		// region instead -- shared objects and strings common to every app
+		// built with this Dart SDK -- and that is the SAME gap already
+		// fixed in ResolvePoolDisplay below and in refinfo.go's
+		// listToplevelFunctions, both of which try ResolveVMName second.
+		// This call site never did, so those Codes fell through to the
+		// `sub_<pcOffset>` placeholder in qualifiedCodeNameLocal.
+		//
+		// Measured before changing anything: of the ranges whose name came
+		// back empty, the ones where an owner WAS resolved are 910 of 1335
+		// on the 3.12 x86_64 sample and 877 of 1286 on 3.x ARM64 -- and
+		// every single one of them, 910 of 910 and 877 of 877, resolves
+		// through the VM table.
+		funcName := l.ResolveName(owner)
+		if funcName == "" {
+			funcName = l.ResolveVMName(owner)
+		}
 		ci := CodeNameInfo{
-			FuncName:  l.ResolveName(owner),
+			FuncName:  funcName,
 			OwnerName: l.ResolveOwnerName(owner),
 		}
 		// Follow Function→FunctionType chain for parameter count.
