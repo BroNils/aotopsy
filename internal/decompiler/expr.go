@@ -326,6 +326,38 @@ func (p *exprParser) parsePrimary() (Expr, bool) {
 			p.i = skipStringLiteral(p.s, p.i) + 1
 			continue
 		}
+		// A member name may BE an operator: Dart spells them `+`, `*`,
+		// `unary-`, `[]`, `[]=`, `==`. Everything from a `.` up to the
+		// argument list is the NAME, whatever characters it uses, so consume
+		// it here rather than letting the operator and bracket branches
+		// below tear it apart.
+		//
+		// Without this, `_StringBase@0150898.+(a, b)` parsed as the atom
+		// `_StringBase@0150898.` plus a binary `+` applied to `(a, b)`, and
+		// printed back as `_StringBase@0150898. + (a, b)` -- a method call
+		// re-rendered as an addition. 1842 sites on the 3.x ARM64 sample
+		// once VM-table name resolution started producing these names.
+		if c == '.' {
+			p.i++ // the dot
+			for p.i < len(p.s) {
+				n := p.s[p.i]
+				if isIdentChar(n) || isOperatorStart(n) {
+					p.i++
+					continue
+				}
+				// `[]` and `[]=` are index-operator names when they directly
+				// follow the dot; a `[` any later opens a real subscript.
+				if n == '[' && p.i > 0 && p.s[p.i-1] == '.' {
+					p.i++
+					for p.i < len(p.s) && (p.s[p.i] == ']' || isOperatorStart(p.s[p.i])) {
+						p.i++
+					}
+					continue
+				}
+				break
+			}
+			continue
+		}
 		if c == ' ' || isOperatorStart(c) {
 			break
 		}

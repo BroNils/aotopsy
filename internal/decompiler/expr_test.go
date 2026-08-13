@@ -213,3 +213,36 @@ func TestExprKeepsBitwiseVsComparisonParens(t *testing.T) {
 		}
 	}
 }
+
+// Dart spells operator methods `+`, `*`, `unary-`, `[]`, `==`, so those
+// characters after a `.` are part of the member NAME, not an infix operator.
+// Without that, `_StringBase.+(a, b)` parsed as `_StringBase.` plus a binary
+// `+` and printed back as `_StringBase. + (a, b)` -- a method call
+// re-rendered as an addition. 1842 sites on the 3.x ARM64 sample.
+func TestExprKeepsOperatorMethodNamesIntact(t *testing.T) {
+	for _, src := range []string{
+		"_StringBase@0150898.+(a, b)",
+		"_OneByteString@0150898.*(s, n)",
+		"Offset.unary-(p)",
+		"Alignment.+(x, y)",
+		"Map.[]=(m, k, v)",
+	} {
+		tree, ok := parseExpr(src)
+		if !ok {
+			t.Errorf("could not parse %q", src)
+			continue
+		}
+		if got := printExpr(tree); got != src {
+			t.Errorf("operator method mangled: %q -> %q", src, got)
+		}
+	}
+	// A genuine addition between two member accesses must still parse as one.
+	add := "a.field + b.field"
+	tree, ok := parseExpr(add)
+	if !ok {
+		t.Fatalf("could not parse %q", add)
+	}
+	if _, isBin := tree.(*Binary); !isBin {
+		t.Errorf("%q should still be a binary addition, got %T", add, tree)
+	}
+}
