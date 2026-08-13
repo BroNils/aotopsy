@@ -256,17 +256,24 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 		return nil
 	}
 
-	alignShift := uint(5)
-	if a := dataImageAlignment(profile); a > 0 {
-		alignShift = 0
-		for (int64(1) << alignShift) < a {
-			alignShift++
-		}
-	}
+	// ROData running_offset delta is encoded in units of kObjectAlignment
+	// (RODataDeserializationCluster::ReadAlloc: running_offset += ReadUnsigned()
+	// << kObjectAlignmentLog2). kObjectAlignmentLog2 = 4 (kObjectAlignment = 16).
+	// This is the SAME delta stride used by extractRODataStrings in fill.go;
+	// the two functions must agree (they share the same ROData image layout).
+	// Previously this used dataImageAlignment(profile) (16 or 64), which is the
+	// IMAGE BASE alignment, not the delta stride — a conflation that only
+	// happened to work when dataImageAlignment == 16 (i.e. Dart <= 2.18).
+	alignShift := uint(4)
+
+	// No per-snapshot header adjustment: with the correct image-base alignment
+	// (kObjectStartAlignment, applied in dataImageObjStart) and the correct delta
+	// stride (kObjectAlignment=16, alignShift=4 above), the cumulative
+	// running_offset lands exactly on each object header for BOTH the VM and the
+	// isolate data images. Verified against real cid=94 OneByteString headers in
+	// both (same fix as extractRODataStrings in fill.go).
 	headerAdjust := int64(0)
-	if isVM {
-		headerAdjust = int64(1) << alignShift
-	}
+	_ = isVM // no longer used; kept in signature for API compatibility
 
 	runningOffset := int64(0)
 	ref := cm.StartRef
