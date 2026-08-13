@@ -14,9 +14,21 @@ type CallEdgeRecord struct {
 	FromFunc string `json:"from_func"`
 	FromPC   string `json:"from_pc"`
 	Kind     string `json:"kind"`             // "bl"/"call" (direct), "blr"/"call_indirect" (indirect)
-	Target   string `json:"target,omitempty"` // resolved name or "0x..." for bl/call
+	Target   string `json:"target,omitempty"` // THE callee: resolved name, or "0x..." for bl/call
 	Reg      string `json:"reg,omitempty"`    // "X16" etc for blr/call_indirect
 	Via      string `json:"via,omitempty"`    // provenance for blr/call_indirect
+
+	// Targets lists possible callees for a POLYMORPHIC indirect call: the
+	// receiver class was unknown but the selector was, so the callee is one
+	// of the implementations of that selector. Target is empty in that case
+	// -- there is no single callee to name, and consumers that follow Target
+	// (render.ReachableSet, the call graph, signal's flow analysis) must not
+	// be handed a guess as if it were a fact.
+	//
+	// Candidates is how many distinct callees the scan found; Targets is
+	// capped, so Candidates can be larger than len(Targets).
+	Targets    []string `json:"targets,omitempty"`
+	Candidates int      `json:"candidates,omitempty"`
 }
 
 // UnresolvedTHRRecord is one line in unresolved_thr.jsonl.

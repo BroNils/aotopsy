@@ -85,6 +85,40 @@ func canonX86Reg(r x86asm.Reg) int {
 	return -1
 }
 
+// x86RegWidthBytes returns the width in bytes of a register-sized argument
+// (8 for RAX, 4 for EAX, 2 for AX, 1 for AL), or 0 if arg is not a register.
+// Used to recover the memory access width for MOV instructions whose
+// DataSize is 0.
+func x86RegWidthBytes(arg x86asm.Arg) int {
+	r, ok := arg.(x86asm.Reg)
+	if !ok {
+		return 0
+	}
+	switch r {
+	case x86asm.RAX, x86asm.RCX, x86asm.RDX, x86asm.RBX,
+		x86asm.RSP, x86asm.RBP, x86asm.RSI, x86asm.RDI,
+		x86asm.R8, x86asm.R9, x86asm.R10, x86asm.R11,
+		x86asm.R12, x86asm.R13, x86asm.R14, x86asm.R15:
+		return 8
+	case x86asm.EAX, x86asm.ECX, x86asm.EDX, x86asm.EBX,
+		x86asm.ESP, x86asm.EBP, x86asm.ESI, x86asm.EDI,
+		x86asm.R8L, x86asm.R9L, x86asm.R10L, x86asm.R11L,
+		x86asm.R12L, x86asm.R13L, x86asm.R14L, x86asm.R15L:
+		return 4
+	case x86asm.AX, x86asm.CX, x86asm.DX, x86asm.BX,
+		x86asm.SP, x86asm.BP, x86asm.SI, x86asm.DI,
+		x86asm.R8W, x86asm.R9W, x86asm.R10W, x86asm.R11W,
+		x86asm.R12W, x86asm.R13W, x86asm.R14W, x86asm.R15W:
+		return 2
+	case x86asm.AL, x86asm.CL, x86asm.DL, x86asm.BL,
+		x86asm.SPB, x86asm.BPB, x86asm.SIB, x86asm.DIB,
+		x86asm.R8B, x86asm.R9B, x86asm.R10B, x86asm.R11B,
+		x86asm.R12B, x86asm.R13B, x86asm.R14B, x86asm.R15B:
+		return 1
+	}
+	return 0
+}
+
 // X86ScanResult carries call edges and string references extracted from
 // one function in a single instruction-decode pass.
 type X86ScanResult struct {
@@ -156,7 +190,7 @@ func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
 	return mask
 }
 
-func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string) CallEdge {
+func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
 	e := CallEdge{FromPC: addr, Kind: "call"}
 	for _, arg := range inst.Args {
 		if arg == nil {
@@ -193,14 +227,44 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			var baseNote string
 			switch canonX86Reg(mem.Base) {
 			case x86RegTHR:
-				// THR-relative calls are dispatch table calls regardless of
-				// whether an index register is present. The indexed form
-				// (call [R14 + RCX*8 + disp]) is the primary dispatch table
-				// call pattern in Dart AOT x86_64 code.
-				baseNote = "dispatch_table"
+				// A THR-relative call with NO index register is a call
+				// through a Thread slot -- a stub entry point -- not a
+				// dispatch-table call. This used to claim `dispatch_table`
+				// for both shapes, on the reasoning that "THR-relative calls
+				// are dispatch table calls regardless of whether an index
+				// register is present". The disassembly says otherwise: the
+				// x86_64 dispatch sequence loads the table out of Thread
+				// first and then indexes the LOADED register,
+				//
+				//	MOV  RAX, [R14+0x70]        ; THR.dispatch_table_array
+				//	CALL [RAX+8*RCX+0xd700]     ; the dispatch call
+				//
+				// so the base register at a real dispatch call is RAX, never
+				// R14. On the 3.12.2 x86_64 sample all 3371 dispatch calls
+				// have that shape, and all 6348 `CALL [R14+disp]` sites had
+				// no index at all -- yet every one was labelled
+				// `dispatch_table` and resolved to nothing. 5979 of them are
+				// a single displacement, the stack-overflow check stub that
+				// sits in almost every function prologue.
+				//
+				// Naming them off the Thread field table is the same thing
+				// the MOV path next door already does (dataflow_x86.go), and
+				// it makes them resolve as stubs, which is what ARM64's
+				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
+				if mem.Index == 0 {
+					if name, ok := thrFields[int(mem.Disp)]; ok {
+						baseNote = "THR." + name
+					} else {
+						// An offset the table does not cover names nothing.
+						// Report the slot rather than inventing a category.
+						baseNote = fmt.Sprintf("THR+0x%x", mem.Disp)
+					}
+				} else {
+					baseNote = "dispatch_table"
+				}
 			case x86RegPP:
-				poolIdx := int(mem.Disp/8) - 2
-				if disp, ok := poolDisplay[poolIdx]; ok {
+				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
+				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
 				} else {
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
@@ -263,7 +327,21 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 			continue
 		}
 		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
-			width := inst.DataSize / 8
+			// DataSize is the operand size in bits but is 0 for many MOV
+			// encodings, yielding width=0. Prefer MemBytes (the memory
+			// operand size in bytes, already 1/2/4/8/16) when present;
+			// otherwise infer the width from the register operand's size
+			// class (RAX=8, EAX=4, AX=2, AL=1).
+			width := inst.MemBytes
+			if width <= 0 {
+				width = x86RegWidthBytes(inst.Args[0])
+				if width <= 0 {
+					width = x86RegWidthBytes(inst.Args[1])
+				}
+			}
+			if width <= 0 {
+				width = inst.DataSize / 8 // last-resort fallback
+			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]

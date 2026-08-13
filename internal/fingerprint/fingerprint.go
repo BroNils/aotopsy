@@ -80,12 +80,14 @@ func Run(path string) (*Report, error) {
 	rep.FlutterMarkers = flutterMarkers
 	rep.DartMarkers = dartMarkers
 
-	if len(flutterMarkers) > 0 {
-		rep.FlutterVersion = extractSemverToken(flutterMarkers[0])
-	}
-	if len(dartMarkers) > 0 {
-		rep.DartVersion = extractSemverToken(dartMarkers[0])
-	}
+	// Iterate ALL markers and take the first semver found. The markers slice
+	// is sorted alphabetically (extractEngineMarkers calls sort.Strings), so
+	// marker[0] is the alphabetically-first entry, which may not contain a
+	// version even if a later marker does (e.g. "Engine revision abc" sorts
+	// before "Flutter Engine 3.24.1"). Taking only [0] silently dropped the
+	// version in that case.
+	rep.FlutterVersion = firstSemverFromMarkers(flutterMarkers)
+	rep.DartVersion = firstSemverFromMarkers(dartMarkers)
 
 	hasVersionHint := rep.FlutterVersion != "" || rep.DartVersion != ""
 	rep.Confidence = confidenceLevel(rep.BuildID != "", hasVersionHint)
@@ -125,7 +127,7 @@ func extractBuildID(ef *elf.File) string {
 		if err != nil {
 			continue
 		}
-		if id := parseBuildIDNotes(data); id != "" {
+		if id := parseBuildIDNotes(data, ef.ByteOrder); id != "" {
 			return id
 		}
 	}
@@ -133,14 +135,17 @@ func extractBuildID(ef *elf.File) string {
 }
 
 // parseBuildIDNotes walks a raw ELF note-section byte stream (repeated
-// namesz/descsz/type u32-LE triples, name padded to 4-byte alignment,
+// namesz/descsz/type u32 triples, name padded to 4-byte alignment,
 // descriptor padded to 4-byte alignment) looking for name=="GNU" type==3.
-func parseBuildIDNotes(data []byte) string {
+// The u32 fields are read using the ELF's native byte order (bo), which is
+// ef.ByteOrder from the caller -- not hardcoded little-endian, so big-endian
+// ELFs are handled correctly.
+func parseBuildIDNotes(data []byte, bo binary.ByteOrder) string {
 	off := 0
 	for off+12 <= len(data) {
-		namesz := binary.LittleEndian.Uint32(data[off:])
-		descsz := binary.LittleEndian.Uint32(data[off+4:])
-		ntype := binary.LittleEndian.Uint32(data[off+8:])
+		namesz := bo.Uint32(data[off:])
+		descsz := bo.Uint32(data[off+4:])
+		ntype := bo.Uint32(data[off+8:])
 		off += 12
 
 		nameEnd := off + int(namesz)
@@ -201,8 +206,14 @@ func extractEngineMarkers(raw []byte) (flutterMarkers, dartMarkers []string) {
 			continue
 		}
 		lower := strings.ToLower(s)
-		isFlutter := strings.Contains(lower, "flutter") || strings.Contains(lower, "engine")
-		isDart := strings.Contains(lower, "dart") || strings.Contains(lower, "isolate snapshot") || strings.Contains(lower, "vm snapshot")
+		// Use specific markers instead of bare "engine"/"dart" substrings,
+		// which match far too broadly (e.g. any string containing "dart"
+		// as a substring of a larger word). Keep the isolate/vm snapshot
+		// patterns which are specific enough.
+		isFlutter := strings.Contains(lower, "flutter engine")
+		isDart := strings.Contains(lower, "dart vm") || strings.Contains(lower, "dart sdk") ||
+			strings.Contains(lower, "dart:") || strings.Contains(lower, "isolate snapshot") ||
+			strings.Contains(lower, "vm snapshot")
 		if isFlutter && !seenFlutter[s] {
 			seenFlutter[s] = true
 			flutterMarkers = append(flutterMarkers, s)
@@ -270,7 +281,27 @@ func extractSemverToken(s string) string {
 			j = k + 1
 		}
 		// Advance i past this failed attempt's first digit run to avoid
-		// re-scanning the same digits repeatedly.
+		// re-scanning the same digits repeatedly. The outer loop's i++ only
+		// advances by 1, so without this a string with many digit runs is
+		// O(n^2). Skip to lastDigitEnd (the end of the digit run we just
+		// examined) so the next iteration starts after it.
+		if lastDigitEnd > i+1 {
+			i = lastDigitEnd
+			continue
+		}
+	}
+	return ""
+}
+
+// firstSemverFromMarkers returns the first semver token found across all
+// markers, or "" if none contains one. Used instead of only checking the
+// alphabetically-first marker (markers are sorted, so [0] may lack a version
+// while a later marker has one).
+func firstSemverFromMarkers(markers []string) string {
+	for _, m := range markers {
+		if v := extractSemverToken(m); v != "" {
+			return v
+		}
 	}
 	return ""
 }

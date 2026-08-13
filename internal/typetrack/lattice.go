@@ -20,11 +20,11 @@ import (
 type TypeLatticeKind int
 
 const (
-	LatticeTop    TypeLatticeKind = iota // no info yet
-	LatticeKnownClass                    // ClassID is known
-	LatticeKnownDispatchIndex            // dispatch table slot offset is known
-	LatticeKnownStub                     // THR-cached stub entry point is known
-	LatticeBottom                        // conflicting/unresolvable
+	LatticeTop                TypeLatticeKind = iota // no info yet
+	LatticeKnownClass                                // ClassID is known
+	LatticeKnownDispatchIndex                        // dispatch table slot offset is known
+	LatticeKnownStub                                 // THR-cached stub entry point is known
+	LatticeBottom                                    // conflicting/unresolvable
 )
 
 // TypeLattice is the type abstraction for a register or SSA value.
@@ -37,6 +37,20 @@ type TypeLattice struct {
 	DispatchIndex int    // valid when Kind == LatticeKnownDispatchIndex
 	StubName      string // valid when Kind == LatticeKnownStub
 	StubOff       int    // valid when Kind == LatticeKnownStub
+
+	// SelectorOnly marks a LatticeKnownDispatchIndex whose class is UNKNOWN:
+	// the ADD/SUB was applied to a class ID that the analysis could not
+	// resolve, so only the selector immediate is known and DispatchIndex
+	// holds that signed immediate (SelectorImm), not a slot.
+	//
+	// This used to be encoded by storing -imm-1 / imm-1 in DispatchIndex and
+	// testing the sign. That was ambiguous in both directions: SUB with
+	// imm>=1 produced a POSITIVE value indistinguishable from a genuine
+	// cid+imm slot, and it was then looked up in the dispatch table as if it
+	// were one -- resolving the call to whatever function happened to live
+	// at slot (imm-1).
+	SelectorOnly bool
+	SelectorImm  int // signed ADD immediate; valid when SelectorOnly
 }
 
 // Top returns the top element of the lattice.
@@ -55,6 +69,18 @@ func KnownDispatch(slot int) TypeLattice {
 	return TypeLattice{Kind: LatticeKnownDispatchIndex, DispatchIndex: slot}
 }
 
+// SelectorDispatch returns a lattice element for a dispatch-table index whose
+// class ID is unknown but whose selector immediate (the value the SDK's
+// EmitDispatchTableCall passes to AddImmediate, i.e.
+// selector_offset - kOriginElement) is known.
+func SelectorDispatch(imm int) TypeLattice {
+	return TypeLattice{
+		Kind:         LatticeKnownDispatchIndex,
+		SelectorOnly: true,
+		SelectorImm:  imm,
+	}
+}
+
 // KnownStub returns a lattice element for a THR-cached stub entry point.
 func KnownStub(name string, off int) TypeLattice {
 	return TypeLattice{Kind: LatticeKnownStub, StubName: name, StubOff: off}
@@ -69,6 +95,12 @@ func (a TypeLattice) Equal(b TypeLattice) bool {
 	case LatticeKnownClass:
 		return a.ClassID == b.ClassID
 	case LatticeKnownDispatchIndex:
+		if a.SelectorOnly != b.SelectorOnly {
+			return false
+		}
+		if a.SelectorOnly {
+			return a.SelectorImm == b.SelectorImm
+		}
 		return a.DispatchIndex == b.DispatchIndex
 	case LatticeKnownStub:
 		return a.StubOff == b.StubOff
@@ -126,6 +158,28 @@ func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 	}
 	// Mixed KnownClass ∧ KnownDispatch → Bottom
 	return Bottom()
+}
+
+// resolveTypeClassIDs fills in TypeInfo.ClassID for Dart 2.10-2.15, where
+// Type.type_class_id is serialised as a Smi ref rather than a scalar, so
+// ReadFill leaves ClassID at 0. MintValues holds the real value (not
+// Smi-encoded), matching how BuildClassLayouts reads word offsets.
+//
+// Must run before anything reads ClassID. It used to be done inline next to
+// the field-type lookup, which is AFTER BuildClassHierarchy -- so the
+// hierarchy saw 0 for every Type and came out empty on 2.x, taking LCA, CHA
+// and any leaf-class test with it.
+//
+// No-op on 3.x, where the class id is already decoded from the packed flags.
+func resolveTypeClassIDs(clResult *cluster.Result) {
+	for i := range clResult.Types {
+		ti := &clResult.Types[i]
+		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
+			if v, ok := clResult.MintValues[ti.TypeClassIdRef]; ok {
+				ti.ClassID = int32(v)
+			}
+		}
+	}
 }
 
 // BuildClassHierarchy builds a superclass map from cluster.ClassInfo data.

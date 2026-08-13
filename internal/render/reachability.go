@@ -11,14 +11,20 @@ import (
 // FindEntryPoints returns functions that have no incoming BL or resolved BLR edges.
 // Runtime stubs (sub_*) are excluded since they're callees, not true entry points.
 func FindEntryPoints(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) []string {
-	// Collect all named BL and resolved BLR targets.
+	// Collect all named BL and resolved BLR targets, including the candidate
+	// callees of polymorphic sites: a function that is only ever reached
+	// through virtual dispatch is not an entry point, and treating it as one
+	// makes the entry list mostly noise.
 	blTargets := make(map[string]bool)
 	for _, e := range edges {
-		if e.Target == "" {
+		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		if e.Kind == "bl" || e.Kind == "call" || e.Kind == "blr" || e.Kind == "call_indirect" {
+		if e.Target != "" {
 			blTargets[e.Target] = true
+		}
+		for _, t := range e.Targets {
+			blTargets[t] = true
 		}
 	}
 
@@ -40,17 +46,24 @@ func FindEntryPoints(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) [
 // and resolved BLR edges (dispatch-table calls resolved by the type
 // inference engine), and returns the set of all reachable function names.
 func ReachableSet(entryPoints []string, edges []disasm.CallEdgeRecord) map[string]bool {
-	// Build adjacency list from BL edges AND resolved BLR edges.
-	// A resolved BLR edge has Kind="blr"/"call_indirect" with a non-empty
-	// Target (set by the type inference stage).
+	// Build adjacency from BL edges, resolved BLR edges, and the candidate
+	// callees of polymorphic BLR edges.
+	//
+	// Following every candidate is a deliberate OVER-approximation: at most
+	// one of them runs at a given call site, so this can mark code reachable
+	// that never executes. For reachability that is the safe direction --
+	// under-approximating hides real code. (It also used to happen by
+	// accident, and wrongly: the joined "a | b | c" string was followed as if
+	// it were one callee, so it reached nothing and added a junk node.)
 	adj := make(map[string][]string)
 	for _, e := range edges {
-		if e.Target == "" {
+		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		if e.Kind == "bl" || e.Kind == "call" || e.Kind == "blr" || e.Kind == "call_indirect" {
+		if e.Target != "" {
 			adj[e.FromFunc] = append(adj[e.FromFunc], e.Target)
 		}
+		adj[e.FromFunc] = append(adj[e.FromFunc], e.Targets...)
 	}
 
 	reachable := make(map[string]bool)
@@ -89,20 +102,24 @@ func ReachabilityDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, r
 		funcOwner[f.Name] = f.Owner
 	}
 
-	// Deduplicate BL and resolved BLR edges within reachable set.
+	// Deduplicate BL, resolved BLR, and polymorphic-candidate edges within
+	// the reachable set (same over-approximation as ReachableSet).
 	type edgeKey struct{ from, to string }
 	edgeCount := make(map[edgeKey]int)
-	for _, e := range edges {
-		if e.Target == "" {
-			continue
+	addEdge := func(from, to string) {
+		if to == "" || !reachable[from] || !reachable[to] {
+			return
 		}
+		edgeCount[edgeKey{from, to}]++
+	}
+	for _, e := range edges {
 		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		if !reachable[e.FromFunc] || !reachable[e.Target] {
-			continue
+		addEdge(e.FromFunc, e.Target)
+		for _, t := range e.Targets {
+			addEdge(e.FromFunc, t)
 		}
-		edgeCount[edgeKey{e.FromFunc, e.Target}]++
 	}
 
 	// Collect referenced nodes.

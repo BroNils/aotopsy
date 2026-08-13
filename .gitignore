@@ -3,6 +3,7 @@ out/
 samples/
 libapp.aotopsy/
 runtime_test/
+docs/
 .graph/
 .devin/
 *.so
@@ -60,3 +61,22 @@ docs_internal/
 /findpool305
 /aotopsy
 aotopsy_*
+docs/roadmap/
+docs/SESSION-HANDOFF*.md
+docs/SESSION_HANDOFF*.md
+# NOTE: internal/pipeline/regression_test.go was listed here and deleted in the
+# same change. That combination removed the only end-to-end regression suite AND
+# made re-adding it impossible without editing this file first. Restored; do not
+# re-ignore source or test files here -- this list is for build outputs.
+
+# Per-machine environment notes: sample binary paths, env var exports, memory
+# limits. The same role as a .env -- AGENTS.md is the shared contract, this is
+# one developer's local setup and is meaningless (and wrong) on another machine.
+AGENTS-local.md
+
+# Golden test records: SHA-256 per output file, keyed by the input binary's
+# hash. These are per-machine — they depend on which sample binaries are
+# installed locally (see AGENTS-local.md). The test auto-creates them with
+# AOTOPSY_UPDATE_GOLDEN=1, and skips (never fails) when the env var points
+# at a different binary. Do NOT commit these.
+internal/pipeline/testdata/golden/*.json

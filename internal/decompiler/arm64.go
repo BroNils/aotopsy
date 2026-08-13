@@ -21,6 +21,29 @@ const (
 	arm64FrameReg  = "x29"
 	arm64LinkReg   = "x30"
 	arm64ReturnReg = "x0"
+	// arm64NullReg holds Object::null() for the whole of generated code.
+	// dart-lang/sdk's runtime/vm/constants_arm64.h declares
+	//   const Register NULL_REG = R22;  // Caches NullObject() value.
+	// unchanged at tags 2.12.0, 3.1.0 and 3.9.2. There is no x64
+	// equivalent -- constants_x64.h defines no NULL_REG, and x86_64 loads
+	// null from the object pool instead -- so this is ARM64-only.
+	//
+	// Checked against the samples before relying on it: across 65113
+	// disassembled 2.12 instructions nothing writes X22 at all, and the
+	// only four writes in 77611 instructions of the 3.x sample are
+	// `LDR X22, [X26,#120]` (THR.object_null) in FFI trampolines, which
+	// restore the same value. So the register holds null everywhere it is
+	// read, and reading it as `null` is not an inference.
+	arm64NullReg = "x22"
+	// arm64HeapBitsReg holds `write_barrier_mask << 32 | heap_base >> 32`.
+	// constants_arm64.h: `const Register HEAP_BITS = R28;`. Shifted left by
+	// 32 it is heap_base, which is how compressed pointers are decompressed.
+	arm64HeapBitsReg = "x28"
+	// arm64StackReg is the Dart stack pointer. constants_arm64.h spells it
+	// twice: `R15 = 15, // SP in Dart code` and `const Register SPREG = R15;`.
+	// The hardware SP (CSP) is a different register and is not used for Dart
+	// frames.
+	arm64StackReg = "x15"
 )
 
 // arm64ArgRegs is a DISPLAY convention (arg0..arg7 = x0..x7), not a
@@ -51,7 +74,12 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.ReturnReg = arm64ReturnReg
 	fir.LinkReg = arm64LinkReg
 	fir.PoolReg = arm64PoolReg
+	// PP is untagged on ARM64, so the displacement is a plain 16+8*index.
+	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
 	fir.ThreadReg = arm64ThreadReg
+	fir.NullReg = arm64NullReg
+	fir.HeapBitsReg = arm64HeapBitsReg
+	fir.StackReg = arm64StackReg
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
@@ -112,6 +140,12 @@ func liftARM64Instr(inst disasm.Inst) Instr {
 		ir.Target = fmt.Sprintf("0x%x", bi.Target)
 		ir.CondKind = "cmp"
 		ir.CondOp = arm64CondOp(strings.ToLower(firstOperandToken(inst.Operands)))
+	case mnemonic == "br":
+		// P6: br xN — indirect branch (jump table, tail call, or computed goto).
+		// Mark as OpJump with the register as target so the emitter can
+		// render it as a tail call or switch dispatch.
+		ir.Op = OpJump
+		ir.Target = firstOperandReg(inst.Operands)
 	case mnemonic == "cbz" || mnemonic == "cbnz":
 		if bi := disasm.DecodeBranch(inst.Raw, inst.Addr); bi != nil {
 			ir.Op = OpBranch
@@ -203,9 +237,13 @@ func arm64CondOp(cc string) string {
 		return ">"
 	case "ge", "hs", "cs":
 		return ">="
-	case "al", "nv":
-		return "true"
 	}
+	// AL/NV are handled before this point: DecodeBranch reports them as
+	// unconditional, so they never become an OpBranch. They used to map to
+	// the string "true", which buildCondition then spliced into its
+	// "%s %s %s" comparison template, emitting `lhs true rhs`. Falling
+	// through to "?" here means that shape is not reachable even if a caller
+	// classifies one as conditional by mistake.
 	// mi/pl/vs/vc (sign/overflow-flag-only conditions) have no direct
 	// Dart comparison-operator equivalent without knowing the specific
 	// arithmetic op that set the flags -- left unresolved on purpose
@@ -233,9 +271,9 @@ func isARM64PoolLoad(operands string) bool {
 }
 
 // arm64PoolIndex extracts the #imm offset from a "[x27, #imm]" operand
-// and converts it to a pool slot index (each slot is 8 bytes on ARM64
-// with compressed pointers, matching this project's own established
-// pool-offset/8 = pool-index convention).
+// and converts it to a pool slot index via disasm.ARM64PoolIndex, which
+// carries the SDK layout constants (elements start at +16, 8 bytes each,
+// PP untagged on ARM64).
 func arm64PoolIndex(operands string) int {
 	i := strings.Index(operands, "#")
 	if i < 0 {
@@ -257,5 +295,9 @@ func arm64PoolIndex(operands string) int {
 	if err != nil || v < 0 {
 		return -1
 	}
-	return int(v / 8)
+	idx, ok := disasm.ARM64PoolIndex(int(v))
+	if !ok {
+		return -1
+	}
+	return idx
 }

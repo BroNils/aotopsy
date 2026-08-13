@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
 
@@ -54,15 +56,29 @@ func RunTypeInferenceStage(
 
 	opts.logf("  type inference: starting...\n")
 
-	resolved, total, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
+	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
 		return nil // non-fatal
 	}
 
-	opts.logf("  type inference: resolved %d/%d BLR call sites\n", resolved, total)
+	// Report the three claims separately. "resolved N/M" alone hid the
+	// difference between a call site with one known callee and one with 43
+	// possible ones -- both used to count as resolved.
+	opts.logf("  type inference: %d/%d indirect call sites with a single callee (%d VM stub)\n",
+		bd.Resolved(), bd.Total, bd.Stub)
+	if bd.Polymorphic > 0 {
+		opts.logf("  polymorphic: %d site(s), %d candidate callees total (avg %.1f per site)\n",
+			bd.Polymorphic, bd.PolymorphicCandidates,
+			float64(bd.PolymorphicCandidates)/float64(bd.Polymorphic))
+	}
+	opts.logf("  unresolved: %d site(s)\n", bd.Unresolved)
+	if tctx != nil && len(tctx.InstanceFieldTypes) > 0 {
+		opts.logf("  observed field types: %d classes, %d field loads typed from const instances\n",
+			len(tctx.InstanceFieldTypes), tctx.InstanceFieldHits)
+	}
 
-	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, resolved, total); err != nil {
+	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, bd, tctx); err != nil {
 		return fmt.Errorf("write typetrack report: %w", err)
 	}
 
@@ -83,17 +99,17 @@ func runTypeInference(
 	table *cluster.InstructionsTable,
 	isARM64 bool,
 	thrFields map[int]string,
-) (int, int, error) {
+) (BLRBreakdown, *typetrack.TypeContext, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
 	// snapshot DATA region (info.IsolateData.Data), not the instructions
 	// region. result.FillEnd is the byte offset within this data.
 	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
 	if err != nil {
-		return 0, 0, nil // non-fatal
+		return BLRBreakdown{}, nil, fmt.Errorf("parse dispatch table: %w", err)
 	}
 	if len(dispatchEntries) == 0 {
-		return 0, 0, nil
+		return BLRBreakdown{}, nil, nil
 	}
 
 	// 2. Build TypeContext.
@@ -105,12 +121,127 @@ func runTypeInference(
 		codeRefToName[ref] = ci.FuncName
 	}
 
+	// Build PP index → function name map for PP-loaded Code objects.
+	// For each PP entry that is a Code object (CID == ct.Code):
+	//   1. Try RefToNamed (app isolate Function name)
+	//   2. Try VmRefToNamed (VM isolate Function name)
+	//   3. Try matching Code's TextOffset to a function VA
+	poolCodeNames := make(map[int]string)
+	// Build refID → function name from CodeNames (already have codeRefToName)
+	// Build refID → TextOffset from clResult.Codes
+	codeByRef := make(map[int]*cluster.CodeEntry, len(clResult.Codes))
+	for i := range clResult.Codes {
+		codeByRef[clResult.Codes[i].RefID] = &clResult.Codes[i]
+	}
+	// Build a sorted [start,end) → function name index from ranges, so a VA
+	// can be mapped to the function that actually CONTAINS it.
+	//
+	// This replaces a `for funcVA, name := range vaToName { if funcVA <= va &&
+	// va < funcVA+0x10000 }` scan: iterating a map returns entries in random
+	// order, so that loop picked an arbitrary function starting within 64 KB
+	// below the address -- a different, and usually wrong, one on each run.
+	type funcSpan struct {
+		start, end uint64
+		name       string
+	}
+	spans := make([]funcSpan, 0, len(ranges))
+	for _, r := range ranges {
+		if r.RefID < 0 || r.Size == 0 {
+			continue
+		}
+		ci, ok := pl.CodeNames[r.RefID]
+		if !ok || ci.FuncName == "" {
+			continue
+		}
+		start := codeVA + uint64(r.PCOffset) - codeOff
+		spans = append(spans, funcSpan{start: start, end: start + uint64(r.Size), name: ci.FuncName})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	funcNameAt := func(va uint64) (string, bool) {
+		i := sort.Search(len(spans), func(i int) bool { return spans[i].start > va })
+		if i == 0 {
+			return "", false
+		}
+		s := spans[i-1]
+		if va < s.start || va >= s.end {
+			return "", false
+		}
+		return s.name, true
+	}
+	for _, pe := range clResult.Pool {
+		if pe.Kind != cluster.PoolTagged {
+			continue
+		}
+		// Check both app isolate RefCID and VM VmRefCID for Code objects.
+		// VM Code objects (ref < BaseObjLimit) have cid in VmRefCID, not RefCID.
+		isCode := false
+		if pl.CT != nil && pl.RefCID != nil {
+			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Code {
+				isCode = true
+			}
+		}
+		if !isCode && pl.CT != nil && pl.VmRefCID != nil {
+			if cid, ok := pl.VmRefCID[pe.RefID]; ok && cid == pl.CT.Code {
+				isCode = true
+			}
+		}
+		// Also check CodeRefDisplay for any ref that has a display string
+		// (covers VM Code objects that don't have CID in either map).
+		if !isCode && pl.CodeRefDisplay != nil {
+			if _, ok := pl.CodeRefDisplay[pe.RefID]; ok {
+				isCode = true
+			}
+		}
+		if !isCode {
+			continue
+		}
+		{
+			// Try app isolate NamedObject
+			if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
+				if no.NameRefID >= 0 {
+					if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
+						poolCodeNames[pe.Index] = name
+					}
+				}
+			}
+			// Try VM isolate NamedObject
+			if _, exists := poolCodeNames[pe.Index]; !exists && pl.VmRefToNamed != nil {
+				if no, ok2 := pl.VmRefToNamed[pe.RefID]; ok2 {
+					if no.NameRefID >= 0 {
+						if name, ok3 := pl.VmRefToStr[no.NameRefID]; ok3 && name != "" {
+							poolCodeNames[pe.Index] = name
+						}
+					}
+				}
+			}
+			// Try matching by TextOffset → VA → function name
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if ce, ok2 := codeByRef[pe.RefID]; ok2 && ce.TextOffset > 0 {
+					va := codeVA + uint64(ce.TextOffset) - codeOff
+					if name, ok3 := funcNameAt(va); ok3 {
+						poolCodeNames[pe.Index] = name
+					}
+				}
+			}
+			// Try CodeRefDisplay (covers VM Code objects with display strings
+			// like "dyn:call", "Native", function names from CodeNames)
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if name, ok2 := pl.CodeRefDisplay[pe.RefID]; ok2 && name != "" {
+					poolCodeNames[pe.Index] = name
+				}
+			}
+		}
+	}
+
 	poolData := &typetrack.PoolLookupData{
 		RefToStr:      pl.RefToStr,
 		RefToNamed:    pl.RefToNamed,
 		RefCID:        pl.RefCID,
 		CT:            pl.CT,
 		CodeRefToName: codeRefToName,
+		VmRefToStr:    pl.VmRefToStr,
+		VmRefToNamed:  pl.VmRefToNamed,
+		PoolCodeNames: poolCodeNames,
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.
@@ -127,11 +258,30 @@ func runTypeInference(
 
 	// Build class name → class ID lookup from ClassIDToName.
 	// ClassIDToName is built from ClassInfo.ClassID (Dart runtime CID).
+	//
+	// Class names are NOT unique -- a Flutter build has many same-named
+	// classes across libraries (State, Node, Entry, _Sink...). Iterating the
+	// map and letting the last writer win therefore picked a random CID for
+	// those names on every run. That CID becomes the receiver type
+	// (ctx.FuncOwnerClass) seeded into the intra-procedural analysis, so a
+	// dispatch-table BLR in e.g. TextStyle.compareTo resolved to a target in
+	// one run and stayed unresolved in the next.
+	//
+	// Ambiguous names are dropped instead: no receiver type at all is
+	// correct-but-weaker, whereas a coin-flip between two classes is wrong
+	// half the time and unreproducible either way.
+	nameCount := make(map[string]int, len(ctx.ClassIDToName))
+	for _, name := range ctx.ClassIDToName {
+		if name != "" {
+			nameCount[name]++
+		}
+	}
 	classNameToID := make(map[string]int, len(ctx.ClassIDToName))
 	for cid, name := range ctx.ClassIDToName {
-		if name != "" {
-			classNameToID[name] = cid
+		if name == "" || nameCount[name] > 1 {
+			continue
 		}
+		classNameToID[name] = cid
 	}
 
 	// Write dispatch table for debugging.
@@ -173,7 +323,7 @@ func runTypeInference(
 		var ownerName string
 		if r.RefID >= 0 {
 			ci := pl.CodeNames[r.RefID]
-			name = QualifiedName(ci.OwnerName, ci.FuncName, r.PCOffset)
+			name = ci.Qualified(r.PCOffset)
 			ownerName = ci.OwnerName
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)
@@ -262,21 +412,147 @@ func runTypeInference(
 	interResult := typetrack.RunInterprocedural(ctx, funcInstsARM64, funcInstsX86, blEdges, maxIter, isARM64, blTargetToName)
 
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
-	resolved, total, err := rewriteCallEdges(outDir, interResult)
+	bd, err := rewriteCallEdges(outDir, interResult, buildTTSCallTargets(clResult.Pool, pl))
 	if err != nil {
-		return 0, 0, fmt.Errorf("rewrite call_edges: %w", err)
+		return bd, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
 
-	return resolved, total, nil
+	// 6. field_accessor_xref.jsonl — (class, field) → the functions that read
+	// and write it, from the per-function field accesses the type analysis
+	// recorded.
+	if err := writeFieldAccessorXref(outDir, ctx, interResult, clResult, pl, info.Version.CompressedPointers); err != nil {
+		return bd, ctx, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
+	}
+
+	// ctx is returned so the caller can report per-source hit counters.
+	return bd, ctx, nil
 }
 
-// rewriteCallEdges reads call_edges.jsonl, updates BLR edges with resolved
-// targets from the inter-procedural analysis, and writes it back.
-func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, int, error) {
+// writeFieldAccessorXref writes field_accessor_xref.jsonl: for every instance
+// field the analysis saw touched, the functions that read it and the functions
+// that write it.
+//
+// The accesses come from typetrack.IntraResult.FieldAccesses, recorded at each
+// LDUR/STUR/STR whose receiver register held a resolved class. A previous
+// version of this file emitted the class→offset table with EMPTY readers and
+// writers and a comment saying per-function field access records did not
+// exist; they do now, so the file is an actual cross-reference.
+//
+// Offsets: the instruction displacement is relative to the TAGGED receiver
+// pointer, so the field at layout byte offset N is addressed as N-1
+// (kHeapObjectTag). Layout offsets are reported, and the tag is removed here.
+func writeFieldAccessorXref(
+	outDir string,
+	ctx *typetrack.TypeContext,
+	interResult *typetrack.InterResult,
+	clResult *cluster.Result,
+	pl *PoolLookups,
+	compressedPtrs bool,
+) error {
+	if interResult == nil || ctx == nil {
+		return nil
+	}
+
+	// class ID → (layout byte offset → field name)
+	fieldNames := map[int]map[int32]string{}
+	for _, layout := range BuildClassLayouts(clResult, pl, compressedPtrs) {
+		m := make(map[int32]string, len(layout.Fields))
+		for _, f := range layout.Fields {
+			m[f.ByteOffset] = f.Name
+		}
+		fieldNames[int(layout.ClassID)] = m
+	}
+
+	type key struct {
+		classID int
+		offset  int32
+	}
+	readers := map[key]map[string]bool{}
+	writers := map[key]map[string]bool{}
+	for name, fa := range interResult.Functions {
+		if fa == nil {
+			continue
+		}
+		for _, acc := range fa.Intra.FieldAccesses {
+			k := key{classID: acc.ClassID, offset: acc.ByteOffset + 1}
+			target := readers
+			if acc.IsStore {
+				target = writers
+			}
+			if target[k] == nil {
+				target[k] = map[string]bool{}
+			}
+			target[k][name] = true
+		}
+	}
+
+	keys := map[key]bool{}
+	for k := range readers {
+		keys[k] = true
+	}
+	for k := range writers {
+		keys[k] = true
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	sortedNames := func(set map[string]bool) []string {
+		out := make([]string, 0, len(set))
+		for n := range set {
+			out = append(out, n)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	entries := make([]interface{}, 0, len(keys))
+	for k := range keys {
+		e := FieldAccessorXref{
+			ClassName:  ctx.ClassIDToName[k.classID],
+			ClassID:    k.classID,
+			ByteOffset: int(k.offset),
+			Readers:    sortedNames(readers[k]),
+			Writers:    sortedNames(writers[k]),
+		}
+		if e.ClassName == "" {
+			e.ClassName = fmt.Sprintf("class_%d", k.classID)
+		}
+		if names, ok := fieldNames[k.classID]; ok {
+			e.FieldName = names[k.offset]
+		}
+		entries = append(entries, e)
+	}
+	// Sort by (name, class ID, offset). Class ID is what makes this a TOTAL
+	// order: without it, two distinct classes sharing a name produced ties,
+	// sort.Slice is not stable, and the file came out in a different order on
+	// every run.
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].(FieldAccessorXref), entries[j].(FieldAccessorXref)
+		if a.ClassName != b.ClassName {
+			return a.ClassName < b.ClassName
+		}
+		if a.ClassID != b.ClassID {
+			return a.ClassID < b.ClassID
+		}
+		return a.ByteOffset < b.ByteOffset
+	})
+	return writeJSONL(filepath.Join(outDir, "field_accessor_xref.jsonl"), entries)
+}
+
+// BLRBreakdown is typetrack.BLRBreakdown; aliased so this file reads
+// naturally.
+type BLRBreakdown = typetrack.BLRBreakdown
+
+// rewriteCallEdges reads call_edges.jsonl, fills in what the
+// inter-procedural analysis recovered for each indirect call site, writes it
+// back, and returns the breakdown.
+func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPoolIndex map[int]string) (BLRBreakdown, error) {
+	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
 	edges, err := ReadJSONL[disasm.CallEdgeRecord](edgesPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("read call_edges.jsonl: %w", err)
+		return bd, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
 
 	// Build PC → resolution map for each function.
@@ -284,50 +560,91 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult) (int, i
 		funcName string
 		pc       string
 	}
-	resolutionMap := make(map[resKey]string)
+	resolutionMap := make(map[resKey]typetrack.BlrResolution)
 	for _, fa := range interResult.Functions {
 		for _, res := range fa.Intra.BLRResolutions {
-			if res.Resolved && res.TargetName != "" {
-				key := resKey{
-					funcName: fa.Name,
-					pc:       fmt.Sprintf("0x%x", res.PC),
-				}
-				resolutionMap[key] = res.TargetName
+			if !res.Resolved {
+				continue
 			}
+			if res.TargetName == "" && len(res.TargetNames) == 0 {
+				continue
+			}
+			key := resKey{
+				funcName: fa.Name,
+				pc:       fmt.Sprintf("0x%x", res.PC),
+			}
+			resolutionMap[key] = res
 		}
 	}
 
 	// Update edges.
-	resolved := 0
-	total := 0
 	for i := range edges {
 		e := &edges[i]
 		if e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		total++
+		bd.Total++
 		key := resKey{funcName: e.FromFunc, pc: e.FromPC}
-		if target, ok := resolutionMap[key]; ok {
-			e.Target = target
-			resolved++
+		if res, ok := resolutionMap[key]; ok {
+			if res.Polymorphic {
+				e.Targets = res.TargetNames
+				e.Candidates = res.Candidates
+				bd.Polymorphic++
+				bd.PolymorphicCandidates += res.Candidates
+			} else {
+				e.Target = res.TargetName
+				e.Candidates = res.Candidates
+				bd.Monomorphic++
+			}
+		} else if name := ttsCallTarget(e.Via, ttsByPoolIndex); name != "" {
+			// A call through a pool slot holding a Type invokes that type's
+			// testing stub -- GenerateIndirectTTSCall, see ttscall.go. One
+			// known callee, so it counts as a stub rather than a Dart-level
+			// monomorphic call.
+			e.Target = name
+			bd.Stub++
+		} else if strings.HasPrefix(e.Via, "THR.") {
+			// Fallback: resolve THR stub calls from via annotation.
+			// via format: "THR.stub_name" or "THR.stub_name_ep"
+			stubName := strings.TrimPrefix(e.Via, "THR.")
+			// Remove _ep suffix if present
+			stubName = strings.TrimSuffix(stubName, "_ep")
+			// Remove _entry_point suffix if present
+			stubName = strings.TrimSuffix(stubName, "_entry_point")
+			if stubName != "" {
+				e.Target = stubName
+				bd.Stub++
+			} else {
+				bd.Unresolved++
+			}
+		} else {
+			bd.Unresolved++
 		}
+		// NOTE: there used to be a third branch here that matched
+		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
+		// "RuntimeEntry", counting it as resolved. That annotation is emitted
+		// precisely for THR offsets whose field name is NOT known
+		// (thrAnnotationLabel's classTag path in disasm/annotate.go), so no
+		// callee identity was recovered: "RuntimeEntry" is a category, not a
+		// target. It named no function, duplicated information already in
+		// Via, and inflated the resolved-BLR count. Removed.
 	}
 
 	// Write back.
 	f, err := os.Create(edgesPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create call_edges.jsonl: %w", err)
+		return bd, fmt.Errorf("create call_edges.jsonl: %w", err)
 	}
 	defer f.Close()
 
 	enc := json.NewEncoder(f)
 	for _, e := range edges {
 		if err := enc.Encode(e); err != nil {
-			return 0, 0, fmt.Errorf("encode call_edge: %w", err)
+			return bd, fmt.Errorf("encode call_edge: %w", err)
 		}
 	}
 
-	return resolved, total, nil
+	return bd, nil
 }
 
 // isBLRaw detects ARM64 BL instruction. Returns target address.

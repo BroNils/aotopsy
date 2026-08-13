@@ -40,6 +40,7 @@ func RunDisasmStageX86(
 	table *cluster.InstructionsTable,
 	fmtOpts dartfmt.Options,
 	thrFields map[int]string, // H-3 fix: pass THR fields for annotation
+	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
 	symbols := make(map[uint64]string)
 	for _, r := range ranges {
@@ -144,7 +145,10 @@ func RunDisasmStageX86(
 			ci := pl.CodeNames[r.RefID]
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
-			name = QualifiedName(ownerName, funcName, r.PCOffset)
+			name = ci.Qualified(r.PCOffset)
+			if funcName == "" {
+				name = elfStubName(elfFuncSyms, funcVA, name)
+			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 			name = funcName

@@ -11,6 +11,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/snapshot"
 )
@@ -119,7 +120,7 @@ func cmdX64Refs(args []string) error {
 		}
 	}
 
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased)
+	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
 	poolDisplay := resolvePoolDisplay(result.Pool, pl)
 
 	fmt.Fprintf(os.Stderr, "ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
@@ -259,7 +260,7 @@ func cmdX64Refs(args []string) error {
 					if !ok || mem.Base != x86asm.R15 {
 						continue
 					}
-					poolIdx := int(mem.Disp/8) - 2
+					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 					display, resolved := poolDisplay[poolIdx]
 					if !resolved {
 						continue
@@ -328,7 +329,7 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 			for _, arg := range inst.Args {
 				if mem, ok := arg.(x86asm.Mem); ok {
 					if mem.Base == x86asm.R15 {
-						poolIdx := int(mem.Disp/8) - 2
+						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
 						} else {
@@ -537,14 +538,9 @@ func scanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 
 // qualifiedCodeNameLocal mirrors pipeline.QualifiedCodeName without importing
 // the pipeline package's disasm-stage machinery (this command is intentionally
-// standalone -- see file header).
+// standalone -- see file header). Uses ci.Qualified() so constructor names
+// are handled correctly (no owner prefix duplication).
 func qualifiedCodeNameLocal(refID int, pl *poolLookups, pcOffset uint32) string {
 	ci := pl.CodeNames[refID]
-	if ci.FuncName == "" {
-		return fmt.Sprintf("sub_%x", pcOffset)
-	}
-	if ci.OwnerName != "" {
-		return ci.OwnerName + "." + ci.FuncName
-	}
-	return ci.FuncName
+	return ci.Qualified(pcOffset)
 }

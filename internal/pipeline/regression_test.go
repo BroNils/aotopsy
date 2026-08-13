@@ -286,6 +286,42 @@ func TestDart212StringExtraction(t *testing.T) {
 	}
 }
 
+// TestDart212StringExtractionClusterOnly is the memory-safe variant of
+// TestDart212StringExtraction. It uses the clusterOnly harness (ELF -> snapshot
+// -> alloc -> fill, NO disassembly) instead of full pipeline.Run(), so it can
+// run on this 6GB WSL2 VM without OOM. The original test calls Run() which
+// spawns the full disasm+typetrack+signal pipeline and has crashed the host.
+//
+// This verifies the same C-3 fix (Dart 2.12 isolate string extraction → class
+// resolution) using only cluster.Result.Strings and cluster.Result.Classes,
+// which are populated by ReadFill without any disassembly.
+//
+// Set AOTOPSY_TEST_SAMPLE_DART212 to the path of a Dart 2.12.0 ARM64 libapp.so.
+func TestDart212StringExtractionClusterOnly(t *testing.T) {
+	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_DART212")
+	if libPath == "" {
+		t.Skip("AOTOPSY_TEST_SAMPLE_DART212 not set, skipping cluster-only string extraction test")
+	}
+	if _, err := os.Stat(libPath); os.IsNotExist(err) {
+		t.Skipf("sample binary not found at %s, skipping cluster-only string extraction test", libPath)
+	}
+
+	res := clusterOnly(t, libPath)
+
+	// C-3 fix: Dart 2.12 (non-compressed pointers, StringRODataPerSubclass)
+	// extracts strings from the ROData image. Before the fix, isolate string
+	// extraction returned nothing and classes could not be resolved by name.
+	if len(res.Strings) == 0 {
+		t.Errorf("Strings: got 0, expected >0 (C-3 fix should extract isolate strings from ROData)")
+	}
+	// Classes are populated from the Class cluster fill; name resolution needs
+	// strings. A non-zero class count confirms the fill stream parsed and the
+	// Class cluster was captured.
+	if len(res.Classes) < 100 {
+		t.Errorf("Classes: got %d, expected >100 (Class cluster fill should yield >100 classes)", len(res.Classes))
+	}
+}
+
 // Helper to count JSONL lines.
 func countJSONLLines(t *testing.T, path string) int {
 	t.Helper()

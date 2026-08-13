@@ -111,7 +111,23 @@ func argRegsForFridaArch(isARM64 bool) []string {
 // native code, so treat them as a checklist for ANY sufficiently
 // defended target, not something to ignore just because THIS particular
 // app hasn't been fingerprinted as hardened yet.
+// fridaOptions carries the opt-in extras a caller can request on top of the
+// hooks/probes. They are OFF by default because each one costs real runtime
+// overhead on the target.
+type fridaOptions struct {
+	// Stalker emits Stalker.follow() for every non-VM-internal thread,
+	// reporting a per-target call summary. Enabled by --gen-frida-stalker.
+	Stalker bool
+	// StalkerMinCalls suppresses targets seen fewer than this many times in
+	// one summary window (0 = report everything).
+	StalkerMinCalls int
+}
+
 func generateFridaScript(libPath string, isARM64 bool, hooks []fridaHook, probes []fridaProbe) string {
+	return generateFridaScriptWithOptions(libPath, isARM64, hooks, probes, fridaOptions{})
+}
+
+func generateFridaScriptWithOptions(libPath string, isARM64 bool, hooks []fridaHook, probes []fridaProbe, opts fridaOptions) string {
 	moduleName := filepath.Base(libPath)
 	defaultRegs := argRegsForFridaArch(isARM64)
 
@@ -212,6 +228,61 @@ console.log("[aotopsy] " + hooks.length + " function hook(s) installed on " + MO
 console.log("[aotopsy] " + probes.length + " indirect-call probe(s) installed on " + MODULE_NAME);
 `)
 	}
+
+	// Stalker call tracing. Emitted only when the caller asked for it
+	// (--gen-frida-stalker): Stalker rewrites and re-executes every basic
+	// block of every followed thread, which is far too invasive to ship
+	// switched on next to the ordinary hooks.
+	//
+	// An earlier revision emitted this unconditionally behind a
+	// `var ENABLE_STALKER = false;` that nothing could flip, together with a
+	// `MemoryAccessMonitor.enable([0, 0x1000], ...)` block. That second block
+	// was removed rather than wired up: MemoryAccessMonitor takes an array of
+	// {base, size} ranges (so `[0, 0x1000]` would throw), it is page-granular,
+	// and the Thread structure it claimed to watch is touched by essentially
+	// every generated instruction -- there is no useful signal to be had from
+	// it, at any range.
+	if opts.Stalker {
+		fmt.Fprintf(&b, `
+// === Stalker: per-thread call tracing (--gen-frida-stalker) ===
+// Follows every thread whose name does not look like a Dart VM helper
+// (GC sweeper / background compiler / Stalker's own worker), and prints a
+// periodic summary of call targets. Overhead is significant -- this is a
+// deliberate, opt-in trade.
+var STALKER_MIN_CALLS = %d;
+
+function stalkerSkipThread(name) {
+  // Dart VM internal threads: "DartWorker", "Dart Profiler",
+  // "dart:io EventHandler", plus generic GC/Compiler helpers.
+  return /^(DartWorker|Dart Profiler|dart:io|gum-js-loop)/.test(name) ||
+         name.indexOf("GC") >= 0 || name.indexOf("Compiler") >= 0;
+}
+
+Process.enumerateThreads().forEach(function (thread) {
+  var name = thread.name || ("tid-" + thread.id);
+  if (stalkerSkipThread(name)) {
+    console.log("[aotopsy] stalker: skipping " + name + " (tid=" + thread.id + ")");
+    return;
+  }
+  Stalker.follow(thread.id, {
+    events: { call: true, ret: false, exec: false, block: false },
+    onCallSummary: function (summary) {
+      Object.keys(summary).forEach(function (target) {
+        var count = summary[target];
+        if (count < STALKER_MIN_CALLS) return;
+        var addr = ptr(target);
+        var mod = Process.findModuleByAddress(addr);
+        var label = mod
+          ? mod.name + "+0x" + addr.sub(mod.base).toString(16)
+          : hex(addr);
+        console.log("[aotopsy] stalker " + name + ": " + label + " x" + count);
+      });
+    }
+  });
+  console.log("[aotopsy] stalker: following " + name + " (tid=" + thread.id + ")");
+});
+`, opts.StalkerMinCalls)
+	}
 	return b.String()
 }
 
@@ -220,7 +291,7 @@ console.log("[aotopsy] " + probes.length + " indirect-call probe(s) installed on
 // an error) if there's nothing to hook, since --gen-frida alongside
 // --max 0 hits or a fully framework-excluded run is a legitimate, if
 // uninteresting, result.
-func writeFridaScript(outPath, outDir, libPath string, isARM64 bool, hooks []fridaHook, probes []fridaProbe) error {
+func writeFridaScript(outPath, outDir, libPath string, isARM64 bool, hooks []fridaHook, probes []fridaProbe, opts fridaOptions) error {
 	if len(hooks) == 0 && len(probes) == 0 {
 		fmt.Fprintln(os.Stderr, "--gen-frida: no functions were decompiled, nothing to hook -- skipping script generation")
 		return nil
@@ -228,7 +299,7 @@ func writeFridaScript(outPath, outDir, libPath string, isARM64 bool, hooks []fri
 	if outPath == "" {
 		outPath = filepath.Join(outDir, "hooks.js")
 	}
-	script := generateFridaScript(libPath, isARM64, hooks, probes)
+	script := generateFridaScriptWithOptions(libPath, isARM64, hooks, probes, opts)
 	if err := os.WriteFile(outPath, []byte(script), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}

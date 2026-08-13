@@ -7,6 +7,7 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 )
 
 // Ground truth for the x86_64 GDT (global dispatch table) call pattern,
@@ -271,7 +272,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						// produces on the call side.
 						rt.define(dstIdx, "dispatch_table")
 					} else if canon64(mem.Base) == canonR15 {
-						poolIdx := int(mem.Disp/8) - 2
+						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							rt.define(dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
 						} else {

@@ -191,7 +191,7 @@ func buildFridaMetadata(ctx *pipeline.Context, dir string) FridaMetadata {
 		CompressedPointers: ctx.Info.Version.CompressedPointers,
 		PointerSize:        8,
 		ModuleBase:         "libapp.so",
-		THRFields:          disasm.THRFields(ctx.DartVersion, isARM64),
+		THRFields:          disasm.THRFieldsWithProfile(ctx.DartVersion, isARM64, ctx.Info.Version),
 		THRReg:             thrReg,
 		PPReg:              ppReg,
 		DTReg:              dtReg,

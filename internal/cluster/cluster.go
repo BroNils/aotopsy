@@ -67,11 +67,20 @@ type ParsedString struct {
 
 // CodeEntry holds a Code object's ref, owner ref, and instruction metadata.
 type CodeEntry struct {
-	RefID        int
-	OwnerRef     int   // ref ID of the owning Function/Closure/FfiTrampolineData
-	ClusterIndex int   // implicit instructions_index_ (main codes only; -1 for deferred)
-	PayloadInfo  int64 // raw payload_info from fill (0 for deferred)
-	TextOffset   int64 // text_offset_delta from fill (v2.10-v2.15 only; 0 otherwise)
+	RefID                int
+	OwnerRef             int   // ref ID of the owning Function/Closure/FfiTrampolineData
+	ClusterIndex         int   // implicit instructions_index_ (main codes only; -1 for deferred)
+	PayloadInfo          int64 // raw payload_info from fill (0 for deferred)
+	TextOffset           int64 // text_offset_delta from fill (v2.10-v2.15 only; 0 otherwise)
+	ExceptionHandlersRef int   // ref ID of ExceptionHandlers object (ref index 1); -1 if not captured
+	PcDescriptorsRef     int   // ref ID of PcDescriptors object (ref index 2); -1 if not captured
+	CodeSourceMapRef     int   // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.x AOT); -1 if not captured
+	InlinedFuncsRef      int   // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.x AOT); -1 if not captured
+	// CompressedStackMapsRef is the ref ID of the CompressedStackMaps object.
+	// In 2.x AOT (CodeNumRefs=7), compressed_stackmaps_ is a ref at index 4.
+	// In 3.x AOT (CodeNumRefs=6), compressed_stackmaps_ is null (not a ref).
+	// -1 if not captured or not present in this version's AOT format.
+	CompressedStackMapsRef int // ref ID of CompressedStackMaps object (ref index 4 in 2.x AOT); -1 if not captured
 }
 
 // PoolEntryKind distinguishes ObjectPool entry types.
@@ -109,6 +118,43 @@ type Result struct {
 	FillStart  int            // byte offset where the fill section begins
 	FillEnd    int            // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
 	Diags      []dartfmt.Diag
+
+	// Captured object data (previously skipped):
+	Instances         []InstanceInfo         // Instance field values
+	Contexts          []ContextInfo          // Context captured variables (empty in AOT — runtime-allocated)
+	TypeArguments     []TypeArgumentsInfo    // TypeArguments type refs
+	ExceptionHandlers []ExceptionHandlerInfo // Exception handler tables
+	ICData            []ICDataInfo           // ICData call-site→class→target mappings (empty in AOT — JIT-only)
+	Scripts           []ScriptInfo           // Script URLs + line/col metadata
+	LoadingUnits      []LoadingUnitInfo      // Loading unit / deferred library metadata
+	KernelProgramInfo []KernelProgramInfoRef // KernelProgramInfo refs (empty in AOT — not serialized)
+
+	// ClosureData: alternative to Context for closure resolution in AOT.
+	// ClosureData objects ARE serialized in AOT (unlike Context objects).
+	// Each ClosureData has parent_function and closure refs, enabling
+	// closure → parent function mapping without runtime Context data.
+	ClosureData []ClosureDataInfo
+
+	// PcDescriptors holds decoded PcDescriptors streams, keyed by ref ID via
+	// PcDescriptorsInfo.RefID and reached from CodeEntry.PcDescriptorsRef.
+	// Their try_index values are the only source for try/catch region extents.
+	PcDescriptors []PcDescriptorsInfo
+
+	// CodeSourceMaps holds decoded CodeSourceMap streams, reached from
+	// CodeEntry.CodeSourceMapRef. Gives PC -> inlined-function stack and raw
+	// token position; see CodeSourceMapInfo for why that is not file:line.
+	CodeSourceMaps []CodeSourceMapInfo
+
+	// CompressedStackMaps holds raw CompressedStackMaps payloads (not decoded
+	// yet — no consumer exists). Captured for completeness so future
+	// decompilation quality improvements can access which registers are live
+	// at safepoints without re-parsing the snapshot.
+	CompressedStackMaps []CompressedStackMapsInfo
+
+	// TypeParameters holds TypeParameters objects: a function's or class's own
+	// generic parameter declarations. Consumed via FuncTypeInfo.TypeParamsRefID
+	// to reconstruct `<T>` in decompiler signatures (gap §2.3).
+	TypeParameters []TypeParametersInfo
 }
 
 // ScanClusters reads the clustered snapshot header and cluster tags from
@@ -404,9 +450,16 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 	case AllocObjectPool:
 		return skipObjectPoolAlloc(s, cm, maxSteps)
 	case AllocROData:
-		// ROData for PcDescriptors/CodeSourceMap/CompressedStackMaps is never canonical,
-		// so the readFirstElement value doesn't matter. Pass nil cm (no string extraction).
-		return skipRODataAlloc(s, nil, canonicalSetInStream, !profile.SplitCanonical, maxSteps)
+		// ROData for PcDescriptors/CodeSourceMap/CompressedStackMaps is never
+		// canonical, so the readFirstElement value doesn't matter.
+		//
+		// cm is passed (it used to be nil, "no string extraction") purely to
+		// RECORD the per-object offset deltas in cm.Lengths. Without them
+		// extractRODataPcDescriptors has no way to locate objects in the data
+		// image, which is why PcDescriptors decoded to nothing on
+		// non-compressed-pointer builds. Recording deltas does not change how
+		// much of the stream is consumed.
+		return skipRODataAlloc(s, cm, canonicalSetInStream, !profile.SplitCanonical, maxSteps)
 	case AllocExceptionHandlers:
 		return skipExceptionHandlersAlloc(s, cm, maxSteps)
 	case AllocContext:

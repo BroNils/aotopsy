@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
+
+	"aotopsy/internal/disasm"
 )
 
 // x86_64 Dart AOT reserved-register convention (confirmed empirically
@@ -19,6 +21,9 @@ const (
 	x86ThreadReg = "r14"
 	x86FrameReg  = "rbp"
 	x86ReturnReg = "rax"
+	// x86StackReg is the Dart stack pointer. constants_x64.h:
+	// `const Register SPREG = RSP;`.
+	x86StackReg = "rsp"
 )
 
 var x86ArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
@@ -75,7 +80,11 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	fir.FrameReg = x86FrameReg
 	fir.ReturnReg = x86ReturnReg
 	fir.PoolReg = x86PoolReg
+	// PP is tagged on x86_64, so FieldAddress has already subtracted the
+	// heap-object tag and the displacement is 16+8*index-1.
+	fir.PoolIndexOf = disasm.X64PoolIndex
 	fir.ThreadReg = x86ThreadReg
+	fir.StackReg = x86StackReg
 
 	funcStart := insts[0].Addr
 	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
@@ -339,8 +348,8 @@ func x86PoolIndex(in x86Inst) int {
 		if !ok || strings.ToLower(mem.Base.String()) != x86PoolReg {
 			continue
 		}
-		idx := int(mem.Disp/8) - 2
-		if idx < 0 {
+		idx, idxOK := disasm.X64PoolIndex(mem.Disp)
+		if !idxOK {
 			return -1
 		}
 		return idx

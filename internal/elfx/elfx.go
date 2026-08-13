@@ -1,4 +1,10 @@
 // Package elfx provides ELF loading helpers for Dart AOT libapp.so files.
+//
+// For Mach-O (iOS) and PE (Windows) container support, see the Container
+// interface and OpenContainer function below. The snapshot parsing packages
+// (cluster, snapshot, disasm, decompiler) are container-agnostic — they
+// operate on raw byte regions, not ELF-specific structures. Only this
+// package and the symbol-lookup layer need container awareness.
 package elfx
 
 import (
@@ -181,4 +187,116 @@ func (f *File) LoadSegments() []SegmentInfo {
 // ByteOrder returns the ELF byte order.
 func (f *File) ByteOrder() binary.ByteOrder {
 	return f.ELF.ByteOrder
+}
+
+// --- Container abstraction for Mach-O / PE support ---
+//
+// The snapshot parsing packages (cluster, snapshot, disasm, decompiler)
+// work with raw byte regions and don't care about the container format.
+// Only symbol lookup and VA-to-offset translation need container awareness.
+// The Container interface abstracts this so Mach-O (iOS) and PE (Windows)
+// binaries can be supported without modifying any parsing code.
+
+// ContainerKind identifies the binary container format.
+type ContainerKind int
+
+const (
+	ContainerELF   ContainerKind = iota // Android, Linux
+	ContainerMachO                      // iOS, macOS
+	ContainerPE                         // Windows
+)
+
+// Container is the abstract interface for loading a Dart AOT binary
+// regardless of its container format (ELF, Mach-O, PE).
+// Implementations must provide symbol lookup and VA-to-offset translation.
+type Container interface {
+	// Kind returns the container format.
+	Kind() ContainerKind
+
+	// Symbol looks up a dynamic symbol by exact name.
+	// Returns the symbol's virtual address and size.
+	Symbol(name string) (addr, size uint64, err error)
+
+	// VAToFileOffset converts a virtual address to a file offset.
+	VAToFileOffset(va uint64) (uint64, error)
+
+	// ReadAt reads bytes from the underlying file at the given file offset.
+	ReadAt(buf []byte, off int64) (int, error)
+
+	// ReadBytesAtVA reads n bytes starting at the given virtual address.
+	ReadBytesAtVA(va uint64, n int) ([]byte, error)
+
+	// IsARM64 reports whether this is an AArch64 binary.
+	IsARM64() bool
+
+	// Is64bit reports whether this is a 64-bit binary.
+	Is64bit() bool
+
+	// ByteOrder returns the byte order.
+	ByteOrder() binary.ByteOrder
+
+	// FileSize returns the size of the underlying file.
+	FileSize() int64
+
+	// Close releases resources.
+	Close() error
+}
+
+// ELFContainer wraps elfx.File to implement Container.
+type ELFContainer struct {
+	*File
+}
+
+func (c *ELFContainer) Kind() ContainerKind { return ContainerELF }
+
+// Is64bit reports whether this is a 64-bit binary.
+func (f *File) Is64bit() bool { return f.ELF.Class == elf.ELFCLASS64 }
+
+// OpenContainer opens a binary file and returns the appropriate Container
+// implementation based on magic bytes. Currently only ELF is supported;
+// Mach-O and PE will return an error indicating the format is recognized
+// but not yet implemented.
+func OpenContainer(path string) (Container, error) {
+	// Read first 8 bytes to identify the format.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("elfx: open: %w", err)
+	}
+	header := make([]byte, 8)
+	_, err = f.Read(header)
+	_ = f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("elfx: read header: %w", err)
+	}
+
+	// ELF magic: 0x7f 'E' 'L' 'F'
+	if header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' {
+		ef, err := Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return &ELFContainer{File: ef}, nil
+	}
+
+	// Mach-O magic: 0xFEEDFACE (32-bit) or 0xFEEDFACF (64-bit)
+	if (header[0] == 0xFE && header[1] == 0xED && header[2] == 0xFA &&
+		(header[3] == 0xCE || header[3] == 0xCF)) ||
+		// Fat binary: 0xCAFEBABE
+		(header[0] == 0xCA && header[1] == 0xFE && header[2] == 0xBA && header[3] == 0xBE) {
+		mo, err := openMachO(path)
+		if err != nil {
+			return nil, fmt.Errorf("elfx: Mach-O: %w", err)
+		}
+		// Dropped the pointless machOAdapter embedding: all methods were
+		// declared on *MachOContainer anyway, so the extra struct added an
+		// indirection and nothing else.
+		return &MachOContainer{mo: mo}, nil
+	}
+
+	// PE magic: "MZ" (DOS header) — PE files start with MZ
+	if header[0] == 'M' && header[1] == 'Z' {
+		return nil, fmt.Errorf("elfx: PE binary detected but PE support is not yet implemented — only ELF and Mach-O are supported")
+	}
+
+	return nil, fmt.Errorf("elfx: unrecognized binary format (magic: %x)", header[:4])
 }

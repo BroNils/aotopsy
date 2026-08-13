@@ -147,7 +147,7 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		for i := blk.Start; i < blk.End; i++ {
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
-				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay)
+				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay, thrFields)
 				if e.TargetPC != 0 {
 					argMask := inferX86CallArgRegMaskLocal(insts, i)
 					e.ArgRegMask = argMask
@@ -369,8 +369,8 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 					x86Define(regs, touched, dstIdx, "dispatch_table")
 				}
 			case x86RegPP:
-				poolIdx := int(mem.Disp/8) - 2
-				if disp, ok := poolDisplay[poolIdx]; ok {
+				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
+				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
 				} else {
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d]", poolIdx))
@@ -432,7 +432,10 @@ func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringR
 	if !ok || canonX86Reg(mem.Base) != x86RegPP {
 		return poolStringRef{}, false
 	}
-	poolIdx := int(mem.Disp/8) - 2
+	poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
+	if !poolIdxOK {
+		return poolStringRef{}, false
+	}
 	disp, ok := poolDisplay[poolIdx]
 	if !ok || len(disp) < 2 || disp[0] != '"' {
 		return poolStringRef{}, false

@@ -313,6 +313,13 @@ func typedDataInternalName(cid int, ct *snapshot.CIDTable) string {
 }
 
 func cidNameFromTable(cid int, ct *snapshot.CIDTable) string {
+	// Defensive nil check: callers reach here with a table taken from a
+	// VersionProfile, and an unsupported/placeholder profile has historically
+	// been able to carry a nil CIDs pointer. Returning "" makes the caller
+	// fall back to its "CID_%d" rendering instead of panicking.
+	if ct == nil {
+		return ""
+	}
 	switch {
 	case cid == ct.Class:
 		return "Class"

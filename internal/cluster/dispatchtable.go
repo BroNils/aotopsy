@@ -1,11 +1,14 @@
 package cluster
 
 import (
+	"os"
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
 )
+
+var debugDT = os.Getenv("DEFLUTTER_DEBUG_DT") != ""
 
 // DispatchTableEntryKind classifies what a DispatchTableEntry points at.
 type DispatchTableEntryKind int
@@ -84,6 +87,7 @@ const (
 // (unverified for this Dart version) or result.FillEnd is unset (0,
 // meaning ReadFill was never run).
 func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable) ([]DispatchTableEntry, error) {
+
 	if result.FillEnd <= 0 {
 		return nil, fmt.Errorf("dispatch table: ReadFill must run first (FillEnd unset)")
 	}
@@ -128,6 +132,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	if !profile.CodeTextOffsetDelta {
 		for _, name := range []string{"initial_field_table", "shared_initial_field_table"} {
 			n, err := s.ReadUnsigned()
+			if debugDT {
+				fmt.Fprintf(os.Stderr, "DEBUG DT: %s count=%d pos=%d\n", name, n, s.Position())
+			}
 			if err != nil {
 				return nil, fmt.Errorf("dispatch table: %s count: %w", name, err)
 			}
