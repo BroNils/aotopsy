@@ -7,6 +7,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
 )
 
@@ -203,31 +204,19 @@ func classifyX86Branch(in x86Inst) (branchKind, uint64, bool) {
 	if op == x86asm.RET {
 		return branchRet, 0, false
 	}
-	if isX86CondJump(op) {
-		if tgt, ok := x86RelTarget(in); ok {
+	if arch.IsX86CondJump(op) {
+		if tgt, ok := arch.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
 			return branchCond, tgt, true
 		}
 		return branchCond, 0, false
 	}
 	if op == x86asm.JMP {
-		if tgt, ok := x86RelTarget(in); ok {
+		if tgt, ok := arch.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
 			return branchJmpDirect, tgt, true
 		}
 		return branchJmpIndirect, 0, false
 	}
 	return branchNone, 0, false
-}
-
-func x86RelTarget(in x86Inst) (uint64, bool) {
-	for _, arg := range in.Inst.Args {
-		if arg == nil {
-			continue
-		}
-		if rel, ok := arg.(x86asm.Rel); ok {
-			return uint64(int64(in.Addr) + int64(in.Len) + int64(rel)), true //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-		}
-	}
-	return 0, false
 }
 
 // x86CondOp maps a Jcc opcode to a Dart comparison operator, applied
@@ -253,16 +242,6 @@ func x86CondOp(op x86asm.Op) string {
 	return "?"
 }
 
-func isX86CondJump(op x86asm.Op) bool {
-	switch op {
-	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
-		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
-		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS:
-		return true
-	}
-	return false
-}
-
 func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool) Instr {
 	src := strings.ToLower(in.Inst.String())
 	ir := Instr{Addr: in.Addr, Src: src, PoolIndex: -1}
@@ -272,7 +251,7 @@ func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool) Instr {
 		ir.Op = OpReturn
 	case in.Inst.Op == x86asm.CALL:
 		ir.Op = OpCall
-		if r, ok := x86RelTarget(in); ok {
+		if r, ok := arch.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
 			ir.Target = fmt.Sprintf("0x%x", r)
 		} else {
 			ir.Target = x86IndirectTargetText(in)

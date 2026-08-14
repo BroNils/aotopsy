@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	"golang.org/x/arch/x86/x86asm"
+
+	"aotopsy/internal/arch"
 )
 
 // ScanX86FunctionCFG is ScanX86Function's CFG-wide replacement, exactly
@@ -203,28 +205,6 @@ func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
 	return out
 }
 
-func x86RelTargetLocal(d x86DecodedInst) (uint64, bool) {
-	for _, arg := range d.Inst.Args {
-		if arg == nil {
-			continue
-		}
-		if rel, ok := arg.(x86asm.Rel); ok {
-			return d.Addr + uint64(d.Len) + uint64(int64(rel)), true //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-		}
-	}
-	return 0, false
-}
-
-func isX86CondJumpLocal(op x86asm.Op) bool {
-	switch op {
-	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
-		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
-		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS:
-		return true
-	}
-	return false
-}
-
 // buildX86Blocks partitions a flat instruction slice into basic blocks:
 // leaders are the function start, JMP/Jcc targets, and instructions
 // following a terminator (RET/JMP/Jcc) -- CALL is deliberately NOT a
@@ -257,12 +237,12 @@ func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
 			kind[i] = kRet
 		case d.Inst.Op == x86asm.JMP:
 			kind[i] = kJmp
-			if t, ok := x86RelTargetLocal(d); ok {
+			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
-		case isX86CondJumpLocal(d.Inst.Op):
+		case arch.IsX86CondJump(d.Inst.Op):
 			kind[i] = kJcc
-			if t, ok := x86RelTargetLocal(d); ok {
+			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
 		default:
@@ -346,7 +326,7 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			return
 		}
 		if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && inst.Op == x86asm.MOV {
-			dstIdx, srcIdx := canonX86Reg(dstReg), canonX86Reg(srcReg)
+			dstIdx, srcIdx := arch.X86CanonReg(dstReg), arch.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 16 && regs[srcIdx] != "" {
 				x86Define(regs, touched, dstIdx, regs[srcIdx])
 			} else {
@@ -355,8 +335,8 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			return
 		}
 		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
-			dstIdx := canonX86Reg(dstReg)
-			switch canonX86Reg(mem.Base) {
+			dstIdx := arch.X86CanonReg(dstReg)
+			switch arch.X86CanonReg(mem.Base) {
 			case x86RegTHR:
 				// H-3 fix: annotate THR loads with field names when available.
 				if thrFields != nil {
@@ -384,12 +364,12 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			}
 			return
 		}
-		x86Kill(regs, touched, canonX86Reg(dstReg))
+		x86Kill(regs, touched, arch.X86CanonReg(dstReg))
 		return
 	}
 	if len(inst.Args) >= 1 {
 		if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-			x86Kill(regs, touched, canonX86Reg(dstReg))
+			x86Kill(regs, touched, arch.X86CanonReg(dstReg))
 		}
 	}
 }
@@ -429,7 +409,7 @@ func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringR
 		return poolStringRef{}, false
 	}
 	mem, ok := inst.Args[1].(x86asm.Mem)
-	if !ok || canonX86Reg(mem.Base) != x86RegPP {
+	if !ok || arch.X86CanonReg(mem.Base) != x86RegPP {
 		return poolStringRef{}, false
 	}
 	poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)

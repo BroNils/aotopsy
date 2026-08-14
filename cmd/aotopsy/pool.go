@@ -3,7 +3,6 @@ package main
 import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/disasm"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -19,15 +18,7 @@ func buildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 // uses. Returns nil when no table covers the version, which leaves THR
 // accesses rendering as THR.fNN.
 func threadFieldOffsets(dartVersion string, isARM64 bool, profile *snapshot.VersionProfile) map[int64]string {
-	src := disasm.THRFieldsWithProfile(dartVersion, isARM64, profile)
-	if len(src) == 0 {
-		return nil
-	}
-	out := make(map[int64]string, len(src))
-	for off, name := range src {
-		out[int64(off)] = name
-	}
-	return out
+	return pipeline.ThreadFieldOffsets(dartVersion, isARM64, profile)
 }
 
 func resolvePoolDisplay(pool []cluster.PoolEntry, l *poolLookups) map[int]string {

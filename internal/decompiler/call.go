@@ -162,17 +162,19 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	// suspend_state_await_ep indicate this is an async function. Mark it
 	// so the signature gets `async`. Await calls are rendered as `await`
 	// rather than a regular call.
-	if strings.Contains(name, "init_async") {
+	//
+	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
+	// pre-pass in emit.go so the two cannot drift apart.
+	switch asyncStubRole(name) {
+	case asyncRoleInit:
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return
-	}
-	if strings.Contains(name, "await") && strings.Contains(name, "suspend") {
+	case asyncRoleAwait:
 		e.fir.IsAsync = true
 		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 		return
-	}
-	if strings.Contains(name, "return_async") {
+	case asyncRoleReturn:
 		e.fir.IsAsync = true
 		e.emit(indent, "return %s;", tmpName)
 		return
@@ -215,7 +217,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// For now, we emit ffi_call with the args and a comment indicating
 		// this is a native FFI call with N arguments.
 		argCount := countArgs(argsText)
-		e.emit(indent, "final %s = ffi_call(%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, argsText, argCount)
+		e.emit(indent, "final %s = %s%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, FFICallMarker, argsText, argCount)
 		return
 	}
 
@@ -232,18 +234,19 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// runtime_offsets_extracted.h (ground truth, not a guess).
 	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
-		// P7: Detect async/await stubs loaded from THR.
-		if strings.Contains(stubName, "init_async") {
+		// P7: Detect async/await stubs loaded from THR. Same classifier as
+		// emitDirectCall -- this is the path that actually sees the
+		// snake_case Thread-table spellings.
+		switch asyncStubRole(stubName) {
+		case asyncRoleInit:
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
 			return
-		}
-		if strings.Contains(stubName, "await") && strings.Contains(stubName, "suspend") {
+		case asyncRoleAwait:
 			e.fir.IsAsync = true
 			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 			return
-		}
-		if strings.Contains(stubName, "return_async") {
+		case asyncRoleReturn:
 			e.fir.IsAsync = true
 			e.emit(indent, "return %s;", tmpName)
 			return

@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"golang.org/x/arch/x86/x86asm"
+
+	"aotopsy/internal/arch"
 )
 
 // x86_64 Dart AOT reserved-register roles, confirmed directly against
@@ -39,50 +41,6 @@ func (rt *x86RegTracker) lookup(idx int) string {
 		return ""
 	}
 	return rt.defs[idx].note
-}
-
-// canonX86Reg maps any-width GP register operand to a canonical family
-// index 0..15 (RAX..R15), or -1 for anything else (XMM, segment regs,
-// high-byte AH/CH/DH/BH, etc.) -- same mapping as
-// cmd/aotopsy/gdtcall.go's canon64, duplicated here rather than shared
-// since internal/disasm cannot import from cmd/aotopsy (the dependency
-// only goes the other way).
-func canonX86Reg(r x86asm.Reg) int {
-	switch r {
-	case x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL:
-		return 0
-	case x86asm.RCX, x86asm.ECX, x86asm.CX, x86asm.CL:
-		return 1
-	case x86asm.RDX, x86asm.EDX, x86asm.DX, x86asm.DL:
-		return 2
-	case x86asm.RBX, x86asm.EBX, x86asm.BX, x86asm.BL:
-		return 3
-	case x86asm.RSP, x86asm.ESP, x86asm.SP, x86asm.SPB:
-		return 4
-	case x86asm.RBP, x86asm.EBP, x86asm.BP, x86asm.BPB:
-		return 5
-	case x86asm.RSI, x86asm.ESI, x86asm.SI, x86asm.SIB:
-		return 6
-	case x86asm.RDI, x86asm.EDI, x86asm.DI, x86asm.DIB:
-		return 7
-	case x86asm.R8, x86asm.R8L, x86asm.R8W, x86asm.R8B:
-		return 8
-	case x86asm.R9, x86asm.R9L, x86asm.R9W, x86asm.R9B:
-		return 9
-	case x86asm.R10, x86asm.R10L, x86asm.R10W, x86asm.R10B:
-		return 10
-	case x86asm.R11, x86asm.R11L, x86asm.R11W, x86asm.R11B:
-		return 11
-	case x86asm.R12, x86asm.R12L, x86asm.R12W, x86asm.R12B:
-		return 12
-	case x86asm.R13, x86asm.R13L, x86asm.R13W, x86asm.R13B:
-		return 13
-	case x86asm.R14, x86asm.R14L, x86asm.R14W, x86asm.R14B:
-		return 14
-	case x86asm.R15, x86asm.R15L, x86asm.R15W, x86asm.R15B:
-		return 15
-	}
-	return -1
 }
 
 // x86RegWidthBytes returns the width in bytes of a register-sized argument
@@ -181,7 +139,7 @@ func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
 		if !ok {
 			continue
 		}
-		pos := x86ArgRegBitPos(canonX86Reg(dstReg))
+		pos := x86ArgRegBitPos(arch.X86CanonReg(dstReg))
 		if pos < 0 {
 			continue
 		}
@@ -207,7 +165,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 		if reg, ok := arg.(x86asm.Reg); ok {
 			e.Kind = "call_indirect"
 			e.Reg = reg.String()
-			e.Via = rt.lookup(canonX86Reg(reg))
+			e.Via = rt.lookup(arch.X86CanonReg(reg))
 			return e
 		}
 		if mem, ok := arg.(x86asm.Mem); ok {
@@ -225,7 +183,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			// themselves are never "defined" that way, so check the base
 			// register's fixed role before falling back to the tracker.
 			var baseNote string
-			switch canonX86Reg(mem.Base) {
+			switch arch.X86CanonReg(mem.Base) {
 			case x86RegTHR:
 				// A THR-relative call with NO index register is a call
 				// through a Thread slot -- a stub entry point -- not a
@@ -270,9 +228,9 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
 				}
 			default:
-				baseNote = rt.lookup(canonX86Reg(mem.Base))
+				baseNote = rt.lookup(arch.X86CanonReg(mem.Base))
 			}
-			if canonX86Reg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if arch.X86CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote
@@ -343,19 +301,19 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8 // last-resort fallback
 			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						DstReg: canonX86Reg(dstReg), Width: width, Resolved: resolved,
+						DstReg: arch.X86CanonReg(dstReg), Width: width, Resolved: resolved,
 					})
 				}
-			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && canonX86Reg(mem.Base) == x86RegTHR && mem.Index == 0 {
+			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						IsStore: true, SrcReg: canonX86Reg(srcReg), Width: width, Resolved: resolved,
+						IsStore: true, SrcReg: arch.X86CanonReg(srcReg), Width: width, Resolved: resolved,
 					})
 				}
 			}

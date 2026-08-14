@@ -67,34 +67,40 @@ type Context struct {
 // LoadContext opens libPath and runs the full static-analysis setup
 // pipeline once. Callers must call Close() when done (closes the
 // underlying ELF file).
-func LoadContext(libPath string) (*Context, error) {
+func LoadContext(libPath string) (ctx *Context, err error) {
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
 	ef, err := elfx.Open(libPath)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
+	// One close, on the named error return, instead of one per failure
+	// path. There were seven `_ = ef.Close()` calls below and eight places
+	// that could fail; every new error path was an opportunity to forget
+	// the eighth. The named return makes that impossible rather than
+	// merely unlikely.
+	defer func() {
+		if err != nil {
+			_ = ef.Close()
+		}
+	}()
 	isARM64 := ef.ELF.Machine == elf.EM_AARCH64
 
 	info, err := snapshot.Extract(ef, opts)
 	if err != nil {
-		_ = ef.Close()
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
 	data := info.IsolateData.Data
 	clusterStart, err := cluster.FindClusterDataStart(data)
 	if err != nil {
-		_ = ef.Close()
 		return nil, fmt.Errorf("cluster start: %w", err)
 	}
 	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
 	if err != nil {
-		_ = ef.Close()
 		return nil, fmt.Errorf("scan: %w", err)
 	}
 	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		_ = ef.Close()
 		return nil, fmt.Errorf("fill: %w", err)
 	}
 
@@ -104,12 +110,13 @@ func LoadContext(libPath string) (*Context, error) {
 	case tblErr != nil && result.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta:
 		ranges = cluster.ResolveCodeRangesFromTextOffset(result.Codes)
 	case tblErr != nil:
-		_ = ef.Close()
 		return nil, fmt.Errorf("instrtable: %w", tblErr)
 	default:
+		// `err` here shadows the named return, but `return nil, fmt.Errorf(...)`
+		// assigns the named return before the defer runs, so the deferred
+		// close still fires. No manual close -- that would double-close.
 		codeRanges, err := cluster.ResolveCodeRanges(result.Codes, table)
 		if err != nil {
-			_ = ef.Close()
 			return nil, fmt.Errorf("code ranges: %w", err)
 		}
 		stubRanges := cluster.ResolveStubRanges(table)
@@ -118,7 +125,6 @@ func LoadContext(libPath string) (*Context, error) {
 
 	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
 	if err != nil {
-		_ = ef.Close()
 		return nil, fmt.Errorf("code region: %w", err)
 	}
 	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // bounded snapshot payload offsets, well under 2^32
@@ -238,6 +244,17 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
 	fir.ThreadStubOffsets = disasm.ThreadStubOffsets(c.DartVersion, c.IsARM64)
+	// Both tables, not just the stub one. ThreadFieldNames is what
+	// applyStore consults to recognise the vm_tag store that marks an FFI
+	// call target, so leaving it nil disables that detection silently --
+	// see ThreadFieldOffsets. Both are keyed per architecture and per Dart
+	// version by the same profile, so this is correct for ARM64 and x86_64
+	// across 2.x and 3.x alike.
+	var profile *snapshot.VersionProfile
+	if c.Info != nil {
+		profile = c.Info.Version
+	}
+	fir.ThreadFieldNames = ThreadFieldOffsets(c.DartVersion, c.IsARM64, profile)
 	return fir, nil
 }
 

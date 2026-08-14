@@ -110,11 +110,32 @@ func RunInterprocedural(
 	// in ctx. It maps method name (e.g., "adoptChild") → []Function refIDs.
 	// Used by setEntryFromParamTypes to look up FuncParamTypes.
 
-	// Dart AOT calling convention (ARM64):
-	// kCpuRegistersForArgs = {R1, R2, R3, R5, R6, R7}
-	// R0 = kClassIdReg, R4 = ARGS_DESC_REG
-	// Parameter i maps to argRegOrder[i]:
-	argRegOrder := []int{1, 2, 3, 5, 6, 7}
+	// Dart AOT's OWN calling convention -- not the platform C ABI.
+	//
+	//	constants_arm64.h @3.12.2
+	//	  kCpuRegistersForArgs[] = {R1, R2, R3, R5, R6, R7}
+	//	constants_x64.h   @3.12.2 and @3.9.2
+	//	  kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
+	//
+	// The ARM64 list was applied to x86_64 as well, with a comment calling
+	// RDI "the SysV ABI first arg". SysV is the C convention; Dart declares
+	// its own, and only the FIRST register happens to coincide. Every other
+	// parameter was typed into the wrong register:
+	//
+	//	param 1  went to R2  = RDX, should be RSI
+	//	param 2  went to R3  = RBX, should be RDX
+	//	param 3  went to R5  = RBP, should be RBX   <- the frame pointer
+	//	param 4  went to R6  = RSI, should be R8
+	//	param 5  went to R7  = RDI, should be R9
+	//
+	// so on x86_64 this did not merely fail to type parameters, it planted
+	// a confident KnownClass on five registers that hold something else,
+	// one of them RBP.
+	//
+	// The struct does not exist before 3.x on x64 -- 2.x passed arguments
+	// on the stack, which is the documented reason x86_64 2.x recovers no
+	// receiver types at all.
+	argRegOrder := dartArgRegisters(isARM64)
 
 	if isARM64 {
 		funcCount = len(funcInstsARM64)
@@ -132,10 +153,11 @@ func RunInterprocedural(
 	// Verified against dart-lang/sdk constants_arm64.h at 3.9.2:
 	//   DartCallingConvention::kCpuRegistersForArgs[] = {R1, R2, R3, R5, R6, R7}
 	// R0 = kClassIdReg, R4 = ARGS_DESC_REG, R5 = IC_DATA_REG.
-	receiverReg := 1 // ARM64: X1
-	if !isARM64 {
-		receiverReg = x86RegRDI // x86_64: RDI (SysV ABI first arg)
-	}
+	// The receiver is parameter 0, so it is simply the head of the list
+	// above rather than a separately-maintained constant. Keeping the two in
+	// step by hand is what let x86_64 have a right receiver and five wrong
+	// parameters.
+	receiverReg := argRegOrder[0]
 
 	// Initialize function analyses with entry types.
 	// M-6 fix: only iterate the map for the active architecture.

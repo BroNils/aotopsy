@@ -578,5 +578,3 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 	})
 	return writeJSONLFile(filepath.Join(outDir, "behavioral_findings.jsonl"), findings)
 }
-
-// Ensure disasm types are available for the function signatures.

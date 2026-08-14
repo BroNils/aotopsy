@@ -214,6 +214,15 @@ type TypeContext struct {
 	X86DispatchNoTable  int // ...but the base register is not a known dispatch table
 	X86DispatchNoClass  int // ...but cid_reg does not hold a KnownClass
 	X86DispatchResolved int // ...and both were known
+	// Splitting NoClass by WHY tells apart two different problems that a
+	// single counter conflates: Top means the receiver was never typed
+	// anywhere on the path (missing producer), Bottom means it was typed
+	// and then contradicted (a merge killed it). Chasing the wrong one
+	// wastes the effort -- the same mistake as reading one ratio without
+	// checking both sides measure the same population.
+	X86DispatchClassTop    int
+	X86DispatchClassBottom int
+	X86DispatchClassOther  int
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function

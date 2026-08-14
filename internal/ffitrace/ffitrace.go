@@ -83,9 +83,9 @@ const defaultMaxScan = 500
 //     the plan's Komponen H "Trap" note on shared-bindings-object
 //     indirection, which this simple per-block scan does NOT follow;
 //     that's a known, documented limitation, not a bug).
-//  2. the decompiled pseudocode's own "nativeCall(...)" marker
-//     (internal/decompiler's existing vm_tag-based FFI-leaf-call
-//     detection), via EmitPseudocode.
+//  2. the decompiled pseudocode's own decompiler.FFICallMarker
+//     ("ffi_call(") -- internal/decompiler's vm_tag-based FFI-leaf-call
+//     detection -- via EmitPseudocode.
 //
 // Applies the same hardening decompile-native --all uses for the same
 // underlying cost profile: GOMAXPROCS cap, a hard memory-limit
@@ -129,8 +129,13 @@ func Trace(ctx *pipeline.Context, opts Options) ([]Finding, int) {
 
 		findings = append(findings, findDynamicLibraryCalls(ctx, fir, funcVA)...)
 
+		// The marker is `ffi_call(`, which is what emitIndirectCall
+		// actually writes when a register carries the vm_tag sentinel.
+		// This read `nativeCall(` -- a string the decompiler has never
+		// emitted -- so signal 2 could not fire at all, on any sample or
+		// architecture, and the only findings came from signal 1.
 		art := decompiler.EmitPseudocode(fir, ctx.SymbolLookup, ctx.PoolLookup)
-		if strings.Contains(art.Source, "nativeCall(") {
+		if strings.Contains(art.Source, decompiler.FFICallMarker) {
 			findings = append(findings, Finding{
 				CallerFunc: fir.Name,
 				CallerVA:   funcVA,

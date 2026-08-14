@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 )
@@ -545,21 +546,27 @@ type basicBlock struct {
 // condition, which is what the measurement above sized.
 func equalitySuccessor(last uint32, numSuccs int) int {
 	if numSuccs != 2 {
-		return -1
+		return arch.SuccUnknown
 	}
 	// Only B.cond reads the flags a CMP set. CBZ/CBNZ and TBZ/TBNZ test a
 	// register or a single bit directly, so a preceding CMP says nothing
 	// about which way they go.
 	if last&0xFF000010 != 0x54000000 {
-		return -1
+		return arch.SuccUnknown
 	}
+	// Same successor convention as arch.X86EqualitySuccessor. The two
+	// functions are deliberately NOT merged -- one decodes a raw 32-bit
+	// B.cond word, the other switches on an x86asm.Op, and a single
+	// function taking both would be a union of unrelated inputs. Only the
+	// convention is shared, because that is the part that can be got
+	// backwards without anything failing loudly.
 	switch last & 0xF {
 	case 0: // EQ: the taken edge is the equal one.
-		return 0
+		return arch.SuccEqual
 	case 1: // NE: the taken edge proves inequality; the fall-through proves equality.
-		return 1
+		return arch.SuccNotEqual
 	}
-	return -1
+	return arch.SuccUnknown
 }
 
 // buildBlocks constructs basic blocks from an instruction list.
@@ -2068,6 +2075,12 @@ func dstRegOfInst(raw uint32) int {
 }
 
 // recordFieldStore records a field store for whole-program field-store → field-load tracking.
+//
+// Unanimity is required, matching InstanceFieldTypes' rule: if two stores
+// to the same (receiverCID, byteOffset) pair record different value classes,
+// the entry is dropped (set to -1 sentinel) rather than keeping the first
+// one. A wrong concrete type is worse than no type, because callers treat
+// KnownClass as authoritative (see InstanceFieldTypes' doc comment).
 func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, valueCID int) {
 	if ctx.FieldStoreTypes == nil {
 		return
@@ -2078,8 +2091,15 @@ func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, value
 		m = make(map[int32]int)
 		ctx.FieldStoreTypes[receiverCID] = m
 	}
-	if _, exists := m[lookupOff]; !exists {
+	existing, exists := m[lookupOff]
+	if !exists {
 		m[lookupOff] = valueCID
+		return
+	}
+	// Already recorded: check for conflict.
+	if existing != valueCID && existing != -1 {
+		// Conflict: drop the entry. -1 sentinel means "conflicting, do not use".
+		m[lookupOff] = -1
 	}
 }
 
