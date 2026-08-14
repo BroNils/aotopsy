@@ -776,6 +776,38 @@ func transferInstructionX86(
 		return
 	}
 
+	// Compressed-pointer decompression is IDENTITY on the type lattice.
+	//
+	// x86_64 spells it as a 32-bit load followed by adding Thread.heap_base
+	// (assembler_x64.cc: `movl(dest, slot); addq(dest, Address(THR,
+	// heap_base_offset()))`). ARM64 spells it `add Xd, Xn, HEAP_BITS,
+	// LSL #32`, and intraproc.go has preserved KnownClass across that since
+	// it was written.
+	//
+	// x86 had no ADD handling at all, so this fell to the default kill
+	// below and wiped the type of every decompressed pointer -- which, on a
+	// compressed-pointer build, is EVERY field load. The dominant dispatch
+	// sequence in the 3.12.2 x86_64 sample is
+	//
+	//	MOV EAX, [RSI+0x7]      ; load a field, compressed
+	//	ADD RAX, [R14+0x58]     ; + THR.heap_base -> decompress
+	//	MOV [RBP-0x8], RAX      ; spill
+	//	MOV RAX, [RBP-0x8]      ; reload as the receiver
+	//	MOV ECX, [RAX-0x1]      ; header
+	//	SHR ECX, 0xc            ; class id
+	//	CALL [RAX+8*RCX+disp]   ; dispatch
+	//
+	// so the class died at instruction two, every time, and everything
+	// downstream saw an untyped receiver.
+	if ins.Op == x86asm.ADD && len(ins.Args) >= 2 && ctx.THRFields != nil {
+		if mem, memOK := ins.Args[1].(x86asm.Mem); memOK &&
+			arch.X86CanonReg(mem.Base) == x86RegTHR {
+			if name, found := ctx.THRFields[int(mem.Disp)]; found && name == "heap_base" {
+				return // same object, wider register: leave the lattice alone
+			}
+		}
+	}
+
 	// Default: if this instruction defines a register, kill its type.
 	//
 	// Args[0] is the destination for most x86 instructions, but NOT for the
