@@ -326,6 +326,41 @@ func AnalyzeFunction(
 		}
 	}
 
+	// Pattern 2.x C: MOV Xn, #imm → ADD Xd, Xm, Xn → LDR X30, [X21, Xd, LSL #3] → BLR X30
+	// The 2.x compiler sometimes loads the selector offset into a register
+	// via MOVZ, then uses register-register ADD instead of ADD with immediate.
+	// This pattern is NOT caught by the ADD/SUB #imm scan above.
+	for i := 0; i < len(insts)-3; i++ {
+		// Look for MOVZ Xn, #imm16
+		movReg, movImm, movOK := isMOVZ64(insts[i].Raw)
+		if !movOK || movReg >= 31 {
+			continue
+		}
+		// Next: ADD Xd, Xm, Xn (register-register, rm == movReg)
+		if i+1 >= len(insts) {
+			continue
+		}
+		addRd, _, addRm, addOK := isADD64Register(insts[i+1].Raw)
+		if !addOK || addRm != movReg || addRd >= 31 {
+			continue
+		}
+		// Next: LDR X30, [X21, Xd, LSL #3]
+		if i+2 >= len(insts) {
+			continue
+		}
+		base, rm, rt, ldrOK := isLDRRegExtended(insts[i+2].Raw)
+		if !ldrOK || base != 21 || rt != 30 || rm != addRd {
+			continue
+		}
+		// Next: BLR X30
+		if i+3 >= len(insts) {
+			continue
+		}
+		if blrReg, ok := isBLR(insts[i+3].Raw); ok && blrReg == 30 {
+			ctx.SelectorOffsets[insts[i+3].Addr] = movImm
+		}
+	}
+
 	// Build basic blocks.
 	blocks := buildBlocks(insts)
 	if len(blocks) == 0 {
@@ -1178,6 +1213,19 @@ func isADD64Register(raw uint32) (rd, rn, rm int, ok bool) {
 	rn = int((raw >> 5) & 0x1F)
 	rm = int((raw >> 16) & 0x1F)
 	return rd, rn, rm, true
+}
+
+// isMOVZ64 detects MOVZ Xd, #imm16 (64-bit, shift=0).
+// Encoding: sf=1 | 10 | 100101 | hw=00 | imm16 | Rd
+// Mask: 0xFFE00000, Value: 0xD2800000 (hw=00 means no shift)
+// Returns dest register and the 16-bit immediate.
+func isMOVZ64(raw uint32) (rd int, imm int, ok bool) {
+	if raw&0xFFE00000 != 0xD2800000 {
+		return 0, 0, false
+	}
+	rd = int(raw & 0x1F)
+	imm = int((raw >> 5) & 0xFFFF)
+	return rd, imm, true
 }
 
 // isUBFX detects UBFM/UBFX Xt, Xn, #lsb, #width (64-bit).
