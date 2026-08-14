@@ -252,17 +252,25 @@ func handlePPLoad(tc *transferCtx) bool {
 				return true
 			}
 		}
+		// Check PoolCodeNames BEFORE PoolClassByIndex: a Code object in
+		// the pool should be named (PPCode:funcName), not typed as
+		// KnownClass(kCodeCid). KnownClass(CodeCID) is useless for BLR
+		// resolution — the function name is what resolveBLR needs.
+		// This was a regression from the VmRefCID fix: PoolClassByIndex
+		// started returning Code's CID for VM Code objects, so the
+		// PoolCodeNames else-if branch was never reached.
+		if tc.ctx.PoolCodeNames != nil {
+			if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
+				tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
+				tc.ctx.PPHits++
+				return true
+			}
+		}
 		if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
 			tc.state[rt] = KnownClass(classID)
 			tc.ctx.PPHits++
 			if tc.ctx.InstantiatedClasses != nil {
 				tc.ctx.InstantiatedClasses[classID] = true
-			}
-		} else if tc.ctx.PoolCodeNames != nil {
-			if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
-				tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
-				tc.ctx.PPHits++
-				return true
 			}
 		}
 		if tc.ctx.PoolClosureClass != nil {

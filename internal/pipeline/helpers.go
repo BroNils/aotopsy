@@ -193,6 +193,51 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		}
 	}
 
+	// Also build CodeNames and CodeRefDisplay for VM Code objects.
+	// VM Code objects (stubs, runtime entries) are referenced from the
+	// app isolate's object pool but only exist in the VM snapshot.
+	// Without this, PoolCodeNames has no entries for PP-loaded VM Code
+	// objects, so BLR calls through them (LDR X24,[X27,PP] → LDUR
+	// X30,[X24,#7] → BLR X30) are unresolved.
+	if vmResult != nil {
+		vmByCodeIndex := CodeIndexToFunc(vmResult, ct, codeIndexOneBased)
+		for _, ce := range vmResult.Codes {
+			if _, exists := l.CodeNames[ce.RefID]; exists {
+				continue
+			}
+			owner, ok := ResolveCodeOwner(ce, l.VmRefToNamed, vmByCodeIndex)
+			if !ok {
+				continue
+			}
+			funcName := l.ResolveVMName(owner)
+			if funcName == "" {
+				continue
+			}
+			ownerName := ""
+			if owner.OwnerRefID >= 0 {
+				if vmOwner, ok2 := l.VmRefToNamed[owner.OwnerRefID]; ok2 {
+					ownerName = l.ResolveVMName(vmOwner)
+				}
+			}
+			ci := CodeNameInfo{
+				FuncName:  funcName,
+				OwnerName: ownerName,
+			}
+			if owner.IsConstructor() && funcName != "" {
+				ci.FuncName = "new " + funcName
+				ci.IsConstructor = true
+			}
+			l.CodeNames[ce.RefID] = ci
+			if ci.FuncName != "" {
+				if ci.OwnerName != "" {
+					l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
+				} else {
+					l.CodeRefDisplay[ce.RefID] = ci.FuncName
+				}
+			}
+		}
+	}
+
 	return l
 }
 

@@ -230,6 +230,13 @@ func runTypeInference(
 					poolCodeNames[pe.Index] = name
 				}
 			}
+			// Try CodeNames directly (covers VM Code objects whose names
+			// were resolved via VM Function owner chain in BuildPoolLookups).
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if ci, ok2 := pl.CodeNames[pe.RefID]; ok2 && ci.FuncName != "" {
+					poolCodeNames[pe.Index] = ci.FuncName
+				}
+			}
 		}
 	}
 
