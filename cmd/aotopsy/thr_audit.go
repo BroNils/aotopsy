@@ -131,8 +131,9 @@ func cmdTHRAudit(args []string) error {
 	}
 
 	type codeInfo struct {
-		funcName  string
-		ownerName string
+		funcName     string
+		ownerName    string
+		isConstructor bool
 	}
 	// Resolved via pipeline.ResolveCodeOwner rather than trusting
 	// ce.OwnerRef directly -- Code.OwnerRef is confirmed unreliable on
@@ -146,9 +147,15 @@ func cmdTHRAudit(args []string) error {
 		if !ok {
 			continue
 		}
+		fn := resolveName(owner)
+		isCtor := owner.IsConstructor()
+		if isCtor && fn != "" {
+			fn = "new " + fn
+		}
 		codeNames[ce.RefID] = codeInfo{
-			funcName:  resolveName(owner),
-			ownerName: resolveOwnerName(owner),
+			funcName:      fn,
+			ownerName:     resolveOwnerName(owner),
+			isConstructor: isCtor,
 		}
 	}
 
@@ -157,7 +164,12 @@ func cmdTHRAudit(args []string) error {
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
 		ci := codeNames[r.RefID]
-		name := qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
+		var name string
+		if ci.isConstructor {
+			name = qualifiedName("", ci.funcName, r.PCOffset)
+		} else {
+			name = qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
+		}
 		symbols[va] = name
 	}
 	lookup := disasm.PlaceholderLookup(symbols)
@@ -202,7 +214,12 @@ func cmdTHRAudit(args []string) error {
 		funcVA := codeVA + funcStart
 
 		ci := codeNames[r.RefID]
-		funcName := qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
+		var funcName string
+		if ci.isConstructor {
+			funcName = qualifiedName("", ci.funcName, r.PCOffset)
+		} else {
+			funcName = qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
+		}
 
 		var records []disasm.THRAuditRecord
 		if isARM64 {

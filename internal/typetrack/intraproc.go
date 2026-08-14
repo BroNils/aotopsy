@@ -2068,6 +2068,12 @@ func dstRegOfInst(raw uint32) int {
 }
 
 // recordFieldStore records a field store for whole-program field-store → field-load tracking.
+//
+// Unanimity is required, matching InstanceFieldTypes' rule: if two stores
+// to the same (receiverCID, byteOffset) pair record different value classes,
+// the entry is dropped (set to -1 sentinel) rather than keeping the first
+// one. A wrong concrete type is worse than no type, because callers treat
+// KnownClass as authoritative (see InstanceFieldTypes' doc comment).
 func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, valueCID int) {
 	if ctx.FieldStoreTypes == nil {
 		return
@@ -2078,8 +2084,15 @@ func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, value
 		m = make(map[int32]int)
 		ctx.FieldStoreTypes[receiverCID] = m
 	}
-	if _, exists := m[lookupOff]; !exists {
+	existing, exists := m[lookupOff]
+	if !exists {
 		m[lookupOff] = valueCID
+		return
+	}
+	// Already recorded: check for conflict.
+	if existing != valueCID && existing != -1 {
+		// Conflict: drop the entry. -1 sentinel means "conflicting, do not use".
+		m[lookupOff] = -1
 	}
 }
 

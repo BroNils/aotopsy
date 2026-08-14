@@ -1226,9 +1226,10 @@ func (e *emitter) extractLoopCondition(id int) string {
 // Handles simple comparisons by flipping the operator, and wraps
 // complex expressions with !(...).
 // A single comparison, and nothing else: `<operand> <op> <operand>`. Operands
-// may not contain spaces, parentheses or logical operators, so a compound
-// condition never matches.
-var singleCmpRe = regexp.MustCompile(`^([A-Za-z0-9_.$\[\]']+) (>=|<=|==|!=|>|<) ([A-Za-z0-9_.$\[\]'-]+)$`)
+// may contain parentheses (for grouped sub-expressions like `(a + b) > 10`)
+// but may not contain spaces or logical operators, so a compound condition
+// never matches.
+var singleCmpRe = regexp.MustCompile(`^([A-Za-z0-9_.$\[\]'()]+) (>=|<=|==|!=|>|<) ([A-Za-z0-9_.$\[\]'-()]+)$`)
 
 var cmpFlips = map[string]string{
 	"==": "!=",

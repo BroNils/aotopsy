@@ -162,7 +162,13 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	// suspend_state_await_ep indicate this is an async function. Mark it
 	// so the signature gets `async`. Await calls are rendered as `await`
 	// rather than a regular call.
-	if strings.Contains(name, "init_async") {
+	//
+	// Use specific suffix matching rather than bare Contains to avoid
+	// false positives: "init_async" alone matches "reinit_async_data",
+	// "init_async_helper", etc. The actual stub names are
+	// "InitAsync"/"_initAsync" (from stub_code_compiler_arm64.cc) and
+	// "ReturnAsync"/"_returnAsync" — verified via gh search + gh api.
+	if strings.HasSuffix(name, "initasync") || strings.Contains(name, "_initasync") {
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return
@@ -172,7 +178,7 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 		return
 	}
-	if strings.Contains(name, "return_async") {
+	if strings.HasSuffix(name, "returnasync") || strings.Contains(name, "_returnasync") {
 		e.fir.IsAsync = true
 		e.emit(indent, "return %s;", tmpName)
 		return
@@ -233,7 +239,8 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
 		// P7: Detect async/await stubs loaded from THR.
-		if strings.Contains(stubName, "init_async") {
+		// Same specific suffix matching as emitDirectCall above.
+		if strings.HasSuffix(stubName, "initasync") || strings.Contains(stubName, "_initasync") {
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
 			return
@@ -243,7 +250,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 			return
 		}
-		if strings.Contains(stubName, "return_async") {
+		if strings.HasSuffix(stubName, "returnasync") || strings.Contains(stubName, "_returnasync") {
 			e.fir.IsAsync = true
 			e.emit(indent, "return %s;", tmpName)
 			return
