@@ -1129,207 +1129,46 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		}
 
 		// Read scalars; extract type-specific data for FunctionType and Field clusters.
-		var fieldKindBits int32
-		funcCodeIndex := -1
-		funcNumFixed, funcNumOptional := -1, -1
-		var funcIsStatic, funcHasKindTag bool
-		funcKind := FunctionKindUnknown
-		// Script scalar capture: line_offset, col_offset, [flags], kernel_script_index.
-		var scriptLine, scriptCol, scriptKernelIdx int32
-		var scriptFlags byte
-		// LoadingUnit scalar capture: the loading-unit id.
-		var loadingUnitID int32
+		var ss scalarState
 		for si, op := range spec.Scalars {
-			if spec.IsFunction && si == 0 {
-				// code_index is OpUnsigned at scalar index 0.
-				ci, err := s.ReadUnsigned()
+			switch {
+			case spec.IsFunction:
+				if err := readFunctionScalar(s, si, len(spec.Scalars), &ss, i, count, profile, op); err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+				}
+			case spec.IsFuncType:
+				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, i, count, op)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d code_index: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
-				funcCodeIndex = int(ci)
-			} else if spec.IsFunction && si == 1 && len(spec.Scalars) == 3 {
-				// Dart 2.x only (specFunction adds this scalar when
-				// fillRefUnsigned): Read<uint32_t>(packed_fields_).
-				//
-				// UntaggedFunction::packed_fields_ bit layout at 2.12.0
-				// (runtime/vm/raw_object.h):
-				//
-				//	[0,1)   Optimizable
-				//	[1,2)   BackgroundOptimizable
-				//	[2,9)   NumTypeParameters       (kMaxTypeParametersBits=7)
-				//	[9,10)  HasNamedOptionalParameters
-				//	[10,20) NumFixedParameters      (kMaxFixedParametersBits=10)
-				//	[20,30) NumOptionalParameters   (kMaxOptionalParametersBits=10)
-				//
-				// 3.x moved arity onto FunctionType.packed_parameter_counts,
-				// which is why CodeNameInfo.ParamCount came out 0 for every
-				// 2.x function: it only ever looked at the signature.
-				packed, err := s.ReadTagged32()
+				if fti != nil {
+					funcTypes = append(funcTypes, *fti)
+				}
+			case spec.IsField:
+				fi, err := readFieldScalar(s, si, ref, nameRef, ownerRef, sigRef, fieldTypeRef, &ss, i, count, op)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d packed_fields: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
-				funcNumFixed = int((packed >> 10) & 0x3FF)
-				funcNumOptional = int((packed >> 20) & 0x3FF)
-			} else if spec.IsFunction && si == 2 && len(spec.Scalars) == 3 {
-				// Dart 2.x: Read<uint32_t>(kind_tag_).
-				//
-				// Function::KindTagBits at 2.12.0 (runtime/vm/object.h):
-				//   kKindTagPos=0 size 5, kRecognizedTagPos=5 size 9,
-				//   kModifierPos=14 size 2, then the single-bit flags of
-				//   FOR_EACH_FUNCTION_KIND_BIT starting at bit 16 with
-				//   V(Static, is_static) first.
-				kindTag, err := s.ReadTagged32()
+				if fi != nil {
+					fields = append(fields, *fi)
+				}
+			case spec.IsType:
+				ti, err := readTypeScalar(s, si, ref, i, count, op)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
-				funcIsStatic = (kindTag>>16)&1 == 1
-				funcHasKindTag = true
-				funcKind = decodeFunctionKind(kindTag, profile)
-			} else if spec.IsFunction && si == 1 && len(spec.Scalars) == 2 {
-				// Dart 3.x: the Function fill is ReadUnsigned(code_index)
-				// then Read<uint32_t>(kind_tag_) -- see specFunction. The
-				// kind_tag scalar was being read and thrown away, so nothing
-				// downstream knew a function's kind on 3.x.
-				//
-				// app_snapshot.cc @3.12.2 writes it unconditionally:
-				//
-				//	s->Write<uint32_t>(func->untag()->kind_tag_);
-				//
-				// outside the `if (kind != Snapshot::kFullAOT)` guard above
-				// it, so it IS present in a release AOT snapshot -- unlike
-				// end_token_pos_, kernel_offset_ and is_optimizable_, which
-				// are inside that guard.
-				kindTag, err := s.ReadTagged32()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
+				if ti != nil {
+					types = append(types, *ti)
 				}
-				funcKind = decodeFunctionKind(kindTag, profile)
-				funcHasKindTag = true
-				// Function::KindTagBits lays the single-bit flags out after
-				// KindBits + RecognizedBits + ModifierBits, so is_static is
-				// NOT at a fixed offset across versions the way the kind is.
-				// It stays unread here rather than guessed; the 2.x path
-				// above has a verified position for it and this one does not.
-			} else if spec.IsFuncType && si == 1 {
-				// packed_parameter_counts is OpTagged32 at scalar index 1.
-				packed, err := s.ReadTagged32()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d packed_param_counts: %w", i, count, err)
+			case isScript:
+				if err := readScriptScalar(s, si, profile, &ss, i, count); err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
-				hasImplicit := (packed & 1) != 0
-				numFixed := int((packed >> 2) & 0x3FFF)
-				numOptional := int((packed >> 16) & 0x3FFF)
-				if hasImplicit && numFixed > 0 {
-					numFixed-- // subtract implicit 'this'
+			case isLoadingUnit:
+				if err := readLoadingUnitScalar(s, &ss, i, count); err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
-				funcTypes = append(funcTypes, FuncTypeInfo{
-					RefID:                ref,
-					NumFixed:             numFixed,
-					NumOptional:          numOptional,
-					HasImplicit:          hasImplicit,
-					ParamTypesArrayRefID: paramTypesRef,
-					TypeParamsRefID:      typeParamsRef,
-				})
-			} else if spec.IsField && si == 0 {
-				// kind_bits is OpTagged32 at scalar index 0.
-				kb, err := s.ReadTagged32()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
-				}
-				fieldKindBits = int32(kb)
-			} else if spec.IsField && si == 1 {
-				// host_offset_or_field_id is OpRefId at scalar index 1.
-				hostOff, err := s.ReadRefId()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d host_offset: %w", i, count, err)
-				}
-				isStatic := (fieldKindBits>>1)&1 != 0
-				offset := int32(hostOff)
-				if isStatic {
-					offset = -1
-				}
-				fields = append(fields, FieldInfo{
-					RefID:            ref,
-					NameRefID:        nameRef,
-					OwnerRefID:       ownerRef,
-					KindBits:         fieldKindBits,
-					HostOffset:       offset,
-					InitializerRefID: sigRef,
-					TypeRefID:        fieldTypeRef,
-				})
-			} else if spec.IsType && si == 0 {
-				// flags is OpUnsigned at scalar index 0 (v3.x only -- see
-				// specType). type_class_id is packed inside it: bit 0 =
-				// nullability, bits [1,3) = TypeState, bits [3,23) = the
-				// 20-bit ClassIdTag (confirmed against Dart SDK source,
-				// runtime/vm/raw_object.h UntaggedType::TypeClassIdBits).
-				flags, err := s.ReadUnsigned()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
-				}
-				classID := int32((flags >> 3) & 0xFFFFF)
-				types = append(types, TypeInfo{RefID: ref, ClassID: classID})
-			} else if isScript {
-				// Script scalars: [line_offset, col_offset, [flags],] kernel_script_index.
-				if profile.ScriptHasLineCol {
-					if si == 0 {
-						v, err := s.ReadTagged32()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script line: %w", i, count, err)
-						}
-						scriptLine = int32(v)
-					} else if si == 1 {
-						v, err := s.ReadTagged32()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script col: %w", i, count, err)
-						}
-						scriptCol = int32(v)
-					} else if profile.ScriptHasFlags && si == 2 {
-						v, err := s.ReadByte()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script flags: %w", i, count, err)
-						}
-						scriptFlags = v
-					} else {
-						v, err := s.ReadTagged32()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
-						}
-						scriptKernelIdx = int32(v)
-					}
-				} else if profile.ScriptHasFlags {
-					if si == 0 {
-						v, err := s.ReadByte()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script flags: %w", i, count, err)
-						}
-						scriptFlags = v
-					} else {
-						v, err := s.ReadTagged32()
-						if err != nil {
-							return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
-						}
-						scriptKernelIdx = int32(v)
-					}
-				} else {
-					v, err := s.ReadTagged32()
-					if err != nil {
-						return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d script kernel_idx: %w", i, count, err)
-					}
-					scriptKernelIdx = int32(v)
-				}
-			} else if isLoadingUnit {
-				// LoadingUnit scalar: id, from
-				// LoadingUnitDeserializationCluster::ReadFill ->
-				// IdBits::encode(d.Read<intptr_t>()).
-				v, err := s.ReadTagged32()
-				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d loading_unit id: %w", i, count, err)
-				}
-				// Was `_ = v`, which silently dropped the id and made every
-				// loading_units.jsonl record report unit_id=0.
-				loadingUnitID = int32(v)
-			} else {
+			default:
 				if err := skipScalar(s, op); err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d scalar: %w", i, count, err)
 				}
@@ -1360,11 +1199,11 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			si := ScriptInfo{
 				RefID:             ref,
 				URLRef:            allRefs[0],
-				LineOffset:        scriptLine,
-				ColOffset:         scriptCol,
-				KernelScriptIndex: scriptKernelIdx,
+				LineOffset:        ss.scriptLine,
+				ColOffset:         ss.scriptCol,
+				KernelScriptIndex: ss.scriptKernelIdx,
 			}
-			_ = scriptFlags // captured but not stored in struct (rarely needed)
+			_ = ss.scriptFlags // captured but not stored in struct (rarely needed)
 			scriptInfos = append(scriptInfos, si)
 		}
 		if isLoadingUnit && len(allRefs) >= 1 {
@@ -1372,7 +1211,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			lui := LoadingUnitInfo{
 				RefID:     ref,
 				ParentRef: allRefs[0],
-				UnitID:    loadingUnitID,
+				UnitID:    ss.loadingUnitID,
 			}
 			loadingUnitInfos = append(loadingUnitInfos, lui)
 		}
@@ -1439,12 +1278,12 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				OwnerRefID:        ownerRef,
 				SignatureRefID:    sigRef,
 				DataRefID:         dataRef,
-				CodeIndex:         funcCodeIndex,
-				NumFixedParams:    funcNumFixed,
-				NumOptionalParams: funcNumOptional,
-				IsStatic:          funcIsStatic,
-				HasKindTag:        funcHasKindTag,
-				FuncKind:          funcKind,
+				CodeIndex:         ss.codeIndex,
+				NumFixedParams:    ss.numFixed,
+				NumOptionalParams: ss.numOptional,
+				IsStatic:          ss.isStatic,
+				HasKindTag:        ss.hasKindTag,
+				FuncKind:          ss.funcKind,
 			})
 		}
 		ref++
