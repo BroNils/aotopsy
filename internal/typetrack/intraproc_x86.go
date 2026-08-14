@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"aotopsy/internal/arch"
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -218,6 +217,10 @@ type x86BasicBlock struct {
 
 // buildBlocksX86 partitions x86_64 instructions into basic blocks.
 // Leaders are at: function start, JMP/Jcc targets, instruction after JMP/RET.
+//
+// NOT merged with ARM64 buildBlocks — see the comment there for why
+// (different instruction/block types, branch classification, and
+// partition approach make a generic version worse than the duplication).
 func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 	if len(insts) == 0 {
 		return nil
@@ -871,41 +874,8 @@ func resolveX86Dispatch(
 		// scan nearby slots for monomorphic targets (same as ARM64).
 		// This handles cases where the dispatch table entry is null/stub
 		// but a nearby slot has a valid Code target.
-		if ctx.DispatchBySlot != nil {
-			candidates := 0
-			var candidateName string
-			var allCandidates []string
-			for offset := 0; offset < 128; offset++ {
-				s := slot + offset
-				entry, ok := ctx.DispatchBySlot[s]
-				if !ok || entry.Kind != cluster.DispatchCode {
-					continue
-				}
-				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-					candidates++
-					candidateName = name
-					allCandidates = append(allCandidates, name)
-				}
-			}
-			if candidates == 1 {
-				res.TargetName = candidateName
-				res.Resolved = true
-				res.Candidates = 1
-			} else if candidates > 1 {
-				// Same rule as the ARM64 path: identical names collapse to a
-				// monomorphic resolution, otherwise it is a candidate set.
-				uniqueNames := map[string]bool{}
-				var unique []string
-				for _, n := range allCandidates {
-					if !uniqueNames[n] {
-						uniqueNames[n] = true
-						unique = append(unique, n)
-					}
-				}
-				sort.Strings(unique)
-				applySelectorCandidates(&res, unique)
-			}
-		}
+		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
+		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }

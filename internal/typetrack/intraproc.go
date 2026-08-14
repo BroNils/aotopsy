@@ -569,7 +569,20 @@ func equalitySuccessor(last uint32, numSuccs int) int {
 }
 
 // buildBlocks constructs basic blocks from an instruction list.
-// Block boundaries are at branch targets and after branch instructions.
+//
+// NOT merged with buildBlocksX86 despite sharing the same algorithm
+// (leader detection → partition → successor edges). The two differ in:
+//   - Instruction type: disasm.Inst (fixed 4-byte, .Raw uint32) vs
+//     X86DecodedInst (variable-length, .Inst x86asm.Inst)
+//   - Branch classification: ARM64 raw-encoding pattern matching
+//     (isBL/isBLR/isB/isCondBranch) vs x86 opcode switch
+//     (x86asm.RET/JMP/IsX86CondJump)
+//   - Partition approach: incremental (iterate, check leader map) vs
+//     sorted-index (sort leader indices, slice between them)
+//
+// A generic version would need type parameters for instruction + block
+// types plus a branch-classifier callback — more abstraction overhead
+// than the ~30 lines of shared partition logic it would save.
 func buildBlocks(insts []disasm.Inst) []basicBlock {
 	if len(insts) == 0 {
 		return nil
@@ -845,45 +858,12 @@ func resolveBLR(
 		// dispatch targets for polymorphic call resolution. Currently the
 		// reverse scan above handles the monomorphic case; CHA would
 		// extend this to polymorphic calls.
-		if ctx.DispatchBySlot != nil {
-			candidates := 0
-			var candidateName string
-			var allCandidates []string
-			// Dispatch slots for class cid start at cid - KOriginElement.
-			baseSlot := t.ClassID - ctx.KOriginElement
-			for offset := 0; offset < 128; offset++ {
-				slot := baseSlot + offset
-				entry, ok := ctx.DispatchBySlot[slot]
-				if !ok || entry.Kind != cluster.DispatchCode {
-					continue
-				}
-				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-					candidates++
-					candidateName = name
-					allCandidates = append(allCandidates, name)
-				}
-			}
-			if candidates == 1 {
-				res.TargetName = candidateName
-				res.Resolved = true
-				res.SlotIndex = -1
-				res.Candidates = 1
-			} else if candidates > 1 {
-				// P5 CHA: multiple dispatch targets. If they all name the
-				// same function it is still monomorphic; otherwise it is a
-				// candidate set, recorded as such.
-				uniqueNames := map[string]bool{}
-				var unique []string
-				for _, n := range allCandidates {
-					if !uniqueNames[n] {
-						uniqueNames[n] = true
-						unique = append(unique, n)
-					}
-				}
-				sort.Strings(unique)
-				applySelectorCandidates(&res, unique)
-			}
+		baseSlot := t.ClassID - ctx.KOriginElement
+		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, baseSlot)
+		if candidates == 1 {
+			res.SlotIndex = -1
 		}
+		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
 	case LatticeTop, LatticeBottom:
 		// No usable type for the call register -- fall back to the selector
 		// immediate the pre-scan recorded for this exact BLR.
