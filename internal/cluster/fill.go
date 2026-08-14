@@ -676,7 +676,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 			// CompressedStackMaps ROData extraction (non-compressed builds).
 			for _, cm := range rodataCSM2Clusters {
-				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile, isVM) {
+				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile) {
 					result.CompressedStackMaps = append(result.CompressedStackMaps,
 						CompressedStackMapsInfo{RefID: p.RefID, Payload: p.Payload})
 				}

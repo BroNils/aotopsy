@@ -808,6 +808,14 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 // indirect call target shortly after.
 const ffiCallTargetSentinel = "__ffi_call_target"
 
+// FFICallMarker is the text emitIndirectCall writes for a recognised FFI
+// native call. Exported because internal/ffitrace scans emitted source for
+// it, and a private copy of the string on that side drifted: it looked for
+// `nativeCall(`, which this package has never emitted, so that detection
+// signal was dead from the day it was written. One constant, one source of
+// truth.
+const FFICallMarker = "ffi_call("
+
 // thrStubSentinelPrefix marks a register as "was just loaded from a known
 // Thread-cached stub entry-point offset" (dart-lang/sdk's
 // CACHED_VM_STUBS_ADDRESSES_LIST, e.g. Thread::write_barrier_entry_point_

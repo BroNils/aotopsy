@@ -217,7 +217,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// For now, we emit ffi_call with the args and a comment indicating
 		// this is a native FFI call with N arguments.
 		argCount := countArgs(argsText)
-		e.emit(indent, "final %s = ffi_call(%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, argsText, argCount)
+		e.emit(indent, "final %s = %s%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, FFICallMarker, argsText, argCount)
 		return
 	}
 

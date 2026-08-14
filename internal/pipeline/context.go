@@ -238,6 +238,17 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
 	fir.ThreadStubOffsets = disasm.ThreadStubOffsets(c.DartVersion, c.IsARM64)
+	// Both tables, not just the stub one. ThreadFieldNames is what
+	// applyStore consults to recognise the vm_tag store that marks an FFI
+	// call target, so leaving it nil disables that detection silently --
+	// see ThreadFieldOffsets. Both are keyed per architecture and per Dart
+	// version by the same profile, so this is correct for ARM64 and x86_64
+	// across 2.x and 3.x alike.
+	var profile *snapshot.VersionProfile
+	if c.Info != nil {
+		profile = c.Info.Version
+	}
+	fir.ThreadFieldNames = ThreadFieldOffsets(c.DartVersion, c.IsARM64, profile)
 	return fir, nil
 }
 
