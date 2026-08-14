@@ -277,24 +277,26 @@ doesn't buy anything.
 ## Known limits (do not claim solved)
 
 - **Dispatch resolution on Dart 2.x is low** (2.12: 129 single-callee out
-  of 5504 BLR, vs 3.9.2: 2378 out of 5354). The cause is not missing data —
-  arity (`packed_fields_`) and `is_static` (`kind_tag_`) are already
-  recovered for 7320/7320 functions. The cause is that 2.x passes
-  arguments via the stack, not registers
-  (`DartCallingConvention::kCpuRegistersForArgs` doesn't exist in
-  `constants_arm64.h` at tag 2.12.0, exists at 3.9.2), so there is no
-  receiver type at entry.
+  of 5504 BLR, vs 3.9.2: 2378 out of 5354). The cause is confirmed (not
+  a dispatch table indexing bug): 2.x passes the receiver via the stack
+  frame, not registers (`DartCallingConvention::kCpuRegistersForArgs`
+  doesn't exist in `constants_arm64.h` at tag 2.12.0, exists at 3.9.2),
+  so there is no receiver type at function entry.
+  Verified against real disassembly: the 2.x dispatch pattern is
+  `LDUR X1, [X29,#-24]` (receiver from stack) → `LDUR X0, [X1,#47]`
+  (field load) → `LDURH W2, [X0,#1]` (class ID from field, not receiver)
+  → `SUB X0, X0, #imm` → `LDR X30, [X21,X0,LSL #3]` → `BLR X30`.
+  The dispatch is on a FIELD's class, not the receiver's class — the
+  type tracker can't track it without knowing the receiver's class,
+  which it can't because the receiver is on the stack.
+  The earlier "off by 2 entries" hypothesis (Layer.find at index 2482,
+  findAnnotations at 2484) is REFUTED: index 2482 is
+  `PrimaryPointerGestureRecognizer.rejectGesture`, not `Layer.find`;
+  `Layer.find` is not in the dispatch table at all (only `findAnnotations`
+  is). The gap was a coincidence, not a systematic offset.
   Seeding `this` from a frame slot has been tried and **discarded**: the
   declaring class is not the exact runtime class, while dispatch lookup
   needs the exact one. Restricting to leaf classes is still wrong.
-  Open lead, with evidence: `Layer` (cid 617) is abstract, its
-  `findAnnotations` subclass implementations occupy cid 619-626, and
-  `Layer.find` resolves via index 2482 while `findAnnotations` starts at
-  2484 — consistent with the 2.x dispatch table being off by about two
-  entries.
-  **Confirm or refute that hypothesis first** before rebuilding the
-  seeding. Do not enable seeding without it; wrong output is worse than
-  `unresolved`.
 
 ## Two gates that must stay green
 
