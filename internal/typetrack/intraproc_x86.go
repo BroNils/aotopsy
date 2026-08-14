@@ -692,6 +692,14 @@ func transferInstructionX86(
 					ctx.X86DispatchResolved++
 				case !classKnown:
 					ctx.X86DispatchNoClass++
+					switch state[x86RegRCX].Kind {
+					case LatticeTop:
+						ctx.X86DispatchClassTop++
+					case LatticeBottom:
+						ctx.X86DispatchClassBottom++
+					default:
+						ctx.X86DispatchClassOther++
+					}
 				default:
 					ctx.X86DispatchNoTable++
 				}

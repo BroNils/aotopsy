@@ -64,7 +64,12 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		X86DispatchNoTable  int `json:"x86_dispatch_no_table,omitempty"`
 		X86DispatchNoClass  int `json:"x86_dispatch_no_class,omitempty"`
 		X86DispatchResolved int `json:"x86_dispatch_resolved,omitempty"`
-		NarrowHits          int `json:"narrow_hits,omitempty"`
+		// NoClass split by cause: never typed (Top) against typed and then
+		// contradicted (Bottom). They need different fixes.
+		X86DispatchClassTop    int `json:"x86_dispatch_class_top,omitempty"`
+		X86DispatchClassBottom int `json:"x86_dispatch_class_bottom,omitempty"`
+		X86DispatchClassOther  int `json:"x86_dispatch_class_other,omitempty"`
+		NarrowHits             int `json:"narrow_hits,omitempty"`
 		NarrowShape         int `json:"narrow_shape,omitempty"`
 		NarrowNoType        int `json:"narrow_no_type,omitempty"`
 		// InstantiatedClasses is the RTA universe: classes observed to be
@@ -91,6 +96,9 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.X86DispatchNoTable = ctx.X86DispatchNoTable
 		report.X86DispatchNoClass = ctx.X86DispatchNoClass
 		report.X86DispatchResolved = ctx.X86DispatchResolved
+		report.X86DispatchClassTop = ctx.X86DispatchClassTop
+		report.X86DispatchClassBottom = ctx.X86DispatchClassBottom
+		report.X86DispatchClassOther = ctx.X86DispatchClassOther
 		report.NarrowHits = ctx.NarrowHits
 		report.NarrowShape = ctx.NarrowShape
 		report.NarrowNoType = ctx.NarrowNoType
