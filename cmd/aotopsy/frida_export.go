@@ -118,6 +118,10 @@ func cmdFridaExport(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load context: %v", err)
 	}
+	// The only LoadContext caller that was not closing its context. Four of
+	// the five did; this one held the mapped ELF open until the process
+	// exited.
+	defer func() { _ = ctx.Close() }()
 
 	// Determine output path
 	if *outPath == "" {
