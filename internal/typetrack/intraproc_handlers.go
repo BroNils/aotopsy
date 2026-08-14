@@ -701,6 +701,7 @@ func handleBLR(tc *transferCtx) bool {
 func handleBL(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 	if target, ok := isBL(raw, tc.inst.Addr); ok {
+		tc.ctx.BLTotal++
 		if tc.result.BLCallSiteTypes == nil {
 			tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 		}
@@ -710,6 +711,12 @@ func handleBL(tc *transferCtx) bool {
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {
+			tc.ctx.BLHasExitType++
+			if calleeAllExit[0].Kind == LatticeKnownClass {
+				tc.ctx.BLExitKnown++
+			} else if calleeAllExit[0].Kind == LatticeBottom {
+				tc.ctx.BLExitBottom++
+			}
 			for r := 0; r <= 7; r++ {
 				if calleeAllExit[r].Kind != LatticeTop {
 					tc.state[r] = calleeAllExit[r]
@@ -720,6 +727,10 @@ func handleBL(tc *transferCtx) bool {
 		} else {
 			calleeExit := tc.ctx.CalleeExitTypes[target]
 			if calleeExit.Kind != LatticeTop {
+				tc.ctx.BLHasExitType++
+				if calleeExit.Kind == LatticeKnownClass {
+					tc.ctx.BLExitKnown++
+				}
 				tc.state[0] = calleeExit
 			} else {
 				tc.state[0] = Top()

@@ -223,6 +223,11 @@ type TypeContext struct {
 	X86DispatchClassTop    int
 	X86DispatchClassBottom int
 	X86DispatchClassOther  int
+	// Debug: BL return value propagation stats.
+	BLTotal        int
+	BLHasExitType  int
+	BLExitKnown    int
+	BLExitBottom   int
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function

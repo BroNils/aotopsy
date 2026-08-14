@@ -268,6 +268,15 @@ func RunInterprocedural(
 		}
 	}
 
+	// Initial CalleeExitTypes population after the first analysis pass,
+	// so the first fixed-point iteration's handleBL can see return types.
+	for target, name := range blTargetToName {
+		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
+			ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+		}
+	}
+
 	// LCA helper.
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }
 
@@ -362,15 +371,17 @@ func RunInterprocedural(
 				result.Functions[name].Intra = intra
 			}
 		}
-	}
 
-	// Fase 7 PART A: populate CalleeExitTypes for call-return tracking.
-	// Map BL target address → callee's ExitTypes[0] (return value type).
-	// Also store full ExitTypes array for full register type propagation.
-	for target, name := range blTargetToName {
-		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-			ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
-			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+		// Update CalleeExitTypes after each re-analysis pass, so the
+		// NEXT iteration's handleBL can see callee return types.
+		// Previously this was only done once after the loop finished,
+		// so handleBL always saw empty CalleeExitTypes during every
+		// iteration — BL return value propagation was completely dead.
+		for target, name := range blTargetToName {
+			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
+				ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+			}
 		}
 	}
 

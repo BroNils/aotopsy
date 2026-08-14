@@ -69,9 +69,15 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		X86DispatchClassTop    int `json:"x86_dispatch_class_top,omitempty"`
 		X86DispatchClassBottom int `json:"x86_dispatch_class_bottom,omitempty"`
 		X86DispatchClassOther  int `json:"x86_dispatch_class_other,omitempty"`
-		NarrowHits             int `json:"narrow_hits,omitempty"`
-		NarrowShape         int `json:"narrow_shape,omitempty"`
-		NarrowNoType        int `json:"narrow_no_type,omitempty"`
+		// BL return value propagation stats: how many BL calls found
+		// callee exit types, and how many of those were KnownClass.
+		BLTotal       int `json:"bl_total,omitempty"`
+		BLHasExitType int `json:"bl_has_exit_type,omitempty"`
+		BLExitKnown   int `json:"bl_exit_known,omitempty"`
+		BLExitBottom  int `json:"bl_exit_bottom,omitempty"`
+		NarrowHits    int `json:"narrow_hits,omitempty"`
+		NarrowShape   int `json:"narrow_shape,omitempty"`
+		NarrowNoType  int `json:"narrow_no_type,omitempty"`
 		// InstantiatedClasses is the RTA universe: classes observed to be
 		// allocated anywhere in the program. RTAApplied says whether the
 		// selector-offset scan actually filtered candidates by it -- below
@@ -99,6 +105,10 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.X86DispatchClassTop = ctx.X86DispatchClassTop
 		report.X86DispatchClassBottom = ctx.X86DispatchClassBottom
 		report.X86DispatchClassOther = ctx.X86DispatchClassOther
+		report.BLTotal = ctx.BLTotal
+		report.BLHasExitType = ctx.BLHasExitType
+		report.BLExitKnown = ctx.BLExitKnown
+		report.BLExitBottom = ctx.BLExitBottom
 		report.NarrowHits = ctx.NarrowHits
 		report.NarrowShape = ctx.NarrowShape
 		report.NarrowNoType = ctx.NarrowNoType
