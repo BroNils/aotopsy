@@ -105,11 +105,11 @@ mindmap
 - `errcheck`, `gofmt`, `goimports`, `gosec`, `staticcheck` findings resolved
 - Dead code removed, package doc comments added
 - `internal/strutil` shared package replaces three duplicated string-sanitization implementations
-- `internal/arch` shared package replaces 7 duplicated x86 register/branch functions across 3 packages (−247 lines)
-- `transferInstruction` 860-baris if-chain → 10 handler functions (`intraproc_handlers.go`)
-- `readFillRefs` 200-baris scalar if-chain → 6 handler functions (`fill_scalar_handlers.go`)
-- `BuildTypeContext` 456-baris monolith → 10 sub-builder functions (`sources_builders.go`)
-- `buildFuncIR` 202-baris closure → `funcIRBuilder` struct + `Build` method (`funcir_builder.go`)
+- `internal/arch` shared package replaces 7 duplicated x86 register/branch functions across 3 packages (-247 lines)
+- `transferInstruction` 860-line if-chain → 10 handler functions (`intraproc_handlers.go`)
+- `readFillRefs` 200-line scalar if-chain → 6 handler functions (`fill_scalar_handlers.go`)
+- `BuildTypeContext` 456-line monolith → 10 sub-builder functions (`sources_builders.go`)
+- `buildFuncIR` 202-line closure → `funcIRBuilder` struct + `Build` method (`funcir_builder.go`)
 - Dead code removed: `retryLoopSynthesis`, `OldArrayFill`/`OldTypeArgsFill`, `isVM` parameter from `extractRODataPayloads`
 - Regression tests use environment variable lookups (`AOTOPSY_TEST_SAMPLE_*`) instead of hardcoded paths
 - `NOTICE` file for Dart SDK derived-data attribution (BSD-3-Clause compatibility)
