@@ -289,8 +289,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 					if name, ok2 := e.symbols(va); ok2 && name != "" {
 						// P7: Async detection via call targets.
 						// Direct BL to async stubs (rare in AOT — usually inlined).
-						if strings.Contains(name, "init_async") || strings.Contains(name, "return_async") ||
-							strings.Contains(name, "InitAsync") || strings.Contains(name, "ReturnAsync") {
+						//
+						// This carried the same loose `Contains(name,
+						// "init_async")` that was flagged in call.go, and was
+						// left untouched when that one was changed -- so the
+						// "fix" hardened the path that never fires and left
+						// the one that does. Both now share asyncStubRole.
+						if isAsyncStubName(name) {
 							fir.IsAsync = true
 							break
 						}
@@ -1226,10 +1231,21 @@ func (e *emitter) extractLoopCondition(id int) string {
 // Handles simple comparisons by flipping the operator, and wraps
 // complex expressions with !(...).
 // A single comparison, and nothing else: `<operand> <op> <operand>`. Operands
-// may contain parentheses (for grouped sub-expressions like `(a + b) > 10`)
-// but may not contain spaces or logical operators, so a compound condition
-// never matches.
-var singleCmpRe = regexp.MustCompile(`^([A-Za-z0-9_.$\[\]'()]+) (>=|<=|==|!=|>|<) ([A-Za-z0-9_.$\[\]'-()]+)$`)
+// may contain parentheses, so `f() == null` flips, but never spaces or
+// logical operators, so a compound condition never matches.
+//
+// The `-` MUST stay last in the right-hand class. Written as `'-()` it is a
+// RANGE from `'` (0x27) to `(` (0x28) rather than a literal hyphen, and
+// negative literals silently stopped matching: `x != -1` flipped to
+// `x == -1` before, and degraded to `!(x != -1)` after. Both are correct
+// Dart; one is readable. 41 such comparisons on the 3.12 x86_64 sample.
+//
+// Note this still cannot match `(a + b) > 10` -- the spaces inside the
+// parentheses put it outside the class -- which an earlier version of this
+// comment gave as the reason for allowing parentheses. Grouped
+// sub-expressions containing operators go to the `!(...)` fallback, as they
+// always did.
+var singleCmpRe = regexp.MustCompile(`^([A-Za-z0-9_.$\[\]'()]+) (>=|<=|==|!=|>|<) ([A-Za-z0-9_.$\[\]'()-]+)$`)
 
 var cmpFlips = map[string]string{
 	"==": "!=",

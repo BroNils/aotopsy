@@ -130,18 +130,18 @@ func cmdTHRAudit(args []string) error {
 		return ""
 	}
 
-	type codeInfo struct {
-		funcName     string
-		ownerName    string
-		isConstructor bool
-	}
+	// pipeline.CodeNameInfo rather than a local struct, so the
+	// constructor rule ("the Function name already carries the class, do
+	// not prepend the owner") is applied by CodeNameInfo.Qualified and
+	// lives in exactly one place. A local copy of that branch was what
+	// this file had, twice.
 	// Resolved via pipeline.ResolveCodeOwner rather than trusting
 	// ce.OwnerRef directly -- Code.OwnerRef is confirmed unreliable on
 	// some real snapshots (Dart 3.7.0 x86_64: ~5.4% of functions get a
 	// bogus shared owner resolving to CID 61/Mint), which would show up
 	// here as an unnamed/misattributed function in the audit report.
 	byCodeIndex := pipeline.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
-	codeNames := make(map[int]codeInfo)
+	codeNames := make(map[int]pipeline.CodeNameInfo)
 	for _, ce := range result.Codes {
 		owner, ok := pipeline.ResolveCodeOwner(ce, refToNamed, byCodeIndex)
 		if !ok {
@@ -152,10 +152,10 @@ func cmdTHRAudit(args []string) error {
 		if isCtor && fn != "" {
 			fn = "new " + fn
 		}
-		codeNames[ce.RefID] = codeInfo{
-			funcName:      fn,
-			ownerName:     resolveOwnerName(owner),
-			isConstructor: isCtor,
+		codeNames[ce.RefID] = pipeline.CodeNameInfo{
+			FuncName:      fn,
+			OwnerName:     resolveOwnerName(owner),
+			IsConstructor: isCtor,
 		}
 	}
 
@@ -163,14 +163,7 @@ func cmdTHRAudit(args []string) error {
 	symbols := make(map[uint64]string)
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
-		ci := codeNames[r.RefID]
-		var name string
-		if ci.isConstructor {
-			name = qualifiedName("", ci.funcName, r.PCOffset)
-		} else {
-			name = qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
-		}
-		symbols[va] = name
+		symbols[va] = codeNames[r.RefID].Qualified(r.PCOffset)
 	}
 	lookup := disasm.PlaceholderLookup(symbols)
 
@@ -213,13 +206,7 @@ func cmdTHRAudit(args []string) error {
 		funcCode := code[funcStart:funcEnd]
 		funcVA := codeVA + funcStart
 
-		ci := codeNames[r.RefID]
-		var funcName string
-		if ci.isConstructor {
-			funcName = qualifiedName("", ci.funcName, r.PCOffset)
-		} else {
-			funcName = qualifiedName(ci.ownerName, ci.funcName, r.PCOffset)
-		}
+		funcName := codeNames[r.RefID].Qualified(r.PCOffset)
 
 		var records []disasm.THRAuditRecord
 		if isARM64 {

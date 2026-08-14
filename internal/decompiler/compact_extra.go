@@ -246,9 +246,17 @@ var exprSimplificationRules = []exprRule{
 	{regexp.MustCompile(`([^()\s]+) \* 1\b`), "$1"},
 	// 1 * a → a
 	{regexp.MustCompile(`\b1 \* ([^()\s]+)`), "$1"},
-	// a * 0 → 0 (skip if a contains parens — could be a method call with side effects)
+	// a * 0 → 0, and 0 * a → 0. Dropping `a` would drop its side effects,
+	// so the operand class `[^()\s]` excludes parentheses -- a call cannot
+	// match, by construction, and no extra guard is needed. (An earlier
+	// comment here presented that as a caveat still to handle; it was
+	// already handled by the class itself.)
+	//
+	// What remains outside the guard is a bare field load, `a.b * 0`. In
+	// this emitter a `.` with no parentheses is a field read, not a getter
+	// call -- calls always render with an argument list -- so there is no
+	// side effect to lose.
 	{regexp.MustCompile(`([^()\s]+) \* 0\b`), "0"},
-	// 0 * a → 0 (same caveat: skip if a contains parens)
 	{regexp.MustCompile(`\b0 \* ([^()\s]+)`), "0"},
 	// a + 0 → a
 	{regexp.MustCompile(`([^()\s]+) \+ 0\b`), "$1"},

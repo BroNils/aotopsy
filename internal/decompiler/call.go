@@ -163,22 +163,18 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	// so the signature gets `async`. Await calls are rendered as `await`
 	// rather than a regular call.
 	//
-	// Use specific suffix matching rather than bare Contains to avoid
-	// false positives: "init_async" alone matches "reinit_async_data",
-	// "init_async_helper", etc. The actual stub names are
-	// "InitAsync"/"_initAsync" (from stub_code_compiler_arm64.cc) and
-	// "ReturnAsync"/"_returnAsync" — verified via gh search + gh api.
-	if strings.HasSuffix(name, "initasync") || strings.Contains(name, "_initasync") {
+	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
+	// pre-pass in emit.go so the two cannot drift apart.
+	switch asyncStubRole(name) {
+	case asyncRoleInit:
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return
-	}
-	if strings.Contains(name, "await") && strings.Contains(name, "suspend") {
+	case asyncRoleAwait:
 		e.fir.IsAsync = true
 		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 		return
-	}
-	if strings.HasSuffix(name, "returnasync") || strings.Contains(name, "_returnasync") {
+	case asyncRoleReturn:
 		e.fir.IsAsync = true
 		e.emit(indent, "return %s;", tmpName)
 		return
@@ -238,19 +234,19 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// runtime_offsets_extracted.h (ground truth, not a guess).
 	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
-		// P7: Detect async/await stubs loaded from THR.
-		// Same specific suffix matching as emitDirectCall above.
-		if strings.HasSuffix(stubName, "initasync") || strings.Contains(stubName, "_initasync") {
+		// P7: Detect async/await stubs loaded from THR. Same classifier as
+		// emitDirectCall -- this is the path that actually sees the
+		// snake_case Thread-table spellings.
+		switch asyncStubRole(stubName) {
+		case asyncRoleInit:
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
 			return
-		}
-		if strings.Contains(stubName, "await") && strings.Contains(stubName, "suspend") {
+		case asyncRoleAwait:
 			e.fir.IsAsync = true
 			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
 			return
-		}
-		if strings.HasSuffix(stubName, "returnasync") || strings.Contains(stubName, "_returnasync") {
+		case asyncRoleReturn:
 			e.fir.IsAsync = true
 			e.emit(indent, "return %s;", tmpName)
 			return
