@@ -834,11 +834,16 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	base := strings.ToLower(op.memBase)
 	if base == fir.ThreadReg && op.hasDisp {
 		// Dart AOT's native/FFI-leaf-call bookkeeping stores the call
-		// target into Thread::vm_tag_ immediately before calling that
-		// same register (il_arm64.cc/il_x64.cc FfiCallInstr::EmitNativeCode).
-		// The offset differs by architecture and version, so we check
-		// the SDK-derived ThreadFieldNames table for the "vm_tag" field
-		// name rather than hardcoding a specific offset.
+		// target into Thread::vm_tag_ via TransitionGeneratedToNative
+		// (assembler_arm64.cc / assembler_x64.cc), which runs in PRODUCT
+		// builds. The offset differs by architecture and version, so we
+		// check the SDK-derived ThreadFieldNames table for the "vm_tag"
+		// field name rather than hardcoding a specific offset.
+		//
+		// NOTE: FfiCallInstr::EmitNativeCode (il_arm64.cc / il_x64.cc)
+		// also stores to vm_tag_ but only under #if !defined(PRODUCT),
+		// so that path is NOT the one that fires in release builds.
+		// TransitionGeneratedToNative is the PRODUCT-build source.
 		//
 		// Previously this fired on ANY store to ANY Thread field, which
 		// marked 43528 stores as FFI bookkeeping on the x86_64 sample —
