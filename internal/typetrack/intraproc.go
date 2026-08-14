@@ -361,6 +361,34 @@ func AnalyzeFunction(
 		}
 	}
 
+	// Pattern 2.x D: LDURH Wn, [Xm,#1] → ... → LDR X30, [X21, Xn, LSL #3] → BLR X30
+	// When selector_offset == kOriginElement, the ADD/SUB is a no-op (offset=0)
+	// and the compiler omits it entirely. The class ID from LDURH goes directly
+	// into the dispatch table LDR without any arithmetic. selectorOffset = 0.
+	// There may be intervening instructions (PP loads, STP pushes) between
+	// the LDURH and the LDR, so scan forward up to 4 instructions.
+	for i := 0; i < len(insts)-2; i++ {
+		// Look for LDURH Wn, [Xm,#1] (class ID extraction, 2.x style)
+		_, ldurhRt, ldurhImm9, ldurhOK := isLDURH(insts[i].Raw)
+		if !ldurhOK || ldurhImm9 != 1 || ldurhRt >= 31 {
+			continue
+		}
+		// Scan forward up to 4 instructions for LDR X30, [X21, Xn, LSL #3]
+		for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
+			base, rm, rt, ldrOK := isLDRRegExtended(insts[j].Raw)
+			if !ldrOK || base != 21 || rt != 30 || rm != ldurhRt {
+				continue
+			}
+			// Next: BLR X30
+			if j+1 < len(insts) {
+				if blrReg, ok := isBLR(insts[j+1].Raw); ok && blrReg == 30 {
+					ctx.SelectorOffsets[insts[j+1].Addr] = 0
+				}
+			}
+			break
+		}
+	}
+
 	// Build basic blocks.
 	blocks := buildBlocks(insts)
 	if len(blocks) == 0 {
