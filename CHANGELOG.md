@@ -86,6 +86,18 @@ mindmap
 - `meetType` preserves `KnownStub` when both stubs are identical
 - x86_64 typetrack completeness: stack tracking, field lookup, LEA dispatch, allocation stub detection
 - `knownVoidSelectors` removed non-void entries (`IOSink.write()` returns `Future`)
+- THR store FFI detection scope: only `vm_tag` field triggers FFI sentinel (was any THR store, 43528 false positives on x86_64)
+- ROData payload alignment: `extractRODataPayloads` uses `kObjectAlignmentLog2=4` (was `dataImageAlignment`, conflating base alignment with delta stride)
+- `recordFieldStore` unanimity: conflicting field stores drop entry (sentinel -1) instead of first-write-wins
+- `funcKindMask` version-keyed decoding: 2.10 had 4-bit mask (should be 5), 2.18 had 5-bit (should be 4) — SDK gate across 22 versions
+- VM stub names reversed: image laid out backwards from `VM_STUB_CODE_LIST`, 9 type-testing stubs positioned after Subtype7TestCache
+- x86_64 calling convention: was using ARM64's `{R1,R2,R3,R5,R6,R7}` instead of `{RDI,RSI,RDX,RBX,R8,R9}` — parameter 3 seeded into RBP (frame pointer)
+- x86_64 compressed-pointer decompression: `ADD RAX, [THR+heap_base]` was killing KnownClass at every field load — now identity on type lattice
+- Async detection: `asyncStubRole` shared between `call.go` and `emit.go` (was loose `Contains` in both, independently wrong)
+- `invertCondition` regex: `'-()` in character class was a range, negative literals stopped matching
+- `replaceIdent` skips string literals to avoid corrupting constants
+- `LoadContext` fd leak: `frida_export.go` found as real leaking caller, 7 manual `Close()` → one `defer`
+- `readFillInstance` unboxed read: TODO settled against SDK — bitmap IS compressed-word indexed, count locked by `kBitsPerWord/kBitsPerInt32`
 
 ## Code Quality
 
@@ -93,5 +105,11 @@ mindmap
 - `errcheck`, `gofmt`, `goimports`, `gosec`, `staticcheck` findings resolved
 - Dead code removed, package doc comments added
 - `internal/strutil` shared package replaces three duplicated string-sanitization implementations
+- `internal/arch` shared package replaces 7 duplicated x86 register/branch functions across 3 packages (−247 lines)
+- `transferInstruction` 860-baris if-chain → 10 handler functions (`intraproc_handlers.go`)
+- `readFillRefs` 200-baris scalar if-chain → 6 handler functions (`fill_scalar_handlers.go`)
+- `BuildTypeContext` 456-baris monolith → 10 sub-builder functions (`sources_builders.go`)
+- `buildFuncIR` 202-baris closure → `funcIRBuilder` struct + `Build` method (`funcir_builder.go`)
+- Dead code removed: `retryLoopSynthesis`, `OldArrayFill`/`OldTypeArgsFill`, `isVM` parameter from `extractRODataPayloads`
 - Regression tests use environment variable lookups (`AOTOPSY_TEST_SAMPLE_*`) instead of hardcoded paths
 - `NOTICE` file for Dart SDK derived-data attribution (BSD-3-Clause compatibility)
