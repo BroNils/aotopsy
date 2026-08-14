@@ -40,11 +40,12 @@ type NamedObject struct {
 	// method has no receiver, so its argument 0 is an ordinary parameter --
 	// seeding it with the owning class would be a fabricated type.
 	IsStatic bool
-	// FuncKind is UntaggedFunction::Kind -- the low bits of kind_tag_ -- or
-	// -1 when it was not captured. FunctionKindConstructor is the only value
-	// this project acts on so far. See funcKindMask3x for why the width is
-	// version-dependent.
-	FuncKind int
+	// FuncKind is UntaggedFunction::Kind, NORMALISED: the raw ordinal is
+	// version-dependent (2.10 numbers Constructor 6, later versions 5) and
+	// so is the field width, so decodeFunctionKind maps both onto a
+	// canonical value at parse time. FunctionKindUnknown when the version
+	// is outside the verified range or the tag was not captured.
+	FuncKind FunctionKind
 	// HasKindTag is false when kind_tag was not captured, so IsStatic=false
 	// cannot be mistaken for "known to be an instance method".
 	HasKindTag bool
@@ -1132,7 +1133,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		funcCodeIndex := -1
 		funcNumFixed, funcNumOptional := -1, -1
 		var funcIsStatic, funcHasKindTag bool
-		funcKind := -1
+		funcKind := FunctionKindUnknown
 		// Script scalar capture: line_offset, col_offset, [flags], kernel_script_index.
 		var scriptLine, scriptCol, scriptKernelIdx int32
 		var scriptFlags byte
@@ -1183,7 +1184,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				}
 				funcIsStatic = (kindTag>>16)&1 == 1
 				funcHasKindTag = true
-				funcKind = int(kindTag & funcKindMask2x)
+				funcKind = decodeFunctionKind(kindTag, profile)
 			} else if spec.IsFunction && si == 1 && len(spec.Scalars) == 2 {
 				// Dart 3.x: the Function fill is ReadUnsigned(code_index)
 				// then Read<uint32_t>(kind_tag_) -- see specFunction. The
@@ -1202,7 +1203,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				if err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
 				}
-				funcKind = int(kindTag & funcKindMask3x)
+				funcKind = decodeFunctionKind(kindTag, profile)
 				funcHasKindTag = true
 				// Function::KindTagBits lays the single-bit flags out after
 				// KindBits + RecognizedBits + ModifierBits, so is_static is
