@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"os"
+	"sort"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
@@ -27,7 +28,7 @@ import (
 func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]string {
 	debug := os.Getenv("AOTOPSY_DEBUG_VMSTUBS") != ""
 	out := make(map[uint64]string)
-	names := disasm.VMStubNames(info.Version.DartVersion)
+	names := disasm.VMStubNamesInImageOrder(info.Version.DartVersion)
 	if names == nil || len(info.VmData.Data) == 0 || info.VmHeader == nil || len(info.VmInstructions.Data) == 0 {
 		if debug {
 			fmt.Fprintf(os.Stderr, "vmstubs: names=%v vmDataLen=%d vmHeader=%v vmInstrLen=%d\n", names != nil, len(info.VmData.Data), info.VmHeader != nil, len(info.VmInstructions.Data))
@@ -83,20 +84,32 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
 	codeVA := info.VmInstructions.VA + codeOff
 
-	pcOffByRef := make(map[int]uint32, len(ranges))
-	for _, r := range ranges {
-		pcOffByRef[r.RefID] = r.PCOffset
+	// Zip names against ranges sorted by ADDRESS, not by Code-cluster index.
+	//
+	// This used to walk result.Codes in cluster order and assign names[i],
+	// which put VM_STUB_CODE_LIST entry 0 (`JumpToFrame`) at the lowest
+	// address. The symbol table of a 3.12.2 build says `JumpToFrame` is at
+	// the HIGHEST: the image is laid out in reverse, and the 9
+	// type-testing stubs sit in the middle rather than in an unnamed tail.
+	// Every name was wrong. See disasm.VMStubNamesInImageOrder for the
+	// derivation and the ground truth it came from.
+	sorted := make([]cluster.CodeRange, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PCOffset < sorted[j].PCOffset })
+
+	if len(sorted) != len(names) && debug {
+		// A mismatch means the composed list and the image disagree about
+		// how many stubs exist, so the zip is offset and every name after
+		// the divergence is wrong. Report it rather than emit them.
+		fmt.Fprintf(os.Stderr, "vmstubs: %d ranges but %d composed names -- refusing to name\n",
+			len(sorted), len(names))
+	}
+	if len(sorted) != len(names) {
+		return out
 	}
 
-	for i, c := range result.Codes {
-		if i >= len(names) {
-			break // the +9 unnamed tail (see disasm.VMStubNames doc comment) -- don't guess
-		}
-		pcOff, ok := pcOffByRef[c.RefID]
-		if !ok {
-			continue
-		}
-		funcVA := codeVA + uint64(pcOff) - codeOff
+	for i, r := range sorted {
+		funcVA := codeVA + uint64(r.PCOffset) - codeOff
 		out[funcVA] = names[i]
 	}
 	return out
