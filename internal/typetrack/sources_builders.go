@@ -114,12 +114,32 @@ func buildPoolClassByIndex(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 			continue
 		}
 		classID := -1
+		// Check isolate RefCID first, then VM VmRefCID.
+		// Pool entries can reference objects from either snapshot;
+		// VM objects (e.g. Type, Class) are common in the pool but
+		// only have VmRefCID, not RefCID. Without this fallback,
+		// PoolClassByIndex was empty for every VM-referenced pool
+		// entry, which on 2.12 meant pp_hits=0 across the entire
+		// binary (every PP load of a Type/Class came from the VM
+		// snapshot).
 		if pl.RefCID != nil {
 			if cid, ok := pl.RefCID[pe.RefID]; ok && cid >= 0 {
 				if pl.CT != nil && cid == pl.CT.Type {
 					if ti, ok := refToType[pe.RefID]; ok && ti.ClassID >= 0 {
 						classID = int(ti.ClassID)
 					}
+				} else {
+					classID = cid
+				}
+			}
+		}
+		if classID < 0 && pl.VmRefCID != nil {
+			if cid, ok := pl.VmRefCID[pe.RefID]; ok && cid >= 0 {
+				if pl.CT != nil && cid == pl.CT.Type {
+					// VM Type object: resolve to the class it represents.
+					// refToType only covers isolate Types; VM Types are
+					// in vmResult.Types which we don't have here. Skip —
+					// the isolate Type path above handles the common case.
 				} else {
 					classID = cid
 				}

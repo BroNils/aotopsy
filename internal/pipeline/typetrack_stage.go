@@ -241,6 +241,7 @@ func runTypeInference(
 		CodeRefToName: codeRefToName,
 		VmRefToStr:    pl.VmRefToStr,
 		VmRefToNamed:  pl.VmRefToNamed,
+		VmRefCID:      pl.VmRefCID,
 		PoolCodeNames: poolCodeNames,
 	}
 

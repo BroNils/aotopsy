@@ -281,6 +281,7 @@ type PoolLookupData struct {
 	CodeRefToName map[int]string               // code ref ID → function name
 	VmRefToStr    map[int]string               // VM snapshot strings by ref ID
 	VmRefToNamed  map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	VmRefCID      map[int]int                  // VM snapshot CID by ref ID
 	PoolCodeNames map[int]string               // PP index → function name for Code objects
 }
 
