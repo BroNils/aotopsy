@@ -305,7 +305,20 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 			return true
 		}
 		if rm < 31 && tc.state[rm].Kind == LatticeKnownDispatchIndex {
-			tc.state[rt] = KnownDispatch(tc.state[rm].DispatchIndex)
+			if tc.state[rm].SelectorOnly {
+				// Selector-only: the index register holds a selector
+				// offset, not an absolute slot. Preserve SelectorOnly
+				// so resolveBLR uses the selector scan path instead
+				// of a direct slot lookup (which would fail because
+				// the selector offset is negative/invalid as a slot).
+				// This is the common 2.x dispatch pattern:
+				//   SUB X0, X0, #imm  ; SelectorDispatch(-imm)
+				//   LDR X30, [X21, X0, LSL #3]
+				//   BLR X30
+				tc.state[rt] = tc.state[rm]
+			} else {
+				tc.state[rt] = KnownDispatch(tc.state[rm].DispatchIndex)
+			}
 		} else if rm < 31 && tc.state[rm].Kind == LatticeKnownClass {
 			slot := tc.state[rm].ClassID - tc.ctx.KOriginElement
 			tc.state[rt] = KnownDispatch(slot)
