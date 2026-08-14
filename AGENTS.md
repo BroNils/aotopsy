@@ -276,27 +276,34 @@ doesn't buy anything.
 
 ## Known limits (do not claim solved)
 
-- **Dispatch resolution on Dart 2.x is low** (2.12: 129 single-callee out
-  of 5504 BLR, vs 3.9.2: 2378 out of 5354). The cause is confirmed (not
-  a dispatch table indexing bug): 2.x passes the receiver via the stack
-  frame, not registers (`DartCallingConvention::kCpuRegistersForArgs`
-  doesn't exist in `constants_arm64.h` at tag 2.12.0, exists at 3.9.2),
-  so there is no receiver type at function entry.
-  Verified against real disassembly: the 2.x dispatch pattern is
-  `LDUR X1, [X29,#-24]` (receiver from stack) → `LDUR X0, [X1,#47]`
-  (field load) → `LDURH W2, [X0,#1]` (class ID from field, not receiver)
-  → `SUB X0, X0, #imm` → `LDR X30, [X21,X0,LSL #3]` → `BLR X30`.
-  The dispatch is on a FIELD's class, not the receiver's class — the
-  type tracker can't track it without knowing the receiver's class,
-  which it can't because the receiver is on the stack.
-  The earlier "off by 2 entries" hypothesis (Layer.find at index 2482,
-  findAnnotations at 2484) is REFUTED: index 2482 is
-  `PrimaryPointerGestureRecognizer.rejectGesture`, not `Layer.find`;
-  `Layer.find` is not in the dispatch table at all (only `findAnnotations`
-  is). The gap was a coincidence, not a systematic offset.
-  Seeding `this` from a frame slot has been tried and **discarded**: the
-  declaring class is not the exact runtime class, while dispatch lookup
-  needs the exact one. Restricting to leaf classes is still wrong.
+- **Dispatch resolution on Dart 2.x was low** (2.12: 129 single-callee out
+  of 5504 BLR, vs 3.9.2: 2378 out of 5354). Three bugs were found and fixed:
+  1. `buildPoolClassByIndex` only checked isolate `RefCID`, not VM `VmRefCID`
+     — pool entries referencing VM objects (Type, Class) were silently
+     dropped. `pool_hits` went from 0 to 172119.
+  2. `CalleeExitTypes` was populated once after the fixed-point loop, not
+     inside it — BL return value propagation was completely dead. `BL has
+     exit type` went from 0 to 834124.
+  3. `handleDispatchTableLoad` dropped the `SelectorOnly` flag when
+     propagating `KnownDispatchIndex` through `LDR [X21, Xm, LSL #3]`. The
+     common 2.x pattern (`SUB X0, X0, #imm → LDR X30, [X21, X0, LSL #3] →
+     BLR X30`) set `SelectorOnly=true` at the SUB, but the LDR replaced it
+     with `KnownDispatch(selectorOffset)` which has `SelectorOnly=false`.
+     `resolveBLR` then tried a direct slot lookup at a negative selector
+     offset (always fails) instead of the selector scan fallback. Fix:
+     preserve `SelectorOnly` through the LDR. `blr.polymorphic` went from
+     41 to 2997, `unresolved` from 5334 to 2378. Total resolved: 3.1% → 56.8%.
+
+  The earlier "chicken-and-egg genuine" conclusion was wrong — the root
+  cause was not 2.x stack-based receiver passing, but a type tracker bug.
+  2.x does pass the receiver via the stack (`DartCallingConvention` does
+  not exist in `constants_arm64.h` at 2.12.0, first appears at 3.4.3),
+  but the selector scan fallback does not need the receiver class — it
+  scans all dispatch table entries at a given selector offset.
+  Seeding `this` from a frame slot was tried and discarded for a different
+  reason: the declaring class is not the exact runtime class, while direct
+  slot lookup needs the exact one. The selector scan does not have this
+  limitation.
 
 ## Two gates that must stay green
 
