@@ -543,209 +543,29 @@ func cmdDecompileNative(args []string) error {
 		}
 	}
 
-	buildFuncIR := func(r cluster.CodeRange) (*decompiler.FuncIR, error) {
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			return nil, fmt.Errorf("empty function range")
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
-		name := symbolNames[funcVA]
-
-		var fir *decompiler.FuncIR
-		if isARM64 {
-			insts := disasm.Disassemble(funcCode, disasm.Options{BaseAddr: funcVA})
-			fir = decompiler.BuildARM64IR(name, insts)
-		} else {
-			xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
-			fir = decompiler.BuildX86IR(name, xinsts)
-		}
-		if masks, ok := buildArgRegMasks()[funcVA]; ok {
-			if regIdx, confident := resolveArgRegIndices(masks); confident {
-				fir.ArgRegIndices = regIdx
-			}
-		}
-		fir.ThreadStubOffsets = disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
-		// Every Thread field, not just the cached stub entry points. This is
-		// what lets object_null / bool_true / bool_false render as null /
-		// true / false -- the way x86_64 materialises them, since it has no
-		// NULL_REG.
-		fir.ThreadFieldNames = threadFieldOffsets(info.Version.DartVersion, isARM64, info.Version)
-		fir.ParamTypeNames = paramTypeNamesFor(r)
-		fir.TypeParamNames = genericParamNamesFor(r)
-		fir.FieldNameResolver = fieldNameResolver
-
-		// A1: Local variable type inference — populate LocalTypeHints from
-		// ParamTypeNames (arg0 → "int", arg1 → "String", etc.).
-		// Also resolve receiver class ID for per-class field name resolution (A2).
-		if len(fir.ParamTypeNames) > 0 {
-			fir.LocalTypeHints = make(map[string]string)
-			for i, typeName := range fir.ParamTypeNames {
-				if typeName != "" {
-					fir.LocalTypeHints[fmt.Sprintf("arg%d", i)] = typeName
-				}
-			}
-		}
-		// A2: Set ReceiverClassID from codeRefToReceiverClassID map.
-		if r.RefID >= 0 {
-			if cid, ok := codeRefToReceiverClassID[r.RefID]; ok && cid > 0 {
-				fir.ReceiverClassID = cid
-			}
-		}
-		if len(closureParents) > 0 && r.RefID >= 0 {
-			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-			if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok {
-				parent := closureParents[owner.RefID]
-				// Drop same-name parents. A tear-off's ClosureData points at a
-				// DIFFERENT Function object that shares the method's name, so a
-				// ref-level self-check (done in BuildClosureParents) does not
-				// catch it: 49 of 99 annotations were "closure declared in: X"
-				// on X itself. Comparing names removes those without losing any
-				// genuinely nested closure.
-				if parent != "" && parent != fir.Name &&
-					!strings.HasPrefix(fir.Name, parent+"_") {
-					fir.EnclosingFunction = parent
-				}
-			}
-		}
-		// Wire exception handlers from cluster capture → decompiler FuncIR.
-		if handlers, ok := codeRefToExcHandlers[r.RefID]; ok {
-			fir.ExceptionHandlers = make([]decompiler.ExceptionHandlerEntry, len(handlers))
-			for i, h := range handlers {
-				fir.ExceptionHandlers[i] = decompiler.ExceptionHandlerEntry{
-					PCOffset:        h.PCOffset,
-					OuterTryIndex:   h.OuterTryIndex,
-					NeedsStacktrace: h.NeedsStacktrace,
-					HasCatchAll:     h.HasCatchAll,
-					IsGenerated:     h.IsGenerated,
-				}
-			}
-
-			// Recover try EXTENTS from PcDescriptors and pair each with its
-			// handler. endPC is the function's size: the last descriptor has no
-			// successor to delimit it, so without this the final region would
-			// be dropped.
-			if entries, ok := codeRefToPcDesc[r.RefID]; ok && len(entries) > 0 {
-				regions := cluster.BuildTryRegions(entries, r.Size)
-				// Recover enclosing trys that left no descriptor of their own:
-				// a pc inside try N is inside handler[N].outer_try_index too.
-				regions = cluster.ExpandOuterTryRegions(regions, handlers)
-				for _, reg := range regions {
-					if reg.TryIndex < 0 || reg.TryIndex >= len(fir.ExceptionHandlers) {
-						// try_index must index this Code's own handler table;
-						// anything else means a mismatched Code/handler pair
-						// rather than a usable region.
-						continue
-					}
-					h := fir.ExceptionHandlers[reg.TryIndex]
-					fir.TryRegions = append(fir.TryRegions, decompiler.TryRegionEntry{
-						StartVA:   funcStart + codeVA + uint64(reg.StartPC),
-						EndVA:     funcStart + codeVA + uint64(reg.EndPC),
-						TryIndex:  reg.TryIndex,
-						Handler:   h,
-						HandlerVA: funcStart + codeVA + uint64(h.PCOffset),
-					})
-				}
-				// Widen to basic-block boundaries. Sound because a block has a
-				// single entry, so a block containing any in-try pc is entirely
-				// in-try. Raw descriptor ranges are otherwise single-instruction
-				// lower bounds.
-				fir.SnapTryRegionsToBlocks()
-			}
-		}
-
-		// Inlined-frame annotation: for each block, ask the CodeSourceMap which
-		// inline stack is active at its start VA and resolve the indices to
-		// function names. Blocks belonging to the function itself get nothing.
-		if csm, ok := codeRefToCSM[r.RefID]; ok && len(fir.Blocks) > 0 {
-			names := codeRefToInlinedNames[r.RefID]
-			for bi := range fir.Blocks {
-				blockVA := fir.Blocks[bi].StartVA
-				// CSM pc offsets are relative to the Code payload start, the
-				// same base funcStart is measured from.
-				pcOff := uint32(blockVA - codeVA)
-				stack, _, ok := csm.InlineStackAt(pcOff)
-				if !ok || len(stack) == 0 {
-					continue
-				}
-				var frames []string
-				for _, id := range stack {
-					if int(id) < len(names) && names[id] != "" {
-						frames = append(frames, names[id])
-					}
-				}
-				if len(frames) == 0 {
-					continue
-				}
-				if fir.InlineFrames == nil {
-					fir.InlineFrames = make(map[uint64][]string)
-				}
-				fir.InlineFrames[blockVA] = frames
-			}
-		}
-		// P6: Switch/case recovery — detect IndirectGoto pattern (br xN).
-		// Dart AOT uses IndirectGotoInstr for switches with >=16 cases.
-		// The codegen (il_arm64.cc) loads a TypedData (int32 offsets) from
-		// the pool, reads offset[index], adds base address (ADR), and br.
-		// The PP load may use 2-level addressing (ADD xN, x27, #hi + LDR xN, [xN, #lo])
-		// which the lifter doesn't recognize as OpLoadPool. So instead of
-		// relying on OpLoadPool, we detect br xN directly and map the
-		// following blocks (which are the case targets — each is a MOV+RET
-		// or a block of case body code) as switch cases.
-		if isARM64 && len(fir.Blocks) > 0 {
-			for bi := range fir.Blocks {
-				for _, ins := range fir.Blocks[bi].Instrs {
-					if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
-						continue
-					}
-					// Found br xN — this is a jump-table dispatch.
-					// Map ALL following blocks as case targets. Each case
-					// starts at a block boundary after the br block. We
-					// collect blocks until we run out or hit 64 cases.
-					// Cases can have complex bodies (if/else, calls) —
-					// don't filter by block size or terminator type.
-					var cases []decompiler.SwitchCase
-					for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
-						cases = append(cases, decompiler.SwitchCase{
-							Index:   len(cases),
-							BlockID: fir.Blocks[ci].ID,
-						})
-					}
-					if len(cases) >= 2 {
-						fir.SwitchCases = cases
-					}
-					break
-				}
-			}
-		}
-
-		// P7: Async/await detection via SuspendState CID in pool loads.
-		// Async functions allocate a SuspendState object (CID=78) early.
-		if !fir.IsAsync && info.Version.CIDs.SuspendState != 0 {
-			for bi := range fir.Blocks {
-				for _, ins := range fir.Blocks[bi].Instrs {
-					if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
-						continue
-					}
-					if pe, ok := poolEntryByIndex(ins.PoolIndex); ok {
-						if cid, ok2 := pl.RefCID[pe.RefID]; ok2 && cid == info.Version.CIDs.SuspendState {
-							fir.IsAsync = true
-							break
-						}
-					}
-				}
-				if fir.IsAsync {
-					break
-				}
-			}
-		}
-
-		return fir, nil
+	funcIRBld := &funcIRBuilder{
+		code:                   code,
+		codeOff:                codeOff,
+		codeVA:                 codeVA,
+		symbolNames:            symbolNames,
+		isARM64:                isARM64,
+		info:                   info,
+		buildArgRegMasks:       buildArgRegMasks,
+		paramTypeNamesFor:      paramTypeNamesFor,
+		genericParamNamesFor:   genericParamNamesFor,
+		fieldNameResolver:      fieldNameResolver,
+		closureParents:         closureParents,
+		pl:                     pl,
+		paramTypeByCodeIndex:   paramTypeByCodeIndex,
+		codeRefToReceiverClass: codeRefToReceiverClassID,
+		codeRefToExcHandlers:   codeRefToExcHandlers,
+		codeRefToPcDesc:        codeRefToPcDesc,
+		codeRefToCSM:           codeRefToCSM,
+		codeRefToInlinedNames:  codeRefToInlinedNames,
+		poolEntryByIndex:       poolEntryByIndex,
 	}
+	buildFuncIR := funcIRBld.Build
+
 
 	// decompileRangeWithIR returns both the pseudocode Artifact and the
 	// intermediate FuncIR -- --gen-frida needs the FuncIR to build
