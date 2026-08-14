@@ -361,22 +361,36 @@ func AnalyzeFunction(
 		}
 	}
 
-	// Pattern 2.x D: LDURH Wn, [Xm,#1] → ... → LDR X30, [X21, Xn, LSL #3] → BLR X30
+	// Pattern 2.x D: LDURH Wn, [Xm,#1] → ... → LDR X30, [X21, Xp, LSL #3] → BLR X30
 	// When selector_offset == kOriginElement, the ADD/SUB is a no-op (offset=0)
 	// and the compiler omits it entirely. The class ID from LDURH goes directly
 	// into the dispatch table LDR without any arithmetic. selectorOffset = 0.
-	// There may be intervening instructions (PP loads, STP pushes) between
-	// the LDURH and the LDR, so scan forward up to 4 instructions.
+	// There may be intervening instructions (PP loads, STP pushes, MOV) between
+	// the LDURH and the LDR. The MOV bridges the register: LDURH writes Wn,
+	// MOV Xp, Xn copies it, LDR uses Xp.
 	for i := 0; i < len(insts)-2; i++ {
 		// Look for LDURH Wn, [Xm,#1] (class ID extraction, 2.x style)
 		_, ldurhRt, ldurhImm9, ldurhOK := isLDURH(insts[i].Raw)
 		if !ldurhOK || ldurhImm9 != 1 || ldurhRt >= 31 {
 			continue
 		}
-		// Scan forward up to 4 instructions for LDR X30, [X21, Xn, LSL #3]
-		for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
-			base, rm, rt, ldrOK := isLDRRegExtended(insts[j].Raw)
-			if !ldrOK || base != 21 || rt != 30 || rm != ldurhRt {
+		// Track which register holds the class ID. LDURH writes to ldurhRt,
+		// but a MOV Xp, Xn may bridge it to a different register before the LDR.
+		classIdReg := ldurhRt
+		// Scan forward up to 5 instructions for MOV bridge then LDR.
+		for j := i + 1; j < len(insts)-1 && j <= i+5; j++ {
+			jraw := insts[j].Raw
+			// Check for MOV Xp, Xn (ORR Xd, XZR, Xm) that bridges the class ID.
+			if movRd, movOK := isMOVOrr(jraw); movOK && movRd < 31 {
+				movRm := int((jraw >> 16) & 0x1F)
+				if movRm == classIdReg {
+					classIdReg = movRd
+					continue
+				}
+			}
+			// Check for LDR X30, [X21, XclassIdReg, LSL #3]
+			base, rm, rt, ldrOK := isLDRRegExtended(jraw)
+			if !ldrOK || base != 21 || rt != 30 || rm != classIdReg {
 				continue
 			}
 			// Next: BLR X30
