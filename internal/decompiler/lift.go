@@ -833,24 +833,38 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	}
 	base := strings.ToLower(op.memBase)
 	if base == fir.ThreadReg && op.hasDisp {
-		// Recognized structurally, NOT by matching a specific known
-		// Thread::vm_tag_offset() value -- verified on a real sample that
-		// the offset differs by architecture for the SAME Dart version/build
-		// (ARM64 0x7b8=1976, x86_64 0x770=1904 for the identical function
-		// in the identical binary), so trusting one architecture's THR
-		// field table for the other produced false negatives. The
-		// distinguishing signal is the SHAPE, not the offset: storing a
-		// register into a Thread field immediately before calling that
-		// EXACT SAME register is Dart AOT's native/FFI-leaf-call bookkeeping
-		// idiom (Thread::vm_tag_offset(), confirmed against dart-lang/sdk's
-		// il_arm64.cc/il_x64.cc FfiCallInstr::EmitNativeCode on both
-		// architectures) -- no other call convention stores the call
-		// target itself into Thread state right before dispatching it.
-		// Suppress the emitted line (pure bookkeeping, not application
-		// logic) but mark the register so the upcoming indirect call is
-		// named instead of showing a raw register name.
-		s.Regs[strings.ToLower(srcTok)] = ffiCallTargetSentinel
-		return "", false
+		// Dart AOT's native/FFI-leaf-call bookkeeping stores the call
+		// target into Thread::vm_tag_ via TransitionGeneratedToNative
+		// (assembler_arm64.cc / assembler_x64.cc), which runs in PRODUCT
+		// builds. The offset differs by architecture and version, so we
+		// check the SDK-derived ThreadFieldNames table for the "vm_tag"
+		// field name rather than hardcoding a specific offset.
+		//
+		// NOTE: FfiCallInstr::EmitNativeCode (il_arm64.cc / il_x64.cc)
+		// also stores to vm_tag_ but only under #if !defined(PRODUCT),
+		// so that path is NOT the one that fires in release builds.
+		// TransitionGeneratedToNative is the PRODUCT-build source.
+		//
+		// Previously this fired on ANY store to ANY Thread field, which
+		// marked 43528 stores as FFI bookkeeping on the x86_64 sample —
+		// most of them write_barrier, stack_overflow checks, etc., not
+		// FFI calls at all. That caused the next BLR through the same
+		// register to be mislabelled as an FFI call.
+		isVMTagStore := false
+		if fir.ThreadFieldNames != nil {
+			if name, ok := fir.ThreadFieldNames[op.memDisp]; ok && name == "vm_tag" {
+				isVMTagStore = true
+			}
+		}
+		if isVMTagStore {
+			// Suppress the emitted line (pure bookkeeping, not application
+			// logic) but mark the register so the upcoming indirect call is
+			// named instead of showing a raw register name.
+			s.Regs[strings.ToLower(srcTok)] = ffiCallTargetSentinel
+			return "", false
+		}
+		// A store to a non-vm_tag Thread field is real application logic
+		// (e.g. write_barrier_mask, store_buffer_block). Emit it normally.
 	}
 	if base == fir.FrameReg && op.hasDisp {
 		name, ok := s.Locals[op.memDisp]
