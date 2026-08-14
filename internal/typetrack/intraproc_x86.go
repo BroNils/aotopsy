@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"golang.org/x/arch/x86/x86asm"
@@ -65,8 +66,8 @@ func AnalyzeFunctionX86(
 		if !ok {
 			continue
 		}
-		baseReg := canonX86RegLocal(mem.Base)
-		idxReg := canonX86RegLocal(mem.Index)
+		baseReg := arch.X86CanonReg(mem.Base)
+		idxReg := arch.X86CanonReg(mem.Index)
 		// Check: CALL [RAX + RCX*8 + disp32]
 		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
 			ctx.SelectorOffsets[inst.Addr] = int(mem.Disp / 8)
@@ -145,7 +146,7 @@ func AnalyzeFunctionX86(
 		// than with the bug.
 		eqSucc := -1
 		if hasCmp && cmpReg >= 0 && cmpReg < 31 && len(blk.insts) > 0 {
-			eqSucc = x86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
+			eqSucc = arch.X86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
 		}
 		if eqSucc >= 0 {
 			ctx.NarrowShape++
@@ -237,15 +238,15 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 			isBranch = true
 		case x86asm.JMP:
 			isBranch = true
-			if t, ok := x86RelTarget(d); ok && t >= funcStart && t < funcEnd {
+			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					leaders[idx] = true
 				}
 			}
 		default:
-			if isX86CondJump(d.Inst.Op) {
+			if arch.IsX86CondJump(d.Inst.Op) {
 				isBranch = true
-				if t, ok := x86RelTarget(d); ok && t >= funcStart && t < funcEnd {
+				if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
 					if idx, ok2 := addrToIdx[t]; ok2 {
 						leaders[idx] = true
 					}
@@ -284,7 +285,7 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 		case x86asm.RET:
 			// terminal
 		case x86asm.JMP:
-			if t, ok := x86RelTarget(last); ok {
+			if t, ok := arch.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					if tb, ok3 := leaderToBlock[idx]; ok3 {
 						blk.successors = append(blk.successors, tb)
@@ -293,8 +294,8 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 				}
 			}
 		default:
-			if isX86CondJump(last.Inst.Op) {
-				if t, ok := x86RelTarget(last); ok {
+			if arch.IsX86CondJump(last.Inst.Op) {
+				if t, ok := arch.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
 					if idx, ok2 := addrToIdx[t]; ok2 {
 						if tb, ok3 := leaderToBlock[idx]; ok3 {
 							blk.successors = append(blk.successors, tb)
@@ -318,20 +319,6 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 	return blocks
 }
 
-// x86RelTarget returns the absolute target address of a rel32 branch.
-func x86RelTarget(d X86DecodedInst) (uint64, bool) {
-	for _, arg := range d.Inst.Args {
-		if arg == nil {
-			continue
-		}
-		if rel, ok := arg.(x86asm.Rel); ok {
-			return d.Addr + uint64(d.Len) + uint64(int64(rel)), true
-		}
-	}
-	return 0, false
-}
-
-// isX86CondJump returns true for conditional jump opcodes.
 // isX86CmpRegImm matches `CMP reg, imm`, returning the canonical register
 // index and the immediate. Intel order puts the compared register first.
 func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
@@ -342,7 +329,7 @@ func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
 	if !isReg {
 		return 0, 0, false
 	}
-	idx := canonX86RegLocal(r)
+	idx := arch.X86CanonReg(r)
 	if idx < 0 || idx >= 31 {
 		return 0, 0, false
 	}
@@ -351,81 +338,6 @@ func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
 		return 0, 0, false
 	}
 	return idx, int(v), true
-}
-
-// x86EqualitySuccessor reports which successor edge of a block ending in op
-// proves that a preceding `CMP reg, imm` compared EQUAL, or -1 for none.
-//
-// Successors are built target-first, fall-through-second, so index 0 is the
-// taken edge -- but only when both resolved, hence numSuccs == 2.
-//
-// JE narrows the taken edge. JNE narrows the FALL-THROUGH, since that is
-// where its equality is proven. Every other condition is a magnitude test
-// (JA/JB/JG/JL and friends) or tests a flag a CMP did not set in a way that
-// implies equality, so nothing is learned. The ARM64 version of this shipped
-// without the condition check and narrowed the taken edge unconditionally;
-// that is fixed there, and deliberately not reproduced here.
-func x86EqualitySuccessor(op x86asm.Op, numSuccs int) int {
-	if numSuccs != 2 {
-		return -1
-	}
-	switch op {
-	case x86asm.JE:
-		return 0
-	case x86asm.JNE:
-		return 1
-	}
-	return -1
-}
-
-func isX86CondJump(op x86asm.Op) bool {
-	switch op {
-	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
-		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
-		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS:
-		return true
-	}
-	return false
-}
-
-// canonX86RegLocal maps any-width GP register operand to a canonical family
-// index 0..15 (RAX..R15), or -1 for anything else.
-func canonX86RegLocal(r x86asm.Reg) int {
-	switch r {
-	case x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL:
-		return 0
-	case x86asm.RCX, x86asm.ECX, x86asm.CX, x86asm.CL:
-		return 1
-	case x86asm.RDX, x86asm.EDX, x86asm.DX, x86asm.DL:
-		return 2
-	case x86asm.RBX, x86asm.EBX, x86asm.BX, x86asm.BL:
-		return 3
-	case x86asm.RSP, x86asm.ESP, x86asm.SP, x86asm.SPB:
-		return 4
-	case x86asm.RBP, x86asm.EBP, x86asm.BP, x86asm.BPB:
-		return 5
-	case x86asm.RSI, x86asm.ESI, x86asm.SI, x86asm.SIB:
-		return 6
-	case x86asm.RDI, x86asm.EDI, x86asm.DI, x86asm.DIB:
-		return 7
-	case x86asm.R8, x86asm.R8L, x86asm.R8W, x86asm.R8B:
-		return 8
-	case x86asm.R9, x86asm.R9L, x86asm.R9W, x86asm.R9B:
-		return 9
-	case x86asm.R10, x86asm.R10L, x86asm.R10W, x86asm.R10B:
-		return 10
-	case x86asm.R11, x86asm.R11L, x86asm.R11W, x86asm.R11B:
-		return 11
-	case x86asm.R12, x86asm.R12L, x86asm.R12W, x86asm.R12B:
-		return 12
-	case x86asm.R13, x86asm.R13L, x86asm.R13W, x86asm.R13B:
-		return 13
-	case x86asm.R14, x86asm.R14L, x86asm.R14W, x86asm.R14B:
-		return 14
-	case x86asm.R15, x86asm.R15L, x86asm.R15W, x86asm.R15B:
-		return 15
-	}
-	return -1
 }
 
 // isX86HeaderLoad reports whether prev was a header load writing dstIdx:
@@ -444,7 +356,7 @@ func isX86HeaderLoad(prev *X86DecodedInst, dstIdx int) bool {
 	if !ok {
 		return false
 	}
-	if canonX86RegLocal(dstReg) != dstIdx {
+	if arch.X86CanonReg(dstReg) != dstIdx {
 		return false
 	}
 	mem, ok := p.Args[1].(x86asm.Mem)
@@ -475,10 +387,10 @@ func transferInstructionX86(
 	// H-4 fix 1: Stack store: MOV [RBP+disp], reg → save reg's type to stack.
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
-			baseIdx := canonX86RegLocal(mem.Base)
+			baseIdx := arch.X86CanonReg(mem.Base)
 			if baseIdx == 5 { // RBP = frame register
 				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := canonX86RegLocal(srcReg)
+					srcIdx := arch.X86CanonReg(srcReg)
 					if srcIdx >= 0 && srcIdx < 31 {
 						stackTypes[int(mem.Disp)] = state[srcIdx]
 					}
@@ -491,10 +403,10 @@ func transferInstructionX86(
 	// H-4 fix 1b: Stack load: MOV reg, [RBP+disp] → load type from stack.
 	if (ins.Op == x86asm.MOV || ins.Op == x86asm.MOVZX) && len(ins.Args) >= 2 {
 		if dstReg, dstOK := ins.Args[0].(x86asm.Reg); dstOK {
-			dstIdx := canonX86RegLocal(dstReg)
+			dstIdx := arch.X86CanonReg(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
 				if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-					baseIdx := canonX86RegLocal(mem.Base)
+					baseIdx := arch.X86CanonReg(mem.Base)
 					if baseIdx == 5 { // RBP
 						if t, ok2 := stackTypes[int(mem.Disp)]; ok2 {
 							state[dstIdx] = t
@@ -514,13 +426,13 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := canonX86RegLocal(dstReg)
+		dstIdx := arch.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		// MOV/MOVZX reg, [mem] — memory load.
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-			baseIdx := canonX86RegLocal(mem.Base)
+			baseIdx := arch.X86CanonReg(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
 			if baseIdx == x86RegPP {
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
@@ -615,7 +527,7 @@ func transferInstructionX86(
 		}
 		// MOV reg, reg — copy type.
 		if srcReg, ok := ins.Args[1].(x86asm.Reg); ok {
-			srcIdx := canonX86RegLocal(srcReg)
+			srcIdx := arch.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 31 {
 				state[dstIdx] = state[srcIdx]
 			} else {
@@ -636,12 +548,12 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := canonX86RegLocal(dstReg)
+		dstIdx := arch.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-			baseIdx := canonX86RegLocal(mem.Base)
+			baseIdx := arch.X86CanonReg(mem.Base)
 			// LEA reg, [THR+disp] → load dispatch table base.
 			if baseIdx == x86RegTHR && mem.Disp != 0 {
 				// This loads the dispatch table array from Thread.
@@ -682,12 +594,12 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := canonX86RegLocal(dstReg)
+		dstIdx := arch.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			srcIdx := canonX86RegLocal(srcReg)
+			srcIdx := arch.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 31 {
 				if state[srcIdx].Kind == LatticeKnownClass {
 					// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
@@ -727,8 +639,8 @@ func transferInstructionX86(
 
 		// CALL [mem] — indirect call (dispatch table or object field).
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
-			idxReg := canonX86RegLocal(mem.Index)
-			baseReg := canonX86RegLocal(mem.Base)
+			idxReg := arch.X86CanonReg(mem.Index)
+			baseReg := arch.X86CanonReg(mem.Base)
 			// Diagnose the dispatch-call shape before trying to resolve it,
 			// so a failure says WHICH half was unknown. Resolving needs both
 			// the table register and cid_reg typed; the counters separate
@@ -810,7 +722,7 @@ func transferInstructionX86(
 		// CALL reg — indirect call through register.
 		// H-4 fix: Check if the register holds KnownStub (THR-cached stub).
 		if reg, ok := ins.Args[0].(x86asm.Reg); ok {
-			regIdx := canonX86RegLocal(reg)
+			regIdx := arch.X86CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && state[regIdx].Kind == LatticeKnownStub {
 				sn := state[regIdx].StubName
 				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
@@ -843,7 +755,7 @@ func transferInstructionX86(
 	// all 61428 opportunities.
 	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
 		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			dstIdx := canonX86RegLocal(dstReg)
+			dstIdx := arch.X86CanonReg(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
 				state[dstIdx] = Top()
 			}
