@@ -48,7 +48,7 @@ Build just the binary: `go build -o aotopsy ./cmd/aotopsy/`
 
 ```mermaid
 flowchart TD
-    CLI[cmd/aotopsy<br/>CLI entry point]
+    CLI_ENTRY[cmd/aotopsy<br/>CLI entry point]
     subgraph "internal/"
         ELFX[elfx<br/>ELF validation]
         SNAP[snapshot<br/>version profiles]
@@ -67,15 +67,18 @@ flowchart TD
         FFI[ffitrace<br/>dart:ffi tracing]
         SX[strxref<br/>string cross-ref]
         SU[strutil<br/>shared utilities]
+        ARCH[arch<br/>shared x86 primitives]
+        CLI[cli<br/>ANSI colors]
+        LAT[lattice<br/>graph IR]
         PIPE[pipeline<br/>orchestration]
     end
     TOOLS[tools/<br/>THR extractor]
     GHIDRA[ghidra_scripts/<br/>Python]
     IDA[ida_scripts/<br/>Python]
 
-    CLI --> PIPE
-    CLI --> DEC
-    CLI --> DISASM
+    CLI_ENTRY --> PIPE
+    CLI_ENTRY --> DEC
+    CLI_ENTRY --> DISASM
     PIPE --> ELFX
     PIPE --> SNAP
     PIPE --> CLUST
@@ -85,9 +88,12 @@ flowchart TD
     CLUST --> DART
     CLUST --> SNAP
     DISASM --> DART
+    DISASM --> ARCH
     DEC --> DISASM
+    DEC --> ARCH
     TT --> DISASM
     TT --> CLUST
+    TT --> ARCH
     FFI --> PIPE
     FFI --> DEC
     SX --> PIPE

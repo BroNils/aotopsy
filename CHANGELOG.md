@@ -75,7 +75,7 @@ mindmap
 - Signal classification false positives removed (RefCID check against OneByteString/TwoByteString before quoting)
 - x86_64 signal graph edge mapping (call/call_indirect vs bl/blr)
 - Dart 2.12.0 string extraction (0 to 8,529 isolate strings)
-- Compressed pointer load tracking (BLR resolution 2x improvement)
+- Compressed pointer load tracking (BLR resolution improvement)
 - `STUR` imm9, `STP`/`LDP` imm7, qualified name lookup fixes
 - Memory layout overlap at large sample scale (`UC_ERR_MAP` fix)
 - `DetectVersion` returns a copy to prevent data races
