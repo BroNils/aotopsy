@@ -385,6 +385,15 @@ func transferInstructionX86(
 	ins := inst.Inst
 
 	// H-4 fix 1: Stack store: MOV [RBP+disp], reg → save reg's type to stack.
+	// Object field store: MOV [base+disp], reg where base has a known class.
+	//
+	// Only the RBP case existed here. An object field store was not handled
+	// at all, which meant two things on x86_64 that were true on ARM64:
+	// field_accessor_xref.jsonl had no store rows, and
+	// TypeContext.FieldStoreTypes -- the whole-program field-store to
+	// field-load type channel -- was never written to. It stayed empty on
+	// every x86_64 run, so one of the three type sources FieldValueClass
+	// consults simply did not exist for this architecture.
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			baseIdx := arch.X86CanonReg(mem.Base)
@@ -396,6 +405,21 @@ func transferInstructionX86(
 					}
 				}
 				return
+			}
+			// Not the frame, not a reserved register: an object field.
+			// PP/THR/SP bases address the pool, Thread and stack, none of
+			// which are Dart objects with fields -- the same exclusions
+			// ARM64's STUR handler applies.
+			if baseIdx >= 0 && baseIdx < 31 &&
+				baseIdx != x86RegPP && baseIdx != x86RegTHR && baseIdx != 4 /*RSP*/ &&
+				state[baseIdx].Kind == LatticeKnownClass {
+				recordFieldAccess(result, state[baseIdx].ClassID, int32(mem.Disp), true, inst.Addr)
+				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
+					srcIdx := arch.X86CanonReg(srcReg)
+					if srcIdx >= 0 && srcIdx < 31 && state[srcIdx].Kind == LatticeKnownClass {
+						recordFieldStore(ctx, state[baseIdx].ClassID, int32(mem.Disp), state[srcIdx].ClassID)
+					}
+				}
 			}
 		}
 	}
@@ -491,6 +515,11 @@ func transferInstructionX86(
 					ctx.HeaderHits++
 					return
 				}
+				// Record the access for field_accessor_xref.jsonl. ARM64 has
+				// done this since the file existed; x86_64 never called
+				// recordFieldAccess at all, which is why the file was simply
+				// absent from an x86_64 run rather than empty.
+				recordFieldAccess(result, state[baseIdx].ClassID, int32(mem.Disp), false, inst.Addr)
 				// Field type: declared type first, then the type observed in
 				// const Instance objects. Shared with the ARM64 handlers via
 				// TypeContext.FieldValueClass so the precedence rule has one
@@ -499,10 +528,18 @@ func transferInstructionX86(
 					state[dstIdx] = KnownClass(classID)
 					return
 				}
-				// Unknown field — keep KnownClass as approximation.
-				state[dstIdx] = KnownClass(state[baseIdx].ClassID)
-				ctx.HeaderHits++
-				return
+				// An unknown field types NOTHING. This used to fall through
+				// to `state[dstIdx] = KnownClass(state[baseIdx].ClassID)`,
+				// commented "keep KnownClass as approximation" -- which
+				// claims a field's value has the same class as the object
+				// holding it. That is true for a linked-list `next` and
+				// false for almost everything else, and KnownClass is
+				// treated as authoritative downstream: it selects dispatch
+				// targets. ARM64 has no such fallback and never did.
+				//
+				// It also incremented HeaderHits, so the counter that was
+				// supposed to measure header loads was partly measuring
+				// this guess.
 			}
 			// Header load with an UNKNOWN receiver type. ARM64 sets Bottom
 			// here (its "P1.2" rule) rather than Top, and that distinction
