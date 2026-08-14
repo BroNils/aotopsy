@@ -209,7 +209,7 @@ func extractRODataPcDescriptors(data []byte, cm *ClusterMeta, dataImageObjStart 
 		return nil
 	}
 	var out []PcDescriptorsInfo
-	for _, p := range extractRODataPayloads(data, cm, profile.CIDs.PcDescriptors, dataImageObjStart, profile, isVM) {
+	for _, p := range extractRODataPayloads(data, cm, profile.CIDs.PcDescriptors, dataImageObjStart, profile) {
 		entries, err := DecodePcDescriptors(p.Payload)
 		if len(entries) > 0 || err == nil {
 			out = append(out, PcDescriptorsInfo{RefID: p.RefID, Entries: entries})
@@ -231,7 +231,7 @@ func extractRODataCodeSourceMaps(data []byte, cm *ClusterMeta, dataImageObjStart
 		return nil
 	}
 	var out []CodeSourceMapInfo
-	for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CodeSourceMap, dataImageObjStart, profile, isVM) {
+	for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CodeSourceMap, dataImageObjStart, profile) {
 		entries, err := DecodeCodeSourceMap(p.Payload)
 		if len(entries) > 0 || err == nil {
 			out = append(out, CodeSourceMapInfo{RefID: p.RefID, Entries: entries})
@@ -251,7 +251,7 @@ type rodataPayload struct {
 //
 // Shared by PcDescriptors and CodeSourceMap because their in-image layout is
 // identical: both are UntaggedObject + a uword length_ + that many bytes.
-func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageObjStart int64, profile *snapshot.VersionProfile, isVM bool) []rodataPayload {
+func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageObjStart int64, profile *snapshot.VersionProfile) []rodataPayload {
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 || wantCID == 0 {
 		return nil
 	}
@@ -272,8 +272,13 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 	// running_offset lands exactly on each object header for BOTH the VM and the
 	// isolate data images. Verified against real cid=94 OneByteString headers in
 	// both (same fix as extractRODataStrings in fill.go).
+	// Both images -- VM and isolate -- land on their object headers with no
+	// per-snapshot fudge, which is why there is no isVM parameter here any
+	// more. It survived the alignment fix as `_ = isVM` "for API
+	// compatibility"; nothing outside this file calls the function, so the
+	// only thing that compatibility preserved was the illusion that the
+	// distinction still mattered.
 	headerAdjust := int64(0)
-	_ = isVM // no longer used; kept in signature for API compatibility
 
 	runningOffset := int64(0)
 	ref := cm.StartRef

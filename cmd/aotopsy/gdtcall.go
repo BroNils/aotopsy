@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 )
@@ -86,47 +87,6 @@ func (rt *x64RegTracker) lookup(idx int) string {
 	return rt.defs[idx].note
 }
 
-// canon64 maps any-width GP register operand to a canonical family index
-// 0..15 (RAX..R15), or -1 if not a plain GP register we track (segment
-// regs, XMM, high-byte AH/CH/DH/BH, etc.)
-func canon64(r x86asm.Reg) int {
-	switch r {
-	case x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL:
-		return 0
-	case x86asm.RCX, x86asm.ECX, x86asm.CX, x86asm.CL:
-		return 1
-	case x86asm.RDX, x86asm.EDX, x86asm.DX, x86asm.DL:
-		return 2
-	case x86asm.RBX, x86asm.EBX, x86asm.BX, x86asm.BL:
-		return 3
-	case x86asm.RSP, x86asm.ESP, x86asm.SP, x86asm.SPB:
-		return 4
-	case x86asm.RBP, x86asm.EBP, x86asm.BP, x86asm.BPB:
-		return 5
-	case x86asm.RSI, x86asm.ESI, x86asm.SI, x86asm.SIB:
-		return 6
-	case x86asm.RDI, x86asm.EDI, x86asm.DI, x86asm.DIB:
-		return 7
-	case x86asm.R8, x86asm.R8L, x86asm.R8W, x86asm.R8B:
-		return 8
-	case x86asm.R9, x86asm.R9L, x86asm.R9W, x86asm.R9B:
-		return 9
-	case x86asm.R10, x86asm.R10L, x86asm.R10W, x86asm.R10B:
-		return 10
-	case x86asm.R11, x86asm.R11L, x86asm.R11W, x86asm.R11B:
-		return 11
-	case x86asm.R12, x86asm.R12L, x86asm.R12W, x86asm.R12B:
-		return 12
-	case x86asm.R13, x86asm.R13L, x86asm.R13W, x86asm.R13B:
-		return 13
-	case x86asm.R14, x86asm.R14L, x86asm.R14W, x86asm.R14B:
-		return 14
-	case x86asm.R15, x86asm.R15L, x86asm.R15W, x86asm.R15B:
-		return 15
-	}
-	return -1
-}
-
 const canonR14 = 14 // THR
 const canonR15 = 15 // PP
 const canonRCX = 1  // DispatchTableNullErrorABI::kClassIdReg
@@ -196,7 +156,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break
 					}
 					if reg, ok := arg.(x86asm.Reg); ok {
-						idx := canon64(reg)
+						idx := arch.X86CanonReg(reg)
 						note := rt.lookup(idx)
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
 						if note != "" {
@@ -212,9 +172,9 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break
 					}
 					if mem, ok := arg.(x86asm.Mem); ok {
-						baseNote := rt.lookup(canon64(mem.Base))
+						baseNote := rt.lookup(arch.X86CanonReg(mem.Base))
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
-						if canon64(mem.Index) == canonRCX && mem.Scale == 8 && baseNote == "dispatch_table" {
+						if arch.X86CanonReg(mem.Index) == canonRCX && mem.Scale == 8 && baseNote == "dispatch_table" {
 							ic.Kind = "gdt"
 							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via RCX)", mem.Disp)
 						} else if baseNote != "" {
@@ -250,7 +210,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					// closure/function pointer loaded a few instructions
 					// earlier (e.g. into RAX) and then shuffled into RCX
 					// before the CALL is still resolved.
-					dstIdx, srcIdx := canon64(dstReg), canon64(srcReg)
+					dstIdx, srcIdx := arch.X86CanonReg(dstReg), arch.X86CanonReg(srcReg)
 					if note := rt.lookup(srcIdx); note != "" {
 						rt.define(dstIdx, note)
 					} else {
@@ -261,8 +221,8 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					continue
 				}
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && dstOK {
-					dstIdx := canon64(dstReg)
-					if canon64(mem.Base) == canonR14 && mem.Index == 0 {
+					dstIdx := arch.X86CanonReg(dstReg)
+					if arch.X86CanonReg(mem.Base) == canonR14 && mem.Index == 0 {
 						// Any THR-relative field load. We cannot know the exact
 						// dispatch_table_array_offset without the live Thread
 						// layout for this build, so treat every THR-sourced
@@ -271,7 +231,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						// shape, which only the real dispatch table load
 						// produces on the call side.
 						rt.define(dstIdx, "dispatch_table")
-					} else if canon64(mem.Base) == canonR15 {
+					} else if arch.X86CanonReg(mem.Base) == canonR15 {
 						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							rt.define(dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
@@ -286,11 +246,11 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					continue
 				}
 				if dstOK {
-					rt.kill(canon64(dstReg))
+					rt.kill(arch.X86CanonReg(dstReg))
 				}
 			} else if len(inst.Args) >= 1 {
 				if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-					rt.kill(canon64(dstReg))
+					rt.kill(arch.X86CanonReg(dstReg))
 				}
 			}
 

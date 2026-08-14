@@ -130,9 +130,48 @@ func semanticArgName(typeName string, idx int) string {
 }
 
 // replaceIdent replaces whole-word identifiers, not substrings.
+// It skips matches inside string literals (between unescaped quotes)
+// to avoid corrupting string constants like print("arg0").
 func replaceIdent(line, old, new string) string {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
-	return re.ReplaceAllString(line, new)
+	// Split on string literals, only replace in non-literal segments.
+	// Handles both "..." and '...' quoting.
+	var result strings.Builder
+	i := 0
+	for i < len(line) {
+		// Find next quote.
+		quoteIdx := strings.IndexAny(line[i:], "\"'")
+		if quoteIdx < 0 {
+			// No more strings — replace in the rest.
+			result.WriteString(re.ReplaceAllString(line[i:], new))
+			break
+		}
+		quotePos := i + quoteIdx
+		quote := line[quotePos]
+		// Replace in the segment before the quote.
+		result.WriteString(re.ReplaceAllString(line[i:quotePos], new))
+		// Copy the string literal verbatim (including the closing quote).
+		result.WriteByte(quote)
+		j := quotePos + 1
+		for j < len(line) {
+			if line[j] == '\\' && j+1 < len(line) {
+				// Escaped char — copy both bytes.
+				result.WriteByte(line[j])
+				result.WriteByte(line[j+1])
+				j += 2
+				continue
+			}
+			if line[j] == quote {
+				result.WriteByte(line[j])
+				j++
+				break
+			}
+			result.WriteByte(line[j])
+			j++
+		}
+		i = j
+	}
+	return result.String()
 }
 
 // --- Dead-store elimination ---
@@ -207,9 +246,17 @@ var exprSimplificationRules = []exprRule{
 	{regexp.MustCompile(`([^()\s]+) \* 1\b`), "$1"},
 	// 1 * a → a
 	{regexp.MustCompile(`\b1 \* ([^()\s]+)`), "$1"},
-	// a * 0 → 0
+	// a * 0 → 0, and 0 * a → 0. Dropping `a` would drop its side effects,
+	// so the operand class `[^()\s]` excludes parentheses -- a call cannot
+	// match, by construction, and no extra guard is needed. (An earlier
+	// comment here presented that as a caveat still to handle; it was
+	// already handled by the class itself.)
+	//
+	// What remains outside the guard is a bare field load, `a.b * 0`. In
+	// this emitter a `.` with no parentheses is a field read, not a getter
+	// call -- calls always render with an argument list -- so there is no
+	// side effect to lose.
 	{regexp.MustCompile(`([^()\s]+) \* 0\b`), "0"},
-	// 0 * a → 0
 	{regexp.MustCompile(`\b0 \* ([^()\s]+)`), "0"},
 	// a + 0 → a
 	{regexp.MustCompile(`([^()\s]+) \+ 0\b`), "$1"},
