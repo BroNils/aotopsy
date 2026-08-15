@@ -112,6 +112,12 @@ type TypeContext struct {
 	// PoolCodeNames maps PP index to function name for Code objects.
 	PoolCodeNames map[int]string
 
+	// TypeTestingStubNames maps PP index to the type testing stub name
+	// for the Type in that pool slot. Used to resolve BLR calls through
+	// AbstractType::type_test_stub_entry_point_ (offset 7 from tagged
+	// pointer on non-compressed builds).
+	TypeTestingStubNames map[int]string
+
 	// InstanceFieldTypes is the observed (class, byte offset) -> value class
 	// map recovered from const Instance objects serialized in the snapshot:
 	// classID -> byteOffset -> classID of the stored value.
@@ -279,15 +285,16 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 // PoolLookupData is the subset of pipeline.PoolLookups needed by typetrack.
 // Passed as a struct to avoid importing the pipeline package (import cycle).
 type PoolLookupData struct {
-	RefToStr      map[int]string               // ref ID → string value
-	RefToNamed    map[int]*cluster.NamedObject // ref ID → NamedObject
-	RefCID        map[int]int                  // ref ID → CID (class ID of the object)
-	CT            *snapshot.CIDTable           // CID table (for Class/Function CID checks)
-	CodeRefToName map[int]string               // code ref ID → function name
-	VmRefToStr    map[int]string               // VM snapshot strings by ref ID
-	VmRefToNamed  map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
-	VmRefCID      map[int]int                  // VM snapshot CID by ref ID
-	PoolCodeNames map[int]string               // PP index → function name for Code objects
+	RefToStr            map[int]string               // ref ID → string value
+	RefToNamed          map[int]*cluster.NamedObject // ref ID → NamedObject
+	RefCID              map[int]int                  // ref ID → CID (class ID of the object)
+	CT                  *snapshot.CIDTable           // CID table (for Class/Function CID checks)
+	CodeRefToName       map[int]string               // code ref ID → function name
+	VmRefToStr          map[int]string               // VM snapshot strings by ref ID
+	VmRefToNamed        map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	VmRefCID            map[int]int                  // VM snapshot CID by ref ID
+	PoolCodeNames       map[int]string               // PP index → function name for Code objects
+	TypeTestingStubNames map[int]string              // Type ref ID → type testing stub name
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,
@@ -338,6 +345,7 @@ func BuildTypeContext(
 		ClosureDataByParent:     make(map[int][]int),
 		PoolClosureClass:        make(map[int]int),
 		PoolCodeNames:           make(map[int]string),
+		TypeTestingStubNames:    pl.TypeTestingStubNames,
 		SelectorOffsets:         make(map[uint64]int),
 		Subclasses:              make(map[int][]int),
 	}

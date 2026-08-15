@@ -240,6 +240,22 @@ func runTypeInference(
 		}
 	}
 
+	// Build PP index → type testing stub name map.
+	// When a Type object is loaded from the pool and its
+	// type_test_stub_entry_point_ (offset 7 from tagged) is called via BLR,
+	// the type tracker needs the stub name to resolve the call.
+	poolTTSNames := make(map[int]string)
+	if len(pl.TypeTestingStubNames) > 0 {
+		for _, pe := range clResult.Pool {
+			if pe.Kind != cluster.PoolTagged {
+				continue
+			}
+			if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok && name != "" {
+				poolTTSNames[pe.Index] = name
+			}
+		}
+	}
+
 	poolData := &typetrack.PoolLookupData{
 		RefToStr:      pl.RefToStr,
 		RefToNamed:    pl.RefToNamed,
@@ -249,7 +265,8 @@ func runTypeInference(
 		VmRefToStr:    pl.VmRefToStr,
 		VmRefToNamed:  pl.VmRefToNamed,
 		VmRefCID:      pl.VmRefCID,
-		PoolCodeNames: poolCodeNames,
+		PoolCodeNames:       poolCodeNames,
+		TypeTestingStubNames: poolTTSNames,
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.

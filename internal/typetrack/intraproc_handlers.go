@@ -285,6 +285,21 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 		}
 	}
 	if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
+		// If this pool entry is a Type with a known type testing stub
+		// name, set KnownStub("TTS:name") instead of KnownClass(TypeCID).
+		// The type_test_stub_entry_point_ is at offset 7 from the Type's
+		// tagged pointer (uword field, not a pointer — verified via gh
+		// api to raw_object.h @2.12.0: type_test_stub_entry_point_ is
+		// the first field in UntaggedAbstractType, at offset 8 from
+		// untagged = 7 from tagged). handleFieldLoad's existing PPCode
+		// handler at imm9==7 will preserve the KnownStub through the
+		// LDUR, and handleBLR will resolve "TTS:name" to the stub name.
+		if tc.ctx.TypeTestingStubNames != nil {
+			if ttsName, ok3 := tc.ctx.TypeTestingStubNames[poolIdx]; ok3 && ttsName != "" {
+				tc.state[rt] = KnownStub("TTS:"+ttsName, byteOff)
+				return true
+			}
+		}
 		tc.state[rt] = KnownClass(classID)
 		if tc.ctx.InstantiatedClasses != nil {
 			tc.ctx.InstantiatedClasses[classID] = true
@@ -478,7 +493,12 @@ func handleFieldLoad(tc *transferCtx) bool {
 		}
 		if imm9 == 7 && base < 31 && tc.state[base].Kind == LatticeKnownStub {
 			sn := tc.state[base].StubName
-			if strings.HasPrefix(sn, "PPCode:") {
+			// PPCode: Code.entry_point_ at offset 7 from tagged Code pointer
+			// TTS: AbstractType.type_test_stub_entry_point_ at offset 7
+			// from tagged Type pointer (verified via gh api to
+			// raw_object.h @2.12.0: type_test_stub_entry_point_ is a
+			// uword at offset 8 from untagged = 7 from tagged)
+			if strings.HasPrefix(sn, "PPCode:") || strings.HasPrefix(sn, "TTS:") {
 				tc.state[rt] = KnownStub(sn, imm9)
 				return true
 			}
@@ -699,6 +719,11 @@ func handleBLR(tc *transferCtx) bool {
 				funcName := sn[len("PPCode:"):]
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
+				})
+			} else if strings.HasPrefix(sn, "TTS:") {
+				stubName := sn[len("TTS:"):]
+				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
+					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
 				})
 			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{

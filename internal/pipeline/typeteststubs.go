@@ -52,7 +52,13 @@ import (
 // for the stub that tests it. Returns nil when the Dart version cannot
 // resolve a Type to its class, in which case callers simply find nothing.
 func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, typeClassIDIsRef bool) map[int]string {
-	if typeClassIDIsRef || len(result.Types) == 0 {
+	// typeClassIDIsRef (Dart 2.10-2.15) used to cause an early return
+	// because Type.type_class_id was a Smi ref, not a scalar, so
+	// TypeInfo.ClassID was 0. But resolveTypeClassIDs (called in
+	// BuildTypeContext before this runs) now fills ClassID from
+	// MintValues, so the guard is no longer needed — removing it
+	// enables TTS name resolution on 2.x.
+	if len(result.Types) == 0 {
 		return nil
 	}
 	classNames := make(map[int32]string)
