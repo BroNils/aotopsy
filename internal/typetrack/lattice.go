@@ -24,6 +24,7 @@ const (
 	LatticeKnownClass                                // ClassID is known
 	LatticeKnownDispatchIndex                        // dispatch table slot offset is known
 	LatticeKnownStub                                 // THR-cached stub entry point is known
+	LatticePPBase                                    // register holds PP + offset (2-level pool addressing)
 	LatticeBottom                                    // conflicting/unresolvable
 )
 
@@ -51,6 +52,10 @@ type TypeLattice struct {
 	// at slot (imm-1).
 	SelectorOnly bool
 	SelectorImm  int // signed ADD immediate; valid when SelectorOnly
+
+	// PPBaseOffset holds the byte offset added to PP (X27) for 2-level
+	// pool addressing. Valid when Kind == LatticePPBase.
+	PPBaseOffset int
 }
 
 // Top returns the top element of the lattice.
@@ -154,6 +159,16 @@ func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 		if a.DispatchIndex == b.DispatchIndex {
 			return a
 		}
+		return Bottom()
+	}
+	// PPBase: identical offsets combine; different or mixed → Bottom
+	if a.Kind == LatticePPBase && b.Kind == LatticePPBase {
+		if a.PPBaseOffset == b.PPBaseOffset {
+			return a
+		}
+		return Bottom()
+	}
+	if a.Kind == LatticePPBase || b.Kind == LatticePPBase {
 		return Bottom()
 	}
 	// Mixed KnownClass ∧ KnownDispatch → Bottom

@@ -4,6 +4,7 @@ samples/
 libapp.aotopsy/
 runtime_test/
 docs/
+.playwright-mcp/
 .graph/
 .devin/
 *.so

@@ -235,57 +235,71 @@ func handleTHRLoad(tc *transferCtx) bool {
 }
 
 // handlePPLoad handles case 1: LDR Xt, [X27, #imm] → KnownClass from pool.
+// Also handles 2-level PP addressing: ADD Xt, X27, #imm → LDR Xd, [Xt, #imm].
 func handlePPLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == regPP {
-		rt := int(raw & 0x1F)
-		if rt >= 31 {
-			return true
-		}
-		poolIdx, poolIdxOK := disasm.ARM64PoolIndex(byteOff)
-		if !poolIdxOK {
-			return true
-		}
-		if tc.ctx.PoolUnlinkedCallNames != nil {
-			if name, ok3 := tc.ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
-				tc.state[rt] = KnownStub("UnlinkedCall:"+name, byteOff)
-				return true
-			}
-		}
-		// Check PoolCodeNames BEFORE PoolClassByIndex: a Code object in
-		// the pool should be named (PPCode:funcName), not typed as
-		// KnownClass(kCodeCid). KnownClass(CodeCID) is useless for BLR
-		// resolution — the function name is what resolveBLR needs.
-		// This was a regression from the VmRefCID fix: PoolClassByIndex
-		// started returning Code's CID for VM Code objects, so the
-		// PoolCodeNames else-if branch was never reached.
-		if tc.ctx.PoolCodeNames != nil {
-			if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
-				tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
-				tc.ctx.PPHits++
-				return true
-			}
-		}
-		if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
-			tc.state[rt] = KnownClass(classID)
+		tc.ctx.PPHits++
+		return resolvePPLoad(tc, byteOff)
+	}
+	// 2-level PP addressing: LDR Xt, [Xn, #imm] where Xn = PP + upper_offset.
+	// The SDK's LoadWordFromPoolIndex emits ADD Xd, PP, #upper20 then
+	// LDR Xd, [Xd, #lower12] when the pool offset exceeds 12-bit range.
+	// Track PP-derived base registers via a dedicated lattice kind.
+	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg < 31 {
+		if tc.state[baseReg].Kind == LatticePPBase {
+			fullOffset := tc.state[baseReg].PPBaseOffset + byteOff
 			tc.ctx.PPHits++
-			if tc.ctx.InstantiatedClasses != nil {
-				tc.ctx.InstantiatedClasses[classID] = true
-			}
+			return resolvePPLoad(tc, fullOffset)
 		}
-		if tc.ctx.PoolClosureClass != nil {
-			if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-				tc.state[rt] = KnownClass(classID)
-				tc.ctx.PPHits++
-				return true
-			}
-			tc.state[rt] = Top()
-		} else {
-			tc.state[rt] = Top()
-		}
-		return true
 	}
 	return false
+}
+
+// resolvePPLoad resolves a PP load at the given byte offset into a KnownClass
+// or KnownStub, shared between direct and 2-level PP addressing.
+func resolvePPLoad(tc *transferCtx, byteOff int) bool {
+	raw := tc.inst.Raw
+	rt := int(raw & 0x1F)
+	if rt >= 31 {
+		return true
+	}
+	poolIdx, poolIdxOK := disasm.ARM64PoolIndex(byteOff)
+	if !poolIdxOK {
+		return true
+	}
+	if tc.ctx.PoolUnlinkedCallNames != nil {
+		if name, ok3 := tc.ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
+			tc.state[rt] = KnownStub("UnlinkedCall:"+name, byteOff)
+			return true
+		}
+	}
+	// Check PoolCodeNames BEFORE PoolClassByIndex: a Code object in
+	// the pool should be named (PPCode:funcName), not typed as
+	// KnownClass(kCodeCid). KnownClass(CodeCID) is useless for BLR
+	// resolution — the function name is what resolveBLR needs.
+	if tc.ctx.PoolCodeNames != nil {
+		if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
+			tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
+			return true
+		}
+	}
+	if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
+		tc.state[rt] = KnownClass(classID)
+		if tc.ctx.InstantiatedClasses != nil {
+			tc.ctx.InstantiatedClasses[classID] = true
+		}
+	}
+	if tc.ctx.PoolClosureClass != nil {
+		if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
+			tc.state[rt] = KnownClass(classID)
+			return true
+		}
+		tc.state[rt] = Top()
+	} else {
+		tc.state[rt] = Top()
+	}
+	return true
 }
 
 // handleDispatchTableLoad handles case 1b/2: LDR from dispatch table base
@@ -406,6 +420,15 @@ func handleDispatchArith(tc *transferCtx) bool {
 			tc.ctx.ADDClassHits++
 			return true
 		}
+	}
+
+	// 4d. ADD Xd, X27, #imm — 2-level PP addressing.
+	// The SDK's LoadWordFromPoolIndex emits this when the pool offset
+	// exceeds 12-bit range: ADD Xd, PP, #upper20 → LDR Xd, [Xd, #lower12].
+	// Track the PP base offset so handlePPLoad can resolve the full index.
+	if rd, rn, imm, ok := isADD64Immediate(raw); ok && rn == regPP && rd < 31 {
+		tc.state[rd] = TypeLattice{Kind: LatticePPBase, PPBaseOffset: imm}
+		return true
 	}
 
 	return false
