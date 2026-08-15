@@ -16,25 +16,17 @@ import (
 // Gated on AOTOPSY_TEST_SAMPLE_ARM64 (a Dart 3.9.2 ARM64 libapp.so), same as
 // the other integration tests; skips when unset.
 
+// sharedCaptureOutDir caches the pipeline output from a single Run() call
+// so that multiple TestCaptured_* tests don't each re-run the full pipeline
+// (each Run() takes ~90s on the 3.9.2 ARM64 sample, and running 5 of them
+// serially exceeds the test timeout).
+var sharedCaptureOutDir string
+var sharedCaptureErr error
+
 func runCaptureFixture(t *testing.T) string {
 	t.Helper()
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set, skipping capture test")
-	}
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s", libPath)
-	}
-	outDir := t.TempDir()
-	if _, err := Run(Opts{
-		LibPath:  libPath,
-		OutDir:   outDir,
-		Quiet:    true,
-		MaxSteps: 100000,
-	}); err != nil {
-		t.Fatalf("pipeline failed: %v", err)
-	}
-	return outDir
+	// Delegate to the package-wide shared pipeline fixture.
+	return sharedPipelineOutDir(t)
 }
 
 func readJSONL(t *testing.T, path string) []map[string]any {

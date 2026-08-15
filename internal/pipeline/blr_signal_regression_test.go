@@ -11,22 +11,7 @@ import (
 // a minimum threshold. This prevents silent BLR drops from code changes.
 // Requires AOTOPSY_TEST_SAMPLE_ARM64 env var.
 func TestBLRResolutionRate(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	result, err := Run(opts)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	_ = result
+	tmpDir := sharedPipelineOutDir(t)
 
 	// Read typetrack report
 	reportPath := filepath.Join(tmpDir, "typetrack_report.json")
@@ -37,42 +22,43 @@ func TestBLRResolutionRate(t *testing.T) {
 	var report struct {
 		ResolvedBLR int `json:"resolved_blr"`
 		TotalBLR    int `json:"total_blr"`
+		BLR         struct {
+			Total       int `json:"total"`
+			Monomorphic int `json:"monomorphic"`
+			Polymorphic int `json:"polymorphic"`
+			Stub        int `json:"stub"`
+			Unresolved  int `json:"unresolved"`
+		} `json:"blr"`
 	}
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("unmarshal typetrack_report: %v", err)
 	}
-	if report.TotalBLR == 0 {
-		t.Fatal("total_blr is 0 — pipeline failed")
+	if report.BLR.Total == 0 {
+		t.Fatal("blr.total is 0 — pipeline failed")
 	}
-	rate := report.ResolvedBLR * 100 / report.TotalBLR
-	// Minimum threshold: 35% for 3.9.2 ARM64 (currently 39%)
-	// If this drops below 35%, something broke.
-	const minRate = 35
+	// Use blr.monomorphic (single-callee sites only) as the regression
+	// metric, NOT resolved_blr (which is monomorphic+stub). The AGENTS-local
+	// note says: "pakai blr.monomorphic, jangan resolved_blr" — resolved_blr
+	// conflates stub calls with real Dart function resolution.
+	monomorphic := report.BLR.Monomorphic
+	total := report.BLR.Total
+	rate := monomorphic * 100 / total
+	// Minimum threshold: 20% for 3.9.2 ARM64 (currently 23% = 1247/5354).
+	// The higher "84%" figure in commit messages includes polymorphic
+	// candidates (which are not single-callee resolutions).
+	const minRate = 20
 	if rate < minRate {
-		t.Errorf("BLR resolution rate = %d%% (%d/%d), minimum %d%%",
-			rate, report.ResolvedBLR, report.TotalBLR, minRate)
+		t.Errorf("BLR monomorphic rate = %d%% (%d/%d), minimum %d%%",
+			rate, monomorphic, total, minRate)
 	}
-	t.Logf("BLR: %d/%d (%d%%)", report.ResolvedBLR, report.TotalBLR, rate)
+	t.Logf("BLR: monomorphic=%d/%d (%d%%), polymorphic=%d, stub=%d, unresolved=%d",
+		monomorphic, total, rate, report.BLR.Polymorphic, report.BLR.Stub, report.BLR.Unresolved)
 }
 
 // TestSignalExpansionOutputs checks that all signal expansion JSONL files
 // are generated and non-empty. This prevents silent output drops.
 func TestSignalExpansionOutputs(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	_, err := Run(opts)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	tmpDir := sharedPipelineOutDir(t)
 
 	// Files that MUST exist (even if 0 entries, the file should be created
 	// by the pipeline for downstream tools to read)
@@ -123,27 +109,29 @@ func TestSignalExpansionOutputs(t *testing.T) {
 // TestDecompilerFeatures checks that decompiler output contains expected
 // features (ffi_call, field names, etc.). This prevents silent feature drops.
 func TestDecompilerFeatures(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	// Use _debug decompile-native --all --max 50 to get a sample
-	// Actually, we need to run the decompiler directly
-	// For integration test, just check that the pipeline produces
-	// the expected JSONL outputs with correct structure
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	result, err := Run(opts)
+	// Uses shared pipeline output — just verify function/signal counts
+	// are non-zero. The shared pipeline already ran Run() with Signal=true.
+	_ = sharedPipelineOutDir(t)
+	// If we got here, the pipeline succeeded. Check counts via the
+	// functions.jsonl file rather than the Result struct (which is not
+	// cached, only the output directory is).
+	funcsPath := filepath.Join(sharedPipelineOutDir(t), "functions.jsonl")
+	data, err := os.ReadFile(funcsPath)
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("read functions.jsonl: %v", err)
 	}
-	if result.FuncCount == 0 {
-		t.Error("no functions were decompiled")
+	if len(data) == 0 {
+		t.Error("functions.jsonl is empty — no functions were produced")
 	}
-	t.Logf("Functions: %d, Signal: %d", result.FuncCount, result.SignalCount)
+	// Count lines as a rough function count
+	lines := 0
+	for _, b := range data {
+		if b == '\n' {
+			lines++
+		}
+	}
+	if lines == 0 {
+		t.Error("no functions in functions.jsonl")
+	}
+	t.Logf("Functions: %d (from functions.jsonl line count)", lines)
 }
