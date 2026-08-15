@@ -332,26 +332,22 @@ func Run(opts Opts) (*Result, error) {
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Errors are logged but non-fatal (captured data is supplementary).
 func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *PoolLookups, layouts []DartClassLayout, log io.Writer) {
-	type jsonlEntry struct {
+	type writeJob struct {
 		filename string
 		label    string
-		records  interface{}
 	}
 
-	entries := []jsonlEntry{
-		{"scripts.jsonl", "scripts", BuildScripts(clResult, pl)},
-		{"loading_units.jsonl", "loading_units", BuildLoadingUnits(clResult)},
-		{"kpi.jsonl", "kpi", BuildKPI(clResult)},
-		{"instances.jsonl", "instances", BuildInstances(clResult, layouts)},
-		{"contexts.jsonl", "contexts", BuildContexts(clResult)},
-		{"type_arguments.jsonl", "type_arguments", BuildTypeArguments(clResult)},
-		{"exception_handlers.jsonl", "exception_handlers", BuildExceptionHandlers(clResult)},
-		{"icdata.jsonl", "icdata", BuildICData(clResult)},
-		{"closure_data.jsonl", "closure_data", BuildClosureData(clResult)},
-		// Consumer for the Script/Library capture: gap §6 "No library ->
-		// functions xref".
-		{"library_functions.jsonl", "library_functions", BuildLibraryFunctions(clResult, pl)},
-	}
+	// Build all records first, then write each non-empty slice.
+	scripts := BuildScripts(clResult, pl)
+	loadingUnits := BuildLoadingUnits(clResult)
+	kpis := BuildKPI(clResult)
+	instances := BuildInstances(clResult, layouts)
+	contexts := BuildContexts(clResult)
+	typeArgs := BuildTypeArguments(clResult)
+	excHandlers := BuildExceptionHandlers(clResult)
+	icdata := BuildICData(clResult)
+	closureData := BuildClosureData(clResult)
+	libFuncs := BuildLibraryFunctions(clResult, pl)
 
 	// Report the Code/loading-unit partition, and say plainly when it carries
 	// no information. A single-unit app (no deferred imports) yields one
@@ -367,104 +363,67 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *PoolLookups, l
 		}
 	}
 
-	for _, entry := range entries {
-		// Use reflection-free approach: check if the slice is empty by
-		// converting to a known interface.
-		if !hasRecords(entry.records) {
-			continue
-		}
-		path := filepath.Join(opts.OutDir, entry.filename)
-		f, err := os.Create(path)
-		if err != nil {
+	// Write each non-empty slice via the generic WriteJSONLFile.
+	type entry struct {
+		filename string
+		label    string
+		count    int
+		err      error
+	}
+	var entries []entry
+
+	if len(scripts) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "scripts.jsonl"), scripts)
+		entries = append(entries, entry{"scripts.jsonl", "scripts", n, err})
+	}
+	if len(loadingUnits) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "loading_units.jsonl"), loadingUnits)
+		entries = append(entries, entry{"loading_units.jsonl", "loading_units", n, err})
+	}
+	if len(kpis) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "kpi.jsonl"), kpis)
+		entries = append(entries, entry{"kpi.jsonl", "kpi", n, err})
+	}
+	if len(instances) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "instances.jsonl"), instances)
+		entries = append(entries, entry{"instances.jsonl", "instances", n, err})
+	}
+	if len(contexts) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "contexts.jsonl"), contexts)
+		entries = append(entries, entry{"contexts.jsonl", "contexts", n, err})
+	}
+	if len(typeArgs) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "type_arguments.jsonl"), typeArgs)
+		entries = append(entries, entry{"type_arguments.jsonl", "type_arguments", n, err})
+	}
+	if len(excHandlers) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "exception_handlers.jsonl"), excHandlers)
+		entries = append(entries, entry{"exception_handlers.jsonl", "exception_handlers", n, err})
+	}
+	if len(icdata) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "icdata.jsonl"), icdata)
+		entries = append(entries, entry{"icdata.jsonl", "icdata", n, err})
+	}
+	if len(closureData) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "closure_data.jsonl"), closureData)
+		entries = append(entries, entry{"closure_data.jsonl", "closure_data", n, err})
+	}
+	// Consumer for the Script/Library capture: gap §6 "No library ->
+	// functions xref".
+	if len(libFuncs) > 0 {
+		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "library_functions.jsonl"), libFuncs)
+		entries = append(entries, entry{"library_functions.jsonl", "library_functions", n, err})
+	}
+
+	for _, e := range entries {
+		if e.err != nil {
 			if !opts.Quiet {
-				_, _ = fmt.Fprintf(log, "  %swarning:%s write %s: %v\n", cli.Muted, cli.Reset, entry.filename, err)
+				_, _ = fmt.Fprintf(log, "  %swarning:%s write %s: %v\n", cli.Muted, cli.Reset, e.filename, e.err)
 			}
 			continue
 		}
-		enc := json.NewEncoder(f)
-		enc.SetEscapeHTML(false)
-		encodeAll(enc, entry.records)
-		_ = f.Close()
 		if !opts.Quiet {
-			_, _ = fmt.Fprintf(log, "  %s%s:%s %d entries\n", cli.Muted, entry.label, cli.Reset, countRecords(entry.records))
-		}
-	}
-}
-
-// hasRecords returns true if the interface wraps a non-empty slice.
-func hasRecords(v interface{}) bool {
-	return countRecords(v) > 0
-}
-
-// countRecords returns the length of a slice wrapped in interface{}, or 0.
-func countRecords(v interface{}) int {
-	switch s := v.(type) {
-	case []ScriptRecord:
-		return len(s)
-	case []LoadingUnitRecord:
-		return len(s)
-	case []KPIRecord:
-		return len(s)
-	case []InstanceRecord:
-		return len(s)
-	case []ContextRecord:
-		return len(s)
-	case []TypeArgumentsRecord:
-		return len(s)
-	case []ExceptionHandlerRecord:
-		return len(s)
-	case []ICDataRecord:
-		return len(s)
-	case []ClosureDataRecord:
-		return len(s)
-	case []LibraryFunctionsRecord:
-		return len(s)
-	}
-	return 0
-}
-
-// encodeAll encodes each element of a slice via the given encoder.
-func encodeAll(enc *json.Encoder, v interface{}) {
-	switch s := v.(type) {
-	case []ScriptRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []LoadingUnitRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []KPIRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []InstanceRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []ContextRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []TypeArgumentsRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []ExceptionHandlerRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []ICDataRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []ClosureDataRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
-		}
-	case []LibraryFunctionsRecord:
-		for i := range s {
-			_ = enc.Encode(&s[i])
+			_, _ = fmt.Fprintf(log, "  %s%s:%s %d entries\n", cli.Muted, e.label, cli.Reset, e.count)
 		}
 	}
 }
