@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -100,8 +101,8 @@ func cmdObjects(args []string) error {
 	}
 
 	// Resolve pool entries.
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
+	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
+	poolDisplay := pipeline.ResolvePoolDisplay(result.Pool, pl)
 
 	fmt.Fprintf(os.Stderr, "pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
 

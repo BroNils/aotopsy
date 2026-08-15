@@ -45,6 +45,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 		{"3.5.0", 3, 5},
 		{"3.9.2", 3, 9},
 		{"3.12.2", 3, 12},
+		{"3.13.0", 3, 13},
 	}
 	for _, p := range probes {
 		t.Run(p.tag, func(t *testing.T) {
@@ -73,7 +74,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 // TestBaseObjectNamesRefusesUnknownVersions guards the deliberate nil: a
 // version outside the verified range must NOT borrow a neighbour's list.
 func TestBaseObjectNamesRefusesUnknownVersions(t *testing.T) {
-	for _, v := range []string{"", "2.11.0", "4.0.0", "3.13.0", "nonsense", "3"} {
+	for _, v := range []string{"", "2.11.0", "4.0.0", "3.14.0", "nonsense", "3"} {
 		if got := BaseObjectNames(v); got != nil {
 			t.Errorf("BaseObjectNames(%q) = %q, want nil -- an unverified version must stay unnamed", v, got)
 		}
@@ -89,6 +90,7 @@ func TestBaseObjectBoolIndicesVaryByVersion(t *testing.T) {
 		"3.3.0":  {11, 12},
 		"3.9.2":  {10, 11},
 		"3.12.2": {10, 11},
+		"3.13.0": {3, 2}, // true=ref3, false=ref2 — SWAPPED vs all prior versions
 	}
 	for v, want := range cases {
 		names := BaseObjectNames(v)

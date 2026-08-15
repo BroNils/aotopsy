@@ -13,6 +13,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -120,8 +121,8 @@ func cmdX64Refs(args []string) error {
 		}
 	}
 
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
+	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
+	poolDisplay := pipeline.ResolvePoolDisplay(result.Pool, pl)
 
 	fmt.Fprintf(os.Stderr, "ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
 

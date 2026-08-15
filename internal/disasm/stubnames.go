@@ -480,6 +480,61 @@ var (
 		"CloneSuspendState", "FfiAsyncCallbackSend", "CheckIsolateFieldAccess", "CheckedStoreIntoShared",
 		"EnsureDeeplyImmutable", "UnknownDartCode",
 	} // count: 164
+
+	// stubNames3130: verified via gh api to dart-lang/sdk stub_code_list.h
+	// @3.13.0. Changes from 3.12.2:
+	// - AllocationProbePoint REMOVED (was at index 7 in 3.12.2)
+	// - AllocateClosure/Generic/TA/TAGeneric REPLACED by AllocateClosure1-4
+	// - TypeIsTopTypeForSubtyping RENAMED to IsTopType
+	// - InitSharedLateFinalStaticField REMOVED
+	// - FfiCallTrampoline ADDED (new)
+	// - RunExceptionHandlerUnbox already present in 3.12.2
+	// - CheckIsolateFieldAccess, CheckedStoreIntoShared, EnsureDeeplyImmutable
+	//   already present in 3.12.2
+	// Count: 163 (vs 164 in 3.12.2)
+	stubNames3130 = []string{
+		"JumpToFrame", "RunExceptionHandler", "RunExceptionHandlerUnbox", "DeoptForRewind", "WriteBarrier",
+		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateMint", "AllocateDouble",
+		"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4", "AllocateInt8Array", "AllocateUint8Array",
+		"AllocateUint8ClampedArray", "AllocateInt16Array", "AllocateUint16Array", "AllocateInt32Array",
+		"AllocateUint32Array", "AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array",
+		"AllocateFloat64Array", "AllocateFloat32x4Array", "AllocateInt32x4Array", "AllocateFloat64x2Array",
+		"AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs", "AllocateClosure1",
+		"AllocateClosure2", "AllocateClosure3", "AllocateClosure4", "AllocateContext", "AllocateGrowableArray",
+		"AllocateObject", "AllocateObjectParameterized", "AllocateObjectSlow", "AllocateRecord",
+		"AllocateRecord2", "AllocateRecord2Named", "AllocateRecord3", "AllocateRecord3Named",
+		"AllocateUnhandledException", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2", "CloneContext",
+		"CallToRuntime", "LazyCompile", "InterpretCall", "ResumeInterpreter", "CallBootstrapNative",
+		"CallNoScopeNative", "CallAutoScopeNative", "FixCallersTarget", "CallStaticFunction", "OptimizeFunction",
+		"InvokeDartCode", "InvokeDartCodeFromBytecode", "DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck",
+		"SingleTargetCall", "ICCallThroughCode", "MegamorphicCall", "FixAllocationStubTarget", "FixParameterizedAllocationStubTarget",
+		"Deoptimize", "DeoptimizeLazyFromReturn", "DeoptimizeLazyFromThrow", "UnoptimizedIdenticalWithNumberCheck",
+		"OptimizedIdenticalWithNumberCheck", "ICCallBreakpoint", "UnoptStaticCallBreakpoint", "RuntimeCallBreakpoint",
+		"OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache", "SmiLessInlineCache",
+		"SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache", "TwoArgsOptimizedCheckInlineCache",
+		"ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall", "TwoArgsUnoptimizedStaticCall",
+		"AssertSubtype", "AssertAssignable", "IsTopType", "NullIsAssignableToType",
+		"Subtype1TestCache", "Subtype2TestCache", "Subtype3TestCache", "Subtype4TestCache", "Subtype6TestCache",
+		"Subtype7TestCache", "CallClosureNoSuchMethod", "FrameAwaitingMaterialization", "AsynchronousGapMarker",
+		"NotLoaded", "DispatchTableNullError", "LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs",
+		"NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs", "NullArgErrorSharedWithFPURegs",
+		"NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs",
+		"RangeErrorSharedWithFPURegs", "RangeErrorSharedWithoutFPURegs", "WriteErrorSharedWithFPURegs",
+		"WriteErrorSharedWithoutFPURegs", "FieldAccessErrorSharedWithFPURegs", "FieldAccessErrorSharedWithoutFPURegs",
+		"StackOverflowSharedWithFPURegs", "StackOverflowSharedWithoutFPURegs", "DoubleToInteger",
+		"OneArgCheckInlineCacheWithExactnessCheck", "OneArgOptimizedCheckInlineCacheWithExactnessCheck",
+		"EnterSafepoint", "ExitSafepoint", "CallNativeThroughSafepoint", "FfiCallTrampoline", "FfiCallbackTrampoline",
+		"InitStaticField", "InitLateStaticField", "InitLateFinalStaticField", "InitInstanceField",
+		"InitLateInstanceField", "InitLateFinalInstanceField", "InitSharedLateStaticField", "Throw",
+		"ReThrow", "InstanceOf", "InstantiateType", "InstantiateTypeNonNullableClassTypeParameter",
+		"InstantiateTypeNullableClassTypeParameter", "InstantiateTypeNonNullableFunctionTypeParameter",
+		"InstantiateTypeNullableFunctionTypeParameter", "InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA",
+		"InstantiateTypeArgumentsMayShareFunctionTA", "NoSuchMethodDispatcher", "Await", "AwaitWithTypeCheck",
+		"InitAsync", "Resume", "ReturnAsync", "ReturnAsyncNotFuture", "InitAsyncStar", "YieldAsyncStar",
+		"ReturnAsyncStar", "InitSyncStar", "SuspendSyncStarAtStart", "SuspendSyncStarAtYield", "AsyncExceptionHandler",
+		"CloneSuspendState", "FfiAsyncCallbackSend", "CheckIsolateFieldAccess", "CheckedStoreIntoShared",
+		"EnsureDeeplyImmutable", "UnknownDartCode",
+	} // count: 163
 )
 
 // VMStubNames returns the ordered VM_STUB_CODE_LIST expansion for a known
@@ -522,6 +577,8 @@ func VMStubNames(dartVersion string) []string {
 		return stubNames3115
 	case "3.12.2":
 		return stubNames3122
+	case "3.13.0":
+		return stubNames3130
 	}
 	return nil
 }

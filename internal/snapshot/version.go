@@ -809,6 +809,40 @@ var cidsV392 = CIDTable{
 	NativePointerCid: 1, NumPredefinedCids: 175,
 }
 
+// v3.13.0: CID(LinkedHashBaseCid) added after CLASS_LIST in CLASS_ID_LIST,
+// shifting all CIDs after String (FFI, TypedData, ByteDataView, Null, etc) +1
+// vs cidsV392. Verified via gh api to dart-lang/sdk class_id.h @3.13.0:
+// the only diff from 3.12.2's CLASS_ID_LIST is one added CID(LinkedHashBaseCid)
+// line after CLASS_LIST(DEFINE_CLASS_ID). CIDs Object(4) through String(95)
+// are unchanged; everything after shifts +1.
+var cidsV3130 = CIDTable{
+	Class: 5, PatchClass: 6, Function: 7, TypeParameters: 8,
+	ClosureData: 9, FfiTrampolineData: 10, Field: 11, Script: 12,
+	Library: 13, Namespace: 14, KernelProgramInfo: 15,
+	WeakSerializationReference: 16, WeakArray: 17,
+	Code: 18, ObjectPool: 23, PcDescriptors: 24, CodeSourceMap: 25,
+	CompressedStackMaps: 26, ExceptionHandlers: 28, Context: 29,
+	ContextScope: 30, Sentinel: 31, SingleTargetCache: 32,
+	UnlinkedCall: 35, MonomorphicSmiableCall: 33, CallSiteData: 34,
+	ICData: 36, MegamorphicCache: 37, SubtypeTestCache: 38,
+	LoadingUnit: 39, LanguageError: 42, UnhandledException: 43,
+	Instance: 45, LibraryPrefix: 46, TypeArguments: 47,
+	Type: 49, FunctionType: 50, RecordType: 51, TypeParameter: 52,
+	Closure: 57, Mint: 61, Double: 62,
+	Float32x4: 64, Int32x4: 65, Float64x2: 66, Record: 67,
+	TypedData: 69, ExternalTypedData: 70, TypedDataView: 71,
+	Capability: 74, ReceivePort: 75, SendPort: 76,
+	StackTrace: 77, SuspendState: 78, RegExp: 79,
+	WeakProperty: 80, WeakReference: 81,
+	FutureOr: 83, UserTag: 84, TransferableTypedData: 85,
+	Map: 86, ConstMap: 87, Set: 88, ConstSet: 89,
+	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
+	String: 93, OneByteString: 94, TwoByteString: 95,
+	// LinkedHashBaseCid = 96 (new in 3.13.0, shifts everything below +1)
+	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	NativePointerCid: 1, NumPredefinedCids: 176,
+}
+
 var versionProfiles = map[string]*VersionProfile{
 	"2.10.0": {DartVersion: "2.10.0", Supported: true, HeaderFields: 4, Tags: TagStyleCidInt32, CIDs: &cidsV210, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, PreCanonicalSplit: true, ClassNumRefs: 16, ClassHasTokenPos: true, FuncNumRefs: 7, TypeNumRefs: 5, TypeClassIdIsRef: true, TypeHasTokenPos: true, TypeParamNumRefs: 5, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ScriptHasLineCol: true, ScriptHasFlags: true, ObjectStoreAOTFieldCount: 176}, // SDK-verified: from()=object_class -> to_snapshot(kFullAOT)=slow_tts_stub = 176 fields (object_store.h @2.10.0)
 	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 8 refs
@@ -845,6 +879,18 @@ var versionProfiles = map[string]*VersionProfile{
 	// function-name resolution succeeding on the sample, not just by
 	// reading the refactored source).
 	"3.12.2": {DartVersion: "3.12.2", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 244, CodeIndexOneBased: true,},
+	// 3.13.0: class_id.h adds CID(LinkedHashBaseCid) after CLASS_LIST but
+	// before CLASS_LIST_FFI, shifting all FFI/TypedData/ByteDataView/
+	// Null/Dynamic/Void/Never CIDs +1 vs 3.12.2. ObjectStore: resume_stub
+	// and slow_tts_stub removed, to_snapshot(kFullAOT) still points at
+	// ffi_callback_functions_. Function kinds expanded to 30 (vs 17) but
+	// the first 8 (RegularFunction..ImplicitSetter) are unchanged, so
+	// layout219's mask 0x1F still works. Stub list changed: AllocateClosure
+	// split into AllocateClosure1-4, RunExceptionHandlerUnbox added,
+	// TypeIsTopTypeForSubtyping* renamed. CID table, stub names, THR
+	// offsets, and function kind layout all verified via gh api to
+	// dart-lang/sdk at tag 3.13.0.
+	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, CodeIndexOneBased: true,},
 }
 
 // DetectVersion returns a VersionProfile for the given snapshot hash.

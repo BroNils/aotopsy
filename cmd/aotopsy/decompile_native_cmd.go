@@ -135,8 +135,8 @@ func cmdDecompileNative(args []string) error {
 		}
 	}
 
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
+	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
+	poolDisplay := pipeline.ResolvePoolDisplay(result.Pool, pl)
 
 	// Build class layouts for field-name resolution in the decompiler.
 	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
@@ -301,7 +301,7 @@ func cmdDecompileNative(args []string) error {
 	// verified yet, or the region can't be parsed -- see
 	// pipeline.BuildVMStubSymbols's doc comment and ARCHITECTURE.md's
 	// "Stub naming" section.
-	vmStubNames := buildVMStubSymbols(info, opts)
+	vmStubNames := pipeline.BuildVMStubSymbols(info, opts)
 
 	// Build a whole-binary VA->name symbol table once, so cross-function
 	// call targets resolve to real names instead of sub_<hex>.
@@ -338,7 +338,7 @@ func cmdDecompileNative(args []string) error {
 	// trace symbolication. See pipeline.BuildDiscardedFunctionSymbols's
 	// doc comment and ARCHITECTURE.md's "Discarded-Code function naming"
 	// section for the full derivation.
-	discardedFuncNames := buildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased)
+	discardedFuncNames := pipeline.BuildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased)
 	for va, name := range discardedFuncNames {
 		symbolNames[va] = name
 	}

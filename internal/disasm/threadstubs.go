@@ -269,6 +269,8 @@ func ThreadStubOffsets(dartVersion string, isARM64 bool) map[int64]string {
 		return threadStubOffsets3115
 	case "3.12.2":
 		return threadStubOffsets3122
+	case "3.13.0": // verified via gh api runtime_offsets_extracted.h @3.13.0 — offsets identical to 3.12.2
+		return threadStubOffsets3122
 	case "2.17.6":
 		return threadStubOffsets2176
 	case "3.0.5":

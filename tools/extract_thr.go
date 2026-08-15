@@ -61,6 +61,7 @@ var allTargets = []extractTarget{
 	{"3.10.7", "arm64", true, true},
 	{"3.11.0", "arm64", true, true},
 	{"3.12.2", "arm64", true, true},
+	{"3.13.0", "arm64", true, true},
 	// ARM64 + non-compressed + PRODUCT (v2.x)
 	{"2.10.0", "arm64", false, true},
 	// 3.x desktop AOT (uncompressed) -- same reason as the x64 entry below.
@@ -87,6 +88,7 @@ var allTargets = []extractTarget{
 	{"3.10.7", "x64", true, true},
 	{"3.11.0", "x64", true, true},
 	{"3.12.2", "x64", true, true},
+	{"3.13.0", "x64", true, true},
 	// x86_64 + non-compressed + PRODUCT (v2.x)
 	{"2.10.0", "x64", false, true},
 	{"2.12.0", "x64", false, true},

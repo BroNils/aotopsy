@@ -90,7 +90,7 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 // a neighbouring version's numbering is what made 2.10 label setters as
 // constructors.
 func TestFunctionKindRefusesUnknownVersions(t *testing.T) {
-	for _, v := range []string{"", "2.11.0", "3.13.0", "4.0.0", "nonsense"} {
+	for _, v := range []string{"", "2.11.0", "3.14.0", "4.0.0", "nonsense"} {
 		if got := decodeFunctionKind(5, &snapshot.VersionProfile{DartVersion: v}); got != FunctionKindUnknown {
 			t.Errorf("decodeFunctionKind at %q = %v, want FunctionKindUnknown", v, got)
 		}

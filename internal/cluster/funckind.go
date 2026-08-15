@@ -152,6 +152,7 @@ var funcKindLayouts = map[string]*funcKindLayout{
 	"3.10.7": &layout219,
 	"3.11.0": &layout219,
 	"3.12.2": &layout219,
+	"3.13.0": &layout219, // 30 kinds, but first 8 (RegularFunction..ImplicitSetter) unchanged, mask 0x1F still valid
 }
 
 // funcKindLayoutFor returns the raw-ordinal numbering for a Dart version, or

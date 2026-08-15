@@ -71,7 +71,7 @@ func (b *funcIRBuilder) Build(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		}
 	}
 	fir.ThreadStubOffsets = disasm.ThreadStubOffsets(b.info.Version.DartVersion, b.isARM64)
-	fir.ThreadFieldNames = threadFieldOffsets(b.info.Version.DartVersion, b.isARM64, b.info.Version)
+	fir.ThreadFieldNames = pipeline.ThreadFieldOffsets(b.info.Version.DartVersion, b.isARM64, b.info.Version)
 	fir.ParamTypeNames = b.paramTypeNamesFor(r)
 	fir.TypeParamNames = b.genericParamNamesFor(r)
 	fir.FieldNameResolver = b.fieldNameResolver

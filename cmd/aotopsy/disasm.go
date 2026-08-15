@@ -32,11 +32,3 @@ func cmdDisasm(args []string) error {
 	})
 	return err
 }
-
-func qualifiedName(ownerName, funcName string, pcOffset uint32) string {
-	return pipeline.QualifiedName(ownerName, funcName, pcOffset)
-}
-
-func sanitizeFilename(name string) string {
-	return pipeline.SanitizeFilename(name)
-}
