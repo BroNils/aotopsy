@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -234,6 +235,30 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				} else {
 					l.CodeRefDisplay[ce.RefID] = ci.FuncName
 				}
+			}
+		}
+	}
+
+	// Name VM stub Code objects by their creation-order index.
+	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
+	// owner — ResolveCodeOwner fails for them. Their names come from
+	// VM_STUB_CODE_LIST (disasm.VMStubNames), which is ordered by
+	// creation order, matching vmResult.Codes[i].
+	// Without this, PoolCodeNames has no entries for PP-loaded VM stub
+	// Code objects, so BLR calls through them are unresolved.
+	if vmResult != nil {
+		vmStubNames := disasm.VMStubNames(dartVersion)
+		if len(vmStubNames) > 0 {
+			for i, ce := range vmResult.Codes {
+				if i >= len(vmStubNames) {
+					break
+				}
+				if _, exists := l.CodeNames[ce.RefID]; exists {
+					continue
+				}
+				name := vmStubNames[i]
+				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
+				l.CodeRefDisplay[ce.RefID] = name
 			}
 		}
 	}

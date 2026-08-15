@@ -70,6 +70,48 @@ var (
 		"UnknownDartCode",
 	} // count: 160
 
+	// stubNames2120 verified against dart-lang/sdk runtime/vm/stub_code_list.h
+	// at tag 2.12.0. Unlike 3.x where VM_TYPE_TESTING_STUB_CODE_LIST is at the
+	// END (and deliberately excluded), in 2.12.0 it is embedded IN THE MIDDLE
+	// (between Subtype7TestCache and CallClosureNoSuchMethod). Excluding it
+	// would shift all subsequent names by 9, producing wrong names for 34
+	// stubs. So this list includes ALL 116 entries in creation order.
+	stubNames2120 = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler", "DeoptForRewind", "WriteBarrier",
+		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateInt8Array", "AllocateUint8Array",
+		"AllocateUint8ClampedArray", "AllocateInt16Array", "AllocateUint16Array", "AllocateInt32Array", "AllocateUint32Array",
+		"AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array", "AllocateFloat64Array", "AllocateFloat32x4Array",
+		"AllocateInt32x4Array", "AllocateFloat64x2Array", "AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs", "AllocateContext",
+		"AllocateObject", "AllocateObjectParameterized", "AllocateObjectSlow", "AllocateUnhandledException", "CloneContext",
+		"CallToRuntime", "LazyCompile", "CallBootstrapNative", "CallNoScopeNative", "CallAutoScopeNative",
+		"FixCallersTarget", "CallStaticFunction", "OptimizeFunction", "InvokeDartCode", "DebugStepCheck",
+		"SwitchableCallMiss", "MonomorphicSmiableCheck", "SingleTargetCall", "ICCallThroughCode", "MegamorphicCall",
+		"FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn", "DeoptimizeLazyFromThrow",
+		"UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck", "ICCallBreakpoint",
+		"UnoptStaticCallBreakpoint", "RuntimeCallBreakpoint", "OneArgCheckInlineCache", "TwoArgsCheckInlineCache",
+		"SmiAddInlineCache", "SmiLessInlineCache", "SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache",
+		"TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall",
+		"TwoArgsUnoptimizedStaticCall", "AssertSubtype", "TypeIsTopTypeForSubtyping", "TypeIsTopTypeForSubtypingNullSafe",
+		"NullIsAssignableToType", "NullIsAssignableToTypeNullSafe", "Subtype1TestCache", "Subtype3TestCache",
+		"Subtype5TestCache", "Subtype7TestCache",
+		// VM_TYPE_TESTING_STUB_CODE_LIST — in the MIDDLE for 2.12.0, not at the end
+		"DefaultTypeTest", "DefaultNullableTypeTest", "TopTypeTypeTest", "UnreachableTypeTest",
+		"TypeParameterTypeTest", "NullableTypeParameterTypeTest", "SlowTypeTest", "LazySpecializeTypeTest",
+		"LazySpecializeNullableTypeTest",
+		// Remaining stubs after type testing list
+		"CallClosureNoSuchMethod", "FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded",
+		"DispatchTableNullError", "LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs",
+		"NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs", "NullArgErrorSharedWithFPURegs",
+		"NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs",
+		"RangeErrorSharedWithFPURegs", "RangeErrorSharedWithoutFPURegs", "StackOverflowSharedWithFPURegs",
+		"StackOverflowSharedWithoutFPURegs", "OneArgCheckInlineCacheWithExactnessCheck",
+		"OneArgOptimizedCheckInlineCacheWithExactnessCheck", "EnterSafepoint", "ExitSafepoint",
+		"CallNativeThroughSafepoint", "InitStaticField", "InitInstanceField", "InitLateInstanceField",
+		"InitLateFinalInstanceField", "Throw", "ReThrow", "AssertBoolean", "InstanceOf",
+		"InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA",
+		"InstantiateTypeArgumentsMayShareFunctionTA", "NoSuchMethodDispatcher",
+	} // count: 116
+
 	// stubNames2176/305/325/343/362 verified against the real
 	// dart-lang/sdk runtime/vm/stub_code_list.h at the 2.17.6, 3.0.5,
 	// 3.2.5, 3.4.3, and 3.6.2 tags respectively (same extraction method
@@ -458,6 +500,8 @@ var (
 // session, not merely assumed to carry over from the older label.
 func VMStubNames(dartVersion string) []string {
 	switch dartVersion {
+	case "2.12.0":
+		return stubNames2120
 	case "2.17.6":
 		return stubNames2176
 	case "3.0.5":
