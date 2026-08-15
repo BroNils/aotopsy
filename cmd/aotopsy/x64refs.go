@@ -149,16 +149,9 @@ func cmdX64Refs(args []string) error {
 				_, _ = fmt.Sscanf(*indirectInFunc, "%x", &targetVA)
 			}
 			scanRanges = nil
-			for _, r := range ranges {
-				if r.Size == 0 {
-					continue
-				}
-				funcStart := uint64(r.PCOffset) - codeOff
-				funcVA := codeVA + funcStart
-				if targetVA >= funcVA && targetVA < funcVA+uint64(r.Size) {
-					scanRanges = append(scanRanges, r)
-					break
-				}
+			found := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
+			if found != nil {
+				scanRanges = append(scanRanges, *found)
 			}
 			if scanRanges == nil {
 				return fmt.Errorf("no range contains VA 0x%x", targetVA)
@@ -242,75 +235,70 @@ func cmdX64Refs(args []string) error {
 // Map/getter key), the natural next step once blind register/memory
 // dumping alone hits its limit.
 func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *poolLookups, poolDisplay map[int]string) error {
-	for _, r := range ranges {
-		if r.Size == 0 {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		funcVA := codeVA + funcStart
-		if targetVA < funcVA || targetVA >= funcVA+uint64(r.Size) {
-			continue
-		}
-		var funcName string
-		if r.RefID >= 0 {
-			funcName = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-		fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
-
-		funcCode := code[funcStart:funcEnd]
-		for off := 0; off < len(funcCode); {
-			addr := funcVA + uint64(off)
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				fmt.Printf("0x%x: <decode error: %v>\n", addr, err)
-				length = 1
-				off += length
-				continue
-			}
-			text := inst.String()
-			annotation := ""
-			for _, arg := range inst.Args {
-				if mem, ok := arg.(x86asm.Mem); ok {
-					if mem.Base == x86asm.R15 {
-						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
-						if disp, ok := poolDisplay[poolIdx]; ok {
-							annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
-						} else {
-							annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
-						}
-					} else if mem.Base == x86asm.R14 {
-						annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
-					}
-				}
-				if rel, ok := arg.(x86asm.Rel); ok {
-					// Resolve JMP/Jcc/CALL rel targets to absolute VA --
-					// added to disambiguate whether a given address is
-					// reachable via normal control flow or only via a
-					// jump/deopt-landing-pad from elsewhere (useful for
-					// telling which of two candidate write sites in a
-					// function is on the normal path vs. a rare
-					// deopt/exception continuation).
-					target := addr + uint64(length) + uint64(int64(rel))
-					annotation += fmt.Sprintf("  ; -> 0x%x", target)
-				}
-			}
-			marker := "  "
-			if addr == targetVA {
-				marker = "->"
-			}
-			fmt.Printf("%s 0x%x: %s%s\n", marker, addr, text, annotation)
-			off += length
-		}
-		return nil
+	r := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
+	if r == nil {
+		return fmt.Errorf("no range contains VA 0x%x", targetVA)
 	}
-	return fmt.Errorf("no range contains VA 0x%x", targetVA)
+	funcStart := uint64(r.PCOffset) - codeOff
+	funcEnd := funcStart + uint64(r.Size)
+	if funcEnd > uint64(len(code)) {
+		funcEnd = uint64(len(code))
+	}
+	funcVA := codeVA + funcStart
+	var funcName string
+	if r.RefID >= 0 {
+		funcName = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
+	} else {
+		funcName = fmt.Sprintf("stub_%x", r.PCOffset)
+	}
+	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
+
+	funcCode := code[funcStart:funcEnd]
+	for off := 0; off < len(funcCode); {
+		addr := funcVA + uint64(off)
+		inst, err := x86asm.Decode(funcCode[off:], 64)
+		length := inst.Len
+		if err != nil || length <= 0 {
+			fmt.Printf("0x%x: <decode error: %v>\n", addr, err)
+			length = 1
+			off += length
+			continue
+		}
+		text := inst.String()
+		annotation := ""
+		for _, arg := range inst.Args {
+			if mem, ok := arg.(x86asm.Mem); ok {
+				if mem.Base == x86asm.R15 {
+					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+					if disp, ok := poolDisplay[poolIdx]; ok {
+						annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
+					} else {
+						annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
+					}
+				} else if mem.Base == x86asm.R14 {
+					annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
+				}
+			}
+			if rel, ok := arg.(x86asm.Rel); ok {
+				// Resolve JMP/Jcc/CALL rel targets to absolute VA --
+				// added to disambiguate whether a given address is
+				// reachable via normal control flow or only via a
+				// jump/deopt-landing-pad from elsewhere (useful for
+				// telling which of two candidate write sites in a
+				// function is on the normal path vs. a rare
+				// deopt/exception continuation).
+				target := addr + uint64(length) + uint64(int64(rel))
+				annotation += fmt.Sprintf("  ; -> 0x%x", target)
+			}
+		}
+		marker := "  "
+		if addr == targetVA {
+			marker = "->"
+		}
+		fmt.Printf("%s 0x%x: %s%s\n", marker, addr, text, annotation)
+		off += length
+	}
+	return nil
 }
 
 // findCallersOf scans every function in the binary for CALL rel32

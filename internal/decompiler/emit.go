@@ -521,12 +521,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = enumReconstruction(source)
 	// Null-safety annotation (detect null-check patterns)
 	source = nullSafetyAnnotation(source)
-	// A1: Local variable type inference — use LocalTypeHints from typetrack
-	// (IR-level) plus heuristic text-based inference from ParamTypeNames.
-	source = localTypeInference(source, effectiveParamTypes)
-	if fir.LocalTypeHints != nil {
-		source = applyLocalTypeHints(source, fir.LocalTypeHints)
-	}
+	// A1: Local variable type inference — consolidated pass that combines
+	// IR-level hints (from typetrack KnownClass) with heuristic text-based
+	// inference from ParamTypeNames. One split + one join instead of two.
+	source = localTypeInference(source, effectiveParamTypes, fir.LocalTypeHints)
 	// For-loop recovery, guard merging and null-check annotation now run
 	// inside compactLines, on the statement tree -- see stmt_loops.go, which
 	// records what each of them used to get wrong as a text pass.

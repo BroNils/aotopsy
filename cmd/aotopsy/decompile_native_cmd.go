@@ -696,20 +696,7 @@ func cmdDecompileNative(args []string) error {
 		// starting exactly at --func's address -- found by testing this
 		// exact command against real libapp.so files with known-good
 		// function addresses.
-		var found *cluster.CodeRange
-		for i, r := range ranges {
-			if r.Size == 0 {
-				continue
-			}
-			funcStart := uint64(r.PCOffset) - codeOff
-			funcVA := codeVA + funcStart
-			if targetVA < funcVA || targetVA >= funcVA+uint64(r.Size) {
-				continue
-			}
-			if found == nil || r.Size < found.Size || (r.Size == found.Size && r.RefID >= 0 && found.RefID < 0) {
-				found = &ranges[i]
-			}
-		}
+		found := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
 		if found == nil {
 			return fmt.Errorf("no CodeRange contains VA 0x%x", targetVA)
 		}
