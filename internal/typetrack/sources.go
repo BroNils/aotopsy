@@ -1,7 +1,7 @@
 package typetrack
 
 import (
-	"sort"
+	"slices"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/snapshot"
@@ -257,7 +257,7 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 	for refID := range pl.RefToNamed {
 		refIDs = append(refIDs, refID)
 	}
-	sort.Ints(refIDs)
+	slices.Sort(refIDs)
 	for _, refID := range refIDs {
 		no := pl.RefToNamed[refID]
 		if no == nil || no.CID != pl.CT.Function {
