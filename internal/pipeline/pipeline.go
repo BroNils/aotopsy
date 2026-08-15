@@ -16,9 +16,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/signal"
-	"aotopsy/internal/snapshot"
 )
 
 // Opts controls pipeline execution.
@@ -88,7 +86,10 @@ func Run(opts Opts) (*Result, error) {
 		return runFromExisting(&opts, result)
 	}
 
-	// Step 1: ELF open + snapshot extract.
+	// Step 1-3: Load snapshot (ELF → snapshot → cluster → fill → table →
+	// code ranges → VM snapshot → pool lookups → pool display).
+	// This was previously inlined as ~120 lines copy-pasted across 8 files;
+	// LoadSnapshot is the single shared implementation.
 	fmtOpts := dartfmt.Options{
 		Mode:     dartfmt.ModeBestEffort,
 		MaxSteps: opts.MaxSteps,
@@ -97,79 +98,30 @@ func Run(opts Opts) (*Result, error) {
 		fmtOpts.Mode = dartfmt.ModeStrict
 	}
 
-	ef, err := elfx.Open(opts.LibPath)
+	sc, err := LoadSnapshot(opts.LibPath, fmtOpts)
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, err
 	}
-	defer func() { _ = ef.Close() }()
-	isARM64 := ef.IsARM64()
-	// Last-resort names for Codes the snapshot cannot name at all. nil on a
-	// stripped build, which is the normal production case. See
-	// elfx.FuncSymbols for why this must not go any further than that.
-	elfFuncSyms := ef.FuncSymbols()
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, fmtOpts)
-	if err != nil {
-		return nil, fmt.Errorf("extract: %w", err)
-	}
+	ef := sc.EF
+	info := sc.Info
+	clResult := sc.Result
+	table := sc.Table
+	ranges := sc.Ranges
+	code := sc.Code
+	codeOff := sc.CodeOff
+	codeVA := sc.CodeVA
+	payloadLen := uint64(len(code))
+	isARM64 := sc.IsARM64
+	elfFuncSyms := ef.FuncSymbols()
+	pl := sc.Pool
+	poolDisplay := sc.PoolDisplay
 
 	if info.Version != nil && info.Version.DartVersion != "" {
 		opts.stagef("elf", "Dart SDK %s%s%s", cli.Gold, info.Version.DartVersion, cli.Reset)
 		result.DartVersion = info.Version.DartVersion
 	}
-	if info.Version != nil && !info.Version.Supported {
-		return nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
-	}
-
-	// Step 2: Parse isolate snapshot clusters + fill.
-	data := info.IsolateData.Data
-	if len(data) < 64 {
-		return nil, fmt.Errorf("isolate data too short (%d bytes)", len(data))
-	}
-
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return nil, fmt.Errorf("cluster start: %w", err)
-	}
-
-	clResult, err := cluster.ScanClusters(data, clusterStart, info.Version, false, fmtOpts)
-	if err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-
-	if err := cluster.ReadFill(data, clResult, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return nil, fmt.Errorf("fill: %w", err)
-	}
-
-	// Step 3: Parse instructions table + resolve code ranges.
-	// Pre-InstructionsTable versions (v2.10-v2.15) have InstructionTableDataOffset=0;
-	// use TextOffset from Code fill instead.
-	var ranges []cluster.CodeRange
-	table, err := cluster.ParseInstructionsTable(data, &clResult.Header, info.Version, info.IsolateHeader)
-	if err != nil && clResult.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta {
-		// Pre-InstructionsTable: build ranges from TextOffset.
-		codeRanges := cluster.ResolveCodeRangesFromTextOffset(clResult.Codes)
-		ranges = codeRanges
-		table = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("instrtable: %w", err)
-	} else {
-		codeRanges, err := cluster.ResolveCodeRanges(clResult.Codes, table)
-		if err != nil {
-			return nil, fmt.Errorf("code ranges: %w", err)
-		}
-		stubRanges := cluster.ResolveStubRanges(table)
-		ranges = cluster.MergeRanges(stubRanges, codeRanges)
-	}
-
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
-	if err != nil {
-		return nil, fmt.Errorf("code region: %w", err)
-	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen)
-	cluster.SetLastRangeSize(ranges, codeEndOffset)
-
-	codeVA := info.IsolateInstructions.VA + codeOff
 
 	opts.stagef("code", "%s%d%s bytes at VA %s0x%x%s",
 		cli.Gold, payloadLen, cli.Reset, cli.Blue, codeVA, cli.Reset)
@@ -187,29 +139,6 @@ func Run(opts Opts) (*Result, error) {
 	if err := os.MkdirAll(opts.OutDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
-
-	// Parse the VM-isolate snapshot region (info.VmData) for base-object
-	// resolution (strings/names/CIDs shared across every app that uses
-	// this Dart SDK build). Without this, pool entries referencing
-	// VM-isolate objects show as opaque "<vm:NNN>" placeholders instead
-	// of their real content. This mirrors LoadContext's exact pattern
-	// (context.go:140-150) and objects.go's proven approach.
-	//
-	// NOTE: This is a minimal inline fix (P0-7). The duplication with
-	// LoadContext will be consolidated in P4-1 (SetupPipeline).
-	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, fmtOpts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	// Build name lookups and pool display map.
-	pl := BuildPoolLookups(clResult, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := ResolvePoolDisplay(clResult.Pool, pl)
 
 	// Build and write class layouts.
 	classLayouts := BuildClassLayouts(clResult, pl, info.Version.CompressedPointers)

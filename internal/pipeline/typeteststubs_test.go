@@ -140,12 +140,11 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 	if got := buildTypeTestingStubNames(res, pl, nil, false); len(got) != 0 {
 		t.Errorf("named an unresolvable class: %v", got)
 	}
-	// typeClassIdIsRef (Dart 2.10-2.15) used to cause an early return nil,
-	// but resolveTypeClassIDs now fills ClassID from MintValues for 2.x,
-	// so the guard was removed (typeteststubs.go:55-60). With no Classes
-	// in the result, the function still returns an empty map (not nil):
-	// it cannot name anything, which is the correct "refuse" behavior.
-	if got := buildTypeTestingStubNames(res, pl, nil, true); len(got) != 0 {
-		t.Errorf("TypeClassIdIsRef with no Classes must not name anything, got %v", got)
+	// typeClassIdIsRef (Dart 2.10-2.15): naming is OFF because
+	// resolveTypeClassIDs fills ClassID from MintValues but all types
+	// resolve to the same class on real 2.x samples (verified on 2.12.0:
+	// 251/251 → "TypeParameters"). The guard returns nil.
+	if got := buildTypeTestingStubNames(res, pl, nil, true); got != nil {
+		t.Errorf("TypeClassIdIsRef must disable naming entirely, got %v", got)
 	}
 }

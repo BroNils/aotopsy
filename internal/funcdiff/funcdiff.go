@@ -13,7 +13,6 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -71,46 +70,14 @@ func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *pipeline.PoolLookups
 // cluster scan+fill, isolate + VM snapshot) and builds the descriptor set
 // for one libapp.so build.
 func Load(libPath string) (descriptors map[FuncDescriptor]int, dartVersion string, err error) {
-	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
-
-	ef, err := elfx.Open(libPath)
+	sc, err := pipeline.LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
-		return nil, "", fmt.Errorf("funcdiff: open %s: %w", libPath, err)
+		return nil, "", fmt.Errorf("funcdiff: %s: %w", libPath, err)
 	}
-	defer func() { _ = ef.Close() }()
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return nil, "", fmt.Errorf("funcdiff: extract %s: %w", libPath, err)
-	}
-
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return nil, "", fmt.Errorf("funcdiff: cluster start %s: %w", libPath, err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return nil, "", fmt.Errorf("funcdiff: scan %s: %w", libPath, err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return nil, "", fmt.Errorf("funcdiff: fill %s: %w", libPath, err)
-	}
-
-	var vmResult *cluster.Result
-	vmData := info.VmData.Data
-	if len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	descriptors = Build(result, pl, info.Version.CIDs)
-	return descriptors, info.Version.DartVersion, nil
+	descriptors = Build(sc.Result, sc.Pool, sc.Info.Version.CIDs)
+	return descriptors, sc.Info.Version.DartVersion, nil
 }
 
 // PackageCounts is unused for now (no per-class library-URI tracking to

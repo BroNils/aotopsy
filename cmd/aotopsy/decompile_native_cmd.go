@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"debug/elf"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,9 +18,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
-	"aotopsy/internal/snapshot"
 )
 
 // cmdDecompileNative implements "aotopsy _debug decompile-native --lib
@@ -66,77 +63,25 @@ func cmdDecompileNative(args []string) error {
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
-	ef, err := elfx.Open(*libapp)
+	sc, err := pipeline.LoadSnapshot(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
-	defer func() { _ = ef.Close() }()
-	isARM64 := ef.ELF.Machine == elf.EM_AARCH64
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
+	ef := sc.EF
+	info := sc.Info
+	result := sc.Result
+	table := sc.Table
+	ranges := sc.Ranges
+	code := sc.Code
+	codeOff := sc.CodeOff
+	codeVA := sc.CodeVA
+	isARM64 := sc.IsARM64
+	pl := sc.Pool
+	poolDisplay := sc.PoolDisplay
+
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch: %s\n", info.Version.DartVersion, ef.ELF.Machine)
-
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
-
-	table, err := cluster.ParseInstructionsTable(data, &result.Header, info.Version, info.IsolateHeader)
-	var ranges []cluster.CodeRange
-	switch {
-	case err != nil && result.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta:
-		ranges = cluster.ResolveCodeRangesFromTextOffset(result.Codes)
-	case err != nil:
-		return fmt.Errorf("instrtable: %w", err)
-	default:
-		codeRanges, err := cluster.ResolveCodeRanges(result.Codes, table)
-		if err != nil {
-			return fmt.Errorf("code ranges: %w", err)
-		}
-		stubRanges := cluster.ResolveStubRanges(table)
-		ranges = cluster.MergeRanges(stubRanges, codeRanges)
-	}
-
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
-	if err != nil {
-		return fmt.Errorf("code region: %w", err)
-	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // codeOff/payloadLen are offsets within one already-loaded snapshot payload, always well under 2^32
-	cluster.SetLastRangeSize(ranges, codeEndOffset)
-	codeVA := info.IsolateInstructions.VA + codeOff
-
-	// Parse the VM-isolate snapshot region for base-object resolution
-	// (strings/names/CIDs shared across every app using this Dart SDK
-	// build). Without this, pool entries referencing VM-isolate objects
-	// showed as opaque "<vm:NNN>" placeholders instead of their real
-	// content -- a real, previously-unnoticed gap (this command passed
-	// nil here since it was written), even though objects.go already
-	// does this correctly (its own "vm snapshot: N clusters, N strings"
-	// stderr line, ~99% pool resolution on a real app). Mirrors
-	// objects.go's exact proven pattern.
-	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := pipeline.BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := pipeline.ResolvePoolDisplay(result.Pool, pl)
 
 	// Build class layouts for field-name resolution in the decompiler.
 	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
