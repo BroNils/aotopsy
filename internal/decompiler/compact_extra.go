@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Pre-compiled regexes for the text-based annotation passes. These were
@@ -149,11 +150,22 @@ func semanticArgName(typeName string, idx int) string {
 	return ""
 }
 
+// identRegexCache caches compiled regexes for replaceIdent, keyed by
+// the identifier being replaced. regex.MustCompile is too expensive to
+// call per-line per-rename inside applyArgRenaming's nested loop.
+var identRegexCache sync.Map
+
 // replaceIdent replaces whole-word identifiers, not substrings.
 // It skips matches inside string literals (between unescaped quotes)
 // to avoid corrupting string constants like print("arg0").
 func replaceIdent(line, old, new string) string {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
+	var re *regexp.Regexp
+	if cached, ok := identRegexCache.Load(old); ok {
+		re = cached.(*regexp.Regexp)
+	} else {
+		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
+		identRegexCache.Store(old, re)
+	}
 	// Split on string literals, only replace in non-literal segments.
 	// Handles both "..." and '...' quoting.
 	var result strings.Builder
@@ -210,7 +222,14 @@ func hasSideEffect(expr string) bool {
 
 // referencesIdent reports whether expr mentions ident as a whole word.
 func referencesIdent(expr, ident string) bool {
-	return regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`).MatchString(expr)
+	var re *regexp.Regexp
+	if cached, ok := identRegexCache.Load(ident); ok {
+		re = cached.(*regexp.Regexp)
+	} else {
+		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
+		identRegexCache.Store(ident, re)
+	}
+	return re.MatchString(expr)
 }
 
 // anyAssignRe matches any assignment target at the start of a statement,
