@@ -54,16 +54,22 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 	for i := range clResult.Types {
 		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
 	}
+	fieldTypeResolved := 0
+	fieldTypeTotal := 0
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]
 		classID := -1
+		fieldTypeTotal++
 		if f.TypeRefID >= 0 {
 			if ti, ok := refToType[f.TypeRefID]; ok && ti.ClassID >= 0 {
 				classID = int(ti.ClassID)
+				fieldTypeResolved++
 			}
 		}
 		ctx.FieldTypes[f.RefID] = classID
 	}
+	ctx.FieldTypeDeclaredHits = 0 // will be counted during analysis
+	ctx.FieldTypesResolvedCount = fieldTypeResolved
 
 	// 4. Build fieldByOwnerOffset.
 	refToClassID := make(map[int]int32, len(clResult.Classes))

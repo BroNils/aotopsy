@@ -234,6 +234,29 @@ type TypeContext struct {
 	BLHasExitType  int
 	BLExitKnown    int
 	BLExitBottom   int
+	// BLR lattice state distribution at the BLR point. Counts which
+	// lattice kind the BLR register has when resolveBLR is called,
+	// diagnosing why monomorphic rate is what it is.
+	BLRAtKnownDispatch    int // direct slot lookup possible
+	BLRAtKnownDispatchSel int // SelectorOnly — selector scan
+	BLRAtKnownClass       int // scan 128 slots for this class
+	BLRAtStub             int // KnownStub
+	BLRAtTop              int // no info at all
+	BLRAtBottom           int // conflicting info
+	BLRAtOther            int // anything else
+	// Field type source breakdown: which of the 3 sources in
+	// FieldValueClass actually produced a hit. Diagnoses whether
+	// the bottleneck is declared types, instance types, or store types.
+	FieldTypeDeclaredHits int // FieldByOwnerOffset + FieldTypes
+	FieldTypeInstanceHits int // InstanceFieldTypes (already counted in InstanceFieldHits)
+	FieldTypeStoreHits    int // FieldStoreTypes
+	// Field type map sizes: how many classes have entries in each map.
+	FieldTypeDeclaredClasses int // len(FieldByOwnerOffset)
+	FieldTypeStoreClasses    int // len(FieldStoreTypes)
+	// Diagnostic: how many fields had their declared type resolved
+	// to a ClassID in buildFieldTypes. If this is 0, the declared
+	// field type source is completely dead.
+	FieldTypesResolvedCount int `json:"-"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -417,22 +440,45 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
 	// map key = field_offset. Add 1 to align.
 	lookupOff := byteOff + 1
-	if fields, ok := ctx.FieldByOwnerOffset[receiverCID]; ok {
-		if fieldRefID, ok := fields[lookupOff]; ok {
-			if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
-				return classID, true
+	// Walk the superclass chain: FieldByOwnerOffset is keyed by the
+	// DECLARING class's CID, but receiverCID is the receiver's actual
+	// (possibly subclass) CID. A field declared in class A is inherited
+	// by subclass B, so when accessing it on a B instance, we must look
+	// up A's entry. Without this walk, declared field types never hit
+	// for any subclass — measured: 369 fields resolved, 89 declaring
+	// classes, but 0 hits because every receiver was a subclass.
+	cid := receiverCID
+	for cid >= 0 {
+		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
+			if fieldRefID, ok := fields[lookupOff]; ok {
+				if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
+					ctx.FieldTypeDeclaredHits++
+					return classID, true
+				}
 			}
 		}
+		// Walk up to superclass: FieldByOwnerOffset is keyed by the
+		// declaring class, but the receiver may be a subclass.
+		if ctx.SuperClass == nil {
+			break
+		}
+		next, ok := ctx.SuperClass[cid]
+		if !ok || next < 0 || next == cid {
+			break
+		}
+		cid = next
 	}
 	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
 		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
 			ctx.InstanceFieldHits++
+			ctx.FieldTypeInstanceHits++
 			return classID, true
 		}
 	}
 	// P1.3: Field-store → field-load tracking.
 	if byOff, ok := ctx.FieldStoreTypes[receiverCID]; ok {
 		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
+			ctx.FieldTypeStoreHits++
 			return classID, true
 		}
 	}

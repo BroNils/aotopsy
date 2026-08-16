@@ -863,6 +863,24 @@ func resolveBLR(
 	t := state[rn]
 	switch t.Kind {
 	case LatticeKnownDispatchIndex:
+		if t.SelectorOnly {
+			ctx.BLRAtKnownDispatchSel++
+		} else {
+			ctx.BLRAtKnownDispatch++
+		}
+	case LatticeKnownClass:
+		ctx.BLRAtKnownClass++
+	case LatticeKnownStub:
+		ctx.BLRAtStub++
+	case LatticeTop:
+		ctx.BLRAtTop++
+	case LatticeBottom:
+		ctx.BLRAtBottom++
+	default:
+		ctx.BLRAtOther++
+	}
+	switch t.Kind {
+	case LatticeKnownDispatchIndex:
 		// P1.2: class unknown, selector immediate known -- scan the dispatch
 		// table at that selector across all classes.
 		if t.SelectorOnly {

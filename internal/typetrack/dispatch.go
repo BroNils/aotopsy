@@ -88,6 +88,20 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		// InstanceFieldClasses is how many classes have at least one
 		// unanimously-typed field offset recovered from const instances.
 		InstanceFieldClasses int `json:"instance_field_classes,omitempty"`
+		// BLR lattice state distribution at the BLR point.
+		BLRAtKnownDispatch    int `json:"blr_at_known_dispatch,omitempty"`
+		BLRAtKnownDispatchSel int `json:"blr_at_known_dispatch_sel,omitempty"`
+		BLRAtKnownClass       int `json:"blr_at_known_class,omitempty"`
+		BLRAtStub             int `json:"blr_at_stub,omitempty"`
+		BLRAtTop              int `json:"blr_at_top,omitempty"`
+		BLRAtBottom           int `json:"blr_at_bottom,omitempty"`
+		BLRAtOther            int `json:"blr_at_other,omitempty"`
+		// Field type source breakdown.
+		FieldTypeDeclaredHits   int `json:"field_type_declared_hits,omitempty"`
+		FieldTypeInstanceHits   int `json:"field_type_instance_hits,omitempty"`
+		FieldTypeStoreHits      int `json:"field_type_store_hits,omitempty"`
+		FieldTypeDeclaredClasses int `json:"field_type_declared_classes,omitempty"`
+		FieldTypeStoreClasses    int `json:"field_type_store_classes,omitempty"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -117,6 +131,18 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)
 		report.InstantiatedClasses = len(ctx.InstantiatedClasses)
 		report.RTAApplied = ctx.RTAApplied()
+		report.BLRAtKnownDispatch = ctx.BLRAtKnownDispatch
+		report.BLRAtKnownDispatchSel = ctx.BLRAtKnownDispatchSel
+		report.BLRAtKnownClass = ctx.BLRAtKnownClass
+		report.BLRAtStub = ctx.BLRAtStub
+		report.BLRAtTop = ctx.BLRAtTop
+		report.BLRAtBottom = ctx.BLRAtBottom
+		report.BLRAtOther = ctx.BLRAtOther
+		report.FieldTypeDeclaredHits = ctx.FieldTypeDeclaredHits
+		report.FieldTypeInstanceHits = ctx.FieldTypeInstanceHits
+		report.FieldTypeStoreHits = ctx.FieldTypeStoreHits
+		report.FieldTypeDeclaredClasses = len(ctx.FieldByOwnerOffset)
+		report.FieldTypeStoreClasses = len(ctx.FieldStoreTypes)
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")
