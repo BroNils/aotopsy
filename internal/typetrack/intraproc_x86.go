@@ -658,15 +658,15 @@ func transferInstructionX86(
 					ctx.UBFXHits++
 					return
 				}
-				if state[srcIdx].Kind == LatticeBottom && prevInst != nil {
-					// Check if prevInst was a header load: MOV srcReg, [base-1].
-					// The x86 header load pattern is MOV reg, [reg-1] where -1
-					// is kHeapObjectTag (same as ARM64 LDUR Xt, [Xn, #-1]).
-					if isX86HeaderLoad(prevInst, srcIdx) {
-						state[dstIdx] = Bottom()
-						ctx.UBFXHits++
-						return
-					}
+				if state[srcIdx].Kind == LatticeBottom {
+					// SHR/AND from Bottom: extracting class ID bits
+					// from an unknown header still yields Bottom, not
+					// Top. Same fix as ARM64 UBFX: don't require the
+					// previous instruction to be a header load — any
+					// Bottom source means "class ID, unknown which".
+					state[dstIdx] = Bottom()
+					ctx.UBFXHits++
+					return
 				}
 			}
 		}

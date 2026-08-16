@@ -659,23 +659,19 @@ func handleUBFX(tc *transferCtx) bool {
 			tc.ctx.UBFXHits++
 			return true
 		}
+		// UBFX from Bottom: extracting class ID bits from an unknown
+		// header still yields "a class ID, but unknown which one" —
+		// Bottom, not Top. The previous code only preserved Bottom
+		// when the immediately preceding instruction was a LDUR at
+		// offset -1, which missed cases with intervening instructions
+		// (e.g., LDR W0, [X1, #-1] → MOV W2, W0 → UBFX W0, W2, ...).
+		// Bottom is strictly more useful than Top: it enables narrowing
+		// via CMP+BEQ downstream, and it enables SelectorDispatch
+		// (selector-only) instead of Top (no info at all) at the ADD.
 		if rn < 31 && tc.state[rn].Kind == LatticeBottom {
-			if _, rt, ok2 := isLDUR64(tc.prevRaw); ok2 && rt == rn {
-				imm9 := int(int32(tc.prevRaw>>12) & 0x1FF)
-				if imm9 > 256 {
-					imm9 -= 512
-				}
-				if imm9 == -1 {
-					tc.state[rd] = Bottom()
-					tc.ctx.UBFXHits++
-					return true
-				}
-			}
-			if _, rt, _, ok2 := isLDUR32(tc.prevRaw); ok2 && rt == rn {
-				tc.state[rd] = Bottom()
-				tc.ctx.UBFXHits++
-				return true
-			}
+			tc.state[rd] = Bottom()
+			tc.ctx.UBFXHits++
+			return true
 		}
 		if rd >= 0 && rd < 31 {
 			tc.state[rd] = Top()
