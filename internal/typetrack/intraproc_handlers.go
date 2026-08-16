@@ -1,6 +1,7 @@
 package typetrack
 
 import (
+	"strconv"
 	"strings"
 
 	"aotopsy/internal/disasm"
@@ -309,7 +310,12 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	}
 	if tc.ctx.PoolClosureClass != nil {
 		if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-			tc.state[rt] = KnownClass(classID)
+			// Set KnownStub("Closure", poolIdx) instead of KnownClass:
+			// this lets handleFieldLoad detect Closure.function loads
+			// and resolve them to KnownClass(ownerClassID) via
+			// PoolClosureClass. KnownClass alone would lose the pool
+			// index, making it impossible to trace back to the closure.
+			tc.state[rt] = KnownStub("Closure:"+strconv.Itoa(classID), poolIdx)
 			return true
 		}
 		tc.state[rt] = Top()
@@ -505,6 +511,26 @@ func handleFieldLoad(tc *transferCtx) bool {
 				return true
 			}
 		}
+		// Closure.function: UntaggedClosure.function is field 3
+		// (after instantiator_type_arguments, function_type_arguments,
+		// delayed_type_arguments). Compressed: 20 from untagged = 19 tagged.
+		// Non-compressed: 32 from untagged = 31 tagged.
+		// SDK-verified via gh api to raw_object.h @3.9.2.
+		// StubOff holds the PP index; PoolClosureClass maps it to
+		// owner class ID. The function field contains a Function
+		// whose owner class IS the closure's owner class.
+		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
+			sn := tc.state[base].StubName
+			if strings.HasPrefix(sn, "Closure:") && (imm9 == 19 || imm9 == 31) {
+				poolIdx := tc.state[base].StubOff
+				if tc.ctx.PoolClosureClass != nil {
+					if ownerCID, ok := tc.ctx.PoolClosureClass[poolIdx]; ok && ownerCID >= 0 {
+						tc.state[rt] = KnownClass(ownerCID)
+						return true
+					}
+				}
+			}
+		}
 		if imm9 == -1 && base < 31 {
 			tc.state[rt] = Bottom()
 			tc.ctx.HeaderHits++
@@ -589,6 +615,19 @@ func handleFieldLoad(tc *transferCtx) bool {
 			tc.ctx.HeaderHits++
 			return true
 		}
+		// Closure.function via compressed LDUR32 (offset 19).
+		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
+			sn := tc.state[base].StubName
+			if strings.HasPrefix(sn, "Closure:") && imm9 == 19 {
+				poolIdx := tc.state[base].StubOff
+				if tc.ctx.PoolClosureClass != nil {
+					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
+						tc.state[rt] = KnownClass(ownerCID)
+						return true
+					}
+				}
+			}
+		}
 		tc.state[rt] = Top()
 		return true
 	}
@@ -599,9 +638,21 @@ func handleFieldLoad(tc *transferCtx) bool {
 		if rt >= 31 {
 			// Don't return — let other handlers process
 		} else if baseReg < 31 && tc.state[baseReg].Kind == LatticeKnownStub {
-			if strings.HasPrefix(tc.state[baseReg].StubName, "UnlinkedCall:") {
+			sn := tc.state[baseReg].StubName
+			if strings.HasPrefix(sn, "UnlinkedCall:") {
 				tc.state[rt] = tc.state[baseReg]
 				return true
+			}
+			// Closure.function via LDR64 unsigned offset.
+			// Compressed: offset 19, non-compressed: offset 31.
+			if strings.HasPrefix(sn, "Closure:") && (byteOff == 19 || byteOff == 31) {
+				poolIdx := tc.state[baseReg].StubOff
+				if tc.ctx.PoolClosureClass != nil {
+					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
+						tc.state[rt] = KnownClass(ownerCID)
+						return true
+					}
+				}
 			}
 		} else if baseReg < 31 && baseReg != regPP && baseReg != regTHR && baseReg != regDT && baseReg != 29 && baseReg != 15 {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
