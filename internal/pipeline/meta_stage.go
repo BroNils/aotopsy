@@ -202,8 +202,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 		return "", fmt.Errorf("close output: %w", err)
 	}
 
-	fi, _ := os.Stat(outPath)
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fi.Size())
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fileSize(outPath))
 
 	return outPath, nil
 }

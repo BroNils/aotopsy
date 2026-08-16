@@ -18,9 +18,20 @@ const (
 	x86RegRDI = 7  // SysV arg 0 (receiver for instance methods)
 )
 
-// x86ArgRegCanon lists the SysV AMD64 ABI integer argument registers
-// in calling-convention order (RDI, RSI, RDX, RCX, R8, R9).
-var x86ArgRegCanon = [6]int{7, 6, 2, 1, 8, 9}
+// x86ArgRegCanon lists Dart's OWN calling-convention integer argument
+// registers as canonical indices, parameter 0 first. This is NOT the
+// SysV C ABI — Dart declares its own convention (verified via gh api to
+// constants_x64.h @3.9.2):
+//
+//	DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
+//
+// The previous value used RCX (1) for parameter 3 instead of RBX (3) —
+// the SysV C ABI order. RCX is DispatchTableNullErrorABI::kClassIdReg
+// in Dart, not an argument register. killX86ArgRegs was killing RCX
+// (losing class-id type info needed for dispatch resolution) and NOT
+// killing RBX (leaving stale type info after calls that could propagate
+// incorrect types).
+var x86ArgRegCanon = [6]int{7, 6, 2, 3, 8, 9}
 
 // X86DecodedInst is a decoded x86_64 instruction with its address.
 type X86DecodedInst struct {
@@ -904,7 +915,8 @@ func resolveX86DispatchSelectorOffset(
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
 
-// killX86ArgRegs kills all argument registers (RDI, RSI, RDX, RCX, R8, R9).
+// killX86ArgRegs kills all Dart calling-convention argument registers
+// (RDI, RSI, RDX, RBX, R8, R9) after a CALL instruction.
 func killX86ArgRegs(state *[31]TypeLattice) {
 	for _, r := range x86ArgRegCanon {
 		if r < 31 {

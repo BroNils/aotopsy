@@ -304,6 +304,8 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 		if tc.ctx.InstantiatedClasses != nil {
 			tc.ctx.InstantiatedClasses[classID] = true
 		}
+		return true // Don't fall through to PoolClosureClass — its
+		// else-branch would set Top(), clobbering this KnownClass.
 	}
 	if tc.ctx.PoolClosureClass != nil {
 		if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {

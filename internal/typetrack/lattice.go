@@ -156,6 +156,21 @@ func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 		return Bottom()
 	}
 	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
+		// Mirror Equal's logic: SelectorOnly and SelectorImm must be
+		// considered, not just DispatchIndex. Two SelectorDispatch
+		// elements with DispatchIndex=0 (unset for SelectorOnly) but
+		// different SelectorImm must meet to Bottom, not to a — the
+		// previous code only checked DispatchIndex and incorrectly
+		// returned a because 0 == 0.
+		if a.SelectorOnly != b.SelectorOnly {
+			return Bottom()
+		}
+		if a.SelectorOnly {
+			if a.SelectorImm == b.SelectorImm {
+				return a
+			}
+			return Bottom()
+		}
 		if a.DispatchIndex == b.DispatchIndex {
 			return a
 		}

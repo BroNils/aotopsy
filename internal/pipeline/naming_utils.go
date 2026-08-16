@@ -249,6 +249,17 @@ func extractFileComments(path string, seen map[string]bool) ([]FlutterMetaCommen
 	return comments, scanner.Err()
 }
 
+// fileSize returns the size of the file at path, or 0 if stat fails.
+// Replaces the unsafe `fi, _ := os.Stat(path); fi.Size()` pattern that
+// panics on nil when stat fails (file deleted between write and stat).
+func fileSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
 // IsInterestingCallee returns true if the callee name represents a real named
 // function rather than VM internals, stubs, or dispatch noise.
 func IsInterestingCallee(name string) bool {
