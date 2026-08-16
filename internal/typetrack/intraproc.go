@@ -80,6 +80,20 @@ func cappedCandidates(targets []string) []string {
 // term on the wrong side and was off by 2*kOriginElement (8192 on ARM64), so
 // every implied class ID -- and thus the RTA filter built on it -- was wrong.
 func (ctx *TypeContext) selectorCandidates(imm int) []string {
+	// CHA cache: if we've already computed candidates for this selector
+	// imm, return the cached result. The cache is valid as long as the
+	// InstantiatedClasses set hasn't changed — in practice it converges
+	// after 2-3 inter-procedural iterations, so the cache stabilizes.
+	if cached, ok := ctx.SelectorCache[imm]; ok {
+		return cached
+	}
+	// Monomorphic fast path: if this selector has exactly one unique
+	// implementation across all instantiated classes, return it directly.
+	if name, ok := ctx.SelectorMonomorphic[imm]; ok {
+		result := []string{name}
+		ctx.SelectorCache[imm] = result
+		return result
+	}
 	seen := map[string]bool{}
 	var targets []string
 	// The RTA filter is only meaningful once enough instantiated classes have
@@ -106,6 +120,13 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 	// DispatchBySlot is a map: sort so the same binary yields the same
 	// candidate list (and the same call_edges.jsonl) on every run.
 	sort.Strings(targets)
+	// Cache the result for future lookups with the same imm.
+	ctx.SelectorCache[imm] = targets
+	// If exactly one unique name, record as monomorphic for future
+	// fast-path lookups.
+	if len(targets) == 1 {
+		ctx.SelectorMonomorphic[imm] = targets[0]
+	}
 	return targets
 }
 
@@ -127,6 +148,14 @@ func (ctx *TypeContext) RTAApplied() bool {
 // site monomorphic, but it is doing substantial work, so the threshold is
 // worth keeping honest.
 const rtaMinInstantiatedClasses = 100
+
+// InvalidateSelectorCache clears the selector candidate cache. Called
+// between inter-procedural iterations when InstantiatedClasses may have
+// grown (new allocation sites discovered). After invalidation, the next
+// call to selectorCandidates for each imm will recompute and re-cache.
+func (ctx *TypeContext) InvalidateSelectorCache() {
+	ctx.SelectorCache = make(map[int][]string)
+}
 
 // applySelectorCandidates fills res from a selector-offset scan: one name
 // means a real (monomorphic) resolution, more means a candidate set.

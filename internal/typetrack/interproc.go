@@ -383,6 +383,11 @@ func RunInterprocedural(
 				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
 			}
 		}
+		// Invalidate selector cache: new allocation sites may have been
+		// discovered during this iteration's re-analysis, changing the
+		// RTA-filtered candidate set. The cache will be rebuilt lazily
+		// on the next iteration's selectorCandidates calls.
+		ctx.InvalidateSelectorCache()
 	}
 
 	// Count resolved BLR.

@@ -189,6 +189,26 @@ type TypeContext struct {
 	// that might override a method, then collect their dispatch targets.
 	Subclasses map[int][]int
 
+	// SelectorCache caches selectorCandidates results per selector immediate.
+	// Keyed by selector imm, value is the sorted unique function name list.
+	// Built lazily on first call to selectorCandidates for each imm, then
+	// reused across all BLR sites with the same selector and across all
+	// inter-procedural iterations. This avoids re-scanning the entire
+	// DispatchBySlot map (potentially hundreds of thousands of entries)
+	// for every BLR site.
+	//
+	// The cache is invalidated and rebuilt when InstantiatedClasses changes
+	// significantly (new allocation sites discovered). In practice the RTA
+	// set converges after 2-3 iterations, so the cache stabilizes.
+	SelectorCache map[int][]string
+
+	// SelectorMonomorphic maps selector imm → single function name, for
+	// selectors where exactly one unique implementation exists across all
+	// instantiated classes. These are the CHA win: regardless of receiver
+	// class, the call target is known. Built at the same time as
+	// SelectorCache.
+	SelectorMonomorphic map[int]string
+
 	// Debug counters.
 	// InstanceFieldHits counts field loads typed from observed const-instance
 	// data that the declared field type could not resolve.
@@ -257,6 +277,11 @@ type TypeContext struct {
 	// to a ClassID in buildFieldTypes. If this is 0, the declared
 	// field type source is completely dead.
 	FieldTypesResolvedCount int `json:"-"`
+	// CHA diagnostics: how many unique selector imms were found to
+	// be monomorphic (1 unique implementation across all instantiated
+	// classes). These are the CHA wins — selectors that resolve to
+	// a single target regardless of receiver class.
+	SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -371,6 +396,8 @@ func BuildTypeContext(
 		TypeTestingStubNames:    pl.TypeTestingStubNames,
 		SelectorOffsets:         make(map[uint64]int),
 		Subclasses:              make(map[int][]int),
+		SelectorCache:           make(map[int][]string),
+		SelectorMonomorphic:     make(map[int]string),
 	}
 
 	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
