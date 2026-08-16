@@ -103,6 +103,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		FieldTypeDeclaredClasses int `json:"field_type_declared_classes,omitempty"`
 		FieldTypeStoreClasses    int `json:"field_type_store_classes,omitempty"`
 		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
+		FuncReturnTypeCount      int `json:"func_return_type_count,omitempty"`
+		FuncReturnTypeSeeds      int `json:"func_return_type_seeds,omitempty"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -145,6 +147,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.FieldTypeDeclaredClasses = len(ctx.FieldByOwnerOffset)
 		report.FieldTypeStoreClasses = len(ctx.FieldStoreTypes)
 		report.SelectorMonomorphicCount = len(ctx.SelectorMonomorphic)
+		report.FuncReturnTypeCount = len(ctx.FuncReturnType)
+		report.FuncReturnTypeSeeds = ctx.FuncReturnTypeSeeds
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

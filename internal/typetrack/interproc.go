@@ -268,11 +268,45 @@ func RunInterprocedural(
 		}
 	}
 
+	// Seed CalleeExitTypes from declared return types (FuncReturnType).
+	seedHits := 0
+	for target, name := range blTargetToName {
+		lookupName := name
+		if idx := strings.LastIndex(name, "_"); idx > 0 {
+			suffix := name[idx+1:]
+			if isHexSuffix(suffix) {
+				lookupName = name[:idx]
+			}
+		}
+		refIDs, ok := ctx.MethodNameToRefIDs[lookupName]
+		if !ok || len(refIDs) == 0 {
+			methodName := lookupName
+			if dotIdx := strings.LastIndex(lookupName, "."); dotIdx >= 0 {
+				methodName = lookupName[dotIdx+1:]
+			}
+			refIDs, ok = ctx.MethodNameToRefIDs[methodName]
+		}
+		if ok {
+			for _, rid := range refIDs {
+				if cid, ok2 := ctx.FuncReturnType[rid]; ok2 && cid >= 0 {
+					ctx.CalleeExitTypes[target] = KnownClass(cid)
+					seedHits++
+					break
+				}
+			}
+		}
+	}
+	ctx.FuncReturnTypeSeeds = seedHits
+
 	// Initial CalleeExitTypes population after the first analysis pass,
 	// so the first fixed-point iteration's handleBL can see return types.
+	// Don't overwrite FuncReturnType seeds with Top — the declared return
+	// type is more precise than "we don't know from analysis alone".
 	for target, name := range blTargetToName {
 		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-			ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+			if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+				ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+			}
 			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
 		}
 	}
@@ -374,12 +408,13 @@ func RunInterprocedural(
 
 		// Update CalleeExitTypes after each re-analysis pass, so the
 		// NEXT iteration's handleBL can see callee return types.
-		// Previously this was only done once after the loop finished,
-		// so handleBL always saw empty CalleeExitTypes during every
-		// iteration — BL return value propagation was completely dead.
+		// Don't overwrite FuncReturnType seeds with Top — the declared
+		// return type is more precise than "analysis found nothing".
 		for target, name := range blTargetToName {
 			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-				ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+				if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+					ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+				}
 				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
 			}
 		}

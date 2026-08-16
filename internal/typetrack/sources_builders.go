@@ -50,9 +50,13 @@ func buildClassIDToName(ctx *TypeContext, clResult *cluster.Result, pl *PoolLook
 // FieldByOwnerOffset (ownerClassID → byteOffset → fieldRefID).
 func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupData) {
 	// 3. Build field type lookup: fieldRefID → ClassID.
-	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
+	// Include VM snapshot Types so framework class field types resolve.
+	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types)+len(pl.VmTypes))
 	for i := range clResult.Types {
 		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
+	}
+	for i := range pl.VmTypes {
+		refToType[pl.VmTypes[i].RefID] = &pl.VmTypes[i]
 	}
 	fieldTypeResolved := 0
 	fieldTypeTotal := 0
@@ -72,10 +76,15 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 	ctx.FieldTypesResolvedCount = fieldTypeResolved
 
 	// 4. Build fieldByOwnerOffset.
+	// Include VM snapshot Classes and Fields so framework class field
+	// types (String, List, Map, etc.) are available for resolution.
 	refToClassID := make(map[int]int32, len(clResult.Classes))
 	for i := range clResult.Classes {
 		refToClassID[clResult.Classes[i].RefID] = clResult.Classes[i].ClassID
 	}
+	// VM class field types need VM Classes result (ClassID per ref),
+	// which is not available in PoolLookupData. VM Fields are still
+	// processed below for their TypeRefID → ClassID resolution.
 	if pl.CT != nil {
 		for ref, no := range pl.RefToNamed {
 			if no.CID == pl.CT.Class {
@@ -85,6 +94,7 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 			}
 		}
 	}
+	// Process isolate Fields.
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]
 		if f.HostOffset < 0 {
@@ -106,6 +116,25 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 		}
 		m[f.HostOffset] = f.RefID
 	}
+	// Process VM Fields: resolve their TypeRefID via refToType (which
+	// now includes VM Types), and their OwnerRefID via VmRefToNamed.
+	// VM Field owner classes are framework classes (String, List, etc.)
+	// whose ClassID we need from VmRefCID or VM Classes result. Since
+	// we don't have VM Classes result here, use VmRefCID as a fallback:
+	// for Class NamedObjects, VmRefCID gives the Class CID (which is
+	// the CID of the Class class, not the class's own ID). This is not
+	// directly useful, so VM field type resolution is limited to the
+	// FieldTypes map (fieldRefID → ClassID), not FieldByOwnerOffset.
+	for i := range pl.VmFields {
+		f := &pl.VmFields[i]
+		if f.TypeRefID >= 0 {
+			if ti, ok := refToType[f.TypeRefID]; ok && ti.ClassID >= 0 {
+				ctx.FieldTypes[f.RefID] = int(ti.ClassID)
+				fieldTypeResolved++
+			}
+		}
+	}
+	ctx.FieldTypesResolvedCount = fieldTypeResolved
 }
 
 // buildPoolClassByIndex builds PP index → ClassID map.
@@ -263,6 +292,14 @@ func buildFuncParamTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLoo
 								paramTypes[j] = cid
 							}
 							ctx.FuncParamTypes[no.RefID] = paramTypes
+						}
+					}
+					// Capture declared return type from FunctionType.result_type.
+					// result_type is an AbstractType ref; resolve to ClassID via
+					// refToType (same map used for parameter types).
+					if ft.ResultTypeRefID >= 0 {
+						if ti, ok2 := refToType[ft.ResultTypeRefID]; ok2 && ti.ClassID >= 0 {
+							ctx.FuncReturnType[no.RefID] = int(ti.ClassID)
 						}
 					}
 				}

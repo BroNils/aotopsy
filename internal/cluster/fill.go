@@ -84,6 +84,15 @@ type FuncTypeInfo struct {
 	// FuncTypeParamTypesIdx has been verified for a version, and nowhere
 	// else -- no new unverified per-version constant.
 	TypeParamsRefID int
+
+	// ResultTypeRefID is the ref ID of this FunctionType's result_type
+	// (an AbstractType object): the declared return type of the function.
+	// -1 when not captured/not applicable.
+	//
+	// Its ref-loop index is FuncTypeParamTypesIdx-1, because
+	// UntaggedFunctionType lays out type_parameters, result_type,
+	// parameter_types consecutively (verified in raw_object.h @3.9.2).
+	ResultTypeRefID int
 }
 
 // TypeParametersInfo holds a TypeParameters object's refs.

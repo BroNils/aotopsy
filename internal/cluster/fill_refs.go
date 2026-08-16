@@ -86,13 +86,14 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			}
 		}
 
-		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef int
+		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef, resultTypeRef int
 		nameRef = -1
 		ownerRef = -1
 		sigRef = -1
 		paramTypesRef = -1
 		fieldTypeRef = -1
 		typeParamsRef = -1
+		resultTypeRef = -1
 		dataRef := -1
 
 		// For CID-specific capture, save all refs in order.
@@ -124,6 +125,11 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if spec.IsFuncType && spec.FuncTypeParamTypesIdx >= 2 && j == spec.FuncTypeParamTypesIdx-2 {
 				typeParamsRef = int(r)
 			}
+			// result_type sits one slot before parameter_types; see
+			// FuncTypeInfo.ResultTypeRefID for the raw_object.h evidence.
+			if spec.IsFuncType && spec.FuncTypeParamTypesIdx >= 1 && j == spec.FuncTypeParamTypesIdx-1 {
+				resultTypeRef = int(r)
+			}
 			// Field type ref is at index 2 (refs: name=0, owner=1, type=2, initializer=3).
 			if spec.IsField && j == 2 {
 				fieldTypeRef = int(r)
@@ -143,7 +149,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
 			case spec.IsFuncType:
-				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, i, count, op)
+				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, i, count, op)
 				if err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}

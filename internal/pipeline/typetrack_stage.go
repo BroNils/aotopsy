@@ -41,6 +41,7 @@ func RunTypeInferenceStage(
 	info *snapshot.Info,
 	table *cluster.InstructionsTable,
 	thrFields map[int]string,
+	vmResult *cluster.Result,
 ) error {
 	if info == nil || info.Version == nil {
 		return nil
@@ -56,7 +57,7 @@ func RunTypeInferenceStage(
 
 	opts.logf("  type inference: starting...\n")
 
-	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
+	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields, vmResult)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
 		return nil // non-fatal
@@ -99,6 +100,7 @@ func runTypeInference(
 	table *cluster.InstructionsTable,
 	isARM64 bool,
 	thrFields map[int]string,
+	vmResult *cluster.Result,
 ) (BLRBreakdown, *typetrack.TypeContext, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
@@ -267,6 +269,10 @@ func runTypeInference(
 		VmRefCID:      pl.VmRefCID,
 		PoolCodeNames:       poolCodeNames,
 		TypeTestingStubNames: poolTTSNames,
+	}
+	if vmResult != nil {
+		poolData.VmFields = vmResult.Fields
+		poolData.VmTypes = vmResult.Types
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.

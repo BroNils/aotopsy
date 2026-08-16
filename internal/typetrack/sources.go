@@ -63,6 +63,15 @@ type TypeContext struct {
 	// Used to initialize X0 = KnownClass(ownerClassID) for instance methods.
 	FuncOwnerClass map[string]int
 
+	// FuncReturnType maps function NamedObject refID → return type ClassID.
+	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
+	// Used to seed CalleeExitTypes for BL return value propagation:
+	// if a function's declared return type is KnownClass, X0 after BL
+	// to that function is set to KnownClass, enabling type chains
+	// across function calls (e.g., getList() returns List → .first
+	// loads List element type).
+	FuncReturnType map[int]int
+
 	// KOriginElement is the dispatch table origin element offset.
 	// The Dart runtime allocates the dispatch table with KOriginElement
 	// padding entries at the beginning, so entries[0] corresponds to
@@ -282,6 +291,9 @@ type TypeContext struct {
 	// classes). These are the CHA wins — selectors that resolve to
 	// a single target regardless of receiver class.
 	SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
+	// FuncReturnType diagnostics.
+	FuncReturnTypeCount int `json:"func_return_type_count,omitempty"`
+	FuncReturnTypeSeeds int `json:"func_return_type_seeds,omitempty"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -343,6 +355,12 @@ type PoolLookupData struct {
 	VmRefCID            map[int]int                  // VM snapshot CID by ref ID
 	PoolCodeNames       map[int]string               // PP index → function name for Code objects
 	TypeTestingStubNames map[int]string              // Type ref ID → type testing stub name
+	// VmFields and VmTypes give access to the VM snapshot's Field and
+	// Type objects, enabling declared field type resolution for framework
+	// classes (String, List, Map, etc.) whose Fields live in the VM
+	// snapshot, not the isolate snapshot.
+	VmFields []cluster.FieldInfo
+	VmTypes  []cluster.TypeInfo
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,
@@ -378,6 +396,7 @@ func BuildTypeContext(
 		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
+		FuncReturnType:          make(map[int]int),
 		KOriginElement:          kOriginElement,
 		THRFields:               thrFields,
 		AllocStubOffsets:        allocStubOffsets,

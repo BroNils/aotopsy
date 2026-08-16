@@ -250,7 +250,7 @@ func Run(opts Opts) (*Result, error) {
 	// Non-fatal: if it fails, BLR edges remain unresolved (as before).
 	// Runs BEFORE xref so that dispatch_table.jsonl is available for
 	// selector_dispatch_xref.jsonl generation.
-	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields); err != nil {
+	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields, sc.VMResult); err != nil {
 		opts.logf("  type inference: %v\n", err)
 	}
 
