@@ -273,6 +273,7 @@ func runTypeInference(
 	if vmResult != nil {
 		poolData.VmFields = vmResult.Fields
 		poolData.VmTypes = vmResult.Types
+		poolData.VmClasses = vmResult.Classes
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.

@@ -359,8 +359,9 @@ type PoolLookupData struct {
 	// Type objects, enabling declared field type resolution for framework
 	// classes (String, List, Map, etc.) whose Fields live in the VM
 	// snapshot, not the isolate snapshot.
-	VmFields []cluster.FieldInfo
-	VmTypes  []cluster.TypeInfo
+	VmFields  []cluster.FieldInfo
+	VmTypes   []cluster.TypeInfo
+	VmClasses []cluster.ClassInfo
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,

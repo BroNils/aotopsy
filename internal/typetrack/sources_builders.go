@@ -78,13 +78,16 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 	// 4. Build fieldByOwnerOffset.
 	// Include VM snapshot Classes and Fields so framework class field
 	// types (String, List, Map, etc.) are available for resolution.
-	refToClassID := make(map[int]int32, len(clResult.Classes))
+	refToClassID := make(map[int]int32, len(clResult.Classes)+len(pl.VmClasses))
 	for i := range clResult.Classes {
 		refToClassID[clResult.Classes[i].RefID] = clResult.Classes[i].ClassID
 	}
-	// VM class field types need VM Classes result (ClassID per ref),
-	// which is not available in PoolLookupData. VM Fields are still
-	// processed below for their TypeRefID → ClassID resolution.
+	// VM Classes: add their ref → ClassID mapping so VM Fields can
+	// resolve their owner class. This is the missing piece that
+	// prevented framework class field types from resolving.
+	for i := range pl.VmClasses {
+		refToClassID[pl.VmClasses[i].RefID] = pl.VmClasses[i].ClassID
+	}
 	if pl.CT != nil {
 		for ref, no := range pl.RefToNamed {
 			if no.CID == pl.CT.Class {
@@ -116,21 +119,28 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 		}
 		m[f.HostOffset] = f.RefID
 	}
-	// Process VM Fields: resolve their TypeRefID via refToType (which
-	// now includes VM Types), and their OwnerRefID via VmRefToNamed.
-	// VM Field owner classes are framework classes (String, List, etc.)
-	// whose ClassID we need from VmRefCID or VM Classes result. Since
-	// we don't have VM Classes result here, use VmRefCID as a fallback:
-	// for Class NamedObjects, VmRefCID gives the Class CID (which is
-	// the CID of the Class class, not the class's own ID). This is not
-	// directly useful, so VM field type resolution is limited to the
-	// FieldTypes map (fieldRefID → ClassID), not FieldByOwnerOffset.
+	// Process VM Fields: resolve TypeRefID → ClassID AND build
+	// FieldByOwnerOffset using VmClasses for owner ClassID resolution.
+	// This enables declared field type lookup for framework classes
+	// (String, List, Map, etc.) whose Fields live in the VM snapshot.
 	for i := range pl.VmFields {
 		f := &pl.VmFields[i]
 		if f.TypeRefID >= 0 {
 			if ti, ok := refToType[f.TypeRefID]; ok && ti.ClassID >= 0 {
 				ctx.FieldTypes[f.RefID] = int(ti.ClassID)
 				fieldTypeResolved++
+			}
+		}
+		// Build FieldByOwnerOffset for VM fields.
+		if f.HostOffset >= 0 && f.OwnerRefID >= 0 {
+			if cid, ok := refToClassID[f.OwnerRefID]; ok {
+				ownerClassID := int(cid)
+				m, ok2 := ctx.FieldByOwnerOffset[ownerClassID]
+				if !ok2 {
+					m = make(map[int32]int)
+					ctx.FieldByOwnerOffset[ownerClassID] = m
+				}
+				m[f.HostOffset] = f.RefID
 			}
 		}
 	}
