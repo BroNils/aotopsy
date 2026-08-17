@@ -176,3 +176,61 @@ func (c *SnapshotContext) Close() error {
 	}
 	return nil
 }
+
+// LoadSnapshotRaw opens libPath and extracts snapshot info only
+// (ELF → snapshot extract), without cluster scan/fill. For diagnostic
+// commands that only need snapshot regions (dump, strings).
+// Caller must close the returned ELF file.
+func LoadSnapshotRaw(libPath string, opts dartfmt.Options) (*elfx.File, *snapshot.Info, error) {
+	ef, err := elfx.Open(libPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open: %w", err)
+	}
+	info, err := snapshot.Extract(ef, opts)
+	if err != nil {
+		_ = ef.Close()
+		return nil, nil, fmt.Errorf("extract: %w", err)
+	}
+	return ef, info, nil
+}
+
+// LoadSnapshotIsolate opens libPath and runs ELF → snapshot → cluster
+// scan + fill for the ISOLATE snapshot only (no VM, no pool, no ranges).
+// For diagnostic commands that need cluster data but not the full
+// pipeline (thr_audit, parity).
+// Caller must close the returned ELF file.
+func LoadSnapshotIsolate(libPath string, opts dartfmt.Options) (*elfx.File, *snapshot.Info, *cluster.Result, error) {
+	ef, info, err := LoadSnapshotRaw(libPath, opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if info.Version != nil && !info.Version.Supported {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)",
+			info.Version.DartVersion, info.VmHeader.SnapshotHash)
+	}
+	data := info.IsolateData.Data
+	if len(data) < 64 {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("isolate data too short (%d bytes)", len(data))
+	}
+	clusterStart, err := cluster.FindClusterDataStart(data)
+	if err != nil {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("cluster start: %w", err)
+	}
+	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
+	if err != nil {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("scan: %w", err)
+	}
+	var isoSize int64
+	if info.IsolateHeader != nil {
+		isoSize = info.IsolateHeader.TotalSize
+	}
+	if err := cluster.ReadFill(data, result, info.Version, false, isoSize); err != nil {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("fill: %w", err)
+	}
+	return ef, info, result, nil
+}

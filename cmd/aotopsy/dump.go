@@ -10,8 +10,8 @@ import (
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/output"
+	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -44,19 +44,13 @@ func cmdDump(args []string) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
-	// Open ELF.
-	ef, err := elfx.Open(*libapp)
+	// Open ELF + extract snapshots.
+	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
-
-	// Extract snapshots.
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
 
 	// Write snapshot.json.
 	if err := output.WriteSnapshotJSON(*outDir, info); err != nil {
