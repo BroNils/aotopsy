@@ -1,16 +1,13 @@
 package cluster
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"math/bits"
-	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
+	"aotopsy/internal/sdktest"
 	"aotopsy/internal/snapshot"
 )
 
@@ -36,10 +33,10 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/cluster/ -run FunctionKindLayoutsMatchSDK
 func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
-	if os.Getenv("AOTOPSY_TEST_SDK") == "" {
+	if sdktest.SkipIfNoSDK() {
 		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
 	}
-	if _, err := exec.LookPath("gh"); err != nil {
+	if !sdktest.HasGH() {
 		t.Skip("gh not on PATH, skipping SDK drift check")
 	}
 
@@ -162,7 +159,7 @@ var kindEntryRe = regexp.MustCompile(`^\s*V\((\w+)\)`)
 
 // sdkFunctionKinds returns FOR_EACH_RAW_FUNCTION_KIND's entries in order.
 func sdkFunctionKinds(tag string) ([]string, error) {
-	src, err := ghRawObjectHeader(tag)
+	src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", tag)
 	if err != nil {
 		return nil, err
 	}
@@ -197,22 +194,3 @@ type kindListError string
 func (e kindListError) Error() string { return string(e) }
 
 const errNoKindList kindListError = "FOR_EACH_RAW_FUNCTION_KIND not found"
-
-func ghRawObjectHeader(tag string) (string, error) {
-	out, err := exec.Command("gh", "api",
-		"repos/dart-lang/sdk/contents/runtime/vm/raw_object.h?ref="+tag).Output()
-	if err != nil {
-		return "", err
-	}
-	var payload struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", err
-	}
-	dec, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
-	if err != nil {
-		return "", err
-	}
-	return string(dec), nil
-}
