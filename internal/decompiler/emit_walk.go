@@ -295,6 +295,72 @@ func isControlFlowOp(op Op) bool {
 	return op == OpBranch || op == OpJump || op == OpReturn
 }
 
+// isStateIndexValue reports whether a register value looks like a
+// SuspendState state index — a small integer loaded from a field or
+// pool slot. This is a heuristic: the state index is typically a small
+// integer (0, 1, 2, ...) loaded from the SuspendState object.
+func isStateIndexValue(val string) bool {
+	if val == "" {
+		return false
+	}
+	// State index is typically a small integer literal or a field load
+	// from a SuspendState object. Check for common patterns:
+	// - "0", "1", "2" (literal state index)
+	// - "state" or "stateIndex" (named local)
+	// - A value containing "state" (from SuspendState field access)
+	if val == "0" || val == "1" || val == "2" || val == "3" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(val), "state")
+}
+
+// emitAsyncStateBranch emits an async state machine dispatch as a
+// labeled case instead of a bare if/else. This makes the state machine
+// structure visible: each branch is a continuation from a different
+// await point, and the label tells the reader which state index it
+// handles.
+func (e *emitter) emitAsyncStateBranch(blk *Block, ins Instr, indent, depth int) {
+	var takenID, fallID = -1, -1
+	for _, s := range blk.Succs {
+		switch s.Cond {
+		case "T":
+			takenID = s.BlockID
+		case "F":
+			fallID = s.BlockID
+		}
+	}
+	regVal := e.state.lookupReg(ins.CondReg)
+	condKind := ins.CondKind
+
+	savedState := e.state
+
+	// Emit as a labeled state machine dispatch.
+	// For eqz: "if (state == 0) { // state 0: initial entry" etc.
+	// For nez: "if (state != 0) { // state != 0: resumed" etc.
+	var cond string
+	if condKind == "eqz" {
+		cond = fmt.Sprintf("%s == 0", regVal)
+	} else {
+		cond = fmt.Sprintf("%s != 0", regVal)
+	}
+
+	e.emit(indent, "// async state machine dispatch")
+	e.emit(indent, "if (%s) {", cond)
+	takenState := e.state.Clone()
+	e.state = takenState
+	e.emitSuccessor(takenID, indent+1, depth)
+	e.emit(indent, "} else {")
+	fallState := savedState.Clone()
+	e.state = fallState
+	e.emitSuccessor(fallID, indent+1, depth)
+	// Merge branch states (Item 7 dataflow join).
+	e.state = savedState.MergeJoin(takenState, fallState, func() string {
+		e.phiCounter++
+		return fmt.Sprintf("t%d", e.phiCounter)
+	}, func(branch int, reg, temp, val string) {})
+	e.emit(indent, "}")
+}
+
 func (e *emitter) canInline(id, depth int) bool {
 	return depth < maxDepth && !e.active[id] && e.visits[id] < maxVisitCount && id >= 0 && id < len(e.fir.Blocks)
 }
@@ -327,7 +393,23 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 // write inside either branch, so code after an if/else saw stale
 // pre-branch values. Phi temporaries (tN) are emitted for registers
 // that differ between branches.
+//
+// Item 9: When the function is async and the branch is on a state index
+// (eqz/nez on a register loaded from SuspendState), emit it as a
+// labeled state-machine case instead of a bare if/else, making the
+// async state machine structure visible.
 func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
+	// Item 9: Async state machine dispatch detection.
+	// When IsAsync and the branch is eqz/nez on a register that holds
+	// a SuspendState state index, emit as a state machine case.
+	if e.fir.IsAsync && (ins.CondKind == "eqz" || ins.CondKind == "nez") {
+		regVal := e.state.lookupReg(ins.CondReg)
+		if isStateIndexValue(regVal) {
+			e.emitAsyncStateBranch(blk, ins, indent, depth)
+			return
+		}
+	}
+
 	cond, ok := e.buildCondition(ins)
 	var takenID, fallID = -1, -1
 	for _, s := range blk.Succs {
