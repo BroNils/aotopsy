@@ -84,6 +84,7 @@ type emitter struct {
 	budgetHit     bool
 	stats         Stats
 	loopHeaders   map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	phiCounter    int          // Item 7: phi temporary counter for dataflow joins
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.

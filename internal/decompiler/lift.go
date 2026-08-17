@@ -60,6 +60,88 @@ func (s *LiftState) Clone() *LiftState {
 	return c
 }
 
+// MergeJoin merges two branch states (taken and fallthrough) into a
+// single state for use after the if/else join point. This is the
+// dataflow join that was missing — the old code restored the
+// pre-branch state, losing every register write inside either branch.
+//
+// Merge rules:
+//   - Register present in both with the same value: keep it (no phi needed).
+//   - Register present in both with different values: create a phi
+//     temporary (tN) and emit assignments in each branch. The merged
+//     state maps the register to "tN".
+//   - Register present in only one branch: keep that branch's value
+//     (the other branch didn't write it, so the pre-branch value
+//     would be stale anyway — the branch that wrote it is the only
+//     one that defined it).
+//   - Register present in neither: keep the pre-branch value.
+//
+// phiTemp is a function that returns a unique temporary name (e.g. "t1").
+// phiEmit is a function that records a phi assignment line for later
+// insertion before the branch's closing brace.
+func (s *LiftState) MergeJoin(taken, fall *LiftState, phiTemp func() string, phiEmit func(branch int, reg, temp, val string)) *LiftState {
+	merged := &LiftState{
+		Regs:    make(map[string]string, len(s.Regs)),
+		Locals:  s.Locals, // Locals is shared by reference (frame-global)
+		LastCmp: s.LastCmp,
+		HasCmp:  s.HasCmp,
+		Pool:    s.Pool,
+	}
+	// Start with pre-branch state as the base.
+	for k, v := range s.Regs {
+		merged.Regs[k] = v
+	}
+	// Collect all register names from all three states.
+	allRegs := make(map[string]bool)
+	for k := range s.Regs {
+		allRegs[k] = true
+	}
+	for k := range taken.Regs {
+		allRegs[k] = true
+	}
+	for k := range fall.Regs {
+		allRegs[k] = true
+	}
+	for reg := range allRegs {
+		preVal, preExists := s.Regs[reg]
+		takenVal, takenExists := taken.Regs[reg]
+		fallVal, fallExists := fall.Regs[reg]
+
+		switch {
+		case takenExists && fallExists && takenVal == fallVal:
+			// Same value in both branches — no phi needed.
+			merged.Regs[reg] = takenVal
+		case takenExists && fallExists && takenVal != fallVal:
+			// Different values — create phi temporary.
+			temp := phiTemp()
+			phiEmit(0, reg, temp, takenVal) // taken branch
+			phiEmit(1, reg, temp, fallVal)  // fall branch
+			merged.Regs[reg] = temp
+		case takenExists && !fallExists:
+			// Only taken branch wrote it.
+			if takenVal != preVal || !preExists {
+				merged.Regs[reg] = takenVal
+			}
+		case !takenExists && fallExists:
+			// Only fall branch wrote it.
+			if fallVal != preVal || !preExists {
+				merged.Regs[reg] = fallVal
+			}
+		case !takenExists && !fallExists && preExists:
+			// Neither branch wrote it — keep pre-branch value.
+			merged.Regs[reg] = preVal
+		}
+	}
+	// LastCmp: if both branches agree, keep it; otherwise clear.
+	if taken.HasCmp && fall.HasCmp && taken.LastCmp == fall.LastCmp {
+		merged.LastCmp = taken.LastCmp
+		merged.HasCmp = true
+	} else {
+		merged.HasCmp = false
+	}
+	return merged
+}
+
 // operand is a parsed instruction operand: either a bare register/
 // immediate token, or a "[base+disp]" memory reference.
 type operand struct {

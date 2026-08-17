@@ -320,6 +320,13 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 // emitBranch resolves the branch condition against live LiftState and
 // emits "if (cond) { <taken> } else { <fallthrough> }" (or a placeholder
 // if the condition can't be resolved -- e.g. no preceding cmp was seen).
+//
+// Item 7: After both branches complete, merges the two branch states
+// via MergeJoin instead of restoring the pre-branch state. This is the
+// dataflow join that was missing — the old code lost every register
+// write inside either branch, so code after an if/else saw stale
+// pre-branch values. Phi temporaries (tN) are emitted for registers
+// that differ between branches.
 func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	cond, ok := e.buildCondition(ins)
 	var takenID, fallID = -1, -1
@@ -335,17 +342,41 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		e.stats.PlaceholderIfs++
 		cond = "/* cond */"
 	}
+	savedState := e.state
+
+	// Track phi assignments to insert before each branch's closing brace.
+	var takenPhis, fallPhis []string
+	phiEmit := func(branch int, reg, temp, val string) {
+		line := fmt.Sprintf("var %s = %s;", temp, val)
+		if branch == 0 {
+			takenPhis = append(takenPhis, line)
+		} else {
+			fallPhis = append(fallPhis, line)
+		}
+	}
+	phiTemp := func() string {
+		e.phiCounter++
+		return fmt.Sprintf("t%d", e.phiCounter)
+	}
+
 	e.emit(indent, "if (%s) {", cond)
 	takenState := e.state.Clone()
-	savedState := e.state
 	e.state = takenState
 	e.emitSuccessor(takenID, indent+1, depth)
-	e.state = savedState
+	// Emit phi assignments for taken branch before closing brace.
+	for _, p := range takenPhis {
+		e.emit(indent+1, "%s", p)
+	}
 	e.emit(indent, "} else {")
-	fallState := e.state.Clone()
+	fallState := savedState.Clone()
 	e.state = fallState
 	e.emitSuccessor(fallID, indent+1, depth)
-	e.state = savedState
+	// Emit phi assignments for fall branch before closing brace.
+	for _, p := range fallPhis {
+		e.emit(indent+1, "%s", p)
+	}
+	// Merge the two branch states instead of restoring pre-branch state.
+	e.state = savedState.MergeJoin(takenState, fallState, phiTemp, phiEmit)
 	e.emit(indent, "}")
 }
 
