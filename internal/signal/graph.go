@@ -65,12 +65,6 @@ func BuildSignalGraph(
 	k int,
 	entryPoints map[string]bool,
 ) *SignalGraph {
-	// Index functions by name.
-	funcByName := make(map[string]*disasm.FuncRecord, len(funcs))
-	for i := range funcs {
-		funcByName[funcs[i].Name] = &funcs[i]
-	}
-
 	// Group string refs by function and classify each string individually.
 	type funcSignal struct {
 		refs       []ClassifiedStringRef

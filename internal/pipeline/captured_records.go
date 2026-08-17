@@ -360,11 +360,3 @@ func BuildClosureData(result *cluster.Result) []ClosureDataRecord {
 	}
 	return records
 }
-
-// Qualified renders this code's display name.
-//
-// A constructor's Function name already carries the class -- Dart names them
-// `_GrowableList.of`, `Duration`, `PlatformDispatcher._` -- so prepending the
-// owner as well produces `_GrowableList.new _GrowableList.of`. The owner is
-// still reported separately in functions.jsonl; it is only the qualified name
-// that must not repeat it.

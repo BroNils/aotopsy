@@ -27,12 +27,6 @@ func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs b
 		wordSize = 4
 	}
 
-	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
-	for i := range result.Classes {
-		ci := &result.Classes[i]
-		classByRef[ci.RefID] = ci
-	}
-
 	type resolvedField struct {
 		nameRefID  int
 		byteOffset int32
@@ -113,7 +107,3 @@ func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs b
 	}
 	return layouts
 }
-
-// --- Phase 1: Captured data builders (Script, LoadingUnit, KernelProgramInfo) ---
-
-// ScriptRecord is one Script entry in scripts.jsonl.

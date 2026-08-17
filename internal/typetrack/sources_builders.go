@@ -88,15 +88,6 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 	for i := range pl.VmClasses {
 		refToClassID[pl.VmClasses[i].RefID] = pl.VmClasses[i].ClassID
 	}
-	if pl.CT != nil {
-		for ref, no := range pl.RefToNamed {
-			if no.CID == pl.CT.Class {
-				if cid, ok := refToClassID[ref]; ok {
-					refToClassID[ref] = cid
-				}
-			}
-		}
-	}
 	// Process isolate Fields.
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]

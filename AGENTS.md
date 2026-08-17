@@ -151,7 +151,7 @@ grep for known symbols instead.
 
 ## Key Conventions
 
-- `main.go`'s `switch` statement is the source of truth for command dispatch — always check it
+- `commands.go`'s command registry (`primaryCommands`/`debugCommands`) is the source of truth for command dispatch — always check it
 - `PoolLookups` (`pipeline.PoolLookups`) is the central name-resolution surface
 - PatchClass hop: `OwnerRefID` may point at a PatchClass (CID 6), not the real Class
 - `DetectVersion` returns a copy to prevent data races

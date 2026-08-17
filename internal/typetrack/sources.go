@@ -229,7 +229,7 @@ type TypeContext struct {
 	DispatchHits      int
 	// NarrowHits counts flow-sensitive narrowings actually applied: a
 	// `CMP class_id, #N` whose equality edge turned the compared register
-	// into KnownClass(N). ARM64 only; x86 has no narrowing.
+	// into KnownClass(N). Both ARM64 and x86_64 implement narrowing.
 	NarrowHits int
 	// NarrowShape / NarrowNoType diagnose why narrowing does or does not
 	// fire: how many block edges had the right shape (a CMP against an

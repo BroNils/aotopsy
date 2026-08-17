@@ -3,12 +3,13 @@
 // ClassID of receiver objects at each call site, then maps
 // class_id + selector_offset → dispatch table slot → target function.
 //
-// The type lattice has five levels:
+// The type lattice has six levels:
 //   - Top:      no type information yet (initial state)
 //   - KnownClass: a specific ClassID is known
 //   - KnownDispatchIndex: a dispatch table selector offset is known
 //     (from ADD Xn, X21, #offset — the offset IS the slot index)
 //   - KnownStub: a THR-cached stub entry point is known (e.g. AllocateObject)
+//   - PPBase:   register holds PP + offset (2-level pool addressing)
 //   - Bottom:   conflicting type information (join of incompatible types)
 package typetrack
 
