@@ -135,7 +135,11 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 		}
 		blocks[i] = Block{ID: i, StartVA: insts[start].Addr}
 		for j := start; j < end; j++ {
-			blocks[i].Instrs = append(blocks[i].Instrs, liftX86Instr(insts[j], kind[j], target[j], hasTarget[j]))
+			var prev *x86Inst
+			if j > start {
+				prev = &insts[j-1]
+			}
+			blocks[i].Instrs = append(blocks[i].Instrs, liftX86Instr(insts[j], kind[j], target[j], hasTarget[j], prev))
 		}
 		leaderToBlock[start] = i
 	}
@@ -242,7 +246,7 @@ func x86CondOp(op x86asm.Op) string {
 	return "?"
 }
 
-func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool) Instr {
+func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool, prev *x86Inst) Instr {
 	src := strings.ToLower(in.Inst.String())
 	ir := Instr{Addr: in.Addr, Src: src, PoolIndex: -1}
 
@@ -264,10 +268,31 @@ func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool) Instr {
 		ir.Target = x86IndirectTargetText(in)
 	case k == branchCond:
 		ir.Op = OpBranch
-		ir.CondKind = "cmp"
 		ir.CondOp = x86CondOp(in.Inst.Op)
 		if hasTgt {
 			ir.Target = fmt.Sprintf("0x%x", tgt)
+		}
+		// Classify the condition based on what instruction set the
+		// flags. x86 doesn't have separate branch instructions for
+		// eqz/nez/bittest — it uses Jcc after CMP, TEST, or BT. The
+		// condition kind depends on the flag-setting instruction,
+		// not just the Jcc opcode.
+		//
+		// SDK reference (assembler_x64.h @3.9.2):
+		//   btl/btq: BT instruction, sets CF to the tested bit.
+		//   testq reg, 1<<N: TEST with power-of-two immediate, sets
+		//     ZF to NOT(bit).
+		//   testq reg, reg: self-test, sets ZF to (reg == 0).
+		//
+		// After BT:  JC = bit is 1 (bittest1), JNC = bit is 0 (bittest0)
+		// After TEST reg, 1<<N:  JE = bit is 0 (bittest0), JNE = bit is 1 (bittest1)
+		// After TEST reg, reg:  JE = reg == 0 (eqz), JNE = reg != 0 (nez)
+		// After CMP:  JE/JNE/JL/etc = comparison (cmp)
+		ir.CondKind = classifyX86Condition(in.Inst, prev)
+		if ir.CondKind == "eqz" || ir.CondKind == "nez" {
+			ir.CondReg = x86CondRegFromTest(prev)
+		} else if ir.CondKind == "bittest0" || ir.CondKind == "bittest1" {
+			ir.CondReg, ir.CondBit = x86CondRegBitFromTest(prev, in.Inst.Op)
 		}
 	case in.Inst.Op == x86asm.MOV && isX86PoolLoad(in):
 		ir.Op = OpLoadPool
@@ -334,4 +359,155 @@ func x86PoolIndex(in x86Inst) int {
 		return idx
 	}
 	return -1
+}
+
+// classifyX86Condition determines the CondKind for a Jcc instruction
+// based on what instruction set the flags. x86 doesn't have separate
+// branch instructions for eqz/nez/bittest — it uses Jcc after CMP,
+// TEST, or BT. The condition kind depends on the flag-setting
+// instruction, not just the Jcc opcode.
+//
+// SDK reference (assembler_x64.h @3.9.2):
+//
+//   btl/btq: BT instruction, sets CF to the tested bit value.
+//   testq reg, 1<<N: TEST with power-of-two immediate, sets ZF to
+//     NOT(bit).
+//   testq reg, reg: self-test, sets ZF to (reg == 0).
+//
+// After BT:        JC = bit is 1 (bittest1), JNC = bit is 0 (bittest0)
+// After TEST 1<<N: JE = bit is 0 (bittest0), JNE = bit is 1 (bittest1)
+// After TEST reg:  JE = reg == 0 (eqz), JNE = reg != 0 (nez)
+// After CMP:       JE/JNE/JL/etc = comparison (cmp)
+//
+// If we can't identify the flag-setting instruction (prev is nil or
+// not CMP/TEST/BT), fall back to "cmp" — the emitter will use
+// LastCmp if available, or print a placeholder if not.
+func classifyX86Condition(jcc x86asm.Inst, prev *x86Inst) string {
+	if prev == nil {
+		return "cmp"
+	}
+	prevOp := prev.Inst.Op
+
+	// BT instruction: sets CF to the tested bit.
+	// JC (carry set) → bit is 1; JNC (carry clear) → bit is 0.
+	if prevOp == x86asm.BT {
+		switch jcc.Op {
+		case x86asm.JB: // JC
+			return "bittest1"
+		case x86asm.JAE: // JNC
+			return "bittest0"
+		}
+		return "cmp" // BT with other Jcc — unusual, fall back
+	}
+
+	// TEST instruction: sets ZF and SF based on AND result.
+	if prevOp == x86asm.TEST && len(prev.Inst.Args) >= 2 {
+		// TEST reg, reg (self-test): ZF = (reg == 0).
+		// JE → eqz, JNE → nez.
+		if isX86SelfTest(prev.Inst) {
+			switch jcc.Op {
+			case x86asm.JE:
+				return "eqz"
+			case x86asm.JNE:
+				return "nez"
+			}
+		}
+
+		// TEST reg, 1<<N (power-of-two immediate): ZF = NOT(bit N).
+		// JE → bit is 0 (bittest0), JNE → bit is 1 (bittest1).
+		if bit := x86TestPowerOfTwoBit(prev.Inst); bit >= 0 {
+			switch jcc.Op {
+			case x86asm.JE:
+				return "bittest0"
+			case x86asm.JNE:
+				return "bittest1"
+			}
+		}
+	}
+
+	// Default: CMP or unrecognized flag-setter → use "cmp" kind.
+	// The emitter will use LastCmp if available, or print a
+	// placeholder "/* cond */" if not.
+	return "cmp"
+}
+
+// isX86SelfTest reports whether inst is `TEST reg, reg` (same
+// register in both operands), which tests whether reg == 0.
+func isX86SelfTest(inst x86asm.Inst) bool {
+	if inst.Op != x86asm.TEST || len(inst.Args) < 2 {
+		return false
+	}
+	r1, ok1 := inst.Args[0].(x86asm.Reg)
+	r2, ok2 := inst.Args[1].(x86asm.Reg)
+	return ok1 && ok2 && r1 == r2
+}
+
+// x86TestPowerOfTwoBit returns the bit number N if inst is
+// `TEST reg, (1 << N)`, or -1 if not.
+func x86TestPowerOfTwoBit(inst x86asm.Inst) int {
+	if inst.Op != x86asm.TEST || len(inst.Args) < 2 {
+		return -1
+	}
+	imm, ok := inst.Args[1].(x86asm.Imm)
+	if !ok {
+		return -1
+	}
+	v := uint64(imm)
+	if v == 0 || v&(v-1) != 0 {
+		return -1 // not a power of two
+	}
+	// Find the bit position.
+	for bit := range 64 {
+		if v&(1<<uint(bit)) != 0 {
+			return bit
+		}
+	}
+	return -1
+}
+
+// x86CondRegFromTest extracts the register name from a `TEST reg, reg`
+// instruction (the register being tested for zero/nonzero).
+func x86CondRegFromTest(prev *x86Inst) string {
+	if prev == nil || prev.Inst.Op != x86asm.TEST || len(prev.Inst.Args) < 1 {
+		return ""
+	}
+	if reg, ok := prev.Inst.Args[0].(x86asm.Reg); ok {
+		return strings.ToLower(reg.String())
+	}
+	return ""
+}
+
+// x86CondRegBitFromTest extracts the register name and bit number from
+// a `TEST reg, (1 << N)` or `BT reg, N` instruction.
+// For TEST: JE means bit is 0, JNE means bit is 1.
+// For BT:   JB (JC) means bit is 1, JAE (JNC) means bit is 0.
+func x86CondRegBitFromTest(prev *x86Inst, jccOp x86asm.Op) (string, int) {
+	if prev == nil {
+		return "", 0
+	}
+
+	if prev.Inst.Op == x86asm.TEST && len(prev.Inst.Args) >= 2 {
+		reg, ok := prev.Inst.Args[0].(x86asm.Reg)
+		if !ok {
+			return "", 0
+		}
+		bit := x86TestPowerOfTwoBit(prev.Inst)
+		if bit < 0 {
+			return "", 0
+		}
+		return strings.ToLower(reg.String()), bit
+	}
+
+	if prev.Inst.Op == x86asm.BT && len(prev.Inst.Args) >= 2 {
+		reg, ok := prev.Inst.Args[0].(x86asm.Reg)
+		if !ok {
+			return "", 0
+		}
+		// BT's second operand can be a register or an immediate.
+		if imm, ok := prev.Inst.Args[1].(x86asm.Imm); ok {
+			return strings.ToLower(reg.String()), int(imm)
+		}
+	}
+
+	return "", 0
 }
