@@ -521,7 +521,14 @@ func cmdDecompileNative(args []string) error {
 		if err != nil {
 			return nil, decompiler.Artifact{}, err
 		}
-		return fir, decompiler.EmitPseudocode(fir, symbolLookup, poolLookup), nil
+		artifact := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
+		// Item 12: CFG structural verification — compare pseudocode
+		// control flow against binary CFG and log mismatches.
+		verification := decompiler.VerifyCFG(fir, artifact)
+		if verification.MismatchedBranches > 0 || verification.MismatchedReturns > 0 {
+			artifact.Source += fmt.Sprintf("\n// CFG verification: %s\n", verification.Summary())
+		}
+		return fir, artifact, nil
 	}
 
 	// callTargetsOf extracts every resolved direct-call target VA from a

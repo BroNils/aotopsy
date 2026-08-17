@@ -84,7 +84,6 @@ type emitter struct {
 	budgetHit     bool
 	stats         Stats
 	loopHeaders   map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
-	phiCounter    int          // Item 7: phi temporary counter for dataflow joins
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -259,15 +258,23 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// ParamTypeNames, or they would leak types through the trust gate that
 	// the signature itself refused to show.
 	effectiveParamTypes := make([]string, len(argRegIdx))
+	// Item 11: NamedParamNames — use recovered named parameter names
+	// instead of generic "argN" when available and count matches.
+	trustNamedParams := len(fir.NamedParamNames) > 0 && len(fir.NamedParamNames) == len(argRegIdx)
 	for i, ri := range argRegIdx {
 		typeName := "dynamic"
 		if trustParamTypes && fir.ParamTypeNames[i] != "" && fir.ParamTypeNames[i] != "?" {
 			typeName = fir.ParamTypeNames[i]
 			effectiveParamTypes[i] = typeName
 		}
-		argList[i] = fmt.Sprintf("%s arg%d", typeName, i)
+		// Item 11: Use named parameter name when available.
+		paramName := fmt.Sprintf("arg%d", i)
+		if trustNamedParams && fir.NamedParamNames[i] != "" && fir.NamedParamNames[i] != "?" {
+			paramName = fir.NamedParamNames[i]
+		}
+		argList[i] = fmt.Sprintf("%s %s", typeName, paramName)
 		if ri >= 0 && ri < len(fir.ArgRegs) {
-			e.state.Regs[fir.ArgRegs[ri]] = fmt.Sprintf("arg%d", i)
+			e.state.Regs[fir.ArgRegs[ri]] = paramName
 		}
 	}
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
@@ -349,6 +356,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	sig := safeFuncName(fir.Name)
 	if len(fir.TypeParamNames) > 0 {
 		sig += "<" + strings.Join(fir.TypeParamNames, ", ") + ">"
+	}
+	// Item 8: Annotate type arguments when recovered (e.g. List<String>).
+	if len(fir.TypeArgNames) > 0 {
+		sig += " // type args: <" + strings.Join(fir.TypeArgNames, ", ") + ">"
 	}
 	// For a closure, name the function it was declared inside. Without this an
 	// anonymous closure is indistinguishable from every other one in its class.

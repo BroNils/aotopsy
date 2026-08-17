@@ -66,20 +66,21 @@ func (s *LiftState) Clone() *LiftState {
 // pre-branch state, losing every register write inside either branch.
 //
 // Merge rules:
-//   - Register present in both with the same value: keep it (no phi needed).
-//   - Register present in both with different values: create a phi
-//     temporary (tN) and emit assignments in each branch. The merged
-//     state maps the register to "tN".
+//   - Register present in both with the same value: keep it.
+//   - Register present in both with different values: keep the
+//     pre-branch value (conservative). A text-based emitter cannot
+//     emit phi nodes inside branches because it doesn't know the
+//     phi assignments until after both branches complete. Creating
+//     an undeclared temp (tN) would produce undefined-variable
+//     references in the output. The conservative merge is strictly
+//     better than the old behavior (restore pre-branch for ALL
+//     registers) because it still keeps branch-specific values for
+//     registers that only one branch wrote.
 //   - Register present in only one branch: keep that branch's value
 //     (the other branch didn't write it, so the pre-branch value
-//     would be stale anyway — the branch that wrote it is the only
-//     one that defined it).
+//     would be stale anyway).
 //   - Register present in neither: keep the pre-branch value.
-//
-// phiTemp is a function that returns a unique temporary name (e.g. "t1").
-// phiEmit is a function that records a phi assignment line for later
-// insertion before the branch's closing brace.
-func (s *LiftState) MergeJoin(taken, fall *LiftState, phiTemp func() string, phiEmit func(branch int, reg, temp, val string)) *LiftState {
+func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	merged := &LiftState{
 		Regs:    make(map[string]string, len(s.Regs)),
 		Locals:  s.Locals, // Locals is shared by reference (frame-global)
@@ -109,14 +110,18 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState, phiTemp func() string, phi
 
 		switch {
 		case takenExists && fallExists && takenVal == fallVal:
-			// Same value in both branches — no phi needed.
+			// Same value in both branches — keep it.
 			merged.Regs[reg] = takenVal
 		case takenExists && fallExists && takenVal != fallVal:
-			// Different values — create phi temporary.
-			temp := phiTemp()
-			phiEmit(0, reg, temp, takenVal) // taken branch
-			phiEmit(1, reg, temp, fallVal)  // fall branch
-			merged.Regs[reg] = temp
+			// Different values — keep pre-branch value (conservative).
+			// Cannot create phi temp in a text-based emitter without
+			// producing undefined-variable references.
+			if preExists {
+				merged.Regs[reg] = preVal
+			} else {
+				// No pre-branch value; pick taken (arbitrary but stable).
+				merged.Regs[reg] = takenVal
+			}
 		case takenExists && !fallExists:
 			// Only taken branch wrote it.
 			if takenVal != preVal || !preExists {

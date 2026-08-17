@@ -229,6 +229,22 @@ type FuncIR struct {
 	// emitter joins them without knowing how bounds are resolved.
 	TypeParamNames []string `json:"-"`
 
+	// TypeArgNames holds resolved type ARGUMENTS for generic instantiations
+	// (e.g. ["String", "int"] for List<String, int>), resolved by the caller
+	// from TypeArguments via pipeline.TypeParamResolver.TypeArgNames.
+	// When non-empty, the emitter annotates pool loads of TypeArguments
+	// objects with their resolved type argument list.
+	// Nil/empty means no type arguments recovered for this function.
+	TypeArgNames []string `json:"-"`
+
+	// NamedParamNames holds the names of named optional parameters
+	// (e.g. ["name", "age"] for foo({String? name, int? age})),
+	// resolved by the caller from FunctionType.named_parameter_names
+	// via pipeline.TypeParamResolver.NamedParamNames. When non-empty
+	// and the length matches the parameter count, the emitter uses
+	// these names in the signature instead of generic "argN".
+	NamedParamNames []string `json:"-"`
+
 	// FieldNameResolver resolves a (classID, byteOffset) pair to a field name.
 	// When non-nil, fieldExpr uses it to emit base.fieldName instead of
 	// base.fNN. Set by the caller from pipeline.BuildClassLayouts before

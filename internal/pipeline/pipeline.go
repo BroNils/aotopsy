@@ -325,6 +325,20 @@ func Run(opts Opts) (*Result, error) {
 		}
 	}
 
+	// Step 7: R2 export (radare2 command script) — Item 18.
+	// Exports recovered function names as r2 flags so analysts can
+	// import them via `r2 -i aotopsy.r2 libapp.so`.
+	if err := writeR2Export(opts.OutDir, ranges, pl, codeVA, codeOff); err != nil {
+		opts.logf("  r2 export: %v\n", err)
+	}
+
+	// Step 8: Function fingerprint dictionary — Item 13.
+	// Writes function_fingerprints.jsonl with SHA-256 hashes of each
+	// function's instruction bytes, for cross-sample name transfer.
+	if err := writeFunctionFingerprints(opts.OutDir, ranges, pl, code, codeOff, codeVA); err != nil {
+		opts.logf("  fingerprints: %v\n", err)
+	}
+
 	return result, nil
 }
 

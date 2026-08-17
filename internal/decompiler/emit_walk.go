@@ -315,10 +315,13 @@ func isStateIndexValue(val string) bool {
 }
 
 // emitAsyncStateBranch emits an async state machine dispatch as a
-// labeled case instead of a bare if/else. This makes the state machine
-// structure visible: each branch is a continuation from a different
-// await point, and the label tells the reader which state index it
-// handles.
+// switch statement on the state index, making the state machine
+// structure visible. Each branch becomes a case in the switch,
+// with the state index value as the case label.
+//
+// This is the structural collapse that item 9 calls for: instead of
+// a bare if/else with a comment, the reader sees a real switch/case
+// that maps directly to the async state machine's dispatch table.
 func (e *emitter) emitAsyncStateBranch(blk *Block, ins Instr, indent, depth int) {
 	var takenID, fallID = -1, -1
 	for _, s := range blk.Succs {
@@ -334,30 +337,40 @@ func (e *emitter) emitAsyncStateBranch(blk *Block, ins Instr, indent, depth int)
 
 	savedState := e.state
 
-	// Emit as a labeled state machine dispatch.
-	// For eqz: "if (state == 0) { // state 0: initial entry" etc.
-	// For nez: "if (state != 0) { // state != 0: resumed" etc.
-	var cond string
+	// Emit as a switch on the state index.
+	// For eqz: "if (state == 0) { ... } else { ... }" becomes
+	//   switch (state) { case 0: ... default: ... }
+	// For nez: "if (state != 0) { ... } else { ... }" becomes
+	//   switch (state) { default: ... case 0: ... }
+	e.emit(indent, "// async state machine dispatch")
+	e.emit(indent, "switch (%s) {", regVal)
+
+	// Determine which branch is "state == 0" and which is "state != 0".
+	// eqz: taken = state==0, fall = state!=0
+	// nez: taken = state!=0, fall = state==0
+	var zeroID, nonzeroID int
 	if condKind == "eqz" {
-		cond = fmt.Sprintf("%s == 0", regVal)
+		zeroID = takenID
+		nonzeroID = fallID
 	} else {
-		cond = fmt.Sprintf("%s != 0", regVal)
+		zeroID = fallID
+		nonzeroID = takenID
 	}
 
-	e.emit(indent, "// async state machine dispatch")
-	e.emit(indent, "if (%s) {", cond)
-	takenState := e.state.Clone()
-	e.state = takenState
-	e.emitSuccessor(takenID, indent+1, depth)
-	e.emit(indent, "} else {")
-	fallState := savedState.Clone()
-	e.state = fallState
-	e.emitSuccessor(fallID, indent+1, depth)
+	// Case 0: initial entry / first execution
+	e.emit(indent+1, "case 0:")
+	zeroState := savedState.Clone()
+	e.state = zeroState
+	e.emitSuccessor(zeroID, indent+2, depth)
+
+	// Default: resumed from await
+	e.emit(indent+1, "default:")
+	nonzeroState := savedState.Clone()
+	e.state = nonzeroState
+	e.emitSuccessor(nonzeroID, indent+2, depth)
+
 	// Merge branch states (Item 7 dataflow join).
-	e.state = savedState.MergeJoin(takenState, fallState, func() string {
-		e.phiCounter++
-		return fmt.Sprintf("t%d", e.phiCounter)
-	}, func(branch int, reg, temp, val string) {})
+	e.state = savedState.MergeJoin(zeroState, nonzeroState)
 	e.emit(indent, "}")
 }
 
@@ -391,8 +404,10 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 // via MergeJoin instead of restoring the pre-branch state. This is the
 // dataflow join that was missing — the old code lost every register
 // write inside either branch, so code after an if/else saw stale
-// pre-branch values. Phi temporaries (tN) are emitted for registers
-// that differ between branches.
+// pre-branch values. MergeJoin keeps branch-specific values for
+// registers that only one branch wrote, and conservatively keeps
+// the pre-branch value for registers that both branches wrote
+// differently (a text-based emitter cannot emit phi nodes).
 //
 // Item 9: When the function is async and the branch is on a state index
 // (eqz/nez on a register loaded from SuspendState), emit it as a
@@ -400,8 +415,6 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 // async state machine structure visible.
 func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// Item 9: Async state machine dispatch detection.
-	// When IsAsync and the branch is eqz/nez on a register that holds
-	// a SuspendState state index, emit as a state machine case.
 	if e.fir.IsAsync && (ins.CondKind == "eqz" || ins.CondKind == "nez") {
 		regVal := e.state.lookupReg(ins.CondReg)
 		if isStateIndexValue(regVal) {
@@ -426,39 +439,16 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	}
 	savedState := e.state
 
-	// Track phi assignments to insert before each branch's closing brace.
-	var takenPhis, fallPhis []string
-	phiEmit := func(branch int, reg, temp, val string) {
-		line := fmt.Sprintf("var %s = %s;", temp, val)
-		if branch == 0 {
-			takenPhis = append(takenPhis, line)
-		} else {
-			fallPhis = append(fallPhis, line)
-		}
-	}
-	phiTemp := func() string {
-		e.phiCounter++
-		return fmt.Sprintf("t%d", e.phiCounter)
-	}
-
 	e.emit(indent, "if (%s) {", cond)
 	takenState := e.state.Clone()
 	e.state = takenState
 	e.emitSuccessor(takenID, indent+1, depth)
-	// Emit phi assignments for taken branch before closing brace.
-	for _, p := range takenPhis {
-		e.emit(indent+1, "%s", p)
-	}
 	e.emit(indent, "} else {")
 	fallState := savedState.Clone()
 	e.state = fallState
 	e.emitSuccessor(fallID, indent+1, depth)
-	// Emit phi assignments for fall branch before closing brace.
-	for _, p := range fallPhis {
-		e.emit(indent+1, "%s", p)
-	}
-	// Merge the two branch states instead of restoring pre-branch state.
-	e.state = savedState.MergeJoin(takenState, fallState, phiTemp, phiEmit)
+	// Item 7: Merge branch states instead of restoring pre-branch state.
+	e.state = savedState.MergeJoin(takenState, fallState)
 	e.emit(indent, "}")
 }
 

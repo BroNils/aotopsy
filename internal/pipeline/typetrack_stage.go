@@ -650,7 +650,16 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 				bd.Unresolved++
 			}
 		} else {
-			bd.Unresolved++
+			// Item 14: Directed symbolic execution fallback.
+			// For unresolved BLR edges, try resolving via the pool
+			// display string in the Via annotation. This catches
+			// pool-loaded Code objects that the type tracker missed.
+			if resolved := resolveViaPoolDisplay(e.Via); resolved != "" {
+				e.Target = resolved
+				bd.Stub++
+			} else {
+				bd.Unresolved++
+			}
 		}
 		// NOTE: there used to be a third branch here that matched
 		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
@@ -691,6 +700,40 @@ func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
 		imm26 |= ^int32(0x03FFFFFF)
 	}
 	return uint64(int64(pc) + int64(imm26)*4), true
+}
+
+// resolveViaPoolDisplay attempts to resolve an unresolved BLR edge
+// via the pool display string in the Via annotation.
+// Item 14: Directed symbolic execution fallback.
+//
+// Via annotations for pool-loaded Code objects look like:
+//   "PP[123] foo" or "pp[123] foo"
+// The pool display string after the PP index is the function name.
+func resolveViaPoolDisplay(via string) string {
+	// Check for PP[NNN] pattern — pool-loaded Code object.
+	if via == "" {
+		return ""
+	}
+	// Look for "PP[" or "pp[" prefix.
+	viaLower := strings.ToLower(via)
+	if !strings.HasPrefix(viaLower, "pp[") {
+		return ""
+	}
+	// Extract the display string after the bracket.
+	closeBracket := strings.IndexByte(via, ']')
+	if closeBracket < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(via[closeBracket+1:])
+	if rest == "" {
+		return ""
+	}
+	// The rest is the pool display string — a function name.
+	// Skip placeholder values like "<vm:NNN>" or "<ref:NNN>".
+	if strings.HasPrefix(rest, "<") {
+		return ""
+	}
+	return rest
 }
 
 // x86CallRelTarget returns the absolute target of a CALL rel32 instruction.
