@@ -43,6 +43,10 @@ var primaryCommands = []Command{
 	{Name: "reflutter-import", Short: "Import reFlutter dump", Run: cmdReflutterImport},
 	{Name: "parity", Short: "Corpus parity report", Run: cmdParity},
 	{Name: "inventory", Short: "Sample inventory", Run: cmdInventory},
+	{Name: "compare-blutter", Short: "Compare output with blutter", Run: cmdCompareBlutter},
+	{Name: "build-fingerprint-dict", Short: "Build function fingerprint dictionary", Run: cmdBuildFingerprintDict},
+	{Name: "apply-fingerprint-dict", Short: "Apply fingerprint dictionary to unnamed functions", Run: cmdApplyFingerprintDict},
+	{Name: "import-darter", Short: "Import darter output for older Dart versions", Run: cmdImportDarter},
 	{Name: "_debug", Short: "Internal commands", Run: cmdDebug},
 
 	// Deprecated commands — still work, print a warning.
