@@ -534,6 +534,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// the trust gate rejected.
 	source = applyArgRenaming(source, effectiveParamTypes)
 	source = applyNamingPass(source, fir)
+	// Item 17: IdentStats-based re-classification pass from flutterdec.
+	// Renames generic temps (t0, t1) to semantic names (result, flag,
+	// counter, accumulator) based on usage patterns.
+	source = applyIdentReclassification(source)
 
 	return Artifact{FunctionName: fir.Name, Source: source, Stats: e.stats}
 }
