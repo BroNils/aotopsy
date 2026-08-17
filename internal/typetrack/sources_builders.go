@@ -83,11 +83,25 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 		refToClassID[pl.VmClasses[i].RefID] = pl.VmClasses[i].ClassID
 	}
 	// Process isolate Fields.
+	// P-2 fix: Field.HostOffset is a REF ID into MintValues, not the
+	// actual offset. BuildClassLayouts converts it via
+	// MintValues[HostOffset] * wordSize; buildFieldTypes was using the
+	// raw ref ID as the map key, so FieldByOwnerOffset was keyed by
+	// ref IDs (10000+) instead of byte offsets (7, 75, 95, ...).
+	// FieldValueClass never found anything, making the declared field
+	// type source completely dead (0 hits on BOTH ARM64 and x86_64).
 	for i := range clResult.Fields {
 		f := &clResult.Fields[i]
 		if f.HostOffset < 0 {
 			continue // static field
 		}
+		// Convert ref ID → word offset → byte offset, matching
+		// BuildClassLayouts' conversion.
+		wordOff, ok := ctx.MintValues[int(f.HostOffset)]
+		if !ok {
+			continue
+		}
+		byteOff := int32(wordOff) * ctx.WordSize
 		ownerClassID := -1
 		if f.OwnerRefID >= 0 {
 			if cid, ok := refToClassID[f.OwnerRefID]; ok {
@@ -102,12 +116,13 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 			m = make(map[int32]int)
 			ctx.FieldByOwnerOffset[ownerClassID] = m
 		}
-		m[f.HostOffset] = f.RefID
+		m[byteOff] = f.RefID
 	}
 	// Process VM Fields: resolve TypeRefID → ClassID AND build
 	// FieldByOwnerOffset using VmClasses for owner ClassID resolution.
 	// This enables declared field type lookup for framework classes
 	// (String, List, Map, etc.) whose Fields live in the VM snapshot.
+	// P-2 fix: same ref ID → byte offset conversion as isolate Fields.
 	for i := range pl.VmFields {
 		f := &pl.VmFields[i]
 		if f.TypeRefID >= 0 {
@@ -118,6 +133,11 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 		}
 		// Build FieldByOwnerOffset for VM fields.
 		if f.HostOffset >= 0 && f.OwnerRefID >= 0 {
+			wordOff, ok := ctx.MintValues[int(f.HostOffset)]
+			if !ok {
+				continue
+			}
+			byteOff := int32(wordOff) * ctx.WordSize
 			if cid, ok := refToClassID[f.OwnerRefID]; ok {
 				ownerClassID := int(cid)
 				m, ok2 := ctx.FieldByOwnerOffset[ownerClassID]
@@ -125,7 +145,7 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 					m = make(map[int32]int)
 					ctx.FieldByOwnerOffset[ownerClassID] = m
 				}
-				m[f.HostOffset] = f.RefID
+				m[byteOff] = f.RefID
 			}
 		}
 	}

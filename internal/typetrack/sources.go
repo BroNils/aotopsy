@@ -300,6 +300,16 @@ type TypeContext struct {
 	// FuncReturnType diagnostics.
 	FuncReturnTypeCount int `json:"func_return_type_count,omitempty"`
 	FuncReturnTypeSeeds int `json:"func_return_type_seeds,omitempty"`
+
+	// MintValues maps ref IDs to Smi/Mint integer values, used to
+	// convert Field.HostOffset (a ref ID) to the actual word offset.
+	// Set from clResult.MintValues in BuildTypeContext.
+	MintValues map[int]int64 `json:"-"`
+
+	// WordSize is the pointer size in bytes (4 for compressed pointers,
+	// 8 for non-compressed). Used to convert word offsets to byte offsets
+	// for FieldByOwnerOffset keys.
+	WordSize int32 `json:"-"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -400,6 +410,8 @@ func BuildTypeContext(
 		CodeRefToName:           make(map[int]string),
 		DispatchCodeIndexToName: make(map[int]string),
 		ClassIDToName:           make(map[int]string),
+		MintValues:              clResult.MintValues,
+		WordSize:                8,
 		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
@@ -425,6 +437,11 @@ func BuildTypeContext(
 		Subclasses:              make(map[int][]int),
 		SelectorCache:           make(map[int][]string),
 		SelectorMonomorphic:     make(map[int]string),
+	}
+
+	// Adjust word size for compressed pointers.
+	if profile != nil && profile.CompressedPointers {
+		ctx.WordSize = 4
 	}
 
 	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
