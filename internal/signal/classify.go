@@ -4,7 +4,6 @@
 package signal
 
 import (
-	"math"
 	"regexp"
 	"strings"
 )
@@ -293,7 +292,7 @@ func ClassifyString(value string) []string {
 	// Base64/hex key (high-entropy, standalone).
 	// Exclude camelCase identifiers which match the character set but aren't keys.
 	trimmed := strings.TrimSpace(value)
-	if reBase64.MatchString(trimmed) && entropy(value) > 3.5 && !isCamelCase(trimmed) {
+	if reBase64.MatchString(trimmed) && ShannonEntropy([]byte(value)) > 3.5 && !isCamelCase(trimmed) {
 		cats = append(cats, CatBase64Key)
 	}
 
@@ -553,26 +552,6 @@ func containsCat(cats []string, cat string) bool {
 	return false
 }
 
-// entropy computes Shannon entropy of a string in bits per character.
-func entropy(s string) float64 {
-	if len(s) == 0 {
-		return 0
-	}
-	freq := make(map[byte]int)
-	for i := 0; i < len(s); i++ {
-		freq[s[i]]++
-	}
-	n := float64(len(s))
-	var ent float64
-	for _, count := range freq {
-		p := float64(count) / n
-		if p > 0 {
-			ent -= p * math.Log2(p)
-		}
-	}
-	return ent
-}
-
 // --- Security analysis keyword lists ---
 //
 // containsKeyword matches against normalizeForMatch(value), which strips
@@ -720,49 +699,10 @@ var pluginKeywords = []string{
 var reMethodChannel = regexp.MustCompile(`(?i)methodchannel\s*\(`)
 
 // isCryptoConstant checks if a value matches known crypto algorithm constants.
-// Uses a map for O(1) lookup. Only the most distinctive constants are listed
-// — those that uniquely identify a specific algorithm.
-var cryptoConstants = map[string]bool{
-	// SHA-256 K[0..7] (most distinctive — first 8 round constants)
-	"0x428a2f98": true, "0x71374491": true, "0xb5c0fbcf": true, "0xe9b5dba5": true,
-	"0x3956c25b": true, "0x59f111f1": true, "0x923f82a4": true, "0xab1c5ed5": true,
-	// SHA-256 H[0..7] (initial hash values)
-	"0x6a09e667": true, "0xbb67ae85": true, "0x3c6ef372": true, "0xa54ff53a": true,
-	"0x510e527f": true, "0x9b05688c": true, "0x1f83d9ab": true, "0x5be0cd19": true,
-	// SHA-1 K[0..3]
-	"0x5a827999": true, "0x6ed9eba1": true, "0x8f1bbcdc": true, "0xca62c1d6": true,
-	// SHA-1 H[0..4]
-	"0x67452301": true, "0xefcdab89": true, "0x98badcfe": true, "0x10325476": true, "0xc3d2e1f0": true,
-	// MD5 T[0..3]
-	"0xd76aa478": true, "0xe8c7b756": true, "0x242070db": true, "0xc1bdceee": true,
-	// AES S-box (first 4 entries — most distinctive)
-	"0x637c777b": true, "0x7b777c63": true, "0xf2b8669f": true, "0x6dc9a7b6": true,
-	// ChaCha20 constants ("expand 32-byte k")
-	"0x61707865": true, "0x3320646e": true, "0x79622d32": true, "0x6b206574": true,
-	// CRC32
-	"0xedb88320": true, "0x04c11db7": true, "0x82f63b78": true,
-	// BLAKE2b IV[0..3]
-	"0x243f6a88": true, "0x85a308d3": true, "0x13198a2e": true, "0x03707344": true,
-	// XTEA delta
-	"0x9e3779b9": true,
-	// Blowfish P-array[0..3] (same as BLAKE2b IV — listed once)
-	// AES Rcon[0..9]
-	"0x01000000": true, "0x02000000": true, "0x04000000": true, "0x08000000": true,
-	"0x10000000": true, "0x20000000": true, "0x40000000": true, "0x80000000": true,
-	"0x1b000000": true, "0x36000000": true,
-	// SHA-512 K[0..3] (64-bit)
-	"0x428a2f98d728ae22": true, "0x7137449123ef65cd": true,
-	"0xb5c0fbcfec4d3b2f": true, "0xe9b5dba58189dbbc": true,
-	// SHA-512 H[0..3] (64-bit)
-	"0x6a09e667f3bcc908": true, "0xbb67ae8584caa73b": true,
-	"0x3c6ef372fe94f82b": true, "0xa54ff53a5f1d36f1": true,
-	// Keccak round constants (first 4)
-	"0x0000000000000001": true, "0x0000000000008082": true,
-	"0x800000000000808a": true, "0x8000000080008000": true,
-}
-
+// Uses cryptoAlgorithmID from crypto_id.go as the single source of truth.
 func isCryptoConstant(value string) bool {
-	return cryptoConstants[strings.ToLower(strings.TrimSpace(value))]
+	_, ok := cryptoAlgorithmID[strings.ToLower(strings.TrimSpace(value))]
+	return ok
 }
 
 // isObfuscatedName detects short meaningless names typical of Dart --obfuscate.

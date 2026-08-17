@@ -30,17 +30,8 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := func(format string, args ...interface{}) {
-		if !quiet {
-			_, _ = fmt.Fprintf(log, format, args...)
-		}
-	}
-	stagef := func(name string, format string, args ...interface{}) {
-		if !quiet {
-			detail := fmt.Sprintf(format, args...)
-			_, _ = fmt.Fprintf(log, "\n%s%s%s %s\n", cli.Pink, name, cli.Reset, detail)
-		}
-	}
+	logf := makeLogf(quiet, log)
+	stagef := makeStagef(quiet, log)
 
 	// Read functions.jsonl.
 	funcs, err := ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))

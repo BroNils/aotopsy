@@ -50,14 +50,8 @@ func buildClassIDToName(ctx *TypeContext, clResult *cluster.Result, pl *PoolLook
 // FieldByOwnerOffset (ownerClassID → byteOffset → fieldRefID).
 func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupData) {
 	// 3. Build field type lookup: fieldRefID → ClassID.
-	// Include VM snapshot Types so framework class field types resolve.
-	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types)+len(pl.VmTypes))
-	for i := range clResult.Types {
-		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
-	}
-	for i := range pl.VmTypes {
-		refToType[pl.VmTypes[i].RefID] = &pl.VmTypes[i]
-	}
+	// RefToType is built once in BuildTypeContext (includes VM Types).
+	refToType := ctx.RefToType
 	fieldTypeResolved := 0
 	fieldTypeTotal := 0
 	for i := range clResult.Fields {
@@ -140,11 +134,8 @@ func buildFieldTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupD
 
 // buildPoolClassByIndex builds PP index → ClassID map.
 func buildPoolClassByIndex(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupData) {
-	// refToType is needed; rebuild it here to keep this function independent.
-	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
-	for i := range clResult.Types {
-		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
-	}
+	// RefToType is built once in BuildTypeContext.
+	refToType := ctx.RefToType
 	for _, pe := range clResult.Pool {
 		if pe.Kind != cluster.PoolTagged {
 			continue
@@ -270,10 +261,8 @@ func buildFuncParamTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLoo
 	for i := range clResult.Arrays {
 		arrayByRef[clResult.Arrays[i].RefID] = &clResult.Arrays[i]
 	}
-	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
-	for i := range clResult.Types {
-		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
-	}
+	// RefToType is built once in BuildTypeContext.
+	refToType := ctx.RefToType
 	for i := range clResult.Named {
 		no := &clResult.Named[i]
 		if pl.CT != nil && no.CID == pl.CT.Function {

@@ -72,6 +72,12 @@ type TypeContext struct {
 	// loads List element type).
 	FuncReturnType map[int]int
 
+	// RefToType maps Type ref ID → TypeInfo, including both isolate
+	// and VM snapshot Types. Built once in BuildTypeContext and shared
+	// across buildFieldTypes, buildPoolClassByIndex, and
+	// buildFuncParamTypes — previously each rebuilt the same map.
+	RefToType map[int]*cluster.TypeInfo
+
 	// KOriginElement is the dispatch table origin element offset.
 	// The Dart runtime allocates the dispatch table with KOriginElement
 	// padding entries at the beginning, so entries[0] corresponds to
@@ -398,6 +404,7 @@ func BuildTypeContext(
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
 		FuncReturnType:          make(map[int]int),
+		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),
 		KOriginElement:          kOriginElement,
 		THRFields:               thrFields,
 		AllocStubOffsets:        allocStubOffsets,
@@ -422,6 +429,15 @@ func BuildTypeContext(
 
 	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
 	resolveTypeClassIDs(clResult)
+
+	// 0b. Build RefToType once: isolate Types + VM Types.
+	// Shared across buildFieldTypes, buildPoolClassByIndex, buildFuncParamTypes.
+	for i := range clResult.Types {
+		ctx.RefToType[clResult.Types[i].RefID] = &clResult.Types[i]
+	}
+	for i := range pl.VmTypes {
+		ctx.RefToType[pl.VmTypes[i].RefID] = &pl.VmTypes[i]
+	}
 
 	// 1. Class hierarchy + subclasses + instantiated classes.
 	buildClassHierarchy(ctx, clResult, pl, dispatchEntries)

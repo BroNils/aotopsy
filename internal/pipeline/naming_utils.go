@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/strutil"
 )
 
@@ -250,14 +252,34 @@ func extractFileComments(path string, seen map[string]bool) ([]FlutterMetaCommen
 }
 
 // fileSize returns the size of the file at path, or 0 if stat fails.
-// Replaces the unsafe `fi, _ := os.Stat(path); fi.Size()` pattern that
-// panics on nil when stat fails (file deleted between write and stat).
 func fileSize(path string) int64 {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return 0
 	}
 	return fi.Size()
+}
+
+// makeLogf returns a closure that writes to log only when !quiet.
+// Shared by RunMetaStage and RunSignalStage to avoid duplicating the
+// same quiet/log helper pattern in both files.
+func makeLogf(quiet bool, log io.Writer) func(string, ...interface{}) {
+	return func(format string, args ...interface{}) {
+		if !quiet {
+			_, _ = fmt.Fprintf(log, format, args...)
+		}
+	}
+}
+
+// makeStagef returns a closure that writes a stage header to log only
+// when !quiet. Shared by RunMetaStage and RunSignalStage.
+func makeStagef(quiet bool, log io.Writer) func(string, string, ...interface{}) {
+	return func(name string, format string, args ...interface{}) {
+		if !quiet {
+			detail := fmt.Sprintf(format, args...)
+			_, _ = fmt.Fprintf(log, "\n%s%s%s %s\n", cli.Pink, name, cli.Reset, detail)
+		}
+	}
 }
 
 // IsInterestingCallee returns true if the callee name represents a real named
