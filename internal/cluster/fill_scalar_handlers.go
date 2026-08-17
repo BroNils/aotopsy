@@ -86,7 +86,7 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 // readFuncTypeScalar reads one scalar for a FunctionType cluster.
 // si is the scalar index. Returns the FuncTypeInfo if this scalar
 // completes the object (si == 1), or nil otherwise.
-func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeParamsRef, resultTypeRef int, i, count int, op ScalarOp) (*FuncTypeInfo, error) {
+func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef int, i, count int, op ScalarOp) (*FuncTypeInfo, error) {
 	if si == 1 {
 		// packed_parameter_counts is OpTagged32 at scalar index 1.
 		packed, err := s.ReadTagged32()
@@ -100,13 +100,14 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 			numFixed-- // subtract implicit 'this'
 		}
 		return &FuncTypeInfo{
-			RefID:                ref,
-			NumFixed:             numFixed,
-			NumOptional:          numOptional,
-			HasImplicit:          hasImplicit,
-			ParamTypesArrayRefID: paramTypesRef,
-			TypeParamsRefID:      typeParamsRef,
-			ResultTypeRefID:      resultTypeRef,
+			RefID:                   ref,
+			NumFixed:                numFixed,
+			NumOptional:             numOptional,
+			HasImplicit:             hasImplicit,
+			ParamTypesArrayRefID:    paramTypesRef,
+			TypeParamsRefID:         typeParamsRef,
+			ResultTypeRefID:         resultTypeRef,
+			NamedParamNamesArrayRefID: namedParamNamesRef,
 		}, nil
 	}
 	// Fallback: skip this scalar to keep stream aligned.

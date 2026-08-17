@@ -86,7 +86,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			}
 		}
 
-		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef, resultTypeRef int
+		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef, resultTypeRef, namedParamNamesRef int
 		nameRef = -1
 		ownerRef = -1
 		sigRef = -1
@@ -94,6 +94,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		fieldTypeRef = -1
 		typeParamsRef = -1
 		resultTypeRef = -1
+		namedParamNamesRef = -1
 		dataRef := -1
 
 		// For CID-specific capture, save all refs in order.
@@ -130,6 +131,14 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if spec.IsFuncType && spec.FuncTypeParamTypesIdx >= 1 && j == spec.FuncTypeParamTypesIdx-1 {
 				resultTypeRef = int(r)
 			}
+			// named_parameter_names sits one slot AFTER parameter_types;
+			// see FuncTypeInfo.NamedParamNamesArrayRefID for the raw_object.h
+			// evidence. UntaggedFunctionType lays out type_parameters,
+			// result_type, parameter_types, named_parameter_names
+			// consecutively (VISIT_TO(named_parameter_names)).
+			if spec.IsFuncType && spec.FuncTypeParamTypesIdx > 0 && j == spec.FuncTypeParamTypesIdx+1 {
+				namedParamNamesRef = int(r)
+			}
 			// Field type ref is at index 2 (refs: name=0, owner=1, type=2, initializer=3).
 			if spec.IsField && j == 2 {
 				fieldTypeRef = int(r)
@@ -149,7 +158,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
 			case spec.IsFuncType:
-				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, i, count, op)
+				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef, i, count, op)
 				if err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}

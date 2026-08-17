@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
@@ -438,6 +439,7 @@ func QualifiedCodeName(refID int, pl *PoolLookups, pcOffset uint32) string {
 type TypeParamResolver struct {
 	arrayByRef map[int]*cluster.ArrayInfo
 	typeByRef  map[int]int32
+	taByRef    map[int]*cluster.TypeArgumentsInfo
 	result     *cluster.Result
 	pl         *PoolLookups
 }
@@ -507,6 +509,85 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 		}
 	}
 	return fmt.Sprintf("<cid:%d>", cid)
+}
+
+// TypeArgNames resolves a TypeArguments ref ID to a list of type
+// argument display names (e.g. ["String", "int"] for List<String, int>).
+// Returns nil if the TypeArguments ref is null or unresolvable.
+//
+// This is the consumer for the TypeArguments capture: TypeArguments.types
+// is a variable-length array of AbstractType refs, each of which resolves
+// to a ClassID via TypeInfo.ClassID, then to a class name via
+// classDisplayName — the same chain ParamTypeNames uses for parameter
+// types, but applied to type arguments instead.
+//
+// SDK-verified: raw_object.h@3.12.2, UntaggedTypeArguments has
+// COMPRESSED_VARIABLE_POINTER_FIELDS(AbstractTypePtr, element, types),
+// already captured as TypeArgumentsInfo.TypeRefs.
+func (r *TypeParamResolver) TypeArgNames(typeArgsRef int) []string {
+	if typeArgsRef <= cluster.RefNull {
+		return nil
+	}
+	// Build TypeArguments lookup if not already built.
+	if r.taByRef == nil {
+		r.taByRef = make(map[int]*cluster.TypeArgumentsInfo, len(r.result.TypeArguments))
+		for i := range r.result.TypeArguments {
+			r.taByRef[r.result.TypeArguments[i].RefID] = &r.result.TypeArguments[i]
+		}
+	}
+	ta, ok := r.taByRef[typeArgsRef]
+	if !ok || len(ta.TypeRefs) == 0 {
+		return nil
+	}
+	names := make([]string, len(ta.TypeRefs))
+	for i, typeRef := range ta.TypeRefs {
+		cid, ok := r.typeByRef[typeRef]
+		if !ok || cid < 0 {
+			names[i] = "?"
+			continue
+		}
+		names[i] = r.classDisplayName(cid)
+	}
+	return names
+}
+
+// FormatTypeArgs renders a type argument list as "<String, int>" or ""
+// when empty. Used by the decompiler to annotate generic instantiations.
+func FormatTypeArgs(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return "<" + strings.Join(names, ", ") + ">"
+}
+
+// NamedParamNames resolves a FunctionType's named_parameter_names Array
+// ref to a list of parameter name strings (e.g. ["name", "age"] for
+// foo({String? name, int? age})). Returns nil if the ref is null or
+// unresolvable.
+//
+// SDK-verified: raw_object.h@3.12.2, UntaggedFunctionType has
+// COMPRESSED_POINTER_FIELD(ArrayPtr, named_parameter_names) as the
+// last ref in VISIT_TO. The Array's elements are String refs, resolved
+// via ArrayInfo.ElementRefIDs → Strings (same chain as type parameter
+// names in BuildFuncTypeParamNames).
+func (r *TypeParamResolver) NamedParamNames(ft cluster.FuncTypeInfo) []string {
+	if ft.NamedParamNamesArrayRefID <= cluster.RefNull {
+		return nil
+	}
+	arr, ok := r.arrayByRef[ft.NamedParamNamesArrayRefID]
+	if !ok {
+		return nil
+	}
+	names := make([]string, len(arr.ElementRefIDs))
+	for i, elemRef := range arr.ElementRefIDs {
+		s, ok := r.pl.StringForRef(elemRef)
+		if !ok || s == "" {
+			names[i] = "?"
+			continue
+		}
+		names[i] = s
+	}
+	return names
 }
 
 // baseObjectName returns the SDK display name for a base-object reference,

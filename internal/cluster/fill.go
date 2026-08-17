@@ -93,6 +93,19 @@ type FuncTypeInfo struct {
 	// UntaggedFunctionType lays out type_parameters, result_type,
 	// parameter_types consecutively (verified in raw_object.h @3.9.2).
 	ResultTypeRefID int
+
+	// NamedParamNamesArrayRefID is the ref ID of this FunctionType's
+	// named_parameter_names Array object: the names of named optional
+	// parameters (e.g. ["name", "age"] for foo({String? name, int? age})).
+	// -1 when absent or not captured for this Dart version.
+	//
+	// Its ref-loop index is FuncTypeParamTypesIdx+1, because
+	// UntaggedFunctionType lays out type_parameters, result_type,
+	// parameter_types, named_parameter_names consecutively
+	// (VISIT_TO(named_parameter_names), verified in raw_object.h @3.12.2).
+	// The Array's elements are String refs, resolved via
+	// ArrayInfo.ElementRefIDs → Strings (same chain as TypeParamNames).
+	NamedParamNamesArrayRefID int
 }
 
 // TypeParametersInfo holds a TypeParameters object's refs.
