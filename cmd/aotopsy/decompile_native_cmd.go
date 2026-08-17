@@ -1024,22 +1024,3 @@ func cmdDecompileNative(args []string) error {
 // function -- real arity cannot differ by target architecture, so at
 // least one of those single-sample answers was wrong. Two or more call
 // sites are required before the intersection is trusted at all.
-func resolveArgRegIndices(masks []uint8) ([]int, bool) {
-	if len(masks) < 2 {
-		return nil, false
-	}
-	core := masks[0]
-	for _, m := range masks[1:] {
-		core &= m
-	}
-	var idx []int
-	for i := 0; i < 8; i++ { // L-4: 8 covers both ARM64 (X0-X7) and x86_64 (6 regs, bits 6-7 always 0)
-		if core&(1<<uint(i)) != 0 {
-			idx = append(idx, i)
-		}
-	}
-	if len(idx) == 0 {
-		return nil, false
-	}
-	return idx, true
-}
