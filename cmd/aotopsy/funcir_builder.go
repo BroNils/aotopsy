@@ -29,6 +29,8 @@ type funcIRBuilder struct {
 	buildArgRegMasks       func() map[uint64][]uint8
 	paramTypeNamesFor      func(r cluster.CodeRange) []string
 	genericParamNamesFor   func(r cluster.CodeRange) []string
+	typeArgNamesFor        func(r cluster.CodeRange) []string
+	namedParamNamesFor     func(r cluster.CodeRange) []string
 	fieldNameResolver      func(classID int, byteOffset int64) string
 	closureParents         map[int]string
 	pl                     *poolLookups
@@ -74,6 +76,14 @@ func (b *funcIRBuilder) Build(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 	fir.ThreadFieldNames = pipeline.ThreadFieldOffsets(b.info.Version.DartVersion, b.isARM64, b.info.Version)
 	fir.ParamTypeNames = b.paramTypeNamesFor(r)
 	fir.TypeParamNames = b.genericParamNamesFor(r)
+	// Item 8: Type argument names for generic instantiations.
+	if b.typeArgNamesFor != nil {
+		fir.TypeArgNames = b.typeArgNamesFor(r)
+	}
+	// Item 11: Named parameter names for named optional parameters.
+	if b.namedParamNamesFor != nil {
+		fir.NamedParamNames = b.namedParamNamesFor(r)
+	}
 	fir.FieldNameResolver = b.fieldNameResolver
 
 	// A1: Local variable type inference from ParamTypeNames.
