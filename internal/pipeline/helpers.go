@@ -185,12 +185,51 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		}
 	}
 
+	// Name VM stub Code objects by their cluster-order index.
+	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
+	// owner — ResolveCodeOwner fails for them. Their names come from
+	// VM_STUB_CODE_LIST + VM_TYPE_TESTING_STUB_CODE_LIST
+	// (disasm.VMStubNamesInClusterOrder), which is ordered by creation
+	// order (VM_STUB_CODE_LIST order with TTS after Subtype7TestCache),
+	// matching vmResult.Codes[i] cluster serialization order.
+	//
+	// This runs BEFORE the Function-owner resolution below so that stub
+	// names take precedence over Function owner names. Without this
+	// ordering, UnknownDartCode (which has a Function owner with a
+	// null/empty name) gets named "<optimized out>" by the owner loop,
+	// and the stub naming loop skips it — the correct name
+	// "UnknownDartCode" is never assigned.
+	//
+	// X-2: Previously used VMStubNames (164 entries, no TTS), missing
+	// the 9 type-testing stubs at indices 164-172. Now uses
+	// VMStubNamesInClusterOrder (173 entries with TTS).
+	if vmResult != nil {
+		vmStubNames := disasm.VMStubNamesInClusterOrder(dartVersion)
+		if len(vmStubNames) > 0 {
+			for i, ce := range vmResult.Codes {
+				if i >= len(vmStubNames) {
+					break
+				}
+				name := vmStubNames[i]
+				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
+				l.CodeRefDisplay[ce.RefID] = name
+			}
+		}
+	}
+
 	// Also build CodeNames and CodeRefDisplay for VM Code objects.
 	// VM Code objects (stubs, runtime entries) are referenced from the
 	// app isolate's object pool but only exist in the VM snapshot.
 	// Without this, PoolCodeNames has no entries for PP-loaded VM Code
 	// objects, so BLR calls through them (LDR X24,[X27,PP] → LDUR
 	// X30,[X24,#7] → BLR X30) are unresolved.
+	//
+	// This runs AFTER the stub naming loop above, so only VM Codes that
+	// were NOT named by the stub list (i.e., not in
+	// VM_STUB_CODE_LIST+TTS) get named via their Function owner. In
+	// practice, all 173 VM Code objects are stubs, so this loop is a
+	// no-op for VM snapshots — but it's kept as a safety net for any
+	// future VM Code that isn't a stub.
 	if vmResult != nil {
 		vmByCodeIndex := CodeIndexToFunc(vmResult, ct, codeIndexOneBased)
 		for _, ce := range vmResult.Codes {
@@ -226,30 +265,6 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				} else {
 					l.CodeRefDisplay[ce.RefID] = ci.FuncName
 				}
-			}
-		}
-	}
-
-	// Name VM stub Code objects by their creation-order index.
-	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
-	// owner — ResolveCodeOwner fails for them. Their names come from
-	// VM_STUB_CODE_LIST (disasm.VMStubNames), which is ordered by
-	// creation order, matching vmResult.Codes[i].
-	// Without this, PoolCodeNames has no entries for PP-loaded VM stub
-	// Code objects, so BLR calls through them are unresolved.
-	if vmResult != nil {
-		vmStubNames := disasm.VMStubNames(dartVersion)
-		if len(vmStubNames) > 0 {
-			for i, ce := range vmResult.Codes {
-				if i >= len(vmStubNames) {
-					break
-				}
-				if _, exists := l.CodeNames[ce.RefID]; exists {
-					continue
-				}
-				name := vmStubNames[i]
-				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
-				l.CodeRefDisplay[ce.RefID] = name
 			}
 		}
 	}
