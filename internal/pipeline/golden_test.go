@@ -29,6 +29,12 @@ import (
 // libapp.so skips (never fails) with a clear message -- a different input is
 // not a regression.
 //
+// The records themselves ARE in the repo, under testdata/golden/. That is
+// what gives this gate teeth: it compares against a baseline someone reviewed
+// and committed, not against whatever the pipeline produced a moment ago.
+// Recording is therefore explicit -- a missing record fails rather than
+// filling itself in.
+//
 //	AOTOPSY_TEST_SAMPLE_ARM64=... go test ./internal/pipeline/ -run Golden
 //	AOTOPSY_UPDATE_GOLDEN=1 ...                                # rewrite records
 
@@ -99,6 +105,20 @@ func runGolden(t *testing.T, env, name string) {
 		haveGolden = true
 	}
 	update := os.Getenv("AOTOPSY_UPDATE_GOLDEN") != ""
+	// A missing record is a failure, not an invitation to write one.
+	//
+	// This used to auto-record and pass, which combined with the records
+	// being gitignored meant the gate could never fail anywhere it mattered:
+	// a fresh clone or a CI checkout has no records, so every sample recorded
+	// whatever the pipeline happened to produce and reported success. The
+	// records are committed now; creating one is an explicit act.
+	if !haveGolden && !update {
+		t.Fatalf("no golden record at %s\n"+
+			"  The records are committed to the repo, so a missing one means either a\n"+
+			"  newly added sample or a deleted file -- not something to fill in silently.\n"+
+			"  To record it deliberately: AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden\n"+
+			"  then review the new file before committing it.", goldenPath)
+	}
 	if haveGolden && !update && want.InputSHA256 != inputHash {
 		t.Skipf("%s points at a different binary than the golden record\n"+
 			"  golden input: %s\n  actual input: %s\n"+
@@ -138,7 +158,7 @@ func runGolden(t *testing.T, env, name string) {
 		got.Lines[f] = strings.Count(string(data), "\n")
 	}
 
-	if update || !haveGolden {
+	if update {
 		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
