@@ -88,6 +88,16 @@ type FillSpec struct {
 	OwnerIdx     int  // index in refs of the "owner" field (-1 = none)
 	SignatureIdx int  // index in refs of the "signature" field (-1 = none; used for Function→FunctionType link)
 	LeadingBool  bool // v2.10: Read<bool>(is_canonical) before refs (1 raw byte per object)
+
+	// VarLenRefs marks an object whose ref count is not fixed: the fill reads
+	// ReadUnsigned(length) first, then NumRefs fixed refs plus `length`
+	// variable ones.
+	//
+	// Dart 3.13.0's Closure is the first such object here. ReadFromTo(obj,
+	// params...) walks from()..to_snapshot(kind, params...), and
+	// UntaggedClosure::to_snapshot just forwards to to(num_elements), so the
+	// whole range including the variable tail is read.
+	VarLenRefs bool
 	IsFuncType   bool // true for FunctionType clusters (extract packed_parameter_counts)
 	IsField      bool // true for Field clusters (extract kind_bits + host_offset)
 	IsFunction   bool // true for Function clusters (extract code_index, scalar 0)
@@ -728,6 +738,29 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		return specNamespace()
 	case cid == ct.Closure:
 		s := specClosure()
+		if profile.ClosureAllocHasLength {
+			// Dart 3.13.0 reshaped Closure. raw_object.h:
+			//
+			//   3.12.2  VISIT_FROM(instantiator_type_arguments),
+			//           function_type_arguments, delayed_type_arguments,
+			//           function, context, VISIT_TO(hash)   = 6 fixed refs
+			//
+			//   3.13.0  COMPRESSED_SMI_FIELD(length_and_flags)  <- VISIT_FROM
+			//           COMPRESSED_SMI_FIELD(hash)
+			//           COMPRESSED_POINTER_FIELD(function)
+			//           COMPRESSED_VARIABLE_POINTER_FIELDS(.., data, function)
+			//                                                = 3 fixed + length
+			//
+			// The type-argument and context fields moved into the variable
+			// `data` tail. The fill reads that length itself, per object.
+			//
+			// Count the fixed refs from the field list, not from VISIT_FROM
+			// alone: `hash` sits between length_and_flags and function and is
+			// easy to miss, and getting 2 instead of 3 here moves the fill
+			// failure earlier rather than fixing it.
+			s.NumRefs = 3
+			s.VarLenRefs = true
+		}
 		if profile.PreCanonicalSplit {
 			s.LeadingBool = true
 		}
@@ -875,6 +908,14 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 			return FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
 		}
 		return FillSpec{Kind: FillROData, NameIdx: -1, OwnerIdx: -1}
+	case ct.ApiError != 0 && cid == ct.ApiError:
+		// Dart 3.13.0+. UntaggedApiError: VISIT_FROM(message)..VISIT_TO(message)
+		// = 1 ref, no scalars.
+		return FillSpec{Kind: FillRefs, NumRefs: 1, NameIdx: -1, OwnerIdx: -1}
+	case ct.UnwindError != 0 && cid == ct.UnwindError:
+		// Dart 3.13.0+. Same single `message` ref, plus
+		// Read<bool>(is_user_initiated) -- one raw byte.
+		return FillSpec{Kind: FillRefs, NumRefs: 1, Scalars: []ScalarOp{OpBool}, NameIdx: -1, OwnerIdx: -1}
 	case ct.LocalVarDescriptors != 0 && cid == ct.LocalVarDescriptors:
 		// Dart 3.13.0+. LocalVarDescriptorsDeserializationCluster::ReadFill is
 		// ReadUnsigned(length) then ReadFromTo(desc, length) per object, i.e.

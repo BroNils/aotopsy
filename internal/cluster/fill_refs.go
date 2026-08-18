@@ -101,7 +101,21 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		var allRefs []int
 
 		// Read refs using version-appropriate encoding.
-		for j := 0; j < spec.NumRefs; j++ {
+		// Variable-length ref objects (Dart 3.13.0 Closure): the fill reads
+		// the element count first, then the fixed refs plus that many more.
+		numRefs := spec.NumRefs
+		if spec.VarLenRefs {
+			n, err := s.ReadUnsigned()
+			if err != nil {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d varlen length: %w", i, count, err)
+			}
+			if n < 0 || int(n) > 1<<20 {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d varlen length %d out of range", i, count, n)
+			}
+			numRefs += int(n)
+		}
+
+		for j := 0; j < numRefs; j++ {
 			r, err := readRef(s, fillRefUnsigned)
 			if err != nil {
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)

@@ -68,6 +68,11 @@ func TestGoldenPipelineOutput(t *testing.T) {
 		// (text-offset deltas, no InstructionsTable), which is where the
 		// "395 of 7714 functions" bug lived.
 		{"AOTOPSY_TEST_SAMPLE_DART212", "dart212_arm64"},
+		// Dart 3.13.0, the unified-snapshot format: one _kDartSnapshotData /
+		// _kDartSnapshotText pair instead of the four legacy symbols, and a
+		// single snapshot rather than a VM/isolate pair. Worth a golden of its
+		// own precisely because nothing else in the corpus exercises that path.
+		{"AOTOPSY_TEST_SAMPLE_313_ARM64", "sample313_arm64"},
 	}
 	for _, s := range samples {
 		t.Run(s.name, func(t *testing.T) { runGolden(t, s.env, s.name) })

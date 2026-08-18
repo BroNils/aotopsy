@@ -257,6 +257,13 @@ type CIDTable struct {
 	// cluster tag, which is why a 3.13.0 snapshot decoded two clusters with
 	// CID 0xFFFFF and then failed in fill.
 	LocalVarDescriptors int
+
+	// ApiError / UnwindError gain deserialization clusters in Dart 3.13.0
+	// (absent from app_snapshot.cc@3.12.2). Both alloc as ReadAllocFixedSize
+	// and fill as ReadFromTo over a single `message` ref; UnwindError reads
+	// one extra Read<bool>(is_user_initiated). Zero for older versions.
+	ApiError    int
+	UnwindError int
 	ExceptionHandlers          int
 	Context                    int
 	ContextScope               int
@@ -884,8 +891,8 @@ var cidsV3130 = CIDTable{
 	// LinkedHashBaseCid = 96 (new in 3.13.0, shifts everything below +1)
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
 	NativePointerCid: 1, NumPredefinedCids: 176,
-	// New in 3.13.0: see CIDTable.LocalVarDescriptors.
-	LocalVarDescriptors: 27,
+	// New in 3.13.0: see CIDTable.LocalVarDescriptors / .ApiError.
+	LocalVarDescriptors: 27, ApiError: 41, UnwindError: 44,
 }
 
 var versionProfiles = map[string]*VersionProfile{
