@@ -92,25 +92,34 @@ func ImportDarter(snap *DarterSnapshot) *R2Export {
 	return r2
 }
 
-// DarterVersionSupport reports which Dart versions darter supports
-// that aotopsy does not. This helps identify where darter import
-// would widen coverage.
+// darterVersions is darter's own coverage: the Dart 2.x releases it was
+// maintained against, per its README.
+var darterVersions = []string{
+	"2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0",
+	"2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0",
+}
+
+// DarterVersionSupport reports which Dart versions darter covers that
+// aotopsy does not, given aotopsy's own supported set
+// (snapshot.SupportedVersions). That difference is where importing darter
+// output actually widens coverage rather than duplicating it.
 //
-// aotopsy supports: 2.10.0 through 3.13.0 (see snapshot/version.go).
-// darter supports: pre-2.10 versions (per its README, it was last
-// maintained around Dart 2.x era).
+// This is a set difference, not a version-range comparison. The previous
+// implementation compared version strings with `<` and ignored its argument
+// entirely, so it reported 2 of the 10 versions above -- "2.9.0" < "2.10.0"
+// is false lexicographically, and so is every other 2.2.0-2.9.0 case -- and
+// reported them as the complete answer.
 func DarterVersionSupport(aotopsyVersions []string) []string {
-	// aotopsy's minimum supported version is 2.10.0.
-	// darter could help with versions below that.
-	aotopsyMin := "2.10.0"
+	supported := make(map[string]bool, len(aotopsyVersions))
+	for _, v := range aotopsyVersions {
+		supported[v] = true
+	}
 	var darterOnly []string
-	for _, v := range []string{"2.0.0", "2.1.0", "2.2.0", "2.3.0",
-		"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0"} {
-		if v < aotopsyMin {
+	for _, v := range darterVersions {
+		if !supported[v] {
 			darterOnly = append(darterOnly, v)
 		}
 	}
-	_ = aotopsyVersions
 	return darterOnly
 }
 

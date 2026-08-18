@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"aotopsy/internal/decompiler"
+	"aotopsy/internal/snapshot"
 )
 
 // cmdCompareBlutter compares aotopsy output against blutter output.
@@ -115,6 +117,21 @@ func cmdImportDarter(args []string) error {
 	fmt.Printf("Darter snapshot: %s %s, %d functions, %d classes, %d strings\n",
 		snap.DartVersion, snap.Arch,
 		len(snap.Functions), len(snap.Classes), len(snap.Strings))
+	// Importing darter output is a coverage fallback for releases this tool
+	// cannot parse itself. When it CAN, say so -- a native run resolves names,
+	// types and call edges that a darter dump does not carry.
+	supported := snapshot.SupportedVersions()
+	for _, v := range supported {
+		if v == snap.DartVersion {
+			fmt.Printf("Note: aotopsy analyses Dart %s natively; running it on the\n"+
+				"      libapp.so directly recovers more than this import can.\n", v)
+			break
+		}
+	}
+	if only := decompiler.DarterVersionSupport(supported); len(only) > 0 {
+		fmt.Printf("Darter-only coverage (%d versions): %s\n",
+			len(only), strings.Join(only, ", "))
+	}
 	r2 := decompiler.ImportDarter(&snap)
 	if err := r2.Write(outputPath); err != nil {
 		return fmt.Errorf("write r2 script: %w", err)
