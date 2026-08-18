@@ -194,3 +194,90 @@ func TestSymtabDifferentialReport(t *testing.T) {
 		t.Skip("no sample env vars set")
 	}
 }
+
+// The tests below need no sample binary at all.
+//
+// They were dropped when this file was rewritten around the env-gated
+// differential above, which means that on any machine without a
+// symbol-bearing sample -- CI included -- nothing in this file ran and the
+// normalisation rules it depends on went untested. Restored, because the
+// normalisers are exactly where a silent naming regression would hide: every
+// agreement figure the differential reports is computed through them.
+
+func TestNormalizeRecoveredName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Duration.compareTo_80", "Duration.compareTo"},
+		{"Duration.dyn:*_210", "Duration.*"},
+		{"FocusManager.get:instance_5bc", "FocusManager.instance"},
+		{"FocusManager.set:instance_5bc", "FocusManager.instance"},
+		{"_ViewState@141024595.didChangeViewFocus_3c0", "_ViewState.didChangeViewFocus"},
+		{"new _GrowableList@0150898.of_1d8", "new _GrowableList.of"},
+		// An unnamed constructor's Function name ends in a bare dot.
+		{"new _GrowableList@0150898._1960", "new _GrowableList"},
+		// A bare top-level function has no owner part.
+		{"main_1a2b", "main"},
+		{"dyn:main_1a2b", "main"},
+		// Nothing to strip.
+		{"Duration.compareTo", "Duration.compareTo"},
+	}
+	for _, c := range cases {
+		if got := NormalizeRecoveredName(c.in); got != c.want {
+			t.Errorf("NormalizeRecoveredName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestNormalizeSymbolName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// We name VM stubs bare, so the ELF's `stub ` prefix is folded away.
+		{"stub CheckIsolateFieldAccess", "CheckIsolateFieldAccess"},
+		// The ELF's phrasing for a type-testing stub is our name said
+		// differently -- confirmed by both naming the same addresses.
+		{"assert type is HitTestTarget", "TypeTestingStub_HitTestTarget"},
+		{"new Duration", "new_Duration"},
+		{"_ViewState@141024595.didChangeViewFocus", "_ViewState.didChangeViewFocus"},
+		{"  Duration.compareTo  ", "Duration.compareTo"},
+	}
+	for _, c := range cases {
+		if got := NormalizeSymbolName(c.in); got != c.want {
+			t.Errorf("NormalizeSymbolName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A stripped build must be a no-op, not a failure: that is the normal
+// production case and most of this project's corpus.
+func TestCompareNamesToSymbolsOnStrippedBuild(t *testing.T) {
+	c := CompareNamesToSymbols(map[uint64]string{0x1000: "Foo.bar_10"}, nil)
+	if c.Compared != 0 || len(c.Disagreement) != 0 {
+		t.Errorf("stripped build should compare nothing, got %+v", c)
+	}
+	if c.AgreementRate() != 1 {
+		t.Errorf("AgreementRate on an empty comparison = %v, want 1", c.AgreementRate())
+	}
+}
+
+func TestCompareNamesToSymbolsCountsBothSides(t *testing.T) {
+	recovered := map[uint64]string{
+		0x1000: "Duration.compareTo_80", // agrees after normalisation
+		0x2000: "Duration.dyn:*_210",    // agrees after normalisation
+		0x3000: "Foo.wrong_30",          // disagrees
+		0x4000: "OnlyOurs.thing_40",     // no symbol at this VA
+	}
+	symbols := map[uint64]string{
+		0x1000: "Duration.compareTo",
+		0x2000: "Duration.*",
+		0x3000: "Foo.right",
+		0x5000: "OnlySymbols.thing",
+	}
+	c := CompareNamesToSymbols(recovered, symbols)
+	if c.Compared != 3 || c.Agree != 2 {
+		t.Errorf("Compared=%d Agree=%d, want 3 and 2", c.Compared, c.Agree)
+	}
+	if c.OnlyOurs != 1 || c.OnlySymbols != 1 {
+		t.Errorf("OnlyOurs=%d OnlySymbols=%d, want 1 and 1", c.OnlyOurs, c.OnlySymbols)
+	}
+	if len(c.Disagreement) != 1 || c.Disagreement[0].VA != 0x3000 {
+		t.Errorf("disagreements = %+v, want just 0x3000", c.Disagreement)
+	}
+}
