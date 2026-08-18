@@ -265,10 +265,10 @@ type TypeContext struct {
 	X86DispatchClassBottom int
 	X86DispatchClassOther  int
 	// Debug: BL return value propagation stats.
-	BLTotal        int
-	BLHasExitType  int
-	BLExitKnown    int
-	BLExitBottom   int
+	BLTotal       int
+	BLHasExitType int
+	BLExitKnown   int
+	BLExitBottom  int
 	// BLR lattice state distribution at the BLR point. Counts which
 	// lattice kind the BLR register has when resolveBLR is called,
 	// diagnosing why monomorphic rate is what it is.
@@ -361,16 +361,16 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 // PoolLookupData is the subset of pipeline.PoolLookups needed by typetrack.
 // Passed as a struct to avoid importing the pipeline package (import cycle).
 type PoolLookupData struct {
-	RefToStr            map[int]string               // ref ID → string value
-	RefToNamed          map[int]*cluster.NamedObject // ref ID → NamedObject
-	RefCID              map[int]int                  // ref ID → CID (class ID of the object)
-	CT                  *snapshot.CIDTable           // CID table (for Class/Function CID checks)
-	CodeRefToName       map[int]string               // code ref ID → function name
-	VmRefToStr          map[int]string               // VM snapshot strings by ref ID
-	VmRefToNamed        map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
-	VmRefCID            map[int]int                  // VM snapshot CID by ref ID
-	PoolCodeNames       map[int]string               // PP index → function name for Code objects
-	TypeTestingStubNames map[int]string              // Type ref ID → type testing stub name
+	RefToStr             map[int]string               // ref ID → string value
+	RefToNamed           map[int]*cluster.NamedObject // ref ID → NamedObject
+	RefCID               map[int]int                  // ref ID → CID (class ID of the object)
+	CT                   *snapshot.CIDTable           // CID table (for Class/Function CID checks)
+	CodeRefToName        map[int]string               // code ref ID → function name
+	VmRefToStr           map[int]string               // VM snapshot strings by ref ID
+	VmRefToNamed         map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	VmRefCID             map[int]int                  // VM snapshot CID by ref ID
+	PoolCodeNames        map[int]string               // PP index → function name for Code objects
+	TypeTestingStubNames map[int]string               // Type ref ID → type testing stub name
 	// VmFields and VmTypes give access to the VM snapshot's Field and
 	// Type objects, enabling declared field type resolution for framework
 	// classes (String, List, Map, etc.) whose Fields live in the VM
@@ -489,7 +489,6 @@ func BuildTypeContext(
 
 	return ctx
 }
-
 
 // FieldValueClass resolves a field load `base.<byteOff>` on a receiver of class
 // receiverCID to the class of the loaded value.

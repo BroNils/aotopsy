@@ -31,8 +31,8 @@ func dartfmtOptionsDefault() dartfmt.Options {
 type SnapshotContext struct {
 	EF          *elfx.File
 	Info        *snapshot.Info
-	Result      *cluster.Result    // isolate snapshot cluster result
-	VMResult    *cluster.Result    // VM snapshot cluster result (nil if no VM snapshot)
+	Result      *cluster.Result // isolate snapshot cluster result
+	VMResult    *cluster.Result // VM snapshot cluster result (nil if no VM snapshot)
 	Table       *cluster.InstructionsTable
 	Ranges      []cluster.CodeRange
 	Pool        *PoolLookups

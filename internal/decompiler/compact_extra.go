@@ -16,7 +16,7 @@ var (
 	// enumReconstruction: "if (x == N) { return 'Name'; }"
 	enumCaseRe = regexp.MustCompile(`^if \((\w+) == (\d+)\) \{ return '([^']+)'; \}$`)
 	// nullSafetyAnnotation
-	nullCheckRe   = regexp.MustCompile(`if \((\w+) == null\)`)
+	nullCheckRe    = regexp.MustCompile(`if \((\w+) == null\)`)
 	notNullCheckRe = regexp.MustCompile(`(\w+) != null`)
 	// localTypeInference / applyLocalTypeHints
 	localAssignArgRe = regexp.MustCompile(`^(local_\w+) = (arg\d+);`)

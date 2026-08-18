@@ -369,10 +369,10 @@ func x86PoolIndex(in x86Inst) int {
 //
 // SDK reference (assembler_x64.h @3.9.2):
 //
-//   btl/btq: BT instruction, sets CF to the tested bit value.
-//   testq reg, 1<<N: TEST with power-of-two immediate, sets ZF to
-//     NOT(bit).
-//   testq reg, reg: self-test, sets ZF to (reg == 0).
+//	btl/btq: BT instruction, sets CF to the tested bit value.
+//	testq reg, 1<<N: TEST with power-of-two immediate, sets ZF to
+//	  NOT(bit).
+//	testq reg, reg: self-test, sets ZF to (reg == 0).
 //
 // After BT:        JC = bit is 1 (bittest1), JNC = bit is 0 (bittest0)
 // After TEST 1<<N: JE = bit is 0 (bittest0), JNE = bit is 1 (bittest1)

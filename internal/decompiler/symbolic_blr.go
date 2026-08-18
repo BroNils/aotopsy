@@ -62,12 +62,12 @@ func NewDirectedSymbolicBLR(symbols SymbolLookup, pool PoolLookup) *DirectedSymb
 
 // BLRResolution holds the result of a backward trace for one BLR site.
 type BLRResolution struct {
-	PC          uint64
-	TargetName  string // resolved target name, empty if unresolved
-	TargetVA    uint64 // resolved target VA, 0 if unresolved
-	TraceSteps  int    // number of instructions traced backwards
-	TracePath   string // human-readable trace for debugging
-	Resolved    bool
+	PC         uint64
+	TargetName string // resolved target name, empty if unresolved
+	TargetVA   uint64 // resolved target VA, 0 if unresolved
+	TraceSteps int    // number of instructions traced backwards
+	TracePath  string // human-readable trace for debugging
+	Resolved   bool
 }
 
 // ResolveBLR attempts to resolve a BLR call site by tracing backwards.

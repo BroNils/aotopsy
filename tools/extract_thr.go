@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
@@ -733,13 +734,25 @@ func runWrite() int {
 		for _, e := range edits {
 			out = out[:e.start] + e.text + out[e.end:]
 		}
-		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		// Format the result the way gofmt would, rather than telling the
+		// caller to remember to do it. Splicing map literals back in by byte
+		// offset changes key widths, and gofmt aligns map values by the
+		// widest key in each run -- so a spliced table is almost always
+		// misaligned. Leaving that to a printed reminder is how ~2000 lines
+		// of thrfields.go/thrfields_x64.go ended up committed unformatted.
+		formatted, ferr := format.Source([]byte(out))
+		if ferr != nil {
+			// Keep the unformatted result rather than losing the rewrite;
+			// the caller still gets a usable file and a clear diagnostic.
+			fmt.Fprintf(os.Stderr, "write: %s: gofmt failed (%v), writing unformatted\n", path, ferr)
+			formatted = []byte(out)
+		}
+		if err := os.WriteFile(path, formatted, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "write: %v\n", err)
 			return 1
 		}
 	}
 	fmt.Fprintf(os.Stderr, "write: %d table(s) rewritten, %d left untouched (no SDK target)\n", rewritten, skipped)
-	fmt.Fprintln(os.Stderr, "write: run gofmt on internal/disasm/ afterwards")
 	return 0
 }
 

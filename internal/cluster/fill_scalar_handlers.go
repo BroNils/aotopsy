@@ -19,12 +19,12 @@ import (
 // update. It is reset to zero at the start of each object in the loop.
 type scalarState struct {
 	// Function
-	codeIndex    int
-	numFixed     int
-	numOptional  int
-	isStatic     bool
-	hasKindTag   bool
-	funcKind     FunctionKind
+	codeIndex   int
+	numFixed    int
+	numOptional int
+	isStatic    bool
+	hasKindTag  bool
+	funcKind    FunctionKind
 	// Field
 	fieldKindBits int32
 	// Script
@@ -100,13 +100,13 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 			numFixed-- // subtract implicit 'this'
 		}
 		return &FuncTypeInfo{
-			RefID:                   ref,
-			NumFixed:                numFixed,
-			NumOptional:             numOptional,
-			HasImplicit:             hasImplicit,
-			ParamTypesArrayRefID:    paramTypesRef,
-			TypeParamsRefID:         typeParamsRef,
-			ResultTypeRefID:         resultTypeRef,
+			RefID:                     ref,
+			NumFixed:                  numFixed,
+			NumOptional:               numOptional,
+			HasImplicit:               hasImplicit,
+			ParamTypesArrayRefID:      paramTypesRef,
+			TypeParamsRefID:           typeParamsRef,
+			ResultTypeRefID:           resultTypeRef,
 			NamedParamNamesArrayRefID: namedParamNamesRef,
 		}, nil
 	}

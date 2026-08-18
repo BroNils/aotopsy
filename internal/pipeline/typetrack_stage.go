@@ -259,15 +259,15 @@ func runTypeInference(
 	}
 
 	poolData := &typetrack.PoolLookupData{
-		RefToStr:      pl.RefToStr,
-		RefToNamed:    pl.RefToNamed,
-		RefCID:        pl.RefCID,
-		CT:            pl.CT,
-		CodeRefToName: codeRefToName,
-		VmRefToStr:    pl.VmRefToStr,
-		VmRefToNamed:  pl.VmRefToNamed,
-		VmRefCID:      pl.VmRefCID,
-		PoolCodeNames:       poolCodeNames,
+		RefToStr:             pl.RefToStr,
+		RefToNamed:           pl.RefToNamed,
+		RefCID:               pl.RefCID,
+		CT:                   pl.CT,
+		CodeRefToName:        codeRefToName,
+		VmRefToStr:           pl.VmRefToStr,
+		VmRefToNamed:         pl.VmRefToNamed,
+		VmRefCID:             pl.VmRefCID,
+		PoolCodeNames:        poolCodeNames,
 		TypeTestingStubNames: poolTTSNames,
 	}
 	if vmResult != nil {
@@ -707,7 +707,9 @@ func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
 // Item 14: Directed symbolic execution fallback.
 //
 // Via annotations for pool-loaded Code objects look like:
-//   "PP[123] foo" or "pp[123] foo"
+//
+//	"PP[123] foo" or "pp[123] foo"
+//
 // The pool display string after the PP index is the function name.
 func resolveViaPoolDisplay(via string) string {
 	// Check for PP[NNN] pattern — pool-loaded Code object.

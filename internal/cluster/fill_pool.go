@@ -1,8 +1,8 @@
 package cluster
 
 import (
-	"os"
 	"fmt"
+	"os"
 
 	"aotopsy/internal/dartfmt"
 )
@@ -101,4 +101,3 @@ func readFillObjectPool(s *dartfmt.Stream, cm *ClusterMeta, oldPoolFormat, poolT
 	}
 	return entries, nil
 }
-

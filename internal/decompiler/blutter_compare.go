@@ -19,37 +19,39 @@ import (
 // turns "we think we're good" into a measurement.
 //
 // blutter output files (from README.md, gh api verified):
-//   asm/*  — assembly with symbols
-//   objs.txt — complete nested dump of Object Pool
-//   pp.txt — all Dart objects in Object Pool
-//   blutter_frida.js — frida script template
+//
+//	asm/*  — assembly with symbols
+//	objs.txt — complete nested dump of Object Pool
+//	pp.txt — all Dart objects in Object Pool
+//	blutter_frida.js — frida script template
 //
 // aotopsy output files:
-//   functions.jsonl — function records with names
-//   call_edges.jsonl — call graph edges
-//   classes.jsonl — class layouts
-//   pool_immediates.jsonl — pool immediate values
-//   string_refs.jsonl — string references
+//
+//	functions.jsonl — function records with names
+//	call_edges.jsonl — call graph edges
+//	classes.jsonl — class layouts
+//	pool_immediates.jsonl — pool immediate values
+//	string_refs.jsonl — string references
 //
 // The comparison checks:
-//   1. Name coverage: % of functions named by each tool
-//   2. Name agreement: do both tools assign the same name to the same VA?
-//   3. Class coverage: how many classes each tool recovers
-//   4. Pool coverage: how many pool entries each tool resolves
+//  1. Name coverage: % of functions named by each tool
+//  2. Name agreement: do both tools assign the same name to the same VA?
+//  3. Class coverage: how many classes each tool recovers
+//  4. Pool coverage: how many pool entries each tool resolves
 type BlutterComparison struct {
 	BlutterDir string // path to blutter output directory
 	AotopsyDir string // path to aotopsy output directory
 
 	// Results
-	BlutterFuncCount   int
-	BlutterNamedCount  int
-	AotopsyFuncCount   int
-	AotopsyNamedCount  int
+	BlutterFuncCount  int
+	BlutterNamedCount int
+	AotopsyFuncCount  int
+	AotopsyNamedCount int
 
 	// Name agreement: functions named by both tools at the same VA
-	BothNamed   int
-	Agree       int
-	Disagree    int
+	BothNamed int
+	Agree     int
+	Disagree  int
 
 	// Unique to each tool
 	OnlyBlutter int
@@ -66,7 +68,7 @@ type BlutterComparison struct {
 // BlutterDisagreement is one function where aotopsy and blutter
 // assign different names to the same address.
 type BlutterDisagreement struct {
-	VA         string
+	VA          string
 	AotopsyName string
 	BlutterName string
 }

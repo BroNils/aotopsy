@@ -20,18 +20,18 @@ import (
 // MismatchedBranches > 0 has control flow that doesn't match the
 // binary, which means the pseudocode is structurally wrong.
 type CFGVerification struct {
-	TotalBlocks       int
-	TotalBranches     int
-	TotalReturns      int
-	TotalLoops        int
-	MatchedBranches   int
+	TotalBlocks        int
+	TotalBranches      int
+	TotalReturns       int
+	TotalLoops         int
+	MatchedBranches    int
 	MismatchedBranches int
-	MatchedReturns    int
-	MismatchedReturns int
+	MatchedReturns     int
+	MismatchedReturns  int
 	// CoveragePct is the percentage of binary CFG nodes that appear
 	// in the pseudocode. Below 100% means some blocks were omitted
 	// (budget exceeded, visit count limit, etc).
-	CoveragePct       float64
+	CoveragePct float64
 }
 
 // VerifyCFG compares the pseudocode artifact's control flow structure

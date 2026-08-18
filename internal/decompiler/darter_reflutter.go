@@ -54,15 +54,15 @@ type DarterFunction struct {
 
 // DarterClass is one class recovered by darter.
 type DarterClass struct {
-	Name      string   `json:"name"`
-	Fields    []string `json:"fields"`
-	Library   string   `json:"library"`
+	Name    string   `json:"name"`
+	Fields  []string `json:"fields"`
+	Library string   `json:"library"`
 }
 
 // DarterString is one string recovered by darter.
 type DarterString struct {
-	Value    string `json:"value"`
-	Address  uint64 `json:"address"`
+	Value   string `json:"value"`
+	Address uint64 `json:"address"`
 }
 
 // ImportDarter converts darter's output to aotopsy's R2Export format,

@@ -438,4 +438,3 @@ func buildPoolClosureClass(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 		}
 	}
 }
-
