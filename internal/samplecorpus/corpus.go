@@ -94,6 +94,11 @@ type Sample struct {
 	// version. Tests skip it with this reason rather than failing forever or,
 	// worse, being left unregistered so the gap goes unrecorded.
 	ProfileIncomplete string
+
+	// FileSuffix distinguishes samples that share a Dart version and
+	// architecture with another entry but were built from a different source
+	// set, e.g. "-pre214".
+	FileSuffix string
 }
 
 // FileName is the name this sample must have under samples/.
@@ -101,13 +106,28 @@ type Sample struct {
 // The version is IN the name deliberately: it is what makes the name
 // checkable, and a name that cannot be checked is what rotted last time.
 func (s Sample) FileName() string {
-	return fmt.Sprintf("dart-%s-%s.so", s.DartVersion, s.Arch)
+	return fmt.Sprintf("dart-%s%s-%s.so", s.DartVersion, s.FileSuffix, s.Arch)
 }
 
 // comparesample is the source set every deliberately-built sample uses: the
 // lib/*.dart of ~/dev/compare_sample, copied verbatim into each new project so
 // the only variable between those binaries is the Dart SDK that compiled them.
 const comparesample = "compare_sample"
+
+// comparesamplePre214 is a SECOND source set, for the Dart versions that
+// cannot compile the first one.
+//
+// signal_ground_truth.dart uses the >>> operator, which does not exist before
+// Dart 2.14, and it is the file every metric in the differential is derived
+// from. Downlevelling it inside the main set would have quietly changed the
+// control that makes the whole comparison meaningful, so the pre-2.14 samples
+// get their own set instead: >>> replaced by an _ushr helper that is exactly
+// equivalent for 1 <= n <= 63, applied identically to every member.
+//
+// The set deliberately includes one modern version built from the SAME
+// downlevelled source, so its members have a known-good baseline to be
+// differential against rather than only each other.
+const comparesamplePre214 = "compare_sample_pre214"
 
 // Registry is every sample the test suite knows about, present or not.
 //
@@ -117,6 +137,17 @@ const comparesample = "compare_sample"
 // sample was quietly replaced by whatever binary shared its name.
 var Registry = []Sample{
 	{DartVersion: "2.12.0", Arch: "arm64", Note: "dart212_sample, Flutter 2.x toy app"},
+
+	// The pre-2.14 source set; see comparesamplePre214. Names carry the
+	// -pre214 suffix so these never collide with the main set's files.
+	// Dart 2.10.0 is NOT buildable from this source and is left out on
+	// purpose. It predates null safety entirely, so `required`, `?` and `late`
+	// are not downlevellable syntax -- rewriting around them would produce a
+	// different program, which is exactly what a source set must not contain.
+	{DartVersion: "2.13.0", Arch: "arm64", SourceSet: comparesamplePre214, Note: "sample_pre214_2.13.0, Flutter 2.2.0 -- the only TagStyleCidInt32 sample besides 2.12.0", FileSuffix: "-pre214"},
+	{DartVersion: "2.13.0", Arch: "x64", SourceSet: comparesamplePre214, Note: "sample_pre214_2.13.0 x86_64", FileSuffix: "-pre214"},
+	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesamplePre214, Note: "sample_pre214_3.5.0 -- known-good baseline for the pre-2.14 set", FileSuffix: "-pre214"},
+	{DartVersion: "3.5.0", Arch: "x64", SourceSet: comparesamplePre214, Note: "sample_pre214_3.5.0 x86_64", FileSuffix: "-pre214"},
 	// 2.14.0-2.16.0 need Java 11 (their Gradle rejects Java 17 class files) and
 	// carry ONE source difference: main.dart's two widget constructors are
 	// written the pre-2.17 way, because super-parameters do not exist there.

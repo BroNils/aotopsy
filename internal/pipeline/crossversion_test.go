@@ -74,8 +74,9 @@ var knownGaps = []knownGap{
 			"explained. Recorded rather than guessed at.",
 	},
 	{
-		metric:   "dispatch_hits",
-		versions: []string{"2.14.0/x64", "2.16.0/x64", "2.17.6/x64", "2.18.0/x64"},
+		metric: "dispatch_hits",
+		versions: []string{"2.13.0/x64", "2.14.0/x64", "2.15.0/x64", "2.16.0/x64",
+			"2.17.6/x64", "2.18.0/x64"},
 		reason: "x86_64 dispatch-table type inference produces nothing on Dart 2.14.0 " +
 			"through 2.18.0, while the SAME source on arm64 gives 192158 hits. Ruled " +
 			"out so far, each by measurement rather than reading: the dispatch table " +
@@ -93,11 +94,28 @@ var knownGaps = []knownGap{
 			"past looks like a smooth curve.",
 	},
 	{
-		metric:   "blr_monomorphic",
-		versions: []string{"2.14.0/x64", "2.16.0/x64", "2.17.6/x64", "2.18.0/x64"},
+		metric: "blr_monomorphic",
+		versions: []string{"2.13.0/x64", "2.14.0/x64", "2.15.0/x64", "2.16.0/x64",
+			"2.17.6/x64", "2.18.0/x64"},
 		reason: "Downstream of the dispatch_hits gap above: with no dispatch-table " +
 			"resolution there is no single-callee site to report. Expected to close " +
 			"with it.",
+	},
+	{
+		metric:   "func_return_type_count",
+		versions: []string{"2.13.0/arm64", "2.13.0/x64"},
+		reason: "Function return types resolve to nothing on Dart 2.12.0 and 2.13.0, " +
+			"while 2.14.0 built from the same source gives 1089 with 710 seeds. The " +
+			"FunctionType objects are there (924 in the 2.13.0 sample) and the ref " +
+			"layout is right -- raw_object.h@2.13.0 has type_test_stub(0), " +
+			"type_parameters(1), result_type(2), parameter_types(3), which is exactly " +
+			"the FuncTypeParamTypesIdx-1 rule this code uses. What differs is the " +
+			"scalar: 2.13.0 writes packed_fields_, and readFuncTypeScalar decodes " +
+			"scalar 1 as packed_parameter_counts_, a different bit layout introduced " +
+			"at 2.14.0. So the FuncTypeInfo is produced but its parameter counts are " +
+			"wrong, and whatever consumes them for return types finds nothing usable. " +
+			"Found by the pre-2.14 source set, which exists precisely because those " +
+			"versions cannot compile the main one.",
 	},
 }
 
