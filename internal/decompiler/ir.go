@@ -229,20 +229,20 @@ type FuncIR struct {
 	// emitter joins them without knowing how bounds are resolved.
 	TypeParamNames []string `json:"-"`
 
-	// TypeArgNames holds resolved type ARGUMENTS for generic instantiations
-	// (e.g. ["String", "int"] for List<String, int>), resolved by the caller
-	// from TypeArguments via pipeline.TypeParamResolver.TypeArgNames.
-	// When non-empty, the emitter annotates pool loads of TypeArguments
-	// objects with their resolved type argument list.
-	// Nil/empty means no type arguments recovered for this function.
-	TypeArgNames []string `json:"-"`
-
-	// NamedParamNames holds the names of named optional parameters
-	// (e.g. ["name", "age"] for foo({String? name, int? age})),
-	// resolved by the caller from FunctionType.named_parameter_names
-	// via pipeline.TypeParamResolver.NamedParamNames. When non-empty
-	// and the length matches the parameter count, the emitter uses
-	// these names in the signature instead of generic "argN".
+	// NamedParamNames holds recovered parameter names positioned by
+	// ARGUMENT INDEX, resolved by the caller from
+	// FunctionType.named_parameter_names via
+	// pipeline.TypeParamResolver.NamedParamNames.
+	//
+	// Only named optional parameters have recoverable names in an AOT
+	// snapshot -- positional ones are dropped by the compiler -- so the
+	// slice is the function's full parameter list with "" in every
+	// positional slot and names only in the named tail. It is indexed by
+	// argument position, NOT by named-parameter position; see
+	// NamedParamNames for the SDK reasoning behind that alignment.
+	//
+	// When non-empty and the length matches the parameter count, the
+	// emitter uses these names in the signature instead of generic "argN".
 	NamedParamNames []string `json:"-"`
 
 	// FieldNameResolver resolves a (classID, byteOffset) pair to a field name.

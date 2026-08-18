@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"fmt"
-	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
@@ -439,7 +438,6 @@ func QualifiedCodeName(refID int, pl *PoolLookups, pcOffset uint32) string {
 type TypeParamResolver struct {
 	arrayByRef map[int]*cluster.ArrayInfo
 	typeByRef  map[int]int32
-	taByRef    map[int]*cluster.TypeArgumentsInfo
 	result     *cluster.Result
 	pl         *PoolLookups
 }
@@ -511,81 +509,63 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 	return fmt.Sprintf("<cid:%d>", cid)
 }
 
-// TypeArgNames resolves a TypeArguments ref ID to a list of type
-// argument display names (e.g. ["String", "int"] for List<String, int>).
-// Returns nil if the TypeArguments ref is null or unresolvable.
-//
-// This is the consumer for the TypeArguments capture: TypeArguments.types
-// is a variable-length array of AbstractType refs, each of which resolves
-// to a ClassID via TypeInfo.ClassID, then to a class name via
-// classDisplayName — the same chain ParamTypeNames uses for parameter
-// types, but applied to type arguments instead.
-//
-// SDK-verified: raw_object.h@3.12.2, UntaggedTypeArguments has
-// COMPRESSED_VARIABLE_POINTER_FIELDS(AbstractTypePtr, element, types),
-// already captured as TypeArgumentsInfo.TypeRefs.
-func (r *TypeParamResolver) TypeArgNames(typeArgsRef int) []string {
-	if typeArgsRef <= cluster.RefNull {
-		return nil
-	}
-	// Build TypeArguments lookup if not already built.
-	if r.taByRef == nil {
-		r.taByRef = make(map[int]*cluster.TypeArgumentsInfo, len(r.result.TypeArguments))
-		for i := range r.result.TypeArguments {
-			r.taByRef[r.result.TypeArguments[i].RefID] = &r.result.TypeArguments[i]
-		}
-	}
-	ta, ok := r.taByRef[typeArgsRef]
-	if !ok || len(ta.TypeRefs) == 0 {
-		return nil
-	}
-	names := make([]string, len(ta.TypeRefs))
-	for i, typeRef := range ta.TypeRefs {
-		cid, ok := r.typeByRef[typeRef]
-		if !ok || cid < 0 {
-			names[i] = "?"
-			continue
-		}
-		names[i] = r.classDisplayName(cid)
-	}
-	return names
-}
-
-// FormatTypeArgs renders a type argument list as "<String, int>" or ""
-// when empty. Used by the decompiler to annotate generic instantiations.
-func FormatTypeArgs(names []string) string {
-	if len(names) == 0 {
-		return ""
-	}
-	return "<" + strings.Join(names, ", ") + ">"
-}
-
 // NamedParamNames resolves a FunctionType's named_parameter_names Array
 // ref to a list of parameter name strings (e.g. ["name", "age"] for
 // foo({String? name, int? age})). Returns nil if the ref is null or
 // unresolvable.
+//
+// The returned slice is aligned to the function's FULL parameter list, not
+// just its named tail: positional slots are "" and only the named tail
+// carries names. That is what makes it safe to index by argument position.
 //
 // SDK-verified: raw_object.h@3.12.2, UntaggedFunctionType has
 // COMPRESSED_POINTER_FIELD(ArrayPtr, named_parameter_names) as the
 // last ref in VISIT_TO. The Array's elements are String refs, resolved
 // via ArrayInfo.ElementRefIDs → Strings (same chain as type parameter
 // names in BuildFuncTypeParamNames).
+//
+// Three SDK facts shape this, and getting any of them wrong invents names:
+//
+//  1. The array is only populated when packed_parameter_counts'
+//     HasNamedOptionalParameters bit is set. Optional POSITIONAL parameters
+//     leave it as the empty array (object.cc@3.12.2 FinalizeNameArray
+//     asserts exactly that when NumOptionalNamedParameters() == 0).
+//
+//  2. The array is LONGER than the name count. After the name Strings come
+//     Smi slots holding the required-ness flag bits -- that is what
+//     FunctionType::HasRequiredNamedParameters tests
+//     (`parameter_names.Length() > num_named_params`). Only the first
+//     NumOptional entries are names; the rest would resolve to "?" garbage.
+//
+//  3. Names are indexed by `index - num_fixed_parameters()`
+//     (object.cc@3.12.2 FunctionType::ParameterNameAt), and the SDK's
+//     num_fixed_parameters INCLUDES the implicit receiver, while
+//     FuncTypeInfo.NumFixed has already subtracted it.
 func (r *TypeParamResolver) NamedParamNames(ft cluster.FuncTypeInfo) []string {
+	if !ft.HasNamedOptional || ft.NumOptional <= 0 {
+		return nil
+	}
 	if ft.NamedParamNamesArrayRefID <= cluster.RefNull {
 		return nil
 	}
 	arr, ok := r.arrayByRef[ft.NamedParamNamesArrayRefID]
-	if !ok {
+	if !ok || len(arr.ElementRefIDs) < ft.NumOptional {
 		return nil
 	}
-	names := make([]string, len(arr.ElementRefIDs))
-	for i, elemRef := range arr.ElementRefIDs {
+	// Fact 3: rebuild the SDK's num_fixed_parameters.
+	numFixed := ft.NumFixed
+	if ft.HasImplicit {
+		numFixed++
+	}
+	names := make([]string, numFixed+ft.NumOptional)
+	// Fact 2: only the first NumOptional elements are names.
+	for i, elemRef := range arr.ElementRefIDs[:ft.NumOptional] {
 		s, ok := r.pl.StringForRef(elemRef)
 		if !ok || s == "" {
-			names[i] = "?"
+			names[numFixed+i] = "?"
 			continue
 		}
-		names[i] = s
+		names[numFixed+i] = s
 	}
 	return names
 }

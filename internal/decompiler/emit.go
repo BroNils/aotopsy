@@ -260,6 +260,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	effectiveParamTypes := make([]string, len(argRegIdx))
 	// Item 11: NamedParamNames — use recovered named parameter names
 	// instead of generic "argN" when available and count matches.
+	//
+	// The slice is aligned to argument position (positional slots are ""),
+	// so indexing it by i is correct; the length check is what rejects it
+	// when the FunctionType's parameter count disagrees with the arity
+	// observed at call sites, which would make the alignment meaningless.
 	trustNamedParams := len(fir.NamedParamNames) > 0 && len(fir.NamedParamNames) == len(argRegIdx)
 	for i, ri := range argRegIdx {
 		typeName := "dynamic"
@@ -356,10 +361,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	sig := safeFuncName(fir.Name)
 	if len(fir.TypeParamNames) > 0 {
 		sig += "<" + strings.Join(fir.TypeParamNames, ", ") + ">"
-	}
-	// Item 8: Annotate type arguments when recovered (e.g. List<String>).
-	if len(fir.TypeArgNames) > 0 {
-		sig += " // type args: <" + strings.Join(fir.TypeArgNames, ", ") + ">"
 	}
 	// For a closure, name the function it was declared inside. Without this an
 	// anonymous closure is indistinguishable from every other one in its class.

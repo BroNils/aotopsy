@@ -461,29 +461,15 @@ func cmdDecompileNative(args []string) error {
 		return out
 	}
 
-	// Item 8: Type argument names for generic instantiations.
-	// Resolves TypeArguments ref → type argument display names via
-	// TypeParamResolver.TypeArgNames.
-	typeArgNamesFor := func(r cluster.CodeRange) []string {
-		if r.RefID < 0 {
-			return nil
-		}
-		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
-		if !ok || owner.SignatureRefID <= 0 {
-			return nil
-		}
-		ft, ok := paramFuncTypeByRef[owner.SignatureRefID]
-		if !ok {
-			return nil
-		}
-		// TypeArgNames needs a TypeArguments ref. FunctionType doesn't
-		// directly hold one — type arguments are on the pool/instance
-		// side. For now, return nil; the API is wired and ready for
-		// when TypeArguments refs are threaded through FunctionType.
-		_ = ft
-		return nil
-	}
+	// There is deliberately no per-function type-ARGUMENT hook here.
+	//
+	// A FunctionType holds type PARAMETERS (the `<T>` declaration, handled by
+	// genericParamNamesFor above); it holds no TypeArguments ref, because a
+	// type argument list belongs to an instantiation, not to a declaration.
+	// The TypeArguments objects a function mentions live in its object pool,
+	// one per call site, so anything that resolved them would be a
+	// per-instruction annotation and not a property of the function at all.
+	// A function-shaped hook could only ever return nil.
 
 	// Item 11: Named parameter names for named optional parameters.
 	// Resolves FunctionType.named_parameter_names → string list via
@@ -541,7 +527,6 @@ func cmdDecompileNative(args []string) error {
 		buildArgRegMasks:       buildArgRegMasks,
 		paramTypeNamesFor:      paramTypeNamesFor,
 		genericParamNamesFor:   genericParamNamesFor,
-		typeArgNamesFor:        typeArgNamesFor,
 		namedParamNamesFor:     namedParamNamesFor,
 		fieldNameResolver:      fieldNameResolver,
 		closureParents:         closureParents,

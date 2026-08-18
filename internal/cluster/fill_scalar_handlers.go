@@ -93,7 +93,13 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 		if err != nil {
 			return nil, fmt.Errorf("obj %d/%d packed_param_counts: %w", i, count, err)
 		}
+		// raw_object.h @3.12.2, UntaggedFunctionType:
+		//   bit 0      PackedNumImplicitParameters   (1 bit)
+		//   bit 1      PackedHasNamedOptionalParameters
+		//   bits 2-15  PackedNumFixedParameters      (14 bits)
+		//   bits 16-29 PackedNumOptionalParameters   (14 bits)
 		hasImplicit := (packed & 1) != 0
+		hasNamedOptional := (packed & 2) != 0
 		numFixed := int((packed >> 2) & 0x3FFF)
 		numOptional := int((packed >> 16) & 0x3FFF)
 		if hasImplicit && numFixed > 0 {
@@ -104,6 +110,7 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 			NumFixed:                  numFixed,
 			NumOptional:               numOptional,
 			HasImplicit:               hasImplicit,
+			HasNamedOptional:          hasNamedOptional,
 			ParamTypesArrayRefID:      paramTypesRef,
 			TypeParamsRefID:           typeParamsRef,
 			ResultTypeRefID:           resultTypeRef,

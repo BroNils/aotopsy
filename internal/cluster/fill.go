@@ -57,6 +57,18 @@ type FuncTypeInfo struct {
 	NumOptional int  // optional parameters
 	HasImplicit bool // true if instance method (has implicit 'this' parameter)
 
+	// HasNamedOptional is packed_parameter_counts bit 1
+	// (UntaggedFunctionType::PackedHasNamedOptionalParameters, raw_object.h
+	// @3.12.2 -- it sits between PackedNumImplicitParameters at bit 0 and
+	// PackedNumFixedParameters at bit 2).
+	//
+	// It decides what NumOptional MEANS: the optional parameters are named
+	// when this is set and positional when it is not. Without it,
+	// named_parameter_names cannot be interpreted at all -- a function with
+	// optional POSITIONAL parameters has an empty names array, and reading
+	// one anyway invents names for parameters that never had any.
+	HasNamedOptional bool
+
 	// ParamTypesArrayRefID is the ref ID of this FunctionType's
 	// parameter_types Array object, captured only when
 	// snapshot.VersionProfile.FuncTypeParamTypesIdx is set for this
