@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/snapshot"
 )
 
 // This file holds the sub-builder functions that BuildTypeContext
@@ -160,7 +161,6 @@ func buildPoolClassByIndex(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
-		classID := -1
 		// Check isolate RefCID first, then VM VmRefCID.
 		// Pool entries can reference objects from either snapshot;
 		// VM objects (e.g. Type, Class) are common in the pool but
@@ -169,33 +169,48 @@ func buildPoolClassByIndex(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 		// entry, which on 2.12 meant pp_hits=0 across the entire
 		// binary (every PP load of a Type/Class came from the VM
 		// snapshot).
+		//
+		// Both maps are resolved the same way, including the Type
+		// indirection. The VM branch used to skip Types on the grounds
+		// that "refToType only covers isolate Types" -- which stopped
+		// being true when RefToType was unified in BuildTypeContext,
+		// where it is now filled from clResult.Types AND pl.VmTypes.
+		// The comment outlived the limitation, and a VM Type in the pool
+		// stayed unresolved for no reason.
+		classID := -1
 		if pl.RefCID != nil {
-			if cid, ok := pl.RefCID[pe.RefID]; ok && cid >= 0 {
-				if pl.CT != nil && cid == pl.CT.Type {
-					if ti, ok := refToType[pe.RefID]; ok && ti.ClassID >= 0 {
-						classID = int(ti.ClassID)
-					}
-				} else {
-					classID = cid
-				}
-			}
+			classID = poolEntryClassID(pl.RefCID, refToType, pl.CT, pe.RefID)
 		}
 		if classID < 0 && pl.VmRefCID != nil {
-			if cid, ok := pl.VmRefCID[pe.RefID]; ok && cid >= 0 {
-				if pl.CT != nil && cid == pl.CT.Type {
-					// VM Type object: resolve to the class it represents.
-					// refToType only covers isolate Types; VM Types are
-					// in vmResult.Types which we don't have here. Skip —
-					// the isolate Type path above handles the common case.
-				} else {
-					classID = cid
-				}
-			}
+			classID = poolEntryClassID(pl.VmRefCID, refToType, pl.CT, pe.RefID)
 		}
 		if classID >= 0 {
 			ctx.PoolClassByIndex[pe.Index] = classID
 		}
 	}
+}
+
+// poolEntryClassID resolves one pool entry's ref to a class ID through a
+// CID map, returning -1 when it cannot.
+//
+// A Type object needs one more hop: the entry's own CID is kTypeCid, which
+// says only "this is a type", so the class it DESCRIBES comes from
+// TypeInfo.ClassID. Reporting kTypeCid instead would type every PP load of a
+// Type as an instance of Type. A Type whose ClassID is unresolved stays -1 --
+// unresolved is the safe answer, since the caller turns a non-negative result
+// into a KnownClass the BLR resolver then trusts.
+func poolEntryClassID(cidByRef map[int]int, refToType map[int]*cluster.TypeInfo, ct *snapshot.CIDTable, refID int) int {
+	cid, ok := cidByRef[refID]
+	if !ok || cid < 0 {
+		return -1
+	}
+	if ct != nil && cid == ct.Type {
+		if ti, ok := refToType[refID]; ok && ti.ClassID >= 0 {
+			return int(ti.ClassID)
+		}
+		return -1
+	}
+	return cid
 }
 
 // buildDispatchTables builds DispatchBySlot and DispatchCodeIndexToName.
