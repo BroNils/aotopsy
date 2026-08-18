@@ -78,14 +78,14 @@ func TestSignalExpansionOutputs(t *testing.T) {
 
 	// Files that MUST have non-zero entries for 3.9.2 ARM64
 	mustHaveEntries := map[string]int{
-		"string_refs.jsonl":           100,  // was 0 before fix, now 5000+
-		"string_value_xref.jsonl":     100,  // was 0 before fix, now 1000+
+		"string_refs.jsonl":            100, // was 0 before fix, now 5000+
+		"string_value_xref.jsonl":      100, // was 0 before fix, now 1000+
 		"selector_dispatch_xref.jsonl": 100, // was MISSING before fix, now 16000+
-		"address_callers_xref.jsonl":  100,  // was always present
-		"method_channels.jsonl":       5,    // should find flutter channels
-		"deobfuscation.jsonl":         10,   // should find base64 patterns
-		"network_endpoints.jsonl":     10,   // should find URLs/domains
-		"yara_findings.jsonl":         1,    // should match at least 1 rule
+		"address_callers_xref.jsonl":   100, // was always present
+		"method_channels.jsonl":        5,   // should find flutter channels
+		"deobfuscation.jsonl":          10,  // should find base64 patterns
+		"network_endpoints.jsonl":      10,  // should find URLs/domains
+		"yara_findings.jsonl":          1,   // should match at least 1 rule
 	}
 	for f, minCount := range mustHaveEntries {
 		path := filepath.Join(tmpDir, f)
@@ -106,32 +106,11 @@ func TestSignalExpansionOutputs(t *testing.T) {
 	}
 }
 
-// TestDecompilerFeatures checks that decompiler output contains expected
-// features (ffi_call, field names, etc.). This prevents silent feature drops.
-func TestDecompilerFeatures(t *testing.T) {
-	// Uses shared pipeline output — just verify function/signal counts
-	// are non-zero. The shared pipeline already ran Run() with Signal=true.
-	_ = sharedPipelineOutDir(t)
-	// If we got here, the pipeline succeeded. Check counts via the
-	// functions.jsonl file rather than the Result struct (which is not
-	// cached, only the output directory is).
-	funcsPath := filepath.Join(sharedPipelineOutDir(t), "functions.jsonl")
-	data, err := os.ReadFile(funcsPath)
-	if err != nil {
-		t.Fatalf("read functions.jsonl: %v", err)
-	}
-	if len(data) == 0 {
-		t.Error("functions.jsonl is empty — no functions were produced")
-	}
-	// Count lines as a rough function count
-	lines := 0
-	for _, b := range data {
-		if b == '\n' {
-			lines++
-		}
-	}
-	if lines == 0 {
-		t.Error("no functions in functions.jsonl")
-	}
-	t.Logf("Functions: %d (from functions.jsonl line count)", lines)
-}
+// The decompiler's own features -- ffi_call naming, instance-field name
+// resolution -- are covered in internal/decompiler (features_test.go), not
+// here. A TestDecompilerFeatures used to sit at this spot claiming to check
+// them; it counted lines in functions.jsonl, a file the decompiler does not
+// write, from a package that never invokes the emitter. It could not have
+// failed if either feature disappeared, and what it did check -- that the
+// pipeline produces functions -- is already asserted exactly by the golden
+// records and loosely by TestSignalExpansionOutputs above.
