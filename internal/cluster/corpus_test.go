@@ -410,3 +410,71 @@ func scanData(t *testing.T, info *snapshot.Info, data []byte, isVM bool) *Result
 	}
 	return result
 }
+
+// TestCorpusTypeClassIDsResolve requires every captured Type to name a class
+// that actually exists in the same snapshot.
+//
+// This is the invariant both Type-capture bugs violated, and it is worth
+// enforcing corpus-wide because neither bug announced itself. Reading
+// type_class_id at the wrong bit offset does not desynchronise anything -- the
+// scalar is the right size either way -- it just yields ids for classes that
+// are not there. On the 3.1.0 sample 1483 of 2419 Types decoded to ids like
+// 3800 in a snapshot with 2194 classes, and everything downstream simply
+// found nothing.
+//
+// A version that captures NO Types at all is caught too. That was the 2.16-2.18
+// state: Result.Types empty, so every declared field type was unresolvable and
+// the analyser was quietly weaker with no error anywhere.
+func TestCorpusTypeClassIDsResolve(t *testing.T) {
+	eachCorpusSample(t, func(t *testing.T, s corpusSample) {
+		data := s.info.IsolateData.Data
+		iso := scanData(t, s.info, data, false)
+		var isoSize int64
+		if s.info.IsolateHeader != nil {
+			isoSize = s.info.IsolateHeader.TotalSize
+		}
+		if err := ReadFill(data, iso, s.info.Version, false, isoSize); err != nil {
+			t.Fatalf("ReadFill: %v", err)
+		}
+
+		// Dart 2.10-2.15 keep type_class_id as a ref that only resolves once
+		// MintValues is applied, which happens in internal/typetrack. Those
+		// versions are covered by the pipeline instead.
+		if s.info.Version.TypeClassIdIsRef {
+			t.Skipf("Dart %s stores type_class_id as a ref; resolution happens "+
+				"in typetrack, not here", s.DartVersion)
+		}
+
+		if len(iso.Types) == 0 {
+			t.Fatalf("no Type objects captured on Dart %s.\n"+
+				"  A snapshot always contains Types -- a sibling build of the same "+
+				"program yields thousands. Zero means the Type cluster's capture is "+
+				"switched off for this version's layout, which makes every declared "+
+				"field type unresolvable.", s.DartVersion)
+		}
+
+		known := make(map[int32]bool, len(iso.Classes))
+		for i := range iso.Classes {
+			known[iso.Classes[i].ClassID] = true
+		}
+		bad := 0
+		var sample []int32
+		for i := range iso.Types {
+			if !known[iso.Types[i].ClassID] {
+				bad++
+				if len(sample) < 8 {
+					sample = append(sample, iso.Types[i].ClassID)
+				}
+			}
+		}
+		if bad > 0 {
+			t.Errorf("%d of %d captured Types name a class that does not exist "+
+				"(%d classes in this snapshot); first bad ids: %v\n"+
+				"  type_class_id is being read from the wrong place for Dart %s. "+
+				"Check UntaggedType in raw_object.h at that tag: both whether it is a "+
+				"scalar or packed into flags, and where TypeStateBits::kNextBit puts "+
+				"it if packed.",
+				bad, len(iso.Types), len(iso.Classes), sample, s.DartVersion)
+		}
+	})
+}
