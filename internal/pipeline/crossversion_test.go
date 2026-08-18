@@ -76,14 +76,21 @@ var knownGaps = []knownGap{
 	{
 		metric:   "dispatch_hits",
 		versions: []string{"2.14.0/x64", "2.16.0/x64", "2.17.6/x64", "2.18.0/x64"},
-		reason: "x86_64 dispatch-table type inference produces nothing at all on Dart " +
-			"2.14.0 through 2.18.0, while the SAME source on arm64 gives 192158 hits " +
-			"and the dispatch table itself parses fine on both (21000-26000 entries). " +
-			"So the table is read and then never used: the x86 handler does not " +
-			"recognise the pre-2.19 dispatch-call shape. Found by the architecture " +
-			"axis of this differential, which is the only thing that could have: " +
-			"comparing x64 against x64 across versions shows a smooth curve, and " +
-			"comparing one arch against its own past shows nothing.",
+		reason: "x86_64 dispatch-table type inference produces nothing on Dart 2.14.0 " +
+			"through 2.18.0, while the SAME source on arm64 gives 192158 hits. Ruled " +
+			"out so far, each by measurement rather than reading: the dispatch table " +
+			"parses on both arches (21000-26000 entries); the call shape is present in " +
+			"the binary (3879 CALL [RAX+RCX*8+disp] sites on the 2.18.0 x64 sample " +
+			"against 3992 on 2.19.0, which does resolve); EmitDispatchTableCall is " +
+			"byte-identical in the SDK at 2.17.6, 2.18.0 and 2.19.0; " +
+			"DispatchTableNullErrorABI::kClassIdReg is RCX in every version; and the " +
+			"x64 compressed Thread tables that were missing for 2.14.0-2.17.6 have " +
+			"been added, taking unresolved_thr to 0 without moving dispatch_hits. So " +
+			"the break is between the pre-scan, which records the selector offsets, " +
+			"and resolveX86Dispatch, which needs a KnownDispatch state and a receiver " +
+			"class at the call. Found by the architecture axis of this differential, " +
+			"which is the only thing that could have: x64 compared against its own " +
+			"past looks like a smooth curve.",
 	},
 	{
 		metric:   "blr_monomorphic",

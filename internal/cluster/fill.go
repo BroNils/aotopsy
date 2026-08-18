@@ -526,7 +526,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			capturePcDesc := ct != nil && ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors
 			captureCSM := ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap
 			captureCSM2 := ct != nil && ct.CompressedStackMaps != 0 && cm.CID == ct.CompressedStackMaps
-			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM || captureCSM2)
+			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM || captureCSM2, spec.InlineBytesLengthShift)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d) pos=0x%x: %w", i, cm.CID, fillPos, err)
 			}
@@ -737,7 +737,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillNone, FillSentinel, FillROData, FillInstructionsTable:
 		// No fill data.
 	case FillInlineBytes:
-		return skipFillInlineBytes(s, cm)
+		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
 		// Pass the real profile through. Passing nil here used to panic:
 		// readFillRefs dereferences profile.CIDs to decide which CID-specific

@@ -134,6 +134,22 @@ type FillSpec struct {
 	// landed on a real class, the other 1483 on ids like 3800 that no class
 	// in the snapshot has.
 	TypeClassIDShift uint
+
+	// InlineBytesLengthShift is how far right to shift the leading unsigned to
+	// get an inline-bytes payload length.
+	//
+	// It is 0 for PcDescriptors and CodeSourceMap, whose ReadFill writes a
+	// plain length, and 2 for CompressedStackMaps from Dart 2.15.0 on, where
+	// the leading value is flags_and_size and the length is
+	// SizeField::decode(flags_and_size) -- GlobalTableBit at bit 0,
+	// UsesTableBit at bit 1, SizeField from bit 2
+	// (raw_object.h UntaggedCompressedStackMaps).
+	//
+	// Dart 2.14.0 and earlier wrote a plain length here too
+	// (clustered_snapshot.cc: `const intptr_t length = d->ReadUnsigned();`),
+	// which is why the 2.14.0 sample parses without it and the 2.15.0 one
+	// asks for a 299796-byte stack map.
+	InlineBytesLengthShift uint
 	// FuncTypeParamTypesIdx is the ref-loop index of parameter_types,
 	// propagated from snapshot.VersionProfile.FuncTypeParamTypesIdx.
 	// 0 = not verified for this version, don't extract.
@@ -944,7 +960,11 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		// ReadUnsigned(length) + ReadBytes(length) per object.
 		// Without compressed pointers, they use ROData (no fill).
 		if profile.CompressedPointers {
-			return FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
+			spec := FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
+			if cid == ct.CompressedStackMaps && dartVersionAtLeast(profile.DartVersion, "2.15.0") {
+				spec.InlineBytesLengthShift = 2
+			}
+			return spec
 		}
 		return FillSpec{Kind: FillROData, NameIdx: -1, OwnerIdx: -1}
 	case ct.ApiError != 0 && cid == ct.ApiError:

@@ -284,7 +284,7 @@ func RunInterprocedural(
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunctionX86(insts, ctx, entry)
+			intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	}
@@ -422,7 +422,7 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunctionX86(insts, ctx, entry)
+				intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		}

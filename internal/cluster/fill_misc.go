@@ -10,8 +10,8 @@ import (
 // skipFillInlineBytes skips clusters that store inline byte data.
 // Per object: ReadUnsigned(length) + ReadBytes(length).
 // Used for PcDescriptors, CodeSourceMap, CompressedStackMaps with compressed pointers.
-func skipFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta) error {
-	_, err := readFillInlineBytes(s, cm, false)
+func skipFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, lengthShift uint) error {
+	_, err := readFillInlineBytes(s, cm, false, lengthShift)
 	return err
 }
 
@@ -26,16 +26,20 @@ func skipFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta) error {
 // non-compressed (2.x) builds route these through ROData. Both paths matter and
 // getting them mixed up is why an earlier attempt to read PcDescriptors from
 // ROData found nothing on a 3.9.2 arm64 sample.
-func readFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, capture bool) ([][]byte, error) {
+// lengthShift is FillSpec.InlineBytesLengthShift: 0 when the leading unsigned
+// IS the length, 2 for CompressedStackMaps on Dart 2.15.0+ where it is
+// flags_and_size with the size starting at bit 2.
+func readFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, capture bool, lengthShift uint) ([][]byte, error) {
 	var payloads [][]byte
 	if capture {
 		payloads = make([][]byte, 0, cm.Count)
 	}
 	for i := int64(0); i < cm.Count; i++ {
-		length, err := s.ReadUnsigned()
+		raw, err := s.ReadUnsigned()
 		if err != nil {
 			return payloads, fmt.Errorf("inline_bytes %d/%d length: %w", i, cm.Count, err)
 		}
+		length := raw >> lengthShift
 		if !capture {
 			if err := s.Skip(int(length)); err != nil {
 				return payloads, fmt.Errorf("inline_bytes %d/%d data (%d bytes): %w", i, cm.Count, length, err)

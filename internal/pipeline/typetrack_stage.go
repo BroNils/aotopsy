@@ -374,12 +374,13 @@ func runTypeInference(
 				// loads it out. Parameter i of a function with N fixed
 				// parameters lives at
 				//   FP + (kParamEndSlotFromFp + N - i) * wordSize
-				// (stack_frame_arm64.h: kParamEndSlotFromFp = 1), so the
-				// receiver -- parameter 0 -- is the highest slot. Confirmed on
-				// a real 2.12.0 binary: a two-parameter operator+ loads its
+				// kParamEndSlotFromFp is 1 on BOTH architectures
+				// (stack_frame_arm64.h and stack_frame_x64.h), so the receiver
+				// -- parameter 0 -- is the highest slot on both. Confirmed on a
+				// real 2.12.0 arm64 binary: a two-parameter operator+ loads its
 				// receiver with `ldr x3, [x29, #24]`, which is (1 + 2 - 0) * 8,
 				// and immediately reads a field off it.
-				if receiverOnStack && isARM64 && r.RefID >= 0 {
+				if receiverOnStack && r.RefID >= 0 {
 					if n := pl.CodeNames[r.RefID].FixedParamsWithReceiver; n > 0 {
 						ctx.FuncReceiverStackSlot[name] = (1 + n) * 8
 					}

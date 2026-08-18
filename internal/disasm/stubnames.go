@@ -160,6 +160,96 @@ var (
 	// stubNames2180 is Dart 2.18.0's VM_STUB_CODE_LIST (142 entries, the 9
 	// type-testing stubs excluded). Added alongside the 2.18.0 sample; before
 	// it VMStubNames had no case for this version at all.
+	// stubNames2140 is Dart 2.14.0's VM_STUB_CODE_LIST (116 entries, the 9
+	// type-testing stubs excluded). Added with the 2.14.0 sample; VMStubNames
+	// had no case for it, so every VM stub call went unnamed.
+	stubNames2140 = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler", "DeoptForRewind", "WriteBarrier",
+		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateMint", "AllocateDouble",
+		"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4", "AllocateInt8Array", "AllocateUint8Array",
+		"AllocateUint8ClampedArray", "AllocateInt16Array", "AllocateUint16Array", "AllocateInt32Array", "AllocateUint32Array",
+		"AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array", "AllocateFloat64Array", "AllocateFloat32x4Array",
+		"AllocateInt32x4Array", "AllocateFloat64x2Array", "AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs", "AllocateClosure",
+		"AllocateContext", "AllocateObject", "AllocateObjectParameterized", "AllocateObjectSlow", "AllocateUnhandledException",
+		"CloneContext", "CallToRuntime", "LazyCompile", "CallBootstrapNative", "CallNoScopeNative",
+		"CallAutoScopeNative", "FixCallersTarget", "CallStaticFunction", "OptimizeFunction", "InvokeDartCode",
+		"DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck", "SingleTargetCall", "ICCallThroughCode",
+		"MegamorphicCall", "FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn", "DeoptimizeLazyFromThrow",
+		"UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck", "ICCallBreakpoint", "UnoptStaticCallBreakpoint", "RuntimeCallBreakpoint",
+		"OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache", "SmiLessInlineCache", "SmiEqualInlineCache",
+		"OneArgOptimizedCheckInlineCache", "TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall", "TwoArgsUnoptimizedStaticCall",
+		"AssertSubtype", "AssertAssignable", "TypeIsTopTypeForSubtyping", "TypeIsTopTypeForSubtypingNullSafe", "NullIsAssignableToType",
+		"NullIsAssignableToTypeNullSafe", "Subtype1TestCache", "Subtype3TestCache", "Subtype5TestCache", "Subtype7TestCache",
+		"CallClosureNoSuchMethod", "FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded", "DispatchTableNullError",
+		"LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs", "NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs", "NullArgErrorSharedWithFPURegs",
+		"NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs", "RangeErrorSharedWithFPURegs", "RangeErrorSharedWithoutFPURegs",
+		"StackOverflowSharedWithFPURegs", "StackOverflowSharedWithoutFPURegs", "OneArgCheckInlineCacheWithExactnessCheck", "OneArgOptimizedCheckInlineCacheWithExactnessCheck", "EnterSafepoint",
+		"ExitSafepoint", "CallNativeThroughSafepoint", "InitStaticField", "InitInstanceField", "InitLateInstanceField",
+		"InitLateFinalInstanceField", "Throw", "ReThrow", "AssertBoolean", "InstanceOf",
+		"InstantiateType", "InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA", "InstantiateTypeArgumentsMayShareFunctionTA", "NoSuchMethodDispatcher",
+		"UnknownDartCode",
+	}
+
+	// stubNames2150 is Dart 2.15.0's VM_STUB_CODE_LIST (118 entries, the 9
+	// type-testing stubs excluded). Added with the 2.15.0 sample; VMStubNames
+	// had no case for it, so every VM stub call went unnamed.
+	stubNames2150 = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler", "DeoptForRewind", "WriteBarrier",
+		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateMint", "AllocateDouble",
+		"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4", "AllocateInt8Array", "AllocateUint8Array",
+		"AllocateUint8ClampedArray", "AllocateInt16Array", "AllocateUint16Array", "AllocateInt32Array", "AllocateUint32Array",
+		"AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array", "AllocateFloat64Array", "AllocateFloat32x4Array",
+		"AllocateInt32x4Array", "AllocateFloat64x2Array", "AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs", "AllocateClosure",
+		"AllocateContext", "AllocateObject", "AllocateObjectParameterized", "AllocateObjectSlow", "AllocateUnhandledException",
+		"BoxDouble", "CloneContext", "CallToRuntime", "LazyCompile", "CallBootstrapNative",
+		"CallNoScopeNative", "CallAutoScopeNative", "FixCallersTarget", "CallStaticFunction", "OptimizeFunction",
+		"InvokeDartCode", "DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck", "SingleTargetCall",
+		"ICCallThroughCode", "MegamorphicCall", "FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn",
+		"DeoptimizeLazyFromThrow", "UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck", "ICCallBreakpoint", "UnoptStaticCallBreakpoint",
+		"RuntimeCallBreakpoint", "OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache", "SmiLessInlineCache",
+		"SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache", "TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall",
+		"TwoArgsUnoptimizedStaticCall", "AssertSubtype", "AssertAssignable", "TypeIsTopTypeForSubtyping", "TypeIsTopTypeForSubtypingNullSafe",
+		"NullIsAssignableToType", "NullIsAssignableToTypeNullSafe", "Subtype1TestCache", "Subtype3TestCache", "Subtype5TestCache",
+		"Subtype7TestCache", "CallClosureNoSuchMethod", "FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded",
+		"DispatchTableNullError", "LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs", "NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs",
+		"NullArgErrorSharedWithFPURegs", "NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs", "RangeErrorSharedWithFPURegs",
+		"RangeErrorSharedWithoutFPURegs", "StackOverflowSharedWithFPURegs", "StackOverflowSharedWithoutFPURegs", "DoubleToInteger", "OneArgCheckInlineCacheWithExactnessCheck",
+		"OneArgOptimizedCheckInlineCacheWithExactnessCheck", "EnterSafepoint", "ExitSafepoint", "CallNativeThroughSafepoint", "InitStaticField",
+		"InitInstanceField", "InitLateInstanceField", "InitLateFinalInstanceField", "Throw", "ReThrow",
+		"AssertBoolean", "InstanceOf", "InstantiateType", "InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA",
+		"InstantiateTypeArgumentsMayShareFunctionTA", "NoSuchMethodDispatcher", "UnknownDartCode",
+	}
+
+	// stubNames2160 is Dart 2.16.0's VM_STUB_CODE_LIST (120 entries, the 9
+	// type-testing stubs excluded). Added with the 2.16.0 sample; VMStubNames
+	// had no case for it, so every VM stub call went unnamed.
+	stubNames2160 = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler", "DeoptForRewind", "WriteBarrier",
+		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateMint", "AllocateDouble",
+		"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4", "AllocateInt8Array", "AllocateUint8Array",
+		"AllocateUint8ClampedArray", "AllocateInt16Array", "AllocateUint16Array", "AllocateInt32Array", "AllocateUint32Array",
+		"AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array", "AllocateFloat64Array", "AllocateFloat32x4Array",
+		"AllocateInt32x4Array", "AllocateFloat64x2Array", "AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs", "AllocateClosure",
+		"AllocateContext", "AllocateObject", "AllocateObjectParameterized", "AllocateObjectSlow", "AllocateUnhandledException",
+		"BoxDouble", "CloneContext", "CallToRuntime", "LazyCompile", "CallBootstrapNative",
+		"CallNoScopeNative", "CallAutoScopeNative", "FixCallersTarget", "CallStaticFunction", "OptimizeFunction",
+		"InvokeDartCode", "DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck", "SingleTargetCall",
+		"ICCallThroughCode", "MegamorphicCall", "FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn",
+		"DeoptimizeLazyFromThrow", "UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck", "ICCallBreakpoint", "UnoptStaticCallBreakpoint",
+		"RuntimeCallBreakpoint", "OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache", "SmiLessInlineCache",
+		"SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache", "TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall",
+		"TwoArgsUnoptimizedStaticCall", "AssertSubtype", "AssertAssignable", "TypeIsTopTypeForSubtyping", "TypeIsTopTypeForSubtypingNullSafe",
+		"NullIsAssignableToType", "NullIsAssignableToTypeNullSafe", "Subtype1TestCache", "Subtype3TestCache", "Subtype5TestCache",
+		"Subtype7TestCache", "CallClosureNoSuchMethod", "FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded",
+		"DispatchTableNullError", "LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs", "NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs",
+		"NullArgErrorSharedWithFPURegs", "NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs", "RangeErrorSharedWithFPURegs",
+		"RangeErrorSharedWithoutFPURegs", "StackOverflowSharedWithFPURegs", "StackOverflowSharedWithoutFPURegs", "DoubleToInteger", "OneArgCheckInlineCacheWithExactnessCheck",
+		"OneArgOptimizedCheckInlineCacheWithExactnessCheck", "EnterSafepoint", "ExitSafepoint", "CallNativeThroughSafepoint", "InitStaticField",
+		"InitLateStaticField", "InitLateFinalStaticField", "InitInstanceField", "InitLateInstanceField", "InitLateFinalInstanceField",
+		"Throw", "ReThrow", "AssertBoolean", "InstanceOf", "InstantiateType",
+		"InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA", "InstantiateTypeArgumentsMayShareFunctionTA", "NoSuchMethodDispatcher", "UnknownDartCode",
+	}
+
 	stubNames2180 = []string{
 		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler", "DeoptForRewind", "WriteBarrier",
 		"WriteBarrierWrappers", "ArrayWriteBarrier", "AllocateArray", "AllocateMint", "AllocateDouble",
@@ -723,6 +813,12 @@ func VMStubNames(dartVersion string) []string {
 	switch dartVersion {
 	case "2.12.0":
 		return stubNames2120
+	case "2.14.0":
+		return stubNames2140
+	case "2.15.0":
+		return stubNames2150
+	case "2.16.0":
+		return stubNames2160
 	case "2.17.6":
 		return stubNames2176
 	case "2.18.0":

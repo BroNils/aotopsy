@@ -74,6 +74,10 @@ var allTargets = []extractTarget{
 	{"2.16.0", "arm64", false, true},
 	{"2.17.6", "arm64", false, true},
 	// x86_64 + compressed + PRODUCT (v2.18+)
+	{"2.14.0", "x64", true, true},
+	{"2.15.0", "x64", true, true},
+	{"2.16.0", "x64", true, true},
+	{"2.17.6", "x64", true, true},
 	{"2.18.0", "x64", true, true},
 	{"2.19.0", "x64", true, true},
 	{"3.0.5", "x64", true, true},

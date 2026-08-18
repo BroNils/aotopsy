@@ -109,29 +109,6 @@ func (s Sample) FileName() string {
 // the only variable between those binaries is the Dart SDK that compiled them.
 const comparesample = "compare_sample"
 
-// profileIncomplete215 records what is known about the Dart 2.15.0 profile,
-// which had never been run against a real 2.15.0 binary until one existed.
-//
-// Two defects it exposed are already fixed: knownHashes mapped this version's
-// snapshot hash to 2.16.0 (the comment beside it even said "Flutter 2.8.0",
-// which ships Dart 2.15.0), and the profile carried OldStringFormat, which the
-// SDK puts at 2.14.0 and earlier -- DecodeLengthAndCid appears in
-// app_snapshot.cc at 2.15.0.
-//
-// What remains: ReadFill now reaches cluster 300 (CompressedStackMaps) and
-// stops there. CompressedStackMapsDeserializationCluster::ReadFill takes the
-// payload length from SizeField::decode(flags_and_size), not from the raw
-// unsigned, and raw_object.h says the size lives in the MOST significant bits.
-// This project reads it raw, which is why the length comes out absurd. That is
-// the same in 3.9.2's SDK source, yet 3.x parses cleanly here, so the decode
-// rule is not simply "shift by the flag bits" and needs establishing before
-// anything is changed.
-const profileIncomplete215 = "the Dart 2.15.0 VersionProfile cannot parse a real 2.15.0 binary yet: " +
-	"ReadFill stops at the CompressedStackMaps cluster because the payload length " +
-	"is SizeField::decode(flags_and_size), not the raw unsigned this code reads. " +
-	"Two earlier defects on this version are already fixed (hash mapped to 2.16.0; " +
-	"OldStringFormat set one version too late)."
-
 // Registry is every sample the test suite knows about, present or not.
 //
 // An entry whose file is absent is a documented hole, not an oversight:
@@ -147,10 +124,8 @@ var Registry = []Sample{
 	// the differential comes from -- are byte-identical to the rest of the set.
 	{DartVersion: "2.14.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.14.0, Flutter 2.5.0 -- first TagStyleCidShift1"},
 	{DartVersion: "2.14.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.14.0 x86_64"},
-	{DartVersion: "2.15.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.15.0, Flutter 2.8.0",
-		ProfileIncomplete: profileIncomplete215},
-	{DartVersion: "2.15.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.15.0 x86_64",
-		ProfileIncomplete: profileIncomplete215},
+	{DartVersion: "2.15.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.15.0, Flutter 2.8.0"},
+	{DartVersion: "2.15.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.15.0 x86_64"},
 	{DartVersion: "2.16.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.16.0, Flutter 2.10.0 -- last with the 6-field header"},
 	{DartVersion: "2.16.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.16.0 x86_64"},
 	{DartVersion: "2.17.6", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.17.6, built with Flutter 3.0.5 to cover TagStyleCidShift1"},

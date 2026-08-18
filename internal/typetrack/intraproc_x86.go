@@ -46,6 +46,7 @@ func AnalyzeFunctionX86(
 	insts []X86DecodedInst,
 	ctx *TypeContext,
 	entryTypes [31]TypeLattice,
+	entryStack map[int]TypeLattice,
 ) *IntraResult {
 	result := &IntraResult{
 		EntryTypes: entryTypes,
@@ -100,7 +101,10 @@ func AnalyzeFunctionX86(
 
 	blockEntry := make([][31]TypeLattice, len(blocks))
 	blockExit := make([][31]TypeLattice, len(blocks))
-	blockEntry[0] = entryTypes
+	blockEntry[0] = entryTypes
+	for off, t := range entryStack {
+		blockStackEntry[0][off] = t
+	}
 
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }
 
