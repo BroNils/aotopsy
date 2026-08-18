@@ -106,7 +106,15 @@ func sanitizeR2Name(name string) string {
 	name = strings.ReplaceAll(name, ")", "_")
 	name = strings.ReplaceAll(name, "[", "_")
 	name = strings.ReplaceAll(name, "]", "_")
-	// Keep dots — r2 uses them for namespacing (sym.func.name).
+	name = strings.ReplaceAll(name, "*", "_")
+	name = strings.ReplaceAll(name, "+", "_")
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, ".", "_")
+	name = strings.ReplaceAll(name, "&", "_")
+	name = strings.ReplaceAll(name, "#", "_")
+	name = strings.ReplaceAll(name, "<", "_")
+	name = strings.ReplaceAll(name, ">", "_")
+	name = strings.ReplaceAll(name, "$", "_")
 	return name
 }
 

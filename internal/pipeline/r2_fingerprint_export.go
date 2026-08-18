@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"aotopsy/internal/cluster"
 )
@@ -56,14 +57,29 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, c
 	for _, e := range entries {
 		// r2 flag: f name @ addr
 		r2Name := sanitizeR2FlagName(e.name)
+		// Strip leading underscores/non-alphanumeric (r2 requires
+		// flag names to start with a letter or underscore that is
+		// followed by alphanumeric).
+		r2Name = strings.TrimLeft(r2Name, "_=")
+		// r2 flag names cannot start with a digit — prefix with f_.
+		if len(r2Name) > 0 && r2Name[0] >= '0' && r2Name[0] <= '9' {
+			r2Name = "f_" + r2Name
+		}
+		// Skip empty names or names that are only underscores.
+		if r2Name == "" || strings.Trim(r2Name, "_") == "" {
+			continue
+		}
 		fmt.Fprintf(f, "f %s @ 0x%x\n", r2Name, e.va)
 	}
 	return nil
 }
 
 // sanitizeR2FlagName makes a name safe for r2 flag syntax.
+// r2 flag names allow: [a-zA-Z0-9_.-] but dots create sub-flags
+// and some characters cause "Invalid flag name" errors.
+// Replace problematic characters with underscores.
 func sanitizeR2FlagName(name string) string {
-	for _, c := range []string{" ", "@", ":", "(", ")", "[", "]"} {
+	for _, c := range []string{" ", "@", ":", "(", ")", "[", "]", "*", "+", "-", ".", "&", "#", "<", ">", "$", "/", "%"} {
 		name = fmtReplace(name, c, "_")
 	}
 	return name
