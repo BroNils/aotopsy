@@ -6,6 +6,15 @@ import (
 	"aotopsy/internal/dartfmt"
 )
 
+// readFillInstance captures Instance fill data.
+// Format: ReadUnsigned64(unboxed_bitmap) ONCE, then per object:
+//
+//	for each field offset from header to next_field_offset:
+//	  if unboxed: ReadWordWith32BitReads (2 × ReadTagged32)
+//	  else: ReadRef (ReadRefId)
+//
+// header_words: 2 for compressed pointers (tags + hash = 2 × 4 bytes = 2 compressed words).
+// header_words: 1 for uncompressed (tags = 1 × 8 bytes = 1 word).
 func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compressedPointers, preCanonicalSplit bool) ([]InstanceInfo, error) {
 	var result []InstanceInfo
 	var bitmap int64

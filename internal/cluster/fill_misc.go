@@ -300,6 +300,21 @@ func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned b
 	return result, nil
 }
 
+// skipFillRecord skips Record fill.
+// Per object: ReadUnsigned(shape) + num_fields × ReadRef(field).
+// num_fields is the low 16 bits of shape.
+//
+// RecordDeserializationCluster::ReadFill @3.12.2 reads exactly that:
+//
+//	const intptr_t shape = d.ReadUnsigned();
+//	const intptr_t num_fields = RecordShape(shape).num_fields();
+//	for (intptr_t j = 0; j < num_fields; ++j) { ... = d.ReadRef(); }
+//
+// and object.h@3.12.2 has RecordShape::NumFieldsBitField =
+// BitField<intptr_t, intptr_t, 0, 16>, hence the 0xFFFF mask.
+//
+// The comment restored here drops a contradictory first line that said
+// ReadRef(shape); the shape is ReadUnsigned, per the SDK above.
 func skipFillRecord(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
 	for i := int64(0); i < cm.Count; i++ {
 		// Fill reads shape from stream; num_fields decoded from lower 16 bits.
@@ -318,14 +333,12 @@ func skipFillRecord(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) er
 }
 
 // skipFillContextScope skips ContextScope fill.
-// Per scope: num_variables entries, each with multiple refs and scalars.
-// ContextScope is non-AOT only (context_scope_ = null in AOT ClosureData).
-// In practice this cluster type should not appear in AOT snapshots,
-// but we handle it for completeness.
-// skipFillContextScope skips ContextScope fill.
-// ContextScope is non-AOT only. Should not appear in AOT PRODUCT snapshots.
 // Per object: ReadUnsigned(length) + ReadByte(is_implicit) + ReadFromTo(scope, length).
 // ReadFromTo reads all pointer fields per variable entry as ReadRef.
+//
+// ContextScope is non-AOT only (context_scope_ is null in AOT ClosureData),
+// so this cluster should not appear in an AOT PRODUCT snapshot at all; it is
+// handled for completeness.
 func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
 	// ContextScope shouldn't appear in AOT. If it does, we'll attempt to skip
 	// using the known structure: ReadUnsigned(length) + ReadByte(is_implicit) +

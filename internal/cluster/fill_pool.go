@@ -7,6 +7,17 @@ import (
 	"aotopsy/internal/dartfmt"
 )
 
+// readFillObjectPool reads ObjectPool fill data and captures entries.
+// Per pool: ReadUnsigned(length) + length × (ReadByte(entry_bits) + type-dependent data).
+//
+// v2.17.6: TypeBits[0:7] (7 bits), PatchableBit[7].
+//
+//	0=kTaggedObject→ReadRef, 1=kImmediate→Read<intptr_t>, 2+=nothing.
+//
+// v3.x: TypeBits[0:4], PatchableBit[4], SnapshotBehaviorBits[5:8].
+//
+//	behavior 0: 0=kImmediate→Read<intptr_t>, 1=kTaggedObject→ReadRef, 2=kNativeFunction→nothing.
+//	behavior 1,2,3: nothing.
 func readFillObjectPool(s *dartfmt.Stream, cm *ClusterMeta, oldPoolFormat, poolTypeSwapped, fillRefUnsigned bool) ([]PoolEntry, error) {
 	if debugFill {
 		saved := s.Position()
