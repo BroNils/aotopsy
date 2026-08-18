@@ -98,10 +98,10 @@ type FillSpec struct {
 	// UntaggedClosure::to_snapshot just forwards to to(num_elements), so the
 	// whole range including the variable tail is read.
 	VarLenRefs bool
-	IsFuncType   bool // true for FunctionType clusters (extract packed_parameter_counts)
-	IsField      bool // true for Field clusters (extract kind_bits + host_offset)
-	IsFunction   bool // true for Function clusters (extract code_index, scalar 0)
-	IsType       bool // true for Type clusters (extract type_class_id, packed into the v3.x "flags" scalar)
+	IsFuncType bool // true for FunctionType clusters (extract packed_parameter_counts)
+	IsField    bool // true for Field clusters (extract kind_bits + host_offset)
+	IsFunction bool // true for Function clusters (extract code_index, scalar 0)
+	IsType     bool // true for Type clusters (extract type_class_id, packed into the v3.x "flags" scalar)
 	// FuncTypeParamTypesIdx is the ref-loop index of parameter_types,
 	// propagated from snapshot.VersionProfile.FuncTypeParamTypesIdx.
 	// 0 = not verified for this version, don't extract.
