@@ -22,6 +22,8 @@ func TestBLRResolutionRate(t *testing.T) {
 	var report struct {
 		ResolvedBLR int `json:"resolved_blr"`
 		TotalBLR    int `json:"total_blr"`
+		PoolHits    int `json:"pool_hits"`
+		PoolLoads   int `json:"pool_loads"`
 		BLR         struct {
 			Total       int `json:"total"`
 			Monomorphic int `json:"monomorphic"`
@@ -53,6 +55,20 @@ func TestBLRResolutionRate(t *testing.T) {
 	}
 	t.Logf("BLR: monomorphic=%d/%d (%d%%), polymorphic=%d, stub=%d, unresolved=%d",
 		monomorphic, total, rate, report.BLR.Polymorphic, report.BLR.Stub, report.BLR.Unresolved)
+
+	// pool_hits counts object-pool loads that RESOLVED; pool_loads counts
+	// every pool load seen. A resolution count above the attempt count means
+	// the two are being incremented at different places again -- which is
+	// exactly what happened when handlePPLoad started counting attempts under
+	// the pool_hits name while x86_64 kept counting resolutions.
+	if report.PoolLoads > 0 && report.PoolHits > report.PoolLoads {
+		t.Errorf("pool_hits=%d exceeds pool_loads=%d -- a pool load cannot resolve "+
+			"more often than it happens", report.PoolHits, report.PoolLoads)
+	}
+	if report.PoolLoads > 0 {
+		t.Logf("pool: %d/%d loads resolved (%d%%)",
+			report.PoolHits, report.PoolLoads, report.PoolHits*100/report.PoolLoads)
+	}
 }
 
 // TestSignalExpansionOutputs checks that all signal expansion JSONL files

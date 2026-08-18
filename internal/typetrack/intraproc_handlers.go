@@ -240,7 +240,7 @@ func handleTHRLoad(tc *transferCtx) bool {
 func handlePPLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == regPP {
-		tc.ctx.PPHits++
+		tc.ctx.PPLoads++
 		return resolvePPLoad(tc, byteOff)
 	}
 	// 2-level PP addressing: LDR Xt, [Xn, #imm] where Xn = PP + upper_offset.
@@ -250,7 +250,7 @@ func handlePPLoad(tc *transferCtx) bool {
 	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg < 31 {
 		if tc.state[baseReg].Kind == LatticePPBase {
 			fullOffset := tc.state[baseReg].PPBaseOffset + byteOff
-			tc.ctx.PPHits++
+			tc.ctx.PPLoads++
 			return resolvePPLoad(tc, fullOffset)
 		}
 	}
@@ -272,6 +272,7 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	if tc.ctx.PoolUnlinkedCallNames != nil {
 		if name, ok3 := tc.ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
 			tc.state[rt] = KnownStub("UnlinkedCall:"+name, byteOff)
+			tc.ctx.PPHits++
 			return true
 		}
 	}
@@ -282,6 +283,7 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	if tc.ctx.PoolCodeNames != nil {
 		if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
 			tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
+			tc.ctx.PPHits++
 			return true
 		}
 	}
@@ -298,10 +300,12 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 		if tc.ctx.TypeTestingStubNames != nil {
 			if ttsName, ok3 := tc.ctx.TypeTestingStubNames[poolIdx]; ok3 && ttsName != "" {
 				tc.state[rt] = KnownStub("TTS:"+ttsName, byteOff)
+				tc.ctx.PPHits++
 				return true
 			}
 		}
 		tc.state[rt] = KnownClass(classID)
+		tc.ctx.PPHits++
 		if tc.ctx.InstantiatedClasses != nil {
 			tc.ctx.InstantiatedClasses[classID] = true
 		}
@@ -316,6 +320,7 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 			// PoolClosureClass. KnownClass alone would lose the pool
 			// index, making it impossible to trace back to the closure.
 			tc.state[rt] = KnownStub("Closure:"+strconv.Itoa(classID), poolIdx)
+			tc.ctx.PPHits++
 			return true
 		}
 		tc.state[rt] = Top()

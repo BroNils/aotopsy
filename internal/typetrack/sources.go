@@ -228,11 +228,24 @@ type TypeContext struct {
 	// InstanceFieldHits counts field loads typed from observed const-instance
 	// data that the declared field type could not resolve.
 	InstanceFieldHits int
-	PPHits            int
-	HeaderHits        int
-	UBFXHits          int
-	ADDClassHits      int
-	DispatchHits      int
+
+	// PPHits counts object-pool loads that RESOLVED to something: a
+	// KnownClass, or a KnownStub for a Code / type-testing-stub / unlinked-call
+	// / closure entry. PPLoads counts every pool load the transfer function
+	// saw, resolved or not, so PPHits/PPLoads is a rate rather than a bare
+	// count.
+	//
+	// These two were briefly one number. handlePPLoad incremented PPHits on
+	// every pool load on ARM64 while x86_64 kept incrementing it only on a
+	// successful resolution, so typetrack_report.json's "pool_hits" meant
+	// attempts on one architecture and resolutions on the other, under the
+	// same key.
+	PPHits       int
+	PPLoads      int
+	HeaderHits   int
+	UBFXHits     int
+	ADDClassHits int
+	DispatchHits int
 	// NarrowHits counts flow-sensitive narrowings actually applied: a
 	// `CMP class_id, #N` whose equality edge turned the compared register
 	// into KnownClass(N). Both ARM64 and x86_64 implement narrowing.

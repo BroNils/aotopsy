@@ -52,6 +52,7 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		BLR         BLRBreakdown `json:"blr"`
 		// Per-source hit counters (omitted when no context was supplied).
 		PoolHits          int `json:"pool_hits,omitempty"`
+		PoolLoads         int `json:"pool_loads,omitempty"`
 		HeaderHits        int `json:"header_hits,omitempty"`
 		DispatchHits      int `json:"dispatch_hits,omitempty"`
 		UBFXHits          int `json:"ubfx_hits,omitempty"`
@@ -112,6 +113,7 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 	}
 	if ctx != nil {
 		report.PoolHits = ctx.PPHits
+		report.PoolLoads = ctx.PPLoads
 		report.HeaderHits = ctx.HeaderHits
 		report.DispatchHits = ctx.DispatchHits
 		report.UBFXHits = ctx.UBFXHits
