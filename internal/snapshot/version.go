@@ -326,6 +326,12 @@ var knownHashes = map[string]string{
 	// them -- see ARCHITECTURE.md's Dart 3.10-3.12 section).
 	"ace654289f5abc240509fc941453ebc5": "3.12.2", // Flutter 3.44.7
 
+	// Dart 3.13.0 -- the unified-snapshot format. Taken from a libapp.so built
+	// locally with Flutter 3.47.0 stable (whose dart_sdk_version is 3.13.0 per
+	// the official releases_linux.json), not from a hash list, so it is a
+	// measured value rather than a transcribed one.
+	"0451907c2eaa8467e848c0067bfe8ed4": "3.13.0", // Flutter 3.47.0
+
 	// Dart 2.14-2.19 (supported with CID tables)
 	"9cf77f4405212c45daf608e1cd646852": "2.14.0", // Flutter 2.5.0
 	"659a72e41e3276e882709901c27de33d": "2.14.0", // Flutter 2.4.0
