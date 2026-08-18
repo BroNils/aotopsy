@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/strutil"
 )
 
 // R2Export exports aotopsy's recovered symbols, classes, and
@@ -46,7 +48,7 @@ func (r *R2Export) AddFunction(va uint64, name string) {
 		return
 	}
 	// r2 flag names can't contain dots, @, or spaces.
-	r2Name := sanitizeR2Name(name)
+	r2Name := strutil.SanitizeR2FlagName(name)
 	r.Lines = append(r.Lines, fmt.Sprintf("f %s @ 0x%x", r2Name, va))
 }
 
@@ -93,29 +95,6 @@ func (r *R2Export) WriteToDir(outDir string) error {
 func (r *R2Export) String() string {
 	sort.Strings(r.Lines)
 	return strings.Join(r.Lines, "\n") + "\n"
-}
-
-// sanitizeR2Name makes a name safe for r2 flag syntax.
-// r2 flag names: [a-zA-Z0-9_.-] are allowed, but dots create
-// sub-flags. Replace dots with underscores for simplicity.
-func sanitizeR2Name(name string) string {
-	name = strings.ReplaceAll(name, " ", "_")
-	name = strings.ReplaceAll(name, "@", "_at_")
-	name = strings.ReplaceAll(name, ":", "_")
-	name = strings.ReplaceAll(name, "(", "_")
-	name = strings.ReplaceAll(name, ")", "_")
-	name = strings.ReplaceAll(name, "[", "_")
-	name = strings.ReplaceAll(name, "]", "_")
-	name = strings.ReplaceAll(name, "*", "_")
-	name = strings.ReplaceAll(name, "+", "_")
-	name = strings.ReplaceAll(name, "-", "_")
-	name = strings.ReplaceAll(name, ".", "_")
-	name = strings.ReplaceAll(name, "&", "_")
-	name = strings.ReplaceAll(name, "#", "_")
-	name = strings.ReplaceAll(name, "<", "_")
-	name = strings.ReplaceAll(name, ">", "_")
-	name = strings.ReplaceAll(name, "$", "_")
-	return name
 }
 
 // escapeR2Comment escapes a string for use in an r2 CC comment.

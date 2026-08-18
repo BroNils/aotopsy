@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/strutil"
 )
 
 // writeR2Export writes aotopsy.r2 — a radare2 command script with
@@ -38,12 +38,6 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, c
 		}
 		entries = append(entries, r2Entry{va: funcVA, name: name})
 	}
-	// Also add VM stub symbols.
-	for _, r := range ranges {
-		if r.RefID < 0 && r.Size > 0 {
-			continue // already added above
-		}
-	}
 	// Sort by VA for deterministic output.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].va < entries[j].va })
 
@@ -56,47 +50,16 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, c
 
 	for _, e := range entries {
 		// r2 flag: f name @ addr
-		r2Name := sanitizeR2FlagName(e.name)
-		// Strip leading underscores/non-alphanumeric (r2 requires
-		// flag names to start with a letter or underscore that is
-		// followed by alphanumeric).
-		r2Name = strings.TrimLeft(r2Name, "_=")
-		// r2 flag names cannot start with a digit — prefix with f_.
-		if len(r2Name) > 0 && r2Name[0] >= '0' && r2Name[0] <= '9' {
-			r2Name = "f_" + r2Name
-		}
-		// Skip empty names or names that are only underscores.
-		if r2Name == "" || strings.Trim(r2Name, "_") == "" {
+		// SanitizeR2FlagName returns "" for a name that carries nothing
+		// once the separators are stripped, and guarantees the rest is
+		// accepted by r2's r_name_check.
+		r2Name := strutil.SanitizeR2FlagName(e.name)
+		if r2Name == "" {
 			continue
 		}
 		fmt.Fprintf(f, "f %s @ 0x%x\n", r2Name, e.va)
 	}
 	return nil
-}
-
-// sanitizeR2FlagName makes a name safe for r2 flag syntax.
-// r2 flag names allow: [a-zA-Z0-9_.-] but dots create sub-flags
-// and some characters cause "Invalid flag name" errors.
-// Replace problematic characters with underscores.
-func sanitizeR2FlagName(name string) string {
-	for _, c := range []string{" ", "@", ":", "(", ")", "[", "]", "*", "+", "-", ".", "&", "#", "<", ">", "$", "/", "%"} {
-		name = fmtReplace(name, c, "_")
-	}
-	return name
-}
-
-func fmtReplace(s, old, new string) string {
-	result := ""
-	for i := 0; i < len(s); {
-		if i+len(old) <= len(s) && s[i:i+len(old)] == old {
-			result += new
-			i += len(old)
-		} else {
-			result += string(s[i])
-			i++
-		}
-	}
-	return result
 }
 
 // writeFunctionFingerprints writes function_fingerprints.jsonl —
