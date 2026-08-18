@@ -63,6 +63,23 @@ type TypeContext struct {
 	// Used to initialize X0 = KnownClass(ownerClassID) for instance methods.
 	FuncOwnerClass map[string]int
 
+	// FuncReceiverStackSlot maps a function name to the FP-relative byte offset
+	// its receiver arrives at, for the Dart versions that pass arguments on the
+	// stack rather than in registers.
+	//
+	// Before Dart 3.4.3 there is no DartCallingConvention: arguments, receiver
+	// included, come in on the caller's stack. The prologue then loads them into
+	// registers, so seeding the receiver REGISTER at entry buys nothing -- the
+	// very next `ldr x0, [x29, #N]` overwrites it with Top, and every field load
+	// off that receiver is then untyped. Measured on identical Dart source: the
+	// base register at a field load was KnownClass 1.5% of the time on 2.17.6
+	// and 44% on 3.4.3, and FieldValueClass was called 9860 times against
+	// 307594.
+	//
+	// Empty on 3.4.3 and later, where kCpuRegistersForArgs exists and the
+	// receiver really is in R0.
+	FuncReceiverStackSlot map[string]int
+
 	// FuncReturnType maps function NamedObject refID → return type ClassID.
 	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
 	// Used to seed CalleeExitTypes for BL return value propagation:
@@ -428,6 +445,7 @@ func BuildTypeContext(
 		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
+		FuncReceiverStackSlot:   make(map[string]int),
 		FuncReturnType:          make(map[int]int),
 		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),
 		KOriginElement:          kOriginElement,

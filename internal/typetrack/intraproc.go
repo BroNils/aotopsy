@@ -239,10 +239,14 @@ func recordFieldAccess(result *IntraResult, classID int, byteOffset int32, isSto
 //
 // entryTypes provides the initial types for parameters (from interproc).
 // Pass all-Top if no inter-procedural info is available yet.
+// entryStack seeds the first block's stack-slot types. It is how the receiver
+// is supplied on the Dart versions that pass arguments on the stack; nil
+// everywhere else. See TypeContext.FuncReceiverStackSlot.
 func AnalyzeFunction(
 	insts []disasm.Inst,
 	ctx *TypeContext,
 	entryTypes [31]TypeLattice,
+	entryStack map[int]TypeLattice,
 ) *IntraResult {
 	result := &IntraResult{
 		EntryTypes: entryTypes,
@@ -455,6 +459,9 @@ func AnalyzeFunction(
 
 	// Initialize first block's entry with parameter types.
 	blockEntry[0] = entryTypes
+	for off, t := range entryStack {
+		blockStackEntry[0][off] = t
+	}
 
 	// LCA helper for meetType.
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }

@@ -10,6 +10,20 @@ import (
 // sortedKeysInsts, sortedKeysX86 and sortedEdgeKeys return map keys in a
 // stable order so that analysis passes that mutate the shared TypeContext
 // produce identical results on every run.
+// entryStackFor builds the first-block stack seed for a function, or nil when
+// this Dart version passes the receiver in a register.
+func entryStackFor(ctx *TypeContext, name string) map[int]TypeLattice {
+	ownerCID, ok := ctx.FuncOwnerClass[name]
+	if !ok || ownerCID < 0 {
+		return nil
+	}
+	slot, ok := ctx.FuncReceiverStackSlot[name]
+	if !ok {
+		return nil
+	}
+	return map[int]TypeLattice{slot: KnownClass(ownerCID)}
+}
+
 func sortedKeysInsts(m FuncInstsARM64) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -243,12 +257,19 @@ func RunInterprocedural(
 			for i := range entry {
 				entry[i] = Top()
 			}
+			var entryStack map[int]TypeLattice
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 				entry[receiverReg] = KnownClass(ownerCID)
+				// Pre-3.4.3 the receiver arrives on the stack and the
+				// prologue immediately overwrites the register, so the
+				// register seed alone is dead on arrival.
+				if slot, ok2 := ctx.FuncReceiverStackSlot[name]; ok2 {
+					entryStack = map[int]TypeLattice{slot: KnownClass(ownerCID)}
+				}
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunction(insts, ctx, entry)
+			intra := AnalyzeFunction(insts, ctx, entry, entryStack)
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	} else {
@@ -382,7 +403,7 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunction(insts, ctx, entry)
+				intra := AnalyzeFunction(insts, ctx, entry, entryStackFor(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		} else {

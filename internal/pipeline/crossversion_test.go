@@ -55,8 +55,11 @@ type knownGap struct {
 
 var knownGaps = []knownGap{
 	{
-		metric:   "field_type_declared_hits",
-		versions: []string{"2.17.6", "2.19.0", "3.1.0", "3.3.0"},
+		metric: "field_type_declared_hits",
+		versions: []string{"2.14.0/arm64", "2.14.0/x64", "2.16.0/arm64", "2.16.0/x64",
+			"2.17.6/arm64", "2.17.6/x64", "2.18.0/arm64", "2.18.0/x64",
+			"2.19.0/arm64", "2.19.0/x64", "3.1.0/arm64", "3.1.0/x64",
+			"3.3.0/arm64", "3.3.0/x64"},
 		reason: "Every field metric collapses to 1-3% across the whole <=3.3.0 group, " +
 			"not just where it happens to hit exactly zero: field_accessor_xref is " +
 			"30-37 against 1708-1792, and field_type_instance_hits 121-341 against " +
@@ -69,6 +72,25 @@ var knownGaps = []knownGap{
 			"and 307594 on 3.9.2. So the cause is upstream of field handling, in how " +
 			"often a receiver register carries a known class, and it is not yet " +
 			"explained. Recorded rather than guessed at.",
+	},
+	{
+		metric:   "dispatch_hits",
+		versions: []string{"2.14.0/x64", "2.16.0/x64", "2.17.6/x64", "2.18.0/x64"},
+		reason: "x86_64 dispatch-table type inference produces nothing at all on Dart " +
+			"2.14.0 through 2.18.0, while the SAME source on arm64 gives 192158 hits " +
+			"and the dispatch table itself parses fine on both (21000-26000 entries). " +
+			"So the table is read and then never used: the x86 handler does not " +
+			"recognise the pre-2.19 dispatch-call shape. Found by the architecture " +
+			"axis of this differential, which is the only thing that could have: " +
+			"comparing x64 against x64 across versions shows a smooth curve, and " +
+			"comparing one arch against its own past shows nothing.",
+	},
+	{
+		metric:   "blr_monomorphic",
+		versions: []string{"2.14.0/x64", "2.16.0/x64", "2.17.6/x64", "2.18.0/x64"},
+		reason: "Downstream of the dispatch_hits gap above: with no dispatch-table " +
+			"resolution there is no single-callee site to report. Expected to close " +
+			"with it.",
 	},
 }
 
@@ -100,6 +122,7 @@ type crossVersionMetric struct {
 // sampleMetrics holds one sample's measured facts.
 type sampleMetrics struct {
 	version string
+	arch    string
 	lines   map[string]int
 	report  map[string]any
 }
@@ -179,6 +202,10 @@ func TestCrossVersionDifferential(t *testing.T) {
 					t.Logf("skipping %s: %s", s.FileName(), samplecorpus.MissingMessage(s))
 					continue
 				}
+				if s.ProfileIncomplete != "" {
+					t.Logf("skipping %s: %s", s.FileName(), s.ProfileIncomplete)
+					continue
+				}
 				m := measureCrossVersion(t, s, path)
 				if m != nil {
 					measured = append(measured, m)
@@ -188,8 +215,15 @@ func TestCrossVersionDifferential(t *testing.T) {
 				t.Skipf("source set %q has %d sample(s) present; a differential needs two",
 					setName, len(measured))
 			}
+			// Deterministic AND readable: version first, then architecture.
+			// sort.Slice is not stable, so sorting on version alone left the
+			// arm64/x64 columns in a different order per version and the table
+			// could not be read at all.
 			sort.Slice(measured, func(i, j int) bool {
-				return versionLess(measured[i].version, measured[j].version)
+				if measured[i].version != measured[j].version {
+					return versionLess(measured[i].version, measured[j].version)
+				}
+				return measured[i].arch < measured[j].arch
 			})
 			reportCrossVersion(t, measured)
 		})
@@ -215,7 +249,7 @@ func measureCrossVersion(t *testing.T, s samplecorpus.Sample, path string) *samp
 		return nil
 	}
 
-	m := &sampleMetrics{version: s.DartVersion, lines: map[string]int{}}
+	m := &sampleMetrics{version: s.DartVersion, arch: s.Arch, lines: map[string]int{}}
 	entries, err := os.ReadDir(outDir)
 	if err != nil {
 		t.Fatalf("read %s: %v", outDir, err)
@@ -249,7 +283,7 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 	fmt.Fprintf(&b, "same Dart source, %d SDK versions:\n", len(ms))
 	fmt.Fprintf(&b, "  %-28s", "metric")
 	for _, m := range ms {
-		fmt.Fprintf(&b, "%12s", m.version)
+		fmt.Fprintf(&b, "%14s", m.version+"/"+m.arch)
 	}
 	b.WriteString("\n")
 
@@ -273,21 +307,9 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 		fmt.Fprintf(&b, "  %-28s", met.name)
 		for _, v := range vals {
 			if v < 0 {
-				fmt.Fprintf(&b, "%12s", "-")
+				fmt.Fprintf(&b, "%14s", "-")
 			} else {
-				fmt.Fprintf(&b, "%12d", v)
-			}
-		}
-		// Ratio against the best sibling makes the outliers readable at a
-		// glance without turning every difference into a failure.
-		if best > 0 {
-			b.WriteString("   ")
-			for _, v := range vals {
-				if v < 0 {
-					b.WriteString(" -")
-					continue
-				}
-				fmt.Fprintf(&b, " %.2f", float64(v)/float64(best))
+				fmt.Fprintf(&b, "%14d", v)
 			}
 		}
 		b.WriteString("\n")
@@ -298,7 +320,7 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 		var zeroAt []string
 		for i, v := range vals {
 			if v == 0 {
-				zeroAt = append(zeroAt, ms[i].version)
+				zeroAt = append(zeroAt, ms[i].version+"/"+ms[i].arch)
 			}
 		}
 		if len(zeroAt) > 0 {

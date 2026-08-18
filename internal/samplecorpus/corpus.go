@@ -87,6 +87,13 @@ type Sample struct {
 	// builds do not have. Comparing a version against its SIBLINGS is the only
 	// arrangement that can say "this one recovers sixty times less".
 	SourceSet string
+
+	// ProfileIncomplete marks a sample whose Dart version has a VersionProfile
+	// that cannot yet parse it. The sample is registered because it exists and
+	// is correct; what is not yet correct is this project's profile for that
+	// version. Tests skip it with this reason rather than failing forever or,
+	// worse, being left unregistered so the gap goes unrecorded.
+	ProfileIncomplete string
 }
 
 // FileName is the name this sample must have under samples/.
@@ -102,6 +109,29 @@ func (s Sample) FileName() string {
 // the only variable between those binaries is the Dart SDK that compiled them.
 const comparesample = "compare_sample"
 
+// profileIncomplete215 records what is known about the Dart 2.15.0 profile,
+// which had never been run against a real 2.15.0 binary until one existed.
+//
+// Two defects it exposed are already fixed: knownHashes mapped this version's
+// snapshot hash to 2.16.0 (the comment beside it even said "Flutter 2.8.0",
+// which ships Dart 2.15.0), and the profile carried OldStringFormat, which the
+// SDK puts at 2.14.0 and earlier -- DecodeLengthAndCid appears in
+// app_snapshot.cc at 2.15.0.
+//
+// What remains: ReadFill now reaches cluster 300 (CompressedStackMaps) and
+// stops there. CompressedStackMapsDeserializationCluster::ReadFill takes the
+// payload length from SizeField::decode(flags_and_size), not from the raw
+// unsigned, and raw_object.h says the size lives in the MOST significant bits.
+// This project reads it raw, which is why the length comes out absurd. That is
+// the same in 3.9.2's SDK source, yet 3.x parses cleanly here, so the decode
+// rule is not simply "shift by the flag bits" and needs establishing before
+// anything is changed.
+const profileIncomplete215 = "the Dart 2.15.0 VersionProfile cannot parse a real 2.15.0 binary yet: " +
+	"ReadFill stops at the CompressedStackMaps cluster because the payload length " +
+	"is SizeField::decode(flags_and_size), not the raw unsigned this code reads. " +
+	"Two earlier defects on this version are already fixed (hash mapped to 2.16.0; " +
+	"OldStringFormat set one version too late)."
+
 // Registry is every sample the test suite knows about, present or not.
 //
 // An entry whose file is absent is a documented hole, not an oversight:
@@ -110,14 +140,40 @@ const comparesample = "compare_sample"
 // sample was quietly replaced by whatever binary shared its name.
 var Registry = []Sample{
 	{DartVersion: "2.12.0", Arch: "arm64", Note: "dart212_sample, Flutter 2.x toy app"},
+	// 2.14.0-2.16.0 need Java 11 (their Gradle rejects Java 17 class files) and
+	// carry ONE source difference: main.dart's two widget constructors are
+	// written the pre-2.17 way, because super-parameters do not exist there.
+	// ground_truth.dart and signal_ground_truth.dart -- where every metric in
+	// the differential comes from -- are byte-identical to the rest of the set.
+	{DartVersion: "2.14.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.14.0, Flutter 2.5.0 -- first TagStyleCidShift1"},
+	{DartVersion: "2.14.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.14.0 x86_64"},
+	{DartVersion: "2.15.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.15.0, Flutter 2.8.0",
+		ProfileIncomplete: profileIncomplete215},
+	{DartVersion: "2.15.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.15.0 x86_64",
+		ProfileIncomplete: profileIncomplete215},
+	{DartVersion: "2.16.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.16.0, Flutter 2.10.0 -- last with the 6-field header"},
+	{DartVersion: "2.16.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.16.0 x86_64"},
 	{DartVersion: "2.17.6", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.17.6, built with Flutter 3.0.5 to cover TagStyleCidShift1"},
 	{DartVersion: "3.1.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.1.0, built with Flutter 3.13.0 (NOT 3.1.0 -- that ships Dart 2.x)"},
 	{DartVersion: "2.19.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.19.0, Flutter 3.7.0 -- first version with initial_field_table in roots"},
 	{DartVersion: "3.3.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.3.0, Flutter 3.19.0 -- last TagStyleCidShift1"},
 	{DartVersion: "3.4.3", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.4.3, Flutter 3.22.2 -- first TagStyleObjectHeader, last with the 4-bit type_class_id shift"},
 	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.5.0, Flutter 3.24.0 -- first with shared_initial_field_table AND the 3-bit shift"},
+	{DartVersion: "2.18.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.18.0, Flutter 3.3.1"},
 	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1 (directory name is the APP version, not Dart's)"},
 	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "compare_sample, the reference toy app"},
+
+	// The x64 half of the same source set. Same program, same Dart version,
+	// different architecture -- the control the arch-parity work never had:
+	// its headline gap (x86_64 281 vs ARM64 2361 single-callee sites) was
+	// measured on one app with no sibling to compare against.
+	{DartVersion: "2.17.6", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.17.6 x86_64"},
+	{DartVersion: "2.18.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.18.0 x86_64"},
+	{DartVersion: "2.19.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.19.0 x86_64"},
+	{DartVersion: "3.1.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.1.0 x86_64"},
+	{DartVersion: "3.3.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.3.0 x86_64"},
+	{DartVersion: "3.4.3", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.4.3 x86_64"},
+	{DartVersion: "3.5.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.5.0 x86_64"},
 	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_310"},
 	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_311"},
 	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},

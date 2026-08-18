@@ -389,7 +389,13 @@ var knownHashes = map[string]string{
 	"24d9d411c2f90c8fbe8907f99e89d4b0": "2.15.0", // Flutter 2.7.0-3.0.pre
 	"d56742caf7b3b3f4bd2df93a9bbb5503": "2.16.0", // Flutter 2.16.0-134.1.beta
 	"3318fe66091c0ffbb64faec39976cb7d": "2.16.0", // Flutter 2.16.0-80.1.beta
-	"adf563436d12ba0d50ea5beb7f3be1bb": "2.16.0", // Flutter 2.8.0-3.1.pre
+	// Flutter 2.8.0 ships Dart 2.15.0, not 2.16.0 -- the comment recorded the
+	// Flutter version correctly and the Dart version wrongly. Proven by
+	// building this exact hash: flutter_for_dart_2.15.0 is Flutter 2.8.0, its
+	// bin/cache/dart-sdk/version reads 2.15.0, and its snapshot hash is this
+	// one. The mistake made every Dart 2.15.0 binary parse with the 2.16.0
+	// profile, which has a 6-field header where 2.15.0 has 5.
+	"adf563436d12ba0d50ea5beb7f3be1bb": "2.15.0", // Flutter 2.8.0
 	"b0e899ec5a90e4661501f0b69e9dd70f": "2.18.0", // Flutter 3.3.0-0.1.pre
 	"b6d0a1f034d158b0d37b51d559379697": "2.18.0", // Flutter 3.3.10
 	"8e50e448b241be23b9e990094f4dca39": "2.18.0", // Flutter 2.18.0.165
@@ -912,7 +918,7 @@ var versionProfiles = map[string]*VersionProfile{
 	"2.12.0":     {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
 	"2.13.0":     {DartVersion: "2.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV213, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAfterRef: 1, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191},                                                          // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.13.0)
 	"2.14.0":     {DartVersion: "2.14.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV214, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 202},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 202 fields (object_store.h @2.14.0)
-	"2.15.0":     {DartVersion: "2.15.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV215, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 182},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 182 fields (object_store.h @2.15.0)
+	"2.15.0":     {DartVersion: "2.15.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV215, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 182},                                                                                                                                                                                                                                                        // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 182 fields (object_store.h @2.15.0)
 	"2.16.0":     {DartVersion: "2.16.0", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV216, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 184},
 	"2.17.6":     {DartVersion: "2.17.6", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV217, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 194},
 	"2.18.0":     {DartVersion: "2.18.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV218, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 212},
@@ -1214,4 +1220,15 @@ func (t TagStyle) String() string {
 // version supported" need a straight no.
 func ProfileForVersion(version string) *VersionProfile {
 	return versionProfiles[version]
+}
+
+// VersionAtLeast reports whether a Dart version string is >= minimum,
+// comparing numerically rather than as text.
+//
+// It exists because the same question keeps arising in more than one package
+// and it must never be answered with a string comparison: "2.9.0" sorts AFTER
+// "2.10.0" lexicographically, which is how a version check in this project
+// once reported 2 of 10 versions and said nothing about the other 8.
+func VersionAtLeast(version, minimum string) bool {
+	return compareDartVersions(version, minimum) >= 0
 }

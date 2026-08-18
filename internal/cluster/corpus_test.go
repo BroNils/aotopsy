@@ -86,6 +86,9 @@ func eachCorpusSample(t *testing.T, fn func(t *testing.T, s corpusSample)) {
 				t.Skip(samplecorpus.MissingMessage(entry))
 			}
 			present++
+			if entry.ProfileIncomplete != "" {
+				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
+			}
 			info := openSample(t, path)
 			if info.Version == nil || info.Version.DartVersion != entry.DartVersion {
 				got := ""

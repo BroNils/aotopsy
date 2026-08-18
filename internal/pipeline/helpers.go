@@ -13,6 +13,14 @@ type CodeNameInfo struct {
 	FuncName   string
 	OwnerName  string
 	ParamCount int // total visible parameters (fixed + optional, excluding implicit 'this')
+
+	// FixedParamsWithReceiver is num_fixed_parameters as the SDK counts it:
+	// the fixed parameters INCLUDING the implicit receiver, and excluding
+	// optionals. It is what locates a parameter's stack slot on the Dart
+	// versions that pass arguments on the stack -- parameter i of a function
+	// with N fixed parameters sits at FP + (kParamEndSlotFromFp + N - i) *
+	// wordSize, so the receiver is the highest slot. 0 when unknown.
+	FixedParamsWithReceiver int
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
@@ -157,6 +165,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
+				ci.FixedParamsWithReceiver = ft.NumFixed
+				if ft.HasImplicit {
+					ci.FixedParamsWithReceiver++
+				}
 			}
 		}
 		// Dart 2.x keeps arity on the Function object instead
@@ -171,6 +183,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				visible--
 			}
 			ci.ParamCount = visible
+			// owner.NumFixedParams already counts the receiver.
+			ci.FixedParamsWithReceiver = owner.NumFixedParams
 		}
 		l.CodeNames[ce.RefID] = ci
 	}

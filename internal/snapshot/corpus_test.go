@@ -34,6 +34,9 @@ func eachSample(t *testing.T, fn func(t *testing.T, s samplecorpus.Sample, info 
 			if path == "" {
 				t.Skip(samplecorpus.MissingMessage(entry))
 			}
+			if entry.ProfileIncomplete != "" {
+				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
+			}
 			ef, err := elfx.Open(path)
 			if err != nil {
 				t.Fatalf("open: %v", err)
