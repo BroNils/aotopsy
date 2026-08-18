@@ -19,7 +19,24 @@ import (
 // stateBitsAfterRef: 0 = no state_bits in fill (v2.10, v2.14+).
 // N>0 = state_bits is read after first N refs (v2.13: N=1). DiscardedBit (bit 3)
 // of state_bits determines whether remaining refs are skipped.
-func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fillRefUnsigned bool, instrIdxBase int, codeNumRefs int, textOffsetDelta bool, stateBitsAfterRef int, stateBitsAtEnd bool) ([]CodeEntry, error) {
+func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fillRefUnsigned bool, instrIdxBase int, codeNumRefs int, textOffsetDelta bool, stateBitsAfterRef int, stateBitsAtEnd bool, hasIndexRefs bool) ([]CodeEntry, error) {
+	// Dart 3.13.0+: the Code cluster's ReadFill opens with two ReadRefId
+	// values before the per-Code loop --
+	//
+	//	d->set_lazy_compile_index(d->ReadRefId());
+	//	d->set_unknown_dart_code_index(d->ReadRefId());
+	//
+	// (CodeDeserializationCluster::ReadFill @3.13.0). They are cluster-level,
+	// not per-object, so they are read exactly once here. Skipping them would
+	// shift every Code record by two refs.
+	if hasIndexRefs {
+		if _, err := s.ReadRefId(); err != nil {
+			return nil, fmt.Errorf("code lazy_compile_index: %w", err)
+		}
+		if _, err := s.ReadRefId(); err != nil {
+			return nil, fmt.Errorf("code unknown_dart_code_index: %w", err)
+		}
+	}
 	numRefs := codeNumRefs
 	if numRefs == 0 {
 		numRefs = 6 // default: owner, exception_handlers, pc_descriptors, catch_entry, inlined_id_to_function, code_source_map

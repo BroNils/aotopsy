@@ -17,6 +17,17 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 	// cluster as non-canonical for alloc-stream purposes on such profiles, even
 	// though the tag's canonical bit/position is still meaningful for InitializeHeader.
 	canonicalSetInStream := isCanonical && !profile.NoCanonicalSetData
+
+	// Dart 3.13.0+ Closure alloc reads a per-object length after the count
+	// (Closure::InstanceSize(length)), where 3.12.2 used ReadAllocFixedSize
+	// and read only the count. Handled here rather than in ClassifyAlloc
+	// because the shape is version-dependent and ClassifyAlloc sees no
+	// profile. Same stream shape as skipRODataAlloc: count + one ReadUnsigned
+	// per object, no canonical-set data.
+	if profile.ClosureAllocHasLength && ct != nil && ct.Closure != 0 && cid == ct.Closure {
+		return skipRODataAlloc(s, cm, false, false, maxSteps)
+	}
+
 	switch kind {
 	case AllocSimple:
 		return skipFixedAllocSimple(s, maxSteps)
@@ -65,7 +76,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// In 2.14+, first_element is always in stream.
 		return skipTypeArgumentsAlloc(s, cm, canonicalSetInStream, !profile.SplitCanonical, maxSteps)
 	case AllocClass:
-		return skipClassAlloc(s, cm, ct, maxSteps)
+		return skipClassAlloc(s, cm, ct, profile.ClassAllocFixedSize, maxSteps)
 	case AllocCode:
 		// In Dart ≤2.13, Code alloc has no per-object state_bits (they are in fill).
 		// In 2.14+, state_bits moved to alloc phase.
@@ -321,7 +332,30 @@ func skipTypeArgumentsAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool
 // if so, we consume it and read the next value as the actual predefined_count.
 //
 // Stores predefined count in cm.MainCount for fill-phase use.
-func skipClassAlloc(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, maxSteps int) (int64, error) {
+func skipClassAlloc(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fixedSize bool, maxSteps int) (int64, error) {
+	// Dart 3.13.0+: ClassDeserializationCluster::ReadAlloc is just
+	// ReadAllocFixedSize(d, Class::InstanceSize()), i.e. ONE ReadUnsigned and
+	// no per-class ReadCid() list and no second count. Reading the old shape
+	// here consumes far more of the alloc stream than the writer produced, so
+	// every subsequent cluster -- and FillStart with them -- lands at the
+	// wrong offset. That is what made a real 3.13.0 snapshot fail in fill with
+	// "cluster 1 (Array): value too large" even though alloc appeared to
+	// succeed: the counts it read were plausible, just not the file's.
+	//
+	// cm.MainCount is deliberately left at zero. readFillClass uses it to tell
+	// predefined classes from new ones, a split that no longer exists here;
+	// leaving it zero makes the unboxed-bitmap condition reduce to
+	// !IsTopLevelCid(class_id), which is exactly what the 3.13.0 fill does.
+	if fixedSize {
+		count, err := s.ReadUnsigned()
+		if err != nil {
+			return 0, err
+		}
+		if count < 0 || int(count) > maxSteps {
+			return 0, fmt.Errorf("class count %d out of range", count)
+		}
+		return count, nil
+	}
 	predefined, err := s.ReadUnsigned()
 	if err != nil {
 		return 0, err

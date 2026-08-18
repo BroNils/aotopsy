@@ -875,6 +875,13 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 			return FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
 		}
 		return FillSpec{Kind: FillROData, NameIdx: -1, OwnerIdx: -1}
+	case ct.LocalVarDescriptors != 0 && cid == ct.LocalVarDescriptors:
+		// Dart 3.13.0+. LocalVarDescriptorsDeserializationCluster::ReadFill is
+		// ReadUnsigned(length) then ReadFromTo(desc, length) per object, i.e.
+		// the same length-prefixed shape the inline-bytes reader consumes.
+		// Guarded on non-zero so older tables, where the field is 0, are not
+		// matched by cid 0.
+		return FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
 	case cid == ct.TypedData:
 		return FillSpec{Kind: FillTypedData, NameIdx: -1, OwnerIdx: -1}
 	case ct.Record != 0 && cid == ct.Record:

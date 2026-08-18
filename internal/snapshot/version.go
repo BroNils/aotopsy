@@ -158,6 +158,27 @@ type VersionProfile struct {
 	CodeTextOffsetDelta     bool // Code ReadInstructions reads extra ReadUnsigned (text_offset_delta). v2.10-v2.15.
 	CodeStateBitsAfterRef   int  // Code state_bits_ position in fill: 0=not in fill (v2.14+), N=read after first N refs. v2.13=1 (1 ref → state_bits → 6 refs).
 	CodeStateBitsAtEnd      bool // Code state_bits_ Read<int32_t> after ALL refs (no discarded check). v2.10.
+
+	// ClassAllocFixedSize marks the Dart 3.13.0+ Class alloc, which is a plain
+	// ReadAllocFixedSize: ONE ReadUnsigned(count) and nothing else. Up to
+	// 3.12.2 it was predefined_count + per-class ReadCid() + new_count, so a
+	// reader using the old shape over-consumes the alloc stream and every
+	// later cluster -- and the fill section start -- lands at the wrong offset.
+	// SDK-verified: ClassDeserializationCluster::ReadAlloc @3.13.0 vs @3.12.2.
+	ClassAllocFixedSize bool
+
+	// CodeFillHasIndexRefs marks the Dart 3.13.0+ Code fill, which begins with
+	// two extra ReadRefId values before the per-Code loop:
+	// set_lazy_compile_index and set_unknown_dart_code_index.
+	// SDK-verified: CodeDeserializationCluster::ReadFill @3.13.0.
+	CodeFillHasIndexRefs bool
+
+	// ClosureAllocHasLength marks the Dart 3.13.0+ Closure alloc, which reads
+	// a per-object length after the count (Closure::InstanceSize(length))
+	// instead of being a plain ReadAllocFixedSize. Same shape as
+	// CompressedStackMaps / LocalVarDescriptors.
+	// SDK-verified: ClosureDeserializationCluster::ReadAlloc @3.13.0 vs @3.12.2.
+	ClosureAllocHasLength bool
 	ClosureDataNumRefs      int  // ClosureData ref count override. 0 = default (2). v2.13=3 (includes default_type_arguments).
 	TypeHasTokenPos         bool // Type/TypeParameter fill has ReadTokenPosition scalar. v2.10 only.
 	ScriptHasLineCol        bool // Script fill has line_offset + col_offset scalars before kernel_script_index. v2.10, v2.13.
@@ -220,6 +241,22 @@ type CIDTable struct {
 	PcDescriptors              int
 	CodeSourceMap              int
 	CompressedStackMaps        int
+	// LocalVarDescriptors is zero for every version before 3.13.0, and that
+	// is not an omission: kLocalVarDescriptorsCid does not appear anywhere in
+	// app_snapshot.cc at 3.12.2 (0 occurrences), so no such cluster is ever
+	// written. In 3.13.0 it gains both a serialization and a deserialization
+	// cluster, sitting next to PcDescriptors / CodeSourceMap /
+	// CompressedStackMaps in both switches, and a real snapshot contains one
+	// (the empty singleton, count=1) because 3.13.0 shrank the base-object set
+	// to 7 Roots entries -- objects that used to arrive as base objects now
+	// have to be serialized.
+	//
+	// Leaving it unmapped made the cluster fall through to the count-only
+	// alloc path, consuming one value where the SDK writes two (count, then a
+	// length per object). That single missing read shifted every following
+	// cluster tag, which is why a 3.13.0 snapshot decoded two clusters with
+	// CID 0xFFFFF and then failed in fill.
+	LocalVarDescriptors int
 	ExceptionHandlers          int
 	Context                    int
 	ContextScope               int
@@ -847,6 +884,8 @@ var cidsV3130 = CIDTable{
 	// LinkedHashBaseCid = 96 (new in 3.13.0, shifts everything below +1)
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
 	NativePointerCid: 1, NumPredefinedCids: 176,
+	// New in 3.13.0: see CIDTable.LocalVarDescriptors.
+	LocalVarDescriptors: 27,
 }
 
 var versionProfiles = map[string]*VersionProfile{
@@ -896,7 +935,7 @@ var versionProfiles = map[string]*VersionProfile{
 	// TypeIsTopTypeForSubtyping* renamed. CID table, stub names, THR
 	// offsets, and function kind layout all verified via gh api to
 	// dart-lang/sdk at tag 3.13.0.
-	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, CodeIndexOneBased: true,},
+	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
 }
 
 // DetectVersion returns a VersionProfile for the given snapshot hash.
