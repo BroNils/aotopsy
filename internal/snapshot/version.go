@@ -7,6 +7,7 @@
 package snapshot
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -1192,4 +1193,25 @@ func parseVersionTriple(s string) [3]int {
 		v[i] = n
 	}
 	return v
+}
+
+// String names the tag encoding, for coverage reports and error messages.
+func (t TagStyle) String() string {
+	switch t {
+	case TagStyleCidShift1:
+		return "TagStyleCidShift1"
+	case TagStyleObjectHeader:
+		return "TagStyleObjectHeader"
+	case TagStyleCidInt32:
+		return "TagStyleCidInt32"
+	}
+	return fmt.Sprintf("TagStyle(%d)", int(t))
+}
+
+// ProfileForVersion returns the profile for an exact Dart version string, or
+// nil when there is none. Unlike DetectVersion it takes a version rather than
+// a snapshot hash, and it never invents a placeholder: callers asking "is this
+// version supported" need a straight no.
+func ProfileForVersion(version string) *VersionProfile {
+	return versionProfiles[version]
 }
