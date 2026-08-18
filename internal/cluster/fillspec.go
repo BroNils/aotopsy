@@ -101,7 +101,39 @@ type FillSpec struct {
 	IsFuncType bool // true for FunctionType clusters (extract packed_parameter_counts)
 	IsField    bool // true for Field clusters (extract kind_bits + host_offset)
 	IsFunction bool // true for Function clusters (extract code_index, scalar 0)
-	IsType     bool // true for Type clusters (extract type_class_id, packed into the v3.x "flags" scalar)
+	IsType     bool // true for Type clusters (extract type_class_id)
+	// TypeClassIDIsScalar0 marks the Dart 2.16-2.18 Type layout, where
+	// scalar 0 is the raw type_class_id rather than the packed "flags" word
+	// that 2.19.0+ uses:
+	//
+	//	2.16-2.18  type->untag()->type_class_id_ = d.ReadUnsigned();
+	//	           const uint8_t combined = d.Read<uint8_t>();
+	//	2.19.0+    type->untag()->set_flags(d.ReadUnsigned());
+	//
+	// (TypeDeserializationCluster::ReadFill, verified at 2.16.0, 2.17.6,
+	// 2.18.0, 2.19.0 and 3.1.0.) The stream shape was always read correctly;
+	// what was missing is that IsType stayed false for this era, so nothing
+	// was captured and Result.Types came out empty on every 2.16-2.18
+	// snapshot -- 0 of the 2.17.6 sample's Type objects, against 2506 on a
+	// 3.9.2 build of the same program.
+	TypeClassIDIsScalar0 bool
+
+	// TypeClassIDShift is where type_class_id starts inside the packed
+	// "flags" word on 2.19.0+ (TypeClassIdBits, whose shift is
+	// TypeStateBits::kNextBit). It is NOT constant across versions:
+	//
+	//	2.19.0-3.4.3  NullabilityBits is 2 bits wide -> TypeState at 2..3 -> shift 4
+	//	3.5.0+        NullabilityBit  is 1 bit  wide -> TypeState at 1..2 -> shift 3
+	//
+	// (raw_object.h UntaggedAbstractType, checked at 2.19.0, 3.0.5, 3.1.0,
+	// 3.2.5, 3.3.0, 3.4.3, 3.5.0, 3.6.2, 3.7.0, 3.9.2 and 3.13.0.) The width
+	// is kClassIdTagSize = 20 throughout.
+	//
+	// A hardcoded 3 made every Type on 2.19.0 through 3.4.3 decode to a
+	// class id shifted one bit left: on the 3.1.0 sample only 936 of 2419
+	// landed on a real class, the other 1483 on ids like 3800 that no class
+	// in the snapshot has.
+	TypeClassIDShift uint
 	// FuncTypeParamTypesIdx is the ref-loop index of parameter_types,
 	// propagated from snapshot.VersionProfile.FuncTypeParamTypesIdx.
 	// 0 = not verified for this version, don't extract.
@@ -334,7 +366,7 @@ func specLoadingUnit() FillSpec {
 	}
 }
 
-func specType(fillRefUnsigned, oldTypeScalars, typeClassIdIsRef, typeHasTokenPos bool, numRefs int) FillSpec {
+func specType(fillRefUnsigned, oldTypeScalars, typeClassIdIsRef, typeHasTokenPos bool, numRefs int, classIDShift uint) FillSpec {
 	// v3.x:       ReadFromTo = 3 refs (type_test_stub, hash, arguments). ReadUnsigned(flags).
 	// v2.17-2.19: ReadFromTo = 3 refs. ReadUnsigned(type_class_id) + Read<uint8_t>(combined).
 	// v2.14-2.15: ReadFromTo = 3 refs (type_class_id, arguments, hash). Read<uint8_t>(combined).
@@ -352,7 +384,7 @@ func specType(fillRefUnsigned, oldTypeScalars, typeClassIdIsRef, typeHasTokenPos
 		// v2.13-v2.15: type_class_id is a pointer in ReadFromTo, only combined scalar.
 		scalars = []ScalarOp{OpUint8}
 	} else if oldTypeScalars {
-		// v2.17/v2.18: type_class_id(Unsigned) + combined(uint8)
+		// v2.16-v2.18: type_class_id(Unsigned) + combined(uint8)
 		scalars = []ScalarOp{OpUnsigned, OpUint8}
 	} else {
 		// v3.x: flags(Unsigned) only. type_class_id is NOT a ref here -- it's
@@ -362,13 +394,20 @@ func specType(fillRefUnsigned, oldTypeScalars, typeClassIdIsRef, typeHasTokenPos
 		// (20-bit ClassIdTag). See readFillRefs' IsType handling.
 		scalars = []ScalarOp{OpUnsigned}
 	}
-	isV3Type := !typeClassIdIsRef && !oldTypeScalars
+	// Both the packed (2.19.0+) and the separate-scalar (2.16-2.18) layouts
+	// carry type_class_id in a scalar, so both are capturable. Only the
+	// 2.10-2.15 layout keeps it as a ref, and that one is captured from
+	// allRefs in readFillRefs instead.
+	oldScalarType := oldTypeScalars && !typeClassIdIsRef
+	packedType := !typeClassIdIsRef && !oldTypeScalars
 	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: numRefs,
-		Scalars: scalars,
-		IsType:  isV3Type,
-		NameIdx: -1, OwnerIdx: -1,
+		Kind:                 FillRefs,
+		NumRefs:              numRefs,
+		Scalars:              scalars,
+		IsType:               packedType || oldScalarType,
+		TypeClassIDIsScalar0: oldScalarType,
+		TypeClassIDShift:     classIDShift,
+		NameIdx:              -1, OwnerIdx: -1,
 	}
 }
 
@@ -772,7 +811,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	case cid == ct.LoadingUnit:
 		return specLoadingUnit()
 	case cid == ct.Type:
-		return specType(fillRefUnsigned, profile.OldTypeScalars, profile.TypeClassIdIsRef, profile.TypeHasTokenPos, profile.TypeNumRefs)
+		return specType(fillRefUnsigned, profile.OldTypeScalars, profile.TypeClassIdIsRef, profile.TypeHasTokenPos, profile.TypeNumRefs, typeClassIDShift(profile.DartVersion))
 	case cid == ct.FunctionType:
 		return specFunctionType(profile.FuncTypeNumRefs, profile.FuncTypeOldScalars, profile.FuncTypeParamTypesIdx)
 	case ct.RecordType != 0 && cid == ct.RecordType:
@@ -956,4 +995,13 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	}
 
 	return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+}
+
+// typeClassIDShift returns where type_class_id starts in UntaggedType's packed
+// flags word for a given Dart version. See FillSpec.TypeClassIDShift.
+func typeClassIDShift(dartVersion string) uint {
+	if dartVersionAtLeast(dartVersion, "3.5.0") {
+		return 3
+	}
+	return 4
 }

@@ -188,7 +188,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					fields = append(fields, *fi)
 				}
 			case spec.IsType:
-				ti, err := readTypeScalar(s, si, ref, i, count, op)
+				ti, err := readTypeScalar(s, si, ref, i, count, op, spec.TypeClassIDIsScalar0, spec.TypeClassIDShift)
 				if err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}

@@ -165,20 +165,29 @@ func readFieldScalar(s *dartfmt.Stream, si int, ref int, nameRef, ownerRef, sigR
 	return nil, nil
 }
 
-// readTypeScalar reads one scalar for a Type cluster (v3.x).
+// readTypeScalar reads one scalar for a Type cluster.
 // si is the scalar index. Returns the TypeInfo if this scalar
 // completes the object (si == 0), or nil otherwise.
-func readTypeScalar(s *dartfmt.Stream, si int, ref int, i, count int, op ScalarOp) (*TypeInfo, error) {
+func readTypeScalar(s *dartfmt.Stream, si int, ref int, i, count int, op ScalarOp, classIDIsScalar0 bool, classIDShift uint) (*TypeInfo, error) {
 	if si == 0 {
-		// flags is OpUnsigned at scalar index 0 (v3.x only).
-		// type_class_id is packed inside: bit 0 = nullability,
-		// bits [1,3) = TypeState, bits [3,23) = 20-bit ClassIdTag.
-		flags, err := s.ReadUnsigned()
+		v, err := s.ReadUnsigned()
 		if err != nil {
-			return nil, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
+			return nil, fmt.Errorf("obj %d/%d type scalar0: %w", i, count, err)
 		}
-		classID := int32((flags >> 3) & 0xFFFFF)
-		return &TypeInfo{RefID: ref, ClassID: classID}, nil
+		if classIDIsScalar0 {
+			// 2.16-2.18: the scalar IS type_class_id.
+			//   type->untag()->type_class_id_ = d.ReadUnsigned();
+			return &TypeInfo{RefID: ref, ClassID: int32(v)}, nil
+		}
+		// 2.19.0+: the scalar is the packed flags word.
+		//   type->untag()->set_flags(d.ReadUnsigned());
+		// type_class_id sits at TypeClassIdBits, whose shift moved when
+		// nullability shrank from two bits to one -- see
+		// FillSpec.TypeClassIDShift. The width is kClassIdTagSize = 20.
+		if classIDShift == 0 {
+			classIDShift = 3
+		}
+		return &TypeInfo{RefID: ref, ClassID: int32((v >> classIDShift) & 0xFFFFF)}, nil
 	}
 	// Fallback: skip this scalar to keep stream aligned.
 	if err := skipScalar(s, op); err != nil {

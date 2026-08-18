@@ -72,6 +72,21 @@ type Sample struct {
 	// Note records where the binary came from, for whoever has to
 	// reconstruct the corpus on a new machine.
 	Note string
+
+	// SourceSet names the Dart PROGRAM this binary was compiled from.
+	// Samples sharing a non-empty SourceSet were built from byte-identical
+	// lib/*.dart by different SDKs, so any difference in what the analyser
+	// recovers from them is a version-specific defect rather than a property
+	// of the app.
+	//
+	// That control is what no other gate in this project provides. The golden
+	// records compare a version against its own previous output, so a version
+	// that has been broken since the day it was added stays green forever --
+	// which is exactly what happened to the nine versions whose dispatch table
+	// could not be parsed at all. symtabdiff needs a .symtab, which release
+	// builds do not have. Comparing a version against its SIBLINGS is the only
+	// arrangement that can say "this one recovers sixty times less".
+	SourceSet string
 }
 
 // FileName is the name this sample must have under samples/.
@@ -82,6 +97,11 @@ func (s Sample) FileName() string {
 	return fmt.Sprintf("dart-%s-%s.so", s.DartVersion, s.Arch)
 }
 
+// comparesample is the source set every deliberately-built sample uses: the
+// lib/*.dart of ~/dev/compare_sample, copied verbatim into each new project so
+// the only variable between those binaries is the Dart SDK that compiled them.
+const comparesample = "compare_sample"
+
 // Registry is every sample the test suite knows about, present or not.
 //
 // An entry whose file is absent is a documented hole, not an oversight:
@@ -90,15 +110,34 @@ func (s Sample) FileName() string {
 // sample was quietly replaced by whatever binary shared its name.
 var Registry = []Sample{
 	{DartVersion: "2.12.0", Arch: "arm64", Note: "dart212_sample, Flutter 2.x toy app"},
-	{DartVersion: "2.17.6", Arch: "arm64", Note: "sample_dart_2.17.6, built with Flutter 3.0.5 to cover TagStyleCidShift1"},
-	{DartVersion: "3.1.0", Arch: "arm64", Note: "sample_dart_3.1.0, built with Flutter 3.13.0 (NOT 3.1.0 -- that ships Dart 2.x)"},
+	{DartVersion: "2.17.6", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.17.6, built with Flutter 3.0.5 to cover TagStyleCidShift1"},
+	{DartVersion: "3.1.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.1.0, built with Flutter 3.13.0 (NOT 3.1.0 -- that ships Dart 2.x)"},
 	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1 (directory name is the APP version, not Dart's)"},
-	{DartVersion: "3.9.2", Arch: "arm64", Note: "compare_sample, the reference toy app"},
+	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "compare_sample, the reference toy app"},
 	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_310"},
 	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_311"},
 	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},
 	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64"},
 	{DartVersion: "3.13.0", Arch: "arm64", Note: "sample_313, built for the unified-snapshot work"},
+}
+
+// SourceSets groups the registry by SourceSet, dropping samples that belong to
+// none and sets with fewer than two members -- a set of one has nothing to be
+// differential against.
+func SourceSets() map[string][]Sample {
+	bySet := map[string][]Sample{}
+	for _, s := range Registry {
+		if s.SourceSet == "" {
+			continue
+		}
+		bySet[s.SourceSet] = append(bySet[s.SourceSet], s)
+	}
+	for name, members := range bySet {
+		if len(members) < 2 {
+			delete(bySet, name)
+		}
+	}
+	return bySet
 }
 
 // Get returns the registry entry for a version/arch pair.
