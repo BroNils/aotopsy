@@ -650,10 +650,11 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 				bd.Unresolved++
 			}
 		} else {
-			// Item 14: Directed symbolic execution fallback.
-			// For unresolved BLR edges, try resolving via the pool
-			// display string in the Via annotation. This catches
-			// pool-loaded Code objects that the type tracker missed.
+			// For unresolved BLR edges, resolve via the pool display
+			// string in the Via annotation. This catches pool-loaded Code
+			// objects that the type tracker missed -- overwhelmingly the
+			// x86_64 type-testing and inline-cache stubs; see
+			// resolveViaPoolDisplay for the measurement.
 			if resolved := resolveViaPoolDisplay(e.Via); resolved != "" {
 				e.Target = resolved
 				bd.Stub++
@@ -702,26 +703,41 @@ func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
 	return uint64(int64(pc) + int64(imm26)*4), true
 }
 
-// resolveViaPoolDisplay attempts to resolve an unresolved BLR edge
-// via the pool display string in the Via annotation.
-// Item 14: Directed symbolic execution fallback.
+// resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display
+// string in its Via annotation.
 //
-// Via annotations for pool-loaded Code objects look like:
+// Via annotations for pool-loaded objects look like:
 //
-//	"PP[123] foo" or "pp[123] foo"
+//	"PP[123] foo"   (ARM64, annotate.go)
+//	"pp[123] foo"   (x86_64, x86.go / dataflow_x86.go)
 //
-// The pool display string after the PP index is the function name.
+// and the register provenance behind them is a real forward dataflow over the
+// function's CFG (ExtractCallEdgesCFG), so the named slot is the value that
+// actually reaches the BLR -- not something found by scanning nearby.
+//
+// Measured across the four corpus samples. It fires on x86_64 and essentially
+// nowhere else: 641 pp[ sites on sample312_x64, of which 503 resolve to 49
+// distinct targets, against 0 on compare_sample_arm64 and sample313_arm64 and
+// 1 on dart212_arm64. That asymmetry is expected -- ARM64 reaches these stubs
+// through THR-cached entry points, which the branch above handles. Every one
+// of the 49 is a genuine BLR target: type-testing stubs, inline-cache stubs
+// and shared-slow-path allocation stubs.
+//
+// The guards below matter because the display string alone does not say what
+// KIND of object the slot holds. ResolvePoolDisplay renders a String entry
+// with %q and an unnamed object as "<CidName>", so both are rejected outright:
+// nothing can be called through a String, and a placeholder names no target.
+// This is the same failure that made the deleted symbolic_blr.go report
+// "Subtype6TestCache" as a call target -- worth guarding against even though
+// the current corpus produces no such case.
 func resolveViaPoolDisplay(via string) string {
-	// Check for PP[NNN] pattern — pool-loaded Code object.
 	if via == "" {
 		return ""
 	}
 	// Look for "PP[" or "pp[" prefix.
-	viaLower := strings.ToLower(via)
-	if !strings.HasPrefix(viaLower, "pp[") {
+	if !strings.HasPrefix(strings.ToLower(via), "pp[") {
 		return ""
 	}
-	// Extract the display string after the bracket.
 	closeBracket := strings.IndexByte(via, ']')
 	if closeBracket < 0 {
 		return ""
@@ -730,9 +746,13 @@ func resolveViaPoolDisplay(via string) string {
 	if rest == "" {
 		return ""
 	}
-	// The rest is the pool display string — a function name.
-	// Skip placeholder values like "<vm:NNN>" or "<ref:NNN>".
+	// "<vm:NNN>", "<Instance_42>", "<String>": a placeholder, not a name.
 	if strings.HasPrefix(rest, "<") {
+		return ""
+	}
+	// A quoted display is a String constant (ResolvePoolDisplay uses %q for
+	// entries whose CID is a string class). Code cannot live there.
+	if strings.HasPrefix(rest, `"`) {
 		return ""
 	}
 	return rest
