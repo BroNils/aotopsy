@@ -90,8 +90,8 @@ func (s Sample) FileName() string {
 // sample was quietly replaced by whatever binary shared its name.
 var Registry = []Sample{
 	{DartVersion: "2.12.0", Arch: "arm64", Note: "dart212_sample, Flutter 2.x toy app"},
-	{DartVersion: "2.17.6", Arch: "arm64", Note: "MISSING -- needs a build; see TestCorpusCoverage"},
-	{DartVersion: "3.1.0", Arch: "arm64", Note: "MISSING -- needs a build; see TestCorpusCoverage"},
+	{DartVersion: "2.17.6", Arch: "arm64", Note: "sample_dart_2.17.6, built with Flutter 3.0.5 to cover TagStyleCidShift1"},
+	{DartVersion: "3.1.0", Arch: "arm64", Note: "sample_dart_3.1.0, built with Flutter 3.13.0 (NOT 3.1.0 -- that ships Dart 2.x)"},
 	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1 (directory name is the APP version, not Dart's)"},
 	{DartVersion: "3.9.2", Arch: "arm64", Note: "compare_sample, the reference toy app"},
 	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_310"},
