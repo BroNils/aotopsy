@@ -60,6 +60,93 @@ func (s *LiftState) Clone() *LiftState {
 	return c
 }
 
+// MergeJoin merges two branch states (taken and fallthrough) into a
+// single state for use after the if/else join point. This is the
+// dataflow join that was missing — the old code restored the
+// pre-branch state, losing every register write inside either branch.
+//
+// Merge rules:
+//   - Register present in both with the same value: keep it.
+//   - Register present in both with different values: keep the
+//     pre-branch value (conservative). A text-based emitter cannot
+//     emit phi nodes inside branches because it doesn't know the
+//     phi assignments until after both branches complete. Creating
+//     an undeclared temp (tN) would produce undefined-variable
+//     references in the output. The conservative merge is strictly
+//     better than the old behavior (restore pre-branch for ALL
+//     registers) because it still keeps branch-specific values for
+//     registers that only one branch wrote.
+//   - Register present in only one branch: keep that branch's value
+//     (the other branch didn't write it, so the pre-branch value
+//     would be stale anyway).
+//   - Register present in neither: keep the pre-branch value.
+func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
+	merged := &LiftState{
+		Regs:    make(map[string]string, len(s.Regs)),
+		Locals:  s.Locals, // Locals is shared by reference (frame-global)
+		LastCmp: s.LastCmp,
+		HasCmp:  s.HasCmp,
+		Pool:    s.Pool,
+	}
+	// Start with pre-branch state as the base.
+	for k, v := range s.Regs {
+		merged.Regs[k] = v
+	}
+	// Collect all register names from all three states.
+	allRegs := make(map[string]bool)
+	for k := range s.Regs {
+		allRegs[k] = true
+	}
+	for k := range taken.Regs {
+		allRegs[k] = true
+	}
+	for k := range fall.Regs {
+		allRegs[k] = true
+	}
+	for reg := range allRegs {
+		preVal, preExists := s.Regs[reg]
+		takenVal, takenExists := taken.Regs[reg]
+		fallVal, fallExists := fall.Regs[reg]
+
+		switch {
+		case takenExists && fallExists && takenVal == fallVal:
+			// Same value in both branches — keep it.
+			merged.Regs[reg] = takenVal
+		case takenExists && fallExists && takenVal != fallVal:
+			// Different values — keep pre-branch value (conservative).
+			// Cannot create phi temp in a text-based emitter without
+			// producing undefined-variable references.
+			if preExists {
+				merged.Regs[reg] = preVal
+			} else {
+				// No pre-branch value; pick taken (arbitrary but stable).
+				merged.Regs[reg] = takenVal
+			}
+		case takenExists && !fallExists:
+			// Only taken branch wrote it.
+			if takenVal != preVal || !preExists {
+				merged.Regs[reg] = takenVal
+			}
+		case !takenExists && fallExists:
+			// Only fall branch wrote it.
+			if fallVal != preVal || !preExists {
+				merged.Regs[reg] = fallVal
+			}
+		case !takenExists && !fallExists && preExists:
+			// Neither branch wrote it — keep pre-branch value.
+			merged.Regs[reg] = preVal
+		}
+	}
+	// LastCmp: if both branches agree, keep it; otherwise clear.
+	if taken.HasCmp && fall.HasCmp && taken.LastCmp == fall.LastCmp {
+		merged.LastCmp = taken.LastCmp
+		merged.HasCmp = true
+	} else {
+		merged.HasCmp = false
+	}
+	return merged
+}
+
 // operand is a parsed instruction operand: either a bare register/
 // immediate token, or a "[base+disp]" memory reference.
 type operand struct {
@@ -504,6 +591,14 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 	mnemonic, ops := splitOperands(ins.Src)
 	mnemonic = normalizeMnemonic(mnemonic)
 
+	// Try arch-specific handlers first (mnemonics are arch-disjoint).
+	if line, hasLine, handled := applyOtherARM64(fir, s, mnemonic, ops); handled {
+		return line, hasLine
+	}
+	if line, hasLine, handled := applyOtherX86(fir, s, mnemonic, ops); handled {
+		return line, hasLine
+	}
+
 	switch mnemonic {
 	case "mov", "movz", "lea":
 		if len(ops) >= 2 {
@@ -532,25 +627,6 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				}
 			}
 			s.Regs[dst] = operandExpr(fir, s, ops[1])
-		}
-	case "movk":
-		// MOVK (ARM64 move-keep) inserts a 16-bit immediate at a shifted
-		// position while preserving other bits. Unlike mov/movz which
-		// overwrite the full register, movk merges with the existing value.
-		// Format: movk dst, #imm, lsl #shift
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			imm := operandExpr(fir, s, ops[1])
-			shift := "0"
-			if len(ops) >= 3 {
-				// ops[2] is like "lsl #16" — extract the shift amount.
-				shiftSpec := strings.TrimSpace(ops[2])
-				if idx := strings.Index(shiftSpec, "#"); idx >= 0 {
-					shift = strings.TrimSpace(shiftSpec[idx+1:])
-				}
-			}
-			old := s.lookupReg(dst)
-			s.Regs[dst] = fmt.Sprintf("(%s | (%s << %s))", old, imm, shift)
 		}
 	case "add", "sub":
 		if len(ops) >= 3 {
@@ -627,32 +703,6 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			s.Regs[dst] = fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx]))
 		}
-	case "ubfx":
-		if len(ops) >= 4 {
-			dst := strings.ToLower(ops[0])
-			src := operandExpr(fir, s, ops[1])
-			expr := fmt.Sprintf("bitField(%s, %s, %s)", src, cleanImmPrefix(ops[2]), cleanImmPrefix(ops[3]))
-			// The well-known Dart object class-id bitfield idiom
-			// (lsb=0xc, width=0x14 on ARM64) renders directly as
-			// classId(...) instead of the generic bitField(...) form.
-			if strings.TrimPrefix(ops[2], "#") == "0xc" && strings.TrimPrefix(ops[3], "#") == "0x14" {
-				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
-			}
-			s.Regs[dst] = expr
-		}
-	case "ldr", "ldur":
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			if fir.ThreadStubOffsets != nil {
-				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
-					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.Regs[dst] = thrStubSentinelPrefix + name
-						return "", false
-					}
-				}
-			}
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
-		}
 	// The three flag-setting compares. dart-lang/sdk's
 	// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
 	// in terms of the operation whose flags it takes:
@@ -668,14 +718,6 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		if len(ops) >= 2 {
 			rhs, ok := shiftedOperand(fir, s, ops, 1)
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), rhs}
-			s.HasCmp = ok
-		}
-	case "cmn":
-		// Flags come from rn + o, so equality means rn == -o. Sharing the
-		// cmp path, as this used to, reported the wrong sign.
-		if len(ops) >= 2 {
-			rhs, ok := shiftedOperand(fir, s, ops, 1)
-			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), negateExpr(rhs)}
 			s.HasCmp = ok
 		}
 	case "test", "tst":
@@ -703,10 +745,6 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			s.HasCmp = ok
 		}
-	case "str", "stur":
-		if len(ops) >= 2 {
-			return applyStore(fir, s, ops[1], ops[0])
-		}
 	// P3-feasible-1: Unary operations — common in Dart AOT compiled code.
 	case "mvn", "not":
 		// mvn (ARM64) / not (x86_64): bitwise NOT
@@ -719,82 +757,6 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
 			s.Regs[dst] = fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1]))
-		}
-	// P3-feasible-1: Zero/sign-extend moves (x86_64)
-	case "movzx":
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
-		}
-	case "movsxd":
-		// movsxd sign-extends a 32-bit value to 64-bit — needs a cast
-		// to preserve sign-extension semantics in the pseudocode.
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(int64)(%s)", operandExpr(fir, s, ops[1]))
-		}
-	case "movsx":
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(int)(%s)", operandExpr(fir, s, ops[1]))
-		}
-	// P3-feasible-1: Address generation (ARM64)
-	case "adr", "adrp":
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
-		}
-	// P3-feasible-1: Load/store pair (ARM64) — ldp/stp load/store two registers.
-	// We model them as two separate assignments.
-	case "ldp":
-		if len(ops) >= 3 {
-			dst1 := strings.ToLower(ops[0])
-			s.Regs[dst1] = operandExpr(fir, s, ops[2])
-			// Second register gets the next memory location (base+8).
-			// Build a new memory operand with disp+8 and resolve it
-			// through operandExpr so frame-relative loads produce the
-			// correct local name (e.g. local_24 instead of *(local_16 + 8)).
-			dst2 := strings.ToLower(ops[1])
-			if op := parseOperand(ops[2]); op.isMem {
-				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
-				s.Regs[dst2] = operandExpr(fir, s, memPlus8)
-			} else {
-				s.Regs[dst2] = fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2]))
-			}
-		}
-	case "stp":
-		if len(ops) >= 3 {
-			// Store pair: stp src1, src2, [mem] — emit as two stores.
-			// M-1 (oracle-audit): previously only stored ops[0], silently
-			// dropped ops[1]. Now store both: src1 to [mem], src2 to [mem+8].
-			line1, handled := applyStore(fir, s, ops[2], ops[0])
-			// Second store: src2 to [mem+8]. Reuse parseOperand to extract
-			// the base register and displacement from ops[2], then add 8.
-			// Process the second store regardless of whether the first was
-			// handled (the first may be a THR store that returns "", false,
-			// but the second store to [mem+8] must still be emitted).
-			op := parseOperand(ops[2])
-			if op.isMem {
-				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
-				line2, _ := applyStore(fir, s, memPlus8, ops[1])
-				if line2 != "" {
-					if line1 != "" {
-						return line1 + "\n" + line2, true
-					}
-					return line2, true
-				}
-			}
-			return line1, handled
-		}
-	// P3-feasible-1: Stack operations (x86_64) — push/pop are mov + sp adjust.
-	case "push":
-		if len(ops) >= 1 {
-			return fmt.Sprintf("push(%s);", operandExpr(fir, s, ops[0])), true
-		}
-	case "pop":
-		if len(ops) >= 1 {
-			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = "/* pop */"
 		}
 	}
 	return "", false

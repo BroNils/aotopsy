@@ -106,7 +106,7 @@ func TestLocalTypeInference(t *testing.T) {
   final t3 = true;
   return t1;
 }`
-	result := localTypeInference(source, []string{"int"})
+	result := localTypeInference(source, []string{"int"}, nil)
 	if !strings.Contains(result, "local types") {
 		t.Error("local type inference should emit annotation")
 	}

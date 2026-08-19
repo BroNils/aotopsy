@@ -8,8 +8,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/elfx"
-	"aotopsy/internal/snapshot"
+	"aotopsy/internal/pipeline"
 )
 
 type poolRecord struct {
@@ -39,70 +38,23 @@ func cmdObjects(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, err := elfx.Open(*libapp)
+	sc, err := pipeline.LoadSnapshot(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
-	defer func() { _ = ef.Close() }()
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
+	info := sc.Info
+	result := sc.Result
+	poolDisplay := sc.PoolDisplay
 
 	if info.Version != nil && info.Version.DartVersion != "" {
 		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
 	}
-	if info.Version != nil && !info.Version.Supported {
-		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
+	if sc.VMResult != nil {
+		fmt.Fprintf(os.Stderr, "vm snapshot: %d clusters, %d strings, %d named\n",
+			len(sc.VMResult.Clusters), len(sc.VMResult.Strings), len(sc.VMResult.Named))
 	}
-
-	// Parse isolate snapshot.
-	data := info.IsolateData.Data
-	if len(data) < 64 {
-		return fmt.Errorf("isolate data too short (%d bytes)", len(data))
-	}
-
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-
-	if os.Getenv("DEFLUTTER_DEBUG_FILL") != "" {
-		if err := cluster.DebugFillPositions(data, result, info.Version, false, os.Stderr); err != nil {
-			return fmt.Errorf("fill debug: %w", err)
-		}
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
-
-	// Parse VM snapshot for base object resolution (strings, names, CIDs).
-	var vmResult *cluster.Result
-	vmData := info.VmData.Data
-	if len(vmData) >= 64 && info.VmHeader != nil {
-		vmStart, err := cluster.FindClusterDataStart(vmData)
-		if err == nil {
-			vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts)
-			if err == nil {
-				// ReadFill handles strings (FillString/FillROData) and named objects.
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-				fmt.Fprintf(os.Stderr, "vm snapshot: %d clusters, %d strings, %d named\n",
-					len(vmRes.Clusters), len(vmRes.Strings), len(vmRes.Named))
-			}
-		}
-	}
-
-	// Resolve pool entries.
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
-
 	fmt.Fprintf(os.Stderr, "pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
 
 	// Output.

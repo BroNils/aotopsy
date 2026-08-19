@@ -52,7 +52,16 @@ import (
 // for the stub that tests it. Returns nil when the Dart version cannot
 // resolve a Type to its class, in which case callers simply find nothing.
 func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, typeClassIDIsRef bool) map[int]string {
-	if typeClassIDIsRef || len(result.Types) == 0 {
+	// typeClassIdIsRef (Dart 2.10-2.15): Type.type_class_id is a Smi ref,
+	// not a scalar packed into the "flags" word. resolveTypeClassIDs
+	// (called in BuildTypeContext) fills ClassID from MintValues, but on
+	// a real 2.12.0 sample ALL 251 type-owned Codes resolved to the SAME
+	// class ("TypeParameters") — 251 confident wrong labels is worse than
+	// 251 honest sub_ placeholders, so naming stays OFF for these versions.
+	if typeClassIDIsRef {
+		return nil
+	}
+	if len(result.Types) == 0 {
 		return nil
 	}
 	classNames := make(map[int32]string)

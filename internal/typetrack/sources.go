@@ -1,7 +1,7 @@
 package typetrack
 
 import (
-	"sort"
+	"slices"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/snapshot"
@@ -63,6 +63,52 @@ type TypeContext struct {
 	// Used to initialize X0 = KnownClass(ownerClassID) for instance methods.
 	FuncOwnerClass map[string]int
 
+	// FuncReceiverStackSlot maps a function name to the FP-relative byte offset
+	// its receiver arrives at, for the Dart versions that pass arguments on the
+	// stack rather than in registers.
+	//
+	// Before Dart 3.4.3 there is no DartCallingConvention: arguments, receiver
+	// included, come in on the caller's stack. The prologue then loads them into
+	// registers, so seeding the receiver REGISTER at entry buys nothing -- the
+	// very next `ldr x0, [x29, #N]` overwrites it with Top, and every field load
+	// off that receiver is then untyped. Measured on identical Dart source: the
+	// base register at a field load was KnownClass 1.5% of the time on 2.17.6
+	// and 44% on 3.4.3, and FieldValueClass was called 9860 times against
+	// 307594.
+	//
+	// Empty on 3.4.3 and later, where kCpuRegistersForArgs exists and the
+	// receiver really is in R0.
+	FuncReceiverStackSlot map[string]int
+
+	// ClassIDIsHalfWord marks the Dart versions whose Assembler::LoadClassId
+	// reads the class id as a 16-bit field:
+	//
+	//	<= 2.18.0  movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
+	//	>= 2.19.0  movl(result, FieldAddress(object, tags_offset)); shrl(12)
+	//
+	// (assembler_x64.cc at 2.17.6, 2.18.0 and 2.19.0 -- kClassIdTagPos and
+	// kClassIdTagSize went from 16/16 to 12/20.) The x86 handler must only
+	// treat a half-word load at displacement +1 as a class id where the
+	// compiler actually emits one; on later versions such a load is an
+	// ordinary 16-bit field read and calling it a class id would invent type
+	// information.
+	ClassIDIsHalfWord bool
+
+	// FuncReturnType maps function NamedObject refID → return type ClassID.
+	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
+	// Used to seed CalleeExitTypes for BL return value propagation:
+	// if a function's declared return type is KnownClass, X0 after BL
+	// to that function is set to KnownClass, enabling type chains
+	// across function calls (e.g., getList() returns List → .first
+	// loads List element type).
+	FuncReturnType map[int]int
+
+	// RefToType maps Type ref ID → TypeInfo, including both isolate
+	// and VM snapshot Types. Built once in BuildTypeContext and shared
+	// across buildFieldTypes, buildPoolClassByIndex, and
+	// buildFuncParamTypes — previously each rebuilt the same map.
+	RefToType map[int]*cluster.TypeInfo
+
 	// KOriginElement is the dispatch table origin element offset.
 	// The Dart runtime allocates the dispatch table with KOriginElement
 	// padding entries at the beginning, so entries[0] corresponds to
@@ -111,6 +157,12 @@ type TypeContext struct {
 
 	// PoolCodeNames maps PP index to function name for Code objects.
 	PoolCodeNames map[int]string
+
+	// TypeTestingStubNames maps PP index to the type testing stub name
+	// for the Type in that pool slot. Used to resolve BLR calls through
+	// AbstractType::type_test_stub_entry_point_ (offset 7 from tagged
+	// pointer on non-compressed builds).
+	TypeTestingStubNames map[int]string
 
 	// InstanceFieldTypes is the observed (class, byte offset) -> value class
 	// map recovered from const Instance objects serialized in the snapshot:
@@ -183,18 +235,51 @@ type TypeContext struct {
 	// that might override a method, then collect their dispatch targets.
 	Subclasses map[int][]int
 
+	// SelectorCache caches selectorCandidates results per selector immediate.
+	// Keyed by selector imm, value is the sorted unique function name list.
+	// Built lazily on first call to selectorCandidates for each imm, then
+	// reused across all BLR sites with the same selector and across all
+	// inter-procedural iterations. This avoids re-scanning the entire
+	// DispatchBySlot map (potentially hundreds of thousands of entries)
+	// for every BLR site.
+	//
+	// The cache is invalidated and rebuilt when InstantiatedClasses changes
+	// significantly (new allocation sites discovered). In practice the RTA
+	// set converges after 2-3 iterations, so the cache stabilizes.
+	SelectorCache map[int][]string
+
+	// SelectorMonomorphic maps selector imm → single function name, for
+	// selectors where exactly one unique implementation exists across all
+	// instantiated classes. These are the CHA win: regardless of receiver
+	// class, the call target is known. Built at the same time as
+	// SelectorCache.
+	SelectorMonomorphic map[int]string
+
 	// Debug counters.
 	// InstanceFieldHits counts field loads typed from observed const-instance
 	// data that the declared field type could not resolve.
 	InstanceFieldHits int
-	PPHits            int
-	HeaderHits        int
-	UBFXHits          int
-	ADDClassHits      int
-	DispatchHits      int
+
+	// PPHits counts object-pool loads that RESOLVED to something: a
+	// KnownClass, or a KnownStub for a Code / type-testing-stub / unlinked-call
+	// / closure entry. PPLoads counts every pool load the transfer function
+	// saw, resolved or not, so PPHits/PPLoads is a rate rather than a bare
+	// count.
+	//
+	// These two were briefly one number. handlePPLoad incremented PPHits on
+	// every pool load on ARM64 while x86_64 kept incrementing it only on a
+	// successful resolution, so typetrack_report.json's "pool_hits" meant
+	// attempts on one architecture and resolutions on the other, under the
+	// same key.
+	PPHits       int
+	PPLoads      int
+	HeaderHits   int
+	UBFXHits     int
+	ADDClassHits int
+	DispatchHits int
 	// NarrowHits counts flow-sensitive narrowings actually applied: a
 	// `CMP class_id, #N` whose equality edge turned the compared register
-	// into KnownClass(N). ARM64 only; x86 has no narrowing.
+	// into KnownClass(N). Both ARM64 and x86_64 implement narrowing.
 	NarrowHits int
 	// NarrowShape / NarrowNoType diagnose why narrowing does or does not
 	// fire: how many block edges had the right shape (a CMP against an
@@ -223,6 +308,52 @@ type TypeContext struct {
 	X86DispatchClassTop    int
 	X86DispatchClassBottom int
 	X86DispatchClassOther  int
+	// Debug: BL return value propagation stats.
+	BLTotal       int
+	BLHasExitType int
+	BLExitKnown   int
+	BLExitBottom  int
+	// BLR lattice state distribution at the BLR point. Counts which
+	// lattice kind the BLR register has when resolveBLR is called,
+	// diagnosing why monomorphic rate is what it is.
+	BLRAtKnownDispatch    int // direct slot lookup possible
+	BLRAtKnownDispatchSel int // SelectorOnly — selector scan
+	BLRAtKnownClass       int // scan 128 slots for this class
+	BLRAtStub             int // KnownStub
+	BLRAtTop              int // no info at all
+	BLRAtBottom           int // conflicting info
+	BLRAtOther            int // anything else
+	// Field type source breakdown: which of the 3 sources in
+	// FieldValueClass actually produced a hit. Diagnoses whether
+	// the bottleneck is declared types, instance types, or store types.
+	FieldTypeDeclaredHits int // FieldByOwnerOffset + FieldTypes
+	FieldTypeInstanceHits int // InstanceFieldTypes (already counted in InstanceFieldHits)
+	FieldTypeStoreHits    int // FieldStoreTypes
+	// Field type map sizes: how many classes have entries in each map.
+	FieldTypeDeclaredClasses int // len(FieldByOwnerOffset)
+	FieldTypeStoreClasses    int // len(FieldStoreTypes)
+	// Diagnostic: how many fields had their declared type resolved
+	// to a ClassID in buildFieldTypes. If this is 0, the declared
+	// field type source is completely dead.
+	FieldTypesResolvedCount int `json:"-"`
+	// CHA diagnostics: how many unique selector imms were found to
+	// be monomorphic (1 unique implementation across all instantiated
+	// classes). These are the CHA wins — selectors that resolve to
+	// a single target regardless of receiver class.
+	SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
+	// FuncReturnType diagnostics.
+	FuncReturnTypeCount int `json:"func_return_type_count,omitempty"`
+	FuncReturnTypeSeeds int `json:"func_return_type_seeds,omitempty"`
+
+	// MintValues maps ref IDs to Smi/Mint integer values, used to
+	// convert Field.HostOffset (a ref ID) to the actual word offset.
+	// Set from clResult.MintValues in BuildTypeContext.
+	MintValues map[int]int64 `json:"-"`
+
+	// WordSize is the pointer size in bytes (4 for compressed pointers,
+	// 8 for non-compressed). Used to convert word offsets to byte offsets
+	// for FieldByOwnerOffset keys.
+	WordSize int32 `json:"-"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -246,7 +377,7 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 	for refID := range pl.RefToNamed {
 		refIDs = append(refIDs, refID)
 	}
-	sort.Ints(refIDs)
+	slices.Sort(refIDs)
 	for _, refID := range refIDs {
 		no := pl.RefToNamed[refID]
 		if no == nil || no.CID != pl.CT.Function {
@@ -274,14 +405,23 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 // PoolLookupData is the subset of pipeline.PoolLookups needed by typetrack.
 // Passed as a struct to avoid importing the pipeline package (import cycle).
 type PoolLookupData struct {
-	RefToStr      map[int]string               // ref ID → string value
-	RefToNamed    map[int]*cluster.NamedObject // ref ID → NamedObject
-	RefCID        map[int]int                  // ref ID → CID (class ID of the object)
-	CT            *snapshot.CIDTable           // CID table (for Class/Function CID checks)
-	CodeRefToName map[int]string               // code ref ID → function name
-	VmRefToStr    map[int]string               // VM snapshot strings by ref ID
-	VmRefToNamed  map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
-	PoolCodeNames map[int]string               // PP index → function name for Code objects
+	RefToStr             map[int]string               // ref ID → string value
+	RefToNamed           map[int]*cluster.NamedObject // ref ID → NamedObject
+	RefCID               map[int]int                  // ref ID → CID (class ID of the object)
+	CT                   *snapshot.CIDTable           // CID table (for Class/Function CID checks)
+	CodeRefToName        map[int]string               // code ref ID → function name
+	VmRefToStr           map[int]string               // VM snapshot strings by ref ID
+	VmRefToNamed         map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
+	VmRefCID             map[int]int                  // VM snapshot CID by ref ID
+	PoolCodeNames        map[int]string               // PP index → function name for Code objects
+	TypeTestingStubNames map[int]string               // Type ref ID → type testing stub name
+	// VmFields and VmTypes give access to the VM snapshot's Field and
+	// Type objects, enabling declared field type resolution for framework
+	// classes (String, List, Map, etc.) whose Fields live in the VM
+	// snapshot, not the isolate snapshot.
+	VmFields  []cluster.FieldInfo
+	VmTypes   []cluster.TypeInfo
+	VmClasses []cluster.ClassInfo
 }
 
 // BuildTypeContext constructs a TypeContext from the cluster fill result,
@@ -314,440 +454,83 @@ func BuildTypeContext(
 		CodeRefToName:           make(map[int]string),
 		DispatchCodeIndexToName: make(map[int]string),
 		ClassIDToName:           make(map[int]string),
+		MintValues:              clResult.MintValues,
+		WordSize:                8,
 		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
+		FuncReceiverStackSlot:   make(map[string]int),
+		FuncReturnType:          make(map[int]int),
+		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),
 		KOriginElement:          kOriginElement,
 		THRFields:               thrFields,
 		AllocStubOffsets:        allocStubOffsets,
-		CalleeExitTypes:         make(map[uint64]TypeLattice),     // Fase 7 PART A
-		CalleeAllExitTypes:      make(map[uint64][31]TypeLattice), // Full exit types
-		// M-14 fix: nil check for pl.CT
-		MinAppClassID:        minAppClassIDSafe(pl.CT),
-		MethodNameToRefIDs:   buildMethodNameToRefIDs(pl),
-		InstanceFieldTypes:   make(map[int]map[int32]int),
-		FieldStoreTypes:      make(map[int]map[int32]int),
-		AllocationSites:      make(map[uint64]int),
-		InstantiatedClasses:  make(map[int]bool),
-		ClosureDataByClosure: make(map[int]int),
-		ClosureDataByParent:  make(map[int][]int),
-		PoolClosureClass:     make(map[int]int),
-		PoolCodeNames:        make(map[int]string),
-		SelectorOffsets:      make(map[uint64]int),
-		Subclasses:           make(map[int][]int),
+		CalleeExitTypes:         make(map[uint64]TypeLattice),
+		CalleeAllExitTypes:      make(map[uint64][31]TypeLattice),
+		MinAppClassID:           minAppClassIDSafe(pl.CT),
+		MethodNameToRefIDs:      buildMethodNameToRefIDs(pl),
+		InstanceFieldTypes:      make(map[int]map[int32]int),
+		FieldStoreTypes:         make(map[int]map[int32]int),
+		AllocationSites:         make(map[uint64]int),
+		InstantiatedClasses:     make(map[int]bool),
+		ClosureDataByClosure:    make(map[int]int),
+		ClosureDataByParent:     make(map[int][]int),
+		PoolClosureClass:        make(map[int]int),
+		PoolCodeNames:           make(map[int]string),
+		TypeTestingStubNames:    pl.TypeTestingStubNames,
+		SelectorOffsets:         make(map[uint64]int),
+		Subclasses:              make(map[int][]int),
+		SelectorCache:           make(map[int][]string),
+		SelectorMonomorphic:     make(map[int]string),
+	}
+
+	// Adjust word size for compressed pointers.
+	if profile != nil && profile.CompressedPointers {
+		ctx.WordSize = 4
 	}
 
 	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
-	//
-	// On 2.10-2.15 Type.type_class_id is a Smi REF, so ReadFill leaves
-	// TypeInfo.ClassID at 0 and the real value has to come from MintValues.
-	// That resolution used to live further down, next to the field-type
-	// lookup -- but BuildClassHierarchy runs first and reads ClassID, so it
-	// saw 0 for every Type and produced an empty hierarchy on 2.x. With no
-	// hierarchy there is no LCA, no CHA, and no way to tell a leaf class from
-	// an abstract base.
 	resolveTypeClassIDs(clResult)
 
-	// 1. Build class hierarchy for LCA.
-	ctx.SuperClass = BuildClassHierarchy(clResult.Classes, clResult.Types, pl.RefToNamed)
-
-	// 1b. Build inverse hierarchy (subclasses) for CHA.
-	for cid, parent := range ctx.SuperClass {
-		if parent >= 0 {
-			ctx.Subclasses[parent] = append(ctx.Subclasses[parent], cid)
-		}
-	}
-	// SuperClass is a map, so the subclass lists come out in a random order.
-	// CHA resolution takes the FIRST subclass whose dispatch slot resolves,
-	// which made call_edges.jsonl differ between runs of the same binary.
-	for parent := range ctx.Subclasses {
-		sort.Ints(ctx.Subclasses[parent])
-	}
-
-	// 1c. Populate InstantiatedClasses from class table and dispatch table.
-	// Every class in the class table is potentially instantiated — the AOT
-	// compiler only includes classes that are reachable from the program.
-	// Every class with dispatch table entries is definitely instantiated
-	// (dispatch entries are only created for classes with virtual methods
-	// that are actually called).
-	for _, ci := range clResult.Classes {
-		ctx.InstantiatedClasses[int(ci.ClassID)] = true
-	}
-	// Also mark classes from dispatch table entries.
-	for _, entry := range dispatchEntries {
-		if entry.Kind == cluster.DispatchCode {
-			// entry.Index = classID + selectorOffset - kOriginElement
-			// We don't know selectorOffset, but the classID is implied
-			// by the entry's existence. Mark all classes as instantiated.
-			// This is conservative (over-approximation) but safe for RTA.
-		}
-	}
-
-	// 2. Build classID → name map.
-	for i := range clResult.Classes {
-		c := &clResult.Classes[i]
-		name := ""
-		if c.NameRefID >= 0 {
-			if s, ok := pl.RefToStr[c.NameRefID]; ok {
-				name = s
-			}
-		}
-		ctx.ClassIDToName[int(c.ClassID)] = name
-	}
-
-	// 3. Build field type lookup: fieldRefID → ClassID.
-	// FieldInfo.TypeRefID points to a Type object; Type.ClassID gives the CID
-	// (already resolved for 2.x by resolveTypeClassIDs at step 0).
-	refToType := make(map[int]*cluster.TypeInfo, len(clResult.Types))
+	// 0b. Build RefToType once: isolate Types + VM Types.
+	// Shared across buildFieldTypes, buildPoolClassByIndex, buildFuncParamTypes.
 	for i := range clResult.Types {
-		refToType[clResult.Types[i].RefID] = &clResult.Types[i]
+		ctx.RefToType[clResult.Types[i].RefID] = &clResult.Types[i]
 	}
-	for i := range clResult.Fields {
-		f := &clResult.Fields[i]
-		classID := -1
-		if f.TypeRefID >= 0 {
-			if ti, ok := refToType[f.TypeRefID]; ok && ti.ClassID >= 0 {
-				classID = int(ti.ClassID)
-			}
-		}
-		ctx.FieldTypes[f.RefID] = classID
+	for i := range pl.VmTypes {
+		ctx.RefToType[pl.VmTypes[i].RefID] = &pl.VmTypes[i]
 	}
 
-	// 4. Build fieldByOwnerOffset: ownerClassID → byteOffset → fieldRefID.
-	// FieldInfo.OwnerRefID points to a Class NamedObject; we need the
-	// Class's ClassID. Build ref→ClassID map from Classes.
-	refToClassID := make(map[int]int32, len(clResult.Classes))
-	for i := range clResult.Classes {
-		refToClassID[clResult.Classes[i].RefID] = clResult.Classes[i].ClassID
-	}
-	// Also check Named objects with Class CID.
-	if pl.CT != nil {
-		for ref, no := range pl.RefToNamed {
-			if no.CID == pl.CT.Class {
-				// This NamedObject is a Class; find its ClassInfo by RefID.
-				if cid, ok := refToClassID[ref]; ok {
-					refToClassID[ref] = cid
-				}
-			}
-		}
-	}
-	for i := range clResult.Fields {
-		f := &clResult.Fields[i]
-		if f.HostOffset < 0 {
-			continue // static field
-		}
-		ownerClassID := -1
-		if f.OwnerRefID >= 0 {
-			if cid, ok := refToClassID[f.OwnerRefID]; ok {
-				ownerClassID = int(cid)
-			}
-		}
-		if ownerClassID < 0 {
-			continue
-		}
-		m, ok := ctx.FieldByOwnerOffset[ownerClassID]
-		if !ok {
-			m = make(map[int32]int)
-			ctx.FieldByOwnerOffset[ownerClassID] = m
-		}
-		m[f.HostOffset] = f.RefID
-	}
+	// 1. Class hierarchy + subclasses + instantiated classes.
+	buildClassHierarchy(ctx, clResult, pl, dispatchEntries)
 
-	// 5. Build poolClassByIndex: PP index → ClassID.
-	// For Instance objects, RefCID gives the instance's class ID.
-	// For Type objects, RefCID gives the Type class's CID (wrong for
-	// dispatch — need the class the Type represents, from TypeInfo.ClassID).
-	// For other objects (Class, Function, etc.), skip.
-	//
-	// IMPORTANT: We populate ALL CIDs, including predefined/framework classes
-	// (Widget, State, RenderObject, etc.). Framework classes DO have dispatch
-	// methods (Widget.build, State.initState, etc.) and are the majority of
-	// dispatch table calls. The previous restriction (cid >= NumPredefinedCids)
-	// excluded 90%+ of dispatch calls from resolution.
-	for _, pe := range clResult.Pool {
-		if pe.Kind != cluster.PoolTagged {
-			continue
-		}
-		classID := -1
-		if pl.RefCID != nil {
-			if cid, ok := pl.RefCID[pe.RefID]; ok && cid >= 0 {
-				if pl.CT != nil && cid == pl.CT.Type {
-					// Type object: resolve to the class it represents.
-					if ti, ok := refToType[pe.RefID]; ok && ti.ClassID >= 0 {
-						classID = int(ti.ClassID)
-					}
-				} else {
-					// Instance or other tagged object: RefCID IS the class ID.
-					// Include ALL classes — both app-defined and framework.
-					classID = cid
-				}
-			}
-		}
-		if classID >= 0 {
-			ctx.PoolClassByIndex[pe.Index] = classID
-		}
-	}
+	// 2. classID → name.
+	buildClassIDToName(ctx, clResult, pl)
 
-	// 6. Build dispatchBySlot.
-	// Key by (entry.Index - KOriginElement) so that computed slots
-	// (cid + selector_offset - KOriginElement) map directly.
-	// The Dart runtime allocates the dispatch table with KOriginElement
-	// padding entries at the beginning; the snapshot stores only the real
-	// entries, so entries[0] corresponds to runtime slot -KOriginElement.
-	for _, e := range dispatchEntries {
-		ctx.DispatchBySlot[e.Index-kOriginElement] = e
-	}
+	// 3+4. Field types + fieldByOwnerOffset.
+	buildFieldTypes(ctx, clResult, pl)
 
-	// 7. Build codeRefToName from PoolLookupData.CodeRefToName.
-	for ref, name := range pl.CodeRefToName {
-		ctx.CodeRefToName[ref] = name
-	}
+	// 5. Pool class by index.
+	buildPoolClassByIndex(ctx, clResult, pl)
 
-	// 7b. Build DispatchCodeIndexToName: ClusterIndex → function name.
-	// This is the direct path from dispatch table slot → target function name.
-	if byCodeIndex != nil {
-		for clusterIdx, no := range byCodeIndex {
-			if no == nil || no.NameRefID < 0 {
-				continue
-			}
-			name := ""
-			if s, ok := pl.RefToStr[no.NameRefID]; ok {
-				name = s
-			}
-			if name != "" {
-				ctx.DispatchCodeIndexToName[clusterIdx] = name
-			}
-		}
-	}
+	// 6+7. Dispatch tables + code index to name.
+	buildDispatchTables(ctx, dispatchEntries, byCodeIndex, clResult, pl, kOriginElement)
 
-	// SUPER FEATURE 1: ClusterIndex → CodeRange → function name fallback.
-	// For dispatch table entries where byCodeIndex doesn't have a Function
-	// NamedObject (stubs, synthesized code, NoSuchMethod dispatchers), try
-	// to resolve via CodeRange → binary address → symbol table lookup.
-	// This recovers names for Code objects whose owner is Null or Class
-	// instead of Function.
-	// Build ClusterIndex → OwnerRef map from clResult.Codes.
-	codeClusterToOwner := make(map[int]int, len(clResult.Codes))
-	for i := range clResult.Codes {
-		c := &clResult.Codes[i]
-		if c.ClusterIndex >= 0 {
-			codeClusterToOwner[c.ClusterIndex] = c.OwnerRef
-		}
-	}
-	// For each ClusterIndex not in DispatchCodeIndexToName, try owner-based resolution.
-	for clusterIdx, ownerRef := range codeClusterToOwner {
-		if _, hasName := ctx.DispatchCodeIndexToName[clusterIdx]; hasName {
-			continue // already resolved
-		}
-		// Try to resolve ownerRef → NamedObject → name
-		if ownerRef >= 0 {
-			if ownerNo, ok := pl.RefToNamed[ownerRef]; ok && ownerNo != nil && ownerNo.NameRefID >= 0 {
-				if name, ok2 := pl.RefToStr[ownerNo.NameRefID]; ok2 && name != "" {
-					ctx.DispatchCodeIndexToName[clusterIdx] = name
-				}
-			}
-		}
-	}
-
-	// SUPER FEATURE 3: Build PoolIndex → UnlinkedCall target_name map.
-	// UnlinkedCall objects are serialized in AOT snapshots with target_name
-	// (StringPtr) and args_descriptor (ArrayPtr). When IC_DATA_REG (R5) is
-	// loaded from PP with an UnlinkedCall object, we can resolve the BLR
-	// target to the method name from target_name.
-	// Verified via gh api: raw_object.h UntaggedCallSiteData has target_name
-	// field, and app_snapshot.cc UnlinkedCallSerializationCluster serializes it.
-	poolUnlinkedCallNames := make(map[int]string)
-	if pl.CT != nil && pl.RefToNamed != nil && pl.RefToStr != nil {
-		for _, pe := range clResult.Pool {
-			if pe.Kind != cluster.PoolTagged {
-				continue
-			}
-			if pl.RefCID != nil {
-				if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.UnlinkedCall {
-					if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 && no != nil && no.NameRefID >= 0 {
-						if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
-							poolUnlinkedCallNames[pe.Index] = name
-						}
-					}
-				}
-			}
-		}
-	}
-	ctx.PoolUnlinkedCallNames = poolUnlinkedCallNames
-	// PoolCodeNames is built in typetrack_stage.go and passed via poolData.
+	// SUPER FEATURE 3: Pool UnlinkedCall names.
+	ctx.PoolUnlinkedCallNames = buildPoolUnlinkedCallNames(clResult, pl)
 	if pl.PoolCodeNames != nil {
 		ctx.PoolCodeNames = pl.PoolCodeNames
 	}
 
-	// 8. Build FuncParamTypes and FuncParamCount from FuncTypeInfo.
-	// TARGET 1: Also resolve parameter type ClassIDs from parameter_types Array.
-	funcTypeByRef := make(map[int]*cluster.FuncTypeInfo, len(clResult.FuncTypes))
-	for i := range clResult.FuncTypes {
-		funcTypeByRef[clResult.FuncTypes[i].RefID] = &clResult.FuncTypes[i]
-	}
-	// Build Array ref → element Type refs lookup.
-	arrayByRef := make(map[int]*cluster.ArrayInfo, len(clResult.Arrays))
-	for i := range clResult.Arrays {
-		arrayByRef[clResult.Arrays[i].RefID] = &clResult.Arrays[i]
-	}
-	// refToType already built above (line 160).
-	for i := range clResult.Named {
-		no := &clResult.Named[i]
-		if pl.CT != nil && no.CID == pl.CT.Function {
-			if no.SignatureRefID >= 0 {
-				if ft, ok := funcTypeByRef[no.SignatureRefID]; ok {
-					ctx.FuncParamCount[no.RefID] = ft.NumFixed + ft.NumOptional
-					ctx.FuncIsInstance[no.RefID] = ft.HasImplicit
+	// 8. FuncParamTypes + FuncParamCount + FuncIsInstance.
+	buildFuncParamTypes(ctx, clResult, pl)
 
-					// TARGET 1: Resolve parameter type ClassIDs.
-					if ft.ParamTypesArrayRefID >= 0 {
-						if arr, ok2 := arrayByRef[ft.ParamTypesArrayRefID]; ok2 {
-							paramTypes := make([]int, len(arr.ElementRefIDs))
-							for j, elemRef := range arr.ElementRefIDs {
-								cid := -1
-								if ti, ok3 := refToType[elemRef]; ok3 && ti.ClassID >= 0 {
-									cid = int(ti.ClassID)
-								}
-								paramTypes[j] = cid
-							}
-							ctx.FuncParamTypes[no.RefID] = paramTypes
-						}
-					}
-				}
-			}
-		}
-	}
+	// Phase 3: observed instance field types.
+	buildInstanceFieldTypes(ctx, clResult, pl)
 
-	// --- Phase 3: observed instance field types + ClosureData index ---
-
-	// Instance -> (class, offset) -> value class. Offsets come straight from
-	// the capture (cluster.InstanceFieldRef.ByteOffset), which records the
-	// field's word index at read time; do NOT try to reconstruct them from the
-	// order of a ref list -- unboxed slots and inherited fields both break
-	// that. Unanimity is required, see InstanceFieldTypes' doc comment.
-	type offsetVotes struct {
-		classID  int
-		conflict bool
-	}
-	votes := map[int]map[int32]*offsetVotes{}
-	for i := range clResult.Instances {
-		inst := &clResult.Instances[i]
-		// Every Instance object is a concrete instance of a class.
-		// Populate InstantiatedClasses for RTA filtering.
-		ctx.InstantiatedClasses[inst.CID] = true
-		for _, f := range inst.Fields {
-			if f.Ref <= cluster.RefNull {
-				continue // null (or an invalid ref) tells us nothing
-			}
-			valCID, ok := pl.RefCID[f.Ref]
-			if !ok || valCID <= 0 {
-				continue
-			}
-			// Also populate InstantiatedClasses with the value's class
-			// (field values are instances too).
-			ctx.InstantiatedClasses[valCID] = true
-			byCls, ok := votes[inst.CID]
-			if !ok {
-				byCls = map[int32]*offsetVotes{}
-				votes[inst.CID] = byCls
-			}
-			v, ok := byCls[f.ByteOffset]
-			if !ok {
-				byCls[f.ByteOffset] = &offsetVotes{classID: valCID}
-				continue
-			}
-			if v.classID != valCID {
-				v.conflict = true
-			}
-		}
-	}
-	for cid, byOff := range votes {
-		for off, v := range byOff {
-			if v.conflict {
-				continue
-			}
-			m, ok := ctx.InstanceFieldTypes[cid]
-			if !ok {
-				m = map[int32]int{}
-				ctx.InstanceFieldTypes[cid] = m
-			}
-			m[off] = v.classID
-		}
-	}
-
-	// ClosureData: map closure ref → parent function ref (AOT alternative to Context).
-	// ClosureData IS serialized in AOT, unlike Context -- verified against
-	// ClosureDataDeserializationCluster::ReadFill in the Dart SDK, which skips
-	// context_scope_ for kFullAOT and then reads parent_function then closure,
-	// and empirically (925-33712 ClosureData objects per sample in the corpus).
-	for i := range clResult.ClosureData {
-		cd := &clResult.ClosureData[i]
-		if cd.ClosureRef >= 0 && cd.ParentFunctionRef >= 0 {
-			ctx.ClosureDataByClosure[cd.ClosureRef] = cd.ParentFunctionRef
-			ctx.ClosureDataByParent[cd.ParentFunctionRef] = append(ctx.ClosureDataByParent[cd.ParentFunctionRef], cd.ClosureRef)
-		}
-	}
-
-	// Build PoolClosureClass: for each PP entry that is a Closure object,
-	// resolve closure → ClosureData.parent_function → Function.owner → Class → ClassID.
-	// This lets a PP load of a Closure set KnownClass(parentOwnerClassID) instead
-	// of Top(), enabling BLR resolution for closure call sites.
-	if pl.CT != nil && pl.CT.Closure != 0 {
-		// Build Function ref → owner class ref map.
-		funcOwnerRef := make(map[int]int)
-		for i := range clResult.Named {
-			no := &clResult.Named[i]
-			if no.CID == pl.CT.Function && no.OwnerRefID > 0 {
-				funcOwnerRef[no.RefID] = no.OwnerRefID
-			}
-		}
-		// Build class ref → class ID map.
-		classRefToID := make(map[int]int32)
-		for _, ci := range clResult.Classes {
-			classRefToID[ci.RefID] = ci.ClassID
-		}
-		// For each pool entry that is a Closure, resolve the chain.
-		for _, pe := range clResult.Pool {
-			if pe.Kind != cluster.PoolTagged || pe.RefID <= 0 {
-				continue
-			}
-			cid, ok := pl.RefCID[pe.RefID]
-			if !ok || cid != pl.CT.Closure {
-				continue
-			}
-			// Closure ref → parent function ref via ClosureDataByClosure.
-			parentFuncRef, ok2 := ctx.ClosureDataByClosure[pe.RefID]
-			if !ok2 || parentFuncRef <= 0 {
-				continue
-			}
-			// Parent function → owner class ref.
-			ownerRef, ok3 := funcOwnerRef[parentFuncRef]
-			if !ok3 || ownerRef <= 0 {
-				continue
-			}
-			// PatchClass hop: owner may be a PatchClass, hop to real class.
-			if ownerNo, ok4 := pl.RefToNamed[ownerRef]; ok4 && pl.CT.PatchClass != 0 && ownerNo.CID == pl.CT.PatchClass {
-				ownerRef = ownerNo.OwnerRefID
-			}
-			// Class ref → class ID.
-			classID, ok5 := classRefToID[ownerRef]
-			if !ok5 || classID < 0 {
-				continue
-			}
-			ctx.PoolClosureClass[pe.Index] = int(classID)
-			// Also resolve parent function name for closure invocation resolution.
-			if parentFuncNo, ok6 := pl.RefToNamed[parentFuncRef]; ok6 && parentFuncNo.NameRefID >= 0 {
-				if name, ok7 := pl.RefToStr[parentFuncNo.NameRefID]; ok7 && name != "" {
-					if ctx.PoolCodeNames == nil {
-						ctx.PoolCodeNames = make(map[int]string)
-					}
-					if _, exists := ctx.PoolCodeNames[pe.Index]; !exists {
-						ctx.PoolCodeNames[pe.Index] = name
-					}
-				}
-			}
-		}
-	}
+	// ClosureData + PoolClosureClass.
+	buildClosureData(ctx, clResult)
+	buildPoolClosureClass(ctx, clResult, pl)
 
 	return ctx
 }
@@ -781,22 +564,45 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
 	// map key = field_offset. Add 1 to align.
 	lookupOff := byteOff + 1
-	if fields, ok := ctx.FieldByOwnerOffset[receiverCID]; ok {
-		if fieldRefID, ok := fields[lookupOff]; ok {
-			if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
-				return classID, true
+	// Walk the superclass chain: FieldByOwnerOffset is keyed by the
+	// DECLARING class's CID, but receiverCID is the receiver's actual
+	// (possibly subclass) CID. A field declared in class A is inherited
+	// by subclass B, so when accessing it on a B instance, we must look
+	// up A's entry. Without this walk, declared field types never hit
+	// for any subclass — measured: 369 fields resolved, 89 declaring
+	// classes, but 0 hits because every receiver was a subclass.
+	cid := receiverCID
+	for cid >= 0 {
+		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
+			if fieldRefID, ok := fields[lookupOff]; ok {
+				if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
+					ctx.FieldTypeDeclaredHits++
+					return classID, true
+				}
 			}
 		}
+		// Walk up to superclass: FieldByOwnerOffset is keyed by the
+		// declaring class, but the receiver may be a subclass.
+		if ctx.SuperClass == nil {
+			break
+		}
+		next, ok := ctx.SuperClass[cid]
+		if !ok || next < 0 || next == cid {
+			break
+		}
+		cid = next
 	}
 	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
 		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
 			ctx.InstanceFieldHits++
+			ctx.FieldTypeInstanceHits++
 			return classID, true
 		}
 	}
 	// P1.3: Field-store → field-load tracking.
 	if byOff, ok := ctx.FieldStoreTypes[receiverCID]; ok {
 		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
+			ctx.FieldTypeStoreHits++
 			return classID, true
 		}
 	}

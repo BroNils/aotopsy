@@ -5,6 +5,27 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+)
+
+// Pre-compiled regexes for the text-based annotation passes. These were
+// previously compiled inside loops (regex.MustCompile called per line),
+// which is both slow and a Go anti-pattern. Each regex is compiled once
+// at package init and reused across all calls.
+var (
+	// enumReconstruction: "if (x == N) { return 'Name'; }"
+	enumCaseRe = regexp.MustCompile(`^if \((\w+) == (\d+)\) \{ return '([^']+)'; \}$`)
+	// nullSafetyAnnotation
+	nullCheckRe    = regexp.MustCompile(`if \((\w+) == null\)`)
+	notNullCheckRe = regexp.MustCompile(`(\w+) != null`)
+	// localTypeInference / applyLocalTypeHints
+	localAssignArgRe = regexp.MustCompile(`^(local_\w+) = (arg\d+);`)
+	finalAssignRe    = regexp.MustCompile(`^final (t\d+) = (.+);`)
+	intLitRe         = regexp.MustCompile(`^-?\d+$`)
+	doubleLitRe      = regexp.MustCompile(`^-?\d+\.\d+$`)
+	stringLitRe      = regexp.MustCompile(`^'[^']*'$`)
+	// applyLocalTypeHints: "final tN = ..."
+	finalPrefixRe = regexp.MustCompile(`^final (t\d+) =`)
 )
 
 // This file ports additional readability passes from flutterdec's
@@ -129,11 +150,22 @@ func semanticArgName(typeName string, idx int) string {
 	return ""
 }
 
+// identRegexCache caches compiled regexes for replaceIdent, keyed by
+// the identifier being replaced. regex.MustCompile is too expensive to
+// call per-line per-rename inside applyArgRenaming's nested loop.
+var identRegexCache sync.Map
+
 // replaceIdent replaces whole-word identifiers, not substrings.
 // It skips matches inside string literals (between unescaped quotes)
 // to avoid corrupting string constants like print("arg0").
 func replaceIdent(line, old, new string) string {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
+	var re *regexp.Regexp
+	if cached, ok := identRegexCache.Load(old); ok {
+		re = cached.(*regexp.Regexp)
+	} else {
+		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
+		identRegexCache.Store(old, re)
+	}
 	// Split on string literals, only replace in non-literal segments.
 	// Handles both "..." and '...' quoting.
 	var result strings.Builder
@@ -190,7 +222,14 @@ func hasSideEffect(expr string) bool {
 
 // referencesIdent reports whether expr mentions ident as a whole word.
 func referencesIdent(expr, ident string) bool {
-	return regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`).MatchString(expr)
+	var re *regexp.Regexp
+	if cached, ok := identRegexCache.Load(ident); ok {
+		re = cached.(*regexp.Regexp)
+	} else {
+		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
+		identRegexCache.Store(ident, re)
+	}
+	return re.MatchString(expr)
 }
 
 // anyAssignRe matches any assignment target at the start of a statement,
@@ -357,7 +396,7 @@ func enumReconstruction(source string) string {
 		t := trimmed(lines[i])
 
 		// Detect "if (x == N) { return 'Name'; }" pattern
-		m := regexp.MustCompile(`^if \((\w+) == (\d+)\) \{ return '([^']+)'; \}$`).FindStringSubmatch(t)
+		m := enumCaseRe.FindStringSubmatch(t)
 		if m != nil {
 			if !inEnumChain {
 				inEnumChain = true
@@ -412,13 +451,13 @@ func nullSafetyAnnotation(source string) string {
 		t := trimmed(line)
 
 		// Detect "if (x == null)" → mark x as nullable
-		m := regexp.MustCompile(`if \((\w+) == null\)`).FindStringSubmatch(t)
+		m := nullCheckRe.FindStringSubmatch(t)
 		if m != nil {
 			nullableVars[m[1]] = true
 		}
 
 		// Detect "x != null" checks
-		m2 := regexp.MustCompile(`(\w+) != null`).FindStringSubmatch(t)
+		m2 := notNullCheckRe.FindStringSubmatch(t)
 		if m2 != nil {
 			nullableVars[m2[1]] = true
 		}
@@ -448,15 +487,20 @@ func nullSafetyAnnotation(source string) string {
 // --- Local Variable Type Inference (heuristic) ---
 
 // localTypeInference annotates local variables with inferred types based on
-// usage patterns. This is a heuristic text-based pass.
-func localTypeInference(source string, paramTypes []string) string {
-	if len(paramTypes) == 0 {
+// usage patterns. When IR-level hints are available (from typetrack
+// KnownClass), they take priority over heuristic inference from ParamTypeNames.
+// This consolidates the former localTypeInference + applyLocalTypeHints pair
+// into a single pass that does one strings.Split + one strings.Join instead
+// of two.
+func localTypeInference(source string, paramTypes []string, irHints map[string]string) string {
+	if len(paramTypes) == 0 && len(irHints) == 0 {
 		return source
 	}
 	lines := strings.Split(source, "\n")
 	var out []string
 	varTypes := map[string]string{}
 
+	// Heuristic: arg types from ParamTypeNames.
 	argTypes := map[string]string{}
 	for i, t := range paramTypes {
 		if t != "" {
@@ -466,30 +510,49 @@ func localTypeInference(source string, paramTypes []string) string {
 
 	for _, line := range lines {
 		t := trimmed(line)
-		m := regexp.MustCompile(`^(local_\w+) = (arg\d+);`).FindStringSubmatch(t)
-		if m != nil {
+
+		// IR-level hints take priority: annotate "local_NN = argN;" and
+		// "final tN = ..." with the hint type.
+		if len(irHints) > 0 {
+			if m := localAssignArgRe.FindStringSubmatch(t); m != nil {
+				if typeName, ok := irHints[m[2]]; ok && typeName != "" {
+					indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+					out = append(out, indent+"// "+m[1]+": "+typeName)
+				}
+			}
+			if m := finalPrefixRe.FindStringSubmatch(t); m != nil {
+				if typeName, ok := irHints[m[1]]; ok && typeName != "" {
+					indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+					out = append(out, indent+"// "+m[1]+": "+typeName)
+				}
+			}
+		}
+
+		// Heuristic inference (lower priority than IR hints).
+		if m := localAssignArgRe.FindStringSubmatch(t); m != nil {
 			if typ, ok := argTypes[m[2]]; ok {
 				varTypes[m[1]] = typ
 			}
 		}
-		m2 := regexp.MustCompile(`^final (t\d+) = (.+);`).FindStringSubmatch(t)
-		if m2 != nil {
+		if m2 := finalAssignRe.FindStringSubmatch(t); m2 != nil {
 			val := m2[1]
 			expr := m2[2]
 			switch {
-			case regexp.MustCompile(`^-?\d+$`).MatchString(expr):
+			case intLitRe.MatchString(expr):
 				varTypes[val] = "int"
-			case regexp.MustCompile(`^-?\d+\.\d+$`).MatchString(expr):
+			case doubleLitRe.MatchString(expr):
 				varTypes[val] = "double"
-			case regexp.MustCompile(`^'[^']*'$`).MatchString(expr):
+			case stringLitRe.MatchString(expr):
 				varTypes[val] = "String"
 			case expr == "true" || expr == "false":
 				varTypes[val] = "bool"
 			}
 		}
+
 		out = append(out, line)
 	}
 
+	// Emit heuristic type annotation at the top (IR hints are inline).
 	if len(varTypes) > 0 {
 		var annotations []string
 		for v, t := range varTypes {
@@ -507,36 +570,8 @@ func localTypeInference(source string, paramTypes []string) string {
 	return strings.Join(out, "\n")
 }
 
-// applyLocalTypeHints annotates local variable declarations with inferred
-// types from LocalTypeHints (populated from typetrack KnownClass → class name
-// and ParamTypeNames). This is the IR-level type inference consumer.
-// It scans for "local_NN = arg0;" patterns and annotates with the arg's type.
+// applyLocalTypeHints is retained for backward compatibility with tests.
+// It delegates to localTypeInference with irHints set and no paramTypes.
 func applyLocalTypeHints(source string, hints map[string]string) string {
-	if len(hints) == 0 {
-		return source
-	}
-	lines := strings.Split(source, "\n")
-	var out []string
-	for _, line := range lines {
-		t := trimmed(line)
-		// Annotate "local_NN = argN;" with type from hints
-		m := regexp.MustCompile(`^(local_\w+) = (arg\d+);`).FindStringSubmatch(t)
-		if m != nil {
-			if typeName, ok := hints[m[2]]; ok && typeName != "" {
-				// Insert type annotation comment before the line
-				indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
-				out = append(out, indent+"// "+m[1]+": "+typeName)
-			}
-		}
-		// Annotate "final tN = <expr>;" with type from hints if tN is in hints
-		m2 := regexp.MustCompile(`^final (t\d+) =`).FindStringSubmatch(t)
-		if m2 != nil {
-			if typeName, ok := hints[m2[1]]; ok && typeName != "" {
-				indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
-				out = append(out, indent+"// "+m2[1]+": "+typeName)
-			}
-		}
-		out = append(out, line)
-	}
-	return strings.Join(out, "\n")
+	return localTypeInference(source, nil, hints)
 }

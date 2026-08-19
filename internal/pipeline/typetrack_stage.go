@@ -41,6 +41,7 @@ func RunTypeInferenceStage(
 	info *snapshot.Info,
 	table *cluster.InstructionsTable,
 	thrFields map[int]string,
+	vmResult *cluster.Result,
 ) error {
 	if info == nil || info.Version == nil {
 		return nil
@@ -56,7 +57,7 @@ func RunTypeInferenceStage(
 
 	opts.logf("  type inference: starting...\n")
 
-	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields)
+	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields, vmResult)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
 		return nil // non-fatal
@@ -99,6 +100,7 @@ func runTypeInference(
 	table *cluster.InstructionsTable,
 	isARM64 bool,
 	thrFields map[int]string,
+	vmResult *cluster.Result,
 ) (BLRBreakdown, *typetrack.TypeContext, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
@@ -230,18 +232,48 @@ func runTypeInference(
 					poolCodeNames[pe.Index] = name
 				}
 			}
+			// Try CodeNames directly (covers VM Code objects whose names
+			// were resolved via VM Function owner chain in BuildPoolLookups).
+			if _, exists := poolCodeNames[pe.Index]; !exists {
+				if ci, ok2 := pl.CodeNames[pe.RefID]; ok2 && ci.FuncName != "" {
+					poolCodeNames[pe.Index] = ci.FuncName
+				}
+			}
+		}
+	}
+
+	// Build PP index → type testing stub name map.
+	// When a Type object is loaded from the pool and its
+	// type_test_stub_entry_point_ (offset 7 from tagged) is called via BLR,
+	// the type tracker needs the stub name to resolve the call.
+	poolTTSNames := make(map[int]string)
+	if len(pl.TypeTestingStubNames) > 0 {
+		for _, pe := range clResult.Pool {
+			if pe.Kind != cluster.PoolTagged {
+				continue
+			}
+			if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok && name != "" {
+				poolTTSNames[pe.Index] = name
+			}
 		}
 	}
 
 	poolData := &typetrack.PoolLookupData{
-		RefToStr:      pl.RefToStr,
-		RefToNamed:    pl.RefToNamed,
-		RefCID:        pl.RefCID,
-		CT:            pl.CT,
-		CodeRefToName: codeRefToName,
-		VmRefToStr:    pl.VmRefToStr,
-		VmRefToNamed:  pl.VmRefToNamed,
-		PoolCodeNames: poolCodeNames,
+		RefToStr:             pl.RefToStr,
+		RefToNamed:           pl.RefToNamed,
+		RefCID:               pl.RefCID,
+		CT:                   pl.CT,
+		CodeRefToName:        codeRefToName,
+		VmRefToStr:           pl.VmRefToStr,
+		VmRefToNamed:         pl.VmRefToNamed,
+		VmRefCID:             pl.VmRefCID,
+		PoolCodeNames:        poolCodeNames,
+		TypeTestingStubNames: poolTTSNames,
+	}
+	if vmResult != nil {
+		poolData.VmFields = vmResult.Fields
+		poolData.VmTypes = vmResult.Types
+		poolData.VmClasses = vmResult.Classes
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.
@@ -295,6 +327,12 @@ func runTypeInference(
 	} else {
 		funcInstsX86 = make(map[string][]typetrack.X86DecodedInst, len(ranges))
 	}
+	// DartCallingConvention (kCpuRegistersForArgs) first appears in
+	// constants_arm64.h at 3.4.3; before it, every argument including the
+	// receiver is passed on the stack.
+	receiverOnStack := !snapshot.VersionAtLeast(info.Version.DartVersion, "3.4.3")
+	// See TypeContext.ClassIDIsHalfWord.
+	ctx.ClassIDIsHalfWord = !snapshot.VersionAtLeast(info.Version.DartVersion, "2.19.0")
 	blEdges := make(map[string][]typetrack.BLEdge)
 
 	// Build address → function name lookup for BL/CALL target resolution.
@@ -333,6 +371,22 @@ func runTypeInference(
 		if ownerName != "" {
 			if cid, ok := classNameToID[ownerName]; ok && cid >= 0 {
 				ctx.FuncOwnerClass[name] = cid
+				// Before Dart 3.4.3 there is no register calling convention:
+				// the receiver comes in on the caller's stack and the prologue
+				// loads it out. Parameter i of a function with N fixed
+				// parameters lives at
+				//   FP + (kParamEndSlotFromFp + N - i) * wordSize
+				// kParamEndSlotFromFp is 1 on BOTH architectures
+				// (stack_frame_arm64.h and stack_frame_x64.h), so the receiver
+				// -- parameter 0 -- is the highest slot on both. Confirmed on a
+				// real 2.12.0 arm64 binary: a two-parameter operator+ loads its
+				// receiver with `ldr x3, [x29, #24]`, which is (1 + 2 - 0) * 8,
+				// and immediately reads a field off it.
+				if receiverOnStack && r.RefID >= 0 {
+					if n := pl.CodeNames[r.RefID].FixedParamsWithReceiver; n > 0 {
+						ctx.FuncReceiverStackSlot[name] = (1 + n) * 8
+					}
+				}
 			}
 		}
 
@@ -618,7 +672,17 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 				bd.Unresolved++
 			}
 		} else {
-			bd.Unresolved++
+			// For unresolved BLR edges, resolve via the pool display
+			// string in the Via annotation. This catches pool-loaded Code
+			// objects that the type tracker missed -- overwhelmingly the
+			// x86_64 type-testing and inline-cache stubs; see
+			// resolveViaPoolDisplay for the measurement.
+			if resolved := resolveViaPoolDisplay(e.Via); resolved != "" {
+				e.Target = resolved
+				bd.Stub++
+			} else {
+				bd.Unresolved++
+			}
 		}
 		// NOTE: there used to be a third branch here that matched
 		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
@@ -659,6 +723,61 @@ func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
 		imm26 |= ^int32(0x03FFFFFF)
 	}
 	return uint64(int64(pc) + int64(imm26)*4), true
+}
+
+// resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display
+// string in its Via annotation.
+//
+// Via annotations for pool-loaded objects look like:
+//
+//	"PP[123] foo"   (ARM64, annotate.go)
+//	"pp[123] foo"   (x86_64, x86.go / dataflow_x86.go)
+//
+// and the register provenance behind them is a real forward dataflow over the
+// function's CFG (ExtractCallEdgesCFG), so the named slot is the value that
+// actually reaches the BLR -- not something found by scanning nearby.
+//
+// Measured across the four corpus samples. It fires on x86_64 and essentially
+// nowhere else: 641 pp[ sites on sample312_x64, of which 503 resolve to 49
+// distinct targets, against 0 on compare_sample_arm64 and sample313_arm64 and
+// 1 on dart212_arm64. That asymmetry is expected -- ARM64 reaches these stubs
+// through THR-cached entry points, which the branch above handles. Every one
+// of the 49 is a genuine BLR target: type-testing stubs, inline-cache stubs
+// and shared-slow-path allocation stubs.
+//
+// The guards below matter because the display string alone does not say what
+// KIND of object the slot holds. ResolvePoolDisplay renders a String entry
+// with %q and an unnamed object as "<CidName>", so both are rejected outright:
+// nothing can be called through a String, and a placeholder names no target.
+// This is the same failure that made the deleted symbolic_blr.go report
+// "Subtype6TestCache" as a call target -- worth guarding against even though
+// the current corpus produces no such case.
+func resolveViaPoolDisplay(via string) string {
+	if via == "" {
+		return ""
+	}
+	// Look for "PP[" or "pp[" prefix.
+	if !strings.HasPrefix(strings.ToLower(via), "pp[") {
+		return ""
+	}
+	closeBracket := strings.IndexByte(via, ']')
+	if closeBracket < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(via[closeBracket+1:])
+	if rest == "" {
+		return ""
+	}
+	// "<vm:NNN>", "<Instance_42>", "<String>": a placeholder, not a name.
+	if strings.HasPrefix(rest, "<") {
+		return ""
+	}
+	// A quoted display is a String constant (ResolvePoolDisplay uses %q for
+	// entries whose CID is a string class). Code cannot live there.
+	if strings.HasPrefix(rest, `"`) {
+		return ""
+	}
+	return rest
 }
 
 // x86CallRelTarget returns the absolute target of a CALL rel32 instruction.

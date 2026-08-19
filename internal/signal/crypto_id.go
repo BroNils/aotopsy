@@ -602,7 +602,7 @@ func WriteSignalExpansionJSONL(outDir string, stringRefs []StringRefRecord) erro
 		}
 	}
 
-	// 3. Plugin enumeration
+	// 2. Plugin enumeration
 	pluginFindings := EnumeratePlugins(stringRefs)
 	if len(pluginFindings) > 0 {
 		if err := writeJSONLFile(filepath.Join(outDir, "plugins.jsonl"), pluginFindings); err != nil {
@@ -610,7 +610,7 @@ func WriteSignalExpansionJSONL(outDir string, stringRefs []StringRefRecord) erro
 		}
 	}
 
-	// 4. String deobfuscation
+	// 3. String deobfuscation
 	deobFindings := DetectObfuscatedStrings(stringRefs)
 	if len(deobFindings) > 0 {
 		if err := writeJSONLFile(filepath.Join(outDir, "deobfuscation.jsonl"), deobFindings); err != nil {
@@ -618,7 +618,7 @@ func WriteSignalExpansionJSONL(outDir string, stringRefs []StringRefRecord) erro
 		}
 	}
 
-	// 5. Network endpoint extraction
+	// 4. Network endpoint extraction
 	netFindings := ExtractNetworkEndpoints(stringRefs)
 	if len(netFindings) > 0 {
 		if err := writeJSONLFile(filepath.Join(outDir, "network_endpoints.jsonl"), netFindings); err != nil {

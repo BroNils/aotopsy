@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"aotopsy/internal/arch"
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -19,9 +18,20 @@ const (
 	x86RegRDI = 7  // SysV arg 0 (receiver for instance methods)
 )
 
-// x86ArgRegCanon lists the SysV AMD64 ABI integer argument registers
-// in calling-convention order (RDI, RSI, RDX, RCX, R8, R9).
-var x86ArgRegCanon = [6]int{7, 6, 2, 1, 8, 9}
+// x86ArgRegCanon lists Dart's OWN calling-convention integer argument
+// registers as canonical indices, parameter 0 first. This is NOT the
+// SysV C ABI — Dart declares its own convention (verified via gh api to
+// constants_x64.h @3.9.2):
+//
+//	DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
+//
+// The previous value used RCX (1) for parameter 3 instead of RBX (3) —
+// the SysV C ABI order. RCX is DispatchTableNullErrorABI::kClassIdReg
+// in Dart, not an argument register. killX86ArgRegs was killing RCX
+// (losing class-id type info needed for dispatch resolution) and NOT
+// killing RBX (leaving stale type info after calls that could propagate
+// incorrect types).
+var x86ArgRegCanon = [6]int{7, 6, 2, 3, 8, 9}
 
 // X86DecodedInst is a decoded x86_64 instruction with its address.
 type X86DecodedInst struct {
@@ -36,6 +46,7 @@ func AnalyzeFunctionX86(
 	insts []X86DecodedInst,
 	ctx *TypeContext,
 	entryTypes [31]TypeLattice,
+	entryStack map[int]TypeLattice,
 ) *IntraResult {
 	result := &IntraResult{
 		EntryTypes: entryTypes,
@@ -90,7 +101,10 @@ func AnalyzeFunctionX86(
 
 	blockEntry := make([][31]TypeLattice, len(blocks))
 	blockExit := make([][31]TypeLattice, len(blocks))
-	blockEntry[0] = entryTypes
+	blockEntry[0] = entryTypes
+	for off, t := range entryStack {
+		blockStackEntry[0][off] = t
+	}
 
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }
 
@@ -218,6 +232,10 @@ type x86BasicBlock struct {
 
 // buildBlocksX86 partitions x86_64 instructions into basic blocks.
 // Leaders are at: function start, JMP/Jcc targets, instruction after JMP/RET.
+//
+// NOT merged with ARM64 buildBlocks — see the comment there for why
+// (different instruction/block types, branch classification, and
+// partition approach make a generic version worse than the duplication).
 func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 	if len(insts) == 0 {
 		return nil
@@ -505,6 +523,38 @@ func transferInstructionX86(
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
 			}
+			// Class-id load, Dart <= 2.18 form: MOVZX reg, word [obj + 1].
+			//
+			// Assembler::LoadClassId emits a 16-bit zero-extending load there,
+			// because kClassIdTagPos is 16 and kClassIdTagSize is 16, so the
+			// class id occupies the high half-word of the tags word and can be
+			// read whole:
+			//
+			//	movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
+			//
+			// FieldAddress subtracts the heap-object tag, so tags_offset 0
+			// becomes displacement +1. From 2.19.0 the field is 20 bits at
+			// position 12 and no longer half-word aligned, so the SDK switched
+			// to movl + shrl -- the form this handler already knew.
+			//
+			// Missing this shape left the class-id register Top on every
+			// dispatch call: 83415 of 83415 sites on the 2.18.0 x64 sample,
+			// against 83417 Bottom on 2.19.0. Bottom is what makes the
+			// selector-offset scan possible, so x86_64 dispatch resolution was
+			// dead on every version up to 2.18.
+			if ctx.ClassIDIsHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == 1 && baseIdx >= 0 && baseIdx < 31 &&
+				baseIdx != x86RegPP && baseIdx != x86RegTHR {
+				if state[baseIdx].Kind == LatticeKnownClass {
+					state[dstIdx] = KnownClass(state[baseIdx].ClassID)
+				} else {
+					// "A class id, but not known which" -- exactly what the
+					// 32-bit path yields, and what narrowing and the
+					// selector-offset scan both consume.
+					state[dstIdx] = Bottom()
+				}
+				ctx.HeaderHits++
+				return
+			}
 			// H-4 fix 2: Field type lookup — MOV reg, [reg+offset] where base
 			// has KnownClass. Look up the field at this offset for the class.
 			if baseIdx >= 0 && baseIdx < 31 && state[baseIdx].Kind == LatticeKnownClass {
@@ -644,15 +694,15 @@ func transferInstructionX86(
 					ctx.UBFXHits++
 					return
 				}
-				if state[srcIdx].Kind == LatticeBottom && prevInst != nil {
-					// Check if prevInst was a header load: MOV srcReg, [base-1].
-					// The x86 header load pattern is MOV reg, [reg-1] where -1
-					// is kHeapObjectTag (same as ARM64 LDUR Xt, [Xn, #-1]).
-					if isX86HeaderLoad(prevInst, srcIdx) {
-						state[dstIdx] = Bottom()
-						ctx.UBFXHits++
-						return
-					}
+				if state[srcIdx].Kind == LatticeBottom {
+					// SHR/AND from Bottom: extracting class ID bits
+					// from an unknown header still yields Bottom, not
+					// Top. Same fix as ARM64 UBFX: don't require the
+					// previous instruction to be a header load — any
+					// Bottom source means "class ID, unknown which".
+					state[dstIdx] = Bottom()
+					ctx.UBFXHits++
+					return
 				}
 			}
 		}
@@ -871,41 +921,8 @@ func resolveX86Dispatch(
 		// scan nearby slots for monomorphic targets (same as ARM64).
 		// This handles cases where the dispatch table entry is null/stub
 		// but a nearby slot has a valid Code target.
-		if ctx.DispatchBySlot != nil {
-			candidates := 0
-			var candidateName string
-			var allCandidates []string
-			for offset := 0; offset < 128; offset++ {
-				s := slot + offset
-				entry, ok := ctx.DispatchBySlot[s]
-				if !ok || entry.Kind != cluster.DispatchCode {
-					continue
-				}
-				if name, ok2 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok2 && name != "" {
-					candidates++
-					candidateName = name
-					allCandidates = append(allCandidates, name)
-				}
-			}
-			if candidates == 1 {
-				res.TargetName = candidateName
-				res.Resolved = true
-				res.Candidates = 1
-			} else if candidates > 1 {
-				// Same rule as the ARM64 path: identical names collapse to a
-				// monomorphic resolution, otherwise it is a candidate set.
-				uniqueNames := map[string]bool{}
-				var unique []string
-				for _, n := range allCandidates {
-					if !uniqueNames[n] {
-						uniqueNames[n] = true
-						unique = append(unique, n)
-					}
-				}
-				sort.Strings(unique)
-				applySelectorCandidates(&res, unique)
-			}
-		}
+		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
+		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
@@ -934,7 +951,8 @@ func resolveX86DispatchSelectorOffset(
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
 
-// killX86ArgRegs kills all argument registers (RDI, RSI, RDX, RCX, R8, R9).
+// killX86ArgRegs kills all Dart calling-convention argument registers
+// (RDI, RSI, RDX, RBX, R8, R9) after a CALL instruction.
 func killX86ArgRegs(state *[31]TypeLattice) {
 	for _, r := range x86ArgRegCanon {
 		if r < 31 {

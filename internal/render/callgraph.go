@@ -89,7 +89,6 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	}
 	type edgeVal struct {
 		count int
-		via   string
 	}
 	dedupEdges := make(map[edgeKey]*edgeVal)
 
@@ -112,7 +111,7 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 		if v, ok := dedupEdges[k]; ok {
 			v.count++
 		} else {
-			dedupEdges[k] = &edgeVal{count: 1, via: e.Via}
+			dedupEdges[k] = &edgeVal{count: 1}
 		}
 	}
 

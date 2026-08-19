@@ -13,6 +13,7 @@ import (
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/render"
+	"aotopsy/internal/strutil"
 )
 
 func cmdRender(args []string) error {
@@ -185,7 +186,7 @@ func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, 
 		}
 
 		// Load raw instructions from .bin file (named by sanitizeFilename).
-		safeName := sanitizeFilename(f.Name)
+		safeName := strutil.SanitizeFilename(f.Name)
 		binPath := filepath.Join(asmDir, safeName+".bin")
 		data, err := os.ReadFile(binPath)
 		if err != nil {

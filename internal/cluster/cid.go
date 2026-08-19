@@ -158,6 +158,16 @@ const (
 
 // ClassifyAlloc determines the alloc kind for a CID given a CID table.
 func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
+	// LocalVarDescriptors, new in Dart 3.13.0. Its ReadAlloc is byte-for-byte
+	// the same shape as CompressedStackMaps' -- count = ReadUnsigned(), then
+	// one ReadUnsigned(length) per object -- so it takes the same path.
+	//
+	// Checked before the switch and guarded on non-zero, because the field is
+	// 0 in every older CID table and a bare `case ct.LocalVarDescriptors:`
+	// would then silently claim cid 0.
+	if ct.LocalVarDescriptors != 0 && cid == ct.LocalVarDescriptors {
+		return AllocROData
+	}
 	switch cid {
 	case ct.String, ct.OneByteString, ct.TwoByteString:
 		return AllocString

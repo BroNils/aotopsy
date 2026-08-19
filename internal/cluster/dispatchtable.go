@@ -1,8 +1,8 @@
 package cluster
 
 import (
-	"os"
 	"fmt"
+	"os"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
@@ -125,23 +125,45 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	}
 
 	// 2. initial_field_table, 3. shared_initial_field_table.
-	// TARGET 3: For Dart 2.x (CodeTextOffsetDelta=true), initial_field_table
-	// count is in the snapshot HEADER (already read by ScanClusters), NOT
-	// in the roots section. shared_initial_field_table doesn't exist in 2.x.
-	// Only read these for Dart 3.x (CodeTextOffsetDelta=false).
-	if !profile.CodeTextOffsetDelta {
-		for _, name := range []string{"initial_field_table", "shared_initial_field_table"} {
-			n, err := s.ReadUnsigned()
-			if debugDT {
-				fmt.Fprintf(os.Stderr, "DEBUG DT: %s count=%d pos=%d\n", name, n, s.Position())
-			}
-			if err != nil {
-				return nil, fmt.Errorf("dispatch table: %s count: %w", name, err)
-			}
-			for i := int64(0); i < n; i++ {
-				if _, err := readRef(s, fillRefUnsigned); err != nil {
-					return nil, fmt.Errorf("dispatch table: %s entry %d/%d: %w", name, i, n, err)
-				}
+	//
+	// Which of these the roots section contains is a per-version fact, and
+	// there are three distinct shapes -- verified by reading
+	// ProgramDeserializationRoots::ReadRoots at twelve dart-lang/sdk tags:
+	//
+	//	<= 2.17.6   ObjectStore refs, then straight to ReadDispatchTable
+	//	>= 2.18.0   ... initial_field_table, then ReadDispatchTable
+	//	>= 3.5.0    ... initial_field_table, shared_initial_field_table, ...
+	//
+	// (2.10-2.15 predate the class entirely; they fall under the first case.)
+	//
+	// This used to be one gate on CodeTextOffsetDelta, which puts the boundary
+	// at 2.15/2.16 and reads BOTH tables above it. That is wrong for every
+	// version from 2.16 through 3.4.3: on 2.17.6 it invents two tables that
+	// are not there, and on 3.1.0 one. Either way the stream desynchronises
+	// and the dispatch table is unreadable, which silently disables the whole
+	// type-inference stage -- no typetrack_report.json and every BLR edge left
+	// unresolved. It went unnoticed because the only samples this was ever run
+	// against were 3.7.0 and 3.10.7, where reading both is correct.
+	readInitial := dartVersionAtLeast(profile.DartVersion, "2.18.0")
+	readShared := dartVersionAtLeast(profile.DartVersion, "3.5.0")
+	tables := make([]string, 0, 2)
+	if readInitial {
+		tables = append(tables, "initial_field_table")
+	}
+	if readShared {
+		tables = append(tables, "shared_initial_field_table")
+	}
+	for _, name := range tables {
+		n, err := s.ReadUnsigned()
+		if debugDT {
+			fmt.Fprintf(os.Stderr, "DEBUG DT: %s count=%d pos=%d\n", name, n, s.Position())
+		}
+		if err != nil {
+			return nil, fmt.Errorf("dispatch table: %s count: %w", name, err)
+		}
+		for i := int64(0); i < n; i++ {
+			if _, err := readRef(s, fillRefUnsigned); err != nil {
+				return nil, fmt.Errorf("dispatch table: %s entry %d/%d: %w", name, i, n, err)
 			}
 		}
 	}

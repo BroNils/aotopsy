@@ -30,17 +30,8 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := func(format string, args ...interface{}) {
-		if !quiet {
-			_, _ = fmt.Fprintf(log, format, args...)
-		}
-	}
-	stagef := func(name string, format string, args ...interface{}) {
-		if !quiet {
-			detail := fmt.Sprintf(format, args...)
-			_, _ = fmt.Fprintf(log, "\n%s%s%s %s\n", cli.Pink, name, cli.Reset, detail)
-		}
-	}
+	logf := makeLogf(quiet, log)
+	stagef := makeStagef(quiet, log)
 
 	// Read functions.jsonl.
 	funcs, err := ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
@@ -138,8 +129,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		return nil, fmt.Errorf("write signal_graph.json: %w", err)
 	}
 	_ = jsonFile.Close()
-	fi, _ := os.Stat(jsonPath)
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, jsonPath, cli.Reset, fi.Size())
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, jsonPath, cli.Reset, fileSize(jsonPath))
 
 	// Write signal.html.
 	htmlFile, err := os.Create(outPath)
@@ -167,8 +157,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if err := htmlFile.Close(); err != nil {
 		return nil, fmt.Errorf("close signal.html: %w", err)
 	}
-	fi, _ = os.Stat(outPath)
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fi.Size())
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fileSize(outPath))
 
 	// Write signal.dot.
 	dotPath := filepath.Join(inDir, "signal.dot")
@@ -176,8 +165,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if err := os.WriteFile(dotPath, []byte(dotContent), 0644); err != nil {
 		return nil, fmt.Errorf("write signal.dot: %w", err)
 	}
-	fi, _ = os.Stat(dotPath)
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, dotPath, cli.Reset, fi.Size())
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, dotPath, cli.Reset, fileSize(dotPath))
 
 	// Write SARIF report.
 	var findings []output.SignalFinding
@@ -229,8 +217,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
 			sarifPath := filepath.Join(inDir, "report.sarif")
-			fi, _ := os.Stat(sarifPath)
-			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, fi.Size(), len(findings))
+			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, fileSize(sarifPath), len(findings))
 		}
 	}
 
@@ -247,9 +234,8 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			if err := os.WriteFile(cfgPath, []byte(cfgDOT), 0644); err != nil {
 				return nil, fmt.Errorf("write signal_cfg.dot: %w", err)
 			}
-			fi, _ = os.Stat(cfgPath)
 			logf("  %s->%s %s%s%s (%d functions, %d bytes)\n",
-				cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), fi.Size())
+				cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), fileSize(cfgPath))
 		}
 	}
 
@@ -270,10 +256,10 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		}
 		for _, df := range dotFiles {
 			svgPath := strings.TrimSuffix(df, ".dot") + ".svg"
-			dfi, _ := os.Stat(df)
-			if dfi != nil && dfi.Size() > largeDOTThreshold {
+			dfSize := fileSize(df)
+			if dfSize > largeDOTThreshold {
 				logf("  %s!%s skipping SVG for %s (%d KB), too large for dot\n",
-					cli.Red, cli.Reset, filepath.Base(df), dfi.Size()/1024)
+					cli.Red, cli.Reset, filepath.Base(df), dfSize/1024)
 				logf("    render manually: %ssfdp -Tsvg -o %s %s%s\n",
 					cli.Muted, filepath.Base(svgPath), filepath.Base(df), cli.Reset)
 				continue
@@ -290,8 +276,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			} else if err != nil {
 				logf("  %s!%s dot render failed for %s: %v\n%s\n", cli.Red, cli.Reset, filepath.Base(df), err, out)
 			} else {
-				fi, _ = os.Stat(svgPath)
-				logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, fi.Size())
+				logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, fileSize(svgPath))
 			}
 		}
 	}
@@ -367,10 +352,33 @@ func BuildSignalContent(
 		for _, e := range funcEdges {
 			edgeByPC[e.FromPC] = e
 		}
+
+		// Determine architecture: ARM64 decode of x86_64 bytes produces
+		// wrong instruction addresses (4-byte aligned vs variable-length),
+		// so no call edge addresses will match. If that happens, fall back
+		// to x86_64 decode. This makes BuildSignalContent work for both
+		// architectures without needing an explicit arch flag.
+		instAddrs := make([]uint64, 0, len(insts))
+		anyMatch := false
+		for _, inst := range insts {
+			instAddrs = append(instAddrs, inst.Addr)
+			if _, ok := edgeByPC[inst.Addr]; ok {
+				anyMatch = true
+			}
+		}
+		if !anyMatch && len(edgeByPC) > 0 {
+			// ARM64 addresses didn't match any call edge — try x86_64.
+			x86Insts := disasm.DecodeX86Simple(data, baseAddr)
+			instAddrs = instAddrs[:0]
+			for _, inst := range x86Insts {
+				instAddrs = append(instAddrs, inst.Addr)
+			}
+		}
+
 		seenCalls := make(map[string]bool)
 		var calls []string
-		for _, inst := range insts {
-			if e, ok := edgeByPC[inst.Addr]; ok {
+		for _, addr := range instAddrs {
+			if e, ok := edgeByPC[addr]; ok {
 				callee := e.TargetName
 				if callee == "" {
 					callee = e.Via

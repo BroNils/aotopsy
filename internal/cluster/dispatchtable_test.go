@@ -67,19 +67,47 @@ func TestEncodersRoundTripRealReader(t *testing.T) {
 // sentinel, deliberately not reused as a legitimate offset here).
 const dispatchTableTestFillEnd = 1
 
+// rootsShape is which field tables a Dart version puts in the roots
+// section before the dispatch table. Verified by reading
+// ProgramDeserializationRoots::ReadRoots at twelve dart-lang/sdk tags:
+//
+//	<= 2.17.6   neither
+//	>= 2.18.0   initial_field_table
+//	>= 3.5.0    initial_field_table + shared_initial_field_table
+type rootsShape struct {
+	name             string
+	dartVersion      string
+	initialFieldTab  bool
+	sharedFieldTable bool
+}
+
+// rootsShapes is every layout ParseDispatchTable has to handle. Testing
+// only the last of the three is how a real bug survived: reading both
+// tables unconditionally desynchronises the stream on every version from
+// 2.16 through 3.4.3, which silently disables type inference entirely.
+var rootsShapes = []rootsShape{
+	{name: "no_field_tables", dartVersion: "2.17.6"},
+	{name: "initial_only", dartVersion: "3.1.0", initialFieldTab: true},
+	{name: "initial_and_shared", dartVersion: "3.7.0", initialFieldTab: true, sharedFieldTable: true},
+}
+
 // buildDispatchTableStream assembles a synthetic roots-section byte
-// stream: one padding byte (see dispatchTableTestFillEnd), then
-// objectStoreFieldCount plain refs, an initial_field_table with one
-// entry, an empty shared_initial_field_table, then the dispatch table's
-// own length/first_code_id/RLE-encoded entries.
-func buildDispatchTableStream(objectStoreFieldCount int, rleEncoded [][]byte, length int64) []byte {
+// stream for the given shape: one padding byte (see
+// dispatchTableTestFillEnd), then objectStoreFieldCount plain refs, then
+// whichever field tables that Dart version writes, then the dispatch
+// table's own length/first_code_id/RLE-encoded entries.
+func buildDispatchTableStream(shape rootsShape, objectStoreFieldCount int, rleEncoded [][]byte, length int64) []byte {
 	buf := make([]byte, dispatchTableTestFillEnd)
 	for i := 0; i < objectStoreFieldCount; i++ {
 		buf = append(buf, encUnsigned(0)...) // ObjectStore field ref (content irrelevant)
 	}
-	buf = append(buf, encUnsigned(1)...)      // initial_field_table count
-	buf = append(buf, encUnsigned(0)...)      // ...1 ref
-	buf = append(buf, encUnsigned(0)...)      // shared_initial_field_table count = 0
+	if shape.initialFieldTab {
+		buf = append(buf, encUnsigned(1)...) // initial_field_table count
+		buf = append(buf, encUnsigned(0)...) // ...1 ref
+	}
+	if shape.sharedFieldTable {
+		buf = append(buf, encUnsigned(0)...) // shared_initial_field_table count = 0
+	}
 	buf = append(buf, encUnsigned(length)...) // dispatch table length
 	buf = append(buf, encUnsigned(0)...)      // first_code_id (unused for non-deferred)
 	for _, e := range rleEncoded {
@@ -125,24 +153,6 @@ func TestParseDispatchTable_NullCodeRecentRepeatStub(t *testing.T) {
 		encTagged64(2),  // entry4: repeat marker, repeatCount=1 -- entry4 AND entry5 get entry3's value (DispatchNull)
 		encTagged64(67), // entry6: code_index=3 (67-64), absoluteSlot=2 < firstEntryWithCode(5) -> stub, StubIndex=2
 	}
-	data := buildDispatchTableStream(2, rle, 7)
-
-	result := &Result{FillEnd: dispatchTableTestFillEnd}
-	profile := &snapshot.VersionProfile{
-		DartVersion:              "test",
-		ObjectStoreAOTFieldCount: 2,
-		CodeIndexOneBased:        true, // Dart >=2.16: recent update only for code entries
-	}
-	table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
-
-	entries, err := ParseDispatchTable(data, result, profile, table)
-	if err != nil {
-		t.Fatalf("ParseDispatchTable: %v", err)
-	}
-	if len(entries) != 7 {
-		t.Fatalf("expected 7 entries, got %d: %+v", len(entries), entries)
-	}
-
 	want := []DispatchTableEntry{
 		{Index: 0, Kind: DispatchNull},
 		{Index: 1, Kind: DispatchCode, ClusterIndex: 3},
@@ -152,9 +162,72 @@ func TestParseDispatchTable_NullCodeRecentRepeatStub(t *testing.T) {
 		{Index: 5, Kind: DispatchNull},               // repeat continuation slot
 		{Index: 6, Kind: DispatchStub, StubIndex: 2}, // code_index=3, absoluteSlot=2 < 5 → stub
 	}
-	for i, w := range want {
-		if entries[i] != w {
-			t.Errorf("entry[%d]: got %+v, want %+v", i, entries[i], w)
+	// The RLE decoding is identical across versions; what differs is how
+	// many bytes sit in front of it. Running the same expectation through
+	// all three roots shapes is what proves the parser skips exactly the
+	// right prelude for each.
+	for _, shape := range rootsShapes {
+		shape := shape
+		t.Run(shape.name, func(t *testing.T) {
+			data := buildDispatchTableStream(shape, 2, rle, 7)
+			result := &Result{FillEnd: dispatchTableTestFillEnd}
+			profile := &snapshot.VersionProfile{
+				DartVersion:              shape.dartVersion,
+				ObjectStoreAOTFieldCount: 2,
+				CodeIndexOneBased:        true, // Dart >=2.16: recent update only for code entries
+			}
+			table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
+
+			entries, err := ParseDispatchTable(data, result, profile, table)
+			if err != nil {
+				t.Fatalf("ParseDispatchTable: %v", err)
+			}
+			if len(entries) != 7 {
+				t.Fatalf("expected 7 entries, got %d: %+v", len(entries), entries)
+			}
+			for i, w := range want {
+				if entries[i] != w {
+					t.Errorf("entry[%d]: got %+v, want %+v", i, entries[i], w)
+				}
+			}
+		})
+	}
+}
+
+// TestParseDispatchTable_WrongRootsShapeIsDetected feeds a stream built for
+// one Dart version to a parser told it is another, which is exactly what the
+// unconditional two-table read did to every version from 2.16 to 3.4.3.
+//
+// It must not quietly return plausible entries: reading a field-table count
+// where the dispatch table length lives produced, on a real 2.17.6 binary,
+// "initial_field_table entry 12708/22168" -- 22168 being the dispatch table's
+// actual length, misread as a field count.
+func TestParseDispatchTable_WrongRootsShapeIsDetected(t *testing.T) {
+	const firstEntryWithCode = 0
+	rle := [][]byte{encTagged64(0), encTagged64(0), encTagged64(0)}
+
+	for _, built := range rootsShapes {
+		for _, parsedAs := range rootsShapes {
+			if built.name == parsedAs.name {
+				continue
+			}
+			t.Run(built.name+"_read_as_"+parsedAs.name, func(t *testing.T) {
+				data := buildDispatchTableStream(built, 1, rle, 3)
+				result := &Result{FillEnd: dispatchTableTestFillEnd}
+				profile := &snapshot.VersionProfile{
+					DartVersion:              parsedAs.dartVersion,
+					ObjectStoreAOTFieldCount: 1,
+					CodeIndexOneBased:        true,
+				}
+				table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
+
+				entries, err := ParseDispatchTable(data, result, profile, table)
+				if err == nil && len(entries) == 3 {
+					t.Errorf("a %s stream read as %s produced a plausible 3-entry table; "+
+						"the version gate is not doing anything",
+						built.name, parsedAs.name)
+				}
+			})
 		}
 	}
 }
@@ -164,9 +237,9 @@ func TestParseDispatchTable_NullCodeRecentRepeatStub(t *testing.T) {
 // style builds or apps with no polymorphic dispatch sites at all)
 // reports nil with no error, not a fabricated empty-but-confusing result.
 func TestParseDispatchTable_ZeroLengthReturnsNilNoError(t *testing.T) {
-	data := buildDispatchTableStream(1, nil, 0)
+	data := buildDispatchTableStream(rootsShapes[2], 1, nil, 0)
 	result := &Result{FillEnd: dispatchTableTestFillEnd}
-	profile := &snapshot.VersionProfile{DartVersion: "test", ObjectStoreAOTFieldCount: 1}
+	profile := &snapshot.VersionProfile{DartVersion: rootsShapes[2].dartVersion, ObjectStoreAOTFieldCount: 1}
 	table := &InstructionsTable{FirstEntryWithCode: 0}
 
 	entries, err := ParseDispatchTable(data, result, profile, table)

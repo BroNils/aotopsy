@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// libPathForTest returns the ARM64 sample path for error messages.
+func libPathForTest() string {
+	return os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
+}
+
 // TestLibraryFunctionsXref verifies the library -> functions xref against the
 // actual Dart source of compare_sample, which declares:
 //
@@ -22,14 +27,7 @@ import (
 // build/app/intermediates/merged_native_libs/... (or jniLibs/...) instead, or
 // this test will fail for a reason that has nothing to do with the code.
 func TestLibraryFunctionsXref(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	outDir := t.TempDir()
-	if _, err := Run(Opts{LibPath: libPath, OutDir: outDir, Quiet: true, MaxSteps: 100000}); err != nil {
-		t.Fatalf("pipeline failed: %v", err)
-	}
+	outDir := sharedPipelineOutDir(t)
 	recs := readJSONL(t, filepath.Join(outDir, "library_functions.jsonl"))
 	if len(recs) < 50 {
 		t.Fatalf("library_functions.jsonl: %d records, want >=50 (a Flutter app "+
@@ -58,7 +56,7 @@ func TestLibraryFunctionsXref(t *testing.T) {
 	if !ok {
 		t.Fatalf("package:compare_sample/main.dart missing. If this sample's "+
 			"libapp.so is the stale extracted_* one, see this test's doc comment. "+
-			"Sample: %s", libPath)
+			"Sample: %s", libPathForTest())
 	}
 	// Class count must match the source exactly: the AOT compiler drops unused
 	// classes, but every class here is reachable from _runAll.
@@ -121,14 +119,7 @@ func TestLibraryFunctionsXref(t *testing.T) {
 // (CID 6), and a Function's owner frequently points at that wrapper rather than
 // the real Class; without the hop, every such function loses its library.
 func TestLibraryResolverPatchClassHop(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	outDir := t.TempDir()
-	if _, err := Run(Opts{LibPath: libPath, OutDir: outDir, Quiet: true, MaxSteps: 100000}); err != nil {
-		t.Fatalf("pipeline failed: %v", err)
-	}
+	outDir := sharedPipelineOutDir(t)
 	recs := readJSONL(t, filepath.Join(outDir, "library_functions.jsonl"))
 
 	var total, unresolved int

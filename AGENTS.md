@@ -1,17 +1,17 @@
 # AGENTS.md — AOTopsy
 
-## ⚠️ WAJIB: baca `AGENTS-local.md` juga
+## ⚠️ MANDATORY: read `AGENTS-local.md` too
 
-Jika `AGENTS-local.md` ada di root repo, WAJIB dibaca sebelum bekerja. Berisi
-info lokal (lokasi sample binaries, env vars) yang tidak didokumentasikan di
-sini. Sample `libapp.so` dan `ground_truth.dart` tidak ada di repo — ada di
-`~/dev/` (lihat AGENTS-local.md).
+If `AGENTS-local.md` exists in the repo root, it MUST be read before working.
+It contains local info (sample binary paths, env vars) not documented here.
+Sample `libapp.so` and `ground_truth.dart` are not in the repo — they live in
+`~/dev/` (see AGENTS-local.md).
 
-File itu **sengaja tidak ada di git** (`.gitignore`), perannya sama seperti
-`.env`: isinya path dan env var satu mesin, yang salah kalau dipakai di mesin
-lain. Jadi clone baru tidak akan punya file ini — itu normal, bukan hilang.
-Kalau belum ada, buat sendiri berisi path sample dan env var integration test
-di mesin Anda.
+That file is **intentionally not in git** (`.gitignore`); its role is like
+`.env`: it holds paths and env vars for one machine, which would be wrong on
+another. So a fresh clone won't have it — that's normal, not missing.
+If it doesn't exist yet, create your own with sample paths and integration
+test env vars for your machine.
 
 ## ⚠️ Host memory: 6 GB. Read this before running anything heavy.
 
@@ -48,7 +48,7 @@ Build just the binary: `go build -o aotopsy ./cmd/aotopsy/`
 
 ```mermaid
 flowchart TD
-    CLI[cmd/aotopsy<br/>CLI entry point]
+    CLI_ENTRY[cmd/aotopsy<br/>CLI entry point]
     subgraph "internal/"
         ELFX[elfx<br/>ELF validation]
         SNAP[snapshot<br/>version profiles]
@@ -67,15 +67,18 @@ flowchart TD
         FFI[ffitrace<br/>dart:ffi tracing]
         SX[strxref<br/>string cross-ref]
         SU[strutil<br/>shared utilities]
+        ARCH[arch<br/>shared x86 primitives]
+        CLI[cli<br/>ANSI colors]
+        LAT[lattice<br/>graph IR]
         PIPE[pipeline<br/>orchestration]
     end
     TOOLS[tools/<br/>THR extractor]
     GHIDRA[ghidra_scripts/<br/>Python]
     IDA[ida_scripts/<br/>Python]
 
-    CLI --> PIPE
-    CLI --> DEC
-    CLI --> DISASM
+    CLI_ENTRY --> PIPE
+    CLI_ENTRY --> DEC
+    CLI_ENTRY --> DISASM
     PIPE --> ELFX
     PIPE --> SNAP
     PIPE --> CLUST
@@ -85,9 +88,12 @@ flowchart TD
     CLUST --> DART
     CLUST --> SNAP
     DISASM --> DART
+    DISASM --> ARCH
     DEC --> DISASM
+    DEC --> ARCH
     TT --> DISASM
     TT --> CLUST
+    TT --> ARCH
     FFI --> PIPE
     FFI --> DEC
     SX --> PIPE
@@ -126,11 +132,11 @@ built from different revisions of `lib/*.dart`. Verified by string-grepping them
 
 | path | matches current source? |
 |---|---|
-| `build/app/intermediates/merged_native_libs/release/.../libapp.so` | ✅ yes |
-| `build/app/intermediates/stripped_native_libs/release/.../libapp.so` | ✅ yes |
-| `build/app/generated/jniLibs/copyJniLibsflutterBuildRelease/.../libapp.so` | ✅ yes |
-| `build/app/outputs/flutter-apk/extracted_arm64/lib/arm64-v8a/libapp.so` | ❌ **STALE** |
-| `build/app/outputs/flutter-apk/extracted_x64/lib/x86_64/libapp.so` | ❌ **STALE** |
+| `build/app/intermediates/merged_native_libs/release/.../libapp.so` | yes |
+| `build/app/intermediates/stripped_native_libs/release/.../libapp.so` | yes |
+| `build/app/generated/jniLibs/copyJniLibsflutterBuildRelease/.../libapp.so` | yes |
+| `build/app/outputs/flutter-apk/extracted_arm64/lib/arm64-v8a/libapp.so` | **STALE** |
+| `build/app/outputs/flutter-apk/extracted_x64/lib/x86_64/libapp.so` | **STALE** |
 
 The `extracted_*` ones predate `ground_truth.dart` entirely and contain no
 `AntiInlineTools` / `safeDivide` / `tryCatchFinally`. Using them silently
@@ -145,7 +151,7 @@ grep for known symbols instead.
 
 ## Key Conventions
 
-- `main.go`'s `switch` statement is the source of truth for command dispatch — always check it
+- `commands.go`'s command registry (`primaryCommands`/`debugCommands`) is the source of truth for command dispatch — always check it
 - `PoolLookups` (`pipeline.PoolLookups`) is the central name-resolution surface
 - PatchClass hop: `OwnerRefID` may point at a PatchClass (CID 6), not the real Class
 - `DetectVersion` returns a copy to prevent data races
@@ -161,168 +167,194 @@ grep for known symbols instead.
 - Shell commands (`exec`) are for running builds, tests, git, and one-off diagnostics — NOT for file content modification.
 - If `edit` fails with "String not found", read the file again to get the exact current content (tabs, spaces, line endings) before retrying. Do NOT fall back to `sed` or python scripts.
 
-**Kenapa aturan ini ada (jangan diakali):** setiap harness (Claude Code, Devin,
-Codex, dll) punya tool edit/write sendiri yang bekerja seperti git — butuh
-`old_string` yang cocok persis, menolak match ganda, dan gagal keras kalau
-konteksnya sudah berubah. Itulah pengamannya. `sed`/`python replace()` tidak
-punya pengaman apa pun: kalau string muncul dua kali ia mengganti dua-duanya,
-kalau file sudah berubah ia tetap menulis, dan CRLF/escape diam-diam rusak.
+**Why this rule exists (do not work around it):** every harness (Claude Code,
+Devin, Codex, etc.) has its own edit/write tool that works like git — it
+requires an exact `old_string`, rejects duplicate matches, and fails hard if
+the context has changed. That is the safety guard. `sed`/`python replace()`
+has no guard at all: if the string appears twice it replaces both, if the
+file has changed it still writes, and CRLF/escape silently corrupt.
 
-- Ini berlaku untuk SEMUA cara memanggil python/sed, termasuk `python3 - <<'PY'`
-  yang membaca file lalu `open(...,'w').write(...)`. Bentuk itu terlihat rapi
-  tapi tetap menulis tanpa verifikasi — dilarang.
-- Bulk edit bukan alasan: pecah jadi beberapa panggilan `edit`, atau `read`
-  seluruh file lalu `write` ulang.
-- Python/sed BOLEH dipakai untuk hal yang tidak menulis file sumber:
-  menghitung, mem-parse output, analisis JSONL/JSON hasil run, menulis skrip
-  bantu di `/tmp`. Batasnya jelas — jangan menyentuh file di dalam repo.
-- Formatter (`gofmt -w`) tetap boleh: itu tool bahasa yang memang bertugas
-  menulis ulang file secara deterministik, bukan substitusi teks ad-hoc.
+- This applies to ALL ways of invoking python/sed, including `python3 - <<'PY'`
+  that reads a file then `open(...,'w').write(...)`. That form looks clean
+  but still writes without verification — forbidden.
+- Bulk edit is not an excuse: break into multiple `edit` calls, or `read`
+  the whole file then `write` it.
+- Python/sed MAY be used for things that do not write source files:
+  computing, parsing output, analyzing JSONL/JSON results, writing helper
+  scripts in `/tmp`. The boundary is clear — do not touch files inside the repo.
+- Formatter (`gofmt -w`) is still allowed: it is a language tool whose job is
+  to rewrite files deterministically, not ad-hoc text substitution.
 
-**Ini sudah pernah dilanggar dan memang mahal.** Di sesi porting decompiler,
-`python3 - <<'PY'` dipakai untuk puluhan edit. Dua di antaranya **diam-diam
-tidak melakukan apa-apa**: `lift.go` dan `arm64.go` ber-CRLF, sementara pola
-`replace()`-nya ditulis dengan `\n`, jadi `replace` mengembalikan string yang
-sama dan file ditulis ulang tanpa perubahan. Tidak ada error, tidak ada
-peringatan. Yang menunjukkan ada yang salah cuma fitur yang tidak menyala
-(`x22` tetap 13600 padahal seharusnya 0) — ketahuan hanya karena kebetulan
-angkanya diperiksa. Tool `edit` akan gagal keras di situ karena `old_string`
-tidak cocok. Itulah gunanya.
+**This has been violated before and it was expensive.** During the decompiler
+porting session, `python3 - <<'PY'` was used for dozens of edits. Two of them
+**silently did nothing**: `lift.go` and `arm64.go` were CRLF, while the
+`replace()` pattern was written with `\n`, so `replace` returned the same
+string and the file was rewritten with no change. No error, no warning. The
+only sign something was wrong was a feature not firing (`x22` stayed 13600
+when it should be 0) — caught only because the number happened to be checked.
+The `edit` tool would have failed hard there because `old_string` didn't
+match. That is the point.
 
-Aturan praktis: kalau tergoda menulis `python3 - <<'PY'` yang memuat
-`open(...,'w')`, berhenti. Pakai `edit` beberapa kali, atau `read` + `write`.
+Rule of thumb: if tempted to write `python3 - <<'PY'` containing
+`open(...,'w')`, stop. Use `edit` multiple times, or `read` + `write`.
 
-**Dan CRLF bukan alasan untuk menghindari `edit`.** Sesi berikutnya sempat
-ragu menyentuh `ir.go`/`lift.go`/`emit.go`/`arm64.go` yang semuanya CRLF,
-lalu mengukurnya: `edit` menyisipkan blok multi-baris (ditulis dengan `\n`)
-dan file tetap **436/436 baris CRLF** — sisipannya dinormalkan mengikuti
-file. Jadi bahaya CRLF itu khusus python/sed, bukan sifat filenya. Catatan
-tambahan: `gofmt -l` menandai semua file CRLF sebagai "belum terformat"
-(`call.go`, `tryregion_test.go`, dst. sudah begitu sejak awal) — itu derau
-baseline, jangan dikira ulah edit Anda, dan **jangan** menjalankan
-`gofmt -w` untuk "membereskan" karena ia mengubah seluruh file ke LF.
+**And CRLF is not a reason to avoid `edit`.** A later session hesitated to
+touch `ir.go`/`lift.go`/`emit.go`/`arm64.go` (all CRLF), then measured:
+`edit` inserts a multi-line block (written with `\n`) and the file stays
+**436/436 lines CRLF** — the insertion is normalized to match the file. So
+the CRLF danger is specific to python/sed, not a property of the file. Note:
+`gofmt -l` flags all CRLF files as "not formatted" (`call.go`,
+`tryregion_test.go`, etc. have been that way since the start) — that is
+baseline noise, not your edit's fault, and **do not** run `gofmt -w` to
+"fix" it because it converts the entire file to LF.
 
 ## Engineering Philosophy
 
-- **Jangan ambil jalan termudah.** Jika fix yang benar butuh refactor besar atau signature change, lakukan. Contoh: `transferInstruction` signature diubah untuk pass `prevRaw` — ini key untuk UBFX fix. "Changing the signature would require many changes" → DO IT ANYWAY.
-- **Jangan deklarasikan "limitation" apa yang belum dicoba.** P7 async detection dideklar "future work" padahal fix-nya (Future.delayed detection) straightforward. Never declare something impossible without first attempting it.
-- **Jangan settle untuk "approximate" atau "good enough"** ketika fix yang real achievable. kHeapObjectTag off-by-one fix seemed trivial tapi unlocked 11550 field hits from 11.
-- **Root cause analysis harus mendalam.** Gunakan gh search + gh api ke SDK source untuk verify setiap assumption. Jangan menebak. Contoh: ObjectStoreAOTFieldCount salah karena hanya count RW fields, padahal ada CW, FW, LAZY_CORE, LAZY_FFI, dll.
-- **"Data limitation" bukan akhir riset.** Jika BLR rendah, cari alternative resolution paths (PP-loaded Code, THR stubs, object field calls). Jangan berhenti di "dispatch table too small".
+- **Do not take the easiest path.** If the correct fix requires a large
+  refactor or signature change, do it. Example: `transferInstruction`
+  signature was changed to pass `prevRaw` — this was key to the UBFX fix.
+  "Changing the signature would require many changes" → DO IT ANYWAY.
+- **Do not declare a "limitation" you haven't tried.** P7 async detection
+  was declared "future work" when the fix (Future.delayed detection) was
+  straightforward. Never declare something impossible without first
+  attempting it.
+- **Do not settle for "approximate" or "good enough"** when a real fix is
+  achievable. The kHeapObjectTag off-by-one fix seemed trivial but unlocked
+  11550 field hits from 11.
+- **Root cause analysis must be deep.** Use gh search + gh api to the SDK
+  source to verify every assumption. Do not guess. Example:
+  ObjectStoreAOTFieldCount was wrong because it only counted RW fields,
+  when there are also CW, FW, LAZY_CORE, LAZY_FFI, etc.
+- **"Data limitation" is not the end of research.** If BLR is low, find
+  alternative resolution paths (PP-loaded Code, THR stubs, object field
+  calls). Do not stop at "dispatch table too small".
 
-### Urutan kerja yang terbukti: cek SDK → hitung → lacak → ubah
+### Proven work order: check SDK → count → trace → change
 
-Ini bukan preferensi. Di codebase ini **membaca kode menghasilkan hipotesis,
-bukan temuan** — terukur pada satu penyelidikan: empat kesimpulan dari
-membaca kode, keempatnya salah; jawabannya datang dari sebuah `println` yang
-justru tidak menyala.
+This is not a preference. In this codebase **reading code produces
+hypotheses, not findings** — measured on one investigation: four conclusions
+from reading code, all four wrong; the answer came from a `println` that
+wasn't even firing.
 
-1. **Cek ketersediaan data di SDK sebelum merencanakan.** Dua rencana besar
-   dibatalkan sebelum satu baris ditulis, karena field-nya memang tidak ada
-   di snapshot AOT rilis: `allocation_stub_` (di luar `to_snapshot(kFullAOT)`)
-   dan `var_descriptors` (`NOT_IN_PRODUCT`). Keduanya akan jadi hari-hari
-   terbuang kalau langsung dikerjakan.
-2. **Hitung SEMUA mode kegagalan sebelum memilih satu.** Contoh yang bekerja:
-   1.335 range tak bernama dipecah jadi 910 "owner ketemu, nama kosong" +
-   425 "owner tak ketemu", lalu diukur bahwa 910 dari 910 bisa diselesaikan
-   lewat tabel string VM. Perbaikannya jadi kepastian, bukan tebakan — dan
-   hasilnya persis angka yang diprediksi.
-3. **Lacak dengan tes yang memutar ulang instruksi aslinya** sebelum
-   mengubah kode. Bug "CMP menghapus register yang dibandingkannya" ketemu
-   begitu, dalam satu jalan, setelah empat putaran penalaran gagal.
+1. **Check data availability in the SDK before planning.** Two major plans
+   were canceled before a single line was written, because the field simply
+   doesn't exist in a release AOT snapshot: `allocation_stub_` (outside
+   `to_snapshot(kFullAOT)`) and `var_descriptors` (`NOT_IN_PRODUCT`). Both
+   would have been days wasted if started directly.
+2. **Count ALL failure modes before choosing one.** Working example: 1335
+   unnamed ranges were split into 910 "owner found, name empty" + 425 "owner
+   not found", then measured that 910 of 910 could be resolved via the VM
+   string table. The fix became a certainty, not a guess — and the result
+   was exactly the predicted number.
+3. **Trace with tests that replay the original instructions** before
+   changing code. The "CMP kills the register it compares" bug was found
+   this way, in one pass, after four rounds of reasoning failed.
 
-### Counter lintas arsitektur belum tentu sebanding
+### Cross-architecture counters are not necessarily comparable
 
-Sebelum menyimpulkan dari selisih angka, pastikan kedua sisi mengukur
-populasi yang sama. Tiga jebakan nyata:
+Before concluding from a number difference, make sure both sides measure
+the same population. Three real traps:
 
-- `add_class_hits` 58× lebih rendah di x86_64 — **memang seharusnya**:
-  `flow_graph_compiler_x64.cc` melipat aritmetika slot ke dalam mode
-  pengalamatan `CALL`, sementara ARM64 memancarkan `AddImmediate` dulu.
-- `header_hits` 3× lebih rendah — ARM64 menghitung cabang bertipe *dan* tak
-  bertipe, x86 hanya yang bertipe.
-- Golden dengan `wc -l` identik — 93 record di dalamnya berubah.
+- `add_class_hits` 58x lower on x86_64 — **by design**:
+  `flow_graph_compiler_x64.cc` folds slot arithmetic into the `CALL`
+  addressing mode, while ARM64 emits `AddImmediate` first.
+- `header_hits` 3x lower — ARM64 counts typed *and* untyped branches,
+  x86 only typed.
+- Golden with identical `wc -l` — 93 records inside changed.
 
-Rasio yang dihitung dari populasi yang salah juga menyesatkan: "70 % situs
-penyempitan tak berdasar" ternyata 4 %, karena dihitung dari distribusi
-`CMP` di disassembly, bukan dari situs yang benar-benar menyala.
+A ratio computed from the wrong population also misleads: "70% of
+narrowing sites are groundless" turned out to be 4%, because it was
+computed from the `CMP` distribution in disassembly, not from sites that
+actually fire.
 
-### Jangan kirim perubahan tanpa hasil terukur
+### Do not send changes without measured results
 
-Perubahan yang benar secara faktual tapi nol dampak pada output lebih baik
-dibatalkan daripada dikirim. Perbaikan korektnes yang menghapus klaim tanpa
-dasar tetap layak kirim walau output belum berubah — tapi **katakan terus
-terang** bahwa ia tidak membeli apa-apa.
+A factually correct change with zero output impact is better canceled than
+sent. A correctness fix that removes an unfounded claim is still worth
+sending even if output hasn't changed — but **say so honestly** that it
+doesn't buy anything.
 
-## Batas yang sudah diketahui (jangan diklaim selesai)
+## Known limits (do not claim solved)
 
-- **Resolusi dispatch di Dart 2.x rendah** (2.12: 129 single-callee dari 5504
-  BLR, vs 3.9.2: 2378 dari 5354). Sebabnya bukan data yang hilang — arity
-  (`packed_fields_`) dan `is_static` (`kind_tag_`) sudah ter-recover 7320/7320
-  fungsi. Sebabnya 2.x melempar argumen lewat stack, bukan register
-  (`DartCallingConvention::kCpuRegistersForArgs` belum ada di
-  `constants_arm64.h` tag 2.12.0, sudah ada di 3.9.2), jadi tak ada tipe
-  receiver di entry.
-  Seeding `this` dari frame slot sudah pernah dicoba dan **dibuang**: kelas
-  pendeklarasi bukan kelas runtime yang eksak, sedangkan lookup dispatch butuh
-  yang eksak. Membatasi ke leaf class pun masih salah.
-  Petunjuk terbuka, dengan bukti: `Layer` (cid 617) abstract, implementasi
-  `findAnnotations` subclass-nya menempati cid 619-626, dan `Layer.find`
-  ter-resolve lewat index 2482 sementara `findAnnotations` mulai di 2484 —
-  konsisten dengan tabel dispatch 2.x meleset sekitar dua entri.
-  **Konfirmasi atau gugurkan dugaan itu dulu** sebelum membangun ulang
-  seeding-nya. Jangan hidupkan seeding tanpa itu; output yang salah lebih
-  buruk daripada `unresolved`.
+- **Dispatch resolution on Dart 2.x was low** (2.12: 129 single-callee out
+  of 5504 BLR, vs 3.9.2: 2378 out of 5354). Three bugs were found and fixed:
+  1. `buildPoolClassByIndex` only checked isolate `RefCID`, not VM `VmRefCID`
+     — pool entries referencing VM objects (Type, Class) were silently
+     dropped. `pool_hits` went from 0 to 172119.
+  2. `CalleeExitTypes` was populated once after the fixed-point loop, not
+     inside it — BL return value propagation was completely dead. `BL has
+     exit type` went from 0 to 834124.
+  3. `handleDispatchTableLoad` dropped the `SelectorOnly` flag when
+     propagating `KnownDispatchIndex` through `LDR [X21, Xm, LSL #3]`. The
+     common 2.x pattern (`SUB X0, X0, #imm → LDR X30, [X21, X0, LSL #3] →
+     BLR X30`) set `SelectorOnly=true` at the SUB, but the LDR replaced it
+     with `KnownDispatch(selectorOffset)` which has `SelectorOnly=false`.
+     `resolveBLR` then tried a direct slot lookup at a negative selector
+     offset (always fails) instead of the selector scan fallback. Fix:
+     preserve `SelectorOnly` through the LDR. `blr.polymorphic` went from
+     41 to 2997, `unresolved` from 5334 to 2378. Total resolved: 3.1% → 56.8%.
 
-## Dua gate yang harus tetap hijau
+  The earlier "chicken-and-egg genuine" conclusion was wrong — the root
+  cause was not 2.x stack-based receiver passing, but a type tracker bug.
+  2.x does pass the receiver via the stack (`DartCallingConvention` does
+  not exist in `constants_arm64.h` at 2.12.0, first appears at 3.4.3),
+  but the selector scan fallback does not need the receiver class — it
+  scans all dispatch table entries at a given selector offset.
+  Seeding `this` from a frame slot was tried and discarded for a different
+  reason: the declaring class is not the exact runtime class, while direct
+  slot lookup needs the exact one. The selector scan does not have this
+  limitation.
 
-Keduanya ada karena bug yang lolos berbulan-bulan: indeks object pool meleset
-dua slot, sementara test regresi hanya mengecek rentang longgar ("50-300
-signal", "20000-50000 edge"). Total tetap masuk akal, tiap barisnya salah.
+## Two gates that must stay green
+
+Both exist because of bugs that slipped through for months: the object pool
+index was off by two slots, while the regression test only checked loose
+ranges ("50-300 signal", "20000-50000 edge"). The total looked reasonable,
+every line was wrong.
 
 ### 1. Golden output (`internal/pipeline/golden_test.go`)
 
-SHA-256 per file output dibandingkan dengan rekaman di
-`internal/pipeline/testdata/golden/`. Kuncinya SHA-256 binary input, jadi
-menunjuk `libapp.so` lain akan SKIP (bukan gagal).
+SHA-256 per output file is compared against records in
+`internal/pipeline/testdata/golden/`. The key is the input binary's SHA-256,
+so pointing at a different `libapp.so` will SKIP (not fail).
 
 ```bash
-go test ./internal/pipeline/ -run Golden                    # verifikasi
-AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # rekam ulang
+go test ./internal/pipeline/ -run Golden                    # verify
+AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # re-record
 ```
 
-Kalau gagal: **jangan langsung rekam ulang**. Cari dulu apa yang berubah;
-rekam ulang hanya setelah perubahan itu dipahami dan disengaja.
+If it fails: **do not re-record immediately**. First find what changed;
+re-record only after the change is understood and intentional.
 
-Perhatikan bahwa gate ini membandingkan **isi**, bukan jumlah baris. Perbaikan
-`B.AL` lolos dari cek manual "jumlah baris sama" tapi tertangkap di sini:
-`call_edges.jsonl` tetap 40502 baris sementara 93 di antaranya mendapat
-anotasi `via` baru. Kalau mau menilai sebuah diff golden, bandingkan
-per-record (kunci → nilai), bukan `wc -l`.
+Note that this gate compares **content**, not line count. A `B.AL` fix
+slipped past a manual "same line count" check but was caught here:
+`call_edges.jsonl` stayed 40502 lines while 93 of them got new `via`
+annotations. To judge a golden diff, compare per-record (key → value), not
+`wc -l`.
 
-`TestGoldenOutputIsDeterministic` menjalankan pipeline dua kali dan menuntut
-byte identik — golden tidak ada artinya kalau outputnya sendiri goyang. Setiap
-`for k := range someMap` yang menulis ke state bersama, atau `sort.Slice`
-dengan kunci yang tidak total, akan tertangkap di sini.
+`TestGoldenOutputIsDeterministic` runs the pipeline twice and demands
+byte-identical output — golden is meaningless if the output itself wobbles.
+Any `for k := range someMap` writing to shared state, or `sort.Slice` with
+a non-total key, will be caught here.
 
 ### 2. SDK drift (`tools/extract_thr.go`)
 
-Tabel offset Thread dan `ObjectStoreAOTFieldCount` tidak bisa divalidasi oleh
-test lokal apa pun: offset yang salah menghasilkan anotasi yang kelihatan
-wajar (`THR.allocate_object_stub`) tapi menunjuk field lain. Satu-satunya
-kebenaran adalah header SDK yang menghasilkannya.
+Thread offset tables and `ObjectStoreAOTFieldCount` cannot be validated by
+any local test: a wrong offset produces a plausible-looking annotation
+(`THR.allocate_object_stub`) but points at a different field. The only
+truth is the SDK header that generated it.
 
 ```bash
-go run tools/extract_thr.go -check              # tabel THR vs SDK
-go run tools/extract_thr.go -check-objectstore  # jumlah field ObjectStore vs SDK
-go run tools/extract_thr.go -write              # tulis ulang tabel dari SDK
-AOTOPSY_TEST_SDK=1 go test ./internal/disasm/ -run MatchSDK   # keduanya, sebagai test
+go run tools/extract_thr.go -check              # THR tables vs SDK
+go run tools/extract_thr.go -check-objectstore  # ObjectStore field count vs SDK
+go run tools/extract_thr.go -write              # rewrite tables from SDK
+AOTOPSY_TEST_SDK=1 go test ./internal/disasm/ -run MatchSDK   # both, as a test
 ```
 
-Tabel THR di `internal/disasm/thrfields*.go` adalah kode generated: ubah lewat
-`-write`, jangan diketik tangan. Field yang memang tidak diekspor SDK
-(`empty_array`, `dynamic_type`, dst — lihat `handDerivedFields`) didaftar
-eksplisit di tool, bukan ditoleransi diam-diam.
+THR tables in `internal/disasm/thrfields*.go` are generated code: change
+via `-write`, do not hand-edit. Fields the SDK genuinely doesn't export
+(`empty_array`, `dynamic_type`, etc. — see `handDerivedFields`) are listed
+explicitly in the tool, not silently tolerated.
 
 ## Source of Truth: SDK Verification
 

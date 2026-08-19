@@ -229,6 +229,22 @@ type FuncIR struct {
 	// emitter joins them without knowing how bounds are resolved.
 	TypeParamNames []string `json:"-"`
 
+	// NamedParamNames holds recovered parameter names positioned by
+	// ARGUMENT INDEX, resolved by the caller from
+	// FunctionType.named_parameter_names via
+	// pipeline.TypeParamResolver.NamedParamNames.
+	//
+	// Only named optional parameters have recoverable names in an AOT
+	// snapshot -- positional ones are dropped by the compiler -- so the
+	// slice is the function's full parameter list with "" in every
+	// positional slot and names only in the named tail. It is indexed by
+	// argument position, NOT by named-parameter position; see
+	// NamedParamNames for the SDK reasoning behind that alignment.
+	//
+	// When non-empty and the length matches the parameter count, the
+	// emitter uses these names in the signature instead of generic "argN".
+	NamedParamNames []string `json:"-"`
+
 	// FieldNameResolver resolves a (classID, byteOffset) pair to a field name.
 	// When non-nil, fieldExpr uses it to emit base.fieldName instead of
 	// base.fNN. Set by the caller from pipeline.BuildClassLayouts before

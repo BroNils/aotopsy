@@ -1,0 +1,16 @@
+{
+  "sample": "dart-2.16.0-arm64.so",
+  "input_sha256": "1fb9854a0f46902081803a8fea3fbd89297c979174fdf66a0cd44ab3de821577",
+  "dart_version": "2.16.0",
+  "unified_snapshot": false,
+  "vm_clusters": 6,
+  "isolate_clusters": 300,
+  "has_instructions_table": true,
+  "strings": 9260,
+  "named": 10967,
+  "codes": 7408,
+  "instr_table_length": 7408,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 7408,
+  "code_ranges": 7408
+}

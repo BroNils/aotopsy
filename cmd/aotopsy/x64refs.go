@@ -12,8 +12,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
-	"aotopsy/internal/snapshot"
+	"aotopsy/internal/pipeline"
 )
 
 // cmdX64Refs disassembles every function in an x86_64 libapp.so (using
@@ -58,71 +57,22 @@ func cmdX64Refs(args []string) error {
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
-	ef, err := elfx.Open(*libapp)
+	sc, err := pipeline.LoadSnapshot(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
-	defer func() { _ = ef.Close() }()
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
+	info := sc.Info
+	result := sc.Result
+	ranges := sc.Ranges
+	code := sc.Code
+	codeOff := sc.CodeOff
+	codeVA := sc.CodeVA
+	pl := sc.Pool
+	poolDisplay := sc.PoolDisplay
+
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
-
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
-
-	table, err := cluster.ParseInstructionsTable(data, &result.Header, info.Version, info.IsolateHeader)
-	var ranges []cluster.CodeRange
-	if err != nil && result.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta {
-		ranges = cluster.ResolveCodeRangesFromTextOffset(result.Codes)
-	} else if err != nil {
-		return fmt.Errorf("instrtable: %w", err)
-	} else {
-		codeRanges, err := cluster.ResolveCodeRanges(result.Codes, table)
-		if err != nil {
-			return fmt.Errorf("code ranges: %w", err)
-		}
-		stubRanges := cluster.ResolveStubRanges(table)
-		ranges = cluster.MergeRanges(stubRanges, codeRanges)
-	}
-
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
-	if err != nil {
-		return fmt.Errorf("code region: %w", err)
-	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen)
-	cluster.SetLastRangeSize(ranges, codeEndOffset)
-	codeVA := info.IsolateInstructions.VA + codeOff
-
-	// Parse the VM-isolate snapshot region for base-object resolution --
-	// same fix applied to decompile_native_cmd.go/pipeline.LoadContext
-	// this session; this command had the identical nil-vmResult gap.
-	// Mirrors objects.go/refinfo.go's already-proven pattern.
-	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
-
 	fmt.Fprintf(os.Stderr, "ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
 
 	if *disasmFuncVA != "" {
@@ -199,16 +149,9 @@ func cmdX64Refs(args []string) error {
 				_, _ = fmt.Sscanf(*indirectInFunc, "%x", &targetVA)
 			}
 			scanRanges = nil
-			for _, r := range ranges {
-				if r.Size == 0 {
-					continue
-				}
-				funcStart := uint64(r.PCOffset) - codeOff
-				funcVA := codeVA + funcStart
-				if targetVA >= funcVA && targetVA < funcVA+uint64(r.Size) {
-					scanRanges = append(scanRanges, r)
-					break
-				}
+			found := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
+			if found != nil {
+				scanRanges = append(scanRanges, *found)
 			}
 			if scanRanges == nil {
 				return fmt.Errorf("no range contains VA 0x%x", targetVA)
@@ -292,75 +235,70 @@ func cmdX64Refs(args []string) error {
 // Map/getter key), the natural next step once blind register/memory
 // dumping alone hits its limit.
 func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *poolLookups, poolDisplay map[int]string) error {
-	for _, r := range ranges {
-		if r.Size == 0 {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		funcVA := codeVA + funcStart
-		if targetVA < funcVA || targetVA >= funcVA+uint64(r.Size) {
-			continue
-		}
-		var funcName string
-		if r.RefID >= 0 {
-			funcName = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-		fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
-
-		funcCode := code[funcStart:funcEnd]
-		for off := 0; off < len(funcCode); {
-			addr := funcVA + uint64(off)
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				fmt.Printf("0x%x: <decode error: %v>\n", addr, err)
-				length = 1
-				off += length
-				continue
-			}
-			text := inst.String()
-			annotation := ""
-			for _, arg := range inst.Args {
-				if mem, ok := arg.(x86asm.Mem); ok {
-					if mem.Base == x86asm.R15 {
-						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
-						if disp, ok := poolDisplay[poolIdx]; ok {
-							annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
-						} else {
-							annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
-						}
-					} else if mem.Base == x86asm.R14 {
-						annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
-					}
-				}
-				if rel, ok := arg.(x86asm.Rel); ok {
-					// Resolve JMP/Jcc/CALL rel targets to absolute VA --
-					// added to disambiguate whether a given address is
-					// reachable via normal control flow or only via a
-					// jump/deopt-landing-pad from elsewhere (useful for
-					// telling which of two candidate write sites in a
-					// function is on the normal path vs. a rare
-					// deopt/exception continuation).
-					target := addr + uint64(length) + uint64(int64(rel))
-					annotation += fmt.Sprintf("  ; -> 0x%x", target)
-				}
-			}
-			marker := "  "
-			if addr == targetVA {
-				marker = "->"
-			}
-			fmt.Printf("%s 0x%x: %s%s\n", marker, addr, text, annotation)
-			off += length
-		}
-		return nil
+	r := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
+	if r == nil {
+		return fmt.Errorf("no range contains VA 0x%x", targetVA)
 	}
-	return fmt.Errorf("no range contains VA 0x%x", targetVA)
+	funcStart := uint64(r.PCOffset) - codeOff
+	funcEnd := funcStart + uint64(r.Size)
+	if funcEnd > uint64(len(code)) {
+		funcEnd = uint64(len(code))
+	}
+	funcVA := codeVA + funcStart
+	var funcName string
+	if r.RefID >= 0 {
+		funcName = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
+	} else {
+		funcName = fmt.Sprintf("stub_%x", r.PCOffset)
+	}
+	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
+
+	funcCode := code[funcStart:funcEnd]
+	for off := 0; off < len(funcCode); {
+		addr := funcVA + uint64(off)
+		inst, err := x86asm.Decode(funcCode[off:], 64)
+		length := inst.Len
+		if err != nil || length <= 0 {
+			fmt.Printf("0x%x: <decode error: %v>\n", addr, err)
+			length = 1
+			off += length
+			continue
+		}
+		text := inst.String()
+		annotation := ""
+		for _, arg := range inst.Args {
+			if mem, ok := arg.(x86asm.Mem); ok {
+				if mem.Base == x86asm.R15 {
+					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+					if disp, ok := poolDisplay[poolIdx]; ok {
+						annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
+					} else {
+						annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
+					}
+				} else if mem.Base == x86asm.R14 {
+					annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
+				}
+			}
+			if rel, ok := arg.(x86asm.Rel); ok {
+				// Resolve JMP/Jcc/CALL rel targets to absolute VA --
+				// added to disambiguate whether a given address is
+				// reachable via normal control flow or only via a
+				// jump/deopt-landing-pad from elsewhere (useful for
+				// telling which of two candidate write sites in a
+				// function is on the normal path vs. a rare
+				// deopt/exception continuation).
+				target := addr + uint64(length) + uint64(int64(rel))
+				annotation += fmt.Sprintf("  ; -> 0x%x", target)
+			}
+		}
+		marker := "  "
+		if addr == targetVA {
+			marker = "->"
+		}
+		fmt.Printf("%s 0x%x: %s%s\n", marker, addr, text, annotation)
+		off += length
+	}
+	return nil
 }
 
 // findCallersOf scans every function in the binary for CALL rel32
