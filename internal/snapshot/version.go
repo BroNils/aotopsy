@@ -212,6 +212,49 @@ type VersionProfile struct {
 	// (`&slow_tts_stub_`) inclusive; see cmd/aotopsy's own
 	// dispatch-table plumbing for how this is consumed.
 	ObjectStoreAOTFieldCount int
+
+	// RootsPrefixRefCount is how many plain refs the roots section carries
+	// BEFORE the ObjectStore fields.
+	//
+	// It was 0 through 3.12.2. Dart 3.13.0 moved the VM's bootstrap objects
+	// out of `vm_isolate_snapshot_object_table` and into a `Roots` struct,
+	// and ProgramDeserializationRoots::ReadRoots now opens with, under
+	// `Snapshot::IncludesCode(kind)` -- true for kFullAOT:
+	//
+	//	for (ptr = roots->from();   ptr <= roots->to();   ptr++)   *ptr = d->ReadRef();
+	//	for (h   = roots->fromh();  h   <= roots->toh();  h++)     h->ptr = d->ReadRef();
+	//	for (ptr = roots->fromah(); ptr <= roots->toah(); ptr++)   *ptr = d->ReadRef();
+	//	for (cid = kObjectCid;   cid < kInstanceCid;       cid++) { if (IsAbsentCid(cid)) continue; ... ReadRef(); }
+	//	for (cid = kInstanceCid; cid < kNumPredefinedCids; cid++) { if (IsAbsentCid(cid)) continue; ... ReadRef(); }
+	//
+	// (app_snapshot.cc @3.13.0; the serializer writes the same five loops in
+	// the same order.) Skipping them desynchronises the stream before the
+	// ObjectStore fields are even reached: on the 3.13.0 arm64 sample
+	// initial_field_table read back as 6936 entries against 552 on 3.12.2,
+	// and the dispatch table came out with 31 entries instead of ~29600 --
+	// which left 80 % of BLR sites unresolved, the worst in the corpus.
+	//
+	// The count is a per-version SDK fact, exactly like
+	// ObjectStoreAOTFieldCount, because every term in it can move:
+	//
+	//	sizeof(Raw)/sizeof(ObjectPtr)       = |RAW_ROOTS_LIST| + 35 + 4 + 256
+	//	sizeof(Internal)/sizeof(VMHandle)   = |HANDLE_ROOTS_LIST|
+	//	                                      + (kNumPredefinedSymbols + 256)
+	//	                                      + kNumStubEntries
+	//	sizeof(Api)/sizeof(ObjectPtr)       = |API_HANDLE_ROOTS_LIST|
+	//	class table                         = (kNumPredefinedCids - kObjectCid)
+	//	                                      - |IsAbsentCid|
+	//
+	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h):
+	// 7+35+4+256 = 302, 63+(557+256)+173 = 1049, 6, and (176-4)-11 = 161,
+	// so 1518. Note kNumStubEntries is 173 and not 164: VM_STUB_CODE_LIST
+	// pulls in PROBE_POINT_STUBS_LIST (defined on ONE line, which a
+	// line-oriented regex misses) and VM_TYPE_TESTING_STUB_CODE_LIST.
+	//
+	// 1518 was also confirmed independently against the binary: it is the
+	// only prefix in [0,3000] for which the whole roots structure replays to
+	// exactly IsolateHeader.TotalSize.
+	RootsPrefixRefCount int
 }
 
 // CIDTable maps predefined type names to class IDs for a specific Dart version.
@@ -961,7 +1004,7 @@ var versionProfiles = map[string]*VersionProfile{
 	// TypeIsTopTypeForSubtyping* renamed. CID table, stub names, THR
 	// offsets, and function kind layout all verified via gh api to
 	// dart-lang/sdk at tag 3.13.0.
-	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
+	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, RootsPrefixRefCount: 1518, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
 }
 
 // DetectVersion returns a VersionProfile for the given snapshot hash.
