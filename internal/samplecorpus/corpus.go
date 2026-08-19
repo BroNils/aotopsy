@@ -99,6 +99,32 @@ type Sample struct {
 	// architecture with another entry but were built from a different source
 	// set, e.g. "-pre214".
 	FileSuffix string
+
+	// GroundTruth marks an UNSTRIPPED twin: the same program as the analysis
+	// sample for this version, built with
+	//
+	//	flutter build apk --release --extra-gen-snapshot-options=--no-strip
+	//
+	// so gen_snapshot leaves a .symtab behind. It exists for exactly one gate,
+	// TestSymtabDifferential, which is the only check in this project that
+	// compares recovered names against something other than our own previous
+	// output.
+	//
+	// It is a SEPARATE sample rather than a replacement, deliberately. The
+	// corpus has to keep representing stripped production binaries, because
+	// that is the condition the tool actually runs in -- recovering names
+	// without symbols is the whole point. So these twins are excluded from the
+	// corpus cluster-fact records and from the cross-version differential:
+	// they would duplicate facts their stripped counterparts already pin, and
+	// double the differential's runtime for nothing.
+	//
+	// Their honesty was measured, not assumed. LoadContext -- the path the
+	// symtab gate reads names from -- never consults .symtab; only
+	// pipeline.Run does, via elfStubName, and only as a last resort for Codes
+	// the snapshot could not name at all. Proven on 3.9.2 arm64 by loading a
+	// stripped binary and its unstripped twin and diffing the recovered names:
+	// 8220 names, ZERO differences. The gate is not validating itself.
+	GroundTruth bool
 }
 
 // FileName is the name this sample must have under samples/.
@@ -259,6 +285,63 @@ var Registry = []Sample{
 	// keyed by input sha256.
 	{DartVersion: "3.12.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.12.0, Flutter 3.44.0 -- Dart 3.12.0 stable, 3.12.2 format", FileSuffix: "-f3440"},
 	{DartVersion: "3.12.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.12.0 x86_64, Flutter 3.44.0", FileSuffix: "-f3440"},
+
+	// Unstripped ground-truth twins -- see Sample.GroundTruth. Built from the
+	// SAME project as the version's analysis sample, so the source is
+	// identical (including the downlevelled sources of the pre-2.14 and
+	// pre-null-safety sets), with
+	// --extra-gen-snapshot-options=--no-strip added.
+	//
+	// The flag is missing from `flutter build apk --help` on every release
+	// before 3.35, which is why it looked unavailable at first. It is present
+	// in flutter_tools/lib/src/build_info.dart at 2.5.0 and every release
+	// after, merely hidden -- and it works: the 2.14.0 twin carries 7303 FUNC
+	// symbols against the analysis sample's zero.
+	// 2.10.0 and 2.12.0 have NO twin and cannot get one. Flutter 2.0.0 and
+	// earlier reject --extra-gen-snapshot-options on the APK build path
+	// outright -- measured both spellings, --no-strip and --no_strip, and the
+	// same project builds fine the moment the option is dropped. The option
+	// exists in flutter_tools/lib/src/flutter_command.dart at that era but is
+	// not plumbed through to the AOT assemble step. Flutter 2.2.0 (Dart 2.13)
+	// is where it starts working, so that is the floor for ground truth.
+	{DartVersion: "2.13.0", Arch: "arm64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.13.0", Arch: "x64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.14.0", Arch: "arm64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.14.0", Arch: "x64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.15.0", Arch: "arm64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.15.0", Arch: "x64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.16.0", Arch: "arm64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.16.0", Arch: "x64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.17.6", Arch: "arm64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.17.6", Arch: "x64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.18.0", Arch: "arm64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.18.0", Arch: "x64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.19.0", Arch: "arm64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.19.0", Arch: "x64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.0.5", Arch: "arm64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.0.5", Arch: "x64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.1.0", Arch: "arm64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.1.0", Arch: "x64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.2.5", Arch: "arm64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.2.5", Arch: "x64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.3.0", Arch: "arm64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.3.0", Arch: "x64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.4.3", Arch: "arm64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.4.3", Arch: "x64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.5.0", Arch: "arm64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.5.0", Arch: "x64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.6.2", Arch: "arm64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.6.2", Arch: "x64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.7.0", Arch: "arm64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.7.0", Arch: "x64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.8.1", Arch: "arm64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.8.1", Arch: "x64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.9.2", Arch: "arm64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.9.2", Arch: "x64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
 }
 
 // SourceSets groups the registry by SourceSet, dropping samples that belong to
