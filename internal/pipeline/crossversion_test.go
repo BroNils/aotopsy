@@ -54,69 +54,12 @@ type knownGap struct {
 }
 
 var knownGaps = []knownGap{
-	{
-		metric: "field_type_declared_hits",
-		versions: []string{"2.14.0/arm64", "2.14.0/x64", "2.16.0/arm64", "2.16.0/x64",
-			"2.17.6/arm64", "2.17.6/x64", "2.18.0/arm64", "2.18.0/x64",
-			"2.19.0/arm64", "2.19.0/x64", "3.1.0/arm64", "3.1.0/x64",
-			"3.3.0/arm64", "3.3.0/x64"},
-		reason: "Every field metric collapses to 1-3% across the whole <=3.3.0 group, " +
-			"not just where it happens to hit exactly zero: field_accessor_xref is " +
-			"30-37 against 1708-1792, and field_type_instance_hits 121-341 against " +
-			"10434-10914. The cliff sits exactly at the 3.3.0/3.4.3 boundary. " +
-			"Measured so far: the field maps themselves are healthy on both sides " +
-			"(FieldByOwnerOffset 82-107 classes, 160-219 entries joinable to a " +
-			"resolved type), and the hit RATE when FieldValueClass is called is " +
-			"actually better on 2.17.6 (6.3%) than on 3.9.2 (4.6%). What is scarce " +
-			"is KnownClass receivers: FieldValueClass is called 9860 times on 2.17.6 " +
-			"and 307594 on 3.9.2. So the cause is upstream of field handling, in how " +
-			"often a receiver register carries a known class, and it is not yet " +
-			"explained. Recorded rather than guessed at.",
-	},
-	{
-		metric: "dispatch_hits",
-		versions: []string{"2.13.0/x64", "2.14.0/x64", "2.15.0/x64", "2.16.0/x64",
-			"2.17.6/x64", "2.18.0/x64"},
-		reason: "x86_64 dispatch-table type inference produces nothing on Dart 2.14.0 " +
-			"through 2.18.0, while the SAME source on arm64 gives 192158 hits. Ruled " +
-			"out so far, each by measurement rather than reading: the dispatch table " +
-			"parses on both arches (21000-26000 entries); the call shape is present in " +
-			"the binary (3879 CALL [RAX+RCX*8+disp] sites on the 2.18.0 x64 sample " +
-			"against 3992 on 2.19.0, which does resolve); EmitDispatchTableCall is " +
-			"byte-identical in the SDK at 2.17.6, 2.18.0 and 2.19.0; " +
-			"DispatchTableNullErrorABI::kClassIdReg is RCX in every version; and the " +
-			"x64 compressed Thread tables that were missing for 2.14.0-2.17.6 have " +
-			"been added, taking unresolved_thr to 0 without moving dispatch_hits. So " +
-			"the break is between the pre-scan, which records the selector offsets, " +
-			"and resolveX86Dispatch, which needs a KnownDispatch state and a receiver " +
-			"class at the call. Found by the architecture axis of this differential, " +
-			"which is the only thing that could have: x64 compared against its own " +
-			"past looks like a smooth curve.",
-	},
-	{
-		metric: "blr_monomorphic",
-		versions: []string{"2.13.0/x64", "2.14.0/x64", "2.15.0/x64", "2.16.0/x64",
-			"2.17.6/x64", "2.18.0/x64"},
-		reason: "Downstream of the dispatch_hits gap above: with no dispatch-table " +
-			"resolution there is no single-callee site to report. Expected to close " +
-			"with it.",
-	},
-	{
-		metric:   "func_return_type_count",
-		versions: []string{"2.13.0/arm64", "2.13.0/x64"},
-		reason: "Function return types resolve to nothing on Dart 2.12.0 and 2.13.0, " +
-			"while 2.14.0 built from the same source gives 1089 with 710 seeds. The " +
-			"FunctionType objects are there (924 in the 2.13.0 sample) and the ref " +
-			"layout is right -- raw_object.h@2.13.0 has type_test_stub(0), " +
-			"type_parameters(1), result_type(2), parameter_types(3), which is exactly " +
-			"the FuncTypeParamTypesIdx-1 rule this code uses. What differs is the " +
-			"scalar: 2.13.0 writes packed_fields_, and readFuncTypeScalar decodes " +
-			"scalar 1 as packed_parameter_counts_, a different bit layout introduced " +
-			"at 2.14.0. So the FuncTypeInfo is produced but its parameter counts are " +
-			"wrong, and whatever consumes them for return types finds nothing usable. " +
-			"Found by the pre-2.14 source set, which exists precisely because those " +
-			"versions cannot compile the main one.",
-	},
+	// Empty. Every entry that has stood here was a real defect and was fixed
+	// rather than tolerated: the roots-section layout, Type capture on two
+	// eras, the type_class_id shift, four missing stub and Thread tables, the
+	// receiver-on-stack seed, the Function.signature ref index, and the 16-bit
+	// class-id load on x86_64. The mechanism stays because the next
+	// measurement will need it.
 }
 
 func gapAllows(metric, version string) (string, bool) {

@@ -101,7 +101,9 @@ type FillSpec struct {
 	IsFuncType bool // true for FunctionType clusters (extract packed_parameter_counts)
 	IsField    bool // true for Field clusters (extract kind_bits + host_offset)
 	IsFunction bool // true for Function clusters (extract code_index, scalar 0)
-	IsType     bool // true for Type clusters (extract type_class_id)
+	// DataIdx is the ref-loop index of Function.data; see specFunction.
+	DataIdx int
+	IsType  bool // true for Type clusters (extract type_class_id)
 	// TypeClassIDIsScalar0 marks the Dart 2.16-2.18 Type layout, where
 	// scalar 0 is the raw type_class_id rather than the packed "flags" word
 	// that 2.19.0+ uses:
@@ -150,6 +152,12 @@ type FillSpec struct {
 	// which is why the 2.14.0 sample parses without it and the 2.15.0 one
 	// asks for a 299796-byte stack map.
 	InlineBytesLengthShift uint
+
+	// PackedParams describes how to decode the parameter-count word of a
+	// FunctionType. The layout changed at 2.14.0 and decoding one with the
+	// other's rule yields plausible-looking but wrong arity for every
+	// function -- see PackedParamLayout.
+	PackedParams PackedParamLayout
 	// FuncTypeParamTypesIdx is the ref-loop index of parameter_types,
 	// propagated from snapshot.VersionProfile.FuncTypeParamTypesIdx.
 	// 0 = not verified for this version, don't extract.
@@ -186,7 +194,19 @@ const (
 // v2.13:   5 refs + ReadRef(code) + Read<uint32_t>(packed_fields) + Read<uint32_t>(kind_tag)
 // v2.14-2.17: 4 refs + ReadUnsigned(code) + Read<uint32_t>(packed_fields) + Read<uint32_t>(kind_tag)
 // v3.x:    4 refs + ReadUnsigned(code) + Read<uint32_t>(kind_tag)
-func specFunction(fillRefUnsigned bool, numRefs int) FillSpec {
+// signatureIdx/dataIdx are the ref-loop positions of Function.signature and
+// Function.data. They moved at 2.14.0, when parameter_names was removed from
+// UntaggedFunction:
+//
+//	<= 2.13.0  name(0), owner(1), parameter_names(2), signature(3), data(4)
+//	>= 2.14.0  name(0), owner(1), signature(2), data(3)
+//
+// (raw_object.h at 2.12.0, 2.13.0 and 2.14.0.) Hardcoding 2 and 3 meant that on
+// 2.12.0 and 2.13.0 the "signature" ref was really parameter_names, so it
+// resolved to no FunctionType at all -- 0 of 7573 Functions on the 2.12.0
+// sample against 2014 of 7455 on 2.14.0 -- and every declared return type,
+// parameter type and arity that hangs off the signature was silently absent.
+func specFunction(fillRefUnsigned bool, numRefs, signatureIdx, dataIdx int) FillSpec {
 	if numRefs <= 0 {
 		numRefs = 4 // default: name, owner, signature, data
 	}
@@ -201,7 +221,8 @@ func specFunction(fillRefUnsigned bool, numRefs int) FillSpec {
 		Scalars:      scalars,
 		NameIdx:      0,
 		OwnerIdx:     1,
-		SignatureIdx: 2, // Function refs: name(0), owner(1), signature(2), data(3)
+		SignatureIdx: signatureIdx,
+		DataIdx:      dataIdx,
 		IsFunction:   true,
 	}
 }
@@ -427,7 +448,7 @@ func specType(fillRefUnsigned, oldTypeScalars, typeClassIdIsRef, typeHasTokenPos
 	}
 }
 
-func specFunctionType(numRefs int, oldScalars bool, paramTypesIdx int) FillSpec {
+func specFunctionType(numRefs int, oldScalars bool, paramTypesIdx int, layout PackedParamLayout) FillSpec {
 	// v2.17+/v3.x: ReadFromTo = 6 refs. Read<uint8_t>(combined) + Read<uint32_t>(packed_parameter_counts) + Read<uint16_t>(packed_type_parameter_counts).
 	// v2.14-2.15:  ReadFromTo = 5 refs (no type_test_stub). Same 3 scalars.
 	// v2.13:       ReadFromTo = 6 refs. Read<uint8_t>(combined) + Read<uint32_t>(packed_fields). Only 2 scalars.
@@ -447,6 +468,7 @@ func specFunctionType(numRefs int, oldScalars bool, paramTypesIdx int) FillSpec 
 		OwnerIdx:              -1,
 		IsFuncType:            true,
 		FuncTypeParamTypesIdx: paramTypesIdx,
+		PackedParams:          layout,
 	}
 }
 
@@ -776,7 +798,8 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	preV32 := profile.PreV32Format
 	switch {
 	case cid == ct.Function:
-		return specFunction(fillRefUnsigned, profile.FuncNumRefs)
+		sigIdx, dataIdx := functionRefIdx(profile.DartVersion)
+		return specFunction(fillRefUnsigned, profile.FuncNumRefs, sigIdx, dataIdx)
 	case cid == ct.Class:
 		return specClass(profile.ClassNumRefs)
 	case cid == ct.PatchClass:
@@ -829,7 +852,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	case cid == ct.Type:
 		return specType(fillRefUnsigned, profile.OldTypeScalars, profile.TypeClassIdIsRef, profile.TypeHasTokenPos, profile.TypeNumRefs, typeClassIDShift(profile.DartVersion))
 	case cid == ct.FunctionType:
-		return specFunctionType(profile.FuncTypeNumRefs, profile.FuncTypeOldScalars, profile.FuncTypeParamTypesIdx)
+		return specFunctionType(profile.FuncTypeNumRefs, profile.FuncTypeOldScalars, profile.FuncTypeParamTypesIdx, packedParamLayoutFor(profile.DartVersion))
 	case ct.RecordType != 0 && cid == ct.RecordType:
 		return specRecordType()
 	case cid == ct.TypeParameter:
@@ -1024,4 +1047,65 @@ func typeClassIDShift(dartVersion string) uint {
 		return 3
 	}
 	return 4
+}
+
+// PackedParamLayout is where the implicit/named/fixed/optional counts sit
+// inside a FunctionType's packed parameter word.
+//
+// Dart split that word in two at 2.14.0. Before then a single packed_fields_
+// held the parent type-argument count as well, pushing everything else up by
+// eight bits:
+//
+//	<= 2.13.0  packed_fields_            parentTypeArgs 0..7, implicit 8,
+//	                                     hasNamedOptional 9,
+//	                                     fixed 10..19 (10 bits),
+//	                                     optional 20..29 (10 bits)
+//	>= 2.14.0  packed_parameter_counts_  implicit 0, hasNamedOptional 1,
+//	                                     fixed 2..15 (14 bits),
+//	                                     optional 16..29 (14 bits)
+//	                                     (parent type args moved to
+//	                                      packed_type_parameter_counts_)
+//
+// Verified in raw_object.h at 2.12.0, 2.13.0, 2.14.0, 2.15.0 and 3.12.2.
+// UntaggedFunction.packed_fields_ keeps the <= 2.13 shape throughout, which is
+// why readFunctionScalar already shifts by 10 and 20 and only the FunctionType
+// path was reading the wrong bits.
+type PackedParamLayout struct {
+	ImplicitShift uint
+	NamedShift    uint
+	FixedShift    uint
+	FixedMask     uint64
+	OptionalShift uint
+	OptionalMask  uint64
+}
+
+// packedParamsPre214 is the Dart <= 2.13.0 layout; packedParams214 is 2.14.0+.
+var (
+	packedParamsPre214 = PackedParamLayout{
+		ImplicitShift: 8, NamedShift: 9,
+		FixedShift: 10, FixedMask: 0x3FF,
+		OptionalShift: 20, OptionalMask: 0x3FF,
+	}
+	packedParams214 = PackedParamLayout{
+		ImplicitShift: 0, NamedShift: 1,
+		FixedShift: 2, FixedMask: 0x3FFF,
+		OptionalShift: 16, OptionalMask: 0x3FFF,
+	}
+)
+
+// packedParamLayoutFor picks the layout for a Dart version.
+func packedParamLayoutFor(dartVersion string) PackedParamLayout {
+	if dartVersionAtLeast(dartVersion, "2.14.0") {
+		return packedParams214
+	}
+	return packedParamsPre214
+}
+
+// functionRefIdx returns the ref-loop indices of Function.signature and
+// Function.data for a Dart version. See specFunction.
+func functionRefIdx(dartVersion string) (signatureIdx, dataIdx int) {
+	if dartVersionAtLeast(dartVersion, "2.14.0") {
+		return 2, 3
+	}
+	return 3, 4
 }

@@ -331,6 +331,8 @@ func runTypeInference(
 	// constants_arm64.h at 3.4.3; before it, every argument including the
 	// receiver is passed on the stack.
 	receiverOnStack := !snapshot.VersionAtLeast(info.Version.DartVersion, "3.4.3")
+	// See TypeContext.ClassIDIsHalfWord.
+	ctx.ClassIDIsHalfWord = !snapshot.VersionAtLeast(info.Version.DartVersion, "2.19.0")
 	blEdges := make(map[string][]typetrack.BLEdge)
 
 	// Build address → function name lookup for BL/CALL target resolution.

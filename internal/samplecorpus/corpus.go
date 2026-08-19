@@ -129,6 +129,44 @@ const comparesample = "compare_sample"
 // differential against rather than only each other.
 const comparesamplePre214 = "compare_sample_pre214"
 
+// comparesamplePreNNBD is a THIRD source set, for the versions that predate
+// null safety.
+//
+// Dart 2.10.0 has no `required` keyword at all, so even the pre-2.14 source
+// will not compile there. Removing the three uses of it produces valid
+// pre-null-safety Dart, and pinning every member's pubspec to language version
+// 2.10 makes the whole set compile the same way -- which is what keeps it a
+// control rather than three unrelated binaries.
+const comparesamplePreNNBD = "compare_sample_prenn"
+
+// profileIncomplete210 records where the Dart 2.10.0 profile stands.
+//
+// The sample exists and most of the pipeline works on it: the image header fix
+// below took it from "data too short for InstructionsSection" to 7657
+// recovered functions, and the clusters parse. What does not work yet is the
+// roots section, so the dispatch table cannot be read and type inference is
+// off for this version.
+//
+// Everything checkable about the roots layout has been checked and is right:
+// ProgramSerializationRoots::WriteRoots at 2.10.0 writes the ObjectStore refs
+// and then the dispatch table with nothing in between; the header is four
+// fields, matching HeaderFields; and ObjectStoreAOTFieldCount = 176 is
+// confirmed by the SDK gate. Scanning FillEnd +/- 96 bytes finds no offset at
+// which the table parses, so the error is not a small mis-sized skip -- it is
+// structural, and 2.10.0 has flags no other sample exercises
+// (PreCanonicalSplit, CodeStateBitsAtEnd, ClassHasTokenPos, TypeHasTokenPos,
+// FuncNumRefs 7) plus bytecode support that later versions dropped. Any one of
+// them shifts the fill end.
+//
+// That is a profile reconstruction of the same kind 2.15.0 needed, not a guess
+// to be made here.
+const profileIncomplete210 = "the Dart 2.10.0 VersionProfile parses clusters and recovers " +
+	"functions, but its roots section does not: ParseDispatchTable reports a bad recent " +
+	"index, so type inference is off. The layout facts that can be checked (roots shape, " +
+	"4-field header, ObjectStoreAOTFieldCount 176) are all confirmed correct against the " +
+	"SDK, and no FillEnd offset within +/-96 bytes parses, so a fill-size flag unique to " +
+	"2.10.0 is wrong. See profileIncomplete210 for the full state."
+
 // Registry is every sample the test suite knows about, present or not.
 //
 // An entry whose file is absent is a documented hole, not an oversight:
@@ -140,10 +178,17 @@ var Registry = []Sample{
 
 	// The pre-2.14 source set; see comparesamplePre214. Names carry the
 	// -pre214 suffix so these never collide with the main set's files.
-	// Dart 2.10.0 is NOT buildable from this source and is left out on
-	// purpose. It predates null safety entirely, so `required`, `?` and `late`
-	// are not downlevellable syntax -- rewriting around them would produce a
-	// different program, which is exactly what a source set must not contain.
+	// The pre-null-safety set; see comparesamplePreNNBD. This is where Dart
+	// 2.10.0 lives -- it is buildable after all, once the source stops using
+	// the `required` keyword.
+	{DartVersion: "2.10.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0, Flutter 1.22.0", FileSuffix: "-prenn",
+		ProfileIncomplete: profileIncomplete210},
+	{DartVersion: "2.10.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0 x86_64", FileSuffix: "-prenn",
+		ProfileIncomplete: profileIncomplete210},
+	{DartVersion: "2.12.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.12.0", FileSuffix: "-prenn"},
+	{DartVersion: "2.12.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.12.0 x86_64", FileSuffix: "-prenn"},
+	{DartVersion: "2.13.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.13.0", FileSuffix: "-prenn"},
+	{DartVersion: "2.13.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.13.0 x86_64", FileSuffix: "-prenn"},
 	{DartVersion: "2.13.0", Arch: "arm64", SourceSet: comparesamplePre214, Note: "sample_pre214_2.13.0, Flutter 2.2.0 -- the only TagStyleCidInt32 sample besides 2.12.0", FileSuffix: "-pre214"},
 	{DartVersion: "2.13.0", Arch: "x64", SourceSet: comparesamplePre214, Note: "sample_pre214_2.13.0 x86_64", FileSuffix: "-pre214"},
 	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesamplePre214, Note: "sample_pre214_3.5.0 -- known-good baseline for the pre-2.14 set", FileSuffix: "-pre214"},

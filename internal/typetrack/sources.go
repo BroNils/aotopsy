@@ -80,6 +80,20 @@ type TypeContext struct {
 	// receiver really is in R0.
 	FuncReceiverStackSlot map[string]int
 
+	// ClassIDIsHalfWord marks the Dart versions whose Assembler::LoadClassId
+	// reads the class id as a 16-bit field:
+	//
+	//	<= 2.18.0  movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
+	//	>= 2.19.0  movl(result, FieldAddress(object, tags_offset)); shrl(12)
+	//
+	// (assembler_x64.cc at 2.17.6, 2.18.0 and 2.19.0 -- kClassIdTagPos and
+	// kClassIdTagSize went from 16/16 to 12/20.) The x86 handler must only
+	// treat a half-word load at displacement +1 as a class id where the
+	// compiler actually emits one; on later versions such a load is an
+	// ordinary 16-bit field read and calling it a class id would invent type
+	// information.
+	ClassIDIsHalfWord bool
+
 	// FuncReturnType maps function NamedObject refID → return type ClassID.
 	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
 	// Used to seed CalleeExitTypes for BL return value propagation:

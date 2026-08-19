@@ -157,8 +157,9 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if spec.IsField && j == 2 {
 				fieldTypeRef = int(r)
 			}
-			// Function.data is ref 3; for closures it is the ClosureData.
-			if spec.IsFunction && j == 3 {
+			// Function.data; for closures it is the ClosureData. Its index
+			// moved with signature at 2.14.0 -- see specFunction.
+			if spec.IsFunction && spec.DataIdx > 0 && j == spec.DataIdx {
 				dataRef = int(r)
 			}
 		}
@@ -172,7 +173,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
 			case spec.IsFuncType:
-				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef, i, count, op)
+				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef, i, count, op, spec.PackedParams)
 				if err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}

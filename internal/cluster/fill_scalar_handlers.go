@@ -86,22 +86,19 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 // readFuncTypeScalar reads one scalar for a FunctionType cluster.
 // si is the scalar index. Returns the FuncTypeInfo if this scalar
 // completes the object (si == 1), or nil otherwise.
-func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef int, i, count int, op ScalarOp) (*FuncTypeInfo, error) {
+func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef int, i, count int, op ScalarOp, layout PackedParamLayout) (*FuncTypeInfo, error) {
 	if si == 1 {
 		// packed_parameter_counts is OpTagged32 at scalar index 1.
 		packed, err := s.ReadTagged32()
 		if err != nil {
 			return nil, fmt.Errorf("obj %d/%d packed_param_counts: %w", i, count, err)
 		}
-		// raw_object.h @3.12.2, UntaggedFunctionType:
-		//   bit 0      PackedNumImplicitParameters   (1 bit)
-		//   bit 1      PackedHasNamedOptionalParameters
-		//   bits 2-15  PackedNumFixedParameters      (14 bits)
-		//   bits 16-29 PackedNumOptionalParameters   (14 bits)
-		hasImplicit := (packed & 1) != 0
-		hasNamedOptional := (packed & 2) != 0
-		numFixed := int((packed >> 2) & 0x3FFF)
-		numOptional := int((packed >> 16) & 0x3FFF)
+		// The bit positions are version-dependent; see PackedParamLayout.
+		u := uint64(packed)
+		hasImplicit := (u>>layout.ImplicitShift)&1 != 0
+		hasNamedOptional := (u>>layout.NamedShift)&1 != 0
+		numFixed := int((u >> layout.FixedShift) & layout.FixedMask)
+		numOptional := int((u >> layout.OptionalShift) & layout.OptionalMask)
 		if hasImplicit && numFixed > 0 {
 			numFixed-- // subtract implicit 'this'
 		}

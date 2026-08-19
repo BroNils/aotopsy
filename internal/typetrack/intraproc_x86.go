@@ -523,6 +523,38 @@ func transferInstructionX86(
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
 			}
+			// Class-id load, Dart <= 2.18 form: MOVZX reg, word [obj + 1].
+			//
+			// Assembler::LoadClassId emits a 16-bit zero-extending load there,
+			// because kClassIdTagPos is 16 and kClassIdTagSize is 16, so the
+			// class id occupies the high half-word of the tags word and can be
+			// read whole:
+			//
+			//	movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
+			//
+			// FieldAddress subtracts the heap-object tag, so tags_offset 0
+			// becomes displacement +1. From 2.19.0 the field is 20 bits at
+			// position 12 and no longer half-word aligned, so the SDK switched
+			// to movl + shrl -- the form this handler already knew.
+			//
+			// Missing this shape left the class-id register Top on every
+			// dispatch call: 83415 of 83415 sites on the 2.18.0 x64 sample,
+			// against 83417 Bottom on 2.19.0. Bottom is what makes the
+			// selector-offset scan possible, so x86_64 dispatch resolution was
+			// dead on every version up to 2.18.
+			if ctx.ClassIDIsHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == 1 && baseIdx >= 0 && baseIdx < 31 &&
+				baseIdx != x86RegPP && baseIdx != x86RegTHR {
+				if state[baseIdx].Kind == LatticeKnownClass {
+					state[dstIdx] = KnownClass(state[baseIdx].ClassID)
+				} else {
+					// "A class id, but not known which" -- exactly what the
+					// 32-bit path yields, and what narrowing and the
+					// selector-offset scan both consume.
+					state[dstIdx] = Bottom()
+				}
+				ctx.HeaderHits++
+				return
+			}
 			// H-4 fix 2: Field type lookup — MOV reg, [reg+offset] where base
 			// has KnownClass. Look up the field at this offset for the class.
 			if baseIdx >= 0 && baseIdx < 31 && state[baseIdx].Kind == LatticeKnownClass {

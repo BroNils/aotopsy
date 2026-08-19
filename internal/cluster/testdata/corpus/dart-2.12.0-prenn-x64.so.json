@@ -1,0 +1,16 @@
+{
+  "sample": "dart-2.12.0-prenn-x64.so",
+  "input_sha256": "61a05460781719414e112a3eb5dff9a2504cc1d3abe016501b17bcbdedb48b48",
+  "dart_version": "2.12.0",
+  "unified_snapshot": false,
+  "vm_clusters": 4,
+  "isolate_clusters": 272,
+  "has_instructions_table": false,
+  "strings": 9014,
+  "named": 10976,
+  "codes": 7967,
+  "instr_table_length": 0,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 0,
+  "code_ranges": 7967
+}
