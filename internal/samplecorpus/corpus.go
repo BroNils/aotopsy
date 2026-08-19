@@ -139,34 +139,26 @@ const comparesamplePre214 = "compare_sample_pre214"
 // control rather than three unrelated binaries.
 const comparesamplePreNNBD = "compare_sample_prenn"
 
-// profileIncomplete210 records where the Dart 2.10.0 profile stands.
+// Dart 2.10.0 used to be registered here with a ProfileIncomplete note saying
+// its roots section could not be read. Both halves of that note were wrong, and
+// the way it was wrong is worth keeping.
 //
-// The sample exists and most of the pipeline works on it: the image header fix
-// below took it from "data too short for InstructionsSection" to 7657
-// recovered functions, and the clusters parse. What does not work yet is the
-// roots section, so the dispatch table cannot be read and type inference is
-// off for this version.
+// The note reasoned that since every checkable roots fact was right (roots
+// shape, 4-field header, ObjectStoreAOTFieldCount 176) and no FillEnd offset
+// within +/-96 bytes parsed, the cause had to be a structural difference in the
+// roots layout itself. The roots layout was never the problem. FillEnd was
+// short by 392 bytes -- four times further out than the window that was
+// searched -- because Instance fill silently read every unboxed field slot as
+// one ref instead of two 32-bit reads. At 2.10 the unboxed bitmap lives only in
+// the Class cluster, and readFillInstance defaulted it to zero. See
+// readFillInstance.
 //
-// Everything checkable about the roots layout has been checked and is right:
-// ProgramSerializationRoots::WriteRoots at 2.10.0 writes the ObjectStore refs
-// and then the dispatch table with nothing in between; the header is four
-// fields, matching HeaderFields; and ObjectStoreAOTFieldCount = 176 is
-// confirmed by the SDK gate. Scanning FillEnd +/- 96 bytes finds no offset at
-// which the table parses, so the error is not a small mis-sized skip -- it is
-// structural, and 2.10.0 has flags no other sample exercises
-// (PreCanonicalSplit, CodeStateBitsAtEnd, ClassHasTokenPos, TypeHasTokenPos,
-// FuncNumRefs 7) plus bytecode support that later versions dropped. Any one of
-// them shifts the fill end.
-//
-// That is a profile reconstruction of the same kind 2.15.0 needed, not a guess
-// to be made here.
-const profileIncomplete210 = "the Dart 2.10.0 VersionProfile parses clusters and recovers " +
-	"functions, but its roots section does not: ParseDispatchTable reports a bad recent " +
-	"index, so type inference is off. The layout facts that can be checked (roots shape, " +
-	"4-field header, ObjectStoreAOTFieldCount 176) are all confirmed correct against the " +
-	"SDK, and no FillEnd offset within +/-96 bytes parses, so a fill-size flag unique to " +
-	"2.10.0 is wrong. See profileIncomplete210 for the full state."
-
+// The lesson: a +/-96 byte scan that finds nothing does not mean "not a
+// mis-sized fill", it means "not a SMALL mis-sized fill". Widening the search
+// and demanding that the whole roots structure replay to exactly the isolate
+// snapshot's end found the true offset immediately, and identically on both
+// architectures -- which is itself the tell that it was a fixed structural
+// miss rather than per-object drift.
 // Registry is every sample the test suite knows about, present or not.
 //
 // An entry whose file is absent is a documented hole, not an oversight:
@@ -181,10 +173,8 @@ var Registry = []Sample{
 	// The pre-null-safety set; see comparesamplePreNNBD. This is where Dart
 	// 2.10.0 lives -- it is buildable after all, once the source stops using
 	// the `required` keyword.
-	{DartVersion: "2.10.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0, Flutter 1.22.0", FileSuffix: "-prenn",
-		ProfileIncomplete: profileIncomplete210},
-	{DartVersion: "2.10.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0 x86_64", FileSuffix: "-prenn",
-		ProfileIncomplete: profileIncomplete210},
+	{DartVersion: "2.10.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0, Flutter 1.22.0", FileSuffix: "-prenn"},
+	{DartVersion: "2.10.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.10.0 x86_64", FileSuffix: "-prenn"},
 	{DartVersion: "2.12.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.12.0", FileSuffix: "-prenn"},
 	{DartVersion: "2.12.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.12.0 x86_64", FileSuffix: "-prenn"},
 	{DartVersion: "2.13.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.13.0", FileSuffix: "-prenn"},

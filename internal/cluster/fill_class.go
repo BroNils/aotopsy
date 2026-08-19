@@ -127,11 +127,23 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		}
 
 		// ReadUnsigned64 (bitmap) — conditional for new classes.
+		//
+		// The predefined loop reads it and throws it away ("Skip unboxed
+		// fields bitmap"); only the second loop calls SetUnboxedFieldsMapAt.
+		// Capturing it only for non-predefined classes mirrors that, and it is
+		// what makes the kInstanceCid (42) cluster come out with an empty
+		// bitmap rather than a predefined class's -- which is correct, since
+		// the SDK never stored one for it either.
 		isPredefined := int64(i) < cm.MainCount
 		isTopLevel := int64(int32(classID)) >= topLevelOffset
+		var unboxed uint64
 		if isPredefined || !isTopLevel {
-			if _, err := s.ReadUnsigned(); err != nil {
+			v, err := s.ReadUnsigned()
+			if err != nil {
 				return named, classes, fmt.Errorf("obj %d/%d bitmap: %w", i, count, err)
+			}
+			if !isPredefined {
+				unboxed = uint64(v)
 			}
 		}
 
@@ -150,6 +162,8 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			TypeArgsOff:    int32(typeArgsOff),
 			SuperTypeRefID: superTypeRef,
 			LibraryRefID:   libraryRef,
+
+			UnboxedFieldBitmap: unboxed,
 		})
 		ref++
 	}

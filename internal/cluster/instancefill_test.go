@@ -4,7 +4,18 @@ import (
 	"testing"
 
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/snapshot"
 )
+
+// instanceProfile is the minimum VersionProfile readFillInstance reads.
+func instanceProfile(version string, compressed bool) *snapshot.VersionProfile {
+	return &snapshot.VersionProfile{
+		DartVersion:        version,
+		FillRefUnsigned:    true,
+		CompressedPointers: compressed,
+		PreCanonicalSplit:  version == "2.10.0",
+	}
+}
 
 // tagged32 encodes v (0..63) as the single terminator byte ReadTagged32
 // expects: values above 127 terminate, and the reader subtracts 192.
@@ -47,7 +58,7 @@ func TestReadFillInstanceUnboxedSlotCostsTwoReads(t *testing.T) {
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: 100, Count: 1, StartRef: 50, NextFieldOffsetInWords: nfo}
 
-	got, err := readFillInstance(s, cm, true /*fillRefUnsigned*/, true /*compressedPointers*/, false)
+	got, err := readFillInstance(s, cm, instanceProfile("3.9.2", true /*compressedPointers*/), nil)
 	if err != nil {
 		t.Fatalf("readFillInstance: %v", err)
 	}
@@ -84,7 +95,7 @@ func TestReadFillInstanceUnboxedCountIsIndependentOfCompression(t *testing.T) {
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: 100, Count: 1, StartRef: 50, NextFieldOffsetInWords: nfo}
 
-	got, err := readFillInstance(s, cm, true, false /*compressedPointers*/, false)
+	got, err := readFillInstance(s, cm, instanceProfile("3.9.2", false /*compressedPointers*/), nil)
 	if err != nil {
 		t.Fatalf("readFillInstance: %v", err)
 	}
@@ -93,6 +104,66 @@ func TestReadFillInstanceUnboxedCountIsIndependentOfCompression(t *testing.T) {
 	}
 	if got[0].HeaderWords != 1 {
 		t.Errorf("HeaderWords = %d, want 1 without compressed pointers", got[0].HeaderWords)
+	}
+}
+
+// At 2.10 the Instance cluster carries NO bitmap of its own: the only copy is
+// the one the Class cluster's fill stored per class id. Reading the stream as
+// if a bitmap were there, or defaulting it to zero, both mis-size the fill --
+// zero turns every unboxed slot from two 32-bit reads into one ref, which is
+// how the 2.10 roots section ended up 392 bytes past where FillEnd said it was.
+func TestReadFillInstance210TakesTheBitmapFromTheClassCluster(t *testing.T) {
+	const cid = 200
+	const nfo = 4 // uncompressed: header 1 word, slots at index 1, 2, 3
+
+	// Slot at word index 2 is unboxed.
+	bitmaps := map[int32]uint64{cid: 1 << 2}
+
+	data := []byte{
+		0,               // is_canonical (raw byte, 2.10 only)
+		unsignedByte(7), // slot 1: boxed -> one ref
+		tagged32(1),     // slot 2: unboxed -> lo
+		tagged32(2),     // slot 2: unboxed -> hi
+		unsignedByte(9), // slot 3: boxed -> one ref
+	}
+	s := dartfmt.NewStream(data)
+	cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 50, NextFieldOffsetInWords: nfo}
+
+	got, err := readFillInstance(s, cm, instanceProfile("2.10.0", false), bitmaps)
+	if err != nil {
+		t.Fatalf("readFillInstance: %v", err)
+	}
+	if s.Position() != len(data) {
+		t.Fatalf("consumed %d of %d bytes; the class-cluster bitmap was not applied",
+			s.Position(), len(data))
+	}
+	if len(got[0].Fields) != 2 {
+		t.Errorf("captured %d boxed fields, want 2 (the unboxed slot must not be one)",
+			len(got[0].Fields))
+	}
+}
+
+// The same cluster with no entry in the class map must read every slot as a
+// ref -- an absent class id means an empty bitmap, not "unknown, guess".
+func TestReadFillInstance210AbsentClassMeansNoUnboxedFields(t *testing.T) {
+	const nfo = 3
+	data := []byte{
+		0,               // is_canonical
+		unsignedByte(7), // slot 1
+		unsignedByte(9), // slot 2
+	}
+	s := dartfmt.NewStream(data)
+	cm := &ClusterMeta{CID: 42, Count: 1, StartRef: 50, NextFieldOffsetInWords: nfo}
+
+	got, err := readFillInstance(s, cm, instanceProfile("2.10.0", false), map[int32]uint64{})
+	if err != nil {
+		t.Fatalf("readFillInstance: %v", err)
+	}
+	if s.Position() != len(data) {
+		t.Fatalf("consumed %d of %d bytes", s.Position(), len(data))
+	}
+	if len(got[0].Fields) != 2 {
+		t.Errorf("captured %d fields, want 2", len(got[0].Fields))
 	}
 }
 
@@ -108,7 +179,7 @@ func TestReadFillInstanceFieldOffsetsUseTheCompressedWordSize(t *testing.T) {
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: 100, Count: 1, StartRef: 50, NextFieldOffsetInWords: nfo}
 
-	got, err := readFillInstance(s, cm, true, true, false)
+	got, err := readFillInstance(s, cm, instanceProfile("3.9.2", true), nil)
 	if err != nil {
 		t.Fatalf("readFillInstance: %v", err)
 	}

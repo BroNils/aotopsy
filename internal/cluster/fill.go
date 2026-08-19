@@ -25,6 +25,13 @@ type NamedObject struct {
 	DataRefID int
 	CodeIndex int // Function's code_index scalar (-1 if not a Function / not captured)
 
+	// ResultTypeRefID/ParamTypesRefID are Function.result_type and
+	// Function.parameter_types, which exist on the Function itself only before
+	// FunctionType did (2.10). From 2.12 they are -1 and the same information
+	// is reached through SignatureRefID instead. See FunctionRefLayout.
+	ResultTypeRefID int
+	ParamTypesRefID int
+
 	// NumFixedParams/NumOptionalParams come from UntaggedFunction.packed_fields_
 	// on Dart 2.x, where a regular function's arity lives on the Function
 	// object itself rather than on a FunctionType signature. Both are -1 when
@@ -155,6 +162,22 @@ type ClassInfo struct {
 	TypeArgsOff    int32 // type_arguments field offset in bytes
 	SuperTypeRefID int   // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
 	LibraryRefID   int   // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
+
+	// UnboxedFieldBitmap marks which of this class's instance field slots hold
+	// a raw machine word rather than a ref, indexed by word offset from the
+	// object start -- the same indexing readFillInstance uses.
+	//
+	// In AOT the Class cluster's fill carries this per class:
+	//
+	//	if (FLAG_precompiled_mode && !ClassTable::IsTopLevelCid(class_id)) {
+	//	  const UnboxedFieldBitmap unboxed_fields_map(d->ReadUnsigned64());
+	//	  shared_class_table->SetUnboxedFieldsMapAt(class_id, unboxed_fields_map);
+	//	}
+	//
+	// (clustered_snapshot.cc, ClassDeserializationCluster::ReadFill.) It is
+	// the ONLY copy at 2.10; from 2.12 the Instance cluster writes its own
+	// copy in its fill and reads it back there. See InstanceUnboxedBitmaps.
+	UnboxedFieldBitmap uint64
 }
 
 // TypeInfo holds the resolved type_class_id for a Type object -- i.e. which
@@ -338,6 +361,26 @@ func readRef(s *dartfmt.Stream, fillRefUnsigned bool) (int64, error) {
 		return s.ReadUnsigned()
 	}
 	return s.ReadRefId()
+}
+
+// classUnboxedBitmaps indexes the per-class unboxed-field bitmaps captured
+// from the Class cluster by class id, for the Instance clusters that need them
+// (see readFillInstance). The Class cluster is serialized before every
+// Instance cluster, so by the time this is first asked for it is complete;
+// the result is memoized because there are hundreds of Instance clusters and
+// thousands of classes.
+func classUnboxedBitmaps(result *Result) map[int32]uint64 {
+	if result.unboxedByClassID != nil {
+		return result.unboxedByClassID
+	}
+	m := make(map[int32]uint64, len(result.Classes))
+	for i := range result.Classes {
+		if b := result.Classes[i].UnboxedFieldBitmap; b != 0 {
+			m[result.Classes[i].ClassID] = b
+		}
+	}
+	result.unboxedByClassID = m
+	return m
 }
 
 // DebugFillPositions iterates the fill section and prints the stream position
@@ -656,7 +699,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.Fields = append(result.Fields, fieldInfos...)
 
 		case FillInstance:
-			instInfos, err := readFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit)
+			instInfos, err := readFillInstance(s, cm, profile, classUnboxedBitmaps(result))
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (Instance CID %d): %w", i, cm.CID, err)
 			}
@@ -777,7 +820,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		_, _, err := readFillField(s, cm, spec, fillRefUnsigned)
 		return err
 	case FillInstance:
-		_, err := readFillInstance(s, cm, fillRefUnsigned, profile.CompressedPointers, profile.PreCanonicalSplit)
+		_, err := readFillInstance(s, cm, profile, classUnboxedBitmaps(result))
 		return err
 	case FillRecord:
 		return skipFillRecord(s, cm, fillRefUnsigned)

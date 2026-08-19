@@ -162,6 +162,14 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if spec.IsFunction && spec.DataIdx > 0 && j == spec.DataIdx {
 				dataRef = int(r)
 			}
+			// Before FunctionType existed the signature lived on the Function
+			// itself; see FunctionRefLayout.
+			if spec.IsFunction && spec.ResultTypeIdx > 0 && j == spec.ResultTypeIdx {
+				resultTypeRef = int(r)
+			}
+			if spec.IsFunction && spec.ParamTypesIdx > 0 && j == spec.ParamTypesIdx {
+				paramTypesRef = int(r)
+			}
 		}
 
 		// Read scalars; extract type-specific data for FunctionType and Field clusters.
@@ -169,7 +177,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		for si, op := range spec.Scalars {
 			switch {
 			case spec.IsFunction:
-				if err := readFunctionScalar(s, si, len(spec.Scalars), &ss, i, count, profile, op); err != nil {
+				if err := readFunctionScalar(s, si, len(spec.Scalars), &ss, i, count, profile, op, funcPackedFieldsFor(profile.DartVersion)); err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
 				}
 			case spec.IsFuncType:
@@ -314,6 +322,8 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				OwnerRefID:        ownerRef,
 				SignatureRefID:    sigRef,
 				DataRefID:         dataRef,
+				ResultTypeRefID:   funcRefOr(spec.IsFunction, spec.ResultTypeIdx, resultTypeRef),
+				ParamTypesRefID:   funcRefOr(spec.IsFunction, spec.ParamTypesIdx, paramTypesRef),
 				CodeIndex:         ss.codeIndex,
 				NumFixedParams:    ss.numFixed,
 				NumOptionalParams: ss.numOptional,
@@ -326,6 +336,17 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 	}
 
 	return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, nil
+}
+
+// funcRefOr returns ref when this spec actually captured that Function field,
+// and -1 otherwise. resultTypeRef/paramTypesRef are shared with the FunctionType
+// path, so without this guard a FunctionType's values would leak onto a
+// NamedObject that never read them.
+func funcRefOr(isFunction bool, idx, ref int) int {
+	if isFunction && idx > 0 {
+		return ref
+	}
+	return -1
 }
 
 // skipScalar reads and discards one scalar value.

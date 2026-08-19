@@ -38,7 +38,7 @@ type scalarState struct {
 
 // readFunctionScalar reads one scalar for a Function cluster.
 // si is the scalar index, numScalars is len(spec.Scalars).
-func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalarState, i, count int, profile *snapshot.VersionProfile, op ScalarOp) error {
+func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalarState, i, count int, profile *snapshot.VersionProfile, op ScalarOp, layout FuncPackedFieldsLayout) error {
 	if si == 0 {
 		// code_index is OpUnsigned at scalar index 0.
 		ci, err := s.ReadUnsigned()
@@ -49,13 +49,15 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 		return nil
 	}
 	if si == 1 && numScalars == 3 {
-		// Dart 2.x only: Read<uint32_t>(packed_fields_).
+		// Dart 2.x only: Read<uint32_t>(packed_fields_). The bit positions
+		// moved at 2.12; see FuncPackedFieldsLayout.
 		packed, err := s.ReadTagged32()
 		if err != nil {
 			return fmt.Errorf("obj %d/%d packed_fields: %w", i, count, err)
 		}
-		state.numFixed = int((packed >> 10) & 0x3FF)
-		state.numOptional = int((packed >> 20) & 0x3FF)
+		u := uint64(packed)
+		state.numFixed = int((u >> layout.FixedShift) & layout.FixedMask)
+		state.numOptional = int((u >> layout.OptionalShift) & layout.OptionalMask)
 		return nil
 	}
 	if si == 2 && numScalars == 3 {

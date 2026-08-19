@@ -298,9 +298,41 @@ func buildFuncParamTypes(ctx *TypeContext, clResult *cluster.Result, pl *PoolLoo
 	}
 	// RefToType is built once in BuildTypeContext.
 	refToType := ctx.RefToType
+	// paramTypesFromArray resolves an Array of AbstractType refs to class ids,
+	// -1 where the element is not a Type we resolved.
+	paramTypesFromArray := func(arrayRef int) ([]int, bool) {
+		arr, ok := arrayByRef[arrayRef]
+		if !ok {
+			return nil, false
+		}
+		out := make([]int, len(arr.ElementRefIDs))
+		for j, elemRef := range arr.ElementRefIDs {
+			out[j] = -1
+			if ti, ok2 := refToType[elemRef]; ok2 && ti.ClassID >= 0 {
+				out[j] = int(ti.ClassID)
+			}
+		}
+		return out, true
+	}
+
 	for i := range clResult.Named {
 		no := &clResult.Named[i]
 		if pl.CT != nil && no.CID == pl.CT.Function {
+			// Before FunctionType existed, result_type and parameter_types sit
+			// on the Function itself and there is no signature to follow. The
+			// signature-only path left every 2.10 function with no declared
+			// return type at all -- func_return_type_count 0 against 994 on
+			// 2.12 from the same source. See cluster.FunctionRefLayout.
+			if no.ResultTypeRefID >= 0 {
+				if ti, ok := refToType[no.ResultTypeRefID]; ok && ti.ClassID >= 0 {
+					ctx.FuncReturnType[no.RefID] = int(ti.ClassID)
+				}
+			}
+			if no.ParamTypesRefID >= 0 {
+				if paramTypes, ok := paramTypesFromArray(no.ParamTypesRefID); ok {
+					ctx.FuncParamTypes[no.RefID] = paramTypes
+				}
+			}
 			if no.SignatureRefID >= 0 {
 				if ft, ok := funcTypeByRef[no.SignatureRefID]; ok {
 					ctx.FuncParamCount[no.RefID] = ft.NumFixed + ft.NumOptional

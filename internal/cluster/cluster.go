@@ -119,6 +119,9 @@ type Result struct {
 	FillEnd    int            // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
 	Diags      []dartfmt.Diag
 
+	// unboxedByClassID memoizes classUnboxedBitmaps' index.
+	unboxedByClassID map[int32]uint64
+
 	// Captured object data (previously skipped):
 	Instances         []InstanceInfo         // Instance field values
 	Contexts          []ContextInfo          // Context captured variables (empty in AOT — runtime-allocated)

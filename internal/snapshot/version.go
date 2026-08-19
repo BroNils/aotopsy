@@ -908,7 +908,14 @@ var cidsV3130 = CIDTable{
 }
 
 var versionProfiles = map[string]*VersionProfile{
-	"2.10.0": {DartVersion: "2.10.0", Supported: true, HeaderFields: 4, Tags: TagStyleCidInt32, CIDs: &cidsV210, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, PreCanonicalSplit: true, ClassNumRefs: 16, ClassHasTokenPos: true, FuncNumRefs: 7, TypeNumRefs: 5, TypeClassIdIsRef: true, TypeHasTokenPos: true, TypeParamNumRefs: 5, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ScriptHasLineCol: true, ScriptHasFlags: true, ObjectStoreAOTFieldCount: 176}, // SDK-verified: from()=object_class -> to_snapshot(kFullAOT)=slow_tts_stub = 176 fields (object_store.h @2.10.0)
+	// StringRODataPerSubclass: at 2.10 ReadOnlyObjectType() already names
+	// kOneByteStringCid and kTwoByteStringCid, so NewClusterForClass hands
+	// each its own RODataSerializationCluster -- there is no cluster under
+	// the abstract String cid (80) to find. Leaving the flag off looked for
+	// cid 80, found nothing, and produced a snapshot with ZERO strings: every
+	// function came out as sub_<addr> and classes.jsonl was not written at all
+	// because no class name would resolve.
+	"2.10.0": {DartVersion: "2.10.0", Supported: true, HeaderFields: 4, Tags: TagStyleCidInt32, CIDs: &cidsV210, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, StringRODataPerSubclass: true, PreCanonicalSplit: true, ClassNumRefs: 16, ClassHasTokenPos: true, FuncNumRefs: 7, TypeNumRefs: 5, TypeClassIdIsRef: true, TypeHasTokenPos: true, TypeParamNumRefs: 5, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ScriptHasLineCol: true, ScriptHasFlags: true, ObjectStoreAOTFieldCount: 176}, // SDK-verified: from()=object_class -> to_snapshot(kFullAOT)=slow_tts_stub = 176 fields (object_store.h @2.10.0)
 	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 8 refs
 	// (object_pool, owner, exception_handlers, pc_descriptors, catch_entry,
 	// compressed_stackmaps, inlined_id_to_function, code_source_map), not interleaved

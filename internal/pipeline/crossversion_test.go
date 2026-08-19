@@ -85,6 +85,19 @@ type crossVersionMetric struct {
 	// as a dead stage. It guards against flagging metrics that are legitimately
 	// zero everywhere on a small app.
 	deadFloor int
+	// fallback marks a counter that measures LEFTOVERS -- work the primary
+	// path did not do. Zero on such a counter means the primary path covered
+	// everything, which is the best outcome, not a dead stage. Still shown in
+	// the table; never flagged.
+	//
+	// blr_stub is the case that forced this distinction. Its three increments
+	// all sit in the `else` arms after the type tracker's own resolution map
+	// misses, so it counts BLR edges rescued by the THR-via and pool-display
+	// fallbacks. On the 2.10.0 arm64 sample all 116 THR-via BLR edges already
+	// carried a target from the tracker, leaving the fallback nothing to
+	// rescue: 335 monomorphic + 0 stub. On 2.12.0, 991 + 14. Reading that 0 as
+	// a dead stage inverts its meaning.
+	fallback bool
 }
 
 // sampleMetrics holds one sample's measured facts.
@@ -126,27 +139,27 @@ func (m *sampleMetrics) reportInt(path ...string) int {
 }
 
 var crossVersionMetrics = []crossVersionMetric{
-	{"functions", func(m *sampleMetrics) int { return m.line("functions.jsonl") }, 100},
-	{"classes", func(m *sampleMetrics) int { return m.line("classes.jsonl") }, 100},
-	{"call_edges", func(m *sampleMetrics) int { return m.line("call_edges.jsonl") }, 100},
-	{"string_refs", func(m *sampleMetrics) int { return m.line("string_refs.jsonl") }, 100},
-	{"dispatch_table", func(m *sampleMetrics) int { return m.line("dispatch_table.jsonl") }, 100},
-	{"field_accessor_xref", func(m *sampleMetrics) int { return m.line("field_accessor_xref.jsonl") }, 100},
-	{"string_value_xref", func(m *sampleMetrics) int { return m.line("string_value_xref.jsonl") }, 100},
-	{"address_callers_xref", func(m *sampleMetrics) int { return m.line("address_callers_xref.jsonl") }, 100},
-	{"pool_immediates", func(m *sampleMetrics) int { return m.line("pool_immediates.jsonl") }, 20},
+	{name: "functions", get: func(m *sampleMetrics) int { return m.line("functions.jsonl") }, deadFloor: 100},
+	{name: "classes", get: func(m *sampleMetrics) int { return m.line("classes.jsonl") }, deadFloor: 100},
+	{name: "call_edges", get: func(m *sampleMetrics) int { return m.line("call_edges.jsonl") }, deadFloor: 100},
+	{name: "string_refs", get: func(m *sampleMetrics) int { return m.line("string_refs.jsonl") }, deadFloor: 100},
+	{name: "dispatch_table", get: func(m *sampleMetrics) int { return m.line("dispatch_table.jsonl") }, deadFloor: 100},
+	{name: "field_accessor_xref", get: func(m *sampleMetrics) int { return m.line("field_accessor_xref.jsonl") }, deadFloor: 100},
+	{name: "string_value_xref", get: func(m *sampleMetrics) int { return m.line("string_value_xref.jsonl") }, deadFloor: 100},
+	{name: "address_callers_xref", get: func(m *sampleMetrics) int { return m.line("address_callers_xref.jsonl") }, deadFloor: 100},
+	{name: "pool_immediates", get: func(m *sampleMetrics) int { return m.line("pool_immediates.jsonl") }, deadFloor: 20},
 
-	{"blr_total", func(m *sampleMetrics) int { return m.reportInt("blr", "total") }, 100},
-	{"blr_monomorphic", func(m *sampleMetrics) int { return m.reportInt("blr", "monomorphic") }, 50},
-	{"blr_stub", func(m *sampleMetrics) int { return m.reportInt("blr", "stub") }, 5},
-	{"pool_hits", func(m *sampleMetrics) int { return m.reportInt("pool_hits") }, 1000},
-	{"header_hits", func(m *sampleMetrics) int { return m.reportInt("header_hits") }, 100},
-	{"dispatch_hits", func(m *sampleMetrics) int { return m.reportInt("dispatch_hits") }, 50},
-	{"field_type_declared_hits", func(m *sampleMetrics) int { return m.reportInt("field_type_declared_hits") }, 100},
-	{"field_type_instance_hits", func(m *sampleMetrics) int { return m.reportInt("field_type_instance_hits") }, 100},
-	{"field_type_store_hits", func(m *sampleMetrics) int { return m.reportInt("field_type_store_hits") }, 100},
-	{"selector_monomorphic_count", func(m *sampleMetrics) int { return m.reportInt("selector_monomorphic_count") }, 20},
-	{"func_return_type_count", func(m *sampleMetrics) int { return m.reportInt("func_return_type_count") }, 20},
+	{name: "blr_total", get: func(m *sampleMetrics) int { return m.reportInt("blr", "total") }, deadFloor: 100},
+	{name: "blr_monomorphic", get: func(m *sampleMetrics) int { return m.reportInt("blr", "monomorphic") }, deadFloor: 50},
+	{name: "blr_stub", get: func(m *sampleMetrics) int { return m.reportInt("blr", "stub") }, deadFloor: 5, fallback: true},
+	{name: "pool_hits", get: func(m *sampleMetrics) int { return m.reportInt("pool_hits") }, deadFloor: 1000},
+	{name: "header_hits", get: func(m *sampleMetrics) int { return m.reportInt("header_hits") }, deadFloor: 100},
+	{name: "dispatch_hits", get: func(m *sampleMetrics) int { return m.reportInt("dispatch_hits") }, deadFloor: 50},
+	{name: "field_type_declared_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_declared_hits") }, deadFloor: 100},
+	{name: "field_type_instance_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_instance_hits") }, deadFloor: 100},
+	{name: "field_type_store_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_store_hits") }, deadFloor: 100},
+	{name: "selector_monomorphic_count", get: func(m *sampleMetrics) int { return m.reportInt("selector_monomorphic_count") }, deadFloor: 20},
+	{name: "func_return_type_count", get: func(m *sampleMetrics) int { return m.reportInt("func_return_type_count") }, deadFloor: 20},
 }
 
 func TestCrossVersionDifferential(t *testing.T) {
@@ -265,11 +278,26 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 
 	for _, met := range crossVersionMetrics {
 		vals := make([]int, len(ms))
-		best, bestAt := -1, ""
+		// The comparison is PER ARCHITECTURE, and the table is not.
+		//
+		// Several counters differ by one to three orders of magnitude between
+		// arm64 and x86_64 by design, not by defect -- blr_stub runs in the
+		// thousands on x64 and in the tens on arm64, because the x64 compiler
+		// reaches stubs through a call the ARM64 one inlines. Ranking a metric
+		// against the best column of EITHER architecture made every such
+		// counter look like a dead stage on arm64: it reported blr_stub as
+		// "0 on 2.10.0/arm64 but 7076 on 2.12.0" while the 2.12.0 arm64 column
+		// -- the only comparable one -- read 14.
+		//
+		// AGENTS.md already records this trap ("Cross-architecture counters are
+		// not necessarily comparable", with add_class_hits 58x lower on x86_64
+		// by design). The gate has to honour it or it manufactures work.
+		bestByArch := make(map[string]int, 2)
+		bestAtByArch := make(map[string]string, 2)
 		for i, m := range ms {
 			vals[i] = met.get(m)
-			if vals[i] > best {
-				best, bestAt = vals[i], m.version
+			if b, ok := bestByArch[m.arch]; !ok || vals[i] > b {
+				bestByArch[m.arch], bestAtByArch[m.arch] = vals[i], m.version
 			}
 		}
 		fmt.Fprintf(&b, "  %-28s", met.name)
@@ -282,17 +310,25 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 		}
 		b.WriteString("\n")
 
-		if best < met.deadFloor {
-			continue // too small anywhere to call a zero meaningful
+		if met.fallback {
+			continue
 		}
-		var zeroAt []string
-		for i, v := range vals {
-			if v == 0 {
-				zeroAt = append(zeroAt, ms[i].version+"/"+ms[i].arch)
+		// One dead-stage report per architecture, each judged only against
+		// columns of that same architecture.
+		for _, arch := range archesOf(ms) {
+			best := bestByArch[arch]
+			if best < met.deadFloor {
+				continue // too small on this arch to call a zero meaningful
 			}
-		}
-		if len(zeroAt) > 0 {
-			dead = append(dead, deadStage{met.name, zeroAt, best, bestAt})
+			var zeroAt []string
+			for i, v := range vals {
+				if v == 0 && ms[i].arch == arch {
+					zeroAt = append(zeroAt, ms[i].version+"/"+ms[i].arch)
+				}
+			}
+			if len(zeroAt) > 0 {
+				dead = append(dead, deadStage{met.name, zeroAt, best, bestAtByArch[arch] + "/" + arch})
+			}
 		}
 	}
 	t.Log(b.String())
@@ -323,6 +359,20 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 			"  place, not the feature being genuinely absent.",
 			d.metric, strings.Join(d.zeroAt, ", "), d.best, d.bestAt)
 	}
+}
+
+// archesOf lists the architectures present, in stable order.
+func archesOf(ms []*sampleMetrics) []string {
+	seen := make(map[string]bool, 2)
+	var out []string
+	for _, m := range ms {
+		if !seen[m.arch] {
+			seen[m.arch] = true
+			out = append(out, m.arch)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func versionLess(a, b string) bool {

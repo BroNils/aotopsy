@@ -4,26 +4,61 @@ import (
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/snapshot"
 )
 
-// readFillInstance captures Instance fill data.
-// Format: ReadUnsigned64(unboxed_bitmap) ONCE, then per object:
+// instanceCarriesUnboxedBitmap reports whether the Instance cluster writes its
+// own copy of the unboxed-fields bitmap into its fill.
 //
+// InstanceSerializationCluster::WriteFill gained
+//
+//	s->WriteUnsigned64(CalculateTargetUnboxedFieldsBitmap(s, cid_).Value());
+//
+// after 2.10: at that tag clustered_snapshot.cc mentions the bitmap only in
+// the Class cluster (write at WriteClass, read/skip in ClassDeserialization-
+// Cluster::ReadFill), while 2.12.0, 2.13.0 and 2.14.0 all carry the extra
+// Instance-cluster pair as well.
+func instanceCarriesUnboxedBitmap(profile *snapshot.VersionProfile) bool {
+	return dartVersionAtLeast(profile.DartVersion, "2.12.0")
+}
+
+// readFillInstance captures Instance fill data. Per object:
+//
+//	[2.10 only] Read<bool>(is_canonical)
 //	for each field offset from header to next_field_offset:
 //	  if unboxed: ReadWordWith32BitReads (2 × ReadTagged32)
-//	  else: ReadRef (ReadRefId)
+//	  else: ReadRef
+//
+// The unboxed bitmap says which slots are raw machine words instead of refs,
+// and WHERE it comes from is version-dependent:
+//
+//	2.10       the Class cluster's fill, per class id -- the Instance cluster
+//	           writes none of its own. Passed in via classBitmaps.
+//	>= 2.12    the Instance cluster's own fill, one ReadUnsigned64 up front.
+//
+// Treating 2.10 like the later versions leaves the bitmap zero, so every
+// unboxed slot is read as one ref instead of two 32-bit reads. That silently
+// under-runs the fill -- on a real 2.10 sample by 392 bytes, identically on
+// arm64 and x64 -- which lands the roots section 392 bytes early and takes the
+// whole dispatch table with it.
 //
 // header_words: 2 for compressed pointers (tags + hash = 2 × 4 bytes = 2 compressed words).
 // header_words: 1 for uncompressed (tags = 1 × 8 bytes = 1 word).
-func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compressedPointers, preCanonicalSplit bool) ([]InstanceInfo, error) {
+func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, profile *snapshot.VersionProfile, classBitmaps map[int32]uint64) ([]InstanceInfo, error) {
 	var result []InstanceInfo
-	var bitmap int64
-	if !preCanonicalSplit {
-		var err error
-		bitmap, err = s.ReadUnsigned()
+	fillRefUnsigned := profile.FillRefUnsigned
+	compressedPointers := profile.CompressedPointers
+	preCanonicalSplit := profile.PreCanonicalSplit
+
+	var bitmap uint64
+	if instanceCarriesUnboxedBitmap(profile) {
+		v, err := s.ReadUnsigned()
 		if err != nil {
 			return result, fmt.Errorf("instance(%d) bitmap: %w", cm.CID, err)
 		}
+		bitmap = uint64(v)
+	} else {
+		bitmap = classBitmaps[int32(cm.CID)]
 	}
 
 	nfo := int(cm.NextFieldOffsetInWords)
@@ -56,7 +91,7 @@ func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, compr
 		}
 		for j := 0; j < numFields; j++ {
 			fieldWordIdx := headerWords + j
-			isUnboxed := (bitmap>>uint(fieldWordIdx))&1 != 0
+			isUnboxed := fieldWordIdx < 64 && (bitmap>>uint(fieldWordIdx))&1 != 0
 			// Two 32-bit reads per unboxed slot, always -- and NOT for the
 			// reason the TODO that used to sit here gave. It claimed the
 			// bitmap granularity is the machine word "not the compressed
