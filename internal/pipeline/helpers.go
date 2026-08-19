@@ -24,6 +24,36 @@ type CodeNameInfo struct {
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
+
+	// IsAllocationStub marks a Code whose owner is a Class rather than a
+	// Function. UntaggedCode.owner_ holds a Function, a Class, or an
+	// AbstractType, and each spells its name differently; the Class case is
+	// the per-class allocation stub. See isAllocationStubOwner.
+	IsAllocationStub bool
+}
+
+// isAllocationStubOwner reports whether a Code's owner makes it the allocation
+// stub for a class.
+//
+// UntaggedCode.owner_ is a Function, a Class, or an AbstractType, and the SDK
+// names each differently. For the Class case (analyze_snapshot_api_impl.cc):
+//
+//	if (owner.IsClass()) {
+//	  js_.PrintfProperty("name", "new %s", Class::Cast(owner).ScrubbedNameCString());
+//	  js_.PrintPropertyBool("is_stub", true);
+//	}
+//
+// so the canonical name carries the same "new " a constructor does. The ELF
+// symbol table agrees: on the 3.12.2 arm64 sample it holds 1231 symbols
+// starting with "new ", of which we were marking 306 -- every one of the other
+// 925 was a Code whose owner is a Class (918) and which we therefore named
+// with the bare class name.
+//
+// This is deliberately keyed on the owner's CID and not on "the name matches
+// its class", which would be a guess: a method may legitimately share its
+// class's name.
+func isAllocationStubOwner(owner *cluster.NamedObject, ct *snapshot.CIDTable) bool {
+	return owner != nil && ct != nil && ct.Class != 0 && owner.CID == ct.Class
 }
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
@@ -160,6 +190,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		if owner.IsConstructor() && funcName != "" {
 			ci.FuncName = "new " + funcName
 			ci.IsConstructor = true
+		}
+		if isAllocationStubOwner(owner, l.CT) && funcName != "" {
+			ci.FuncName = "new " + funcName
+			ci.IsAllocationStub = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
 		if owner.SignatureRefID > 0 {

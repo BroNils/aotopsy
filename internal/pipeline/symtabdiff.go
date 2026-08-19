@@ -67,7 +67,18 @@ func NormalizeRecoveredName(name string) string {
 	// An unnamed constructor's Function name is the class followed by a bare
 	// `.` -- `_GrowableList@0150898.` -- so stripping the mangling leaves a
 	// trailing dot that the ELF does not have.
-	return strings.TrimSuffix(n, ".")
+	n = strings.TrimSuffix(n, ".")
+	// Fold spaces to underscores, exactly as NormalizeSymbolName does.
+	//
+	// This side did not, and the asymmetry made an entire category
+	// structurally incapable of agreeing: every `new X` we produce became
+	// "new X" here while the ELF's became "new_X" there, so all 1231
+	// constructor and allocation-stub symbols on the 3.12.2 arm64 sample
+	// counted as disagreements no matter how right the name was. It hid both
+	// the 306 constructors that were already correct and the 918 allocation
+	// stubs fixed alongside this -- the agreement rate did not move by a
+	// single tenth when those were added, which is what exposed it.
+	return strings.ReplaceAll(n, " ", "_")
 }
 
 // NormalizeSymbolName reduces an ELF symbol to comparable shape.
