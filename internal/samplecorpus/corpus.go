@@ -201,8 +201,14 @@ var Registry = []Sample{
 	{DartVersion: "3.4.3", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.4.3, Flutter 3.22.2 -- first TagStyleObjectHeader, last with the 4-bit type_class_id shift"},
 	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.5.0, Flutter 3.24.0 -- first with shared_initial_field_table AND the 3-bit shift"},
 	{DartVersion: "2.18.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.18.0, Flutter 3.3.1"},
-	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1 (directory name is the APP version, not Dart's)"},
-	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "compare_sample, the reference toy app"},
+	// A REAL production app, not a toy -- the only such sample here, and worth
+	// keeping for that reason: it exercises code shapes the generated sample
+	// never produces. The directory name is the APP version, not Dart's.
+	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1, a real production app", FileSuffix: "-gopay"},
+	{DartVersion: "3.7.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.7.0, Flutter 3.29.1"},
+	{DartVersion: "3.7.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.7.0 x86_64"},
+	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.9.2, Flutter 3.35.5"},
+	{DartVersion: "3.9.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.9.2 x86_64"},
 
 	// The x64 half of the same source set. Same program, same Dart version,
 	// different architecture -- the control the arch-parity work never had:
@@ -215,11 +221,19 @@ var Registry = []Sample{
 	{DartVersion: "3.3.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.3.0 x86_64"},
 	{DartVersion: "3.4.3", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.4.3 x86_64"},
 	{DartVersion: "3.5.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.5.0 x86_64"},
+	// sample_310 and sample_311 have their own lib/, NOT compare_sample's, so
+	// they stay out of the source set -- checked, not assumed. They still earn
+	// their place: corpus cluster facts and architecture coverage.
 	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_310"},
+	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_310 x86_64"},
 	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_311"},
+	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_311 x86_64"},
 	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},
 	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64"},
-	{DartVersion: "3.13.0", Arch: "arm64", Note: "sample_313, built for the unified-snapshot work"},
+	// sample_313's lib/ IS byte-identical to compare_sample's, so unlike
+	// sample_310/311 this pair can carry its weight in the differential.
+	{DartVersion: "3.13.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.13.0, Flutter 3.47.0"},
+	{DartVersion: "3.13.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.13.0 x86_64"},
 
 	// The versions whose ObjectStoreAOTFieldCount had only ever been counted
 	// from object_store.h, never confirmed against a binary. 2.15.0 is why

@@ -1,16 +1,16 @@
 {
   "sample": "dart-3.9.2-arm64.so",
-  "input_sha256": "f70c4ff9b5c5b84fa34fed0d0a968b78037603bfd8a3f6d3b82776afb8dba774",
+  "input_sha256": "a073a2590c1035b9510436fb82711477eb296da999b0be5fad646ceaeb26eceb",
   "dart_version": "3.9.2",
   "unified_snapshot": false,
   "vm_clusters": 6,
   "isolate_clusters": 343,
   "has_instructions_table": true,
-  "strings": 9077,
-  "named": 11645,
-  "codes": 8045,
-  "instr_table_length": 8045,
+  "strings": 9073,
+  "named": 11633,
+  "codes": 8049,
+  "instr_table_length": 8049,
   "instr_table_first_entry_with_code": 0,
-  "instr_table_code_entries": 8045,
-  "code_ranges": 8045
+  "instr_table_code_entries": 8049,
+  "code_ranges": 8049
 }
