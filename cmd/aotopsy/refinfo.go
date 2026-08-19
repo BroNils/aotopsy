@@ -9,7 +9,6 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -52,46 +51,18 @@ func cmdRefInfo(args []string) error {
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
-	ef, err := elfx.Open(*libapp)
+	sc, err := pipeline.LoadSnapshot(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
-	defer func() { _ = ef.Close() }()
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
-
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
-
-	var vmResult *cluster.Result
-	vmData := info.VmData.Data
-	if len(vmData) >= 64 && info.VmHeader != nil {
-		vmStart, err := cluster.FindClusterDataStart(vmData)
-		if err == nil {
-			vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts)
-			if err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
+	info := sc.Info
+	result := sc.Result
+	pl := sc.Pool
 	ct := info.Version.CIDs
+
+	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
 
 	// RefCID only covers Named/Class clusters via cm.StartRef..StopRef in
 	// BuildPoolLookups; that's exactly what we want here (raw CID lookup

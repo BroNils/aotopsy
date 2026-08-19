@@ -3,12 +3,13 @@
 // ClassID of receiver objects at each call site, then maps
 // class_id + selector_offset → dispatch table slot → target function.
 //
-// The type lattice has five levels:
+// The type lattice has six levels:
 //   - Top:      no type information yet (initial state)
 //   - KnownClass: a specific ClassID is known
 //   - KnownDispatchIndex: a dispatch table selector offset is known
 //     (from ADD Xn, X21, #offset — the offset IS the slot index)
 //   - KnownStub: a THR-cached stub entry point is known (e.g. AllocateObject)
+//   - PPBase:   register holds PP + offset (2-level pool addressing)
 //   - Bottom:   conflicting type information (join of incompatible types)
 package typetrack
 
@@ -24,6 +25,7 @@ const (
 	LatticeKnownClass                                // ClassID is known
 	LatticeKnownDispatchIndex                        // dispatch table slot offset is known
 	LatticeKnownStub                                 // THR-cached stub entry point is known
+	LatticePPBase                                    // register holds PP + offset (2-level pool addressing)
 	LatticeBottom                                    // conflicting/unresolvable
 )
 
@@ -51,6 +53,10 @@ type TypeLattice struct {
 	// at slot (imm-1).
 	SelectorOnly bool
 	SelectorImm  int // signed ADD immediate; valid when SelectorOnly
+
+	// PPBaseOffset holds the byte offset added to PP (X27) for 2-level
+	// pool addressing. Valid when Kind == LatticePPBase.
+	PPBaseOffset int
 }
 
 // Top returns the top element of the lattice.
@@ -151,9 +157,34 @@ func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 		return Bottom()
 	}
 	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
+		// Mirror Equal's logic: SelectorOnly and SelectorImm must be
+		// considered, not just DispatchIndex. Two SelectorDispatch
+		// elements with DispatchIndex=0 (unset for SelectorOnly) but
+		// different SelectorImm must meet to Bottom, not to a — the
+		// previous code only checked DispatchIndex and incorrectly
+		// returned a because 0 == 0.
+		if a.SelectorOnly != b.SelectorOnly {
+			return Bottom()
+		}
+		if a.SelectorOnly {
+			if a.SelectorImm == b.SelectorImm {
+				return a
+			}
+			return Bottom()
+		}
 		if a.DispatchIndex == b.DispatchIndex {
 			return a
 		}
+		return Bottom()
+	}
+	// PPBase: identical offsets combine; different or mixed → Bottom
+	if a.Kind == LatticePPBase && b.Kind == LatticePPBase {
+		if a.PPBaseOffset == b.PPBaseOffset {
+			return a
+		}
+		return Bottom()
+	}
+	if a.Kind == LatticePPBase || b.Kind == LatticePPBase {
 		return Bottom()
 	}
 	// Mixed KnownClass ∧ KnownDispatch → Bottom

@@ -10,6 +10,20 @@ import (
 // sortedKeysInsts, sortedKeysX86 and sortedEdgeKeys return map keys in a
 // stable order so that analysis passes that mutate the shared TypeContext
 // produce identical results on every run.
+// entryStackFor builds the first-block stack seed for a function, or nil when
+// this Dart version passes the receiver in a register.
+func entryStackFor(ctx *TypeContext, name string) map[int]TypeLattice {
+	ownerCID, ok := ctx.FuncOwnerClass[name]
+	if !ok || ownerCID < 0 {
+		return nil
+	}
+	slot, ok := ctx.FuncReceiverStackSlot[name]
+	if !ok {
+		return nil
+	}
+	return map[int]TypeLattice{slot: KnownClass(ownerCID)}
+}
+
 func sortedKeysInsts(m FuncInstsARM64) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -243,12 +257,19 @@ func RunInterprocedural(
 			for i := range entry {
 				entry[i] = Top()
 			}
+			var entryStack map[int]TypeLattice
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 				entry[receiverReg] = KnownClass(ownerCID)
+				// Pre-3.4.3 the receiver arrives on the stack and the
+				// prologue immediately overwrites the register, so the
+				// register seed alone is dead on arrival.
+				if slot, ok2 := ctx.FuncReceiverStackSlot[name]; ok2 {
+					entryStack = map[int]TypeLattice{slot: KnownClass(ownerCID)}
+				}
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunction(insts, ctx, entry)
+			intra := AnalyzeFunction(insts, ctx, entry, entryStack)
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	} else {
@@ -263,8 +284,51 @@ func RunInterprocedural(
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunctionX86(insts, ctx, entry)
+			intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
+		}
+	}
+
+	// Seed CalleeExitTypes from declared return types (FuncReturnType).
+	seedHits := 0
+	for target, name := range blTargetToName {
+		lookupName := name
+		if idx := strings.LastIndex(name, "_"); idx > 0 {
+			suffix := name[idx+1:]
+			if isHexSuffix(suffix) {
+				lookupName = name[:idx]
+			}
+		}
+		refIDs, ok := ctx.MethodNameToRefIDs[lookupName]
+		if !ok || len(refIDs) == 0 {
+			methodName := lookupName
+			if dotIdx := strings.LastIndex(lookupName, "."); dotIdx >= 0 {
+				methodName = lookupName[dotIdx+1:]
+			}
+			refIDs, ok = ctx.MethodNameToRefIDs[methodName]
+		}
+		if ok {
+			for _, rid := range refIDs {
+				if cid, ok2 := ctx.FuncReturnType[rid]; ok2 && cid >= 0 {
+					ctx.CalleeExitTypes[target] = KnownClass(cid)
+					seedHits++
+					break
+				}
+			}
+		}
+	}
+	ctx.FuncReturnTypeSeeds = seedHits
+
+	// Initial CalleeExitTypes population after the first analysis pass,
+	// so the first fixed-point iteration's handleBL can see return types.
+	// Don't overwrite FuncReturnType seeds with Top — the declared return
+	// type is more precise than "we don't know from analysis alone".
+	for target, name := range blTargetToName {
+		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
+			if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+				ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+			}
+			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
 		}
 	}
 
@@ -339,7 +403,7 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunction(insts, ctx, entry)
+				intra := AnalyzeFunction(insts, ctx, entry, entryStackFor(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		} else {
@@ -358,20 +422,28 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunctionX86(insts, ctx, entry)
+				intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		}
-	}
 
-	// Fase 7 PART A: populate CalleeExitTypes for call-return tracking.
-	// Map BL target address → callee's ExitTypes[0] (return value type).
-	// Also store full ExitTypes array for full register type propagation.
-	for target, name := range blTargetToName {
-		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-			ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
-			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+		// Update CalleeExitTypes after each re-analysis pass, so the
+		// NEXT iteration's handleBL can see callee return types.
+		// Don't overwrite FuncReturnType seeds with Top — the declared
+		// return type is more precise than "analysis found nothing".
+		for target, name := range blTargetToName {
+			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
+				if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+					ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+				}
+				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+			}
 		}
+		// Invalidate selector cache: new allocation sites may have been
+		// discovered during this iteration's re-analysis, changing the
+		// RTA-filtered candidate set. The cache will be rebuilt lazily
+		// on the next iteration's selectorCandidates calls.
+		ctx.InvalidateSelectorCache()
 	}
 
 	// Count resolved BLR.

@@ -1,19 +1,11 @@
 package pipeline
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/snapshot"
-	"aotopsy/internal/strutil"
 )
 
 // CodeNameInfo holds resolved function and owner names for a code ref.
@@ -21,6 +13,14 @@ type CodeNameInfo struct {
 	FuncName   string
 	OwnerName  string
 	ParamCount int // total visible parameters (fixed + optional, excluding implicit 'this')
+
+	// FixedParamsWithReceiver is num_fixed_parameters as the SDK counts it:
+	// the fixed parameters INCLUDING the implicit receiver, and excluding
+	// optionals. It is what locates a parameter's stack slot on the Dart
+	// versions that pass arguments on the stack -- parameter i of a function
+	// with N fixed parameters sits at FP + (kParamEndSlotFromFp + N - i) *
+	// wordSize, so the receiver is the highest slot. 0 when unknown.
+	FixedParamsWithReceiver int
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
@@ -165,6 +165,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
+				ci.FixedParamsWithReceiver = ft.NumFixed
+				if ft.HasImplicit {
+					ci.FixedParamsWithReceiver++
+				}
 			}
 		}
 		// Dart 2.x keeps arity on the Function object instead
@@ -179,6 +183,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				visible--
 			}
 			ci.ParamCount = visible
+			// owner.NumFixedParams already counts the receiver.
+			ci.FixedParamsWithReceiver = owner.NumFixedParams
 		}
 		l.CodeNames[ce.RefID] = ci
 	}
@@ -189,6 +195,90 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
 			} else {
 				l.CodeRefDisplay[ce.RefID] = ci.FuncName
+			}
+		}
+	}
+
+	// Name VM stub Code objects by their cluster-order index.
+	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
+	// owner — ResolveCodeOwner fails for them. Their names come from
+	// VM_STUB_CODE_LIST + VM_TYPE_TESTING_STUB_CODE_LIST
+	// (disasm.VMStubNamesInClusterOrder), which is ordered by creation
+	// order (VM_STUB_CODE_LIST order with TTS after Subtype7TestCache),
+	// matching vmResult.Codes[i] cluster serialization order.
+	//
+	// This runs BEFORE the Function-owner resolution below so that stub
+	// names take precedence over Function owner names. Without this
+	// ordering, UnknownDartCode (which has a Function owner with a
+	// null/empty name) gets named "<optimized out>" by the owner loop,
+	// and the stub naming loop skips it — the correct name
+	// "UnknownDartCode" is never assigned.
+	//
+	// X-2: Previously used VMStubNames (164 entries, no TTS), missing
+	// the 9 type-testing stubs at indices 164-172. Now uses
+	// VMStubNamesInClusterOrder (173 entries with TTS).
+	if vmResult != nil {
+		vmStubNames := disasm.VMStubNamesInClusterOrder(dartVersion)
+		if len(vmStubNames) > 0 {
+			for i, ce := range vmResult.Codes {
+				if i >= len(vmStubNames) {
+					break
+				}
+				name := vmStubNames[i]
+				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
+				l.CodeRefDisplay[ce.RefID] = name
+			}
+		}
+	}
+
+	// Also build CodeNames and CodeRefDisplay for VM Code objects.
+	// VM Code objects (stubs, runtime entries) are referenced from the
+	// app isolate's object pool but only exist in the VM snapshot.
+	// Without this, PoolCodeNames has no entries for PP-loaded VM Code
+	// objects, so BLR calls through them (LDR X24,[X27,PP] → LDUR
+	// X30,[X24,#7] → BLR X30) are unresolved.
+	//
+	// This runs AFTER the stub naming loop above, so only VM Codes that
+	// were NOT named by the stub list (i.e., not in
+	// VM_STUB_CODE_LIST+TTS) get named via their Function owner. In
+	// practice, all 173 VM Code objects are stubs, so this loop is a
+	// no-op for VM snapshots — but it's kept as a safety net for any
+	// future VM Code that isn't a stub.
+	if vmResult != nil {
+		vmByCodeIndex := CodeIndexToFunc(vmResult, ct, codeIndexOneBased)
+		for _, ce := range vmResult.Codes {
+			if _, exists := l.CodeNames[ce.RefID]; exists {
+				continue
+			}
+			owner, ok := ResolveCodeOwner(ce, l.VmRefToNamed, vmByCodeIndex)
+			if !ok {
+				continue
+			}
+			funcName := l.ResolveVMName(owner)
+			if funcName == "" {
+				continue
+			}
+			ownerName := ""
+			if owner.OwnerRefID >= 0 {
+				if vmOwner, ok2 := l.VmRefToNamed[owner.OwnerRefID]; ok2 {
+					ownerName = l.ResolveVMName(vmOwner)
+				}
+			}
+			ci := CodeNameInfo{
+				FuncName:  funcName,
+				OwnerName: ownerName,
+			}
+			if owner.IsConstructor() && funcName != "" {
+				ci.FuncName = "new " + funcName
+				ci.IsConstructor = true
+			}
+			l.CodeNames[ce.RefID] = ci
+			if ci.FuncName != "" {
+				if ci.OwnerName != "" {
+					l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
+				} else {
+					l.CodeRefDisplay[ce.RefID] = ci.FuncName
+				}
 			}
 		}
 	}
@@ -433,6 +523,67 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 	return fmt.Sprintf("<cid:%d>", cid)
 }
 
+// NamedParamNames resolves a FunctionType's named_parameter_names Array
+// ref to a list of parameter name strings (e.g. ["name", "age"] for
+// foo({String? name, int? age})). Returns nil if the ref is null or
+// unresolvable.
+//
+// The returned slice is aligned to the function's FULL parameter list, not
+// just its named tail: positional slots are "" and only the named tail
+// carries names. That is what makes it safe to index by argument position.
+//
+// SDK-verified: raw_object.h@3.12.2, UntaggedFunctionType has
+// COMPRESSED_POINTER_FIELD(ArrayPtr, named_parameter_names) as the
+// last ref in VISIT_TO. The Array's elements are String refs, resolved
+// via ArrayInfo.ElementRefIDs → Strings (same chain as type parameter
+// names in BuildFuncTypeParamNames).
+//
+// Three SDK facts shape this, and getting any of them wrong invents names:
+//
+//  1. The array is only populated when packed_parameter_counts'
+//     HasNamedOptionalParameters bit is set. Optional POSITIONAL parameters
+//     leave it as the empty array (object.cc@3.12.2 FinalizeNameArray
+//     asserts exactly that when NumOptionalNamedParameters() == 0).
+//
+//  2. The array is LONGER than the name count. After the name Strings come
+//     Smi slots holding the required-ness flag bits -- that is what
+//     FunctionType::HasRequiredNamedParameters tests
+//     (`parameter_names.Length() > num_named_params`). Only the first
+//     NumOptional entries are names; the rest would resolve to "?" garbage.
+//
+//  3. Names are indexed by `index - num_fixed_parameters()`
+//     (object.cc@3.12.2 FunctionType::ParameterNameAt), and the SDK's
+//     num_fixed_parameters INCLUDES the implicit receiver, while
+//     FuncTypeInfo.NumFixed has already subtracted it.
+func (r *TypeParamResolver) NamedParamNames(ft cluster.FuncTypeInfo) []string {
+	if !ft.HasNamedOptional || ft.NumOptional <= 0 {
+		return nil
+	}
+	if ft.NamedParamNamesArrayRefID <= cluster.RefNull {
+		return nil
+	}
+	arr, ok := r.arrayByRef[ft.NamedParamNamesArrayRefID]
+	if !ok || len(arr.ElementRefIDs) < ft.NumOptional {
+		return nil
+	}
+	// Fact 3: rebuild the SDK's num_fixed_parameters.
+	numFixed := ft.NumFixed
+	if ft.HasImplicit {
+		numFixed++
+	}
+	names := make([]string, numFixed+ft.NumOptional)
+	// Fact 2: only the first NumOptional elements are names.
+	for i, elemRef := range arr.ElementRefIDs[:ft.NumOptional] {
+		s, ok := r.pl.StringForRef(elemRef)
+		if !ok || s == "" {
+			names[numFixed+i] = "?"
+			continue
+		}
+		names[numFixed+i] = s
+	}
+	return names
+}
+
 // baseObjectName returns the SDK display name for a base-object reference,
 // or "" when the ref is not one or the Dart version is not in the table.
 //
@@ -576,718 +727,3 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 }
 
 // DartClassLayout is a resolved class definition ready for export.
-type DartClassLayout struct {
-	ClassName    string            `json:"class_name"`
-	ClassID      int32             `json:"class_id"`
-	InstanceSize int32             `json:"instance_size"`
-	Fields       []DartFieldLayout `json:"fields"`
-}
-
-// DartFieldLayout is one field in a DartClassLayout.
-type DartFieldLayout struct {
-	Name       string `json:"name"`
-	ByteOffset int32  `json:"byte_offset"`
-}
-
-// BuildClassLayouts joins ClassInfo + FieldInfo + string lookups into class layouts.
-func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs bool) []DartClassLayout {
-	var wordSize int32 = 8
-	if compressedPtrs {
-		wordSize = 4
-	}
-
-	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
-	for i := range result.Classes {
-		ci := &result.Classes[i]
-		classByRef[ci.RefID] = ci
-	}
-
-	type resolvedField struct {
-		nameRefID  int
-		byteOffset int32
-	}
-	fieldsByOwner := make(map[int][]resolvedField)
-	for _, fi := range result.Fields {
-		if fi.OwnerRefID <= 0 || fi.HostOffset < 0 {
-			continue
-		}
-		offsetRef := int(fi.HostOffset)
-		wordOff, ok := result.MintValues[offsetRef]
-		if !ok {
-			continue
-		}
-		fieldsByOwner[fi.OwnerRefID] = append(fieldsByOwner[fi.OwnerRefID], resolvedField{
-			nameRefID:  fi.NameRefID,
-			byteOffset: int32(wordOff) * wordSize,
-		})
-	}
-
-	var layouts []DartClassLayout
-	for _, ci := range result.Classes {
-		if ci.InstanceSize <= 0 {
-			continue
-		}
-		className := ""
-		if ci.NameRefID >= 0 {
-			if s, ok := pl.RefToStr[ci.NameRefID]; ok {
-				className = s
-			}
-		}
-		if className == "" {
-			continue
-		}
-
-		layout := DartClassLayout{
-			ClassName:    className,
-			ClassID:      ci.ClassID,
-			InstanceSize: ci.InstanceSize * wordSize,
-		}
-
-		if rfs, ok := fieldsByOwner[ci.RefID]; ok {
-			for _, rf := range rfs {
-				fieldName := ""
-				if rf.nameRefID >= 0 {
-					if s, ok := pl.RefToStr[rf.nameRefID]; ok {
-						fieldName = s
-					}
-				}
-				if fieldName == "" {
-					if s, ok := pl.VmRefToStr[rf.nameRefID]; ok {
-						fieldName = s
-					}
-				}
-				if fieldName == "" {
-					fieldName = fmt.Sprintf("field_0x%x", rf.byteOffset)
-				}
-				layout.Fields = append(layout.Fields, DartFieldLayout{
-					Name:       fieldName,
-					ByteOffset: rf.byteOffset,
-				})
-			}
-		} else {
-			byteSize := ci.InstanceSize * wordSize
-			for off := wordSize; off+wordSize <= byteSize; off += wordSize {
-				layout.Fields = append(layout.Fields, DartFieldLayout{
-					Name:       fmt.Sprintf("f_0x%x", off),
-					ByteOffset: off,
-				})
-			}
-		}
-
-		sort.Slice(layout.Fields, func(i, j int) bool {
-			return layout.Fields[i].ByteOffset < layout.Fields[j].ByteOffset
-		})
-
-		layouts = append(layouts, layout)
-	}
-	return layouts
-}
-
-// --- Phase 1: Captured data builders (Script, LoadingUnit, KernelProgramInfo) ---
-
-// ScriptRecord is one Script entry in scripts.jsonl.
-type ScriptRecord struct {
-	RefID             int    `json:"ref_id"`
-	URL               string `json:"url"`
-	LineOffset        int32  `json:"line_offset,omitempty"`
-	ColOffset         int32  `json:"col_offset,omitempty"`
-	KernelScriptIndex int32  `json:"kernel_script_index,omitempty"`
-}
-
-// BuildScripts joins cluster.ScriptInfo + PoolLookups string table → script records.
-func BuildScripts(result *cluster.Result, pl *PoolLookups) []ScriptRecord {
-	var records []ScriptRecord
-	for _, si := range result.Scripts {
-		url := pl.RefToStr[si.URLRef]
-		rec := ScriptRecord{
-			RefID:             si.RefID,
-			URL:               url,
-			LineOffset:        si.LineOffset,
-			ColOffset:         si.ColOffset,
-			KernelScriptIndex: si.KernelScriptIndex,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// RefNull re-exports cluster.RefNull for readability at call sites here.
-const RefNull = cluster.RefNull
-
-// LoadingUnitRecord is one LoadingUnit entry in loading_units.jsonl.
-type LoadingUnitRecord struct {
-	RefID     int   `json:"ref_id"`
-	ParentRef int   `json:"parent_ref,omitempty"`
-	UnitID    int32 `json:"unit_id,omitempty"`
-	// IsRoot is true when parent_ is null, i.e. this is the base unit whose
-	// Code objects live in the snapshot we just parsed.
-	IsRoot bool `json:"is_root,omitempty"`
-	// MainCodeCount / DeferredCodeCount describe the Code partition. Only set
-	// on the root unit -- see PartitionCodesByLoadingUnit for why a non-root
-	// unit's codes are not in this snapshot at all.
-	MainCodeCount     int `json:"main_code_count,omitempty"`
-	DeferredCodeCount int `json:"deferred_code_count,omitempty"`
-}
-
-// LoadingUnitPartition is the Code-to-loading-unit attribution for one snapshot.
-//
-// This implements the "partition Codes by loading unit" half of the LoadingUnit
-// gap. What it can and cannot say is a property of split AOT, not a shortcut:
-//
-// Dart's deferred loading splits an app into a root unit plus one unit per
-// deferred import, and each unit gets its OWN snapshot blob (app.so,
-// app-2.part.so, ...). The Code cluster inside a single blob is written in two
-// sections -- see CodeDeserializationCluster::ReadAlloc, which reads `count`
-// main codes and then `deferred_count` deferred ones. The main section is the
-// code this blob defines; the deferred section is a set of Code objects that
-// this blob references but whose instructions live in another unit's blob
-// (ReadInstructions early-returns for them, which is why our reader leaves
-// ClusterIndex == -1).
-//
-// So per-blob the honest partition is exactly two buckets: "defined here"
-// (root unit) and "defined in some other unit" (deferred). Attributing a
-// deferred Code to a SPECIFIC unit id requires loading that unit's blob too,
-// which is a multi-file input this tool does not take yet.
-type LoadingUnitPartition struct {
-	// RootUnitID is the id of the unit this snapshot defines, or 0 if no
-	// LoadingUnit cluster was present.
-	RootUnitID int32
-	// UnitCount is the number of LoadingUnit objects described in this
-	// snapshot (including non-root ones, which are metadata-only here).
-	UnitCount int
-	// MainCodeRefs are Code ref IDs defined by the root unit.
-	MainCodeRefs []int
-	// DeferredCodeRefs are Code ref IDs referenced here but defined in
-	// another loading unit's blob.
-	DeferredCodeRefs []int
-	// Degenerate is true when there is at most one unit and no deferred
-	// codes, i.e. the app uses no deferred imports and the partition carries
-	// no information. Callers should say so rather than presenting a
-	// single-bucket split as a result.
-	Degenerate bool
-}
-
-// PartitionCodesByLoadingUnit splits result.Codes into root-unit and deferred
-// buckets and pairs that with the LoadingUnit metadata.
-func PartitionCodesByLoadingUnit(result *cluster.Result) *LoadingUnitPartition {
-	p := &LoadingUnitPartition{UnitCount: len(result.LoadingUnits)}
-	for _, lui := range result.LoadingUnits {
-		if lui.ParentRef == RefNull {
-			p.RootUnitID = lui.UnitID
-			break
-		}
-	}
-	for _, ce := range result.Codes {
-		if ce.ClusterIndex >= 0 {
-			p.MainCodeRefs = append(p.MainCodeRefs, ce.RefID)
-		} else {
-			p.DeferredCodeRefs = append(p.DeferredCodeRefs, ce.RefID)
-		}
-	}
-	p.Degenerate = p.UnitCount <= 1 && len(p.DeferredCodeRefs) == 0
-	return p
-}
-
-// UnitOf reports which bucket a Code ref belongs to: the root unit id when the
-// Code is defined in this snapshot, or 0 with deferred=true when it is defined
-// in another unit. found is false for a ref that is not a Code at all.
-func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int32, deferred, found bool) {
-	for _, r := range p.MainCodeRefs {
-		if r == codeRef {
-			return p.RootUnitID, false, true
-		}
-	}
-	for _, r := range p.DeferredCodeRefs {
-		if r == codeRef {
-			return 0, true, true
-		}
-	}
-	return 0, false, false
-}
-
-// BuildLoadingUnits converts cluster.LoadingUnitInfo → output records, with the
-// Code partition folded onto the root unit.
-func BuildLoadingUnits(result *cluster.Result) []LoadingUnitRecord {
-	part := PartitionCodesByLoadingUnit(result)
-	var records []LoadingUnitRecord
-	for _, lui := range result.LoadingUnits {
-		rec := LoadingUnitRecord{
-			RefID:     lui.RefID,
-			ParentRef: lui.ParentRef,
-			UnitID:    lui.UnitID,
-			IsRoot:    lui.ParentRef == RefNull,
-		}
-		if rec.IsRoot {
-			rec.MainCodeCount = len(part.MainCodeRefs)
-			rec.DeferredCodeCount = len(part.DeferredCodeRefs)
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// KPIRecord is one KernelProgramInfo entry in kpi.jsonl.
-type KPIRecord struct {
-	RefID              int `json:"ref_id"`
-	KernelComponentRef int `json:"kernel_component_ref,omitempty"`
-	StringOffsetsRef   int `json:"string_offsets_ref,omitempty"`
-	StringDataRef      int `json:"string_data_ref,omitempty"`
-	CanonicalNamesRef  int `json:"canonical_names_ref,omitempty"`
-	ConstantsRef       int `json:"constants_ref,omitempty"`
-	ConstantsTableRef  int `json:"constants_table_ref,omitempty"`
-}
-
-// BuildKPI converts cluster.KernelProgramInfoRef → output records.
-func BuildKPI(result *cluster.Result) []KPIRecord {
-	var records []KPIRecord
-	for _, kpi := range result.KernelProgramInfo {
-		rec := KPIRecord{
-			RefID:              kpi.RefID,
-			KernelComponentRef: kpi.KernelComponentRef,
-			StringOffsetsRef:   kpi.StringOffsetsRef,
-			StringDataRef:      kpi.StringDataRef,
-			CanonicalNamesRef:  kpi.CanonicalNamesRef,
-			ConstantsRef:       kpi.ConstantsRef,
-			ConstantsTableRef:  kpi.ConstantsTableRef,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// InstanceFieldRecord is one captured pointer field of an instance.
-type InstanceFieldRecord struct {
-	Offset int    `json:"offset"`
-	Ref    int    `json:"ref"`
-	Name   string `json:"name,omitempty"` // field name when the offset maps to a known layout slot
-}
-
-// InstanceRecord is one Instance entry in instances.jsonl.
-type InstanceRecord struct {
-	RefID int `json:"ref_id"`
-	CID   int `json:"cid"`
-	// SlotCount is the number of field slots the object has, including unboxed
-	// ones that produce no entry in Fields.
-	SlotCount int                   `json:"slot_count,omitempty"`
-	Fields    []InstanceFieldRecord `json:"fields,omitempty"`
-}
-
-// BuildInstances converts cluster.InstanceInfo → output records, naming each
-// field offset via the class layout where possible.
-//
-// The old shape was a bare "field_refs":[...] list with no offsets, which was
-// not usable: the position of a ref in that list is not its field index once
-// any unboxed field is present. Offsets now come from the capture itself.
-func BuildInstances(result *cluster.Result, layouts []DartClassLayout) []InstanceRecord {
-	// classID -> byteOffset -> field name.
-	nameByCIDOffset := make(map[int32]map[int32]string, len(layouts))
-	for _, l := range layouts {
-		m := make(map[int32]string, len(l.Fields))
-		for _, f := range l.Fields {
-			m[f.ByteOffset] = f.Name
-		}
-		nameByCIDOffset[l.ClassID] = m
-	}
-
-	records := make([]InstanceRecord, 0, len(result.Instances))
-	for _, ii := range result.Instances {
-		rec := InstanceRecord{
-			RefID:     ii.RefID,
-			CID:       ii.CID,
-			SlotCount: ii.NumFieldSlots,
-		}
-		names := nameByCIDOffset[int32(ii.CID)]
-		for _, f := range ii.Fields {
-			fr := InstanceFieldRecord{Offset: int(f.ByteOffset), Ref: f.Ref}
-			if names != nil {
-				fr.Name = names[f.ByteOffset]
-			}
-			rec.Fields = append(rec.Fields, fr)
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// ContextRecord is one Context entry in contexts.jsonl.
-type ContextRecord struct {
-	RefID     int   `json:"ref_id"`
-	ParentRef int   `json:"parent_ref,omitempty"`
-	VarRefs   []int `json:"var_refs,omitempty"`
-}
-
-// BuildContexts converts cluster.ContextInfo → output records.
-func BuildContexts(result *cluster.Result) []ContextRecord {
-	var records []ContextRecord
-	for _, ci := range result.Contexts {
-		rec := ContextRecord{
-			RefID:     ci.RefID,
-			ParentRef: ci.ParentRef,
-			VarRefs:   ci.VarRefs,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// TypeArgumentsRecord is one TypeArguments entry in type_arguments.jsonl.
-type TypeArgumentsRecord struct {
-	RefID          int   `json:"ref_id"`
-	Length         int   `json:"length"`
-	TypeRefs       []int `json:"type_refs,omitempty"`
-	Instantiations int   `json:"instantiations_ref,omitempty"`
-	Hash           int32 `json:"hash,omitempty"`
-	Nullability    int   `json:"nullability,omitempty"`
-}
-
-// BuildTypeArguments converts cluster.TypeArgumentsInfo → output records.
-func BuildTypeArguments(result *cluster.Result) []TypeArgumentsRecord {
-	var records []TypeArgumentsRecord
-	for _, ta := range result.TypeArguments {
-		rec := TypeArgumentsRecord{
-			RefID:          ta.RefID,
-			Length:         ta.Length,
-			TypeRefs:       ta.TypeRefs,
-			Instantiations: ta.Instantiations,
-			Hash:           ta.Hash,
-			Nullability:    ta.Nullability,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// ExceptionHandlerRecord is one ExceptionHandlers entry in exception_handlers.jsonl.
-type ExceptionHandlerRecord struct {
-	RefID           int                     `json:"ref_id"`
-	HandledTypesRef int                     `json:"handled_types_ref,omitempty"`
-	Handlers        []ExceptionHandlerEntry `json:"handlers,omitempty"`
-}
-
-// ExceptionHandlerEntry is one handler in an ExceptionHandlerRecord.
-type ExceptionHandlerEntry struct {
-	PCOffset        int32 `json:"pc_offset"`
-	OuterTryIndex   int16 `json:"outer_try_index,omitempty"`
-	NeedsStacktrace bool  `json:"needs_stacktrace,omitempty"`
-	HasCatchAll     bool  `json:"has_catch_all,omitempty"`
-	IsGenerated     bool  `json:"is_generated,omitempty"`
-}
-
-// BuildExceptionHandlers converts cluster.ExceptionHandlerInfo → output records.
-func BuildExceptionHandlers(result *cluster.Result) []ExceptionHandlerRecord {
-	var records []ExceptionHandlerRecord
-	for _, eh := range result.ExceptionHandlers {
-		rec := ExceptionHandlerRecord{
-			RefID:           eh.RefID,
-			HandledTypesRef: eh.HandledTypesRef,
-		}
-		for _, h := range eh.Handlers {
-			rec.Handlers = append(rec.Handlers, ExceptionHandlerEntry{
-				PCOffset:        h.PCOffset,
-				OuterTryIndex:   h.OuterTryIndex,
-				NeedsStacktrace: h.NeedsStacktrace,
-				HasCatchAll:     h.HasCatchAll,
-				IsGenerated:     h.IsGenerated,
-			})
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// ICDataRecord is one ICData entry in icdata.jsonl.
-//
-// Emitted only if an ICData cluster is ever present; AOT snapshots have none
-// (see cluster.ICDataInfo). The fields track ICData's ReadFromTo order --
-// the old single "owner_ref" field did not correspond to any ICData ref slot.
-type ICDataRecord struct {
-	RefID         int `json:"ref_id"`
-	TargetNameRef int `json:"target_name_ref,omitempty"`
-	ArgsDescRef   int `json:"args_desc_ref,omitempty"`
-	EntriesRef    int `json:"entries_ref,omitempty"`
-}
-
-// BuildICData converts cluster.ICDataInfo → output records.
-func BuildICData(result *cluster.Result) []ICDataRecord {
-	var records []ICDataRecord
-	for _, icd := range result.ICData {
-		rec := ICDataRecord{
-			RefID:         icd.RefID,
-			TargetNameRef: icd.TargetNameRef,
-			ArgsDescRef:   icd.ArgsDescRef,
-			EntriesRef:    icd.EntriesRef,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// ClosureDataRecord is one ClosureData entry in closure_data.jsonl.
-type ClosureDataRecord struct {
-	RefID             int `json:"ref_id"`
-	ParentFunctionRef int `json:"parent_function_ref,omitempty"`
-	ClosureRef        int `json:"closure_ref,omitempty"`
-}
-
-// BuildClosureData converts cluster.ClosureDataInfo → output records.
-func BuildClosureData(result *cluster.Result) []ClosureDataRecord {
-	var records []ClosureDataRecord
-	for _, cd := range result.ClosureData {
-		rec := ClosureDataRecord{
-			RefID:             cd.RefID,
-			ParentFunctionRef: cd.ParentFunctionRef,
-			ClosureRef:        cd.ClosureRef,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// Qualified renders this code's display name.
-//
-// A constructor's Function name already carries the class -- Dart names them
-// `_GrowableList.of`, `Duration`, `PlatformDispatcher._` -- so prepending the
-// owner as well produces `_GrowableList.new _GrowableList.of`. The owner is
-// still reported separately in functions.jsonl; it is only the qualified name
-// that must not repeat it.
-func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
-	if ci.IsConstructor {
-		return QualifiedName("", ci.FuncName, pcOffset)
-	}
-	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
-}
-
-// QualifiedName builds "Owner.FuncName_hexaddr" like blutter.
-func QualifiedName(ownerName, funcName string, pcOffset uint32) string {
-	suffix := fmt.Sprintf("_%x", pcOffset)
-	if funcName == "" {
-		return "sub" + suffix
-	}
-	if ownerName != "" {
-		return ownerName + "." + funcName + suffix
-	}
-	return funcName + suffix
-}
-
-// SanitizeFilename makes a string safe for use as a filename.
-// Strips non-printable runes and replaces filesystem-unsafe characters.
-// SanitizeFilename delegates to the shared strutil.SanitizeFilename.
-// Kept for backward compatibility — all callers should eventually use
-// strutil.SanitizeFilename directly. (P4-5)
-func SanitizeFilename(name string) string {
-	return strutil.SanitizeFilename(name)
-}
-
-// FuncRelPath returns a relative path like "OwnerClass/funcName_hex" for functions
-// with an owner, or "funcName_hex" for ownerless functions.
-func FuncRelPath(ownerName, funcName string, pcOffset uint32) string {
-	suffix := fmt.Sprintf("_%x", pcOffset)
-	var fpart string
-	if funcName == "" {
-		fpart = "sub" + suffix
-	} else {
-		fpart = SanitizeFilename(funcName + suffix)
-	}
-	if ownerName != "" {
-		return SanitizeFilename(ownerName) + "/" + fpart
-	}
-	return fpart
-}
-
-// FuncRelPathFromQualified reconstructs the relative path from a qualified name
-// and its owner. Used by post-disasm commands (signal, decompile).
-func FuncRelPathFromQualified(qualifiedName, owner string) string {
-	if owner != "" {
-		prefix := owner + "."
-		funcPart := qualifiedName
-		if strings.HasPrefix(qualifiedName, prefix) {
-			funcPart = qualifiedName[len(prefix):]
-		}
-		return SanitizeFilename(owner) + "/" + SanitizeFilename(funcPart)
-	}
-	return SanitizeFilename(qualifiedName)
-}
-
-// ReadJSONL reads a JSONL file into a slice of T.
-func ReadJSONL[T any](path string) ([]T, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	var records []T
-	dec := json.NewDecoder(f)
-	for dec.More() {
-		var rec T
-		if err := dec.Decode(&rec); err != nil {
-			return records, fmt.Errorf("line %d: %w", len(records)+1, err)
-		}
-		records = append(records, rec)
-	}
-
-	return records, nil
-}
-
-// DisasmIndexEntry is the per-function index record written to index.jsonl.
-type DisasmIndexEntry struct {
-	Name      string `json:"name"`
-	OwnerName string `json:"owner_name,omitempty"`
-	RefID     int    `json:"ref_id"`
-	OwnerRef  int    `json:"owner_ref,omitempty"`
-	PCOffset  uint32 `json:"pc_offset"`
-	Size      uint32 `json:"size"`
-	File      string `json:"file"`
-}
-
-// DartMetaJSON is the structure written to dart_meta.json.
-type DartMetaJSON struct {
-	DartVersion        string             `json:"dart_version"`
-	CompressedPointers bool               `json:"compressed_pointers"`
-	PointerSize        int                `json:"pointer_size"`
-	THRFields          []DartMetaTHRField `json:"thr_fields"`
-}
-
-// DartMetaTHRField is a THR field entry for dart_meta.json.
-type DartMetaTHRField struct {
-	Offset int    `json:"offset"`
-	Name   string `json:"name"`
-}
-
-// WriteDartMeta writes dart_meta.json with snapshot metadata.
-func WriteDartMeta(outDir, dartVersion string, compressed bool, ptrSize int, thrFields map[int]string) error {
-	fields := make([]DartMetaTHRField, 0, len(thrFields))
-	for off, name := range thrFields {
-		fields = append(fields, DartMetaTHRField{Offset: off, Name: name})
-	}
-	sort.Slice(fields, func(i, j int) bool { return fields[i].Offset < fields[j].Offset })
-
-	meta := DartMetaJSON{
-		DartVersion:        dartVersion,
-		CompressedPointers: compressed,
-		PointerSize:        ptrSize,
-		THRFields:          fields,
-	}
-
-	f, err := os.Create(filepath.Join(outDir, "dart_meta.json"))
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(meta); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-// NormalizeHexAddr strips leading zeros: "0x000652e4" → "0x652e4".
-func NormalizeHexAddr(s string) string {
-	if !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
-		return s
-	}
-	v, err := strconv.ParseUint(s[2:], 16, 64)
-	if err != nil {
-		return s
-	}
-	return fmt.Sprintf("0x%x", v)
-}
-
-// ParseHexAddr parses "0x..." hex address strings. Returns 0 on failure.
-func ParseHexAddr(s string) uint64 {
-	s = strings.TrimPrefix(s, "0x")
-	v, _ := strconv.ParseUint(s, 16, 64)
-	return v
-}
-
-// AsmCommentRe matches annotated asm lines: address + instruction + "; comment"
-var AsmCommentRe = regexp.MustCompile(`^(0x[0-9a-fA-F]+)\s+.*;\s+(.+)$`)
-
-// ExtractAsmComments parses all .txt files in asmDir for instruction-level annotations.
-func ExtractAsmComments(asmDir string) ([]FlutterMetaComment, error) {
-	entries, err := os.ReadDir(asmDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var comments []FlutterMetaComment
-	seen := make(map[string]bool)
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt") {
-			continue
-		}
-		path := filepath.Join(asmDir, entry.Name())
-		fc, err := extractFileComments(path, seen)
-		if err != nil {
-			continue
-		}
-		comments = append(comments, fc...)
-	}
-
-	return comments, nil
-}
-
-func extractFileComments(path string, seen map[string]bool) ([]FlutterMetaComment, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	var comments []FlutterMetaComment
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		m := AsmCommentRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		addr := NormalizeHexAddr(m[1])
-		text := strings.TrimSpace(m[2])
-
-		if strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">") {
-			continue
-		}
-
-		if seen[addr] {
-			continue
-		}
-		seen[addr] = true
-
-		comments = append(comments, FlutterMetaComment{
-			Addr: addr,
-			Text: text,
-		})
-	}
-
-	return comments, scanner.Err()
-}
-
-// IsInterestingCallee returns true if the callee name represents a real named
-// function rather than VM internals, stubs, or dispatch noise.
-func IsInterestingCallee(name string) bool {
-	if name == "" {
-		return false
-	}
-	switch {
-	case len(name) > 4 && name[:4] == "sub_":
-		return false
-	case len(name) > 2 && name[0] == '0' && name[1] == 'x':
-		return false
-	case name == "dispatch_table" || name == "object_field":
-		return false
-	case len(name) > 4 && name[:4] == "THR.":
-		return false
-	case len(name) > 3 && name[:3] == "PP[":
-		return false
-	}
-	return true
-}
-
-// FlutterMetaComment is a comment entry for flutter_meta.json.
-type FlutterMetaComment struct {
-	Addr string `json:"addr"`
-	Text string `json:"text"`
-}

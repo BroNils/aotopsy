@@ -75,6 +75,26 @@ func VMStubNamesInImageOrder(dartVersion string) []string {
 	return out
 }
 
+// VMStubNamesInClusterOrder returns the stub names in the order their Code
+// objects appear in the VM snapshot's Code cluster (creation/emission order),
+// including the 9 type-testing stubs inserted after the subtype-test-cache
+// group. This matches vmResult.Codes[i] ordering, which is the order Code
+// objects were serialized into the cluster — the same as the order they were
+// allocated by StubCode::Init (VM_STUB_CODE_LIST order with TTS after
+// Subtype7TestCache).
+//
+// Use this (NOT VMStubNamesInImageOrder) when zipping against vmResult.Codes
+// directly, as BuildPoolLookups does for pool-display naming. The image-order
+// function is for address-sorted ranges, as BuildVMStubSymbols does for
+// VA→name symbol mapping.
+func VMStubNamesInClusterOrder(dartVersion string) []string {
+	list := VMStubNames(dartVersion)
+	if list == nil {
+		return nil
+	}
+	return composeVMStubEmissionOrder(list)
+}
+
 // composeVMStubEmissionOrder inserts the type-testing stubs after the
 // subtype-test-cache group. If the anchor is missing -- a list shape this
 // code has not seen -- the type-testing stubs are appended at the end rather

@@ -19,6 +19,20 @@ const (
 	SymIsolateSnapshotData         = "_kDartIsolateSnapshotData"
 	SymIsolateSnapshotInstructions = "_kDartIsolateSnapshotInstructions"
 	SymSnapshotBuildID             = "_kDartSnapshotBuildId"
+
+	// Dart 3.13.0+ replaced all four symbols above with these two, and merged
+	// the VM and isolate snapshots into a single one.
+	//
+	// SDK-verified via gh api on runtime/include/dart_api.h at both tags:
+	// 3.12.2 defines kVmSnapshotDataCSymbol / kIsolateSnapshotDataCSymbol and
+	// their Instructions counterparts; 3.13.0 defines only kSnapshotDataCSymbol
+	// and kSnapshotTextCSymbol. That this is deliberate is visible in the SDK
+	// itself: pkg/native_stack_traces/lib/src/constants.dart@3.13.0 keeps the
+	// old four as oldVmSymbolName / oldIsolateSymbolName for reading older
+	// snapshots, and ImageWriter::SectionSymbol lost its `bool vm` parameter,
+	// so there is no VM-vs-isolate distinction at the image level any more.
+	SymUnifiedSnapshotData = "_kDartSnapshotData"
+	SymUnifiedSnapshotText = "_kDartSnapshotText"
 )
 
 // snapshotMagic is the 4-byte magic at the start of a Dart snapshot data blob.
@@ -130,6 +144,7 @@ type Info struct {
 	VmInstructions      Region          `json:"vm_instructions"`
 	IsolateData         Region          `json:"isolate_data"`
 	IsolateInstructions Region          `json:"isolate_instructions"`
+	UnifiedSnapshot     bool            `json:"unified_snapshot,omitempty"`
 	VmHeader            *Header         `json:"vm_header,omitempty"`
 	IsolateHeader       *Header         `json:"isolate_header,omitempty"`
 	Version             *VersionProfile `json:"version,omitempty"`
@@ -151,6 +166,25 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 		{SymVmSnapshotInstructions, &info.VmInstructions},
 		{SymIsolateSnapshotData, &info.IsolateData},
 		{SymIsolateSnapshotInstructions, &info.IsolateInstructions},
+	}
+
+	// Dart 3.13.0+ unified layout: one data blob and one text blob holding a
+	// SINGLE snapshot that serves as both VM and isolate.
+	//
+	// The blob is mapped onto IsolateData/IsolateInstructions and the VM
+	// regions are left empty. That is not a shortcut for "we did not find it":
+	// there is exactly one snapshot in there, verified on a real 3.13.0
+	// libapp.so by scanning for the 0xdcdcf5f5 magic, which occurs once, at
+	// offset 0. Downstream code already guards VM parsing with
+	// `len(VmData) >= 64`, so it skips cleanly instead of inventing a second
+	// snapshot. UnifiedSnapshot lets callers tell "no VM snapshot exists" from
+	// "VM snapshot extraction failed".
+	if _, _, err := ef.Symbol(SymUnifiedSnapshotData); err == nil {
+		info.UnifiedSnapshot = true
+		targets = []symTarget{
+			{SymUnifiedSnapshotData, &info.IsolateData},
+			{SymUnifiedSnapshotText, &info.IsolateInstructions},
+		}
 	}
 
 	for _, t := range targets {
@@ -219,13 +253,23 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	}
 
 	// Detect Dart SDK version from snapshot hash.
-	if info.VmHeader != nil && info.VmHeader.SnapshotHash != "" {
-		info.Version = DetectVersion(info.VmHeader.SnapshotHash)
+	//
+	// The hash normally comes from the VM snapshot header. Under the 3.13.0+
+	// unified layout there is no VM snapshot, so the single header carries it.
+	// Both headers hold the same version hash by construction, so preferring
+	// the VM one and falling back to the isolate one is version-agnostic
+	// rather than a special case.
+	hashRegion, hashHeader := info.VmData, info.VmHeader
+	if hashHeader == nil || hashHeader.SnapshotHash == "" {
+		hashRegion, hashHeader = info.IsolateData, info.IsolateHeader
+	}
+	if hashHeader != nil && hashHeader.SnapshotHash != "" {
+		info.Version = DetectVersion(hashHeader.SnapshotHash)
 
-		// For unknown hashes, probe the VM data to determine tag style.
-		if info.Version != nil && info.Version.DartVersion == "" && info.VmData.Data != nil {
-			if cs, err := findClusterDataStart(info.VmData.Data); err == nil {
-				info.Version = ProbeTagStyle(info.VmData.Data, cs)
+		// For unknown hashes, probe the data to determine tag style.
+		if info.Version != nil && info.Version.DartVersion == "" && hashRegion.Data != nil {
+			if cs, err := findClusterDataStart(hashRegion.Data); err == nil {
+				info.Version = ProbeTagStyle(hashRegion.Data, cs)
 			}
 		}
 	}

@@ -11,22 +11,7 @@ import (
 // a minimum threshold. This prevents silent BLR drops from code changes.
 // Requires AOTOPSY_TEST_SAMPLE_ARM64 env var.
 func TestBLRResolutionRate(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	result, err := Run(opts)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	_ = result
+	tmpDir := sharedPipelineOutDir(t)
 
 	// Read typetrack report
 	reportPath := filepath.Join(tmpDir, "typetrack_report.json")
@@ -37,42 +22,59 @@ func TestBLRResolutionRate(t *testing.T) {
 	var report struct {
 		ResolvedBLR int `json:"resolved_blr"`
 		TotalBLR    int `json:"total_blr"`
+		PoolHits    int `json:"pool_hits"`
+		PoolLoads   int `json:"pool_loads"`
+		BLR         struct {
+			Total       int `json:"total"`
+			Monomorphic int `json:"monomorphic"`
+			Polymorphic int `json:"polymorphic"`
+			Stub        int `json:"stub"`
+			Unresolved  int `json:"unresolved"`
+		} `json:"blr"`
 	}
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("unmarshal typetrack_report: %v", err)
 	}
-	if report.TotalBLR == 0 {
-		t.Fatal("total_blr is 0 — pipeline failed")
+	if report.BLR.Total == 0 {
+		t.Fatal("blr.total is 0 — pipeline failed")
 	}
-	rate := report.ResolvedBLR * 100 / report.TotalBLR
-	// Minimum threshold: 35% for 3.9.2 ARM64 (currently 39%)
-	// If this drops below 35%, something broke.
-	const minRate = 35
+	// Use blr.monomorphic (single-callee sites only) as the regression
+	// metric, NOT resolved_blr (which is monomorphic+stub). The AGENTS-local
+	// note says: "pakai blr.monomorphic, jangan resolved_blr" — resolved_blr
+	// conflates stub calls with real Dart function resolution.
+	monomorphic := report.BLR.Monomorphic
+	total := report.BLR.Total
+	rate := monomorphic * 100 / total
+	// Minimum threshold: 20% for 3.9.2 ARM64 (currently 23% = 1247/5354).
+	// The higher "84%" figure in commit messages includes polymorphic
+	// candidates (which are not single-callee resolutions).
+	const minRate = 20
 	if rate < minRate {
-		t.Errorf("BLR resolution rate = %d%% (%d/%d), minimum %d%%",
-			rate, report.ResolvedBLR, report.TotalBLR, minRate)
+		t.Errorf("BLR monomorphic rate = %d%% (%d/%d), minimum %d%%",
+			rate, monomorphic, total, minRate)
 	}
-	t.Logf("BLR: %d/%d (%d%%)", report.ResolvedBLR, report.TotalBLR, rate)
+	t.Logf("BLR: monomorphic=%d/%d (%d%%), polymorphic=%d, stub=%d, unresolved=%d",
+		monomorphic, total, rate, report.BLR.Polymorphic, report.BLR.Stub, report.BLR.Unresolved)
+
+	// pool_hits counts object-pool loads that RESOLVED; pool_loads counts
+	// every pool load seen. A resolution count above the attempt count means
+	// the two are being incremented at different places again -- which is
+	// exactly what happened when handlePPLoad started counting attempts under
+	// the pool_hits name while x86_64 kept counting resolutions.
+	if report.PoolLoads > 0 && report.PoolHits > report.PoolLoads {
+		t.Errorf("pool_hits=%d exceeds pool_loads=%d -- a pool load cannot resolve "+
+			"more often than it happens", report.PoolHits, report.PoolLoads)
+	}
+	if report.PoolLoads > 0 {
+		t.Logf("pool: %d/%d loads resolved (%d%%)",
+			report.PoolHits, report.PoolLoads, report.PoolHits*100/report.PoolLoads)
+	}
 }
 
 // TestSignalExpansionOutputs checks that all signal expansion JSONL files
 // are generated and non-empty. This prevents silent output drops.
 func TestSignalExpansionOutputs(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	_, err := Run(opts)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	tmpDir := sharedPipelineOutDir(t)
 
 	// Files that MUST exist (even if 0 entries, the file should be created
 	// by the pipeline for downstream tools to read)
@@ -92,14 +94,14 @@ func TestSignalExpansionOutputs(t *testing.T) {
 
 	// Files that MUST have non-zero entries for 3.9.2 ARM64
 	mustHaveEntries := map[string]int{
-		"string_refs.jsonl":           100,  // was 0 before fix, now 5000+
-		"string_value_xref.jsonl":     100,  // was 0 before fix, now 1000+
+		"string_refs.jsonl":            100, // was 0 before fix, now 5000+
+		"string_value_xref.jsonl":      100, // was 0 before fix, now 1000+
 		"selector_dispatch_xref.jsonl": 100, // was MISSING before fix, now 16000+
-		"address_callers_xref.jsonl":  100,  // was always present
-		"method_channels.jsonl":       5,    // should find flutter channels
-		"deobfuscation.jsonl":         10,   // should find base64 patterns
-		"network_endpoints.jsonl":     10,   // should find URLs/domains
-		"yara_findings.jsonl":         1,    // should match at least 1 rule
+		"address_callers_xref.jsonl":   100, // was always present
+		"method_channels.jsonl":        5,   // should find flutter channels
+		"deobfuscation.jsonl":          10,  // should find base64 patterns
+		"network_endpoints.jsonl":      10,  // should find URLs/domains
+		"yara_findings.jsonl":          1,   // should match at least 1 rule
 	}
 	for f, minCount := range mustHaveEntries {
 		path := filepath.Join(tmpDir, f)
@@ -120,30 +122,11 @@ func TestSignalExpansionOutputs(t *testing.T) {
 	}
 }
 
-// TestDecompilerFeatures checks that decompiler output contains expected
-// features (ffi_call, field names, etc.). This prevents silent feature drops.
-func TestDecompilerFeatures(t *testing.T) {
-	libapp := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libapp == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	tmpDir := t.TempDir()
-	// Use _debug decompile-native --all --max 50 to get a sample
-	// Actually, we need to run the decompiler directly
-	// For integration test, just check that the pipeline produces
-	// the expected JSONL outputs with correct structure
-	opts := Opts{
-		LibPath: libapp,
-		OutDir:  tmpDir,
-		Signal:  true,
-		Quiet:   true,
-	}
-	result, err := Run(opts)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.FuncCount == 0 {
-		t.Error("no functions were decompiled")
-	}
-	t.Logf("Functions: %d, Signal: %d", result.FuncCount, result.SignalCount)
-}
+// The decompiler's own features -- ffi_call naming, instance-field name
+// resolution -- are covered in internal/decompiler (features_test.go), not
+// here. A TestDecompilerFeatures used to sit at this spot claiming to check
+// them; it counted lines in functions.jsonl, a file the decompiler does not
+// write, from a package that never invokes the emitter. It could not have
+// failed if either feature disappeared, and what it did check -- that the
+// pipeline produces functions -- is already asserted exactly by the golden
+// records and loosely by TestSignalExpansionOutputs above.

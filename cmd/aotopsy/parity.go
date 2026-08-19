@@ -12,9 +12,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
-	"aotopsy/internal/snapshot"
 )
 
 type parityRow struct {
@@ -94,20 +92,13 @@ func cmdParity(args []string) error {
 func runParitySample(libpath, hash string, opts dartfmt.Options) parityRow {
 	row := parityRow{SampleHash: hash}
 
-	ef, err := elfx.Open(libpath)
+	ef, info, result, err := pipeline.LoadSnapshotIsolate(libpath, opts)
 	if err != nil {
 		row.Status = "EXTRACT_FAIL"
 		row.Error = err.Error()
 		return row
 	}
 	defer func() { _ = ef.Close() }()
-
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		row.Status = "EXTRACT_FAIL"
-		row.Error = err.Error()
-		return row
-	}
 
 	if info.Version != nil {
 		row.DartVersion = info.Version.DartVersion
@@ -119,37 +110,7 @@ func runParitySample(libpath, hash string, opts dartfmt.Options) parityRow {
 		return row
 	}
 
-	// Run pipeline on isolate snapshot.
-	data := info.IsolateData.Data
-	if len(data) < 64 {
-		row.Status = "EXTRACT_FAIL"
-		row.Error = "isolate data too short"
-		return row
-	}
-
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		row.Status = "ALLOC_FAIL"
-		row.Error = err.Error()
-		return row
-	}
-
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		row.Status = "ALLOC_FAIL"
-		row.Error = err.Error()
-		return row
-	}
 	row.Clusters = len(result.Clusters)
-
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		row.Status = "FILL_FAIL"
-		row.Error = err.Error()
-		row.Strings = len(result.Strings)
-		row.Named = len(result.Named)
-		row.Codes = len(result.Codes)
-		return row
-	}
 
 	row.Strings = len(result.Strings)
 	row.Named = len(result.Named)

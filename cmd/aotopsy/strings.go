@@ -8,9 +8,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
-	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strxref"
 )
 
@@ -40,16 +38,11 @@ func cmdStrings(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, err := elfx.Open(*libapp)
+	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
 	defer func() { _ = ef.Close() }()
-
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
 
 	if info.Version != nil && info.Version.DartVersion != "" {
 		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)

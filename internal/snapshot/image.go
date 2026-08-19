@@ -72,11 +72,38 @@ func ParseInstructionsSection(data []byte, offset uint64) (*InstructionsSection,
 }
 
 // CodeRegion extracts the actual machine code bytes from an instruction image.
-// Returns the code bytes, their VA offset from the image start, and the payload length.
+// Returns the code bytes, their VA offset from the image start, and the payload
+// length.
+//
+// Dart 2.10 has no InstructionsSection object at all. Its image header is two
+// words -- snapshot size, then bss_offset -- and object_start() is simply
+// raw_memory + kHeaderSize, so the code begins immediately after the header
+// (image_snapshot.h@2.10.0, class Image). The InstructionsSectionOffset field
+// appears at 2.12.0, where HeaderField gains a second enumerator.
+//
+// Reading the 2.10 header as though it carried that offset takes bss_offset --
+// a negative word -- as an image offset, which is why a 2.10.0 binary reported
+// "data too short for InstructionsSection at 0xffffffffffff2009".
 func CodeRegion(imageData []byte) (code []byte, codeOffsetInImage uint64, payloadLen uint64, err error) {
 	hdr, err := ParseImageHeader(imageData)
 	if err != nil {
 		return nil, 0, 0, err
+	}
+
+	// bss_offset is rounded down to kBssAlignment and its low bit flags
+	// "compiled directly to ELF", so on 2.10 word 1 is either negative or
+	// tiny -- never a plausible offset to an object inside the image.
+	if hdr.InstructionsSectionOffset == 0 ||
+		hdr.InstructionsSectionOffset >= uint64(len(imageData)) {
+		start := uint64(imageHeaderSize)
+		if start >= uint64(len(imageData)) {
+			return nil, start, 0, nil
+		}
+		size := hdr.ImageSize
+		if size == 0 || size > uint64(len(imageData)) {
+			size = uint64(len(imageData))
+		}
+		return imageData[start:size], start, size - start, nil
 	}
 
 	sect, err := ParseInstructionsSection(imageData, hdr.InstructionsSectionOffset)

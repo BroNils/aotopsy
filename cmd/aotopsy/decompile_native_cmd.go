@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"debug/elf"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,9 +18,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
-	"aotopsy/internal/snapshot"
 )
 
 // cmdDecompileNative implements "aotopsy _debug decompile-native --lib
@@ -66,77 +63,25 @@ func cmdDecompileNative(args []string) error {
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
-	ef, err := elfx.Open(*libapp)
+	sc, err := pipeline.LoadSnapshot(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
-	defer func() { _ = ef.Close() }()
-	isARM64 := ef.ELF.Machine == elf.EM_AARCH64
+	defer func() { _ = sc.Close() }()
 
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
+	ef := sc.EF
+	info := sc.Info
+	result := sc.Result
+	table := sc.Table
+	ranges := sc.Ranges
+	code := sc.Code
+	codeOff := sc.CodeOff
+	codeVA := sc.CodeVA
+	isARM64 := sc.IsARM64
+	pl := sc.Pool
+	poolDisplay := sc.PoolDisplay
+
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch: %s\n", info.Version.DartVersion, ef.ELF.Machine)
-
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
-
-	table, err := cluster.ParseInstructionsTable(data, &result.Header, info.Version, info.IsolateHeader)
-	var ranges []cluster.CodeRange
-	switch {
-	case err != nil && result.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta:
-		ranges = cluster.ResolveCodeRangesFromTextOffset(result.Codes)
-	case err != nil:
-		return fmt.Errorf("instrtable: %w", err)
-	default:
-		codeRanges, err := cluster.ResolveCodeRanges(result.Codes, table)
-		if err != nil {
-			return fmt.Errorf("code ranges: %w", err)
-		}
-		stubRanges := cluster.ResolveStubRanges(table)
-		ranges = cluster.MergeRanges(stubRanges, codeRanges)
-	}
-
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
-	if err != nil {
-		return fmt.Errorf("code region: %w", err)
-	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // codeOff/payloadLen are offsets within one already-loaded snapshot payload, always well under 2^32
-	cluster.SetLastRangeSize(ranges, codeEndOffset)
-	codeVA := info.IsolateInstructions.VA + codeOff
-
-	// Parse the VM-isolate snapshot region for base-object resolution
-	// (strings/names/CIDs shared across every app using this Dart SDK
-	// build). Without this, pool entries referencing VM-isolate objects
-	// showed as opaque "<vm:NNN>" placeholders instead of their real
-	// content -- a real, previously-unnoticed gap (this command passed
-	// nil here since it was written), even though objects.go already
-	// does this correctly (its own "vm snapshot: N clusters, N strings"
-	// stderr line, ~99% pool resolution on a real app). Mirrors
-	// objects.go's exact proven pattern.
-	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := buildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := resolvePoolDisplay(result.Pool, pl)
 
 	// Build class layouts for field-name resolution in the decompiler.
 	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
@@ -301,7 +246,7 @@ func cmdDecompileNative(args []string) error {
 	// verified yet, or the region can't be parsed -- see
 	// pipeline.BuildVMStubSymbols's doc comment and ARCHITECTURE.md's
 	// "Stub naming" section.
-	vmStubNames := buildVMStubSymbols(info, opts)
+	vmStubNames := pipeline.BuildVMStubSymbols(info, opts)
 
 	// Build a whole-binary VA->name symbol table once, so cross-function
 	// call targets resolve to real names instead of sub_<hex>.
@@ -338,7 +283,7 @@ func cmdDecompileNative(args []string) error {
 	// trace symbolication. See pipeline.BuildDiscardedFunctionSymbols's
 	// doc comment and ARCHITECTURE.md's "Discarded-Code function naming"
 	// section for the full derivation.
-	discardedFuncNames := buildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased)
+	discardedFuncNames := pipeline.BuildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased)
 	for va, name := range discardedFuncNames {
 		symbolNames[va] = name
 	}
@@ -516,6 +461,35 @@ func cmdDecompileNative(args []string) error {
 		return out
 	}
 
+	// There is deliberately no per-function type-ARGUMENT hook here.
+	//
+	// A FunctionType holds type PARAMETERS (the `<T>` declaration, handled by
+	// genericParamNamesFor above); it holds no TypeArguments ref, because a
+	// type argument list belongs to an instantiation, not to a declaration.
+	// The TypeArguments objects a function mentions live in its object pool,
+	// one per call site, so anything that resolved them would be a
+	// per-instruction annotation and not a property of the function at all.
+	// A function-shaped hook could only ever return nil.
+
+	// Item 11: Named parameter names for named optional parameters.
+	// Resolves FunctionType.named_parameter_names → string list via
+	// TypeParamResolver.NamedParamNames.
+	namedParamNamesFor := func(r cluster.CodeRange) []string {
+		if r.RefID < 0 {
+			return nil
+		}
+		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
+		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
+		if !ok || owner.SignatureRefID <= 0 {
+			return nil
+		}
+		ft, ok := paramFuncTypeByRef[owner.SignatureRefID]
+		if !ok {
+			return nil
+		}
+		return typeParams.NamedParamNames(*ft)
+	}
+
 	// A2: Build classByRef and codeRefToReceiverClassID BEFORE buildFuncIR
 	// so that ReceiverClassID can be set inside buildFuncIR.
 	ctEarly := info.Version.CIDs
@@ -543,209 +517,30 @@ func cmdDecompileNative(args []string) error {
 		}
 	}
 
-	buildFuncIR := func(r cluster.CodeRange) (*decompiler.FuncIR, error) {
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			return nil, fmt.Errorf("empty function range")
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
-		name := symbolNames[funcVA]
-
-		var fir *decompiler.FuncIR
-		if isARM64 {
-			insts := disasm.Disassemble(funcCode, disasm.Options{BaseAddr: funcVA})
-			fir = decompiler.BuildARM64IR(name, insts)
-		} else {
-			xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
-			fir = decompiler.BuildX86IR(name, xinsts)
-		}
-		if masks, ok := buildArgRegMasks()[funcVA]; ok {
-			if regIdx, confident := resolveArgRegIndices(masks); confident {
-				fir.ArgRegIndices = regIdx
-			}
-		}
-		fir.ThreadStubOffsets = disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
-		// Every Thread field, not just the cached stub entry points. This is
-		// what lets object_null / bool_true / bool_false render as null /
-		// true / false -- the way x86_64 materialises them, since it has no
-		// NULL_REG.
-		fir.ThreadFieldNames = threadFieldOffsets(info.Version.DartVersion, isARM64, info.Version)
-		fir.ParamTypeNames = paramTypeNamesFor(r)
-		fir.TypeParamNames = genericParamNamesFor(r)
-		fir.FieldNameResolver = fieldNameResolver
-
-		// A1: Local variable type inference — populate LocalTypeHints from
-		// ParamTypeNames (arg0 → "int", arg1 → "String", etc.).
-		// Also resolve receiver class ID for per-class field name resolution (A2).
-		if len(fir.ParamTypeNames) > 0 {
-			fir.LocalTypeHints = make(map[string]string)
-			for i, typeName := range fir.ParamTypeNames {
-				if typeName != "" {
-					fir.LocalTypeHints[fmt.Sprintf("arg%d", i)] = typeName
-				}
-			}
-		}
-		// A2: Set ReceiverClassID from codeRefToReceiverClassID map.
-		if r.RefID >= 0 {
-			if cid, ok := codeRefToReceiverClassID[r.RefID]; ok && cid > 0 {
-				fir.ReceiverClassID = cid
-			}
-		}
-		if len(closureParents) > 0 && r.RefID >= 0 {
-			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-			if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok {
-				parent := closureParents[owner.RefID]
-				// Drop same-name parents. A tear-off's ClosureData points at a
-				// DIFFERENT Function object that shares the method's name, so a
-				// ref-level self-check (done in BuildClosureParents) does not
-				// catch it: 49 of 99 annotations were "closure declared in: X"
-				// on X itself. Comparing names removes those without losing any
-				// genuinely nested closure.
-				if parent != "" && parent != fir.Name &&
-					!strings.HasPrefix(fir.Name, parent+"_") {
-					fir.EnclosingFunction = parent
-				}
-			}
-		}
-		// Wire exception handlers from cluster capture → decompiler FuncIR.
-		if handlers, ok := codeRefToExcHandlers[r.RefID]; ok {
-			fir.ExceptionHandlers = make([]decompiler.ExceptionHandlerEntry, len(handlers))
-			for i, h := range handlers {
-				fir.ExceptionHandlers[i] = decompiler.ExceptionHandlerEntry{
-					PCOffset:        h.PCOffset,
-					OuterTryIndex:   h.OuterTryIndex,
-					NeedsStacktrace: h.NeedsStacktrace,
-					HasCatchAll:     h.HasCatchAll,
-					IsGenerated:     h.IsGenerated,
-				}
-			}
-
-			// Recover try EXTENTS from PcDescriptors and pair each with its
-			// handler. endPC is the function's size: the last descriptor has no
-			// successor to delimit it, so without this the final region would
-			// be dropped.
-			if entries, ok := codeRefToPcDesc[r.RefID]; ok && len(entries) > 0 {
-				regions := cluster.BuildTryRegions(entries, r.Size)
-				// Recover enclosing trys that left no descriptor of their own:
-				// a pc inside try N is inside handler[N].outer_try_index too.
-				regions = cluster.ExpandOuterTryRegions(regions, handlers)
-				for _, reg := range regions {
-					if reg.TryIndex < 0 || reg.TryIndex >= len(fir.ExceptionHandlers) {
-						// try_index must index this Code's own handler table;
-						// anything else means a mismatched Code/handler pair
-						// rather than a usable region.
-						continue
-					}
-					h := fir.ExceptionHandlers[reg.TryIndex]
-					fir.TryRegions = append(fir.TryRegions, decompiler.TryRegionEntry{
-						StartVA:   funcStart + codeVA + uint64(reg.StartPC),
-						EndVA:     funcStart + codeVA + uint64(reg.EndPC),
-						TryIndex:  reg.TryIndex,
-						Handler:   h,
-						HandlerVA: funcStart + codeVA + uint64(h.PCOffset),
-					})
-				}
-				// Widen to basic-block boundaries. Sound because a block has a
-				// single entry, so a block containing any in-try pc is entirely
-				// in-try. Raw descriptor ranges are otherwise single-instruction
-				// lower bounds.
-				fir.SnapTryRegionsToBlocks()
-			}
-		}
-
-		// Inlined-frame annotation: for each block, ask the CodeSourceMap which
-		// inline stack is active at its start VA and resolve the indices to
-		// function names. Blocks belonging to the function itself get nothing.
-		if csm, ok := codeRefToCSM[r.RefID]; ok && len(fir.Blocks) > 0 {
-			names := codeRefToInlinedNames[r.RefID]
-			for bi := range fir.Blocks {
-				blockVA := fir.Blocks[bi].StartVA
-				// CSM pc offsets are relative to the Code payload start, the
-				// same base funcStart is measured from.
-				pcOff := uint32(blockVA - codeVA)
-				stack, _, ok := csm.InlineStackAt(pcOff)
-				if !ok || len(stack) == 0 {
-					continue
-				}
-				var frames []string
-				for _, id := range stack {
-					if int(id) < len(names) && names[id] != "" {
-						frames = append(frames, names[id])
-					}
-				}
-				if len(frames) == 0 {
-					continue
-				}
-				if fir.InlineFrames == nil {
-					fir.InlineFrames = make(map[uint64][]string)
-				}
-				fir.InlineFrames[blockVA] = frames
-			}
-		}
-		// P6: Switch/case recovery — detect IndirectGoto pattern (br xN).
-		// Dart AOT uses IndirectGotoInstr for switches with >=16 cases.
-		// The codegen (il_arm64.cc) loads a TypedData (int32 offsets) from
-		// the pool, reads offset[index], adds base address (ADR), and br.
-		// The PP load may use 2-level addressing (ADD xN, x27, #hi + LDR xN, [xN, #lo])
-		// which the lifter doesn't recognize as OpLoadPool. So instead of
-		// relying on OpLoadPool, we detect br xN directly and map the
-		// following blocks (which are the case targets — each is a MOV+RET
-		// or a block of case body code) as switch cases.
-		if isARM64 && len(fir.Blocks) > 0 {
-			for bi := range fir.Blocks {
-				for _, ins := range fir.Blocks[bi].Instrs {
-					if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
-						continue
-					}
-					// Found br xN — this is a jump-table dispatch.
-					// Map ALL following blocks as case targets. Each case
-					// starts at a block boundary after the br block. We
-					// collect blocks until we run out or hit 64 cases.
-					// Cases can have complex bodies (if/else, calls) —
-					// don't filter by block size or terminator type.
-					var cases []decompiler.SwitchCase
-					for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
-						cases = append(cases, decompiler.SwitchCase{
-							Index:   len(cases),
-							BlockID: fir.Blocks[ci].ID,
-						})
-					}
-					if len(cases) >= 2 {
-						fir.SwitchCases = cases
-					}
-					break
-				}
-			}
-		}
-
-		// P7: Async/await detection via SuspendState CID in pool loads.
-		// Async functions allocate a SuspendState object (CID=78) early.
-		if !fir.IsAsync && info.Version.CIDs.SuspendState != 0 {
-			for bi := range fir.Blocks {
-				for _, ins := range fir.Blocks[bi].Instrs {
-					if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
-						continue
-					}
-					if pe, ok := poolEntryByIndex(ins.PoolIndex); ok {
-						if cid, ok2 := pl.RefCID[pe.RefID]; ok2 && cid == info.Version.CIDs.SuspendState {
-							fir.IsAsync = true
-							break
-						}
-					}
-				}
-				if fir.IsAsync {
-					break
-				}
-			}
-		}
-
-		return fir, nil
+	funcIRBld := &funcIRBuilder{
+		code:                   code,
+		codeOff:                codeOff,
+		codeVA:                 codeVA,
+		symbolNames:            symbolNames,
+		isARM64:                isARM64,
+		info:                   info,
+		buildArgRegMasks:       buildArgRegMasks,
+		paramTypeNamesFor:      paramTypeNamesFor,
+		genericParamNamesFor:   genericParamNamesFor,
+		namedParamNamesFor:     namedParamNamesFor,
+		fieldNameResolver:      fieldNameResolver,
+		closureParents:         closureParents,
+		pl:                     pl,
+		paramTypeByCodeIndex:   paramTypeByCodeIndex,
+		codeRefToReceiverClass: codeRefToReceiverClassID,
+		codeRefToExcHandlers:   codeRefToExcHandlers,
+		codeRefToPcDesc:        codeRefToPcDesc,
+		codeRefToCSM:           codeRefToCSM,
+		codeRefToInlinedNames:  codeRefToInlinedNames,
+		poolEntryByIndex:       poolEntryByIndex,
 	}
+	buildFuncIR := funcIRBld.Build
+
 
 	// decompileRangeWithIR returns both the pseudocode Artifact and the
 	// intermediate FuncIR -- --gen-frida needs the FuncIR to build
@@ -756,7 +551,14 @@ func cmdDecompileNative(args []string) error {
 		if err != nil {
 			return nil, decompiler.Artifact{}, err
 		}
-		return fir, decompiler.EmitPseudocode(fir, symbolLookup, poolLookup), nil
+		artifact := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
+		// Item 12: CFG structural verification — compare pseudocode
+		// control flow against binary CFG and log mismatches.
+		verification := decompiler.VerifyCFG(fir, artifact)
+		if verification.MismatchedBranches > 0 || verification.MismatchedReturns > 0 {
+			artifact.Source += fmt.Sprintf("\n// CFG verification: %s\n", verification.Summary())
+		}
+		return fir, artifact, nil
 	}
 
 	// callTargetsOf extracts every resolved direct-call target VA from a
@@ -931,20 +733,7 @@ func cmdDecompileNative(args []string) error {
 		// starting exactly at --func's address -- found by testing this
 		// exact command against real libapp.so files with known-good
 		// function addresses.
-		var found *cluster.CodeRange
-		for i, r := range ranges {
-			if r.Size == 0 {
-				continue
-			}
-			funcStart := uint64(r.PCOffset) - codeOff
-			funcVA := codeVA + funcStart
-			if targetVA < funcVA || targetVA >= funcVA+uint64(r.Size) {
-				continue
-			}
-			if found == nil || r.Size < found.Size || (r.Size == found.Size && r.RefID >= 0 && found.RefID < 0) {
-				found = &ranges[i]
-			}
-		}
+		found := findRangeContainingVA(ranges, codeVA, codeOff, targetVA)
 		if found == nil {
 			return fmt.Errorf("no CodeRange contains VA 0x%x", targetVA)
 		}
@@ -1272,22 +1061,3 @@ func cmdDecompileNative(args []string) error {
 // function -- real arity cannot differ by target architecture, so at
 // least one of those single-sample answers was wrong. Two or more call
 // sites are required before the intersection is trusted at all.
-func resolveArgRegIndices(masks []uint8) ([]int, bool) {
-	if len(masks) < 2 {
-		return nil, false
-	}
-	core := masks[0]
-	for _, m := range masks[1:] {
-		core &= m
-	}
-	var idx []int
-	for i := 0; i < 8; i++ { // L-4: 8 covers both ARM64 (X0-X7) and x86_64 (6 regs, bits 6-7 always 0)
-		if core&(1<<uint(i)) != 0 {
-			idx = append(idx, i)
-		}
-	}
-	if len(idx) == 0 {
-		return nil, false
-	}
-	return idx, true
-}

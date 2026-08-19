@@ -76,6 +76,17 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if owner := pl.ResolveOwnerName(no); owner != "" {
 			name = owner + "." + name
 		}
+		// X-4: Prefix constructors with "new ", mirroring BuildPoolLookups'
+		// handling of non-discarded Codes (helpers.go). Without this, a
+		// discarded constructor's instructions render as "MyClass.myMethod"
+		// instead of "new MyClass.myMethod", making it indistinguishable from
+		// an ordinary method — the exact gap measured in the session handoff:
+		// 520 Function objects have kind=constructor, but only 306 own a Code
+		// directly (handled by BuildPoolLookups); the remaining 214 have
+		// discarded Code and were named here without the "new " prefix.
+		if no.IsConstructor() && name != "" {
+			name = "new " + name
+		}
 		funcVA := codeVA + uint64(table.Entries[idx].PCOffset) - codeOff
 		out[funcVA] = name
 	}

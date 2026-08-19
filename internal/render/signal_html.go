@@ -12,17 +12,22 @@ import (
 )
 
 // gzipBase64 gzip-compresses data and returns the base64-encoded result.
+// If gzip fails (theoretically unreachable: gzip.NewWriterLevel with
+// BestCompression never fails, and bytes.Buffer never fails on Write/Close),
+// returns empty string rather than uncompressed base64 — the JS client
+// always uses DecompressionStream("gzip"), so uncompressed data would
+// fail to decompress client-side, causing silent data loss.
 func gzipBase64(data []byte) string {
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
-		return base64.StdEncoding.EncodeToString(data) // fallback: uncompressed
+		return ""
 	}
 	if _, err := gz.Write(data); err != nil {
-		return base64.StdEncoding.EncodeToString(data)
+		return ""
 	}
 	if err := gz.Close(); err != nil {
-		return base64.StdEncoding.EncodeToString(data)
+		return ""
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }

@@ -140,7 +140,10 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 	if got := buildTypeTestingStubNames(res, pl, nil, false); len(got) != 0 {
 		t.Errorf("named an unresolvable class: %v", got)
 	}
-	// And the version gate wins even when the data would resolve.
+	// typeClassIdIsRef (Dart 2.10-2.15): naming is OFF because
+	// resolveTypeClassIDs fills ClassID from MintValues but all types
+	// resolve to the same class on real 2.x samples (verified on 2.12.0:
+	// 251/251 → "TypeParameters"). The guard returns nil.
 	if got := buildTypeTestingStubNames(res, pl, nil, true); got != nil {
 		t.Errorf("TypeClassIdIsRef must disable naming entirely, got %v", got)
 	}

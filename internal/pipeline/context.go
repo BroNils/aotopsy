@@ -1,12 +1,10 @@
 package pipeline
 
 import (
-	"debug/elf"
 	"fmt"
 	"strings"
 
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
@@ -68,131 +66,48 @@ type Context struct {
 // pipeline once. Callers must call Close() when done (closes the
 // underlying ELF file).
 func LoadContext(libPath string) (ctx *Context, err error) {
-	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
-
-	ef, err := elfx.Open(libPath)
+	sc, err := LoadSnapshot(libPath, dartfmtOptionsDefault())
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	// One close, on the named error return, instead of one per failure
-	// path. There were seven `_ = ef.Close()` calls below and eight places
-	// that could fail; every new error path was an opportunity to forget
-	// the eighth. The named return makes that impossible rather than
-	// merely unlikely.
-	defer func() {
-		if err != nil {
-			_ = ef.Close()
-		}
-	}()
-	isARM64 := ef.ELF.Machine == elf.EM_AARCH64
-
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return nil, fmt.Errorf("extract: %w", err)
+		return nil, err
 	}
 
-	data := info.IsolateData.Data
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return nil, fmt.Errorf("cluster start: %w", err)
-	}
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return nil, fmt.Errorf("fill: %w", err)
-	}
-
-	table, tblErr := cluster.ParseInstructionsTable(data, &result.Header, info.Version, info.IsolateHeader)
-	var ranges []cluster.CodeRange
-	switch {
-	case tblErr != nil && result.Header.InstructionTableDataOffset == 0 && info.Version.CodeTextOffsetDelta:
-		ranges = cluster.ResolveCodeRangesFromTextOffset(result.Codes)
-	case tblErr != nil:
-		return nil, fmt.Errorf("instrtable: %w", tblErr)
-	default:
-		// `err` here shadows the named return, but `return nil, fmt.Errorf(...)`
-		// assigns the named return before the defer runs, so the deferred
-		// close still fires. No manual close -- that would double-close.
-		codeRanges, err := cluster.ResolveCodeRanges(result.Codes, table)
-		if err != nil {
-			return nil, fmt.Errorf("code ranges: %w", err)
-		}
-		stubRanges := cluster.ResolveStubRanges(table)
-		ranges = cluster.MergeRanges(stubRanges, codeRanges)
-	}
-
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
-	if err != nil {
-		return nil, fmt.Errorf("code region: %w", err)
-	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // bounded snapshot payload offsets, well under 2^32
-	cluster.SetLastRangeSize(ranges, codeEndOffset)
-	codeVA := info.IsolateInstructions.VA + codeOff
-
-	// Parse the VM-isolate snapshot region (info.VmData) for base-object
-	// resolution (strings/names/CIDs shared across every app that uses
-	// this Dart SDK build, not serialized per-app). Without this, pool
-	// entries referencing VM-isolate objects show as opaque "<vm:NNN>"
-	// placeholders instead of their real content -- confirmed as a real,
-	// previously-unnoticed gap this exact session: cmd/aotopsy/
-	// decompile_native_cmd.go ALSO passes nil here (an existing,
-	// project-wide limitation, not something new), while cmd/aotopsy/
-	// objects.go already does this correctly (its own "vm snapshot: N
-	// clusters, N strings" stderr line, ~99% pool resolution on a real
-	// app) -- this mirrors objects.go's exact proven pattern rather than
-	// inventing a new one.
-	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
-			}
-		}
-	}
-
-	pl := BuildPoolLookups(result, info.Version.CIDs, vmResult, info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := ResolvePoolDisplay(result.Pool, pl)
-
-	symbolNames := make(map[uint64]string, len(ranges))
-	symbolSizes := make(map[uint64]uint32, len(ranges))
-	for _, r := range ranges {
+	symbolNames := make(map[uint64]string, len(sc.Ranges))
+	symbolSizes := make(map[uint64]uint32, len(sc.Ranges))
+	for _, r := range sc.Ranges {
 		if r.Size == 0 {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
+		funcStart := uint64(r.PCOffset) - sc.CodeOff
+		funcVA := sc.CodeVA + funcStart
 		symbolSizes[funcVA] = r.Size
 		if r.RefID >= 0 {
-			symbolNames[funcVA] = QualifiedCodeName(r.RefID, pl, r.PCOffset)
+			symbolNames[funcVA] = QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
 		} else {
 			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 	}
-	for va, name := range BuildVMStubSymbols(info, opts) {
+	for va, name := range BuildVMStubSymbols(sc.Info, dartfmtOptionsDefault()) {
 		symbolNames[va] = name
 	}
-	for va, name := range BuildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
+	for va, name := range BuildDiscardedFunctionSymbols(sc.Result.Named, sc.Info.Version.CIDs, sc.Table, sc.Pool, sc.CodeVA, sc.CodeOff, sc.Info.Version.CodeIndexOneBased) {
 		symbolNames[va] = name
 	}
 
 	return &Context{
-		EF:          ef,
-		Info:        info,
-		Result:      result,
-		Ranges:      ranges,
-		InstrTable:  table,
-		Pool:        pl,
-		PoolDisplay: poolDisplay,
-		Code:        code,
-		CodeVA:      codeVA,
-		CodeOff:     codeOff,
+		EF:          sc.EF,
+		Info:        sc.Info,
+		Result:      sc.Result,
+		Ranges:      sc.Ranges,
+		InstrTable:  sc.Table,
+		Pool:        sc.Pool,
+		PoolDisplay: sc.PoolDisplay,
+		Code:        sc.Code,
+		CodeVA:      sc.CodeVA,
+		CodeOff:     sc.CodeOff,
 		SymbolNames: symbolNames,
 		SymbolSizes: symbolSizes,
-		IsARM64:     isARM64,
-		DartVersion: info.Version.DartVersion,
+		IsARM64:     sc.IsARM64,
+		DartVersion: sc.Info.Version.DartVersion,
 	}, nil
 }
 

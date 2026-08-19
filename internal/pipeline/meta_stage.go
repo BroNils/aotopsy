@@ -44,17 +44,8 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := func(format string, args ...interface{}) {
-		if !quiet {
-			_, _ = fmt.Fprintf(log, format, args...)
-		}
-	}
-	stagef := func(name string, format string, args ...interface{}) {
-		if !quiet {
-			detail := fmt.Sprintf(format, args...)
-			_, _ = fmt.Fprintf(log, "\n%s%s%s %s\n", cli.Pink, name, cli.Reset, detail)
-		}
-	}
+	logf := makeLogf(quiet, log)
+	stagef := makeStagef(quiet, log)
 
 	if outPath == "" {
 		outPath = filepath.Join(inDir, "flutter_meta.json")
@@ -202,8 +193,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 		return "", fmt.Errorf("close output: %w", err)
 	}
 
-	fi, _ := os.Stat(outPath)
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fi.Size())
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, fileSize(outPath))
 
 	return outPath, nil
 }

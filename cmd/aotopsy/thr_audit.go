@@ -9,7 +9,6 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -33,46 +32,20 @@ func cmdTHRAudit(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, err := elfx.Open(*libapp)
+	ef, info, result, err := pipeline.LoadSnapshotIsolate(*libapp, opts)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
-
-	info, err := snapshot.Extract(ef, opts)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
 
 	dartVersion := ""
 	if info.Version != nil {
 		dartVersion = info.Version.DartVersion
 	}
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", dartVersion)
-	if info.Version != nil && !info.Version.Supported {
-		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
-	}
 
-	// Parse isolate snapshot clusters + fill.
 	data := info.IsolateData.Data
-	if len(data) < 64 {
-		return fmt.Errorf("isolate data too short (%d bytes)", len(data))
-	}
-
-	clusterStart, err := cluster.FindClusterDataStart(data)
-	if err != nil {
-		return fmt.Errorf("cluster start: %w", err)
-	}
-
-	result, err := cluster.ScanClusters(data, clusterStart, info.Version, false, opts)
-	if err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-
-	if err := cluster.ReadFill(data, result, info.Version, false, info.IsolateHeader.TotalSize); err != nil {
-		return fmt.Errorf("fill: %w", err)
-	}
 
 	// Parse instructions table (or use text-offset fallback for pre-v2.16).
 	var ranges []cluster.CodeRange

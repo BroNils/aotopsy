@@ -1,0 +1,16 @@
+{
+  "sample": "dart-2.13.0-prenn-arm64.so",
+  "input_sha256": "0fe1f9069c711fc118205840e41b70252a9734b1beadbd81c6b24473132b9e77",
+  "dart_version": "2.13.0",
+  "unified_snapshot": false,
+  "vm_clusters": 5,
+  "isolate_clusters": 294,
+  "has_instructions_table": false,
+  "strings": 8871,
+  "named": 11145,
+  "codes": 8083,
+  "instr_table_length": 0,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 0,
+  "code_ranges": 8083
+}

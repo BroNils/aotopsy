@@ -77,6 +77,21 @@ var baseObjectLayouts = []baseObjectLayout{
 		"<dynamic type>", "<void type>", "[]", "true", "false",
 		"<synthetic getter parameter types>", "<synthetic getter parameter names>",
 	}},
+	// 3.13.0: fundamental change. AddBaseObjects no longer reads from
+	// vm_isolate_snapshot_object_table (which carried ~12 entries including
+	// empty_array, dynamic/void types, etc). Instead, for snapshots that
+	// include code (kFullAOT), exactly 7 hardcoded Roots entries are added
+	// as base objects. The empty_array etc are now pushed to early clusters
+	// (PushRoots), not AddBaseObject. Verified via gh api to
+	// dart-lang/sdk app_snapshot.cc @3.13.0: ProgramSerializationRoots::
+	// AddBaseObjects and ProgramDeserializationRoots::AddBaseObjects both
+	// add the same 7 in the same order. Roots::null_obj is ref 1, false is
+	// ref 2, true is ref 3 — note true/false are SWAPPED vs 3.12.2 where
+	// true=ref 9, false=ref 10.
+	{3, 13, 3, 13, []string{
+		"null", "false", "true", "sentinel", "unknown constant",
+		"non constant", "<optimized out>",
+	}},
 }
 
 // BaseObjectNames returns the SDK's display names for the VM-isolate base

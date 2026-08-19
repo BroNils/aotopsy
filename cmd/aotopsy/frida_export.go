@@ -75,8 +75,6 @@ func cmdFridaExport(args []string) error {
 	outPath := fs.String("out", "", "output JSON path (default: <from>/frida_metadata.json)")
 	genScript := fs.Bool("gen-script", false, "also generate a ready-to-run Frida JS script")
 	scriptPath := fs.String("script-out", "", "output path for Frida script (default: <from>/frida_hooks.js)")
-	_ = fs.Bool("gen-stalker", false, "also generate a Stalker call graph tracer script (not yet implemented)")
-	_ = fs.String("stalker-out", "", "output path for Stalker script")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

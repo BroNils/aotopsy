@@ -1,13 +1,12 @@
 package snapshot
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdktest"
 )
 
 // TestBaseObjectNamesMatchSDK re-derives every row of baseObjectLayouts from
@@ -23,10 +22,10 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/snapshot/ -run BaseObjectNamesMatchSDK
 func TestBaseObjectNamesMatchSDK(t *testing.T) {
-	if os.Getenv("AOTOPSY_TEST_SDK") == "" {
+	if sdktest.SkipIfNoSDK() {
 		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
 	}
-	if _, err := exec.LookPath("gh"); err != nil {
+	if !sdktest.HasGH() {
 		t.Skip("gh not on PATH, skipping SDK drift check")
 	}
 	// One tag per layout is enough to catch drift in that layout's row, and
@@ -45,6 +44,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 		{"3.5.0", 3, 5},
 		{"3.9.2", 3, 9},
 		{"3.12.2", 3, 12},
+		{"3.13.0", 3, 13},
 	}
 	for _, p := range probes {
 		t.Run(p.tag, func(t *testing.T) {
@@ -73,7 +73,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 // TestBaseObjectNamesRefusesUnknownVersions guards the deliberate nil: a
 // version outside the verified range must NOT borrow a neighbour's list.
 func TestBaseObjectNamesRefusesUnknownVersions(t *testing.T) {
-	for _, v := range []string{"", "2.11.0", "4.0.0", "3.13.0", "nonsense", "3"} {
+	for _, v := range []string{"", "2.11.0", "4.0.0", "3.14.0", "nonsense", "3"} {
 		if got := BaseObjectNames(v); got != nil {
 			t.Errorf("BaseObjectNames(%q) = %q, want nil -- an unverified version must stay unnamed", v, got)
 		}
@@ -89,6 +89,7 @@ func TestBaseObjectBoolIndicesVaryByVersion(t *testing.T) {
 		"3.3.0":  {11, 12},
 		"3.9.2":  {10, 11},
 		"3.12.2": {10, 11},
+		"3.13.0": {3, 2}, // true=ref3, false=ref2 — SWAPPED vs all prior versions
 	}
 	for v, want := range cases {
 		names := BaseObjectNames(v)
@@ -120,7 +121,7 @@ func sdkBaseObjectNames(tag string) ([]string, error) {
 	// The function moved file in 2.13; try both names.
 	var lastErr error
 	for _, path := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
-		src, err := ghFileAtTag(path, tag)
+		src, err := sdktest.GHFileAtTag(path, tag)
 		if err != nil {
 			lastErr = err
 			continue
@@ -151,24 +152,4 @@ func sdkBaseObjectNames(tag string) ([]string, error) {
 		lastErr = os.ErrNotExist
 	}
 	return nil, lastErr
-}
-
-// ghFileAtTag reads a file from dart-lang/sdk at a tag via the GitHub API.
-func ghFileAtTag(path, tag string) (string, error) {
-	cmd := exec.Command("gh", "api", "repos/dart-lang/sdk/contents/"+path+"?ref="+tag)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	var payload struct {
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", err
-	}
-	dec, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
-	if err != nil {
-		return "", err
-	}
-	return string(dec), nil
 }

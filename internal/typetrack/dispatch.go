@@ -52,6 +52,7 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		BLR         BLRBreakdown `json:"blr"`
 		// Per-source hit counters (omitted when no context was supplied).
 		PoolHits          int `json:"pool_hits,omitempty"`
+		PoolLoads         int `json:"pool_loads,omitempty"`
 		HeaderHits        int `json:"header_hits,omitempty"`
 		DispatchHits      int `json:"dispatch_hits,omitempty"`
 		UBFXHits          int `json:"ubfx_hits,omitempty"`
@@ -69,9 +70,15 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		X86DispatchClassTop    int `json:"x86_dispatch_class_top,omitempty"`
 		X86DispatchClassBottom int `json:"x86_dispatch_class_bottom,omitempty"`
 		X86DispatchClassOther  int `json:"x86_dispatch_class_other,omitempty"`
-		NarrowHits             int `json:"narrow_hits,omitempty"`
-		NarrowShape         int `json:"narrow_shape,omitempty"`
-		NarrowNoType        int `json:"narrow_no_type,omitempty"`
+		// BL return value propagation stats: how many BL calls found
+		// callee exit types, and how many of those were KnownClass.
+		BLTotal       int `json:"bl_total,omitempty"`
+		BLHasExitType int `json:"bl_has_exit_type,omitempty"`
+		BLExitKnown   int `json:"bl_exit_known,omitempty"`
+		BLExitBottom  int `json:"bl_exit_bottom,omitempty"`
+		NarrowHits    int `json:"narrow_hits,omitempty"`
+		NarrowShape   int `json:"narrow_shape,omitempty"`
+		NarrowNoType  int `json:"narrow_no_type,omitempty"`
 		// InstantiatedClasses is the RTA universe: classes observed to be
 		// allocated anywhere in the program. RTAApplied says whether the
 		// selector-offset scan actually filtered candidates by it -- below
@@ -82,6 +89,23 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		// InstanceFieldClasses is how many classes have at least one
 		// unanimously-typed field offset recovered from const instances.
 		InstanceFieldClasses int `json:"instance_field_classes,omitempty"`
+		// BLR lattice state distribution at the BLR point.
+		BLRAtKnownDispatch    int `json:"blr_at_known_dispatch,omitempty"`
+		BLRAtKnownDispatchSel int `json:"blr_at_known_dispatch_sel,omitempty"`
+		BLRAtKnownClass       int `json:"blr_at_known_class,omitempty"`
+		BLRAtStub             int `json:"blr_at_stub,omitempty"`
+		BLRAtTop              int `json:"blr_at_top,omitempty"`
+		BLRAtBottom           int `json:"blr_at_bottom,omitempty"`
+		BLRAtOther            int `json:"blr_at_other,omitempty"`
+		// Field type source breakdown.
+		FieldTypeDeclaredHits   int `json:"field_type_declared_hits,omitempty"`
+		FieldTypeInstanceHits   int `json:"field_type_instance_hits,omitempty"`
+		FieldTypeStoreHits      int `json:"field_type_store_hits,omitempty"`
+		FieldTypeDeclaredClasses int `json:"field_type_declared_classes,omitempty"`
+		FieldTypeStoreClasses    int `json:"field_type_store_classes,omitempty"`
+		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
+		FuncReturnTypeCount      int `json:"func_return_type_count,omitempty"`
+		FuncReturnTypeSeeds      int `json:"func_return_type_seeds,omitempty"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -89,6 +113,7 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 	}
 	if ctx != nil {
 		report.PoolHits = ctx.PPHits
+		report.PoolLoads = ctx.PPLoads
 		report.HeaderHits = ctx.HeaderHits
 		report.DispatchHits = ctx.DispatchHits
 		report.UBFXHits = ctx.UBFXHits
@@ -99,6 +124,10 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.X86DispatchClassTop = ctx.X86DispatchClassTop
 		report.X86DispatchClassBottom = ctx.X86DispatchClassBottom
 		report.X86DispatchClassOther = ctx.X86DispatchClassOther
+		report.BLTotal = ctx.BLTotal
+		report.BLHasExitType = ctx.BLHasExitType
+		report.BLExitKnown = ctx.BLExitKnown
+		report.BLExitBottom = ctx.BLExitBottom
 		report.NarrowHits = ctx.NarrowHits
 		report.NarrowShape = ctx.NarrowShape
 		report.NarrowNoType = ctx.NarrowNoType
@@ -107,6 +136,21 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.InstanceFieldClasses = len(ctx.InstanceFieldTypes)
 		report.InstantiatedClasses = len(ctx.InstantiatedClasses)
 		report.RTAApplied = ctx.RTAApplied()
+		report.BLRAtKnownDispatch = ctx.BLRAtKnownDispatch
+		report.BLRAtKnownDispatchSel = ctx.BLRAtKnownDispatchSel
+		report.BLRAtKnownClass = ctx.BLRAtKnownClass
+		report.BLRAtStub = ctx.BLRAtStub
+		report.BLRAtTop = ctx.BLRAtTop
+		report.BLRAtBottom = ctx.BLRAtBottom
+		report.BLRAtOther = ctx.BLRAtOther
+		report.FieldTypeDeclaredHits = ctx.FieldTypeDeclaredHits
+		report.FieldTypeInstanceHits = ctx.FieldTypeInstanceHits
+		report.FieldTypeStoreHits = ctx.FieldTypeStoreHits
+		report.FieldTypeDeclaredClasses = len(ctx.FieldByOwnerOffset)
+		report.FieldTypeStoreClasses = len(ctx.FieldStoreTypes)
+		report.SelectorMonomorphicCount = len(ctx.SelectorMonomorphic)
+		report.FuncReturnTypeCount = len(ctx.FuncReturnType)
+		report.FuncReturnTypeSeeds = ctx.FuncReturnTypeSeeds
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

@@ -44,7 +44,7 @@ func TestX86ClassCheckSequenceTypesTheComparedRegister(t *testing.T) {
 	for i := range entry {
 		entry[i] = Top()
 	}
-	AnalyzeFunctionX86(insts, ctx, entry)
+	AnalyzeFunctionX86(insts, ctx, entry, nil)
 
 	if ctx.HeaderHits == 0 {
 		t.Error("the header load produced no type at all")

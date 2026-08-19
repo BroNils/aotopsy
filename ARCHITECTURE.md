@@ -51,7 +51,7 @@ Dart's variable-length integer encodings (`ReadUnsigned`, `ReadRefId`, etc.). Ev
 The core package. Dart AOT snapshots serialize in two passes:
 
 1. **Alloc** (`ScanClusters`): walk clusters in CID order, each declaring an object count. Assigns sequential ref IDs. No data read yet.
-2. **Fill** (`ReadFill`): walk the same clusters again, reading field values — string bytes, ref IDs, scalars. The fill encoding is declared per-CID by `FillSpec` in `fillspec.go`.
+2. **Fill** (`ReadFill`): walk the same clusters again, reading field values — string bytes, ref IDs, scalars. The fill encoding is declared per-CID by `FillSpec` in `fillspec.go`. Per-CID scalar reading is split across `fill_scalar_handlers.go` into 6 handlers (Function, FunctionType, Field, Type, Script, LoadingUnit), each with a fallback to `skipScalar` to keep the stream aligned.
 
 Key types:
 - `NamedObject` — the universal "this ref has a name and/or owner" record
@@ -160,7 +160,11 @@ flowchart TD
 
 `AnalyzeFunction` runs a forward CFG worklist algorithm: build blocks, initialize entry types, transfer function per instruction, meet at block exits, repeat to fixed point. On BLR instructions, attempts to resolve the dispatch target.
 
-`TypeContext` holds precomputed lookup tables: function parameter types, field types, pool class mappings, dispatch table entries, superclass relationships, code index to function mappings.
+The per-instruction transfer function is split across `intraproc_handlers.go` (ARM64) and `intraproc_x86.go` (x86_64). Each handler covers one instruction category (stack store/load, THR/PP load, dispatch arithmetic, field load, UBFX, MOV, BLR, BL) and returns true to consume the instruction or false to fall through to the next handler.
+
+`TypeContext` holds precomputed lookup tables: function parameter types, field types, pool class mappings, dispatch table entries, superclass relationships, code index to function mappings. Construction is split across `sources_builders.go` into 10 sub-builders (class hierarchy, field types, pool class, dispatch tables, func param types, instance field types, closure data, etc.).
+
+`callconv.go` holds Dart's AOT calling convention (`dartArgRegisters`), verified against `constants_arm64.h` and `constants_x64.h` — NOT the platform C ABI. ARM64: `{R1,R2,R3,R5,R6,R7}`, x86_64: `{RDI,RSI,RDX,RBX,R8,R9}`.
 
 Inter-procedural propagation (`interproc.go`) passes parameter types from callers to callees across function boundaries.
 
@@ -207,6 +211,10 @@ String-to-function cross-referencing. Given a string, finds every function that 
 ### `internal/strutil`
 
 Shared string utilities: `SanitizeFilename`, `SanitizeIdentifier`. Replaces three previously-duplicated implementations.
+
+### `internal/arch`
+
+Architecture-neutral primitives shared across `disasm`, `decompiler`, and `typetrack`: `X86CanonReg` (register canonicalization), `X86RelTarget` (rel32 branch target), `IsX86CondJump` (conditional jump classification), `X86EqualitySuccessor` (B.cond/JE successor convention). Replaces 7 duplicated copies across 3 packages. The `SuccEqual`/`SuccNotEqual`/`SuccUnknown` convention is shared between ARM64 and x86_64 equality-branch handling; the functions themselves are NOT merged because their inputs are different types (raw 32-bit ARM64 word vs `x86asm.Op`).
 
 ### `cmd/aotopsy`
 
