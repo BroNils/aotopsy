@@ -245,7 +245,7 @@ func buildFridaMetadata(ctx *pipeline.Context, dir string) FridaMetadata {
 			}
 			if json.Unmarshal([]byte(line), &e) == nil && e.Kind == "blr" && e.Target == "" {
 				// Only include dispatch_table and object_field BLRs (not THR calls)
-				if e.Via == "dispatch_table" || e.Via == "object_field" || e.Via == "" {
+				if e.Via == "dispatch_table" || strings.HasPrefix(e.Via, disasm.ObjectFieldVia) || e.Via == "" {
 					meta.UnresolvedBLRs = append(meta.UnresolvedBLRs, FridaUnresolvedBLR{
 						VA:       e.FromPC,
 						FromFunc: e.FromFunc,

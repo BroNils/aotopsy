@@ -20,7 +20,7 @@
   },
   "sha256": {
     "address_callers_xref.jsonl": "ecc6f8c8f624dac7cdad8542f0fcd776bf59f171c604efec0ed27943c68f7b68",
-    "call_edges.jsonl": "a43ea14fead0e19297b6cd8ecf3e6db6b2291820cf969e7161af73b192a88fc1",
+    "call_edges.jsonl": "9ca7b0aae660bc73ea0ea5b1d482ea4b552d8f888dffe5220ea7fa3aa0f272b1",
     "classes.jsonl": "99b1279e23b62b81a42485844eb4272d85ffe01780ce0b07645166d2b331fd7e",
     "dispatch_table.jsonl": "cf8ca0aee2f62151fa45ec3852fad68e65823a8fc6d5149acd1eb697737d04a3",
     "field_accessor_xref.jsonl": "688431a25135a1e0d4cfb2024074940399d8aa298dc54331dbb44fb82320eaec",

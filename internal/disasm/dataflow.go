@@ -248,8 +248,8 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 		defineReg(regs, touched, dstR, "dispatch_table")
 		return
 	}
-	if _, dstR, ok := isLDUR64(inst.Raw); ok {
-		defineReg(regs, touched, dstR, "object_field")
+	if _, dstR, off, ok := isLDUR64(inst.Raw); ok {
+		defineReg(regs, touched, dstR, ObjectFieldViaAt(off))
 		return
 	}
 	var annotation string

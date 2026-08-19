@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/cli"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/strutil"
 )
 
@@ -293,7 +294,8 @@ func IsInterestingCallee(name string) bool {
 		return false
 	case len(name) > 2 && name[0] == '0' && name[1] == 'x':
 		return false
-	case name == "dispatch_table" || name == "object_field":
+	// object_field carries a field offset suffix, so match by prefix.
+	case name == "dispatch_table" || strings.HasPrefix(name, disasm.ObjectFieldVia):
 		return false
 	case len(name) > 4 && name[:4] == "THR.":
 		return false
