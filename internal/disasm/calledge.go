@@ -227,6 +227,43 @@ func isLDUR64(raw uint32) (base, rt, off int, ok bool) {
 // offset in this codebase uses before FieldValueClass adds the tag back.
 const ObjectFieldVia = "object_field"
 
+// Code entry-point displacements, as an instruction encodes them (byte offset
+// minus kHeapObjectTag).
+//
+// UntaggedCode opens with two uwords right after the object header:
+//
+//	uword entry_point_;              // offset 8  -> displacement 7
+//	uword monomorphic_entry_point_;  // offset 16 -> displacement 0xf
+//
+// (raw_object.h, identical at 2.12.0 and 3.12.2; the header stays 8 bytes even
+// on compressed-pointer builds, so the offsets do not move.)
+const (
+	codeEntryPointDisp            = 0x7
+	codeMonomorphicEntryPointDisp = 0xf
+)
+
+// IsCodeEntryPointDisp reports whether a load displacement reads one of a Code
+// object's entry points.
+//
+// This matters because such a load is not really an "object field" at all: the
+// entry point OF Code X is X, so a call through it calls X. Wherever the base
+// register's provenance is known, the loaded value inherits it rather than
+// becoming anonymous.
+//
+// Measured on the 3.12.2 arm64 sample: of the 523 indirect calls whose target
+// is loaded at one of these two displacements, 500 (96%) take their base
+// straight out of the object pool -- the shape is
+//
+//	LDR  X30, [X27,#744]   ; PP[91]
+//	LDUR X30, [X30,#7]
+//	BLR  X30
+//
+// and the remaining 23 are two-level pool addressing, which is still the pool.
+// Discarding the base's provenance here is what left those calls unresolved.
+func IsCodeEntryPointDisp(off int) bool {
+	return off == codeEntryPointDisp || off == codeMonomorphicEntryPointDisp
+}
+
 // ObjectFieldViaAt formats the provenance for an object-field load at off.
 func ObjectFieldViaAt(off int) string {
 	if off == 0 {

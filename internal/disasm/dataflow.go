@@ -248,7 +248,20 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 		defineReg(regs, touched, dstR, "dispatch_table")
 		return
 	}
-	if _, dstR, off, ok := isLDUR64(inst.Raw); ok {
+	if base, dstR, off, ok := isLDUR64(inst.Raw); ok {
+		// A Code entry-point load inherits its base's provenance: the entry
+		// point OF Code X is X. See IsCodeEntryPointDisp.
+		//
+		// When the base is unknown HERE the result is the same anonymous
+		// object_field it always was, so nothing gets worse. During the
+		// block-local precompute `regs` starts blank, which means this only
+		// fires when the pool load and the entry-point load sit in the same
+		// block -- and measured on the corpus they are one or two
+		// instructions apart, so that covers essentially all of them.
+		if IsCodeEntryPointDisp(off) && base >= 0 && base < len(regs) && regs[base] != "" {
+			defineReg(regs, touched, dstR, regs[base])
+			return
+		}
 		defineReg(regs, touched, dstR, ObjectFieldViaAt(off))
 		return
 	}
