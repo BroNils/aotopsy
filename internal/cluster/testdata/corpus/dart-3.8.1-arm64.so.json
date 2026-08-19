@@ -1,0 +1,16 @@
+{
+  "sample": "dart-3.8.1-arm64.so",
+  "input_sha256": "f64ee7952666b64aa1d5356ef0ffc912a8571bbdd0e939a6cf0181fbaef69397",
+  "dart_version": "3.8.1",
+  "unified_snapshot": false,
+  "vm_clusters": 7,
+  "isolate_clusters": 337,
+  "has_instructions_table": true,
+  "strings": 9007,
+  "named": 11527,
+  "codes": 7976,
+  "instr_table_length": 7976,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 7976,
+  "code_ranges": 7976
+}

@@ -220,6 +220,31 @@ var Registry = []Sample{
 	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},
 	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64"},
 	{DartVersion: "3.13.0", Arch: "arm64", Note: "sample_313, built for the unified-snapshot work"},
+
+	// The versions whose ObjectStoreAOTFieldCount had only ever been counted
+	// from object_store.h, never confirmed against a binary. 2.15.0 is why
+	// that distinction matters: its profile looked just as correct, until a
+	// real sample showed its snapshot hash was mapped to the wrong version.
+	// Flutter release picked from releases_linux.json's dart_sdk_version,
+	// not guessed: 3.0.5 -> Flutter 3.10.5, 3.2.5 -> 3.16.8,
+	// 3.6.2 -> 3.27.4, 3.8.1 -> 3.32.8.
+	{DartVersion: "3.0.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.0.5, Flutter 3.10.5"},
+	{DartVersion: "3.0.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.0.5 x86_64"},
+	{DartVersion: "3.2.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.2.5, Flutter 3.16.8"},
+	{DartVersion: "3.2.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.2.5 x86_64"},
+	{DartVersion: "3.6.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.6.2, Flutter 3.27.4"},
+	{DartVersion: "3.6.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.6.2 x86_64"},
+	{DartVersion: "3.8.1", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.8.1, Flutter 3.32.8"},
+	{DartVersion: "3.8.1", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.8.1 x86_64"},
+
+	// Dart 3.12.0 stable. Registered under the 3.12.2 profile because that is
+	// what it detects as -- the whole 3.12 line is one format; see the three
+	// hashes mapped together in snapshot/version.go. It is kept as its own
+	// sample rather than folded into 3.12.2's because it is a different
+	// binary from a different Flutter release, and the corpus records are
+	// keyed by input sha256.
+	{DartVersion: "3.12.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.12.0, Flutter 3.44.0 -- Dart 3.12.0 stable, 3.12.2 format", FileSuffix: "-f3440"},
+	{DartVersion: "3.12.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.12.0 x86_64, Flutter 3.44.0", FileSuffix: "-f3440"},
 }
 
 // SourceSets groups the registry by SourceSet, dropping samples that belong to
