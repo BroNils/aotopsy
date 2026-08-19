@@ -530,8 +530,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = compactLines(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
-	// Enum reconstruction (detect switch-over-CID patterns)
-	source = enumReconstruction(source)
 	// Null-safety annotation (detect null-check patterns)
 	source = nullSafetyAnnotation(source)
 	// A1: Local variable type inference — consolidated pass that combines

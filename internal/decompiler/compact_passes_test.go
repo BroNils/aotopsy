@@ -63,22 +63,6 @@ func TestSimplifyExpressions(t *testing.T) {
 
 // --- CSE tests ---
 
-// --- Enum reconstruction tests ---
-
-func TestEnumReconstruction(t *testing.T) {
-	source := `dynamic foo(int x) {
-  if (x == 0) { return 'Zero'; }
-  if (x == 1) { return 'One'; }
-  if (x == 2) { return 'Two'; }
-  if (x == 3) { return 'Three'; }
-  return 'Unknown';
-}`
-	result := enumReconstruction(source)
-	if !strings.Contains(result, "enum reconstruction") {
-		t.Error("enum reconstruction should detect 4-case chain")
-	}
-}
-
 // --- Null-safety annotation tests ---
 
 func TestNullSafetyAnnotation(t *testing.T) {
