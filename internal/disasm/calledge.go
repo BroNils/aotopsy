@@ -175,8 +175,20 @@ func popcount8(m uint8) int {
 // Returns base, index register, and destination register.
 func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
 	// Encoding: 11|111|V=0|01|opc=01|1|Rm|option|S|10|Rn|Rt
-	// We match: 0xFFE00C00 == 0xF8600800
-	if raw&0xFFE00C00 != 0xF8600800 {
+	//
+	// option (15:13) and S (12) are part of the match: without them the mask
+	// also accepts the UNSCALED `LDR Xt, [Xn, Xm]`, whose index is not
+	// multiplied by 8, and reading one of those as a dispatch-table load makes
+	// the slot arithmetic wrong by a factor of eight. Measured on the 3.12.2
+	// arm64 .text: 3412 scaled, 280 unscaled, no other extend option at all.
+	// The same tightening and the same measurement are in typetrack's
+	// isLDRRegExtended.
+	//
+	// NOTE the killer in dstRegOfInst above deliberately keeps the LOOSE mask:
+	// every LDR-register-offset writes Rt whether or not it is scaled, so a
+	// tightened mask there would leave those 280 destinations holding stale
+	// types. Detector tight, killer loose.
+	if raw&0xFFE0FC00 != 0xF8607800 {
 		return 0, 0, 0, false
 	}
 	rt = int(raw & 0x1F)
