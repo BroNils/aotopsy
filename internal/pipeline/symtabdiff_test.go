@@ -131,7 +131,10 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 	//                 class (worst band 73.2% -> 76.3%)
 	//   0.76 -> 0.77  mixin owner folded to its last component in the prose
 	//                 dialect for comparison (worst band 76.3% -> 78.1%)
-	const minAgreementRate = 0.77
+	//   0.77 -> 0.81  the "::" top-level pseudo-class stripped from real output
+	//                 and the init: marker folded in prose (worst band
+	//                 78.1% -> 81.3%)
+	const minAgreementRate = 0.81
 	if rate < minAgreementRate {
 		t.Errorf("agreement rate %.1f%% < %.1f%% threshold -- %d disagreements out of %d compared",
 			rate*100, minAgreementRate*100, len(comp.Disagreement), comp.Compared)

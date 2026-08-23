@@ -307,7 +307,12 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ownerName := ""
 			if owner.OwnerRefID >= 0 {
 				if vmOwner, ok2 := l.VmRefToNamed[owner.OwnerRefID]; ok2 {
-					ownerName = l.ResolveVMName(vmOwner)
+					// Route through resolveClassName, same as the isolate loop:
+					// it strips the "::" top-level pseudo-class and hops a
+					// PatchClass. A VM-snapshot function like dart:_runtime's
+					// _runMain is owned by "::", so without this it rendered
+					// `::._runMain`.
+					ownerName = l.resolveClassName(vmOwner, 0)
 				}
 			}
 			ci := CodeNameInfo{
@@ -487,14 +492,31 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 //     fixed at other call sites. ~300 more per sample.
 //
 // depth guards against a malformed PatchClass chain pointing back at itself.
+// topLevelClassName is Symbols::TopLevel -- the name of the invisible
+// per-library class that owns top-level functions and fields.
+const topLevelClassName = "::"
+
 func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) string {
 	if owner == nil || depth > 4 {
 		return ""
 	}
+	// The top-level pseudo-class is named "::" (Symbols::TopLevel, verified in
+	// symbol_list.h). It is not a real owner: the SDK scrubs it to "" and
+	// PrintName skips it (`!cls.IsTopLevel()`), so a top-level function is
+	// bare. Reporting `::._runMain` instead of `_runMain` disagreed with the
+	// symbol table on ~390 functions per prose sample. The name can come from
+	// EITHER string table -- a dart:_runtime function like _runMain resolves
+	// its "::" owner through the VM table -- so the check must cover both.
 	if n := l.ResolveName(owner); n != "" {
+		if n == topLevelClassName {
+			return ""
+		}
 		return n
 	}
 	if n := l.ResolveVMName(owner); n != "" {
+		if n == topLevelClassName {
+			return ""
+		}
 		return n
 	}
 	// A PatchClass wraps the real Class in its OwnerRefID; hop to it.

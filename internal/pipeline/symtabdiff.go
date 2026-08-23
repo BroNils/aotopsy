@@ -42,8 +42,15 @@ var (
 	reNameSuffix = regexp.MustCompile(`_[0-9a-f]+$`)
 	// Private-library mangling: `@` followed by digits.
 	reLibMangle = regexp.MustCompile(`@\d+`)
-	// Marker prefixes on the member part.
+	// Marker prefixes on the member part, stripped for EVERY dialect because
+	// none of them survive in the symbol table.
 	memberMarkers = []string{"dyn:", "get:", "set:"}
+	// proseMarkers are stripped only in the 3.x prose comparison. `init:`
+	// marks a lazy field initializer; the prose symbol drops it
+	// (`Zone.init:_current` -> `Zone._current`), but the 2.13-2.17 and 2.18+
+	// assembly dialects KEEP it (as `init_`), so stripping it there turns
+	// matches into misses -- measured, it dropped 2.14.0 from 82.4% to 80.8%.
+	proseMarkers = []string{"init:"}
 )
 
 // NormalizeRecoveredName reduces one of our names to the shape the ELF symbol
@@ -221,10 +228,30 @@ func NamesAgree(ours, sym string) bool {
 		return addAssemblerIdentifier(mine) == addAssemblerIdentifier(body)
 	}
 	// Prose dialect (3.x). Only here does the ELF reduce a mixin-application
-	// owner to its last component; both assembly dialects above keep the full
-	// `&`-chain (as underscores), so folding our side there would break matches
-	// -- measured, it dropped 2.14.0 from 82.4% to 75.1%.
-	return foldMixinOwner(NormalizeRecoveredName(ours)) == NormalizeSymbolName(sym)
+	// owner to its last component and drop the `init:` marker; both assembly
+	// dialects above keep the full `&`-chain and the marker (as underscores),
+	// so folding our side there breaks matches -- measured, mixin folding
+	// dropped 2.14.0 from 82.4% to 75.1% and init: stripping from 82.4% to
+	// 80.8%.
+	return proseFold(NormalizeRecoveredName(ours)) == NormalizeSymbolName(sym)
+}
+
+// proseFold applies the reductions the 3.x prose symbol table makes but the
+// assembly dialects do not: a mixin owner to its last component, and the
+// `init:` field-initializer marker away.
+func proseFold(n string) string {
+	n = foldMixinOwner(n)
+	if i := strings.LastIndex(n, "."); i >= 0 {
+		owner, member := n[:i+1], n[i+1:]
+		for _, m := range proseMarkers {
+			member = strings.TrimPrefix(member, m)
+		}
+		return owner + member
+	}
+	for _, m := range proseMarkers {
+		n = strings.TrimPrefix(n, m)
+	}
+	return n
 }
 
 // reAsmIndex is the `_<code_index>` SnapshotNameFor appends to every name.
