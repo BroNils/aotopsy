@@ -123,7 +123,11 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 	// category-sized regression to pass unnoticed -- and one was in fact
 	// hiding there: every `new X` name disagreed on a space-vs-underscore
 	// asymmetry in NormalizeRecoveredName, worth 14.8 points on its own.
-	const minAgreementRate = 0.65
+	//
+	// Raised 0.65 -> 0.72 after PatchClass owner resolution lifted the worst
+	// band (the Precompiled_ dialect) from 66.9% to 73.2%: ~1000 functions per
+	// sample whose owner is a PatchClass now carry the owner name the ELF has.
+	const minAgreementRate = 0.72
 	if rate < minAgreementRate {
 		t.Errorf("agreement rate %.1f%% < %.1f%% threshold -- %d disagreements out of %d compared",
 			rate*100, minAgreementRate*100, len(comp.Disagreement), comp.Compared)

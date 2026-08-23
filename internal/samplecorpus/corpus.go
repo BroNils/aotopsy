@@ -227,10 +227,18 @@ var Registry = []Sample{
 	{DartVersion: "3.4.3", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.4.3, Flutter 3.22.2 -- first TagStyleObjectHeader, last with the 4-bit type_class_id shift"},
 	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.5.0, Flutter 3.24.0 -- first with shared_initial_field_table AND the 3-bit shift"},
 	{DartVersion: "2.18.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.18.0, Flutter 3.3.1"},
-	// A REAL production app, not a toy -- the only such sample here, and worth
-	// keeping for that reason: it exercises code shapes the generated sample
-	// never produces. The directory name is the APP version, not Dart's.
+	// REAL production apps, not toys. These exercise code shapes -- deep
+	// class hierarchies, obfuscated names, third-party packages, XOR/AES
+	// helpers -- that the generated sample never produces, which is exactly
+	// where name resolution is stressed hardest.
 	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1, a real production app", FileSuffix: "-gopay"},
+	// A real third-party production app, Dart 3.12.2 arm64, 9.5 MB, 23795
+	// Codes. Stripped, obfuscated, and shipped alongside native protection
+	// libraries, so it is the most adversarial name-resolution target in the
+	// corpus. NOT in a SourceSet: its source is unknown and unshared, so it
+	// belongs to no differential. Kept deliberately anonymous -- only its
+	// format-relevant properties matter here.
+	{DartVersion: "3.12.2", Arch: "arm64", Note: "third-party production app, stripped + obfuscated", FileSuffix: "-realapp"},
 	{DartVersion: "3.7.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.7.0, Flutter 3.29.1"},
 	{DartVersion: "3.7.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.7.0 x86_64"},
 	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.9.2, Flutter 3.35.5"},

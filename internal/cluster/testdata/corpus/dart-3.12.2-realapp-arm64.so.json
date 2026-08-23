@@ -1,0 +1,16 @@
+{
+  "sample": "dart-3.12.2-realapp-arm64.so",
+  "input_sha256": "a22c75544245f487742107aaef174fa579e1d330b117fe7a995ecef2161c4834",
+  "dart_version": "3.12.2",
+  "unified_snapshot": false,
+  "vm_clusters": 6,
+  "isolate_clusters": 741,
+  "has_instructions_table": true,
+  "strings": 35400,
+  "named": 34822,
+  "codes": 23795,
+  "instr_table_length": 23795,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 23795,
+  "code_ranges": 23795
+}

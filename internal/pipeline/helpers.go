@@ -30,6 +30,12 @@ type CodeNameInfo struct {
 	// AbstractType, and each spells its name differently; the Class case is
 	// the per-class allocation stub. See isAllocationStubOwner.
 	IsAllocationStub bool
+
+	// EnclosingFunction is the class-qualified name of the function a closure
+	// was declared inside, from ClosureData.parent_function. Empty for
+	// non-closures. It, not OwnerName, qualifies a closure's displayed name --
+	// see CodeNameInfo.Qualified and BuildClosureParents.
+	EnclosingFunction string
 }
 
 // isAllocationStubOwner reports whether a Code's owner makes it the allocation
@@ -140,6 +146,11 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		funcTypeByRef[ft.RefID] = ft
 	}
 
+	// Closure Function ref → enclosing function name, so a closure's displayed
+	// name is qualified by the function that declared it rather than only its
+	// class. RefToNamed is fully populated above, which is all this needs.
+	closureParents := BuildClosureParents(result, l)
+
 	byCodeIndex := CodeIndexToFunc(result, ct, codeIndexOneBased)
 
 	// Build code ref→name.
@@ -178,8 +189,9 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			funcName = l.ResolveVMName(owner)
 		}
 		ci := CodeNameInfo{
-			FuncName:  funcName,
-			OwnerName: l.ResolveOwnerName(owner),
+			FuncName:          funcName,
+			OwnerName:         l.ResolveOwnerName(owner),
+			EnclosingFunction: closureParents[owner.RefID],
 		}
 		// Dart names a constructor after its class -- `Duration`,
 		// `_GrowableList.of` -- so without UntaggedFunction::Kind it is
@@ -451,8 +463,45 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 	if no.OwnerRefID < 0 {
 		return ""
 	}
-	if owner, ok := l.RefToNamed[no.OwnerRefID]; ok {
-		return l.ResolveName(owner)
+	owner, ok := l.RefToNamed[no.OwnerRefID]
+	if !ok {
+		return ""
+	}
+	return l.resolveClassName(owner, 0)
+}
+
+// resolveClassName turns a Class-or-PatchClass NamedObject into a class name,
+// hopping through PatchClass and falling back to the VM string table.
+//
+// Two gaps this closes, both measured on the ground-truth twins where the ELF
+// carries the owner and we did not (2.14.0/2.18.0/3.9.2 arm64):
+//
+//   - PatchClass. A function declared in a source-patched or mixin-applied
+//     class has a PatchClass as its owner, and a PatchClass has no name of its
+//     own -- its wrapped_class does (raw_object.h UntaggedPatchClass, ref 0,
+//     captured as OwnerRefID by specPatchClass). This was the largest bucket:
+//     917-1147 functions per sample whose owner is a PatchClass, every one of
+//     them coming back nameless.
+//   - VM base objects. A class name can live in the VM isolate snapshot rather
+//     than the app's -- the same ResolveName-then-ResolveVMName gap already
+//     fixed at other call sites. ~300 more per sample.
+//
+// depth guards against a malformed PatchClass chain pointing back at itself.
+func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) string {
+	if owner == nil || depth > 4 {
+		return ""
+	}
+	if n := l.ResolveName(owner); n != "" {
+		return n
+	}
+	if n := l.ResolveVMName(owner); n != "" {
+		return n
+	}
+	// A PatchClass wraps the real Class in its OwnerRefID; hop to it.
+	if l.CT != nil && owner.CID == l.CT.PatchClass && owner.OwnerRefID >= 0 {
+		if wrapped, ok := l.RefToNamed[owner.OwnerRefID]; ok {
+			return l.resolveClassName(wrapped, depth+1)
+		}
 	}
 	return ""
 }

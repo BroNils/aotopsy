@@ -21,6 +21,14 @@ func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
 	if ci.IsConstructor {
 		return QualifiedName("", ci.FuncName, pcOffset)
 	}
+	// A closure is qualified by the FUNCTION it was declared inside, not by its
+	// owning class -- the SDK spells it `Enclosing.<anonymous closure>` (the
+	// QualifiedScrubbedName walks the parent chain). Without this every closure
+	// in a class renders identically and disagrees with the symbol table. The
+	// enclosing name is already class-qualified by BuildClosureParents.
+	if ci.EnclosingFunction != "" {
+		return QualifiedName(ci.EnclosingFunction, ci.FuncName, pcOffset)
+	}
 	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
 }
 
