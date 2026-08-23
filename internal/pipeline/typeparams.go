@@ -194,15 +194,24 @@ func BuildClosureParents(result *cluster.Result, pl *PoolLookups) map[int]string
 		if no.CID != pl.CT.Function || no.DataRefID <= cluster.RefNull {
 			continue
 		}
+		// Tear-offs (implicit closures) are NOT qualified by their enclosing
+		// function: the SDK prepends the parent name only for non-implicit
+		// closures (FunctionPrintNameHelper, IsNonImplicitClosureFunction in
+		// object.cc). A tear-off of `_throwNew` is named `_throwNew`, not
+		// `_throwNew._throwNew`. This is by kind, not by ref equality: the
+		// tear-off and the method it tears off are DISTINCT NamedObjects that
+		// merely share a name, so the old self-reference guard below never
+		// caught them -- it left 288 doubled names (30% of the residual
+		// disagreements on 3.9.2) like `StateError._throwNew._throwNew`.
+		if no.IsImplicitClosure() {
+			continue
+		}
 		parentRef, ok := parentByData[no.DataRefID]
 		if !ok {
 			continue
 		}
-		// Skip self-references. A ClosureData whose parent_function is the very
-		// function owning it carries no information -- it shows up for implicit
-		// closure functions (tear-offs), where the "enclosing function" is the
-		// method being torn off. Reporting "closure declared in: _runMain" on
-		// _runMain itself is noise at best and misleading at worst.
+		// Self-references still skipped: a ClosureData whose parent_function is
+		// the very function owning it carries no information.
 		if parentRef == no.RefID {
 			continue
 		}

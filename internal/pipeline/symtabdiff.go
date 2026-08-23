@@ -336,7 +336,7 @@ func asmFold(s string) string {
 		prevUnderscore = false
 		out = append(out, b[i])
 	}
-	return strings.Trim(string(out), "_")
+	return collapseSelfDouble(strings.Trim(string(out), "_"))
 }
 
 // scrubbedAsmBody recognises the THIRD ELF dialect, introduced at 2.18.0.
@@ -445,7 +445,7 @@ func addAssemblerIdentifier(s string) string {
 		prev = false
 		out = append(out, c)
 	}
-	return strings.Trim(string(out), "_")
+	return collapseSelfDouble(strings.Trim(string(out), "_"))
 }
 
 // foldMixinOwner reduces a mixin-application owner to its last component, for
@@ -479,4 +479,44 @@ func foldMixinOwner(n string) string {
 	// Our synthetic mixin-app names carry a leading '_' the ELF component does
 	// not double; leave the component's own leading underscores intact.
 	return last + member
+}
+
+// collapseSelfDouble folds an immediately-repeated trailing segment `..._M_M`
+// down to `..._M`. It runs on BOTH sides of the asm comparison, so it is
+// symmetric.
+//
+// The assembly dialects double a tear-off's name. ToQualifiedCString prepends
+// the enclosing function even for an implicit closure, and for a tear-off the
+// enclosing function IS the method being torn off -- so `_throwNew` in class
+// StateError renders `StateError._throwNew._throwNew` and, after
+// EnsureAssemblerIdentifier folds every separator to '_', arrives as
+// `StateError_throwNew_throwNew`. A top-level tear-off has no owner and arrives
+// as the whole string doubled, `nullDoneHandler_4048458_nullDoneHandler_4048458`.
+// Our real output names a tear-off once (the prose convention,
+// IsNonImplicitClosure in typeparams.go), so without this the two sides
+// disagreed on every tear-off in the Precompiled dialect -- measured, 2.14.0
+// dropped 82.4% -> 79.0%. The prose and scrubbed dialects need no equivalent:
+// they keep their separators, so the tear-off change already lines both sides up
+// there (3.9.2 84.0% -> 91.6%, 2.18.0 79.9% -> 86.3%).
+//
+// It collapses only an EXACT adjacent repetition of a '_'-delimited suffix, and
+// the LONGEST such suffix, so `List_List_of` (a constructor, whose doubling is a
+// PREFIX and is reproduced on our side by qualifiedCString) is left untouched.
+func collapseSelfDouble(s string) string {
+	// Split points are the '_' separators. For each, the tail is everything
+	// after it; a collapse is valid when the same-length run immediately before
+	// the separator equals the tail. Longest tail wins, so scan from the front.
+	for i := 1; i < len(s)-1; i++ {
+		if s[i] != '_' {
+			continue
+		}
+		tail := s[i+1:]
+		if i-len(tail) < 0 || s[i-1] == '_' {
+			continue
+		}
+		if s[i-len(tail):i] == tail {
+			return s[:i]
+		}
+	}
+	return s
 }
