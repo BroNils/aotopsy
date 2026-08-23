@@ -220,7 +220,11 @@ func NamesAgree(ours, sym string) bool {
 		}
 		return addAssemblerIdentifier(mine) == addAssemblerIdentifier(body)
 	}
-	return NormalizeRecoveredName(ours) == NormalizeSymbolName(sym)
+	// Prose dialect (3.x). Only here does the ELF reduce a mixin-application
+	// owner to its last component; both assembly dialects above keep the full
+	// `&`-chain (as underscores), so folding our side there would break matches
+	// -- measured, it dropped 2.14.0 from 82.4% to 75.1%.
+	return foldMixinOwner(NormalizeRecoveredName(ours)) == NormalizeSymbolName(sym)
 }
 
 // reAsmIndex is the `_<code_index>` SnapshotNameFor appends to every name.
@@ -324,9 +328,19 @@ func scrubbedAsmBody(sym string) (body string, allocStub, ok bool) {
 	if s == "" || strings.ContainsAny(s, " ") {
 		return "", false, false // prose dialect
 	}
+	// A Stub_ symbol is scrubbed-asm even without a code index.
 	if rest, cut := strings.CutPrefix(s, "Stub_"); cut {
-		// A null-owner stub carries no code index.
 		return rest, false, true
+	}
+	// Otherwise the tell of the scrubbed-asm dialect is the trailing
+	// `_<code_index>` SnapshotNameFor always appends. Without it the symbol is
+	// prose (3.x), which -- crucially -- is the ONLY dialect that reduces a
+	// mixin owner to its last component. Treating a spaceless prose name like
+	// `_LinkedHashMapMixin._set` as asm routed it through the full-chain
+	// comparison and defeated foldMixinOwner, which is exactly the collision
+	// this guard removes.
+	if !reAsmIndex.MatchString(s) {
+		return "", false, false
 	}
 	s = reAsmIndex.ReplaceAllString(s, "")
 	if rest, cut := strings.CutPrefix(s, "AllocationStub_"); cut {
@@ -405,4 +419,37 @@ func addAssemblerIdentifier(s string) string {
 		out = append(out, c)
 	}
 	return strings.Trim(string(out), "_")
+}
+
+// foldMixinOwner reduces a mixin-application owner to its last component, for
+// COMPARISON ONLY -- it is never written into real output.
+//
+// Our name for a method on a mixin application is the full synthetic class
+// name, `_Map&_HashVMBase&MapMixin&...&_LinkedHashMapMixin._set`, which is the
+// actual class name in the snapshot. The ELF symbol drops all but the last
+// component: `_LinkedHashMapMixin._set`. Measured on 3.9.2 arm64, the
+// last-component rule matches the ELF on 77% of the 744 mixin disagreements.
+//
+// The other 23% are cases like `MapMixin.update` where the ELF says
+// `MapBase.update` -- the method is defined on a SUPERCLASS of the mixin, not
+// the mixin, which is not derivable from the class name at all. That is exactly
+// why this fold lives here and NOT in the resolver: emitting the last component
+// as the real name would assert a defining class that is wrong 23% of the time
+// -- the confident-wrong failure this project exists to avoid. The full chain
+// is complete and honest; the ELF's short form is a lossy SDK convention, so
+// the two are reconciled only for the agreement measurement.
+func foldMixinOwner(n string) string {
+	dot := strings.LastIndex(n, ".")
+	if dot < 0 {
+		return n
+	}
+	owner, member := n[:dot], n[dot:]
+	amp := strings.LastIndex(owner, "&")
+	if amp < 0 {
+		return n
+	}
+	last := owner[amp+1:]
+	// Our synthetic mixin-app names carry a leading '_' the ELF component does
+	// not double; leave the component's own leading underscores intact.
+	return last + member
 }

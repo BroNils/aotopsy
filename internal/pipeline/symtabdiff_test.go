@@ -129,7 +129,9 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 	//   0.65 -> 0.72  PatchClass owner resolution (worst band 66.9% -> 73.2%)
 	//   0.72 -> 0.76  closures qualified by their enclosing function, not their
 	//                 class (worst band 73.2% -> 76.3%)
-	const minAgreementRate = 0.76
+	//   0.76 -> 0.77  mixin owner folded to its last component in the prose
+	//                 dialect for comparison (worst band 76.3% -> 78.1%)
+	const minAgreementRate = 0.77
 	if rate < minAgreementRate {
 		t.Errorf("agreement rate %.1f%% < %.1f%% threshold -- %d disagreements out of %d compared",
 			rate*100, minAgreementRate*100, len(comp.Disagreement), comp.Compared)
