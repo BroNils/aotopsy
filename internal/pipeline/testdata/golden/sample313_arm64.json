@@ -9,7 +9,7 @@
     "call_edges.jsonl": 41872,
     "classes.jsonl": 2387,
     "dispatch_table.jsonl": 29636,
-    "field_accessor_xref.jsonl": 1978,
+    "field_accessor_xref.jsonl": 1979,
     "functions.jsonl": 8520,
     "index.jsonl": 8520,
     "pool_immediates.jsonl": 181,
@@ -19,17 +19,17 @@
     "unresolved_thr.jsonl": 1561
   },
   "sha256": {
-    "address_callers_xref.jsonl": "e85d3b6d7646f051b42f2626d0c390c9530bc0a929d851600c8e426eb52a2224",
-    "call_edges.jsonl": "e33aaabecdc71fb0cddefa0daca3dbfc1bf6bffadfbaa3aef4fe5bbd0e0dc314",
+    "address_callers_xref.jsonl": "f0dbfed1e6749b6616d7510ab7db5407f1df195c4d592e6f4e52f0ccaaa894e0",
+    "call_edges.jsonl": "847a3a90315780abab75b4d1ea1cad9c6544b5f2f03e68c7029bf694ac770089",
     "classes.jsonl": "99b1279e23b62b81a42485844eb4272d85ffe01780ce0b07645166d2b331fd7e",
     "dispatch_table.jsonl": "cf8ca0aee2f62151fa45ec3852fad68e65823a8fc6d5149acd1eb697737d04a3",
-    "field_accessor_xref.jsonl": "fc9ffcf47bbf23ba1230eea47c74cfe1ba38411d72d65378b3188d820910d18a",
-    "functions.jsonl": "9ae6d294675a8779a478c5b38f2771feb8adcfd53a062821a7a4c4c3c0927778",
+    "field_accessor_xref.jsonl": "b15e32e275dc21f711d107689838de4af1570dcd1729ef462fbb0fe5b59f0503",
+    "functions.jsonl": "5b8386c8379d410bf9d5610928991e640ebab809bb0c084f0f0c92fe83b5854f",
     "index.jsonl": "c9a69551abfae472dec46b6cf461e67059e298577947ed8bcd1d04552b1a10f2",
     "pool_immediates.jsonl": "3a4d29f53b17a24ce6195fd16e7ea52fc78b7018a1cd2f0171c32efd271604ba",
-    "string_refs.jsonl": "9fd7cfa433836674f98044a1aaae9714f75e3a3d68b9e4f4fae37b656542ce8f",
-    "string_value_xref.jsonl": "546d5e69cd8433839a5111a7ebae57313462f216e21ce698e109596e31a43c52",
-    "typetrack_report.json": "964827714f7a4126e25a7867d0a7cba67a8881b239065adf7414fd17f57b4976",
-    "unresolved_thr.jsonl": "35e3339da856f5d404722ce092cfece3ca434e2c6cde50c816079899ec092ccb"
+    "string_refs.jsonl": "2a3548d798e5689adf326e4990c43e45b9e06634f15cc1900a11a5cb8775c5fc",
+    "string_value_xref.jsonl": "bc387b765c16b0e6a21c4a2dd9311b8c318db86f1a640779f9fce92280b13e3d",
+    "typetrack_report.json": "c9ffffb19bebc6251230103ecb0daef2bc0c7e4465f63b55bf32113005558b02",
+    "unresolved_thr.jsonl": "74559b99ce0f5d9b86625dffbe0cf224e8ff9e103ae4bc645757e819cc8ba530"
   }
 }
