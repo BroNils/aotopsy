@@ -85,6 +85,17 @@ type PoolLookups struct {
 	// invoke one. Nil on versions that cannot resolve a Type to its class.
 	// See buildTypeTestingStubNames.
 	TypeTestingStubNames map[int]string
+	// ClosureParents maps a closure Function's ref ID to the name of the
+	// function it was declared inside (BuildClosureParents). Both the
+	// Code-name path and the pool-display path qualify a closure by its
+	// enclosing function so that the SDK's own convention -- a non-implicit
+	// closure prints as `parent.<anonymous closure>`, FunctionPrintNameHelper
+	// -- is spoken consistently. Without it, every anonymous closure loaded
+	// through the object pool renders as the bare, indistinguishable
+	// `<anonymous closure>` (measured: 565 of them on 3.12.2, 362 on 2.17.6,
+	// all identical). Implicit closures (tear-offs) are absent from this map
+	// by construction, so they keep their single, un-doubled name.
+	ClosureParents map[int]string
 }
 
 // BuildPoolLookups builds the lookup maps from a fill result.
@@ -150,6 +161,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// name is qualified by the function that declared it rather than only its
 	// class. RefToNamed is fully populated above, which is all this needs.
 	closureParents := BuildClosureParents(result, l)
+	l.ClosureParents = closureParents
 
 	byCodeIndex := CodeIndexToFunc(result, ct, codeIndexOneBased)
 
@@ -761,6 +773,19 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 						if owner := l.ResolveOwnerName(no); owner != "" {
 							name = owner + "." + name
 						}
+					}
+					// A closure Function is qualified by the function it was
+					// declared inside, the same as the Code-name path does via
+					// CodeNameInfo.EnclosingFunction. Every anonymous closure's
+					// own name is the bare, shared `<anonymous closure>`, so
+					// without this the object pool renders hundreds of them
+					// identically; the enclosing function is what tells them
+					// apart. Gated on ClosureParents membership, which
+					// BuildClosureParents populates only for non-implicit
+					// closures that have a distinct parent -- so a tear-off or a
+					// self-referential closure is left untouched.
+					if parent := l.ClosureParents[pe.RefID]; parent != "" {
+						name = parent + "." + name
 					}
 					display[pe.Index] = name
 				} else {
