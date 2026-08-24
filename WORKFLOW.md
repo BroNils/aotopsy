@@ -19,6 +19,7 @@ flowchart TD
     FL --> LIB
     LIB --> DOC[doctor<br/>sanity check]
     DOC --> Q2{"What do you<br/>want to know?"}
+    Q2 -->|"I want the whole project<br/>reconstructed in Dart"| EXP[export-dart --out lib/]
     Q2 -->|"What does this app DO?"| FULL[aotopsy libapp.so<br/>full pipeline]
     Q2 -->|"Pseudocode, no name known"| FM[decompile-native --from-main]
     Q2 -->|"I know a class name"| FIL[decompile-native --all --filter]
@@ -26,12 +27,13 @@ flowchart TD
     Q2 -->|"Locate by name first"| FIND[decompile-native --find]
     Q2 -->|"Which function loads<br/>this string?"| XREF[strings --find --xref]
     Q2 -->|"Does this app<br/>use dart:ffi?"| FFI[ffi-trace]
+    EXP --> DONE[Done]
     FULL --> WALL{Static analysis<br/>hit a wall?}
     FM --> WALL
     FIL --> WALL
     FUNC --> WALL
     WALL -->|Yes| FRIDA[--gen-frida<br/>run live]
-    WALL -->|No| DONE[Done]
+    WALL -->|No| DONE
     FRIDA --> UI{Want full<br/>decompiler UI?}
     UI -->|Yes| GH[ghidra / ida<br/>ARM64 only]
     UI -->|No| DONE
@@ -76,6 +78,21 @@ aotopsy signal libapp.so   # skip metadata, just signal analysis
 ```
 
 Produces `signal.html` (behavioral report), `functions.jsonl`, `call_edges.jsonl`, `classes.jsonl`. This is orientation — "where are the interesting strings and what do they connect to" — not readable code yet.
+
+## Step 2.5: Whole-project source reconstruction
+
+Export reconstructed, modular `.dart` files organizing classes, constructors, methods, and getters/setters mapped by original library URIs:
+
+```bash
+# Reconstruct entire application source code:
+aotopsy export-dart --lib libapp.so --out ./reconstructed_lib/
+
+# Reconstruct only application-specific code (skip Flutter framework & Dart SDK):
+aotopsy export-dart --lib libapp.so --out ./lib/ --app-only
+
+# Filter specific module/feature:
+aotopsy export-dart --lib libapp.so --out ./lib/ --filter Auth
+```
 
 ## Step 3: Targeted decompilation
 

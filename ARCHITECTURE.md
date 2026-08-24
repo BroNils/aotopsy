@@ -115,32 +115,39 @@ JSONL serialization helpers for artifact files.
 
 ### `internal/decompiler`
 
-Dart-AOT-aware pseudocode decompiler supporting both ARM64 and x86_64. Architecture:
+Dart-AOT-aware high-level decompiler supporting both ARM64 and x86_64, producing idiomatic Dart source code.
 
 ```mermaid
-flowchart LR
-    A[Machine code<br/>ARM64 or x86_64] --> B[Decode]
-    B --> C[IR lift<br/>lift.go]
-    C --> D[Instr structs<br/>Op classification]
-    D --> E[Emit<br/>emit.go]
-    E --> F[Naming pass<br/>naming.go]
-    F --> G[Selector hints<br/>selector.go]
-    G --> H[Call resolution<br/>call.go]
-    H --> I[Compact<br/>compact.go]
-    I --> J[Pseudocode output]
+flowchart TD
+    A[Machine code<br/>ARM64 or x86_64] --> B[Decode + IR Lift<br/>lift.go]
+    B --> C[CFG + Exception Handling<br/>ExceptionHandlerTable + PcDescriptors]
+    C --> D[Emit Stmt Tree<br/>emit.go + stmt.go]
+    D --> E[Multi-Pass AST Compaction<br/>compact.go]
+    
+    subgraph Multi-Pass AST Transforms
+        E --> F1[Control-Flow: for-in, while, for, try-catch<br/>stmt_for_in.go + stmt_loops.go]
+        E --> F2[Async/Await Linearizer<br/>async_linearizer.go]
+        E --> F3[Closure & Lambda Inlining<br/>stmt_closure.go]
+        E --> F4[SSA Inlining & Idiom Recognition<br/>stmt_inline.go + stmt_idioms.go]
+        E --> F5[Fixed-Point Type Lattice<br/>stmt_types.go]
+        E --> F6[Naming & Mixin Cleanups<br/>naming.go]
+    end
+
+    E --> G[High-Level Dart Pseudocode]
+    G --> H[Whole-Project Synthesizer<br/>project_synthesizer.go]
+    H --> I[Modular .dart Source Files]
 ```
 
-1. **Decode** — ARM64 via `arm64asm.Decode`, x86_64 via `x86asm.Decode`
-2. **IR lift** (`lift.go`) — instructions become `Instr` structs with an `Op` classification (OpCall, OpBranch, OpJump, OpReturn, OpLoadPool, OpOther). Register and stack-slot values are tracked as string expression fragments (not an AST — a string-rewriting system).
-3. **Emit** (`emit.go`) — walks the CFG, producing pseudocode lines. Uses `LiftState` (register/stack expressions) with per-branch cloning. Flow-sensitive: branches get snapshot copies of state.
-4. **Naming** (`naming.go`) — replaces raw ABI register tokens with friendlier names (framePointer, returnAddress).
-5. **Selector hints** (`selector.go`) — static catalog mapping normalized selector names to qualified semantic paths (e.g. `build` → `framework:flutter.widgets.Widget.build`).
-6. **Call resolution** (`call.go`) — resolves direct calls to named targets, detects void calls, extracts selector hints from argument expressions.
-7. **Compact** (`compact.go`) — post-processing pass on emitted pseudocode.
+1. **Decode & IR Lift** (`lift.go`, `lift_arm64ops.go`, `lift_x86.go`) — instructions become `Instr` structs with `Op` classification and tracked register/stack expressions. Frame setup instructions (`STP/LDP FP, LR`) and stack-check boilerplate (`CMP SP, THR.stack_limit`) are elided at this stage.
+2. **Ground-Truth Exception Handling** (`internal/cluster` PCD & `ExceptionHandlerTable`) — PC ranges for try-catch-finally blocks are bound mathematically from snapshot metadata rather than heuristic branch guessing.
+3. **AST Statement Tree** (`stmt.go`, `stmt_expr.go`) — the decompiler lifts bytecode into a structured AST of `Stmt` (`Line`, `Construct`, `Block`), enabling safe non-regex tree transformations.
+4. **Async/Await Linearizer** (`async_linearizer.go`) — decompiles Dart async state machines (`_SuspendState`), flattening state jumps into linear `await future` statements and `await for` streams.
+5. **Closure & Lambda Synthesis** (`stmt_closure.go`) — links `AllocateClosure` / `_Closure` instantiations to their enclosing lexical parents and inlines them as arrow functions `(arg) => body` at call sites.
+6. **Idioms & SSA Compactor** (`stmt_idioms.go`, `stmt_inline.go`) — inlines single-use temporaries, recovers `for-in` iterators, cascade operators (`..`), null-aware navigation (`?.`, `??`, `??=`), Set/List/Map literals, and string interpolation (`"${a}${b}"`).
+7. **Type Inference Lattice** (`stmt_types.go`) — propagates concrete Dart types (`String`, `int`, `UserModel`) across SSA definitions using fixed-point abstract interpretation.
+8. **Whole-Project Synthesizer** (`project_synthesizer.go`) — organizes decompiled functions by `ClassTable` and `LibraryTable`, reconstructing classes (`class`, `extends`, `with`, fields, constructors, methods) into modular `.dart` files mapped by original library URIs.
 
-`LiftState.Clone` intentionally shares `Locals` by reference (not deep-copied) — stack slots are frame-global, while register state is path-local. Deep-copying Locals would break cross-branch local-name visibility.
-
-The emitter has hard backstops against combinatorial blowup: `maxDepth=20`, `maxVisitCount=24`, `maxStepsPerEmitter=20000`. These were found necessary after an unbounded `--all` sweep crashed the host.
+The emitter has hard backstops against combinatorial blowup: `maxDepth=20`, `maxVisitCount=24`, `maxStepsPerEmitter=20000`. These prevent host memory exhaustion during large-scale analysis.
 
 ### `internal/typetrack`
 

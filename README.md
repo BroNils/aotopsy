@@ -14,6 +14,7 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 | String references | Which functions load which string literals from the object pool |
 | Behavioral signals | Crypto, network, gambling, SIM, location, WebView, blockchain keyword classification |
 | Pseudocode | Architecture-neutral decompiled output from ARM64 or x86_64 machine code |
+| Dart Source Export | Whole-project modular `.dart` files reconstructed with classes, fields, and methods |
 
 Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.12**.
 
@@ -23,7 +24,8 @@ Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.12**.
 make build
 ./aotopsy libapp.so                    # full pipeline
 ./aotopsy doctor libapp.so             # quick diagnostic
-./aotopsy _debug decompile-native --lib libapp.so --find MyClass  # find a function
+./aotopsy export-dart --lib libapp.so --out ./lib  # reconstruct entire Dart source project
+./aotopsy _debug decompile-native --lib libapp.so --find MyClass  # find and decompile a function
 ```
 
 See `WORKFLOW.md` for the step-by-step methodology when you have a raw APK and don't know where to start.
@@ -119,7 +121,24 @@ aotopsy doctor libapp.so       # Dart version, pointer size, support status, bui
 aotopsy find-libapp --apk app.apk  # locate libapp.so inside an APK
 ```
 
-### Decompiler (ARM64 + x86_64, no Ghidra/IDA needed)
+### Whole-Project Dart Source Export
+
+Reconstructs all classes, fields, methods, getters, setters, and constructors into modular `.dart` files mapped by original library URIs:
+
+```bash
+aotopsy export-dart --lib libapp.so --out ./reconstructed_lib/   # full project export
+aotopsy export-dart --lib libapp.so --out ./lib/ --app-only      # filter out core/flutter framework
+aotopsy export-dart --lib libapp.so --out ./lib/ --filter Auth   # targeted export by name
+```
+
+### High-Level Native Decompiler (ARM64 + x86_64)
+
+Produces clean, idiomatic Dart code directly from binary machine instructions:
+- **Structural Control Flow**: `for-in` iterators, `while`, `for`, `try-catch-finally` with exact PC bounding.
+- **Async/Await Linearization**: Unwraps `_SuspendState` state machines into linear `await future` and `await for`.
+- **Lambda Inlining**: Synthesizes arrow callbacks `(item) => process(item)` directly at call sites.
+- **Type Lattice**: Propagates concrete Dart types (`String`, `int`, `UserModel`) across SSA values without running a live VM.
+- **Dart Idioms**: Null-aware (`?.`, `??`, `??=`), cascade (`..`), Set/List/Map literals, string interpolation (`"${a}${b}"`).
 
 ```bash
 aotopsy _debug decompile-native --lib libapp.so --find MyClass         # locate by name
