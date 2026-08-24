@@ -34,6 +34,9 @@ func newLiftState(nullReg string) *LiftState {
 	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
 	if nullReg != "" {
 		s.Regs[nullReg] = "null"
+		if strings.HasPrefix(nullReg, "x") {
+			s.Regs["w"+nullReg[1:]] = "null"
+		}
 	}
 	return s
 }
@@ -307,14 +310,18 @@ func parseImm(s string) (int64, bool) {
 		s = s[1:]
 	}
 	var v int64
-	var err error
 	if strings.HasPrefix(s, "0x") {
-		v, err = strconv.ParseInt(s[2:], 16, 64)
+		u, err := strconv.ParseUint(s[2:], 16, 64)
+		if err != nil {
+			return 0, false
+		}
+		v = int64(u)
 	} else {
+		var err error
 		v, err = strconv.ParseInt(s, 10, 64)
-	}
-	if err != nil {
-		return 0, false
+		if err != nil {
+			return 0, false
+		}
 	}
 	if neg {
 		v = -v
@@ -920,6 +927,13 @@ func simplifyBinExpr(mnemonic, lhs, rhs string) string {
 				return strconv.FormatInt(lv+rv, 10)
 			}
 			return strconv.FormatInt(lv-rv, 10)
+		}
+	}
+	if rv, ok := parseImm(rhs); ok {
+		if rv < 0 && op == "+" {
+			return fmt.Sprintf("(%s - %d)", lhs, -rv)
+		} else if rv < 0 && op == "-" {
+			return fmt.Sprintf("(%s + %d)", lhs, -rv)
 		}
 	}
 	return fmt.Sprintf("(%s %s %s)", lhs, op, rhs)

@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"fmt"
+	"math"
+	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
@@ -850,6 +852,20 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				display[pe.Index] = fmt.Sprintf("<ref:%d>", pe.RefID)
 			}
 		case cluster.PoolImmediate:
+			bits := uint64(pe.Imm)
+			exp := (bits >> 52) & 0x7ff
+			// Check if this bit pattern represents a finite floating-point constant
+			if exp >= 0x3c0 && exp <= 0x440 {
+				f := math.Float64frombits(bits)
+				if !math.IsNaN(f) && !math.IsInf(f, 0) {
+					fStr := fmt.Sprintf("%g", f)
+					if !strings.Contains(fStr, ".") && !strings.Contains(fStr, "e") {
+						fStr += ".0"
+					}
+					display[pe.Index] = fStr
+					continue
+				}
+			}
 			display[pe.Index] = fmt.Sprintf("0x%x", pe.Imm)
 		}
 	}

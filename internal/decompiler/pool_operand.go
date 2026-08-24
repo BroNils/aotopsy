@@ -65,6 +65,19 @@ func parsePPOffset(fir *FuncIR, expr string) (int64, bool) {
 	if base != "pp" && base != strings.ToLower(fir.PoolReg) {
 		return 0, false
 	}
-	v, ok := parseImm(strings.TrimSpace(parts[1]))
+	term := strings.TrimSpace(parts[1])
+	term = strings.Trim(term, "()")
+	// Handle shift expression: e.g. "13 << 12" or "0xd << 12"
+	if strings.Contains(term, "<<") {
+		shiftParts := strings.Split(term, "<<")
+		if len(shiftParts) == 2 {
+			lhs, ok1 := parseImm(shiftParts[0])
+			rhs, ok2 := parseImm(shiftParts[1])
+			if ok1 && ok2 && rhs >= 0 && rhs <= 63 {
+				return lhs << uint(rhs), true
+			}
+		}
+	}
+	v, ok := parseImm(term)
 	return v, ok
 }
