@@ -173,6 +173,7 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 			name = sym
 		}
 	}
+	name = cleanCalleeName(name)
 	// P7: Async/await detection. Calls to suspend_state_init_async_ep or
 	// suspend_state_await_ep indicate this is an async function. Mark it
 	// so the signature gets `async`. Await calls are rendered as `await`

@@ -336,3 +336,206 @@ func TestIntraproceduralArityInference(t *testing.T) {
 		t.Errorf("D2 violation: 2-arg setter declared extra arguments:\n%s", art2.Source)
 	}
 }
+
+// Test2LevelPPAddressing verifies D5: 2-level PP addressing loads resolve to literal pool values.
+func Test2LevelPPAddressing(t *testing.T) {
+	fir := newFuncIR("test_pool_2level", 0x4000)
+	fir.ArgRegs = arm64ArgRegs
+	fir.ReturnReg = arm64ReturnReg
+	fir.PoolReg = arm64PoolReg
+	fir.PoolIndexOf = func(disp int64) (int, bool) {
+		// disp = 16 + 8 * idx
+		if disp < 16 || (disp-16)%8 != 0 {
+			return 0, false
+		}
+		return int((disp - 16) / 8), true
+	}
+
+	// Calculate disp for pool slot 100: 16 + 800 = 816
+	// Break into 2-level: upper = 512, lower = 304 (512 + 304 = 816)
+	fir.addBlock(Block{
+		ID:      0,
+		StartVA: 0x4000,
+		Instrs: []Instr{
+			{Addr: 0x4000, Op: OpOther, Src: "add x16, x27, #512"},
+			{Addr: 0x4004, Op: OpOther, Src: "ldr x0, [x16, #304]"},
+			{Addr: 0x4008, Op: OpReturn, Src: "ret"},
+		},
+	})
+
+	pool := func(idx int) (string, bool) {
+		if idx == 100 {
+			return `"my_secret_token"`, true
+		}
+		return "", false
+	}
+
+	art := EmitPseudocode(fir, nil, pool)
+	if strings.Contains(art.Source, "(x27 + 512)") || strings.Contains(art.Source, "(PP + 512)") {
+		t.Errorf("D5 violation: 2-level pool addressing was not resolved:\n%s", art.Source)
+	}
+	if !strings.Contains(art.Source, `return "my_secret_token";`) {
+		t.Errorf("expected return \"my_secret_token\"; got:\n%s", art.Source)
+	}
+}
+
+// TestCalleeNameCleaning verifies D4 mixin chain simplification and D7 PCOffset suffix stripping.
+func TestCalleeNameCleaning(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: "__Set & _HashVMBase & SetMixin & _LinkedHashSetMixin@3099033.add_564794",
+			want:  "_LinkedHashSetMixin.add",
+		},
+		{
+			input: "new _Set@3099033_14b90",
+			want:  "new _Set",
+		},
+		{
+			input: "PlatformThemeCheckExtension_get_isCupertino_233d64",
+			want:  "PlatformThemeCheckExtension_get_isCupertino",
+		},
+		{
+			input: "sub_233d64",
+			want:  "sub_233d64",
+		},
+	}
+
+	for _, tc := range tests {
+		got := cleanCalleeName(tc.input)
+		if got != tc.want {
+			t.Errorf("cleanCalleeName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestArrayPlaceholderNormalization verifies D8: <Array> placeholder evaluates to [].
+func TestArrayPlaceholderNormalization(t *testing.T) {
+	input := []string{
+		`return "<Array>";`,
+		`x0 = "<GrowableObjectArray>";`,
+	}
+	tree := parseStmts(input)
+	cleanExprs(tree)
+	out := printStmts(tree)
+	joined := strings.Join(out, "\n")
+
+	if strings.Contains(joined, `"<Array>"`) || strings.Contains(joined, `"<GrowableObjectArray>"`) {
+		t.Errorf("D8 violation: placeholder was not normalized:\n%s", joined)
+	}
+	if !strings.Contains(joined, "return [];") {
+		t.Errorf("expected 'return [];', got:\n%s", joined)
+	}
+}
+
+// TestTailCallSymbolResolution verifies D10: tail call to hex VA resolves through symbols.
+func TestTailCallSymbolResolution(t *testing.T) {
+	fir := newFuncIR("caller", 0x5000)
+	fir.ArgRegs = arm64ArgRegs
+	fir.ReturnReg = arm64ReturnReg
+
+	fir.addBlock(Block{
+		ID:      0,
+		StartVA: 0x5000,
+		Instrs: []Instr{
+			{Addr: 0x5000, Op: OpOther, Src: "mov x0, #10"},
+			{Addr: 0x5004, Op: OpJump, Src: "b 0x6000", Target: "0x6000"},
+		},
+	})
+
+	symbols := func(va uint64) (string, bool) {
+		if va == 0x6000 {
+			return "MathTools.factorial_12345", true
+		}
+		return "", false
+	}
+
+	art := EmitPseudocode(fir, symbols, nil)
+	if strings.Contains(art.Source, "tailCall_") {
+		t.Errorf("D10 violation: emitted tailCall_ placeholder:\n%s", art.Source)
+	}
+	if !strings.Contains(art.Source, "return MathTools.factorial(10);") && !strings.Contains(art.Source, "return MathTools.factorial(x0);") {
+		t.Errorf("expected clean symbol tail call, got:\n%s", art.Source)
+	}
+}
+
+// TestInlineSingleUseTemps verifies D9: single-use temporaries are inlined.
+func TestInlineSingleUseTemps(t *testing.T) {
+	input := []string{
+		"dynamic sample() {",
+		"  final t0 = getTheme();",
+		"  return t0;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "t0") {
+		t.Errorf("D9 violation: single-use temp t0 was not inlined:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "return getTheme();") {
+		t.Errorf("expected 'return getTheme();', got:\n%s", compacted)
+	}
+}
+
+// TestCollectionIdioms verifies D11: Set/List constructors + adds are collapsed to literals.
+func TestCollectionIdioms(t *testing.T) {
+	input := []string{
+		"dynamic sample() {",
+		"  final s = new _LinkedHashSet();",
+		`  s.add("alpha");`,
+		`  s.add("beta");`,
+		"  return s;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "new _LinkedHashSet") || strings.Contains(compacted, "s.add(") {
+		t.Errorf("D11 violation: collection constructor + add was not collapsed:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `{"alpha", "beta"}`) {
+		t.Errorf("expected set literal {\"alpha\", \"beta\"}, got:\n%s", compacted)
+	}
+}
+
+// TestStringInterpolationIdiom verifies Phase 5: string interpolation and concat calls are converted to template literals.
+func TestStringInterpolationIdiom(t *testing.T) {
+	input := []string{
+		"dynamic sample() {",
+		`  final msg = _StringBase._interpolate(["Hello, ", name, "!"]);`,
+		`  final pair = _StringBase.concat(a, b);`,
+		"  return msg;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "_StringBase._interpolate") || strings.Contains(compacted, "_StringBase.concat") {
+		t.Errorf("Phase 5 violation: string interpolation call was not converted:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `"Hello, $name!"`) {
+		t.Errorf("expected template literal '\"Hello, $name!\"', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `"$a$b"`) {
+		t.Errorf("expected template literal '\"$a$b\"', got:\n%s", compacted)
+	}
+}
+
+// TestReturnTypeEmission verifies Phase 5: fir.ReturnType overrides dynamic signature prefix.
+func TestReturnTypeEmission(t *testing.T) {
+	fir := newFuncIR("computeScore", 0x4000)
+	fir.ReturnType = "int"
+	fir.ArgRegs = arm64ArgRegs
+	fir.ReturnReg = arm64ReturnReg
+
+	fir.addBlock(Block{
+		ID:      0,
+		StartVA: 0x4000,
+		Instrs: []Instr{
+			{Addr: 0x4000, Op: OpOther, Src: "mov x0, #42"},
+			{Addr: 0x4004, Op: OpReturn, Src: "ret"},
+		},
+	})
+
+	art := EmitPseudocode(fir, nil, nil)
+	if !strings.HasPrefix(strings.TrimSpace(art.Source), "int computeScore()") {
+		t.Errorf("expected signature to start with 'int computeScore()', got:\n%s", art.Source)
+	}
+}

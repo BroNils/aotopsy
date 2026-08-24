@@ -387,6 +387,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			returnType = hint
 		}
 	}
+	if returnType == "dynamic" && fir.ReturnType != "" && fir.ReturnType != "?" {
+		returnType = fir.ReturnType
+	}
 	if returnType == "dynamic" {
 		returnType = inferReturnTypeFromName(fir.Name)
 	}

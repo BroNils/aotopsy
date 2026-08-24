@@ -287,6 +287,10 @@ type FuncIR struct {
 	// instance methods, resolved from typetrack's FuncOwnerClass. When > 0,
 	// FieldNameResolver can use it for per-class field name resolution.
 	ReceiverClassID int `json:"-"`
+
+	// ReturnType holds the recovered or inferred return type name (e.g. "String", "int", "bool", "void").
+	// When non-empty, the signature emits `<ReturnType> funcName(...)` instead of `dynamic funcName(...)`.
+	ReturnType string `json:"-"`
 }
 
 // SwitchCase is one case in a recovered switch dispatch.

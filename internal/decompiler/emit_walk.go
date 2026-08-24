@@ -552,6 +552,19 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 		return
 	}
 	if ins.Target != "" {
+		if va, ok := parseHexVA(ins.Target); ok {
+			name := fmt.Sprintf("sub_%x", va)
+			if e.symbols != nil {
+				if sym, ok := e.symbols(va); ok && sym != "" {
+					name = sym
+				}
+			}
+			name = cleanCalleeName(name)
+			args := e.callArgExprs(len(e.fir.ArgRegs))
+			argsText := strings.Join(args, ", ")
+			e.emit(indent, "return %s(%s);", name, argsText)
+			return
+		}
 		e.emit(indent, "return tailCall_%s();", sanitizeTailCallName(ins.Target))
 		return
 	}

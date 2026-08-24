@@ -55,3 +55,48 @@ func replaceIdentToken(text, old, newName string) string {
 func isIdentChar(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
+
+// cleanCalleeName simplifies callee symbol names for pseudocode display:
+// 1. D4: Simplifies compound mixin chain (__A & _B & _C.method -> _C.method)
+// 2. D7: Strips PCOffset hex disambiguation suffixes (_564794, _233d64, _14b90)
+// 3. Strips library hash @NNNNNN from class names (_Set@3099033 -> _Set)
+func cleanCalleeName(name string) string {
+	if name == "" {
+		return name
+	}
+	// D4: Compound mixin chain simplification
+	if strings.Contains(name, " & ") {
+		parts := strings.Split(name, " & ")
+		name = strings.TrimSpace(parts[len(parts)-1])
+	}
+	// Strip library hash: ClassName@123456.method -> ClassName.method or ClassName@123456 -> ClassName
+	if atIdx := strings.Index(name, "@"); atIdx >= 0 {
+		rest := name[atIdx+1:]
+		end := strings.IndexAny(rest, "._ \t")
+		if end >= 0 {
+			name = name[:atIdx] + rest[end:]
+		} else {
+			name = name[:atIdx]
+		}
+	}
+	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
+	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {
+		suffix := name[lastUnder+1:]
+		if isHexOffset(suffix) && !strings.HasPrefix(name, "sub_") && !strings.HasPrefix(name, "block_") && !strings.HasPrefix(name, "local_") && !strings.HasPrefix(name, "local_m") {
+			name = name[:lastUnder]
+		}
+	}
+	return name
+}
+
+func isHexOffset(s string) bool {
+	if len(s) < 4 || len(s) > 8 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}

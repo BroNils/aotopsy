@@ -410,6 +410,13 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 		return poolOperandExpr(fir, s, op)
 	}
 	baseExpr := s.lookupReg(base)
+	// D5: 2-level PP addressing resolution (base register holds PP + offset)
+	if ppOff, ok := parsePPOffset(fir, baseExpr); ok && op.hasDisp {
+		return poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+	}
+	if ppOff, ok := parsePPOffset(fir, base); ok && op.hasDisp {
+		return poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+	}
 	if !op.hasDisp {
 		return baseExpr
 	}
@@ -848,7 +855,9 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
-		if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
+		if ppOff, ok := parsePPOffset(fir, baseExpr); ok {
+			lhs = poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+		} else if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
 			lhs = expr
 		} else if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
 			lhs = expr

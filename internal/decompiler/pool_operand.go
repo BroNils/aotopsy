@@ -1,6 +1,9 @@
 package decompiler
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Object-pool operands outside a plain load.
 //
@@ -27,7 +30,15 @@ func poolOperandExpr(fir *FuncIR, s *LiftState, op operand) string {
 	if !op.hasDisp || fir.PoolIndexOf == nil {
 		return "pool[?]"
 	}
-	idx, ok := fir.PoolIndexOf(op.memDisp)
+	return poolOperandDispExpr(fir, s, op.memDisp)
+}
+
+// poolOperandDispExpr resolves a pool slot by its byte displacement off the pool register.
+func poolOperandDispExpr(fir *FuncIR, s *LiftState, disp int64) string {
+	if fir.PoolIndexOf == nil {
+		return "pool[?]"
+	}
+	idx, ok := fir.PoolIndexOf(disp)
 	if !ok {
 		// A displacement that cannot name an element: not element-aligned,
 		// or below the first one. Reporting a wrong index would be worse
@@ -35,9 +46,25 @@ func poolOperandExpr(fir *FuncIR, s *LiftState, op operand) string {
 		return "pool[?]"
 	}
 	if s != nil && s.Pool != nil {
-		if disp, found := s.Pool(idx); found {
-			return disp
+		if display, found := s.Pool(idx); found {
+			return display
 		}
 	}
 	return fmt.Sprintf("pool[%d]", idx)
+}
+
+// parsePPOffset extracts the byte offset from a "(PP + N)", "(x27 + N)", or "PP+N" expression.
+func parsePPOffset(fir *FuncIR, expr string) (int64, bool) {
+	expr = strings.TrimSpace(expr)
+	expr = strings.Trim(expr, "()")
+	parts := strings.Split(expr, "+")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	base := strings.ToLower(strings.TrimSpace(parts[0]))
+	if base != "pp" && base != strings.ToLower(fir.PoolReg) {
+		return 0, false
+	}
+	v, ok := parseImm(strings.TrimSpace(parts[1]))
+	return v, ok
 }

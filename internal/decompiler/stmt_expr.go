@@ -96,8 +96,10 @@ func rewriteExprs(stmts []Stmt, fn func(Expr) Expr) bool {
 // sweep.
 func rewriteExprText(src string, fn func(Expr) Expr) string {
 	if tree, ok := parseExpr(src); ok {
-		if b, isAtom := tree.(*Atom); !isAtom || b.Text != src {
-			return printExpr(fn(descendAtoms(tree, fn)))
+		res := fn(descendAtoms(tree, fn))
+		resText := printExpr(res)
+		if resText != src {
+			return resText
 		}
 	}
 	// The whole expression is one opaque atom: descend into its bracket
@@ -296,6 +298,11 @@ func constantFoldExpr(e Expr) Expr {
 		return &Unary{Op: n.Op, X: x}
 	case *Paren:
 		return &Paren{X: constantFoldExpr(n.X)}
+	case *Atom:
+		// D8: Value/Return placeholder normalization (<Array> -> [])
+		if n.Text == "\"<Array>\"" || n.Text == "<Array>" || n.Text == "\"<GrowableObjectArray>\"" || n.Text == "<GrowableObjectArray>" {
+			return &Atom{Text: "[]", P: precSelector}
+		}
 	}
 	return e
 }
