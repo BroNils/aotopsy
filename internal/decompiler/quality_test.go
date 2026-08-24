@@ -586,3 +586,48 @@ func TestNullAwareAndCascadeReconstruction(t *testing.T) {
 		t.Errorf("expected cascade return, got:\n%s", compacted)
 	}
 }
+
+// TestAsyncStateMachineLinearization verifies Phase 7: async state machine dispatch is unwrapped into linear await statements.
+func TestAsyncStateMachineLinearization(t *testing.T) {
+	input := []string{
+		"dynamic fetchUser() async {",
+		"  if (state == 0) {",
+		`    final fut = client.get("user");`,
+		"    await t1(fut); // await",
+		"  } else if (state == 1) {",
+		"    final t2 = parseUser(t1);",
+		"    return t2;",
+		"  }",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "if (state == 0)") || strings.Contains(compacted, "} else if (state == 1)") {
+		t.Errorf("Phase 7 violation: async state machine dispatch was not unwrapped:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "await") {
+		t.Errorf("expected linear await in output:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "return parseUser(") {
+		t.Errorf("expected return parseUser in output:\n%s", compacted)
+	}
+}
+
+// TestAsyncStreamAwaitFor verifies Phase 7: Stream iterator while-loops are reconstructed into await for syntax.
+func TestAsyncStreamAwaitFor(t *testing.T) {
+	input := []string{
+		"dynamic listenEvents(dynamic eventStream) async {",
+		"  final it = new _StreamIterator(eventStream);",
+		"  while (await it.moveNext()) {",
+		"    final event = it.current;",
+		"    handleEvent(event);",
+		"  }",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "new _StreamIterator") || strings.Contains(compacted, "it.moveNext()") {
+		t.Errorf("Phase 7 violation: stream loop was not reconstructed into await for:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "await for (final event in eventStream) {") {
+		t.Errorf("expected 'await for (final event in eventStream) {', got:\n%s", compacted)
+	}
+}

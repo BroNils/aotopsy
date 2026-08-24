@@ -188,11 +188,19 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 		return
 	case asyncRoleAwait:
 		e.fir.IsAsync = true
-		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
+		if argsText != "" {
+			e.emit(indent, "final %s = await %s;", tmpName, argsText)
+		} else {
+			e.emit(indent, "final %s = await;", tmpName)
+		}
 		return
 	case asyncRoleReturn:
 		e.fir.IsAsync = true
-		e.emit(indent, "return %s;", tmpName)
+		if argsText != "" {
+			e.emit(indent, "return %s;", argsText)
+		} else {
+			e.emit(indent, "return %s;", tmpName)
+		}
 		return
 	}
 	intent := resolveCallIntent(name, selectorHint)
@@ -260,11 +268,19 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 			return
 		case asyncRoleAwait:
 			e.fir.IsAsync = true
-			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
+			if argsText != "" {
+				e.emit(indent, "final %s = await %s;", tmpName, argsText)
+			} else {
+				e.emit(indent, "final %s = await;", tmpName)
+			}
 			return
 		case asyncRoleReturn:
 			e.fir.IsAsync = true
-			e.emit(indent, "return %s;", tmpName)
+			if argsText != "" {
+				e.emit(indent, "return %s;", argsText)
+			} else {
+				e.emit(indent, "return %s;", tmpName)
+			}
 			return
 		}
 		e.stats.SemanticIndirectCalls++
