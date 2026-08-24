@@ -267,3 +267,212 @@ func isSimpleIdent(s string) bool {
 	}
 	return true
 }
+
+var (
+	// ternaryNotNullRe matches `(a != null) ? thenExpr : elseExpr`
+	ternaryNotNullRe = regexp.MustCompile(`\(([A-Za-z_]\w*)\s*!=\s*null\)\s*\?\s*([^?:]+?)\s*:\s*([^;]+)`)
+	// ternaryEqualsNullRe matches `(a == null) ? thenExpr : elseExpr`
+	ternaryEqualsNullRe = regexp.MustCompile(`\(([A-Za-z_]\w*)\s*==\s*null\)\s*\?\s*([^?:]+?)\s*:\s*([^;]+)`)
+
+	// nullAssignRe matches `if (x == null) { x = val; }`
+	nullAssignRe = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*(.+);$`)
+)
+
+// nullAwareIdiomStmt folds null check ternaries and guards into `?.`, `??`, `??=`.
+func nullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
+	anyChanged := false
+
+	var walk func([]Stmt) ([]Stmt, bool)
+	walk = func(body []Stmt) ([]Stmt, bool) {
+		bodyChanged := false
+		for i := 0; i < len(body); i++ {
+			// Check construct: if (x == null) { x = val; } -> x ??= val;
+			if c := asConstruct(body[i]); c != nil {
+				if c.isIf() && len(c.Clauses) == 1 {
+					cond := strings.TrimSpace(c.cond())
+					varName := ""
+					if strings.HasSuffix(cond, " == null") {
+						varName = strings.TrimSpace(strings.TrimSuffix(cond, " == null"))
+					}
+					if varName != "" && len(c.body()) == 1 {
+						if l := asLine(c.body()[0]); l != nil {
+							if m := nullAssignRe.FindStringSubmatch(strings.TrimSpace(l.Text)); m != nil && m[1] == varName {
+								val := strings.TrimSpace(m[2])
+								newLine := &Line{Ind: c.Ind, Text: fmt.Sprintf("%s ??= %s;", varName, val)}
+								body[i] = newLine
+								bodyChanged = true
+								anyChanged = true
+								continue
+							}
+						}
+					}
+				}
+
+				for ci := range c.Clauses {
+					var cChanged bool
+					c.Clauses[ci].Body, cChanged = walk(c.Clauses[ci].Body)
+					bodyChanged = bodyChanged || cChanged
+				}
+				continue
+			}
+
+			line := asLine(body[i])
+			if line == nil {
+				continue
+			}
+
+			text := line.Text
+			if strings.Contains(text, "?") && strings.Contains(text, "null") {
+				text = ternaryNotNullRe.ReplaceAllStringFunc(text, func(match string) string {
+					m := ternaryNotNullRe.FindStringSubmatch(match)
+					if len(m) < 4 {
+						return match
+					}
+					varName := strings.TrimSpace(m[1])
+					thenExpr := strings.TrimSpace(m[2])
+					elseExpr := strings.TrimSpace(m[3])
+
+					// (a != null) ? a : b -> a ?? b
+					if thenExpr == varName {
+						return fmt.Sprintf("%s ?? %s", varName, elseExpr)
+					}
+					// (a != null) ? a.foo : null -> a?.foo
+					if elseExpr == "null" && strings.HasPrefix(thenExpr, varName+".") {
+						return fmt.Sprintf("%s?.%s", varName, strings.TrimPrefix(thenExpr, varName+"."))
+					}
+					return match
+				})
+
+				text = ternaryEqualsNullRe.ReplaceAllStringFunc(text, func(match string) string {
+					m := ternaryEqualsNullRe.FindStringSubmatch(match)
+					if len(m) < 4 {
+						return match
+					}
+					varName := strings.TrimSpace(m[1])
+					thenExpr := strings.TrimSpace(m[2])
+					elseExpr := strings.TrimSpace(m[3])
+
+					// (a == null) ? b : a -> a ?? b
+					if elseExpr == varName {
+						return fmt.Sprintf("%s ?? %s", varName, thenExpr)
+					}
+					// (a == null) ? null : a.foo -> a?.foo
+					if thenExpr == "null" && strings.HasPrefix(elseExpr, varName+".") {
+						return fmt.Sprintf("%s?.%s", varName, strings.TrimPrefix(elseExpr, varName+"."))
+					}
+					return match
+				})
+			}
+
+			if text != line.Text {
+				line.Text = text
+				bodyChanged = true
+				anyChanged = true
+			}
+		}
+		return body, bodyChanged
+	}
+
+	res, changed := walk(stmts)
+	return res, changed || anyChanged
+}
+
+var (
+	// newInstanceRe matches `final p = new Paint();` or `final p = Paint();`
+	newInstanceRe = regexp.MustCompile(`^(?:final\s+)?([A-Za-z_]\w*)\s*=\s*(?:new\s+)?([A-Z]\w*(?:\([^)]*\))?);$`)
+)
+
+// cascadeIdiomStmt collapses sequence of method/setter calls on a new instance into cascade notation `..`:
+//
+//	final p = new Paint();
+//	p.color = red;
+//	p.strokeWidth = 2;
+//	return p;
+//	->
+//	return Paint()..color = red..strokeWidth = 2;
+func cascadeIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
+	anyChanged := false
+
+	var walk func([]Stmt) ([]Stmt, bool)
+	walk = func(body []Stmt) ([]Stmt, bool) {
+		bodyChanged := false
+		for i := 0; i < len(body); i++ {
+			if c := asConstruct(body[i]); c != nil {
+				for ci := range c.Clauses {
+					var cChanged bool
+					c.Clauses[ci].Body, cChanged = walk(c.Clauses[ci].Body)
+					bodyChanged = bodyChanged || cChanged
+				}
+				continue
+			}
+
+			line := asLine(body[i])
+			if line == nil {
+				continue
+			}
+
+			m := newInstanceRe.FindStringSubmatch(strings.TrimSpace(line.Text))
+			if m == nil {
+				continue
+			}
+
+			varName := m[1]
+			instExpr := m[2]
+			if !strings.HasSuffix(instExpr, ")") {
+				instExpr += "()"
+			}
+
+			var cascades []string
+			k := i + 1
+			for k < len(body) {
+				subLine := asLine(body[k])
+				if subLine == nil {
+					break
+				}
+				t := strings.TrimSpace(subLine.Text)
+				// Check if this line is varName.foo = bar; or varName.method(...);
+				if strings.HasPrefix(t, varName+".") && strings.HasSuffix(t, ";") {
+					rest := strings.TrimSuffix(strings.TrimPrefix(t, varName+"."), ";")
+					cascades = append(cascades, ".."+rest)
+					k++
+					continue
+				}
+				break
+			}
+
+			if len(cascades) == 0 {
+				continue
+			}
+
+			cascadeStr := instExpr + strings.Join(cascades, "")
+
+			// Check if next line is return varName;
+			if k < len(body) {
+				retLine := asLine(body[k])
+				if retLine != nil && strings.TrimSpace(retLine.Text) == "return "+varName+";" {
+					newLine := &Line{Ind: line.Ind, Text: "return " + cascadeStr + ";"}
+					body = append(body[:i], append([]Stmt{newLine}, body[k+1:]...)...)
+					bodyChanged = true
+					anyChanged = true
+					break
+				}
+			}
+
+			// Otherwise declare final varName = cascadeStr;
+			isFinal := strings.HasPrefix(line.Text, "final ")
+			declPrefix := ""
+			if isFinal {
+				declPrefix = "final "
+			}
+			newLine := &Line{Ind: line.Ind, Text: fmt.Sprintf("%s%s = %s;", declPrefix, varName, cascadeStr)}
+			body = append(body[:i], append([]Stmt{newLine}, body[k:]...)...)
+			bodyChanged = true
+			anyChanged = true
+			break
+		}
+		return body, bodyChanged
+	}
+
+	res, changed := walk(stmts)
+	return res, changed || anyChanged
+}

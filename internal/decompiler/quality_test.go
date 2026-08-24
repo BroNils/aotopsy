@@ -539,3 +539,50 @@ func TestReturnTypeEmission(t *testing.T) {
 		t.Errorf("expected signature to start with 'int computeScore()', got:\n%s", art.Source)
 	}
 }
+
+// TestForInLoopReconstruction verifies Phase 6: iterator while-loops are reconstructed into for-in syntax.
+func TestForInLoopReconstruction(t *testing.T) {
+	input := []string{
+		"dynamic processItems(dynamic items) {",
+		"  final it = items.iterator;",
+		"  while (it.moveNext()) {",
+		"    final item = it.current;",
+		"    print(item);",
+		"  }",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "it.iterator") || strings.Contains(compacted, "it.moveNext()") {
+		t.Errorf("Phase 6 violation: for-in loop was not reconstructed:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "for (final item in items) {") {
+		t.Errorf("expected 'for (final item in items) {', got:\n%s", compacted)
+	}
+}
+
+// TestNullAwareAndCascadeReconstruction verifies Phase 6: null-aware ?. / ?? and cascade .. are reconstructed.
+func TestNullAwareAndCascadeReconstruction(t *testing.T) {
+	input := []string{
+		"dynamic formatWidget() {",
+		"  final prop = (user != null) ? user.name : null;",
+		"  final title = (header != null) ? header : defaultTitle;",
+		"  final p = new Paint();",
+		"  p.color = red;",
+		"  p.strokeWidth = 2;",
+		"  return p;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "(user != null) ?") {
+		t.Errorf("Phase 6 violation: null-aware was not folded to ?.:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "user?.name") {
+		t.Errorf("expected 'user?.name', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "header ?? defaultTitle") {
+		t.Errorf("expected 'header ?? defaultTitle', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "return Paint()..color = red..strokeWidth = 2;") {
+		t.Errorf("expected cascade return, got:\n%s", compacted)
+	}
+}

@@ -30,14 +30,17 @@ func compactLines(source string) string {
 	for pass := 0; pass < 16; pass++ {
 		var changed bool
 		tree, changed = compactTree(tree)
-		var c0, c4, c5 bool
+		var c0, c4, c5, c6, c7, c8 bool
+		tree, c6 = forInLoopRecoveryStmt(tree)
 		tree, c0 = collectionIdiomsStmt(tree)
 		tree, c5 = stringInterpolationIdiomStmt(tree)
+		tree, c7 = nullAwareIdiomStmt(tree)
 		c1 := copyPropagationStmt(tree)
 		c2 := commonSubexpressionEliminationStmt(tree)
 		tree, c4 = inlineSingleUseTempsStmt(tree)
+		tree, c8 = cascadeIdiomStmt(tree)
 		c3 := cleanExprs(tree)
-		if !changed && !c0 && !c1 && !c2 && !c3 && !c4 && !c5 {
+		if !changed && !c0 && !c1 && !c2 && !c3 && !c4 && !c5 && !c6 && !c7 && !c8 {
 			break
 		}
 	}
