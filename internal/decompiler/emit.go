@@ -25,9 +25,10 @@ type Stats struct {
 
 // Artifact is one function's emitted pseudocode plus its stats.
 type Artifact struct {
-	FunctionName string `json:"function_name"`
-	Source       string `json:"source"`
-	Stats        Stats  `json:"stats"`
+	FunctionName  string       `json:"function_name"`
+	Source        string       `json:"source"`
+	Stats         Stats        `json:"stats"`
+	VisitedBlocks map[int]bool `json:"visited_blocks,omitempty"`
 }
 
 const (
@@ -234,22 +235,19 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
 	// aggregating cross-function call-site evidence -- NOT a positional
-	// arg0..argN-1 run necessarily starting at ArgRegs[0]. Falls back to
-	// the full ArgRegs set (the old fixed ABI-register display) when
-	// unresolved, unchanged from before.
+	// arg0..argN-1 run necessarily starting at ArgRegs[0].
+	// When cross-site evidence is empty, we deduce arity from intraprocedural
+	// liveness (inferLiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
 	argRegIdx := fir.ArgRegIndices
 	if len(argRegIdx) == 0 {
-		argRegIdx = make([]int, len(fir.ArgRegs))
-		for i := range fir.ArgRegs {
-			argRegIdx[i] = i
-		}
+		argRegIdx = inferLiveInArgIndices(fir)
 	}
 	// Real per-parameter type names are only trusted when their count
 	// EXACTLY matches the independently-verified arity above (and that
 	// arity was itself confidently resolved, not the raw-ArgRegs
 	// fallback) -- see FuncIR.ParamTypeNames' doc comment for why this
 	// cross-check exists at all.
-	trustParamTypes := len(fir.ArgRegIndices) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
+	trustParamTypes := len(argRegIdx) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
 
 	argList := make([]string, len(argRegIdx))
 	// effectiveParamTypes holds exactly the types the signature displays:
@@ -549,7 +547,19 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// counter, accumulator) based on usage patterns.
 	source = applyIdentReclassification(source)
 
-	return Artifact{FunctionName: fir.Name, Source: source, Stats: e.stats}
+	visited := make(map[int]bool, len(e.visits))
+	for id, count := range e.visits {
+		if count > 0 {
+			visited[id] = true
+		}
+	}
+
+	return Artifact{
+		FunctionName:  fir.Name,
+		Source:        source,
+		Stats:         e.stats,
+		VisitedBlocks: visited,
+	}
 }
 
 // labelDeclRe matches an emitted block label line, gotoRe a reference to one.

@@ -155,6 +155,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				if !ok {
 					cond = "/* cond */"
 				}
+				if isStackOverflowCond(cond) {
+					continue
+				}
 				var takenID = -1
 				var fallID = -1
 				for _, s := range blk.Succs {
@@ -437,6 +440,30 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		e.stats.PlaceholderIfs++
 		cond = "/* cond */"
 	}
+
+	// D1: Stack overflow check elision.
+	// In Dart AOT, functions check stack limit at entry or in loops:
+	// "cmp SP, THR.stack_limit; b.ls <runtime_stub>".
+	// The slow path calls the runtime and exits/retries; the fallthrough
+	// is the normal body. Modeling this as 2-way if/else duplicates the entire body.
+	// We elide the check and continue directly into the normal function body.
+	if isStackOverflowCond(cond) {
+		normalID := fallID
+		if strings.Contains(cond, ">") || strings.Contains(cond, "!=") {
+			normalID = takenID
+		}
+		if normalID < 0 {
+			normalID = fallID
+			if normalID < 0 {
+				normalID = takenID
+			}
+		}
+		if normalID >= 0 {
+			e.emitSuccessor(normalID, indent, depth)
+			return
+		}
+	}
+
 	savedState := e.state
 
 	e.emit(indent, "if (%s) {", cond)
@@ -450,6 +477,17 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// Item 7: Merge branch states instead of restoring pre-branch state.
 	e.state = savedState.MergeJoin(takenState, fallState)
 	e.emit(indent, "}")
+}
+
+// isStackOverflowCond reports whether a branch condition is a Dart
+// runtime stack-overflow check (CMP SP, THR.stack_limit).
+func isStackOverflowCond(cond string) bool {
+	if cond == "" {
+		return false
+	}
+	hasTHR := strings.Contains(cond, "THR") || strings.Contains(cond, "stack_limit")
+	hasSP := strings.Contains(cond, "x15") || strings.Contains(cond, "SP") || strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
+	return hasTHR && hasSP
 }
 
 func (e *emitter) buildCondition(ins Instr) (string, bool) {

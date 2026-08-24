@@ -3,6 +3,7 @@ package signal
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestIdentifyCryptoFromBinary(t *testing.T) {
 		0x65, 0x78, 0x70, 0x61, // ChaCha20 'expa'
 	}
 	// Write to temp file and scan
-	tmpFile := "/tmp/test_crypto_binary.bin"
+	tmpFile := filepath.Join(t.TempDir(), "test_crypto_binary.bin")
 	if err := writeFile(tmpFile, data); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}

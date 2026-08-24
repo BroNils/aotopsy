@@ -41,6 +41,21 @@ func (e *emitter) callArgExprs(n int) []string {
 		}
 		out = append(out, e.state.lookupReg(reg))
 	}
+	// D2: If declared arity is resolved, truncate to the real argument count.
+	if len(e.fir.ArgRegIndices) > 0 && len(e.fir.ArgRegIndices) <= len(out) {
+		return out[:len(e.fir.ArgRegIndices)]
+	}
+	// D2: Truncate trailing unassigned argument registers (where lookupReg(reg) == reg or argN)
+	for len(out) > 0 {
+		lastIdx := len(out) - 1
+		reg := e.fir.ArgRegAt(lastIdx)
+		defaultArg := fmt.Sprintf("arg%d", lastIdx)
+		if out[lastIdx] == reg || out[lastIdx] == defaultArg || out[lastIdx] == "" {
+			out = out[:lastIdx]
+		} else {
+			break
+		}
+	}
 	return out
 }
 

@@ -254,6 +254,30 @@ func constantFoldExpr(e Expr) Expr {
 	switch n := e.(type) {
 	case *Binary:
 		l, r := constantFoldExpr(n.L), constantFoldExpr(n.R)
+		// D11: Identity folding (x + 0 -> x, 0 + x -> x, x - 0 -> x, x * 1 -> x)
+		// and NULL_REG arithmetic (null + N -> N, x22 + N -> N)
+		if a, aok := l.(*Atom); aok {
+			if a.Text == "0" && n.Op == "+" {
+				return r
+			}
+			if a.Text == "1" && n.Op == "*" {
+				return r
+			}
+			if (a.Text == "null" || a.Text == "x22") && (n.Op == "+" || n.Op == "-") {
+				return r
+			}
+		}
+		if b, bok := r.(*Atom); bok {
+			if b.Text == "0" && (n.Op == "+" || n.Op == "-") {
+				return l
+			}
+			if b.Text == "1" && n.Op == "*" {
+				return l
+			}
+			if (b.Text == "null" || b.Text == "x22") && n.Op == "+" {
+				return l
+			}
+		}
 		a, aok := intLiteral(l)
 		b, bok := intLiteral(r)
 		if aok && bok {

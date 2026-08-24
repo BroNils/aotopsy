@@ -89,22 +89,27 @@ func VerifyCFG(fir *FuncIR, artifact Artifact) CFGVerification {
 		}
 	}
 
-	// Count emitted blocks by scanning for block labels.
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "block_") && strings.HasSuffix(trimmed, ":;") {
-			// Extract block ID from label.
-			label := strings.TrimSuffix(trimmed, ":;")
-			var id int
-			if _, err := fmt.Sscanf(label, "block_%d", &id); err == nil {
-				emittedBlocks[id] = true
-			}
-		}
-	}
-
-	// Calculate coverage.
+	// Calculate coverage based on actual blocks visited and emitted in pseudocode.
 	if v.TotalBlocks > 0 {
-		v.CoveragePct = float64(len(emittedBlocks)) / float64(v.TotalBlocks) * 100
+		visitedCount := len(artifact.VisitedBlocks)
+		if visitedCount == 0 {
+			// Fallback: count emitted blocks by scanning for block labels if VisitedBlocks was empty
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "block_") && strings.HasSuffix(trimmed, ":;") {
+					label := strings.TrimSuffix(trimmed, ":;")
+					var id int
+					if _, err := fmt.Sscanf(label, "block_%d", &id); err == nil {
+						emittedBlocks[id] = true
+					}
+				}
+			}
+			visitedCount = len(emittedBlocks)
+		}
+		v.CoveragePct = float64(visitedCount) / float64(v.TotalBlocks) * 100.0
+		if v.CoveragePct > 100.0 {
+			v.CoveragePct = 100.0
+		}
 	}
 
 	// Match counts (structural, not semantic).
