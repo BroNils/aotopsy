@@ -64,11 +64,6 @@ func cleanCalleeName(name string) string {
 	if name == "" {
 		return name
 	}
-	// D4: Compound mixin chain simplification
-	if strings.Contains(name, " & ") {
-		parts := strings.Split(name, " & ")
-		name = strings.TrimSpace(parts[len(parts)-1])
-	}
 	// Strip library hash: ClassName@123456.method -> ClassName.method or ClassName@123456 -> ClassName
 	if atIdx := strings.Index(name, "@"); atIdx >= 0 {
 		rest := name[atIdx+1:]
@@ -78,6 +73,11 @@ func cleanCalleeName(name string) string {
 		} else {
 			name = name[:atIdx]
 		}
+	}
+	// D4: Compound mixin chain simplification (both "A & B" and "A&B")
+	if strings.Contains(name, "&") {
+		parts := strings.Split(name, "&")
+		name = strings.TrimSpace(parts[len(parts)-1])
 	}
 	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
 	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {

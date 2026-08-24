@@ -390,6 +390,10 @@ func TestCalleeNameCleaning(t *testing.T) {
 			want:  "_LinkedHashSetMixin.add",
 		},
 		{
+			input: "_MixinApplication504&Object&DioMixin@18353248.post_b4594",
+			want:  "DioMixin.post",
+		},
+		{
 			input: "new _Set@3099033_14b90",
 			want:  "new _Set",
 		},
