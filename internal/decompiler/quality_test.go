@@ -671,3 +671,29 @@ func TestAnonymousClosureCallCleaning(t *testing.T) {
 		t.Errorf("expected 'items.map((item) => process(item))', got:\n%s", compacted)
 	}
 }
+
+// TestTypedDeclarations verifies Phase 10: literal & instantiation declarations are typed.
+func TestTypedDeclarations(t *testing.T) {
+	input := []string{
+		"dynamic buildState() {",
+		`  final title = "Dashboard";`,
+		"  final count = 100;",
+		"  final isActive = true;",
+		"  final user = new UserModel();",
+		"  return user;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if !strings.Contains(compacted, `final String title = "Dashboard";`) {
+		t.Errorf("expected typed String declaration, got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `final int count = 100;`) {
+		t.Errorf("expected typed int declaration, got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `final bool isActive = true;`) {
+		t.Errorf("expected typed bool declaration, got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, `final UserModel user = UserModel();`) {
+		t.Errorf("expected typed UserModel declaration, got:\n%s", compacted)
+	}
+}

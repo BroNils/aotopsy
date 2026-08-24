@@ -293,8 +293,8 @@ func TestConstantFoldDoesNotEatCallParens(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"  final t1 = foo(1 + 2);", "  final t1 = foo(3);"},
 		{"  final t2 = bar(2 * 4);", "  final t2 = bar(8);"},
-		{"  final t3 = (1 << 12) + 1;", "  final t3 = 4097;"},
-		{"  final t4 = (2 * 4);", "  final t4 = 8;"},
+		{"  final t3 = (1 << 12) + 1;", "  final int t3 = 4097;"},
+		{"  final t4 = (2 * 4);", "  final int t4 = 8;"},
 		{"  final t5 = foo(a + 1);", "  final t5 = foo(a + 1);"},
 	}
 	for _, tt := range tests {
