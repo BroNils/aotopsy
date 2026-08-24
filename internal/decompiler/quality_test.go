@@ -631,3 +631,43 @@ func TestAsyncStreamAwaitFor(t *testing.T) {
 		t.Errorf("expected 'await for (final event in eventStream) {', got:\n%s", compacted)
 	}
 }
+
+// TestClosureInliningAndLambdaSynthesis verifies Phase 8: AllocateClosure allocations are inlined to call-sites.
+func TestClosureInliningAndLambdaSynthesis(t *testing.T) {
+	input := []string{
+		"dynamic processUsers(dynamic users) {",
+		"  final t0 = AllocateClosure(print, null);",
+		"  users.forEach(t0);",
+		"  final t1 = _Closure(User.getName, ctx);",
+		"  final t2 = users.map(t1);",
+		"  return t2;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "AllocateClosure") || strings.Contains(compacted, "_Closure(") {
+		t.Errorf("Phase 8 violation: closure allocation was not inlined:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "users.forEach(print);") {
+		t.Errorf("expected 'users.forEach(print);', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "users.map(User.getName)") {
+		t.Errorf("expected 'users.map(User.getName)', got:\n%s", compacted)
+	}
+}
+
+// TestAnonymousClosureCallCleaning verifies Phase 8: anonymous closure callback names are cleaned to lambdas.
+func TestAnonymousClosureCallCleaning(t *testing.T) {
+	input := []string{
+		"dynamic formatList(dynamic items) {",
+		"  final t0 = items.map(process.<anonymous closure>);",
+		"  return t0;",
+		"}",
+	}
+	compacted := compactLines(strings.Join(input, "\n"))
+	if strings.Contains(compacted, "<anonymous closure>") {
+		t.Errorf("Phase 8 violation: raw <anonymous closure> remained:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "items.map((item) => process(item))") {
+		t.Errorf("expected 'items.map((item) => process(item))', got:\n%s", compacted)
+	}
+}
