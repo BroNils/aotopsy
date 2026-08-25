@@ -29,21 +29,23 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			old := s.lookupReg(dst)
-			s.Regs[dst] = fmt.Sprintf("(%s | (%s << %s))", old, imm, shift)
+			s.setReg(dst, fmt.Sprintf("(%s | (%s << %s))", old, imm, shift))
 		}
 		return "", false, true
 	case "ubfx":
 		if len(ops) >= 4 {
 			dst := strings.ToLower(ops[0])
 			src := operandExpr(fir, s, ops[1])
+			pos, ok1 := parseImm(ops[2])
+			width, ok2 := parseImm(ops[3])
 			expr := fmt.Sprintf("bitField(%s, %s, %s)", src, cleanImmPrefix(ops[2]), cleanImmPrefix(ops[3]))
 			// The well-known Dart object class-id bitfield idiom
-			// (lsb=0xc, width=0x14 on ARM64) renders directly as
+			// (lsb=12 / 0xc, width=20 / 0x14 on ARM64) renders directly as
 			// classId(...) instead of the generic bitField(...) form.
-			if strings.TrimPrefix(ops[2], "#") == "0xc" && strings.TrimPrefix(ops[3], "#") == "0x14" {
+			if ok1 && ok2 && pos == 12 && width == 20 {
 				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
 			}
-			s.Regs[dst] = expr
+			s.setReg(dst, expr)
 		}
 		return "", false, true
 	case "ldr", "ldur":
@@ -52,12 +54,13 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.Regs[dst] = thrStubSentinelPrefix + name
+						s.setReg(dst, thrStubSentinelPrefix + name)
 						return "", false, true
 					}
 				}
 			}
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
+			propagateLoadedFieldClass(fir, s, dst, ops[1])
 		}
 		return "", false, true
 	case "cmn":
@@ -78,25 +81,43 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 	case "adr", "adrp":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 		}
 		return "", false, true
 	case "ldp":
 		if len(ops) >= 3 {
-			dst1 := strings.ToLower(ops[0])
-			s.Regs[dst1] = operandExpr(fir, s, ops[2])
+			dst1 := strings.ToLower(strings.TrimSpace(ops[0]))
+			dst2 := strings.ToLower(strings.TrimSpace(ops[1]))
+			if (dst1 == "x29" || dst1 == "fp" || dst1 == arm64FrameReg) &&
+				(dst2 == "x30" || dst2 == "lr" || dst2 == arm64LinkReg) {
+				memOp := parseOperand(ops[2])
+				if memOp.isMem && (memOp.memBase == "x15" || memOp.memBase == "sp" || memOp.memBase == "csp") {
+					// Epilogue frame restore — elide in high-level pseudocode
+					return "", false, true
+				}
+			}
+			s.setReg(dst1, operandExpr(fir, s, ops[2]))
 			// Second register gets the next memory location (base+8).
-			dst2 := strings.ToLower(ops[1])
 			if op := parseOperand(ops[2]); op.isMem {
 				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
-				s.Regs[dst2] = operandExpr(fir, s, memPlus8)
+				s.setReg(dst2, operandExpr(fir, s, memPlus8))
 			} else {
-				s.Regs[dst2] = fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2]))
+				s.setReg(dst2, fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2])))
 			}
 		}
 		return "", false, true
 	case "stp":
 		if len(ops) >= 3 {
+			src1 := strings.ToLower(strings.TrimSpace(ops[0]))
+			src2 := strings.ToLower(strings.TrimSpace(ops[1]))
+			if (src1 == "x29" || src1 == "fp" || src1 == arm64FrameReg) &&
+				(src2 == "x30" || src2 == "lr" || src2 == arm64LinkReg) {
+				memOp := parseOperand(ops[2])
+				if memOp.isMem && (memOp.memBase == "x15" || memOp.memBase == "sp" || memOp.memBase == "csp") {
+					// Prologue frame pointer & link register save — elide in high-level pseudocode
+					return "", false, true
+				}
+			}
 			// Store pair: stp src1, src2, [mem] — emit as two stores.
 			line1, handled := applyStore(fir, s, ops[2], ops[0])
 			op := parseOperand(ops[2])

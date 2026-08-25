@@ -24,6 +24,42 @@ type CodeNameInfo struct {
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
+
+	// IsAllocationStub marks a Code whose owner is a Class rather than a
+	// Function. UntaggedCode.owner_ holds a Function, a Class, or an
+	// AbstractType, and each spells its name differently; the Class case is
+	// the per-class allocation stub. See isAllocationStubOwner.
+	IsAllocationStub bool
+
+	// EnclosingFunction is the class-qualified name of the function a closure
+	// was declared inside, from ClosureData.parent_function. Empty for
+	// non-closures. It, not OwnerName, qualifies a closure's displayed name --
+	// see CodeNameInfo.Qualified and BuildClosureParents.
+	EnclosingFunction string
+}
+
+// isAllocationStubOwner reports whether a Code's owner makes it the allocation
+// stub for a class.
+//
+// UntaggedCode.owner_ is a Function, a Class, or an AbstractType, and the SDK
+// names each differently. For the Class case (analyze_snapshot_api_impl.cc):
+//
+//	if (owner.IsClass()) {
+//	  js_.PrintfProperty("name", "new %s", Class::Cast(owner).ScrubbedNameCString());
+//	  js_.PrintPropertyBool("is_stub", true);
+//	}
+//
+// so the canonical name carries the same "new " a constructor does. The ELF
+// symbol table agrees: on the 3.12.2 arm64 sample it holds 1231 symbols
+// starting with "new ", of which we were marking 306 -- every one of the other
+// 925 was a Code whose owner is a Class (918) and which we therefore named
+// with the bare class name.
+//
+// This is deliberately keyed on the owner's CID and not on "the name matches
+// its class", which would be a guess: a method may legitimately share its
+// class's name.
+func isAllocationStubOwner(owner *cluster.NamedObject, ct *snapshot.CIDTable) bool {
+	return owner != nil && ct != nil && ct.Class != 0 && owner.CID == ct.Class
 }
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
@@ -49,6 +85,17 @@ type PoolLookups struct {
 	// invoke one. Nil on versions that cannot resolve a Type to its class.
 	// See buildTypeTestingStubNames.
 	TypeTestingStubNames map[int]string
+	// ClosureParents maps a closure Function's ref ID to the name of the
+	// function it was declared inside (BuildClosureParents). Both the
+	// Code-name path and the pool-display path qualify a closure by its
+	// enclosing function so that the SDK's own convention -- a non-implicit
+	// closure prints as `parent.<anonymous closure>`, FunctionPrintNameHelper
+	// -- is spoken consistently. Without it, every anonymous closure loaded
+	// through the object pool renders as the bare, indistinguishable
+	// `<anonymous closure>` (measured: 565 of them on 3.12.2, 362 on 2.17.6,
+	// all identical). Implicit closures (tear-offs) are absent from this map
+	// by construction, so they keep their single, un-doubled name.
+	ClosureParents map[int]string
 }
 
 // BuildPoolLookups builds the lookup maps from a fill result.
@@ -110,6 +157,12 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		funcTypeByRef[ft.RefID] = ft
 	}
 
+	// Closure Function ref → enclosing function name, so a closure's displayed
+	// name is qualified by the function that declared it rather than only its
+	// class. RefToNamed is fully populated above, which is all this needs.
+	closureParents := BuildClosureParents(result, l)
+	l.ClosureParents = closureParents
+
 	byCodeIndex := CodeIndexToFunc(result, ct, codeIndexOneBased)
 
 	// Build code ref→name.
@@ -148,8 +201,9 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			funcName = l.ResolveVMName(owner)
 		}
 		ci := CodeNameInfo{
-			FuncName:  funcName,
-			OwnerName: l.ResolveOwnerName(owner),
+			FuncName:          funcName,
+			OwnerName:         l.ResolveOwnerName(owner),
+			EnclosingFunction: closureParents[owner.RefID],
 		}
 		// Dart names a constructor after its class -- `Duration`,
 		// `_GrowableList.of` -- so without UntaggedFunction::Kind it is
@@ -160,6 +214,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		if owner.IsConstructor() && funcName != "" {
 			ci.FuncName = "new " + funcName
 			ci.IsConstructor = true
+		}
+		if isAllocationStubOwner(owner, l.CT) && funcName != "" {
+			ci.FuncName = "new " + funcName
+			ci.IsAllocationStub = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
 		if owner.SignatureRefID > 0 {
@@ -261,7 +319,12 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ownerName := ""
 			if owner.OwnerRefID >= 0 {
 				if vmOwner, ok2 := l.VmRefToNamed[owner.OwnerRefID]; ok2 {
-					ownerName = l.ResolveVMName(vmOwner)
+					// Route through resolveClassName, same as the isolate loop:
+					// it strips the "::" top-level pseudo-class and hops a
+					// PatchClass. A VM-snapshot function like dart:_runtime's
+					// _runMain is owned by "::", so without this it rendered
+					// `::._runMain`.
+					ownerName = l.resolveClassName(vmOwner, 0)
 				}
 			}
 			ci := CodeNameInfo{
@@ -417,8 +480,62 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 	if no.OwnerRefID < 0 {
 		return ""
 	}
-	if owner, ok := l.RefToNamed[no.OwnerRefID]; ok {
-		return l.ResolveName(owner)
+	owner, ok := l.RefToNamed[no.OwnerRefID]
+	if !ok {
+		return ""
+	}
+	return l.resolveClassName(owner, 0)
+}
+
+// resolveClassName turns a Class-or-PatchClass NamedObject into a class name,
+// hopping through PatchClass and falling back to the VM string table.
+//
+// Two gaps this closes, both measured on the ground-truth twins where the ELF
+// carries the owner and we did not (2.14.0/2.18.0/3.9.2 arm64):
+//
+//   - PatchClass. A function declared in a source-patched or mixin-applied
+//     class has a PatchClass as its owner, and a PatchClass has no name of its
+//     own -- its wrapped_class does (raw_object.h UntaggedPatchClass, ref 0,
+//     captured as OwnerRefID by specPatchClass). This was the largest bucket:
+//     917-1147 functions per sample whose owner is a PatchClass, every one of
+//     them coming back nameless.
+//   - VM base objects. A class name can live in the VM isolate snapshot rather
+//     than the app's -- the same ResolveName-then-ResolveVMName gap already
+//     fixed at other call sites. ~300 more per sample.
+//
+// depth guards against a malformed PatchClass chain pointing back at itself.
+// topLevelClassName is Symbols::TopLevel -- the name of the invisible
+// per-library class that owns top-level functions and fields.
+const topLevelClassName = "::"
+
+func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) string {
+	if owner == nil || depth > 4 {
+		return ""
+	}
+	// The top-level pseudo-class is named "::" (Symbols::TopLevel, verified in
+	// symbol_list.h). It is not a real owner: the SDK scrubs it to "" and
+	// PrintName skips it (`!cls.IsTopLevel()`), so a top-level function is
+	// bare. Reporting `::._runMain` instead of `_runMain` disagreed with the
+	// symbol table on ~390 functions per prose sample. The name can come from
+	// EITHER string table -- a dart:_runtime function like _runMain resolves
+	// its "::" owner through the VM table -- so the check must cover both.
+	if n := l.ResolveName(owner); n != "" {
+		if n == topLevelClassName {
+			return ""
+		}
+		return n
+	}
+	if n := l.ResolveVMName(owner); n != "" {
+		if n == topLevelClassName {
+			return ""
+		}
+		return n
+	}
+	// A PatchClass wraps the real Class in its OwnerRefID; hop to it.
+	if l.CT != nil && owner.CID == l.CT.PatchClass && owner.OwnerRefID >= 0 {
+		if wrapped, ok := l.RefToNamed[owner.OwnerRefID]; ok {
+			return l.resolveClassName(wrapped, depth+1)
+		}
 	}
 	return ""
 }
@@ -657,6 +774,19 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 							name = owner + "." + name
 						}
 					}
+					// A closure Function is qualified by the function it was
+					// declared inside, the same as the Code-name path does via
+					// CodeNameInfo.EnclosingFunction. Every anonymous closure's
+					// own name is the bare, shared `<anonymous closure>`, so
+					// without this the object pool renders hundreds of them
+					// identically; the enclosing function is what tells them
+					// apart. Gated on ClosureParents membership, which
+					// BuildClosureParents populates only for non-implicit
+					// closures that have a distinct parent -- so a tear-off or a
+					// self-referential closure is left untouched.
+					if parent := l.ClosureParents[pe.RefID]; parent != "" {
+						name = parent + "." + name
+					}
 					display[pe.Index] = name
 				} else {
 					display[pe.Index] = fmt.Sprintf("<%s>", cluster.CidNameV(no.CID, l.CT))
@@ -720,6 +850,15 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				display[pe.Index] = fmt.Sprintf("<ref:%d>", pe.RefID)
 			}
 		case cluster.PoolImmediate:
+			// A pool immediate is a raw, UNTYPED 64-bit value; whether it is an
+			// integer or an IEEE-754 double is only decided by the instruction
+			// that consumes it (an FP load vs an integer load). The previous code
+			// guessed "double" purely from the exponent-field bit pattern (audit
+			// A7), which mis-renders any large integer whose bits happen to fall
+			// in the exponent range as a bogus float -- in the SHARED pipeline
+			// pool display, affecting every consumer. We render the raw value
+			// here; float interpretation belongs in the decompiler's FP-load
+			// operand path where the type is actually known.
 			display[pe.Index] = fmt.Sprintf("0x%x", pe.Imm)
 		}
 	}

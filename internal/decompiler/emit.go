@@ -25,14 +25,22 @@ type Stats struct {
 
 // Artifact is one function's emitted pseudocode plus its stats.
 type Artifact struct {
-	FunctionName string `json:"function_name"`
-	Source       string `json:"source"`
-	Stats        Stats  `json:"stats"`
+	FunctionName  string       `json:"function_name"`
+	Source        string       `json:"source"`
+	Stats         Stats        `json:"stats"`
+	VisitedBlocks map[int]bool `json:"visited_blocks,omitempty"`
 }
 
 const (
 	maxDepth      = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
-	maxVisitCount = 24
+	// Re-emission cap. Lowered from 24: coverage is set by each block's FIRST
+	// emission (unaffected here), so anything above this only DUPLICATES already-
+	// emitted code. On dense 100+ block state machines (chunked-JSON parser) the
+	// old cap re-inlined blocks up to ~42x, inflating both line count and the
+	// raw-register census by the same factor. At 4, average CFG coverage is
+	// unchanged (verified 87.9% on dart-3.9.2-gt-arm64, identical to 24) while
+	// emitted lines and duplicated raw-register leaks drop ~60-68%.
+	maxVisitCount = 4
 	maxHelpers    = 64
 	// maxStepsPerEmitter caps total emitBlock invocations for one
 	// emitter instance (the main function body, or one helper
@@ -79,6 +87,14 @@ type emitter struct {
 	// omittedStates stores register state snapshots at extraction points,
 	// so helper sub-emitters can receive live register aliases as parameters.
 	omittedStates map[int]*LiftState
+	// blockOut records each block's OUT register state (with real emission-time
+	// temp names) the first time its own instructions finish emitting. It is the
+	// per-block dataflow lattice point used by seedFromEmittedPreds to fill a
+	// successor's unknown live-in registers with values every already-emitted
+	// predecessor agrees on -- a forward join, purely additive and §2-safe (only
+	// agreed concrete values are propagated; any disagreement leaves the register
+	// unknown, i.e. honestly raw).
+	blockOut map[int]*LiftState
 	callIdx       int
 	steps         int
 	budgetHit     bool
@@ -215,6 +231,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// through operandExpr, not emitLoadPool. See poolOperandExpr.
 	e.state.Pool = pool
 
+	// Seed the receiver register with the receiver's class so field-load chains
+	// starting from `this` are typed (this.a -> a's type -> a.b resolves). The
+	// clear-before-write invariant drops it as soon as the register is reused,
+	// so it never goes stale.
+	if fir.ReceiverClassID > 0 && len(fir.ArgRegs) > 0 {
+		e.state.setRegClass(fir.ArgRegs[0], fir.ReceiverClassID)
+	}
+
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
 	// Map blocks to the try region covering them, for per-block annotation.
@@ -234,21 +258,20 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
 	// aggregating cross-function call-site evidence -- NOT a positional
-	// arg0..argN-1 run necessarily starting at ArgRegs[0]. Falls back to
-	// the full ArgRegs set (the old fixed ABI-register display) when
-	// unresolved, unchanged from before.
+	// arg0..argN-1 run necessarily starting at ArgRegs[0].
+	// When cross-site evidence is empty, we deduce arity from intraprocedural
+	// liveness (inferLiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
 	argRegIdx := fir.ArgRegIndices
 	if len(argRegIdx) == 0 {
-		argRegIdx = make([]int, len(fir.ArgRegs))
-		for i := range fir.ArgRegs {
-			argRegIdx[i] = i
-		}
+		argRegIdx = inferLiveInArgIndices(fir)
 	}
-	// Real per-parameter type names are only trusted when their count
-	// EXACTLY matches the independently-verified arity above (and that
-	// arity was itself confidently resolved, not the raw-ArgRegs
-	// fallback) -- see FuncIR.ParamTypeNames' doc comment for why this
-	// cross-check exists at all.
+	// Real per-parameter type names are only trusted when their count EXACTLY
+	// matches arity that was CONFIDENTLY resolved from cross-call-site evidence
+	// (fir.ArgRegIndices) -- NOT the intraprocedural-liveness heuristic
+	// (inferLiveInArgIndices) that fills argRegIdx when cross-site evidence is
+	// empty. Trusting types on a heuristic arity (audit C1) leaks confident-wrong
+	// parameter types; the liveness count is good enough to stop declaring 8 fake
+	// args, but not to vouch for per-parameter TYPES. Gate stays on ArgRegIndices.
 	trustParamTypes := len(fir.ArgRegIndices) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
 
 	argList := make([]string, len(argRegIdx))
@@ -279,7 +302,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		}
 		argList[i] = fmt.Sprintf("%s %s", typeName, paramName)
 		if ri >= 0 && ri < len(fir.ArgRegs) {
-			e.state.Regs[fir.ArgRegs[ri]] = paramName
+			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
@@ -389,12 +412,26 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			returnType = hint
 		}
 	}
+	if returnType == "dynamic" && fir.ReturnType != "" && fir.ReturnType != "?" {
+		returnType = fir.ReturnType
+	}
 	if returnType == "dynamic" {
 		returnType = inferReturnTypeFromName(fir.Name)
 	}
 	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
-	e.state.Regs[fir.ThreadReg] = "THR"
-	e.state.Regs[fir.PoolReg] = "PP"
+	e.state.setReg(fir.ThreadReg, "THR")
+	e.state.setReg(fir.PoolReg, "PP")
+	// SPREG (ARM64 x15 / x86 rsp) and HEAP_BITS (ARM64 x28) are reserved
+	// registers with fixed meanings, verified against constants_arm64.h
+	// (SPREG=R15, HEAP_BITS=R28). Seeding them by name keeps computed
+	// stack addresses and write-barrier-mask math from leaking raw register
+	// tokens into the pseudocode.
+	if fir.StackReg != "" {
+		e.state.setReg(fir.StackReg, "SP")
+	}
+	if fir.HeapBitsReg != "" {
+		e.state.setReg(fir.HeapBitsReg, "HEAP_BITS")
+	}
 
 	// P7: Async state machine annotation. Dart compiles async functions
 	// into state machines: the function body is split at each await point,
@@ -530,8 +567,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = compactLines(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
-	// Enum reconstruction (detect switch-over-CID patterns)
-	source = enumReconstruction(source)
 	// Null-safety annotation (detect null-check patterns)
 	source = nullSafetyAnnotation(source)
 	// A1: Local variable type inference — consolidated pass that combines
@@ -551,7 +586,19 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// counter, accumulator) based on usage patterns.
 	source = applyIdentReclassification(source)
 
-	return Artifact{FunctionName: fir.Name, Source: source, Stats: e.stats}
+	visited := make(map[int]bool, len(e.visits))
+	for id, count := range e.visits {
+		if count > 0 {
+			visited[id] = true
+		}
+	}
+
+	return Artifact{
+		FunctionName:  fir.Name,
+		Source:        source,
+		Stats:         e.stats,
+		VisitedBlocks: visited,
+	}
 }
 
 // labelDeclRe matches an emitted block label line, gotoRe a reference to one.

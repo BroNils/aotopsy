@@ -17,15 +17,15 @@ func (e *emitter) emitLoadPool(ins Instr) {
 	dst := strings.ToLower(ins.Target)
 	if e.pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := e.pool(ins.PoolIndex); ok {
-			e.state.Regs[dst] = disp
+			e.state.setReg(dst, disp)
 			return
 		}
 	}
 	if ins.PoolIndex >= 0 {
-		e.state.Regs[dst] = fmt.Sprintf("pool[%d]", ins.PoolIndex)
+		e.state.setReg(dst, fmt.Sprintf("pool[%d]", ins.PoolIndex))
 		return
 	}
-	e.state.Regs[dst] = "pool[?]"
+	e.state.setReg(dst, "pool[?]")
 }
 
 // appendHelperFunctions materializes every block recorded in e.omitted as
@@ -44,6 +44,20 @@ func (e *emitter) appendHelperFunctions() {
 	seen := map[int]bool{}
 	queue := append([]int(nil), e.omitted...)
 	inlined := map[int][]string{} // id → inlined body lines
+	// maxInlineFanIn bounds duplication: a small helper reached from many
+	// emission paths appears as `return _block_N();` at every one of them, so
+	// inlining its body at each site multiplies its content (and every raw
+	// register token in it) by the fan-in. On a 116-block chunked-JSON state
+	// machine this exploded one function to 130k lines / 15k rawReg hits. Above
+	// this fan-in the helper is kept as a single function and CALLED instead.
+	const maxInlineFanIn = 3
+	fanIn := map[int]int{}
+	for _, line := range e.lines {
+		var fid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "return _block_%d();", &fid); err == nil {
+			fanIn[fid]++
+		}
+	}
 	for len(queue) > 0 && len(seen) < maxHelpers {
 		id := queue[0]
 		queue = queue[1:]
@@ -79,7 +93,7 @@ func (e *emitter) appendHelperFunctions() {
 			}
 		}
 
-		if nonEmpty <= maxInlineHelperLines {
+		if nonEmpty <= maxInlineHelperLines && fanIn[id] <= maxInlineFanIn {
 			// Inline: store body for replacement at call sites.
 			inlined[id] = sub.lines
 			// Don't emit as separate function.
@@ -93,6 +107,21 @@ func (e *emitter) appendHelperFunctions() {
 		for _, nid := range sub.omitted {
 			if !seen[nid] {
 				queue = append(queue, nid)
+			}
+		}
+		// Propagate the sub-emitter's captured live-in states into e's map so
+		// nested helpers reached only through this helper are materialized with
+		// their real register context. Without this the queued nested blocks
+		// fell back to a fresh empty state, leaking every live-in register
+		// (e.g. `if (x8 != null)`) as a raw token.
+		if sub.omittedStates != nil {
+			for nid, st := range sub.omittedStates {
+				if _, exists := e.omittedStates[nid]; !exists {
+					if e.omittedStates == nil {
+						e.omittedStates = map[int]*LiftState{}
+					}
+					e.omittedStates[nid] = st
+				}
 			}
 		}
 		e.stats.UnresolvedCF += sub.stats.UnresolvedCF

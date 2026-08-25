@@ -19,6 +19,7 @@ func compactTree(stmts []Stmt) ([]Stmt, bool) {
 		changed := false
 		for _, fn := range []func([]Stmt) ([]Stmt, bool){
 			removeDeadCodeAfterTerminatorStmt,
+			removeSelfAssignStmt,
 			removeEmptyElseStmt,
 			collapseElseIfStmt,
 			collapseRedundantGuardedReturnStmt,
@@ -396,4 +397,19 @@ func splitSimpleAssign(text string) (lhs, rhs string, ok bool) {
 		return "", "", false
 	}
 	return m[1], m[2], true
+}
+
+// removeSelfAssignStmt removes redundant self-assignments like `x = x;`.
+func removeSelfAssignStmt(body []Stmt) ([]Stmt, bool) {
+	for i, s := range body {
+		l := asLine(s)
+		if l == nil {
+			continue
+		}
+		lhs, rhs, ok := splitSimpleAssign(l.Text)
+		if ok && lhs == rhs {
+			return append(append([]Stmt{}, body[:i]...), body[i+1:]...), true
+		}
+	}
+	return body, false
 }

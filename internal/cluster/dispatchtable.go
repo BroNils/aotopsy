@@ -115,6 +115,16 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	s := dartfmt.NewStreamAt(data, result.FillEnd)
 	fillRefUnsigned := profile.FillRefUnsigned
 
+	// 0. The Roots prefix, from 3.13.0 on: VM bootstrap objects and the
+	// predefined class table, read before anything else. Zero on every
+	// earlier version. See snapshot.VersionProfile.RootsPrefixRefCount for
+	// the SDK derivation and for what breaks when it is skipped.
+	for i := 0; i < profile.RootsPrefixRefCount; i++ {
+		if _, err := readRef(s, fillRefUnsigned); err != nil {
+			return nil, fmt.Errorf("dispatch table: roots prefix ref %d/%d: %w", i, profile.RootsPrefixRefCount, err)
+		}
+	}
+
 	// 1. ObjectStore fields -- plain refs, contents intentionally
 	// discarded: ParseDispatchTable only needs to advance the stream by
 	// the correct number of bytes, not interpret what each field means.
@@ -133,6 +143,8 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	//	<= 2.17.6   ObjectStore refs, then straight to ReadDispatchTable
 	//	>= 2.18.0   ... initial_field_table, then ReadDispatchTable
 	//	>= 3.5.0    ... initial_field_table, shared_initial_field_table, ...
+	//	>= 3.13.0   a Roots prefix comes FIRST, ahead of the ObjectStore refs
+	//	            -- see RootsPrefixRefCount, handled above as step 0.
 	//
 	// (2.10-2.15 predate the class entirely; they fall under the first case.)
 	//

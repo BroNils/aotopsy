@@ -360,7 +360,15 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 				// off a non-PP/THR base). Mirrors ARM64's LDUR64 fallback in
 				// touchInstrEffect (dataflow.go) -- annotate rather than kill,
 				// so call sites indirecting through it still get a `via`.
-				x86Define(regs, touched, dstIdx, "object_field")
+				// A Code entry-point load inherits its base's provenance --
+				// the entry point OF Code X is X. Same rule as ARM64's
+				// touchInstrEffect; see IsCodeEntryPointDisp.
+				baseIdx := arch.X86CanonReg(mem.Base)
+				if IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
+					x86Define(regs, touched, dstIdx, regs[baseIdx])
+				} else {
+					x86Define(regs, touched, dstIdx, ObjectFieldViaAt(int(mem.Disp)))
+				}
 			}
 			return
 		}

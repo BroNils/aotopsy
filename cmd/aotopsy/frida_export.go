@@ -187,11 +187,17 @@ func buildFridaMetadata(ctx *pipeline.Context, dir string) FridaMetadata {
 		bitWidth = 16
 	}
 
+	// Pointer size: 4 for compressed pointers, 8 otherwise.
+	pointerSize := 8
+	if ctx.Info.Version.CompressedPointers {
+		pointerSize = 4
+	}
+
 	meta := FridaMetadata{
 		DartVersion:        ctx.DartVersion,
 		Architecture:       arch,
 		CompressedPointers: ctx.Info.Version.CompressedPointers,
-		PointerSize:        8,
+		PointerSize:        pointerSize,
 		ModuleBase:         "libapp.so",
 		THRFields:          disasm.THRFieldsWithProfile(ctx.DartVersion, isARM64, ctx.Info.Version),
 		THRReg:             thrReg,
@@ -245,7 +251,7 @@ func buildFridaMetadata(ctx *pipeline.Context, dir string) FridaMetadata {
 			}
 			if json.Unmarshal([]byte(line), &e) == nil && e.Kind == "blr" && e.Target == "" {
 				// Only include dispatch_table and object_field BLRs (not THR calls)
-				if e.Via == "dispatch_table" || e.Via == "object_field" || e.Via == "" {
+				if e.Via == "dispatch_table" || strings.HasPrefix(e.Via, disasm.ObjectFieldVia) || e.Via == "" {
 					meta.UnresolvedBLRs = append(meta.UnresolvedBLRs, FridaUnresolvedBLR{
 						VA:       e.FromPC,
 						FromFunc: e.FromFunc,

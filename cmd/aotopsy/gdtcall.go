@@ -146,14 +146,12 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			}
 
 			if inst.Op == x86asm.CALL {
-				handled := false
 				for _, arg := range inst.Args {
 					if arg == nil {
 						continue
 					}
 					if _, ok := arg.(x86asm.Rel); ok {
-						handled = true // direct call, already covered by findCallersOf
-						break
+						break // direct call, already covered by findCallersOf
 					}
 					if reg, ok := arg.(x86asm.Reg); ok {
 						idx := arch.X86CanonReg(reg)
@@ -168,7 +166,6 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						}
 						out = append(out, ic)
 						hits++
-						handled = true
 						break
 					}
 					if mem, ok := arg.(x86asm.Mem); ok {
@@ -186,11 +183,9 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						}
 						out = append(out, ic)
 						hits++
-						handled = true
 						break
 					}
 				}
-				_ = handled
 				rt.tick()
 				off += length
 				if maxHits > 0 && hits >= maxHits {

@@ -41,6 +41,21 @@ func (e *emitter) callArgExprs(n int) []string {
 		}
 		out = append(out, e.state.lookupReg(reg))
 	}
+	// D2: If declared arity is resolved, truncate to the real argument count.
+	if len(e.fir.ArgRegIndices) > 0 && len(e.fir.ArgRegIndices) <= len(out) {
+		return out[:len(e.fir.ArgRegIndices)]
+	}
+	// D2: Truncate trailing unassigned argument registers (where lookupReg(reg) == reg or argN)
+	for len(out) > 0 {
+		lastIdx := len(out) - 1
+		reg := e.fir.ArgRegAt(lastIdx)
+		defaultArg := fmt.Sprintf("arg%d", lastIdx)
+		if out[lastIdx] == reg || out[lastIdx] == defaultArg || out[lastIdx] == "" {
+			out = out[:lastIdx]
+		} else {
+			break
+		}
+	}
 	return out
 }
 
@@ -72,11 +87,50 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 
+	// A call overwrites the return register with a result of unknown class;
+	// drop any stale tracked type. emitDirectCall re-establishes it only when the
+	// callee is an allocation stub (`new <Class>`).
+	e.state.clearRegClass(e.fir.ReturnReg)
+
+	var bound bool
 	if va, ok := parseHexVA(ins.Target); ok {
-		e.emitDirectCall(tmpName, va, argsText, selectorHint, indent)
+		bound = e.emitDirectCall(tmpName, va, argsText, selectorHint, indent)
+	} else {
+		bound = e.emitIndirectCall(tmpName, ins.Target, argsText, selectorHint, indent)
+	}
+	// The call clobbers the return register. If it bound a result temp, the
+	// return register now holds that temp's value, so make reads of it render as
+	// the temp (this is the single largest source of raw-register leakage: every
+	// call result used afterwards was rendering as the bare return register).
+	// Otherwise the register holds an untracked/void result -- drop any stale
+	// value so it is not read as a prior expression.
+	if bound {
+		e.bindReturnReg(tmpName)
+	} else {
+		e.clobberReturnReg()
+	}
+}
+
+// bindReturnReg makes subsequent reads of the return register render as name
+// (a just-declared temp), with the ARM64 w/x alias kept in sync.
+func (e *emitter) bindReturnReg(name string) {
+	rr := e.fir.ReturnReg
+	if rr == "" {
 		return
 	}
-	e.emitIndirectCall(tmpName, ins.Target, argsText, selectorHint, indent)
+	// setReg keys by canonical physical register, so the ARM64 w/x (and
+	// x86 sub-register) views are updated by this single write.
+	e.state.setReg(rr, name)
+}
+
+// clobberReturnReg drops any tracked value for the return register (a void or
+// untracked call result must not be read as a stale prior expression).
+func (e *emitter) clobberReturnReg() {
+	rr := e.fir.ReturnReg
+	if rr == "" {
+		return
+	}
+	delete(e.state.Regs, canonReg(rr))
 }
 
 func parseHexVA(target string) (uint64, bool) {
@@ -151,12 +205,22 @@ func isVoidCall(name, selectorHint string) bool {
 	return false
 }
 
-func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHint string, indent int) {
+// emitDirectCall emits the call and returns true when it bound the result into
+// `tmpName` (a `final tmpName = …` form), so the caller can make the return
+// register read as `tmpName` afterwards instead of the raw register.
+func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHint string, indent int) bool {
 	name := fmt.Sprintf("sub_%x", va)
 	if e.symbols != nil {
 		if sym, ok := e.symbols(va); ok && sym != "" {
 			name = sym
 		}
+	}
+	name = cleanCalleeName(name)
+	// If this call allocates a `new <Class>`, the return register now holds a
+	// fresh instance of that class -- record it so subsequent field accesses on
+	// the object resolve to real field names (audit-driven P2 / value typing).
+	if cid := e.fir.AllocatedClassID(name); cid > 0 {
+		e.state.setRegClass(e.fir.ReturnReg, cid)
 	}
 	// P7: Async/await detection. Calls to suspend_state_init_async_ep or
 	// suspend_state_await_ep indicate this is an async function. Mark it
@@ -169,15 +233,23 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	case asyncRoleInit:
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
-		return
+		return false
 	case asyncRoleAwait:
 		e.fir.IsAsync = true
-		e.emit(indent, "await %s(%s); // await", tmpName, argsText)
-		return
+		if argsText != "" {
+			e.emit(indent, "final %s = await %s;", tmpName, argsText)
+		} else {
+			e.emit(indent, "final %s = await;", tmpName)
+		}
+		return true
 	case asyncRoleReturn:
 		e.fir.IsAsync = true
-		e.emit(indent, "return %s;", tmpName)
-		return
+		if argsText != "" {
+			e.emit(indent, "return %s;", argsText)
+		} else {
+			e.emit(indent, "return %s;", tmpName)
+		}
+		return false
 	}
 	intent := resolveCallIntent(name, selectorHint)
 	// P3-feasible-3: Skip temp assignment for known void calls.
@@ -185,20 +257,23 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 		if intent != "" {
 			e.stats.SemanticDirectCalls++
 			e.emit(indent, "%s(%s); // %s", name, argsText, intent)
-			return
+			return false
 		}
 		e.emit(indent, "%s(%s);", name, argsText)
-		return
+		return false
 	}
 	if intent != "" {
 		e.stats.SemanticDirectCalls++
 		e.emit(indent, "final %s = %s(%s); // %s", tmpName, name, argsText, intent)
-		return
+		return true
 	}
 	e.emit(indent, "final %s = %s(%s);", tmpName, name, argsText)
+	return true
 }
 
-func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint string, indent int) {
+// emitIndirectCall emits the indirect call and returns true when it bound the
+// result into `tmpName` (see emitDirectCall).
+func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint string, indent int) bool {
 	e.stats.IndirectCalls++
 
 	// A structural signal, checked before anything else: the target
@@ -209,7 +284,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// into Thread state right before dispatching it, so this is a
 	// confirmed call kind, not a guess -- takes priority over
 	// selector-hint sniffing.
-	if e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))] == ffiCallTargetSentinel {
+	if e.state.Regs[canonReg(targetText)] == ffiCallTargetSentinel {
 		e.stats.SemanticIndirectCalls++
 		// Emit typed FFI call with argument count for signature inference.
 		// In a full implementation, this would resolve the FFI signature
@@ -218,7 +293,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// this is a native FFI call with N arguments.
 		argCount := countArgs(argsText)
 		e.emit(indent, "final %s = %s%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, FFICallMarker, argsText, argCount)
-		return
+		return true
 	}
 
 	// A second structural signal, same priority as the FFI check above:
@@ -232,7 +307,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// frequent THR-relative ldr+blr pattern found in an FFI-heavy
 	// function, cross-checked against dart-lang/sdk's generated
 	// runtime_offsets_extracted.h (ground truth, not a guess).
-	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
+	if v, ok := e.state.Regs[canonReg(targetText)]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
@@ -241,19 +316,27 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		case asyncRoleInit:
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
-			return
+			return false
 		case asyncRoleAwait:
 			e.fir.IsAsync = true
-			e.emit(indent, "await %s(%s); // await", tmpName, argsText)
-			return
+			if argsText != "" {
+				e.emit(indent, "final %s = await %s;", tmpName, argsText)
+			} else {
+				e.emit(indent, "final %s = await;", tmpName)
+			}
+			return true
 		case asyncRoleReturn:
 			e.fir.IsAsync = true
-			e.emit(indent, "return %s;", tmpName)
-			return
+			if argsText != "" {
+				e.emit(indent, "return %s;", argsText)
+			} else {
+				e.emit(indent, "return %s;", tmpName)
+			}
+			return false
 		}
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s(%s); // Dart AOT runtime stub call (Thread cached entry point)", tmpName, stubName, argsText)
-		return
+		return true
 	}
 
 	// x86_64-specific variant of the same check: unlike ARM64 (BLR always
@@ -271,7 +354,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 			if stubName, ok := e.fir.ThreadStubOffsets[memOp.memDisp]; ok {
 				e.stats.SemanticIndirectCalls++
 				e.emit(indent, "final %s = %s(%s); // Dart AOT runtime stub call (Thread cached entry point)", tmpName, stubName, argsText)
-				return
+				return true
 			}
 		}
 	}
@@ -284,12 +367,12 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		if intent != "" {
 			e.stats.SemanticIndirectCalls++
 			e.emit(indent, "%s(%s); // %s, indirect via: %s", sanitizeCallName(selectorHint), argsText, intent, named)
-			return
+			return false
 		}
 		if selectorHint != "" {
 			if fallback := fallbackCallNameFromSelector(selectorHint); fallback != "" {
 				e.emit(indent, "%s(%s); // indirect via: %s", fallback, argsText, named)
-				return
+				return false
 			}
 		}
 	}
@@ -298,16 +381,17 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	if intent != "" {
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s(%s); // %s, indirect via: %s", tmpName, sanitizeCallName(selectorHint), argsText, intent, named)
-		return
+		return true
 	}
 	if selectorHint != "" {
 		if fallback := fallbackCallNameFromSelector(selectorHint); fallback != "" {
 			e.emit(indent, "final %s = %s(%s); // indirect via: %s", tmpName, fallback, argsText, named)
-			return
+			return true
 		}
 	}
 	e.stats.RawRegisterCalls++
 	e.emit(indent, "final %s = dynamicCall(%s, [%s]);", tmpName, named, argsText)
+	return true
 }
 
 // countArgs counts the number of comma-separated arguments in an args string.

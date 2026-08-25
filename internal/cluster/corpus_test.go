@@ -89,6 +89,13 @@ func eachCorpusSample(t *testing.T, fn func(t *testing.T, s corpusSample)) {
 			if entry.ProfileIncomplete != "" {
 				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
 			}
+			if entry.GroundTruth {
+				// An unstripped twin is the same program as its stripped
+				// counterpart, so its cluster facts are already pinned by that
+				// sample's record. Recording them twice would double the
+				// corpus for no extra coverage. See Sample.GroundTruth.
+				t.Skipf("%s: kembaran ground-truth, fakta cluster-nya sudah dijamin sampel terstripnya", entry.FileName())
+			}
 			info := openSample(t, path)
 			if info.Version == nil || info.Version.DartVersion != entry.DartVersion {
 				got := ""

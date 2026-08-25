@@ -1,5 +1,7 @@
 package disasm
 
+import "strconv"
+
 const regDT = 21 // X21 = dispatch table register
 
 // CallEdge represents a call site extracted from disassembly.
@@ -173,8 +175,20 @@ func popcount8(m uint8) int {
 // Returns base, index register, and destination register.
 func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
 	// Encoding: 11|111|V=0|01|opc=01|1|Rm|option|S|10|Rn|Rt
-	// We match: 0xFFE00C00 == 0xF8600800
-	if raw&0xFFE00C00 != 0xF8600800 {
+	//
+	// option (15:13) and S (12) are part of the match: without them the mask
+	// also accepts the UNSCALED `LDR Xt, [Xn, Xm]`, whose index is not
+	// multiplied by 8, and reading one of those as a dispatch-table load makes
+	// the slot arithmetic wrong by a factor of eight. Measured on the 3.12.2
+	// arm64 .text: 3412 scaled, 280 unscaled, no other extend option at all.
+	// The same tightening and the same measurement are in typetrack's
+	// isLDRRegExtended.
+	//
+	// NOTE the killer in dstRegOfInst above deliberately keeps the LOOSE mask:
+	// every LDR-register-offset writes Rt whether or not it is scaled, so a
+	// tightened mask there would leave those 280 destinations holding stale
+	// types. Detector tight, killer loose.
+	if raw&0xFFE0FC00 != 0xF8607800 {
 		return 0, 0, 0, false
 	}
 	rt = int(raw & 0x1F)
@@ -183,12 +197,80 @@ func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
 	return base, rm, rt, true
 }
 
-// isLDUR64 detects LDUR Xt, [Xn, #imm9] (64-bit unscaled immediate).
-func isLDUR64(raw uint32) (base, rt int, ok bool) {
+// isLDUR64 detects LDUR Xt, [Xn, #imm9] (64-bit unscaled immediate) and
+// returns the signed imm9 alongside the registers.
+//
+// The offset used to be discarded. It is the only thing that distinguishes one
+// object-field call site from another, and without it every such site got the
+// bare provenance "object_field" -- which made the largest bucket of
+// unresolved indirect calls (954 of 1666 on the 3.12.2 arm64 sample, 57%)
+// impossible to break down at all, let alone act on.
+func isLDUR64(raw uint32) (base, rt, off int, ok bool) {
 	if raw&0xFFE00C00 != 0xF8400000 {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	rt = int(raw & 0x1F)
 	base = int((raw >> 5) & 0x1F)
-	return base, rt, true
+	// imm9 is signed, bits 20:12.
+	imm9 := int32(raw>>12) & 0x1FF
+	if imm9&0x100 != 0 {
+		imm9 -= 0x200
+	}
+	return base, rt, int(imm9), true
+}
+
+// ObjectFieldVia is the provenance string for a call target loaded out of an
+// object field, carrying the field's byte offset.
+//
+// The offset is the field's displacement as the instruction encodes it, i.e.
+// still short by kHeapObjectTag -- the same convention every other field
+// offset in this codebase uses before FieldValueClass adds the tag back.
+const ObjectFieldVia = "object_field"
+
+// Code entry-point displacements, as an instruction encodes them (byte offset
+// minus kHeapObjectTag).
+//
+// UntaggedCode opens with two uwords right after the object header:
+//
+//	uword entry_point_;              // offset 8  -> displacement 7
+//	uword monomorphic_entry_point_;  // offset 16 -> displacement 0xf
+//
+// (raw_object.h, identical at 2.12.0 and 3.12.2; the header stays 8 bytes even
+// on compressed-pointer builds, so the offsets do not move.)
+const (
+	codeEntryPointDisp            = 0x7
+	codeMonomorphicEntryPointDisp = 0xf
+)
+
+// IsCodeEntryPointDisp reports whether a load displacement reads one of a Code
+// object's entry points.
+//
+// This matters because such a load is not really an "object field" at all: the
+// entry point OF Code X is X, so a call through it calls X. Wherever the base
+// register's provenance is known, the loaded value inherits it rather than
+// becoming anonymous.
+//
+// Measured on the 3.12.2 arm64 sample: of the 523 indirect calls whose target
+// is loaded at one of these two displacements, 500 (96%) take their base
+// straight out of the object pool -- the shape is
+//
+//	LDR  X30, [X27,#744]   ; PP[91]
+//	LDUR X30, [X30,#7]
+//	BLR  X30
+//
+// and the remaining 23 are two-level pool addressing, which is still the pool.
+// Discarding the base's provenance here is what left those calls unresolved.
+func IsCodeEntryPointDisp(off int) bool {
+	return off == codeEntryPointDisp || off == codeMonomorphicEntryPointDisp
+}
+
+// ObjectFieldViaAt formats the provenance for an object-field load at off.
+func ObjectFieldViaAt(off int) string {
+	if off == 0 {
+		return ObjectFieldVia
+	}
+	if off < 0 {
+		return ObjectFieldVia + "-0x" + strconv.FormatInt(int64(-off), 16)
+	}
+	return ObjectFieldVia + "+0x" + strconv.FormatInt(int64(off), 16)
 }

@@ -186,6 +186,10 @@ func writeParitySummary(path string, rows []parityRow) error {
 		if r.DartVersion != "" {
 			versionCounts[r.DartVersion]++
 		}
+		// Only count totals for OK samples — the header says "OK samples only".
+		if r.Status != "OK" {
+			continue
+		}
 		totalStrings += r.Strings
 		totalNamed += r.Named
 		totalCodes += r.Codes

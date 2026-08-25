@@ -6,6 +6,7 @@
 package fingerprint
 
 import (
+	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"encoding/hex"
@@ -156,7 +157,7 @@ func parseBuildIDNotes(data []byte, bo binary.ByteOrder) string {
 		if namesz > 0 {
 			// namesz includes the trailing NUL.
 			raw := data[off:nameEnd]
-			if i := indexByte(raw, 0); i >= 0 {
+			if i := bytes.IndexByte(raw, 0); i >= 0 {
 				name = string(raw[:i])
 			} else {
 				name = string(raw)
@@ -176,15 +177,6 @@ func parseBuildIDNotes(data []byte, bo binary.ByteOrder) string {
 		}
 	}
 	return ""
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }
 
 func align4(n int) int {

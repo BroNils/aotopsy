@@ -13,7 +13,7 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 	case "movzx":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 		}
 		return "", false, true
 	case "movsxd":
@@ -21,13 +21,13 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 		// to preserve sign-extension semantics in the pseudocode.
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(int64)(%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(int64)(%s)", operandExpr(fir, s, ops[1])))
 		}
 		return "", false, true
 	case "movsx":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(int)(%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(int)(%s)", operandExpr(fir, s, ops[1])))
 		}
 		return "", false, true
 	case "push":
@@ -38,7 +38,7 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 	case "pop":
 		if len(ops) >= 1 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = "/* pop */"
+			s.setReg(dst, "/* pop */")
 		}
 		return "", false, true
 	}

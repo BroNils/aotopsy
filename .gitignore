@@ -26,6 +26,8 @@ docs/
 __pycache__/
 *.pyc
 docs_internal/
+HANDOFF_REPORT.md
+GEMINI.md
 
 # Compiled Go binaries (root-level)
 /codealign

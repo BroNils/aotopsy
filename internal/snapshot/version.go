@@ -212,6 +212,49 @@ type VersionProfile struct {
 	// (`&slow_tts_stub_`) inclusive; see cmd/aotopsy's own
 	// dispatch-table plumbing for how this is consumed.
 	ObjectStoreAOTFieldCount int
+
+	// RootsPrefixRefCount is how many plain refs the roots section carries
+	// BEFORE the ObjectStore fields.
+	//
+	// It was 0 through 3.12.2. Dart 3.13.0 moved the VM's bootstrap objects
+	// out of `vm_isolate_snapshot_object_table` and into a `Roots` struct,
+	// and ProgramDeserializationRoots::ReadRoots now opens with, under
+	// `Snapshot::IncludesCode(kind)` -- true for kFullAOT:
+	//
+	//	for (ptr = roots->from();   ptr <= roots->to();   ptr++)   *ptr = d->ReadRef();
+	//	for (h   = roots->fromh();  h   <= roots->toh();  h++)     h->ptr = d->ReadRef();
+	//	for (ptr = roots->fromah(); ptr <= roots->toah(); ptr++)   *ptr = d->ReadRef();
+	//	for (cid = kObjectCid;   cid < kInstanceCid;       cid++) { if (IsAbsentCid(cid)) continue; ... ReadRef(); }
+	//	for (cid = kInstanceCid; cid < kNumPredefinedCids; cid++) { if (IsAbsentCid(cid)) continue; ... ReadRef(); }
+	//
+	// (app_snapshot.cc @3.13.0; the serializer writes the same five loops in
+	// the same order.) Skipping them desynchronises the stream before the
+	// ObjectStore fields are even reached: on the 3.13.0 arm64 sample
+	// initial_field_table read back as 6936 entries against 552 on 3.12.2,
+	// and the dispatch table came out with 31 entries instead of ~29600 --
+	// which left 80 % of BLR sites unresolved, the worst in the corpus.
+	//
+	// The count is a per-version SDK fact, exactly like
+	// ObjectStoreAOTFieldCount, because every term in it can move:
+	//
+	//	sizeof(Raw)/sizeof(ObjectPtr)       = |RAW_ROOTS_LIST| + 35 + 4 + 256
+	//	sizeof(Internal)/sizeof(VMHandle)   = |HANDLE_ROOTS_LIST|
+	//	                                      + (kNumPredefinedSymbols + 256)
+	//	                                      + kNumStubEntries
+	//	sizeof(Api)/sizeof(ObjectPtr)       = |API_HANDLE_ROOTS_LIST|
+	//	class table                         = (kNumPredefinedCids - kObjectCid)
+	//	                                      - |IsAbsentCid|
+	//
+	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h):
+	// 7+35+4+256 = 302, 63+(557+256)+173 = 1049, 6, and (176-4)-11 = 161,
+	// so 1518. Note kNumStubEntries is 173 and not 164: VM_STUB_CODE_LIST
+	// pulls in PROBE_POINT_STUBS_LIST (defined on ONE line, which a
+	// line-oriented regex misses) and VM_TYPE_TESTING_STUB_CODE_LIST.
+	//
+	// 1518 was also confirmed independently against the binary: it is the
+	// only prefix in [0,3000] for which the whole roots structure replays to
+	// exactly IsolateHeader.TotalSize.
+	RootsPrefixRefCount int
 }
 
 // CIDTable maps predefined type names to class IDs for a specific Dart version.
@@ -364,17 +407,26 @@ var knownHashes = map[string]string{
 	"1ce86630892e2dca9a8543fdb8ed8e22": "3.10.7", // Flutter 3.38.4
 	// Dart 3.11.x (Flutter 3.41.x)
 	"78da37fed6bf1489361a312568249f3f": "3.11.0", // Flutter 3.41.1
-	// Dart unstable (main branch, snapshot as of 2026-02-20) -- a
-	// DIFFERENT, pre-release hash than the real stable 3.12.2 entry
-	// immediately below; not verified against a real compiled sample.
-	"bf2a89a0870c9457c268c1bc89403fe1": "3.12.0-dev", // dart-lang/sdk main
-	// Dart 3.12.x (Flutter 3.44.x) -- real stable release, verified
-	// end-to-end (cluster parse + decompile-native name resolution) against
-	// a real compiled sample built with Flutter 3.44.7/Dart 3.12.2. The
-	// stable-release hash differs from the "3.12.0-dev" pre-release
-	// snapshot above (real, source-verified format changes landed between
-	// them -- see ARCHITECTURE.md's Dart 3.10-3.12 section).
-	"ace654289f5abc240509fc941453ebc5": "3.12.2", // Flutter 3.44.7
+	// The 3.12 line ships THREE distinct snapshot hashes, all one format.
+	//
+	// There used to be a separate "3.12.0-dev" profile for the first of them,
+	// carrying the note "not verified against a real compiled sample" and a
+	// claim that "real, source-verified format changes landed between" it and
+	// 3.12.2. Both halves were wrong, and the profile was byte-for-byte
+	// identical to 3.12.2 in every field, so it only ever duplicated it.
+	//
+	// Settled by building Dart 3.12.0 stable (Flutter 3.44.0) here: its
+	// snapshot parses end to end under the 3.12.2 profile -- 29576 dispatch
+	// entries, 8368 functions, 1925 classes, ground-truth symbols resolving --
+	// on both architectures. A pre-release from the same line has no reason to
+	// differ from the stable it became, and nothing measurable says it does.
+	//
+	// All three now map to one profile. The unknown-hash fallback is what made
+	// this worth chasing: it hands back a 3.9.2-shaped placeholder, under which
+	// 3.12.0 died in the String cluster rather than being reported unsupported.
+	"bf2a89a0870c9457c268c1bc89403fe1": "3.12.2", // dart-lang/sdk main (pre-release)
+	"41be3daaabd524b8aa7423bc24584957": "3.12.2", // Flutter 3.44.0 (Dart 3.12.0)
+	"ace654289f5abc240509fc941453ebc5": "3.12.2", // Flutter 3.44.7 (Dart 3.12.2)
 
 	// Dart 3.13.0 -- the unified-snapshot format. Taken from a libapp.so built
 	// locally with Flutter 3.47.0 stable (whose dart_sdk_version is 3.13.0 per
@@ -922,27 +974,26 @@ var versionProfiles = map[string]*VersionProfile{
 	// after compressed_stackmaps like v2.13. Verified against dart-lang/sdk
 	// runtime/vm/clustered_snapshot.cc CodeDeserializationCluster::ReadFill at the
 	// 2.12.0 tag (no Code::IsDiscarded concept either — that's 2.13+/PRECOMPILED_RUNTIME).
-	"2.12.0":     {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
-	"2.13.0":     {DartVersion: "2.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV213, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAfterRef: 1, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191},                                                          // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.13.0)
-	"2.14.0":     {DartVersion: "2.14.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV214, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 202},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 202 fields (object_store.h @2.14.0)
-	"2.15.0":     {DartVersion: "2.15.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV215, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 182},                                                                                                                                                                                                                                                        // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 182 fields (object_store.h @2.15.0)
-	"2.16.0":     {DartVersion: "2.16.0", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV216, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 184},
-	"2.17.6":     {DartVersion: "2.17.6", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV217, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 194},
-	"2.18.0":     {DartVersion: "2.18.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV218, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 212},
-	"2.19.0":     {DartVersion: "2.19.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV219, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 224},
-	"3.0.5":      {DartVersion: "3.0.5", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV305, PreV32Format: true, HasTypeParamClassId: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 232},
-	"3.1.0":      {DartVersion: "3.1.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, PreV32Format: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},    // ObjectStoreAOTFieldCount: source-verified only (no real-binary test)
-	"3.2.5":      {DartVersion: "3.2.5", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, OldPoolFormat: true, PoolTypeSwapped: true, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 232, CodeIndexOneBased: true}, // ObjectStoreAOTFieldCount: source-verified only
-	"3.3.0":      {DartVersion: "3.3.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                             // ObjectStoreAOTFieldCount: source-verified only
-	"3.4.3":      {DartVersion: "3.4.3", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV343, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 232, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
-	"3.5.0":      {DartVersion: "3.5.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV343, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 229, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
-	"3.6.2":      {DartVersion: "3.6.2", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
-	"3.7.0":      {DartVersion: "3.7.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: real-binary verified
-	"3.8.1":      {DartVersion: "3.8.1", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
-	"3.9.2":      {DartVersion: "3.9.2", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 235, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: real-binary verified
-	"3.10.7":     {DartVersion: "3.10.7", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 241, CodeIndexOneBased: true},                                         // ObjectStoreAOTFieldCount: real-binary verified (3.10.7 arm64+x64, zero unresolved)
-	"3.11.0":     {DartVersion: "3.11.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 242, CodeIndexOneBased: true},                                         // ObjectStoreAOTFieldCount: real-binary verified (3.11.0 arm64+x64, zero unresolved)
-	"3.12.0-dev": {DartVersion: "3.12.0-dev", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 244, CodeIndexOneBased: true},
+	"2.12.0": {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
+	"2.13.0": {DartVersion: "2.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV213, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAfterRef: 1, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191},                                                          // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.13.0)
+	"2.14.0": {DartVersion: "2.14.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV214, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 202},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 202 fields (object_store.h @2.14.0)
+	"2.15.0": {DartVersion: "2.15.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV215, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 182},                                                                                                                                                                                                                                                        // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 182 fields (object_store.h @2.15.0)
+	"2.16.0": {DartVersion: "2.16.0", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV216, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 184},
+	"2.17.6": {DartVersion: "2.17.6", Supported: true, HeaderFields: 6, Tags: TagStyleCidShift1, CIDs: &cidsV217, FillRefUnsigned: true, CodeIndexOneBased: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 194},
+	"2.18.0": {DartVersion: "2.18.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV218, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 212},
+	"2.19.0": {DartVersion: "2.19.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV219, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 224},
+	"3.0.5":  {DartVersion: "3.0.5", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV305, PreV32Format: true, HasTypeParamClassId: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 3, CodeIndexOneBased: true, ObjectStoreAOTFieldCount: 232},
+	"3.1.0":  {DartVersion: "3.1.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, PreV32Format: true, OldPoolFormat: true, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},    // ObjectStoreAOTFieldCount: source-verified only (no real-binary test)
+	"3.2.5":  {DartVersion: "3.2.5", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, OldPoolFormat: true, PoolTypeSwapped: true, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 232, CodeIndexOneBased: true}, // ObjectStoreAOTFieldCount: source-verified only
+	"3.3.0":  {DartVersion: "3.3.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV325, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                             // ObjectStoreAOTFieldCount: source-verified only
+	"3.4.3":  {DartVersion: "3.4.3", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV343, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 232, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
+	"3.5.0":  {DartVersion: "3.5.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV343, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 229, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
+	"3.6.2":  {DartVersion: "3.6.2", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
+	"3.7.0":  {DartVersion: "3.7.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: real-binary verified
+	"3.8.1":  {DartVersion: "3.8.1", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV362, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 233, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: source-verified only
+	"3.9.2":  {DartVersion: "3.9.2", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 235, CodeIndexOneBased: true},                                          // ObjectStoreAOTFieldCount: real-binary verified
+	"3.10.7": {DartVersion: "3.10.7", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 241, CodeIndexOneBased: true},                                         // ObjectStoreAOTFieldCount: real-binary verified (3.10.7 arm64+x64, zero unresolved)
+	"3.11.0": {DartVersion: "3.11.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV392, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 242, CodeIndexOneBased: true},                                         // ObjectStoreAOTFieldCount: real-binary verified (3.11.0 arm64+x64, zero unresolved)
 	// 3.12.2: verified end-to-end against a real compiled sample (Flutter
 	// 3.44.7) -- same CID table as 3.9.2 despite class_id.h's macro-based
 	// refactor at this version (CLASS_LIST/CLASS_LIST_FFI/
@@ -961,7 +1012,7 @@ var versionProfiles = map[string]*VersionProfile{
 	// TypeIsTopTypeForSubtyping* renamed. CID table, stub names, THR
 	// offsets, and function kind layout all verified via gh api to
 	// dart-lang/sdk at tag 3.13.0.
-	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
+	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, RootsPrefixRefCount: 1518, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
 }
 
 // DetectVersion returns a VersionProfile for the given snapshot hash.

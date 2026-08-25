@@ -50,10 +50,9 @@ func cmdInventory(args []string) error {
 		row := InventoryRow{
 			SampleID: strings.TrimSuffix(e.Name(), ".zip"),
 			APKPath:  path,
-			ABI:      "arm64-v8a",
 		}
 
-		libapp, err := inventoryExtractLibapp(path)
+		libapp, abi, err := inventoryExtractLibapp(path)
 		if err != nil {
 			row.DeclaredLibapp = false
 			row.Error = err.Error()
@@ -61,6 +60,7 @@ func cmdInventory(args []string) error {
 			continue
 		}
 		row.DeclaredLibapp = true
+		row.ABI = abi
 
 		hash, dartVer, features, err := inventoryScanLibapp(libapp)
 		_ = os.Remove(libapp)
@@ -143,18 +143,22 @@ func cmdInventory(args []string) error {
 	return nil
 }
 
-// inventoryExtractLibapp finds and extracts lib/arm64-v8a/libapp.so from a zip.
-func inventoryExtractLibapp(zipPath string) (string, error) {
+// inventoryExtractLibapp finds and extracts libapp.so from a zip.
+// Tries arm64-v8a first, then x86_64. Returns (path, abi, error).
+func inventoryExtractLibapp(zipPath string) (string, string, error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return "", fmt.Errorf("open zip: %w", err)
+		return "", "", fmt.Errorf("open zip: %w", err)
 	}
 	defer func() { _ = zr.Close() }()
 
-	// Direct libapp.so.
-	for _, f := range zr.File {
-		if f.Name == "lib/arm64-v8a/libapp.so" {
-			return inventoryExtractFile(f)
+	// Direct libapp.so — try both ABIs.
+	for _, abi := range []string{"arm64-v8a", "x86_64"} {
+		for _, f := range zr.File {
+			if f.Name == "lib/"+abi+"/libapp.so" {
+				path, err := inventoryExtractFile(f)
+				return path, abi, err
+			}
 		}
 	}
 
@@ -182,10 +186,16 @@ func inventoryExtractLibapp(zipPath string) (string, error) {
 			continue
 		}
 
-		var found string
-		for _, inf := range inner.File {
-			if inf.Name == "lib/arm64-v8a/libapp.so" {
-				found, err = inventoryExtractFile(inf)
+		var found, foundABI string
+		for _, abi := range []string{"arm64-v8a", "x86_64"} {
+			for _, inf := range inner.File {
+				if inf.Name == "lib/"+abi+"/libapp.so" {
+					found, err = inventoryExtractFile(inf)
+					foundABI = abi
+					break
+				}
+			}
+			if found != "" {
 				break
 			}
 		}
@@ -193,11 +203,11 @@ func inventoryExtractLibapp(zipPath string) (string, error) {
 		_ = os.Remove(tmp.Name())
 
 		if found != "" {
-			return found, err
+			return found, foundABI, err
 		}
 	}
 
-	return "", fmt.Errorf("no lib/arm64-v8a/libapp.so found")
+	return "", "", fmt.Errorf("no libapp.so found (tried arm64-v8a and x86_64)")
 }
 
 func inventoryExtractFile(f *zip.File) (string, error) {

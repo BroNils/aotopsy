@@ -93,7 +93,10 @@ func TestFeatureNonVMTagThreadStoreIsNotFFI(t *testing.T) {
 // FieldNameResolver with the receiver's class ID.
 func TestFeatureFieldNamesResolve(t *testing.T) {
 	fir := featureFuncIR("field_reader", []Instr{
-		{Addr: 0x1000, Op: OpOther, Src: "ldr x2, [x0, #0x10]"},
+		// Access disp is the TAGGED-pointer offset (field byte offset 0x10
+		// minus kHeapObjectTag=1 = 0xf); the resolver is keyed by the real
+		// field offset 0x10.
+		{Addr: 0x1000, Op: OpOther, Src: "ldr x2, [x0, #0xf]"},
 		// The load lands in x2, which nothing reads; move it into the
 		// return register so the expression actually reaches the output.
 		{Addr: 0x1004, Op: OpOther, Src: "mov x0, x2"},

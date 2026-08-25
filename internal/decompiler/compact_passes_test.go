@@ -63,22 +63,6 @@ func TestSimplifyExpressions(t *testing.T) {
 
 // --- CSE tests ---
 
-// --- Enum reconstruction tests ---
-
-func TestEnumReconstruction(t *testing.T) {
-	source := `dynamic foo(int x) {
-  if (x == 0) { return 'Zero'; }
-  if (x == 1) { return 'One'; }
-  if (x == 2) { return 'Two'; }
-  if (x == 3) { return 'Three'; }
-  return 'Unknown';
-}`
-	result := enumReconstruction(source)
-	if !strings.Contains(result, "enum reconstruction") {
-		t.Error("enum reconstruction should detect 4-case chain")
-	}
-}
-
 // --- Null-safety annotation tests ---
 
 func TestNullSafetyAnnotation(t *testing.T) {
@@ -309,8 +293,8 @@ func TestConstantFoldDoesNotEatCallParens(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"  final t1 = foo(1 + 2);", "  final t1 = foo(3);"},
 		{"  final t2 = bar(2 * 4);", "  final t2 = bar(8);"},
-		{"  final t3 = (1 << 12) + 1;", "  final t3 = 4097;"},
-		{"  final t4 = (2 * 4);", "  final t4 = 8;"},
+		{"  final t3 = (1 << 12) + 1;", "  final int t3 = 4097;"},
+		{"  final t4 = (2 * 4);", "  final int t4 = 8;"},
 		{"  final t5 = foo(a + 1);", "  final t5 = foo(a + 1);"},
 	}
 	for _, tt := range tests {

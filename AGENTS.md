@@ -358,12 +358,17 @@ explicitly in the tool, not silently tolerated.
 
 ## Source of Truth: SDK Verification
 
-Two techniques for verifying against Dart SDK source:
+Two-step technique for verifying against Dart SDK source:
 
-1. **gh search + gh api**: `gh search code "pattern" --repo dart-lang/sdk` to find files, then `gh api -H "Accept: application/vnd.github.raw" "repos/dart-lang/sdk/contents/path?ref=VERSION"` to read at specific version tag.
-2. **websearch + gh api**: `web_search` for context/concept, then `gh api` for ground truth verification.
+1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`).
+   - Use `repo: "dart-lang/sdk"`.
+   - Pass literal code/symbol in `query` (e.g. `"CheckStackOverflowInstr"`, `"NULL_REG"`).
+   - ⚠️ **NEVER** put `repo:...` or `path:...` inside `query` — `query` matches literal text in files.
+   - Use `path` parameter (e.g. `"runtime/vm"`) to narrow results.
+2. **`gh api` @ version tag**: Once the path is found, fetch exact uncompressed source lines:
+   `gh api -H "Accept: application/vnd.github.raw" "repos/dart-lang/sdk/contents/<path>?ref=<tag>"`
 
-Both are necessary: websearch gives context, gh api gives ground truth. Never rely on just one.
+Both are necessary: Grep MCP finds the file/line fast, `gh api` gives versioned ground truth. Never rely on training memory.
 
 ### Critical lessons learned
 

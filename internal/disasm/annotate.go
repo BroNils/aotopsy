@@ -218,8 +218,6 @@ func thrAnnotationLabel(byteOff int, isStore bool, width int, cls THRClass) stri
 // the ADD destination register is overwritten between ADD and LDR.
 type PeepholeState struct {
 	pool       map[int]string
-	prevRaw    uint32
-	prevValid  bool
 	addDestReg int  // destination register from ADD (for liveness tracking)
 	addImm     int  // immediate from ADD (for combined offset)
 	addValid   bool // true if prev was ADD Xd, X27, #imm
@@ -232,7 +230,6 @@ func NewPeepholeState(pool map[int]string) *PeepholeState {
 
 // Reset clears the peephole state. Call between functions.
 func (p *PeepholeState) Reset() {
-	p.prevValid = false
 	p.addValid = false
 	p.addDestReg = -1
 }
@@ -277,9 +274,6 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 		p.addImm = addImm
 		p.addValid = true
 	}
-
-	p.prevRaw = inst.Raw
-	p.prevValid = true
 
 	return result
 }

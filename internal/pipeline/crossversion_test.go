@@ -30,10 +30,17 @@ import (
 //
 // The distinction that makes it usable:
 //
-//   - a metric that is ZERO on one sibling and substantial on another means a
-//     stage produced nothing at all. That is unambiguous and fails.
-//   - a metric that merely DIFFERS is expected -- Dart changes what it emits
-//     between releases -- so ratios are reported, not enforced.
+//   - a metric that DIPS against the versions either side of it, on the same
+//     architecture -- under a fifth of their median -- means a stage mostly
+//     produced nothing there. That fails. Zero is the extreme case of a dip,
+//     not a separate rule.
+//   - a metric that merely DIFFERS, or that STEPS from one Dart era to the
+//     next, is expected -- Dart changes what it emits between releases -- so
+//     ratios are reported, not enforced.
+//
+// The rule was "exactly zero" until 36 columns made its blind spot obvious:
+// blr_monomorphic on 2.16.0/x64 read 15 against same-arch neighbours of 287,
+// 294, 133 and 127, and the gate said nothing because 15 is not 0.
 //
 // Running it needs the samples, which are gitignored:
 //
@@ -53,13 +60,59 @@ type knownGap struct {
 	reason   string
 }
 
+// arityGapReason is shared by every metric that depends on knowing a
+// function's parameter count, because they all fail for the same measured
+// reason.
+//
+// Before 3.4.3 there is no register calling convention: the receiver arrives
+// on the caller's stack at FP + (1 + num_fixed_parameters) * 8, so seeding
+// `this` -- and therefore every declared/instance/stored field type reached
+// through it -- needs num_fixed_parameters. The SDK removed that number from
+// the Function object in two steps:
+//
+//	2.12.0  UntaggedFunction.packed_fields_ is uint32_t and carries the counts
+//	2.13.0  same layout (verified identical in raw_object.h), but the compiler
+//	        has begun moving arity onto the new FunctionType
+//	2.14.0  packed_fields_ becomes AtomicBitFieldContainer<uint8_t> and carries
+//	        no counts at all; arity lives only on FunctionType
+//
+// and FunctionType is reached through WSR_COMPRESSED_POINTER_FIELD(signature),
+// a WeakSerializationReference. app_snapshot.cc is explicit that "No WSRs are
+// serialized": when the target is not otherwise reachable it is replaced,
+// which deserialises as null. Measured on these samples -- the count of
+// Functions whose packed_fields_ still yields an arity, and the share of
+// named Codes that end up with FixedParamsWithReceiver:
+//
+//	2.12.0   7202 of 7573   84%
+//	2.13.0   4169 of 7645   51%
+//	2.14.0      0 of 7455   14%   (the 14% come from surviving signatures)
+//	3.3.0       0 of 7518   12%
+//
+// On 3.4.3 and later the receiver is in a register and none of this is needed,
+// which is exactly where the metrics jump back: field_type_declared_hits goes
+// 1782 (3.3.0) -> 13465 (3.4.3) on arm64.
+//
+// So this is a real AOT limitation, not a parser bug, and it is recorded here
+// rather than fixed. What it would take to close is recovering the receiver
+// slot from the CODE instead of the snapshot -- see docs/ROADMAP.md; that is
+// a heuristic and has not been attempted, so nothing here claims it works.
+const arityGapReason = "num_fixed_parameters is absent from the snapshot: " +
+	"packed_fields_ stopped carrying it at 2.14 and FunctionType reaches it " +
+	"through a WeakSerializationReference the AOT serializer drops. " +
+	"Only the versions from 3.4.3 on, which pass the receiver in a register, " +
+	"are unaffected. Measured: 84% arity coverage at 2.12, 51% at 2.13, " +
+	"12-14% from 2.14 on."
+
 var knownGaps = []knownGap{
-	// Empty. Every entry that has stood here was a real defect and was fixed
-	// rather than tolerated: the roots-section layout, Type capture on two
-	// eras, the type_class_id shift, four missing stub and Thread tables, the
-	// receiver-on-stack seed, the Function.signature ref index, and the 16-bit
-	// class-id load on x86_64. The mechanism stays because the next
-	// measurement will need it.
+	// The differential's neighbour rule flags the LAST version before 3.4.3
+	// because its window straddles that boundary; 3.2.5 and earlier sit in a
+	// low band whose neighbours are equally low, so only 3.3.0 and the
+	// partially-affected 2.13.0 surface. All of them are the same measured
+	// limitation.
+	{metric: "field_accessor_xref", versions: []string{"3.3.0/arm64", "3.3.0/x64"}, reason: arityGapReason},
+	{metric: "field_type_declared_hits", versions: []string{"3.3.0/x64", "2.13.0/x64"}, reason: arityGapReason},
+	{metric: "field_type_instance_hits", versions: []string{"3.3.0/x64"}, reason: arityGapReason},
+	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/x64"}, reason: arityGapReason},
 }
 
 func gapAllows(metric, version string) (string, bool) {
@@ -98,6 +151,36 @@ type crossVersionMetric struct {
 	// rescue: 335 monomorphic + 0 stub. On 2.12.0, 991 + 14. Reading that 0 as
 	// a dead stage inverts its meaning.
 	fallback bool
+	// confidence marks a counter that goes UP when the resolver guesses and
+	// DOWN when it is honest. Such a counter is still checked for ZERO -- that
+	// really is a dead stage -- but never for a mere collapse, because a
+	// collapse there can be an improvement.
+	//
+	// blr_monomorphic is the case that forced this, and it forced it twice.
+	// §2 of docs/ROADMAP.md records the first: on 3.12.2 arm64 the old
+	// resolver claimed 2271 monomorphic sites whose true candidate count is a
+	// median of 208 and never 1. The second is 2.16.0/x64, which the collapse
+	// rule accused the moment it was added -- 15 against same-arch neighbours
+	// of 287, 294, 133, 127. Measured, it is not a defect at all:
+	//
+	//	          total   mono   poly   stub   unres   resolved
+	//	2.15.0    11467    294   2915   7100    1158     89.9%
+	//	2.16.0    11256     15   3156   7097     988     91.2%
+	//	2.17.6    11379    133   3304   6976     966     91.5%
+	//
+	// The 279 "missing" monomorphic sites went to polymorphic (+241) and
+	// unresolved fell by 170. 2.16.0 resolves MORE than 2.15.0 overall. Its
+	// dispatch table parses (20744 entries), its arm64 sibling is healthy
+	// (857 monomorphic), the instruction shapes at dispatch sites are
+	// identical across all three versions (3564/3566/3779 sites, same
+	// base-register distribution), and every type source feeding it is
+	// comparable. There was nothing to fix.
+	//
+	// dispatch_hits carries the flag for the same reason: it counts direct
+	// slot resolutions, so it falls when slots legitimately resolve to a
+	// scan instead. It stays zero-checked because zero there WAS a real bug
+	// -- 0 on x64 for 2.13-2.18 until the 16-bit class-id load was fixed.
+	confidence bool
 }
 
 // sampleMetrics holds one sample's measured facts.
@@ -150,11 +233,11 @@ var crossVersionMetrics = []crossVersionMetric{
 	{name: "pool_immediates", get: func(m *sampleMetrics) int { return m.line("pool_immediates.jsonl") }, deadFloor: 20},
 
 	{name: "blr_total", get: func(m *sampleMetrics) int { return m.reportInt("blr", "total") }, deadFloor: 100},
-	{name: "blr_monomorphic", get: func(m *sampleMetrics) int { return m.reportInt("blr", "monomorphic") }, deadFloor: 50},
+	{name: "blr_monomorphic", get: func(m *sampleMetrics) int { return m.reportInt("blr", "monomorphic") }, deadFloor: 50, confidence: true},
 	{name: "blr_stub", get: func(m *sampleMetrics) int { return m.reportInt("blr", "stub") }, deadFloor: 5, fallback: true},
 	{name: "pool_hits", get: func(m *sampleMetrics) int { return m.reportInt("pool_hits") }, deadFloor: 1000},
 	{name: "header_hits", get: func(m *sampleMetrics) int { return m.reportInt("header_hits") }, deadFloor: 100},
-	{name: "dispatch_hits", get: func(m *sampleMetrics) int { return m.reportInt("dispatch_hits") }, deadFloor: 50},
+	{name: "dispatch_hits", get: func(m *sampleMetrics) int { return m.reportInt("dispatch_hits") }, deadFloor: 50, confidence: true},
 	{name: "field_type_declared_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_declared_hits") }, deadFloor: 100},
 	{name: "field_type_instance_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_instance_hits") }, deadFloor: 100},
 	{name: "field_type_store_hits", get: func(m *sampleMetrics) int { return m.reportInt("field_type_store_hits") }, deadFloor: 100},
@@ -268,37 +351,12 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 	}
 	b.WriteString("\n")
 
-	type deadStage struct {
-		metric string
-		zeroAt []string
-		best   int
-		bestAt string
-	}
-	var dead []deadStage
+	var collapses []metricCollapse
 
 	for _, met := range crossVersionMetrics {
 		vals := make([]int, len(ms))
-		// The comparison is PER ARCHITECTURE, and the table is not.
-		//
-		// Several counters differ by one to three orders of magnitude between
-		// arm64 and x86_64 by design, not by defect -- blr_stub runs in the
-		// thousands on x64 and in the tens on arm64, because the x64 compiler
-		// reaches stubs through a call the ARM64 one inlines. Ranking a metric
-		// against the best column of EITHER architecture made every such
-		// counter look like a dead stage on arm64: it reported blr_stub as
-		// "0 on 2.10.0/arm64 but 7076 on 2.12.0" while the 2.12.0 arm64 column
-		// -- the only comparable one -- read 14.
-		//
-		// AGENTS.md already records this trap ("Cross-architecture counters are
-		// not necessarily comparable", with add_class_hits 58x lower on x86_64
-		// by design). The gate has to honour it or it manufactures work.
-		bestByArch := make(map[string]int, 2)
-		bestAtByArch := make(map[string]string, 2)
 		for i, m := range ms {
 			vals[i] = met.get(m)
-			if b, ok := bestByArch[m.arch]; !ok || vals[i] > b {
-				bestByArch[m.arch], bestAtByArch[m.arch] = vals[i], m.version
-			}
 		}
 		fmt.Fprintf(&b, "  %-28s", met.name)
 		for _, v := range vals {
@@ -313,33 +371,27 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 		if met.fallback {
 			continue
 		}
-		// One dead-stage report per architecture, each judged only against
-		// columns of that same architecture.
+		// Judge PER ARCHITECTURE. Several counters differ by one to three
+		// orders of magnitude between arm64 and x86_64 by design, not by
+		// defect -- blr_stub runs in the thousands on x64 and in the tens on
+		// arm64 because the x64 compiler reaches stubs through a call the
+		// ARM64 one inlines. Ranking against the best column of EITHER
+		// architecture made every such counter look dead on arm64.
+		// AGENTS.md records this trap; the gate has to honour it or it
+		// manufactures work.
 		for _, arch := range archesOf(ms) {
-			best := bestByArch[arch]
-			if best < met.deadFloor {
-				continue // too small on this arch to call a zero meaningful
-			}
-			var zeroAt []string
-			for i, v := range vals {
-				if v == 0 && ms[i].arch == arch {
-					zeroAt = append(zeroAt, ms[i].version+"/"+ms[i].arch)
-				}
-			}
-			if len(zeroAt) > 0 {
-				dead = append(dead, deadStage{met.name, zeroAt, best, bestAtByArch[arch] + "/" + arch})
-			}
+			collapses = append(collapses, collapsesIn(met.name, arch, met.deadFloor, met.confidence, ms, vals)...)
 		}
 	}
 	t.Log(b.String())
 
-	for _, d := range dead {
+	for _, c := range collapses {
 		// A gap every listed version shares is a documented debt; one that
 		// shows up somewhere else is new and fails.
 		allowed := true
 		var reason string
-		for _, v := range d.zeroAt {
-			r, ok := gapAllows(d.metric, v)
+		for _, v := range c.at {
+			r, ok := gapAllows(c.metric, v)
 			if !ok {
 				allowed = false
 				break
@@ -347,18 +399,132 @@ func reportCrossVersion(t *testing.T, ms []*sampleMetrics) {
 			reason = r
 		}
 		if allowed {
-			t.Logf("KNOWN GAP: %s is 0 on Dart %s (best sibling: %d on %s).\n  %s",
-				d.metric, strings.Join(d.zeroAt, ", "), d.best, d.bestAt, reason)
+			t.Logf("KNOWN GAP: %s collapses on Dart %s (%s; %s median %d).\n  %s",
+				c.metric, strings.Join(c.at, ", "), c.valueList(), c.arch, c.median, reason)
 			continue
 		}
-		t.Errorf("%s is 0 on Dart %s but %d on Dart %s, from the SAME source.\n"+
-			"  A metric that is zero on one sibling and substantial on another is a\n"+
-			"  stage that produced nothing, not a difference between Dart releases.\n"+
+		t.Errorf("%s collapses on Dart %s: %s, against a %s median of %d from the SAME source.\n"+
+			"  A metric far below its same-architecture siblings is a stage that\n"+
+			"  mostly produced nothing, not a difference between Dart releases --\n"+
+			"  and zero is only the extreme case of that.\n"+
 			"  Verify against dart-lang/sdk at both versions before changing anything:\n"+
 			"  the fix is usually a version boundary that the code puts in the wrong\n"+
 			"  place, not the feature being genuinely absent.",
-			d.metric, strings.Join(d.zeroAt, ", "), d.best, d.bestAt)
+			c.metric, strings.Join(c.at, ", "), c.valueList(), c.arch, c.median)
 	}
+}
+
+// metricCollapse is one metric that fell far below its same-architecture
+// siblings on one or more samples.
+type metricCollapse struct {
+	metric string
+	arch   string
+	at     []string // "<version>/<arch>" of each collapsed sample
+	vals   []int    // their values, parallel to at
+	median int      // the same-arch median they are judged against
+}
+
+func (c metricCollapse) valueList() string {
+	parts := make([]string, len(c.vals))
+	for i, v := range c.vals {
+		parts[i] = fmt.Sprintf("%s=%d", c.at[i], v)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// collapseRatio is how far below its neighbours a value must fall to be
+// accused: v*collapseRatio < neighbourMedian, i.e. under 20%.
+//
+// The gate used to accuse ONLY exact zeros. That let a real defect through in
+// plain sight: with 36 columns, blr_monomorphic on 2.16.0/x64 read 15 while
+// its same-architecture neighbours read 287, 294, 133 and 127 -- a ~20x drop
+// the gate had no opinion about, because 15 is not 0. Zero is not the only
+// shape a dead stage takes; it is just the shape that is easy to test for.
+const collapseRatio = 5
+
+// collapseNeighbours is how many same-arch siblings on each side form the
+// yardstick.
+//
+// The yardstick is NEIGHBOURING versions, not the whole row, and that
+// distinction is the difference between a usable gate and a noisy one.
+// Measured: judging against the whole same-arch median produced five
+// accusations, and three were era-shaped rather than defect-shaped --
+// pool_immediates sits at 15 on x64 for 2.14, 2.15 AND 2.16 while 3.x sits
+// near 123, and field_type_store_hits steps down across six consecutive arm64
+// versions. Those are Dart changing what it emits, which this harness
+// explicitly does not enforce. A row median dominated by a different era
+// accuses every version of the smaller era at once.
+//
+// A mis-placed version boundary -- the defect this gate exists to find --
+// looks nothing like that. It is a LOCAL dip: one version far below the
+// versions either side of it, which is exactly what 2.16.0/x64 is.
+const collapseNeighbours = 2
+
+// collapsesIn returns the collapsed samples of one architecture for one metric.
+func collapsesIn(metric, arch string, deadFloor int, confidence bool, ms []*sampleMetrics, vals []int) []metricCollapse {
+	// The same-arch row, in version order, carrying each sample's index.
+	type cell struct {
+		version string
+		val     int
+	}
+	var row []cell
+	for i, m := range ms {
+		if m.arch == arch && vals[i] >= 0 {
+			row = append(row, cell{m.version, vals[i]})
+		}
+	}
+	if len(row) < 3 {
+		// With one or two samples there is no "typical" to be far below; a
+		// two-sample row would make each one the other's yardstick.
+		return nil
+	}
+	sort.SliceStable(row, func(a, b int) bool { return versionLess(row[a].version, row[b].version) })
+
+	var c metricCollapse
+	c.metric, c.arch = metric, arch
+	for i, cur := range row {
+		var near []int
+		for d := 1; d <= collapseNeighbours; d++ {
+			if i-d >= 0 {
+				near = append(near, row[i-d].val)
+			}
+			if i+d < len(row) {
+				near = append(near, row[i+d].val)
+			}
+		}
+		if len(near) < 2 {
+			continue
+		}
+		med := medianOf(near)
+		if med < deadFloor {
+			continue // too small around here for a shortfall to mean anything
+		}
+		if confidence && cur.val != 0 {
+			// See crossVersionMetric.confidence: a dip here can mean the
+			// resolver stopped guessing. Only an outright zero is a defect.
+			continue
+		}
+		if cur.val*collapseRatio < med {
+			c.at = append(c.at, cur.version+"/"+arch)
+			c.vals = append(c.vals, cur.val)
+			c.median = med
+		}
+	}
+	if len(c.at) == 0 {
+		return nil
+	}
+	return []metricCollapse{c}
+}
+
+// medianOf returns the median of vals, which it sorts a copy of.
+func medianOf(vals []int) int {
+	s := append([]int(nil), vals...)
+	sort.Ints(s)
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
 }
 
 // archesOf lists the architectures present, in stable order.

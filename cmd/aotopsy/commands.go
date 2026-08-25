@@ -47,6 +47,7 @@ var primaryCommands = []Command{
 	{Name: "build-fingerprint-dict", Short: "Build function fingerprint dictionary", Run: cmdBuildFingerprintDict},
 	{Name: "apply-fingerprint-dict", Short: "Apply fingerprint dictionary to unnamed functions", Run: cmdApplyFingerprintDict},
 	{Name: "import-darter", Short: "Import darter output for older Dart versions", Run: cmdImportDarter},
+	{Name: "export-dart", Short: "Export decompiled Dart project structure to .dart files", Run: cmdExportDart},
 	{Name: "_debug", Short: "Internal commands", Run: cmdDebug},
 
 	// Deprecated commands — still work, print a warning.

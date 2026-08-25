@@ -1,0 +1,16 @@
+{
+  "sample": "dart-3.7.0-arm64.so",
+  "input_sha256": "5f26b614daf7e718f86750899ca0b5b20fe9438845d0ad8b28a5862c1ece119d",
+  "dart_version": "3.7.0",
+  "unified_snapshot": false,
+  "vm_clusters": 7,
+  "isolate_clusters": 337,
+  "has_instructions_table": true,
+  "strings": 9038,
+  "named": 11609,
+  "codes": 8035,
+  "instr_table_length": 8035,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 8035,
+  "code_ranges": 8035
+}

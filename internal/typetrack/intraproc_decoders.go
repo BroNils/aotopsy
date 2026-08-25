@@ -113,14 +113,23 @@ func isSTR64UnsignedOffset(raw uint32) (baseReg int, byteOffset int, ok bool) {
 // isLDRRegExtended detects LDR Xt, [Xn, Xm, LSL #3] (register offset).
 // Returns base, index, and destination register.
 //
-// TODO(BUG-HUNT): the mask 0xFFE00C00 does NOT cover the option (bits 23-22)
-// and S (bit 12) fields of the LDR (register) encoding. This is an
-// intentional trade-off: the subsequent dispatch-detection checks constrain
-// the result enough to limit false positives, and tightening the mask to
-// also verify option==011 (LSL) and S==0 could break the existing dispatch
-// table detection. Verifying option/S here is left as future work.
+// The mask now covers option (bits 15:13) and S (bit 12), which the old
+// 0xFFE00C00 left free. A TODO here used to call that an intentional
+// trade-off, on the grounds that tightening "could break the existing
+// dispatch table detection". Measured on the 3.12.2 arm64 .text before
+// changing anything, over the 3692 words the loose mask accepts:
+//
+//	option=011 (LSL/UXTX) S=1   3412   92.4%
+//	option=011 (LSL/UXTX) S=0    280    7.6%
+//
+// So no other extend option occurs at all, and the only thing the loose mask
+// actually admitted was 280 UNSCALED loads -- `LDR Xt, [Xn, Xm]` -- being
+// read as if the index were scaled by 8. The SDK emits the scaled form for a
+// dispatch call (`Call(Address(DISPATCH_TABLE_REG, LR, UXTX, Scaled))`,
+// flow_graph_compiler_arm64.cc), so those 280 were never this instruction and
+// their slot arithmetic was wrong by a factor of eight.
 func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
-	if raw&0xFFE00C00 != 0xF8600800 {
+	if raw&0xFFE0FC00 != 0xF8607800 {
 		return 0, 0, 0, false
 	}
 	rt = int(raw & 0x1F)

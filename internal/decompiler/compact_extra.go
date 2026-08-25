@@ -13,8 +13,6 @@ import (
 // which is both slow and a Go anti-pattern. Each regex is compiled once
 // at package init and reused across all calls.
 var (
-	// enumReconstruction: "if (x == N) { return 'Name'; }"
-	enumCaseRe = regexp.MustCompile(`^if \((\w+) == (\d+)\) \{ return '([^']+)'; \}$`)
 	// nullSafetyAnnotation
 	nullCheckRe    = regexp.MustCompile(`if \((\w+) == null\)`)
 	notNullCheckRe = regexp.MustCompile(`(\w+) != null`)
@@ -382,58 +380,20 @@ func simplifyLineProtectingStrings(line string) string {
 
 // --- Enum Reconstruction ---
 
-// enumReconstruction detects switch-over-CID patterns and annotates them
-// as potential enum dispatches. This is a heuristic text-based pass that
-// looks for chains of "if (x == N) { return 'Name'; }" patterns that
-// suggest enum-to-string mapping.
-func enumReconstruction(source string) string {
-	lines := strings.Split(source, "\n")
-	var out []string
-	var enumCases []string
-	inEnumChain := false
-
-	for i := 0; i < len(lines); i++ {
-		t := trimmed(lines[i])
-
-		// Detect "if (x == N) { return 'Name'; }" pattern
-		m := enumCaseRe.FindStringSubmatch(t)
-		if m != nil {
-			if !inEnumChain {
-				inEnumChain = true
-				enumCases = nil
-			}
-			enumCases = append(enumCases, fmt.Sprintf("  // %s = %s → '%s'", m[1], m[2], m[3]))
-			out = append(out, lines[i])
-			continue
-		}
-
-		// If we were in an enum chain and hit a non-matching line
-		if inEnumChain && len(enumCases) >= 3 {
-			// Emit enum annotation before the current line
-			out = append(out, fmt.Sprintf("// enum reconstruction: %d cases detected", len(enumCases)))
-			for _, c := range enumCases {
-				out = append(out, c)
-			}
-			inEnumChain = false
-			enumCases = nil
-		} else if inEnumChain {
-			inEnumChain = false
-			enumCases = nil
-		}
-
-		out = append(out, lines[i])
-	}
-
-	// Handle trailing enum chain
-	if inEnumChain && len(enumCases) >= 3 {
-		out = append(out, fmt.Sprintf("// enum reconstruction: %d cases detected", len(enumCases)))
-		for _, c := range enumCases {
-			out = append(out, c)
-		}
-	}
-
-	return strings.Join(out, "\n")
-}
+// enumReconstruction was REMOVED, for the same reason and on the same evidence
+// as retryLoopSynthesis above: this emitter does not generate the shape it
+// looked for.
+//
+// It matched chains of `if (x == N) { return 'Name'; }` and, on three or more,
+// inserted a `// enum reconstruction: N cases detected` comment. Measured over
+// 371773 lines of real output from 700 functions of the 3.12.2 arm64 sample:
+// that marker appears ZERO times, and the marker is its only effect -- with no
+// match it rebuilds the input line for line. So it was inert, not merely rare.
+//
+// The two passes beside it were measured the same way and KEPT, because they
+// do fire: nullSafetyAnnotation 3 times over those lines, localTypeInference
+// 43 (as `// local_m8: List` comments -- proven by diffing the output with the
+// call disabled, after a grep for typed declarations wrongly suggested zero).
 
 // --- Null-safety Annotation ---
 
