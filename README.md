@@ -241,6 +241,20 @@ make test       # run tests
 
 Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set.
 
+## Releases & Branches
+
+AOTopsy uses a two-branch model:
+
+| Branch | Role |
+|--------|------|
+| `main` | **Stable.** Every commit is a squash-merged, gate-verified release candidate. Tagged releases (with prebuilt cross-platform binaries) are cut from here. |
+| `develop` | **Rolling / nightly.** Where day-to-day small commits, features, and research land first. May be unstable between merges. Batched into `main` via a squash-merge PR once the gates are green. |
+
+Contribute against `develop`; open a PR into `main` only when a batch of work is gate-verified.
+
+Prebuilt binaries for Linux, macOS, and Windows (amd64/arm64) are attached to each
+[GitHub release](../../releases). AOTopsy is pure Go, so `make build` cross-compiles cleanly for any target.
+
 ## Limitations
 
 - **AOT only.** No JIT support.
