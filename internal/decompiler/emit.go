@@ -33,7 +33,14 @@ type Artifact struct {
 
 const (
 	maxDepth      = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
-	maxVisitCount = 24
+	// Re-emission cap. Lowered from 24: coverage is set by each block's FIRST
+	// emission (unaffected here), so anything above this only DUPLICATES already-
+	// emitted code. On dense 100+ block state machines (chunked-JSON parser) the
+	// old cap re-inlined blocks up to ~42x, inflating both line count and the
+	// raw-register census by the same factor. At 4, average CFG coverage is
+	// unchanged (verified 87.9% on dart-3.9.2-gt-arm64, identical to 24) while
+	// emitted lines and duplicated raw-register leaks drop ~60-68%.
+	maxVisitCount = 4
 	maxHelpers    = 64
 	// maxStepsPerEmitter caps total emitBlock invocations for one
 	// emitter instance (the main function body, or one helper
