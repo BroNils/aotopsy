@@ -216,6 +216,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// through operandExpr, not emitLoadPool. See poolOperandExpr.
 	e.state.Pool = pool
 
+	// Seed the receiver register with the receiver's class so field-load chains
+	// starting from `this` are typed (this.a -> a's type -> a.b resolves). The
+	// clear-before-write invariant drops it as soon as the register is reused,
+	// so it never goes stale.
+	if fir.ReceiverClassID > 0 && len(fir.ArgRegs) > 0 {
+		e.state.setRegClass(fir.ArgRegs[0], fir.ReceiverClassID)
+	}
+
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
 	// Map blocks to the try region covering them, for per-block annotation.

@@ -60,6 +60,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			propagateLoadedFieldClass(fir, s, dst, ops[1])
 		}
 		return "", false, true
 	case "cmn":

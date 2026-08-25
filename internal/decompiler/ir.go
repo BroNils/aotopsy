@@ -300,6 +300,12 @@ type FuncIR struct {
 	// allocation stub (`new <Class>`), so subsequent field accesses on the freshly
 	// allocated object resolve to real field names. Nil disables the feature.
 	ClassNameToID map[string]int `json:"-"`
+
+	// FieldTypeResolver returns the class ID of the declared type of the field at
+	// (classID, byteOffset), or 0. It types field-load chains: reading field `a`
+	// of a known class yields an object of `a`'s type, so a following `.b`
+	// resolves. Nil disables chain typing.
+	FieldTypeResolver func(classID int, byteOffset int64) int `json:"-"`
 }
 
 // AllocatedClassID returns the class ID a callee name allocates, or 0. A Dart

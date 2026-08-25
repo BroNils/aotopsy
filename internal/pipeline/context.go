@@ -64,14 +64,15 @@ type Context struct {
 	// Decompile enrichment, built once on demand by ensureDecompileMaps so a
 	// FuncIR produced by FuncIRFor carries the same field-name / receiver-class /
 	// closure-parent / try-catch metadata the cmd path wires. Nil until built.
-	decompileMapsBuilt   bool
-	fieldNameResolver    func(classID int, byteOffset int64) string
-	receiverClassByCode  map[int]int
-	closureParentByFunc  map[int]string
-	excHandlersByCode    map[int][]cluster.ExceptionHandlerEntry
-	pcDescByCode         map[int][]cluster.PcDescriptorEntry
-	paramTypeByCodeIndex map[int]*cluster.NamedObject
-	classNameToID        map[string]int
+	decompileMapsBuilt     bool
+	fieldNameResolver      func(classID int, byteOffset int64) string
+	receiverClassByCode    map[int]int
+	closureParentByFunc    map[int]string
+	excHandlersByCode      map[int][]cluster.ExceptionHandlerEntry
+	pcDescByCode           map[int][]cluster.PcDescriptorEntry
+	paramTypeByCodeIndex   map[int]*cluster.NamedObject
+	classNameToID          map[string]int
+	fieldTypeByClassOffset map[int]map[int64]int
 }
 
 // LoadContext opens libPath and runs the full static-analysis setup
@@ -232,6 +233,38 @@ func (c *Context) ensureDecompileMaps() {
 		}
 	}
 
+	// Field TYPE by (ownerClassID, byteOffset) -> the field's declared type's
+	// class ID. This types field-load chains (`this.a.b`): loading field `a` of a
+	// known class yields an object whose class is `a`'s declared type, so the
+	// next `.b` resolves. Only populated where the type resolves to a concrete
+	// class (v3.x TypeInfo.ClassID); elsewhere it degrades to unknown (honest).
+	typeClassByRef := make(map[int]int32, len(result.Types))
+	for i := range result.Types {
+		if result.Types[i].ClassID > 0 {
+			typeClassByRef[result.Types[i].RefID] = result.Types[i].ClassID
+		}
+	}
+	c.fieldTypeByClassOffset = map[int]map[int64]int{}
+	for i := range result.Fields {
+		f := &result.Fields[i]
+		if f.HostOffset < 0 || f.TypeRefID < 0 {
+			continue
+		}
+		tc, ok := typeClassByRef[f.TypeRefID]
+		if !ok || tc <= 0 {
+			continue
+		}
+		ownerClass, ok := classByRef[f.OwnerRefID]
+		if !ok || ownerClass.ClassID <= 0 {
+			continue
+		}
+		ocid := int(ownerClass.ClassID)
+		if c.fieldTypeByClassOffset[ocid] == nil {
+			c.fieldTypeByClassOffset[ocid] = map[int64]int{}
+		}
+		c.fieldTypeByClassOffset[ocid][int64(f.HostOffset)] = int(tc)
+	}
+
 	c.closureParentByFunc = BuildClosureParents(result, pl)
 
 	// Exception handlers + PcDescriptors per Code, for ground-truth try/catch.
@@ -305,6 +338,14 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 	c.ensureDecompileMaps()
 	fir.FieldNameResolver = c.fieldNameResolver
 	fir.ClassNameToID = c.classNameToID
+	if c.fieldTypeByClassOffset != nil {
+		fir.FieldTypeResolver = func(classID int, off int64) int {
+			if m, ok := c.fieldTypeByClassOffset[classID]; ok {
+				return m[off]
+			}
+			return 0
+		}
+	}
 	if r.RefID >= 0 {
 		if cid, ok := c.receiverClassByCode[r.RefID]; ok && cid > 0 {
 			fir.ReceiverClassID = cid

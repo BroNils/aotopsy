@@ -194,6 +194,30 @@ func (s *LiftState) clearWrittenRegClasses(ins Instr) {
 	}
 }
 
+// propagateLoadedFieldClass types the destination of a field LOAD: if the load
+// reads `[base + off]` where base's class is tracked and that field has a known
+// declared type, the destination register now holds an object of that type. This
+// is what walks a `this.a.b.c` chain -- each load re-establishes the next class.
+// dst's stale class was already cleared before the instruction, so a load with no
+// resolvable field type correctly leaves it unknown.
+func propagateLoadedFieldClass(fir *FuncIR, s *LiftState, dst, memTok string) {
+	if fir.FieldTypeResolver == nil {
+		return
+	}
+	op := parseOperand(memTok)
+	if !op.isMem || !op.hasDisp {
+		return
+	}
+	cid, ok := s.RegClass[strings.ToLower(op.memBase)]
+	if !ok || cid <= 0 || op.memDisp < 0 {
+		return
+	}
+	// +1 undoes the tagged-pointer offset, same as dartFieldResolver.
+	if ft := fir.FieldTypeResolver(cid, op.memDisp+1); ft > 0 {
+		s.setRegClass(dst, ft)
+	}
+}
+
 // clearRegClass drops the tracked class of reg and its w/x alias.
 func (s *LiftState) clearRegClass(reg string) {
 	if reg == "" || len(s.RegClass) == 0 {
@@ -658,7 +682,17 @@ func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, in
 			cid = c
 		}
 	}
-	return func(_ int64, off int64) string { return fir.FieldNameResolver(cid, off) }
+	// The access displacement is a TAGGED-pointer offset: a field at byte offset
+	// H in the object is loaded from `[taggedPtr + H - 1]` (kHeapObjectTag = 1),
+	// so the raw disp is H-1 while the field layout is keyed by H. Undo the tag
+	// (+1) before the lookup -- without this the resolver never matched and every
+	// field stayed the raw `.fNN`, which is why field resolution had no effect.
+	return func(_ int64, off int64) string {
+		if off < 0 {
+			return ""
+		}
+		return fir.FieldNameResolver(cid, off+1)
+	}
 }
 
 func fieldExpr(base string, off int64, resolver func(int64, int64) string) string {
@@ -725,6 +759,10 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			// the destination (the class was cleared for dst just before this).
 			if cid, ok := s.RegClass[strings.ToLower(strings.TrimSpace(ops[1]))]; ok && cid > 0 {
 				s.setRegClass(dst, cid)
+			} else {
+				// x86_64 uses `mov` for memory loads too: type the destination
+				// from the loaded field's declared type when known.
+				propagateLoadedFieldClass(fir, s, dst, ops[1])
 			}
 		}
 	case "add", "sub":
