@@ -59,16 +59,16 @@ func isIdentChar(c byte) bool {
 // cleanCalleeName simplifies callee symbol names for pseudocode display:
 //  1. Strips the library-disambiguation hash @NNNNNN (_Set@3099033 -> _Set).
 //  2. D7: Strips PCOffset hex disambiguation suffixes (_564794, _233d64, _14b90).
+//  3. Compacts a mixin-application owner to `base&….member` (see compactMixinOwner).
 //
-// It deliberately does NOT fold a mixin-application chain to its last component.
-// A synthetic class like `_Set&_HashVMBase&…&_LinkedHashSetMixin` is the ACTUAL
-// owning class of the method, so `<full chain>.add` is correct. Folding to the
-// last component (`_LinkedHashSetMixin.add`) asserts the DEFINING class, which is
-// wrong ~23% of the time -- the method is often defined on a superclass of the
-// mixin, not derivable from the class name (this is exactly why foldMixinOwner in
-// symtabdiff.go is COMPARISON-ONLY and never touches real output). Removed here
-// as audit finding A6: a verbose-but-correct owner beats a compact-but-fabricated
-// one.
+// It deliberately does NOT fold a mixin-application chain to its LAST component.
+// Folding `_Set&…&_LinkedHashSetMixin.add` to `_LinkedHashSetMixin.add` asserts
+// the DEFINING class, which is wrong ~23% of the time (the method is often on a
+// superclass of the mixin) -- this is why foldMixinOwner in symtabdiff.go is
+// comparison-only (audit A6). Instead we keep the base class and mark the mixins
+// with `&…`, which is compact AND honest: it asserts only the base type (`_Set`)
+// -- true by construction -- and signals a mixin composite without naming a
+// definer. Measured: the full chains were ~85k tokens of noise per 400 functions.
 func cleanCalleeName(name string) string {
 	if name == "" {
 		return name
@@ -83,6 +83,7 @@ func cleanCalleeName(name string) string {
 			name = name[:atIdx]
 		}
 	}
+	name = compactMixinOwner(name)
 	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
 	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {
 		suffix := name[lastUnder+1:]
@@ -91,6 +92,30 @@ func cleanCalleeName(name string) string {
 		}
 	}
 	return name
+}
+
+// compactMixinOwner rewrites a mixin-application owner `A & B & … & Z.member`
+// (or the unspaced `A&B&…&Z.member`) to `A&….member`, keeping the base class A
+// and marking the applied mixins with `&…`. It asserts only the base type, so it
+// never claims a wrong defining class (unlike a last-component fold). Names with
+// no `&` are returned unchanged.
+func compactMixinOwner(name string) string {
+	if !strings.Contains(name, "&") {
+		return name
+	}
+	owner, member := name, ""
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		owner, member = name[:dot], name[dot:]
+	}
+	amp := strings.IndexByte(owner, '&')
+	if amp < 0 {
+		return name
+	}
+	base := strings.TrimSpace(owner[:amp])
+	if base == "" {
+		return name
+	}
+	return base + "&…" + member
 }
 
 func isHexOffset(s string) bool {

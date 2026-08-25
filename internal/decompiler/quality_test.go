@@ -389,14 +389,15 @@ func TestCalleeNameCleaning(t *testing.T) {
 		want  string
 	}{
 		{
-			// Mixin chain is KEPT (audit A6): the full mixin-application class is
-			// the real owner; only @hash and the PCOffset suffix are stripped.
+			// Mixin chain compacted to base+`&…` (audit A6 + P3): asserts only the
+			// base class, never a (possibly wrong) defining mixin; @hash and the
+			// PCOffset suffix are stripped.
 			input: "__Set & _HashVMBase & SetMixin & _LinkedHashSetMixin@3099033.add_564794",
-			want:  "__Set & _HashVMBase & SetMixin & _LinkedHashSetMixin.add",
+			want:  "__Set&….add",
 		},
 		{
 			input: "_MixinApplication504&Object&DioMixin@18353248.post_b4594",
-			want:  "_MixinApplication504&Object&DioMixin.post",
+			want:  "_MixinApplication504&….post",
 		},
 		{
 			input: "new _Set@3099033_14b90",
