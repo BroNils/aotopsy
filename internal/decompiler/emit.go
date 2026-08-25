@@ -80,6 +80,14 @@ type emitter struct {
 	// omittedStates stores register state snapshots at extraction points,
 	// so helper sub-emitters can receive live register aliases as parameters.
 	omittedStates map[int]*LiftState
+	// blockOut records each block's OUT register state (with real emission-time
+	// temp names) the first time its own instructions finish emitting. It is the
+	// per-block dataflow lattice point used by seedFromEmittedPreds to fill a
+	// successor's unknown live-in registers with values every already-emitted
+	// predecessor agrees on -- a forward join, purely additive and §2-safe (only
+	// agreed concrete values are propagated; any disagreement leaves the register
+	// unknown, i.e. honestly raw).
+	blockOut map[int]*LiftState
 	callIdx       int
 	steps         int
 	budgetHit     bool

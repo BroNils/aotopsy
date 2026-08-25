@@ -128,6 +128,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// dangling goto.
 	e.emit(indent, "block_%d:;", id)
 	e.annotateInlineFrames(blk.StartVA, indent)
+	// Forward dataflow join: fill live-in registers every already-emitted
+	// predecessor agrees on but the taken path left unknown.
+	e.seedFromEmittedPreds(id)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
 		// RegClass invariant: drop the tracked class of any register this
@@ -230,6 +233,10 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			}
 		}
 	}
+
+	// Record this block's OUT state (after its own instructions, before any
+	// successor recursion) for downstream forward joins.
+	e.recordBlockOut(id)
 
 	// Fallthrough / unconditional-jump successor for blocks whose last
 	// instruction wasn't itself a control-flow op (e.g. ends mid-block
