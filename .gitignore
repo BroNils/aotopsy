@@ -84,3 +84,6 @@ AGENTS-local.md
 # gate unable to fail — with no record on disk the test recorded one and
 # passed, so a fresh clone or CI run always went green no matter what the
 # pipeline produced.
+
+# GoReleaser build output
+dist/
