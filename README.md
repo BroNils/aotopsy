@@ -1,8 +1,12 @@
 # AOTopsy
 
+[![CI](https://github.com/BroNils/aotopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/BroNils/aotopsy/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BroNils/aotopsy?sort=semver)](https://github.com/BroNils/aotopsy/releases)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+
 A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code inside a Flutter release APK — into function names, class layouts, call graphs, behavioral signals, and readable pseudocode. No Dart VM, no SDK compilation, no runtime fallback.
 
-> **Fork notice:** AOTopsy is a fork of [unflutter](https://github.com/zboralski/unflutter) by [Anthony Zboralski](https://github.com/zboralski), extended with x86_64 support, a native decompiler, whole-program type inference, Frida script generation, and comprehensive documentation. All credit for the original snapshot parser, cluster deserializer, ARM64 disassembly pipeline, and Ghidra/IDA integration belongs to the original author.
+> **Fork notice:** AOTopsy is a fork of **unflutter**, originally by **Anthony Zboralski**. The original `zboralski/unflutter` repository is no longer available (removed by the author); a community continuation exists at [`KristijanZic/unflutter`](https://github.com/KristijanZic/unflutter). All credit for the original snapshot parser, cluster deserializer, ARM64 disassembly pipeline, and Ghidra/IDA integration belongs to the original author. AOTopsy extends it with x86_64 support, a native decompiler, whole-program type inference, Frida script generation, and comprehensive documentation.
 
 ## What It Recovers
 
@@ -16,7 +20,23 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 | Pseudocode | Architecture-neutral decompiled output from ARM64 or x86_64 machine code |
 | Dart Source Export | Whole-project modular `.dart` files reconstructed with classes, fields, and methods |
 
-Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.12**.
+Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier).
+
+## Accuracy & Honesty
+
+AOTopsy is measured against ground truth, not asserted. Two properties are enforced by
+the test suite on every change:
+
+| Metric | Value | What it means |
+|--------|-------|---------------|
+| **Name-recovery agreement** | **89.8%** overall (81.3% worst band, ≥ 0.81 gate floor) across 44 ground-truth builds | Recovered function names compared against each build's own ELF `.symtab`, the external ground truth — `TestSymtabDifferential`. Full per-build scoreboard: [BENCHMARK.md](BENCHMARK.md) (`make bench`). |
+| **Decompiler syntax validity** | **100%** valid Dart | Every emitted pseudocode function parses as Dart — `TestDecompileQualityCorpus`. |
+| **Fabrication rate** | **0%** | The §2 rule: never emit a guessed name, type, or call target as fact. Unknowns render honestly (`indirectCall`, `<unknown>`, `dynamic`). |
+
+The ground-truth twins are real production builds we cannot redistribute, so those
+differential gates run **locally**; public CI validates build + unit tests across the
+platform matrix (sample-dependent tests skip cleanly when the binary is absent). See
+[SECURITY.md](SECURITY.md) for release-binary verification and the honest scope below.
 
 ## Quick Start
 
@@ -98,7 +118,7 @@ flowchart LR
     end
 ```
 
-[Blutter](https://github.com/aspect-sec/blutter) embeds the Dart VM to deserialize the snapshot through its own code paths. Perfect fidelity, but requires compiling a matching Dart SDK for every target version.
+[Blutter](https://github.com/worawit/blutter) embeds the Dart VM to deserialize the snapshot through its own code paths. Perfect fidelity, but requires compiling a matching Dart SDK for every target version — and it is ARM64-only, with no static x86_64 support. AOTopsy is the only static, version-independent analyzer with a native pseudocode decompiler and published ground-truth accuracy.
 
 AOTopsy parses the binary format directly. No VM, no SDK. The tradeoff: every format change across Dart versions must be modeled explicitly. There is no runtime to handle it automatically.
 
@@ -255,13 +275,31 @@ Contribute against `develop`; open a PR into `main` only when a batch of work is
 Prebuilt binaries for Linux, macOS, and Windows (amd64/arm64) are attached to each
 [GitHub release](../../releases). AOTopsy is pure Go, so `make build` cross-compiles cleanly for any target.
 
-## Limitations
+## Limitations & Scope
 
+AOTopsy states plainly what it does and does not recover. Some limits are engineering
+scope; others are **hard AOT-format floors** — information the Dart compiler removes in
+release (PRODUCT) builds, verified against the SDK source. We document floors rather than
+fabricating over them.
+
+**Hard AOT floors (verified — do not expect these to improve):**
+- **Instance field names are ~97–99% absent.** `Precompiler::DropFields` keeps field
+  names only under `#if !defined(PRODUCT)`; a real app has ~233 named `Field` objects vs
+  ~16k synthetic. Accessor-based recovery (`get:`/`set:` still carry the name) pierces
+  this partially (−11–22%, deterministic, never guessed); the rest is genuinely gone.
+- **Local and captured variable names are gone.** Rendered as `local_*` / `tN`.
+- **Truly polymorphic dispatch targets are not statically resolvable.** BLR through a
+  dispatch table / dynamic `Closure` object is an AOT limit, not an analysis gap; these
+  render honestly as `indirectCall` / `dynamicCall`. See `docs/roadmap/20-invariants-and-non-defects.md`.
+
+**Engineering scope:**
 - **AOT only.** No JIT support.
-- **Ghidra/IDA decompilation is ARM64-only.** x86_64 is rejected with a clear error — use `decompile-native` instead.
+- **Ghidra/IDA decompilation is ARM64-only.** x86_64 is rejected with a clear error — use `decompile-native` instead (the only static x86_64 Flutter decompiler).
 - **`--all` decompilation can crash the host.** A real full-size app needs ~64GB RAM for unbounded `--all`. Use targeted modes (`--find`, `--func`, `--from-main`) or cap with `--max`.
 - **Virtual dispatch is invisible to `--from-main` reachability.** Widget lifecycle callbacks go through Flutter's framework dispatch, not direct call instructions. A class-touch heuristic recovers some, but it's an over-approximation. Use Frida for the rest.
-- **Every Dart version change must be modeled.** There is no VM to handle format changes automatically.
+- **Every Dart version change must be modeled.** There is no VM to handle format changes automatically. The snapshot carries a git-derived hash, not a version number, so support is structure-based. Currently modeled: Dart 2.10 → 3.13.
+- **Ground-truth twins are not redistributable** (real production builds), so the
+  name-recovery differential runs locally, not in public CI.
 
 ## License
 
