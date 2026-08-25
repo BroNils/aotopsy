@@ -1,0 +1,74 @@
+# GoReleaser v2 — cross-platform, checksummed, cosign-keyless-signed, SBOM'd releases.
+# Cut a release by pushing a tag: `git tag v1.2.3 && git push origin v1.2.3`
+# (the .github/workflows/release.yml workflow runs this).
+version: 2
+
+builds:
+  - id: aotopsy
+    main: ./cmd/aotopsy
+    binary: aotopsy
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "aotopsy_v{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - SECURITY.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "SHA256SUMS.txt"
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+# Keyless (Sigstore/OIDC) signature of the checksum file. Requires the release
+# job to run with `id-token: write`; no stored keys. Verify with:
+#   cosign verify-blob --bundle SHA256SUMS.txt.sigstore.json \
+#     --certificate-identity-regexp 'https://github.com/BroNils/aotopsy/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS.txt
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+release:
+  github:
+    owner: BroNils
+    name: aotopsy
+  draft: false
+  prerelease: auto
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "merge conflict"

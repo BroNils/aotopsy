@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// Build metadata, injected at release time via -ldflags -X (see .goreleaser.yaml).
+// Defaults keep a `go build` / `go run` binary self-describing.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		printPrimaryUsage()
@@ -18,6 +26,12 @@ func main() {
 	// Help flags.
 	if cmd == "help" || cmd == "-h" || cmd == "--help" {
 		printPrimaryUsage()
+		os.Exit(0)
+	}
+
+	// Version flags.
+	if cmd == "version" || cmd == "--version" || cmd == "-V" {
+		fmt.Printf("aotopsy %s (commit %s, built %s)\n", version, commit, date)
 		os.Exit(0)
 	}
 

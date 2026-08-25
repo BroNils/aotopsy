@@ -94,3 +94,6 @@ clean:
 skills:
 	@echo "Available skills:"
 	@ls -1 .claude/skills/ 2>/dev/null | while read d; do echo "  /$$d"; done || echo "  (none)"
+
+bench: ## Regenerate BENCHMARK.md from the ground-truth symtab differential
+	@bash scripts/gen_benchmark.sh BENCHMARK.md

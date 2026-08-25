@@ -90,6 +90,8 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 	rate := comp.AgreementRate()
 	t.Logf("%d compared, %d agree, %d disagree, rate=%.1f%%",
 		comp.Compared, comp.Agree, len(comp.Disagreement), rate*100)
+	// Machine-parseable row for the public benchmark scoreboard (see `make bench`).
+	t.Logf("BENCHROW\t%s\t%.1f\t%d\t%d", name, rate*100, comp.Compared, comp.Agree)
 
 	if len(comp.Disagreement) > 0 {
 		limit := min(20, len(comp.Disagreement))
