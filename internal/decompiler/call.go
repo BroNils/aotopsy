@@ -114,27 +114,23 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 // bindReturnReg makes subsequent reads of the return register render as name
 // (a just-declared temp), with the ARM64 w/x alias kept in sync.
 func (e *emitter) bindReturnReg(name string) {
-	rr := strings.ToLower(e.fir.ReturnReg)
+	rr := e.fir.ReturnReg
 	if rr == "" {
 		return
 	}
-	e.state.Regs[rr] = name
-	if strings.HasPrefix(rr, "x") {
-		e.state.Regs["w"+rr[1:]] = name
-	}
+	// setReg keys by canonical physical register, so the ARM64 w/x (and
+	// x86 sub-register) views are updated by this single write.
+	e.state.setReg(rr, name)
 }
 
 // clobberReturnReg drops any tracked value for the return register (a void or
 // untracked call result must not be read as a stale prior expression).
 func (e *emitter) clobberReturnReg() {
-	rr := strings.ToLower(e.fir.ReturnReg)
+	rr := e.fir.ReturnReg
 	if rr == "" {
 		return
 	}
-	delete(e.state.Regs, rr)
-	if strings.HasPrefix(rr, "x") {
-		delete(e.state.Regs, "w"+rr[1:])
-	}
+	delete(e.state.Regs, canonReg(rr))
 }
 
 func parseHexVA(target string) (uint64, bool) {
@@ -288,7 +284,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// into Thread state right before dispatching it, so this is a
 	// confirmed call kind, not a guess -- takes priority over
 	// selector-hint sniffing.
-	if e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))] == ffiCallTargetSentinel {
+	if e.state.Regs[canonReg(targetText)] == ffiCallTargetSentinel {
 		e.stats.SemanticIndirectCalls++
 		// Emit typed FFI call with argument count for signature inference.
 		// In a full implementation, this would resolve the FFI signature
@@ -311,7 +307,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	// frequent THR-relative ldr+blr pattern found in an FFI-heavy
 	// function, cross-checked against dart-lang/sdk's generated
 	// runtime_offsets_extracted.h (ground truth, not a guess).
-	if v, ok := e.state.Regs[strings.ToLower(strings.TrimSpace(targetText))]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
+	if v, ok := e.state.Regs[canonReg(targetText)]; ok && strings.HasPrefix(v, thrStubSentinelPrefix) {
 		stubName := strings.TrimPrefix(v, thrStubSentinelPrefix)
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the

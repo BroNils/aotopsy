@@ -29,7 +29,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			old := s.lookupReg(dst)
-			s.Regs[dst] = fmt.Sprintf("(%s | (%s << %s))", old, imm, shift)
+			s.setReg(dst, fmt.Sprintf("(%s | (%s << %s))", old, imm, shift))
 		}
 		return "", false, true
 	case "ubfx":
@@ -45,7 +45,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if ok1 && ok2 && pos == 12 && width == 20 {
 				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
 			}
-			s.Regs[dst] = expr
+			s.setReg(dst, expr)
 		}
 		return "", false, true
 	case "ldr", "ldur":
@@ -54,12 +54,12 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.Regs[dst] = thrStubSentinelPrefix + name
+						s.setReg(dst, thrStubSentinelPrefix + name)
 						return "", false, true
 					}
 				}
 			}
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 			propagateLoadedFieldClass(fir, s, dst, ops[1])
 		}
 		return "", false, true
@@ -81,7 +81,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 	case "adr", "adrp":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 		}
 		return "", false, true
 	case "ldp":
@@ -96,13 +96,13 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 					return "", false, true
 				}
 			}
-			s.Regs[dst1] = operandExpr(fir, s, ops[2])
+			s.setReg(dst1, operandExpr(fir, s, ops[2]))
 			// Second register gets the next memory location (base+8).
 			if op := parseOperand(ops[2]); op.isMem {
 				memPlus8 := fmt.Sprintf("[%s, #%d]", op.memBase, op.memDisp+8)
-				s.Regs[dst2] = operandExpr(fir, s, memPlus8)
+				s.setReg(dst2, operandExpr(fir, s, memPlus8))
 			} else {
-				s.Regs[dst2] = fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2]))
+				s.setReg(dst2, fmt.Sprintf("*(%s + 8)", operandExpr(fir, s, ops[2])))
 			}
 		}
 		return "", false, true

@@ -43,10 +43,7 @@ type LiftState struct {
 func newLiftState(nullReg string) *LiftState {
 	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string), RegClass: make(map[string]int)}
 	if nullReg != "" {
-		s.Regs[nullReg] = "null"
-		if strings.HasPrefix(nullReg, "x") {
-			s.Regs["w"+nullReg[1:]] = "null"
-		}
+		s.setReg(nullReg, "null")
 	}
 	return s
 }
@@ -68,7 +65,7 @@ func newLiftState(nullReg string) *LiftState {
 func (s *LiftState) Clone() *LiftState {
 	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
 	for k, v := range s.Regs {
-		c.Regs[k] = v
+		c.setReg(k, v)
 	}
 	for k, v := range s.RegClass {
 		c.RegClass[k] = v
@@ -106,7 +103,7 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	}
 	// Start with pre-branch state as the base.
 	for k, v := range s.Regs {
-		merged.Regs[k] = v
+		merged.setReg(k, v)
 	}
 	// Collect all register names from all three states.
 	allRegs := make(map[string]bool)
@@ -127,30 +124,30 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 		switch {
 		case takenExists && fallExists && takenVal == fallVal:
 			// Same value in both branches — keep it.
-			merged.Regs[reg] = takenVal
+			merged.setReg(reg, takenVal)
 		case takenExists && fallExists && takenVal != fallVal:
 			// Different values — keep pre-branch value (conservative).
 			// Cannot create phi temp in a text-based emitter without
 			// producing undefined-variable references.
 			if preExists {
-				merged.Regs[reg] = preVal
+				merged.setReg(reg, preVal)
 			} else {
 				// No pre-branch value; pick taken (arbitrary but stable).
-				merged.Regs[reg] = takenVal
+				merged.setReg(reg, takenVal)
 			}
 		case takenExists && !fallExists:
 			// Only taken branch wrote it.
 			if takenVal != preVal || !preExists {
-				merged.Regs[reg] = takenVal
+				merged.setReg(reg, takenVal)
 			}
 		case !takenExists && fallExists:
 			// Only fall branch wrote it.
 			if fallVal != preVal || !preExists {
-				merged.Regs[reg] = fallVal
+				merged.setReg(reg, fallVal)
 			}
 		case !takenExists && !fallExists && preExists:
 			// Neither branch wrote it — keep pre-branch value.
-			merged.Regs[reg] = preVal
+			merged.setReg(reg, preVal)
 		}
 	}
 	// LastCmp: if both branches agree, keep it; otherwise clear.
@@ -184,13 +181,7 @@ func (s *LiftState) clearWrittenRegClasses(ins Instr) {
 	}
 	_, writes := inspectInstrRegUsage(ins, "")
 	for _, w := range writes {
-		delete(s.RegClass, w)
-		// x0/w0 alias: clearing either clears the pair.
-		if strings.HasPrefix(w, "x") {
-			delete(s.RegClass, "w"+w[1:])
-		} else if strings.HasPrefix(w, "w") {
-			delete(s.RegClass, "x"+w[1:])
-		}
+		delete(s.RegClass, canonReg(w))
 	}
 }
 
@@ -208,7 +199,7 @@ func propagateLoadedFieldClass(fir *FuncIR, s *LiftState, dst, memTok string) {
 	if !op.isMem || !op.hasDisp {
 		return
 	}
-	cid, ok := s.RegClass[strings.ToLower(op.memBase)]
+	cid, ok := s.RegClass[canonReg(op.memBase)]
 	if !ok || cid <= 0 || op.memDisp < 0 {
 		return
 	}
@@ -218,32 +209,20 @@ func propagateLoadedFieldClass(fir *FuncIR, s *LiftState, dst, memTok string) {
 	}
 }
 
-// clearRegClass drops the tracked class of reg and its w/x alias.
+// clearRegClass drops the tracked class of reg (canonical physical register).
 func (s *LiftState) clearRegClass(reg string) {
 	if reg == "" || len(s.RegClass) == 0 {
 		return
 	}
-	reg = strings.ToLower(reg)
-	delete(s.RegClass, reg)
-	if strings.HasPrefix(reg, "x") {
-		delete(s.RegClass, "w"+reg[1:])
-	} else if strings.HasPrefix(reg, "w") {
-		delete(s.RegClass, "x"+reg[1:])
-	}
+	delete(s.RegClass, canonReg(reg))
 }
 
-// setRegClass records reg (and its w/x alias) as holding class cid.
+// setRegClass records reg (canonical physical register) as holding class cid.
 func (s *LiftState) setRegClass(reg string, cid int) {
 	if cid <= 0 || reg == "" {
 		return
 	}
-	reg = strings.ToLower(reg)
-	s.RegClass[reg] = cid
-	if strings.HasPrefix(reg, "x") {
-		s.RegClass["w"+reg[1:]] = cid
-	} else if strings.HasPrefix(reg, "w") {
-		s.RegClass["x"+reg[1:]] = cid
-	}
+	s.RegClass[canonReg(reg)] = cid
 }
 
 // operand is a parsed instruction operand: either a bare register/
@@ -469,6 +448,7 @@ func (s *LiftState) lookupReg(tok string) string {
 	if isZeroReg(tok) {
 		return "0"
 	}
+	tok = canonReg(tok)
 	if v, ok := s.Regs[tok]; ok {
 		if v == ffiCallTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
 			// Internal-only markers (see applyStore / the ldr/mov
@@ -678,7 +658,7 @@ func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, in
 	// the rest unchanged.
 	cid := fir.ReceiverClassID
 	if s != nil {
-		if c, ok := s.RegClass[strings.ToLower(baseReg)]; ok && c > 0 {
+		if c, ok := s.RegClass[canonReg(baseReg)]; ok && c > 0 {
 			cid = c
 		}
 	}
@@ -749,15 +729,15 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			if mnemonic != "lea" && fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.Regs[dst] = thrStubSentinelPrefix + name
+						s.setReg(dst, thrStubSentinelPrefix + name)
 						return "", false
 					}
 				}
 			}
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 			// A register-to-register move carries the source's tracked class to
 			// the destination (the class was cleared for dst just before this).
-			if cid, ok := s.RegClass[strings.ToLower(strings.TrimSpace(ops[1]))]; ok && cid > 0 {
+			if cid, ok := s.RegClass[canonReg(ops[1])]; ok && cid > 0 {
 				s.setRegClass(dst, cid)
 			} else {
 				// x86_64 uses `mov` for memory loads too: type the destination
@@ -773,7 +753,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				shiftTok = ops[3]
 			}
 			if isPointerDecompression(fir, mnemonic, ops[2], shiftTok) {
-				s.Regs[dst] = operandExpr(fir, s, ops[1])
+				s.setReg(dst, operandExpr(fir, s, ops[1]))
 				break
 			}
 			lhs := operandExpr(fir, s, ops[1])
@@ -795,10 +775,10 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				}
 			}
 			if v, ok := boolFromNullOffset(fir, mnemonic, lhs, ops[2]); ok {
-				s.Regs[dst] = v
+				s.setReg(dst, v)
 				break
 			}
-			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+			s.setReg(dst, simplifyBinExpr(mnemonic, lhs, rhs))
 		} else if len(ops) == 2 {
 			// x86 two-operand form: dst is also the first source.
 			dst := strings.ToLower(ops[0])
@@ -807,16 +787,16 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			lhs := s.lookupReg(dst)
 			rhs := operandExpr(fir, s, ops[1])
-			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+			s.setReg(dst, simplifyBinExpr(mnemonic, lhs, rhs))
 		}
 	case "mul", "imul", "and", "orr", "or", "eor", "xor":
 		op := binOpSymbol(mnemonic)
 		if len(ops) >= 3 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2]))
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2])))
 		} else if len(ops) == 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", s.lookupReg(dst), op, operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", s.lookupReg(dst), op, operandExpr(fir, s, ops[1])))
 		}
 	case "lsl", "shl":
 		if len(ops) >= 2 {
@@ -827,7 +807,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				lhs = operandExpr(fir, s, ops[1])
 				idx = 2
 			}
-			s.Regs[dst] = fmt.Sprintf("(%s << %s)", lhs, operandExpr(fir, s, ops[idx]))
+			s.setReg(dst, fmt.Sprintf("(%s << %s)", lhs, operandExpr(fir, s, ops[idx])))
 		}
 	case "lsr", "asr", "shr", "sar":
 		if len(ops) >= 2 {
@@ -838,7 +818,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				lhs = operandExpr(fir, s, ops[1])
 				idx = 2
 			}
-			s.Regs[dst] = fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx]))
+			s.setReg(dst, fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx])))
 		}
 	// The three flag-setting compares. dart-lang/sdk's
 	// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
@@ -887,13 +867,13 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		// mvn (ARM64) / not (x86_64): bitwise NOT
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(~%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(~%s)", operandExpr(fir, s, ops[1])))
 		}
 	case "neg":
 		// neg: arithmetic negation (ARM64 and x86_64)
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1])))
 		}
 	}
 	return "", false
@@ -967,7 +947,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 			// Suppress the emitted line (pure bookkeeping, not application
 			// logic) but mark the register so the upcoming indirect call is
 			// named instead of showing a raw register name.
-			s.Regs[strings.ToLower(srcTok)] = ffiCallTargetSentinel
+			s.setReg(strings.ToLower(srcTok), ffiCallTargetSentinel)
 			return "", false
 		}
 		// A store to a non-vm_tag Thread field is real application logic
@@ -979,7 +959,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 			name = localName(op.memDisp)
 			s.Locals[op.memDisp] = name
 		}
-		s.Regs[name] = valExpr
+		s.setReg(name, valExpr)
 		return fmt.Sprintf("%s = %s;", name, valExpr), true
 	}
 	baseExpr := s.lookupReg(base)

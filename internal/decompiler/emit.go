@@ -287,7 +287,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		}
 		argList[i] = fmt.Sprintf("%s %s", typeName, paramName)
 		if ri >= 0 && ri < len(fir.ArgRegs) {
-			e.state.Regs[fir.ArgRegs[ri]] = paramName
+			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
@@ -404,8 +404,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		returnType = inferReturnTypeFromName(fir.Name)
 	}
 	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
-	e.state.Regs[fir.ThreadReg] = "THR"
-	e.state.Regs[fir.PoolReg] = "PP"
+	e.state.setReg(fir.ThreadReg, "THR")
+	e.state.setReg(fir.PoolReg, "PP")
 
 	// P7: Async state machine annotation. Dart compiles async functions
 	// into state machines: the function body is split at each await point,

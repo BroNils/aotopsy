@@ -17,15 +17,15 @@ func (e *emitter) emitLoadPool(ins Instr) {
 	dst := strings.ToLower(ins.Target)
 	if e.pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := e.pool(ins.PoolIndex); ok {
-			e.state.Regs[dst] = disp
+			e.state.setReg(dst, disp)
 			return
 		}
 	}
 	if ins.PoolIndex >= 0 {
-		e.state.Regs[dst] = fmt.Sprintf("pool[%d]", ins.PoolIndex)
+		e.state.setReg(dst, fmt.Sprintf("pool[%d]", ins.PoolIndex))
 		return
 	}
-	e.state.Regs[dst] = "pool[?]"
+	e.state.setReg(dst, "pool[?]")
 }
 
 // appendHelperFunctions materializes every block recorded in e.omitted as
