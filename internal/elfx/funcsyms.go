@@ -11,7 +11,7 @@ import "debug/elf"
 //
 // This is deliberately a LAST RESORT and must stay one. Recovering names from
 // the snapshot is the entire point of the tool, and a production app is
-// usually stripped: the gopay corpus samples are. A name that comes from the
+// usually stripped: the realapp2 corpus samples are. A name that comes from the
 // symbol table proves nothing about whether the snapshot-derived naming
 // works, so it must never silently stand in for it. It is used only where the
 // snapshot yields no name at all -- Codes with a null owner, which are VM and

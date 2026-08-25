@@ -25,7 +25,7 @@ func TestDecompileFidelityCensus(t *testing.T) {
 	const perSampleCap = 400
 	samples := []string{
 		"dart-3.12.2-realapp-arm64.so",
-		"dart-3.7.0-gopay-x64.so",
+		"dart-3.7.0-realapp2-x64.so",
 		"dart-3.9.2-gt-arm64.so",
 		"dart-3.12.2-x64.so",
 	}

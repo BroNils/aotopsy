@@ -1,5 +1,5 @@
 {
-  "sample": "dart-3.7.0-gopay-x64.so",
+  "sample": "dart-3.7.0-realapp2-x64.so",
   "input_sha256": "a49243334e08b64fa533048f27507f8d41dc7eca845dd6863898c322f3714685",
   "dart_version": "3.7.0",
   "unified_snapshot": false,

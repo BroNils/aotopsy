@@ -231,7 +231,7 @@ var Registry = []Sample{
 	// class hierarchies, obfuscated names, third-party packages, XOR/AES
 	// helpers -- that the generated sample never produces, which is exactly
 	// where name resolution is stressed hardest.
-	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1, a real production app", FileSuffix: "-gopay"},
+	{DartVersion: "3.7.0", Arch: "x64", Note: "realapp2 (production app, x64)", FileSuffix: "-realapp2"},
 	// A real third-party production app, Dart 3.12.2 arm64, 9.5 MB, 23795
 	// Codes. Stripped, obfuscated, and shipped alongside native protection
 	// libraries, so it is the most adversarial name-resolution target in the

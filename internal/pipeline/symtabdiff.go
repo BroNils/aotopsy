@@ -16,7 +16,7 @@ import (
 //
 // This is a CHECK, never a source. Recovering names without symbols is the
 // whole point of the tool and production builds are stripped -- the corpus
-// has symbols on one of four builds and none of the gopay ones. Nothing here
+// has symbols on one of four builds and none of the realapp2 ones. Nothing here
 // feeds a name back into the pipeline.
 //
 // The two sides spell the same name differently on purpose, and those
