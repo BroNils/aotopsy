@@ -82,6 +82,7 @@ func TestDecompileFidelityCensus(t *testing.T) {
 			catFnHits := map[string]int{}  // functions containing >=1 hit
 			catTokHits := map[string]int{} // total token hits
 			var sumStats decompiler.Stats
+			distinctRawReg := 0
 			for _, r := range ctx.Ranges {
 				if fns >= perSampleCap {
 					break
@@ -113,6 +114,20 @@ func TestDecompileFidelityCensus(t *testing.T) {
 						catTokHits[c.name] += len(m)
 					}
 				}
+				// Distinct rawReg leaks: a giant re-emitted state machine repeats
+				// the SAME raw-register line many times, so the raw token count
+				// over-states the true number of unresolved values. Counting
+				// unique raw-register-bearing lines per function is the honest
+				// fidelity figure (a single distinct defect counts once no matter
+				// how often the structural walk duplicates its block).
+				rr := cats[0].re // rawReg is cats[0]
+				uniq := map[string]struct{}{}
+				for _, ln := range strings.Split(src, "\n") {
+					if rr.MatchString(ln) {
+						uniq[strings.TrimSpace(ln)] = struct{}{}
+					}
+				}
+				distinctRawReg += len(uniq)
 			}
 			t.Logf("=== %s: %d fns, %d lines ===", name, fns, lines)
 			names := make([]string, 0, len(cats))
@@ -130,6 +145,7 @@ func TestDecompileFidelityCensus(t *testing.T) {
 			t.Logf("  Stats: calls=%d indirect=%d semDirect=%d placeholderIf=%d unresolvedCF=%d rawRegCall=%d",
 				sumStats.TotalCalls, sumStats.IndirectCalls, sumStats.SemanticDirectCalls,
 				sumStats.PlaceholderIfs, sumStats.UnresolvedCF, sumStats.RawRegisterCalls)
+			t.Logf("  rawReg(distinct-lines)=%d  [token count above over-counts re-emitted giants]", distinctRawReg)
 		}()
 	}
 }
