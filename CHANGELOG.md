@@ -8,7 +8,7 @@ mindmap
     Architecture
       ARM64 support
       x86_64 support
-      Dart 2.10–3.12
+      Dart 2.10–3.13
     Decompiler & Synthesis
       Whole-project export
       Async/await linearizer
@@ -63,7 +63,7 @@ mindmap
 - **Ground-Truth Exception Handling** — Ingests `ExceptionHandlerTable` and `PcDescriptors` from snapshot metadata for mathematically exact try-catch-finally bounds.
 - **Adversarial Binary Resilience** — Evaluates 2-level shifted ObjectPool arithmetic (`<< 12`), formats IEEE 754 float64 constants (`95.0`, `42.0`), elides frame setup (`STP/LDP FP, LR`), normalizes signed 64-bit two's complement hex immediates, seeds `w22` `NULL_REG`, and cleans unspaced mixin chains (`_MixinApplication504&Object&DioMixin`).
 - **Dual-architecture support** — ARM64 and x86_64, sharing the same snapshot parser front half with separate disassembly backends
-- **Dart 2.10–3.12 coverage** — Version-specific layouts verified against `dart-lang/sdk` source at each version tag
+- **Dart 2.10–3.13 coverage** — Version-specific layouts verified against `dart-lang/sdk` source at each version tag
 - **Whole-program type inference** — `internal/typetrack` resolves BLR receiver types via intraprocedural dataflow + interprocedural propagation
 - **Dispatch table parsing** — Full `DispatchTable` decode with entry classification (Code/Stub/Null)
 - **THR-cached stub resolution** — Thread-relative indirect calls resolved to real names using ground-truth offsets from `runtime_offsets_extracted.h`
