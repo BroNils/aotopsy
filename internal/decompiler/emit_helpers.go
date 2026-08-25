@@ -44,6 +44,20 @@ func (e *emitter) appendHelperFunctions() {
 	seen := map[int]bool{}
 	queue := append([]int(nil), e.omitted...)
 	inlined := map[int][]string{} // id → inlined body lines
+	// maxInlineFanIn bounds duplication: a small helper reached from many
+	// emission paths appears as `return _block_N();` at every one of them, so
+	// inlining its body at each site multiplies its content (and every raw
+	// register token in it) by the fan-in. On a 116-block chunked-JSON state
+	// machine this exploded one function to 130k lines / 15k rawReg hits. Above
+	// this fan-in the helper is kept as a single function and CALLED instead.
+	const maxInlineFanIn = 3
+	fanIn := map[int]int{}
+	for _, line := range e.lines {
+		var fid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "return _block_%d();", &fid); err == nil {
+			fanIn[fid]++
+		}
+	}
 	for len(queue) > 0 && len(seen) < maxHelpers {
 		id := queue[0]
 		queue = queue[1:]
@@ -79,7 +93,7 @@ func (e *emitter) appendHelperFunctions() {
 			}
 		}
 
-		if nonEmpty <= maxInlineHelperLines {
+		if nonEmpty <= maxInlineHelperLines && fanIn[id] <= maxInlineFanIn {
 			// Inline: store body for replacement at call sites.
 			inlined[id] = sub.lines
 			// Don't emit as separate function.
