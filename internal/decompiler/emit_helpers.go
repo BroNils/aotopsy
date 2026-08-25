@@ -95,6 +95,21 @@ func (e *emitter) appendHelperFunctions() {
 				queue = append(queue, nid)
 			}
 		}
+		// Propagate the sub-emitter's captured live-in states into e's map so
+		// nested helpers reached only through this helper are materialized with
+		// their real register context. Without this the queued nested blocks
+		// fell back to a fresh empty state, leaking every live-in register
+		// (e.g. `if (x8 != null)`) as a raw token.
+		if sub.omittedStates != nil {
+			for nid, st := range sub.omittedStates {
+				if _, exists := e.omittedStates[nid]; !exists {
+					if e.omittedStates == nil {
+						e.omittedStates = map[int]*LiftState{}
+					}
+					e.omittedStates[nid] = st
+				}
+			}
+		}
 		e.stats.UnresolvedCF += sub.stats.UnresolvedCF
 		e.stats.PlaceholderIfs += sub.stats.PlaceholderIfs
 		e.stats.TotalCalls += sub.stats.TotalCalls
