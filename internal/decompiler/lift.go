@@ -13,10 +13,20 @@ import (
 // exactly (the report's central architectural finding: this decompiler
 // family is a string-rewriting system, not an AST-based one).
 type LiftState struct {
-	Regs    map[string]string // register name -> expr string
-	Locals  map[int64]string  // frame-relative byte offset -> local var name
-	LastCmp [2]string
-	HasCmp  bool
+	Regs   map[string]string // register name -> expr string
+	Locals map[int64]string  // frame-relative byte offset -> local var name
+	// RegClass maps a register to the Dart class ID of the object it currently
+	// holds, when known (0/absent = unknown). It lets fieldExpr resolve `.fNN`
+	// on typed non-receiver objects (e.g. a freshly `new`-ed instance), not just
+	// the receiver. It is maintained CONSERVATIVELY: a register's class is
+	// cleared before every instruction that writes it (clearWrittenRegClasses)
+	// and only re-established by an explicit typing event (an allocation call, or
+	// a mov from another typed register). A stale class here would fabricate a
+	// wrong field name -- exactly the §2 error this project forbids -- so the
+	// invariant is "clear by default, set only on proof".
+	RegClass map[string]int
+	LastCmp  [2]string
+	HasCmp   bool
 	// Pool resolves an object-pool index to its display text. Set by the
 	// emitter, which is the only layer that has the deserialized pool; nil
 	// in unit tests that lift instructions in isolation, in which case a
@@ -31,9 +41,9 @@ type LiftState struct {
 // "" where the architecture has no such register (x86_64, which loads null
 // from the object pool instead).
 func newLiftState(nullReg string) *LiftState {
-	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
+	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string), RegClass: make(map[string]int)}
 	if nullReg != "" {
-		s.Regs[nullReg] = "null"
+		s.setReg(nullReg, "null")
 	}
 	return s
 }
@@ -53,9 +63,12 @@ func newLiftState(nullReg string) *LiftState {
 // frame-global (a stack slot is the same slot regardless of which branch
 // wrote to it).
 func (s *LiftState) Clone() *LiftState {
-	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
 	for k, v := range s.Regs {
-		c.Regs[k] = v
+		c.setReg(k, v)
+	}
+	for k, v := range s.RegClass {
+		c.RegClass[k] = v
 	}
 	return c
 }
@@ -90,7 +103,7 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	}
 	// Start with pre-branch state as the base.
 	for k, v := range s.Regs {
-		merged.Regs[k] = v
+		merged.setReg(k, v)
 	}
 	// Collect all register names from all three states.
 	allRegs := make(map[string]bool)
@@ -111,30 +124,30 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 		switch {
 		case takenExists && fallExists && takenVal == fallVal:
 			// Same value in both branches — keep it.
-			merged.Regs[reg] = takenVal
+			merged.setReg(reg, takenVal)
 		case takenExists && fallExists && takenVal != fallVal:
 			// Different values — keep pre-branch value (conservative).
 			// Cannot create phi temp in a text-based emitter without
 			// producing undefined-variable references.
 			if preExists {
-				merged.Regs[reg] = preVal
+				merged.setReg(reg, preVal)
 			} else {
 				// No pre-branch value; pick taken (arbitrary but stable).
-				merged.Regs[reg] = takenVal
+				merged.setReg(reg, takenVal)
 			}
 		case takenExists && !fallExists:
 			// Only taken branch wrote it.
 			if takenVal != preVal || !preExists {
-				merged.Regs[reg] = takenVal
+				merged.setReg(reg, takenVal)
 			}
 		case !takenExists && fallExists:
 			// Only fall branch wrote it.
 			if fallVal != preVal || !preExists {
-				merged.Regs[reg] = fallVal
+				merged.setReg(reg, fallVal)
 			}
 		case !takenExists && !fallExists && preExists:
 			// Neither branch wrote it — keep pre-branch value.
-			merged.Regs[reg] = preVal
+			merged.setReg(reg, preVal)
 		}
 	}
 	// LastCmp: if both branches agree, keep it; otherwise clear.
@@ -144,7 +157,72 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	} else {
 		merged.HasCmp = false
 	}
+	// RegClass: keep a class only when both branches agree on it. Any
+	// disagreement (or presence in only one branch) drops it -- never guess a
+	// type across a join.
+	merged.RegClass = make(map[string]int, len(s.RegClass))
+	for reg, tc := range taken.RegClass {
+		if fc, ok := fall.RegClass[reg]; ok && fc == tc {
+			merged.RegClass[reg] = tc
+		}
+	}
 	return merged
+}
+
+// clearWrittenRegClasses drops the tracked class of every register an
+// instruction writes, BEFORE the instruction is lifted. This is the
+// conservative core of the RegClass invariant: after this, a register's class
+// is only re-established by an explicit typing event, so a stale class can never
+// survive a redefinition and fabricate a wrong field name. The write set is
+// derived from the same text analysis the arity liveness uses.
+func (s *LiftState) clearWrittenRegClasses(ins Instr) {
+	if len(s.RegClass) == 0 {
+		return
+	}
+	_, writes := inspectInstrRegUsage(ins, "")
+	for _, w := range writes {
+		delete(s.RegClass, canonReg(w))
+	}
+}
+
+// propagateLoadedFieldClass types the destination of a field LOAD: if the load
+// reads `[base + off]` where base's class is tracked and that field has a known
+// declared type, the destination register now holds an object of that type. This
+// is what walks a `this.a.b.c` chain -- each load re-establishes the next class.
+// dst's stale class was already cleared before the instruction, so a load with no
+// resolvable field type correctly leaves it unknown.
+func propagateLoadedFieldClass(fir *FuncIR, s *LiftState, dst, memTok string) {
+	if fir.FieldTypeResolver == nil {
+		return
+	}
+	op := parseOperand(memTok)
+	if !op.isMem || !op.hasDisp {
+		return
+	}
+	cid, ok := s.RegClass[canonReg(op.memBase)]
+	if !ok || cid <= 0 || op.memDisp < 0 {
+		return
+	}
+	// +1 undoes the tagged-pointer offset, same as dartFieldResolver.
+	if ft := fir.FieldTypeResolver(cid, op.memDisp+1); ft > 0 {
+		s.setRegClass(dst, ft)
+	}
+}
+
+// clearRegClass drops the tracked class of reg (canonical physical register).
+func (s *LiftState) clearRegClass(reg string) {
+	if reg == "" || len(s.RegClass) == 0 {
+		return
+	}
+	delete(s.RegClass, canonReg(reg))
+}
+
+// setRegClass records reg (canonical physical register) as holding class cid.
+func (s *LiftState) setRegClass(reg string, cid int) {
+	if cid <= 0 || reg == "" {
+		return
+	}
+	s.RegClass[canonReg(reg)] = cid
 }
 
 // operand is a parsed instruction operand: either a bare register/
@@ -307,14 +385,18 @@ func parseImm(s string) (int64, bool) {
 		s = s[1:]
 	}
 	var v int64
-	var err error
 	if strings.HasPrefix(s, "0x") {
-		v, err = strconv.ParseInt(s[2:], 16, 64)
+		u, err := strconv.ParseUint(s[2:], 16, 64)
+		if err != nil {
+			return 0, false
+		}
+		v = int64(u)
 	} else {
+		var err error
 		v, err = strconv.ParseInt(s, 10, 64)
-	}
-	if err != nil {
-		return 0, false
+		if err != nil {
+			return 0, false
+		}
 	}
 	if neg {
 		v = -v
@@ -366,6 +448,7 @@ func (s *LiftState) lookupReg(tok string) string {
 	if isZeroReg(tok) {
 		return "0"
 	}
+	tok = canonReg(tok)
 	if v, ok := s.Regs[tok]; ok {
 		if v == ffiCallTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
 			// Internal-only markers (see applyStore / the ldr/mov
@@ -410,6 +493,13 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 		return poolOperandExpr(fir, s, op)
 	}
 	baseExpr := s.lookupReg(base)
+	// D5: 2-level PP addressing resolution (base register holds PP + offset)
+	if ppOff, ok := parsePPOffset(fir, baseExpr); ok && op.hasDisp {
+		return poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+	}
+	if ppOff, ok := parsePPOffset(fir, base); ok && op.hasDisp {
+		return poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+	}
 	if !op.hasDisp {
 		return baseExpr
 	}
@@ -419,7 +509,7 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
 		return expr
 	}
-	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, s, base))
 }
 
 // localName renders a frame-relative byte offset as a valid Dart
@@ -556,15 +646,33 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 // identified come from the SDK-derived tables in internal/disasm
 // (thrfields.go / thrfields_x64.go), applied by the annotator, not from
 // class layouts.
-func dartFieldResolver(fir *FuncIR, baseReg string) func(int64, int64) string {
+func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, int64) string {
 	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg ||
 		baseReg == fir.PoolReg || baseReg == fir.StackReg {
 		return nil
 	}
-	// A2: pass ReceiverClassID so the resolver can use the per-class field
-	// map rather than the offset-only fallback.
-	rcid := fir.ReceiverClassID
-	return func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
+	// Prefer the base register's TRACKED class (from an allocation the value
+	// flowed out of) -- accurate for any object. Fall back to ReceiverClassID
+	// (the receiver `this`) only when the base's class is unknown, exactly as
+	// before, so this is strictly additive: it improves typed bases and leaves
+	// the rest unchanged.
+	cid := fir.ReceiverClassID
+	if s != nil {
+		if c, ok := s.RegClass[canonReg(baseReg)]; ok && c > 0 {
+			cid = c
+		}
+	}
+	// The access displacement is a TAGGED-pointer offset: a field at byte offset
+	// H in the object is loaded from `[taggedPtr + H - 1]` (kHeapObjectTag = 1),
+	// so the raw disp is H-1 while the field layout is keyed by H. Undo the tag
+	// (+1) before the lookup -- without this the resolver never matched and every
+	// field stayed the raw `.fNN`, which is why field resolution had no effect.
+	return func(_ int64, off int64) string {
+		if off < 0 {
+			return ""
+		}
+		return fir.FieldNameResolver(cid, off+1)
+	}
 }
 
 func fieldExpr(base string, off int64, resolver func(int64, int64) string) string {
@@ -621,12 +729,21 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			if mnemonic != "lea" && fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.Regs[dst] = thrStubSentinelPrefix + name
+						s.setReg(dst, thrStubSentinelPrefix + name)
 						return "", false
 					}
 				}
 			}
-			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
+			// A register-to-register move carries the source's tracked class to
+			// the destination (the class was cleared for dst just before this).
+			if cid, ok := s.RegClass[canonReg(ops[1])]; ok && cid > 0 {
+				s.setRegClass(dst, cid)
+			} else {
+				// x86_64 uses `mov` for memory loads too: type the destination
+				// from the loaded field's declared type when known.
+				propagateLoadedFieldClass(fir, s, dst, ops[1])
+			}
 		}
 	case "add", "sub":
 		if len(ops) >= 3 {
@@ -636,7 +753,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				shiftTok = ops[3]
 			}
 			if isPointerDecompression(fir, mnemonic, ops[2], shiftTok) {
-				s.Regs[dst] = operandExpr(fir, s, ops[1])
+				s.setReg(dst, operandExpr(fir, s, ops[1]))
 				break
 			}
 			lhs := operandExpr(fir, s, ops[1])
@@ -658,10 +775,10 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				}
 			}
 			if v, ok := boolFromNullOffset(fir, mnemonic, lhs, ops[2]); ok {
-				s.Regs[dst] = v
+				s.setReg(dst, v)
 				break
 			}
-			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+			s.setReg(dst, simplifyBinExpr(mnemonic, lhs, rhs))
 		} else if len(ops) == 2 {
 			// x86 two-operand form: dst is also the first source.
 			dst := strings.ToLower(ops[0])
@@ -670,16 +787,16 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			lhs := s.lookupReg(dst)
 			rhs := operandExpr(fir, s, ops[1])
-			s.Regs[dst] = simplifyBinExpr(mnemonic, lhs, rhs)
+			s.setReg(dst, simplifyBinExpr(mnemonic, lhs, rhs))
 		}
 	case "mul", "imul", "and", "orr", "or", "eor", "xor":
 		op := binOpSymbol(mnemonic)
 		if len(ops) >= 3 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2]))
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2])))
 		} else if len(ops) == 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(%s %s %s)", s.lookupReg(dst), op, operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", s.lookupReg(dst), op, operandExpr(fir, s, ops[1])))
 		}
 	case "lsl", "shl":
 		if len(ops) >= 2 {
@@ -690,7 +807,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				lhs = operandExpr(fir, s, ops[1])
 				idx = 2
 			}
-			s.Regs[dst] = fmt.Sprintf("(%s << %s)", lhs, operandExpr(fir, s, ops[idx]))
+			s.setReg(dst, fmt.Sprintf("(%s << %s)", lhs, operandExpr(fir, s, ops[idx])))
 		}
 	case "lsr", "asr", "shr", "sar":
 		if len(ops) >= 2 {
@@ -701,7 +818,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				lhs = operandExpr(fir, s, ops[1])
 				idx = 2
 			}
-			s.Regs[dst] = fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx]))
+			s.setReg(dst, fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx])))
 		}
 	// The three flag-setting compares. dart-lang/sdk's
 	// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
@@ -750,13 +867,13 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		// mvn (ARM64) / not (x86_64): bitwise NOT
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(~%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(~%s)", operandExpr(fir, s, ops[1])))
 		}
 	case "neg":
 		// neg: arithmetic negation (ARM64 and x86_64)
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			s.Regs[dst] = fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1]))
+			s.setReg(dst, fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1])))
 		}
 	}
 	return "", false
@@ -830,7 +947,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 			// Suppress the emitted line (pure bookkeeping, not application
 			// logic) but mark the register so the upcoming indirect call is
 			// named instead of showing a raw register name.
-			s.Regs[strings.ToLower(srcTok)] = ffiCallTargetSentinel
+			s.setReg(strings.ToLower(srcTok), ffiCallTargetSentinel)
 			return "", false
 		}
 		// A store to a non-vm_tag Thread field is real application logic
@@ -842,19 +959,37 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 			name = localName(op.memDisp)
 			s.Locals[op.memDisp] = name
 		}
-		s.Regs[name] = valExpr
+		s.setReg(name, valExpr)
 		return fmt.Sprintf("%s = %s;", name, valExpr), true
+	}
+	// A store through SPREG resolves to a stack slot by REGISTER NAME, so it
+	// is correct even where the "SP" value seed was dropped at a merge join
+	// (which otherwise leaks the raw x15/rsp base into `x15 = ...`).
+	if base == fir.StackReg {
+		if op.hasDisp {
+			if slot, ok := stackSlotExpr(fir, base, op.memDisp); ok {
+				return fmt.Sprintf("%s = %s;", slot, valExpr), true
+			}
+		}
+		return fmt.Sprintf("[SP] = %s;", valExpr), true
 	}
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
-		if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
+		if ppOff, ok := parsePPOffset(fir, baseExpr); ok {
+			lhs = poolOperandDispExpr(fir, s, ppOff+op.memDisp)
+		} else if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {
 			lhs = expr
 		} else if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
 			lhs = expr
 		} else {
-			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, s, base))
 		}
+	} else if slot, ok := stackComputedSlot(baseExpr); ok {
+		// A stored-through computed SP-relative address (sub xN, SP, #k;
+		// str src, [xN]) is a stack slot -- render it like the direct
+		// [SP-k] form stackSlotExpr produces, not a raw pointer deref.
+		lhs = slot
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
 		// found testing against a real libapp.so where a computed
@@ -911,6 +1046,13 @@ func simplifyBinExpr(mnemonic, lhs, rhs string) string {
 				return strconv.FormatInt(lv+rv, 10)
 			}
 			return strconv.FormatInt(lv-rv, 10)
+		}
+	}
+	if rv, ok := parseImm(rhs); ok {
+		if rv < 0 && op == "+" {
+			return fmt.Sprintf("(%s - %d)", lhs, -rv)
+		} else if rv < 0 && op == "-" {
+			return fmt.Sprintf("(%s + %d)", lhs, -rv)
 		}
 	}
 	return fmt.Sprintf("(%s %s %s)", lhs, op, rhs)

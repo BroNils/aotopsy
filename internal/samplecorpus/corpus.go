@@ -99,6 +99,32 @@ type Sample struct {
 	// architecture with another entry but were built from a different source
 	// set, e.g. "-pre214".
 	FileSuffix string
+
+	// GroundTruth marks an UNSTRIPPED twin: the same program as the analysis
+	// sample for this version, built with
+	//
+	//	flutter build apk --release --extra-gen-snapshot-options=--no-strip
+	//
+	// so gen_snapshot leaves a .symtab behind. It exists for exactly one gate,
+	// TestSymtabDifferential, which is the only check in this project that
+	// compares recovered names against something other than our own previous
+	// output.
+	//
+	// It is a SEPARATE sample rather than a replacement, deliberately. The
+	// corpus has to keep representing stripped production binaries, because
+	// that is the condition the tool actually runs in -- recovering names
+	// without symbols is the whole point. So these twins are excluded from the
+	// corpus cluster-fact records and from the cross-version differential:
+	// they would duplicate facts their stripped counterparts already pin, and
+	// double the differential's runtime for nothing.
+	//
+	// Their honesty was measured, not assumed. LoadContext -- the path the
+	// symtab gate reads names from -- never consults .symtab; only
+	// pipeline.Run does, via elfStubName, and only as a last resort for Codes
+	// the snapshot could not name at all. Proven on 3.9.2 arm64 by loading a
+	// stripped binary and its unstripped twin and diffing the recovered names:
+	// 8220 names, ZERO differences. The gate is not validating itself.
+	GroundTruth bool
 }
 
 // FileName is the name this sample must have under samples/.
@@ -201,8 +227,22 @@ var Registry = []Sample{
 	{DartVersion: "3.4.3", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.4.3, Flutter 3.22.2 -- first TagStyleObjectHeader, last with the 4-bit type_class_id shift"},
 	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.5.0, Flutter 3.24.0 -- first with shared_initial_field_table AND the 3-bit shift"},
 	{DartVersion: "2.18.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.18.0, Flutter 3.3.1"},
-	{DartVersion: "3.7.0", Arch: "x64", Note: "gopay_2.14.1 (directory name is the APP version, not Dart's)"},
-	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "compare_sample, the reference toy app"},
+	// REAL production apps, not toys. These exercise code shapes -- deep
+	// class hierarchies, obfuscated names, third-party packages, XOR/AES
+	// helpers -- that the generated sample never produces, which is exactly
+	// where name resolution is stressed hardest.
+	{DartVersion: "3.7.0", Arch: "x64", Note: "realapp2 (production app, x64)", FileSuffix: "-realapp2"},
+	// A real third-party production app, Dart 3.12.2 arm64, 9.5 MB, 23795
+	// Codes. Stripped, obfuscated, and shipped alongside native protection
+	// libraries, so it is the most adversarial name-resolution target in the
+	// corpus. NOT in a SourceSet: its source is unknown and unshared, so it
+	// belongs to no differential. Kept deliberately anonymous -- only its
+	// format-relevant properties matter here.
+	{DartVersion: "3.12.2", Arch: "arm64", Note: "third-party production app, stripped + obfuscated", FileSuffix: "-realapp"},
+	{DartVersion: "3.7.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.7.0, Flutter 3.29.1"},
+	{DartVersion: "3.7.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.7.0 x86_64"},
+	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.9.2, Flutter 3.35.5"},
+	{DartVersion: "3.9.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.9.2 x86_64"},
 
 	// The x64 half of the same source set. Same program, same Dart version,
 	// different architecture -- the control the arch-parity work never had:
@@ -215,11 +255,101 @@ var Registry = []Sample{
 	{DartVersion: "3.3.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.3.0 x86_64"},
 	{DartVersion: "3.4.3", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.4.3 x86_64"},
 	{DartVersion: "3.5.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.5.0 x86_64"},
+	// sample_310 and sample_311 have their own lib/, NOT compare_sample's, so
+	// they stay out of the source set -- checked, not assumed. They still earn
+	// their place: corpus cluster facts and architecture coverage.
 	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_310"},
+	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_310 x86_64"},
 	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_311"},
+	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_311 x86_64"},
 	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},
 	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64"},
-	{DartVersion: "3.13.0", Arch: "arm64", Note: "sample_313, built for the unified-snapshot work"},
+	// sample_313's lib/ IS byte-identical to compare_sample's, so unlike
+	// sample_310/311 this pair can carry its weight in the differential.
+	{DartVersion: "3.13.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.13.0, Flutter 3.47.0"},
+	{DartVersion: "3.13.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.13.0 x86_64"},
+
+	// The versions whose ObjectStoreAOTFieldCount had only ever been counted
+	// from object_store.h, never confirmed against a binary. 2.15.0 is why
+	// that distinction matters: its profile looked just as correct, until a
+	// real sample showed its snapshot hash was mapped to the wrong version.
+	// Flutter release picked from releases_linux.json's dart_sdk_version,
+	// not guessed: 3.0.5 -> Flutter 3.10.5, 3.2.5 -> 3.16.8,
+	// 3.6.2 -> 3.27.4, 3.8.1 -> 3.32.8.
+	{DartVersion: "3.0.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.0.5, Flutter 3.10.5"},
+	{DartVersion: "3.0.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.0.5 x86_64"},
+	{DartVersion: "3.2.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.2.5, Flutter 3.16.8"},
+	{DartVersion: "3.2.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.2.5 x86_64"},
+	{DartVersion: "3.6.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.6.2, Flutter 3.27.4"},
+	{DartVersion: "3.6.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.6.2 x86_64"},
+	{DartVersion: "3.8.1", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.8.1, Flutter 3.32.8"},
+	{DartVersion: "3.8.1", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.8.1 x86_64"},
+
+	// Dart 3.12.0 stable. Registered under the 3.12.2 profile because that is
+	// what it detects as -- the whole 3.12 line is one format; see the three
+	// hashes mapped together in snapshot/version.go. It is kept as its own
+	// sample rather than folded into 3.12.2's because it is a different
+	// binary from a different Flutter release, and the corpus records are
+	// keyed by input sha256.
+	{DartVersion: "3.12.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.12.0, Flutter 3.44.0 -- Dart 3.12.0 stable, 3.12.2 format", FileSuffix: "-f3440"},
+	{DartVersion: "3.12.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.12.0 x86_64, Flutter 3.44.0", FileSuffix: "-f3440"},
+
+	// Unstripped ground-truth twins -- see Sample.GroundTruth. Built from the
+	// SAME project as the version's analysis sample, so the source is
+	// identical (including the downlevelled sources of the pre-2.14 and
+	// pre-null-safety sets), with
+	// --extra-gen-snapshot-options=--no-strip added.
+	//
+	// The flag is missing from `flutter build apk --help` on every release
+	// before 3.35, which is why it looked unavailable at first. It is present
+	// in flutter_tools/lib/src/build_info.dart at 2.5.0 and every release
+	// after, merely hidden -- and it works: the 2.14.0 twin carries 7303 FUNC
+	// symbols against the analysis sample's zero.
+	// 2.10.0 and 2.12.0 have NO twin and cannot get one. Flutter 2.0.0 and
+	// earlier reject --extra-gen-snapshot-options on the APK build path
+	// outright -- measured both spellings, --no-strip and --no_strip, and the
+	// same project builds fine the moment the option is dropped. The option
+	// exists in flutter_tools/lib/src/flutter_command.dart at that era but is
+	// not plumbed through to the AOT assemble step. Flutter 2.2.0 (Dart 2.13)
+	// is where it starts working, so that is the floor for ground truth.
+	{DartVersion: "2.13.0", Arch: "arm64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.13.0", Arch: "x64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.14.0", Arch: "arm64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.14.0", Arch: "x64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.15.0", Arch: "arm64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.15.0", Arch: "x64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.16.0", Arch: "arm64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.16.0", Arch: "x64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.17.6", Arch: "arm64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.17.6", Arch: "x64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.18.0", Arch: "arm64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.18.0", Arch: "x64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.19.0", Arch: "arm64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.19.0", Arch: "x64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.0.5", Arch: "arm64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.0.5", Arch: "x64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.1.0", Arch: "arm64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.1.0", Arch: "x64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.2.5", Arch: "arm64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.2.5", Arch: "x64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.3.0", Arch: "arm64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.3.0", Arch: "x64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.4.3", Arch: "arm64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.4.3", Arch: "x64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.5.0", Arch: "arm64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.5.0", Arch: "x64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.6.2", Arch: "arm64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.6.2", Arch: "x64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.7.0", Arch: "arm64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.7.0", Arch: "x64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.8.1", Arch: "arm64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.8.1", Arch: "x64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.9.2", Arch: "arm64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.9.2", Arch: "x64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
 }
 
 // SourceSets groups the registry by SourceSet, dropping samples that belong to

@@ -27,9 +27,12 @@ func ClassifyEdgeProv(e disasm.CallEdgeRecord) string {
 		return ProvTHR
 	case strings.HasPrefix(e.Via, "PP["):
 		return ProvPP
-	case e.Via == "dispatch_table":
+	case e.Via == ProvDispatch:
 		return ProvDispatch
-	case e.Via == "object_field":
+	// Prefix, not equality: an object-field via carries the field offset
+	// (`object_field+0x30`) so unresolved sites can be told apart. See
+	// disasm.ObjectFieldViaAt.
+	case strings.HasPrefix(e.Via, ProvObject):
 		return ProvObject
 	case e.Via == "":
 		return ProvUnresolved

@@ -189,3 +189,13 @@ func decodeFunctionKind(kindTag uint32, profile *snapshot.VersionProfile) Functi
 func (n *NamedObject) IsConstructor() bool {
 	return n.FuncKind == FunctionKindConstructor
 }
+
+// IsImplicitClosure reports whether a Function is an implicit closure -- a
+// tear-off. Unlike a real (non-implicit) closure, the SDK does NOT qualify it
+// with its enclosing function: FunctionPrintNameHelper prepends the parent
+// name only under IsNonImplicitClosureFunction (object.cc), so a tear-off of
+// `_throwNew` is named `_throwNew`, not `_throwNew._throwNew`. Callers that add
+// the enclosing name must skip these.
+func (n *NamedObject) IsImplicitClosure() bool {
+	return n.FuncKind == FunctionKindImplicitClosure
+}

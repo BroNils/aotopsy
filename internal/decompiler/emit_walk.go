@@ -128,8 +128,15 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// dangling goto.
 	e.emit(indent, "block_%d:;", id)
 	e.annotateInlineFrames(blk.StartVA, indent)
+	// Forward dataflow join: fill live-in registers every already-emitted
+	// predecessor agrees on but the taken path left unknown.
+	e.seedFromEmittedPreds(id)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
+		// RegClass invariant: drop the tracked class of any register this
+		// instruction overwrites BEFORE lifting it, so a stale type can never
+		// survive a redefinition (see LiftState.RegClass).
+		e.state.clearWrittenRegClasses(ins)
 		switch ins.Op {
 		case OpCall:
 			e.emitCall(ins, indent)
@@ -154,6 +161,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				cond, ok := e.buildCondition(ins)
 				if !ok {
 					cond = "/* cond */"
+				}
+				if isStackOverflowCond(cond) {
+					continue
 				}
 				var takenID = -1
 				var fallID = -1
@@ -223,6 +233,10 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			}
 		}
 	}
+
+	// Record this block's OUT state (after its own instructions, before any
+	// successor recursion) for downstream forward joins.
+	e.recordBlockOut(id)
 
 	// Fallthrough / unconditional-jump successor for blocks whose last
 	// instruction wasn't itself a control-flow op (e.g. ends mid-block
@@ -437,6 +451,30 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		e.stats.PlaceholderIfs++
 		cond = "/* cond */"
 	}
+
+	// D1: Stack overflow check elision.
+	// In Dart AOT, functions check stack limit at entry or in loops:
+	// "cmp SP, THR.stack_limit; b.ls <runtime_stub>".
+	// The slow path calls the runtime and exits/retries; the fallthrough
+	// is the normal body. Modeling this as 2-way if/else duplicates the entire body.
+	// We elide the check and continue directly into the normal function body.
+	if isStackOverflowCond(cond) {
+		normalID := fallID
+		if strings.Contains(cond, ">") || strings.Contains(cond, "!=") {
+			normalID = takenID
+		}
+		if normalID < 0 {
+			normalID = fallID
+			if normalID < 0 {
+				normalID = takenID
+			}
+		}
+		if normalID >= 0 {
+			e.emitSuccessor(normalID, indent, depth)
+			return
+		}
+	}
+
 	savedState := e.state
 
 	e.emit(indent, "if (%s) {", cond)
@@ -450,6 +488,25 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// Item 7: Merge branch states instead of restoring pre-branch state.
 	e.state = savedState.MergeJoin(takenState, fallState)
 	e.emit(indent, "}")
+}
+
+// isStackOverflowCond reports whether a branch condition is a Dart runtime
+// stack-overflow check: `CMP SP, [THR + stack_limit]`.
+//
+// It requires the SPECIFIC `stack_limit` thread-field token (audit D1), not just
+// any THR reference, so an ordinary comparison against some other THR field can
+// never be mistaken for the prologue guard and have its branch elided. The stack
+// pointer is x15 on ARM64 (verified: `SPREG = R15` in constants_arm64.h) and
+// rsp on x86_64.
+func isStackOverflowCond(cond string) bool {
+	if cond == "" {
+		return false
+	}
+	if !strings.Contains(cond, "stack_limit") {
+		return false
+	}
+	return strings.Contains(cond, "x15") || strings.Contains(cond, "SP") ||
+		strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
 }
 
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
@@ -514,6 +571,19 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 		return
 	}
 	if ins.Target != "" {
+		if va, ok := parseHexVA(ins.Target); ok {
+			name := fmt.Sprintf("sub_%x", va)
+			if e.symbols != nil {
+				if sym, ok := e.symbols(va); ok && sym != "" {
+					name = sym
+				}
+			}
+			name = cleanCalleeName(name)
+			args := e.callArgExprs(len(e.fir.ArgRegs))
+			argsText := strings.Join(args, ", ")
+			e.emit(indent, "return %s(%s);", name, argsText)
+			return
+		}
 		e.emit(indent, "return tailCall_%s();", sanitizeTailCallName(ins.Target))
 		return
 	}

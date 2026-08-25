@@ -1,0 +1,15 @@
+{
+  "sample": "dart-3.13.0-x64.so",
+  "input_sha256": "c0491baca16b6d6a5446ea6bd7acdbc4ffea722a66ad9e77de6d3d2184630f04",
+  "dart_version": "3.13.0",
+  "unified_snapshot": true,
+  "isolate_clusters": 387,
+  "has_instructions_table": true,
+  "strings": 10258,
+  "named": 12189,
+  "codes": 8518,
+  "instr_table_length": 8518,
+  "instr_table_first_entry_with_code": 0,
+  "instr_table_code_entries": 8518,
+  "code_ranges": 8518
+}

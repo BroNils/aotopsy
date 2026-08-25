@@ -13,12 +13,21 @@ import (
 	"strings"
 
 	"aotopsy/internal/cli"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/strutil"
 )
 
 func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
 	if ci.IsConstructor {
 		return QualifiedName("", ci.FuncName, pcOffset)
+	}
+	// A closure is qualified by the FUNCTION it was declared inside, not by its
+	// owning class -- the SDK spells it `Enclosing.<anonymous closure>` (the
+	// QualifiedScrubbedName walks the parent chain). Without this every closure
+	// in a class renders identically and disagrees with the symbol table. The
+	// enclosing name is already class-qualified by BuildClosureParents.
+	if ci.EnclosingFunction != "" {
+		return QualifiedName(ci.EnclosingFunction, ci.FuncName, pcOffset)
 	}
 	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
 }
@@ -293,7 +302,8 @@ func IsInterestingCallee(name string) bool {
 		return false
 	case len(name) > 2 && name[0] == '0' && name[1] == 'x':
 		return false
-	case name == "dispatch_table" || name == "object_field":
+	// object_field carries a field offset suffix, so match by prefix.
+	case name == "dispatch_table" || strings.HasPrefix(name, disasm.ObjectFieldVia):
 		return false
 	case len(name) > 4 && name[:4] == "THR.":
 		return false

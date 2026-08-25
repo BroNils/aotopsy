@@ -9,6 +9,7 @@
 package symbolmap
 
 import (
+	"bytes"
 	"debug/elf"
 	"fmt"
 	"os"
@@ -220,7 +221,7 @@ func compareExecLayouts(stripped, unstripped []execSection) (layoutMatch, bytesM
 			bytesMatch = false
 			continue
 		}
-		if string(u.Data) != string(s.Data) {
+		if !bytes.Equal(u.Data, s.Data) {
 			bytesMatch = false
 		}
 	}

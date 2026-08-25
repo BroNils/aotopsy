@@ -337,7 +337,7 @@ func cmdDecompileNative(args []string) error {
 		if !ok {
 			return "", false
 		}
-		return fmt.Sprintf("%q", s), true
+		return s, true
 	}
 
 	// argRegMasks is a lazily-computed, whole-binary aggregation of every
