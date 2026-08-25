@@ -37,6 +37,10 @@ func TestDecompileFidelityCensus(t *testing.T) {
 	cats := []cat{
 		{"rawReg", regexp.MustCompile(`\b([wx]\d{1,2}|r[a-d]x|rsi|rdi|rbp|r[89]|r1[0-5])\b`)},
 		{"rawField", regexp.MustCompile(`\.f\d+\b`)},
+		// THR-rooted `.fNN` (e.g. THR.field_table_values.f1760) is NOT an
+		// instance-field-name failure; it pollutes rawField. Reported separately
+		// so instance-field = rawField - thrField.
+		{"thrField", regexp.MustCompile(`THR[\w.]*\.f\d+\b`)},
 		{"poolUnresolved", regexp.MustCompile(`\(PP \+ \d+\)|\bpool\[`)},
 		{"placeholderVal", regexp.MustCompile(`<[A-Za-z][\w ]*>`)},
 		{"unresolvedCall", regexp.MustCompile(`indirectCall|\bsub_[0-9a-f]+|tailCall_|dynamicCall`)},
