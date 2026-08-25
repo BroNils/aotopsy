@@ -13,10 +13,20 @@ import (
 // exactly (the report's central architectural finding: this decompiler
 // family is a string-rewriting system, not an AST-based one).
 type LiftState struct {
-	Regs    map[string]string // register name -> expr string
-	Locals  map[int64]string  // frame-relative byte offset -> local var name
-	LastCmp [2]string
-	HasCmp  bool
+	Regs   map[string]string // register name -> expr string
+	Locals map[int64]string  // frame-relative byte offset -> local var name
+	// RegClass maps a register to the Dart class ID of the object it currently
+	// holds, when known (0/absent = unknown). It lets fieldExpr resolve `.fNN`
+	// on typed non-receiver objects (e.g. a freshly `new`-ed instance), not just
+	// the receiver. It is maintained CONSERVATIVELY: a register's class is
+	// cleared before every instruction that writes it (clearWrittenRegClasses)
+	// and only re-established by an explicit typing event (an allocation call, or
+	// a mov from another typed register). A stale class here would fabricate a
+	// wrong field name -- exactly the §2 error this project forbids -- so the
+	// invariant is "clear by default, set only on proof".
+	RegClass map[string]int
+	LastCmp  [2]string
+	HasCmp   bool
 	// Pool resolves an object-pool index to its display text. Set by the
 	// emitter, which is the only layer that has the deserialized pool; nil
 	// in unit tests that lift instructions in isolation, in which case a
@@ -31,7 +41,7 @@ type LiftState struct {
 // "" where the architecture has no such register (x86_64, which loads null
 // from the object pool instead).
 func newLiftState(nullReg string) *LiftState {
-	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string)}
+	s := &LiftState{Regs: make(map[string]string), Locals: make(map[int64]string), RegClass: make(map[string]int)}
 	if nullReg != "" {
 		s.Regs[nullReg] = "null"
 		if strings.HasPrefix(nullReg, "x") {
@@ -56,9 +66,12 @@ func newLiftState(nullReg string) *LiftState {
 // frame-global (a stack slot is the same slot regardless of which branch
 // wrote to it).
 func (s *LiftState) Clone() *LiftState {
-	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
 	for k, v := range s.Regs {
 		c.Regs[k] = v
+	}
+	for k, v := range s.RegClass {
+		c.RegClass[k] = v
 	}
 	return c
 }
@@ -147,7 +160,66 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	} else {
 		merged.HasCmp = false
 	}
+	// RegClass: keep a class only when both branches agree on it. Any
+	// disagreement (or presence in only one branch) drops it -- never guess a
+	// type across a join.
+	merged.RegClass = make(map[string]int, len(s.RegClass))
+	for reg, tc := range taken.RegClass {
+		if fc, ok := fall.RegClass[reg]; ok && fc == tc {
+			merged.RegClass[reg] = tc
+		}
+	}
 	return merged
+}
+
+// clearWrittenRegClasses drops the tracked class of every register an
+// instruction writes, BEFORE the instruction is lifted. This is the
+// conservative core of the RegClass invariant: after this, a register's class
+// is only re-established by an explicit typing event, so a stale class can never
+// survive a redefinition and fabricate a wrong field name. The write set is
+// derived from the same text analysis the arity liveness uses.
+func (s *LiftState) clearWrittenRegClasses(ins Instr) {
+	if len(s.RegClass) == 0 {
+		return
+	}
+	_, writes := inspectInstrRegUsage(ins, "")
+	for _, w := range writes {
+		delete(s.RegClass, w)
+		// x0/w0 alias: clearing either clears the pair.
+		if strings.HasPrefix(w, "x") {
+			delete(s.RegClass, "w"+w[1:])
+		} else if strings.HasPrefix(w, "w") {
+			delete(s.RegClass, "x"+w[1:])
+		}
+	}
+}
+
+// clearRegClass drops the tracked class of reg and its w/x alias.
+func (s *LiftState) clearRegClass(reg string) {
+	if reg == "" || len(s.RegClass) == 0 {
+		return
+	}
+	reg = strings.ToLower(reg)
+	delete(s.RegClass, reg)
+	if strings.HasPrefix(reg, "x") {
+		delete(s.RegClass, "w"+reg[1:])
+	} else if strings.HasPrefix(reg, "w") {
+		delete(s.RegClass, "x"+reg[1:])
+	}
+}
+
+// setRegClass records reg (and its w/x alias) as holding class cid.
+func (s *LiftState) setRegClass(reg string, cid int) {
+	if cid <= 0 || reg == "" {
+		return
+	}
+	reg = strings.ToLower(reg)
+	s.RegClass[reg] = cid
+	if strings.HasPrefix(reg, "x") {
+		s.RegClass["w"+reg[1:]] = cid
+	} else if strings.HasPrefix(reg, "w") {
+		s.RegClass["x"+reg[1:]] = cid
+	}
 }
 
 // operand is a parsed instruction operand: either a bare register/
@@ -433,7 +505,7 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 	if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
 		return expr
 	}
-	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+	return fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, s, base))
 }
 
 // localName renders a frame-relative byte offset as a valid Dart
@@ -570,15 +642,23 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 // identified come from the SDK-derived tables in internal/disasm
 // (thrfields.go / thrfields_x64.go), applied by the annotator, not from
 // class layouts.
-func dartFieldResolver(fir *FuncIR, baseReg string) func(int64, int64) string {
+func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, int64) string {
 	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg ||
 		baseReg == fir.PoolReg || baseReg == fir.StackReg {
 		return nil
 	}
-	// A2: pass ReceiverClassID so the resolver can use the per-class field
-	// map rather than the offset-only fallback.
-	rcid := fir.ReceiverClassID
-	return func(_ int64, off int64) string { return fir.FieldNameResolver(rcid, off) }
+	// Prefer the base register's TRACKED class (from an allocation the value
+	// flowed out of) -- accurate for any object. Fall back to ReceiverClassID
+	// (the receiver `this`) only when the base's class is unknown, exactly as
+	// before, so this is strictly additive: it improves typed bases and leaves
+	// the rest unchanged.
+	cid := fir.ReceiverClassID
+	if s != nil {
+		if c, ok := s.RegClass[strings.ToLower(baseReg)]; ok && c > 0 {
+			cid = c
+		}
+	}
+	return func(_ int64, off int64) string { return fir.FieldNameResolver(cid, off) }
 }
 
 func fieldExpr(base string, off int64, resolver func(int64, int64) string) string {
@@ -641,6 +721,11 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				}
 			}
 			s.Regs[dst] = operandExpr(fir, s, ops[1])
+			// A register-to-register move carries the source's tracked class to
+			// the destination (the class was cleared for dst just before this).
+			if cid, ok := s.RegClass[strings.ToLower(strings.TrimSpace(ops[1]))]; ok && cid > 0 {
+				s.setRegClass(dst, cid)
+			}
 		}
 	case "add", "sub":
 		if len(ops) >= 3 {
@@ -869,7 +954,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 		} else if expr, ok := stackSlotExpr(fir, base, op.memDisp); ok {
 			lhs = expr
 		} else {
-			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, base))
+			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, s, base))
 		}
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",

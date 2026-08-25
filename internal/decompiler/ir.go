@@ -9,7 +9,10 @@
 // is based on for the full rationale.
 package decompiler
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Op classifies one instruction's role in control flow / value flow, this
 // is deliberately a small enum mirroring flutterdec-ir's IROp -- most
@@ -291,6 +294,31 @@ type FuncIR struct {
 	// ReturnType holds the recovered or inferred return type name (e.g. "String", "int", "bool", "void").
 	// When non-empty, the signature emits `<ReturnType> funcName(...)` instead of `dynamic funcName(...)`.
 	ReturnType string `json:"-"`
+
+	// ClassNameToID maps a class name to its class ID. It lets the emitter tag a
+	// register with a concrete class when a call resolves to that class's
+	// allocation stub (`new <Class>`), so subsequent field accesses on the freshly
+	// allocated object resolve to real field names. Nil disables the feature.
+	ClassNameToID map[string]int `json:"-"`
+}
+
+// AllocatedClassID returns the class ID a callee name allocates, or 0. A Dart
+// AOT allocation stub is named `new <Class>` (isAllocationStubOwner), so a call
+// to it yields a fresh instance of <Class>.
+func (f *FuncIR) AllocatedClassID(calleeName string) int {
+	if f.ClassNameToID == nil {
+		return 0
+	}
+	rest, ok := strings.CutPrefix(calleeName, "new ")
+	if !ok {
+		return 0
+	}
+	// The class is the token before any `.` (unnamed vs named constructor) and
+	// before any residual args; allocation stubs are just `new <Class>`.
+	if i := strings.IndexAny(rest, ". ("); i >= 0 {
+		rest = rest[:i]
+	}
+	return f.ClassNameToID[rest]
 }
 
 // SwitchCase is one case in a recovered switch dispatch.

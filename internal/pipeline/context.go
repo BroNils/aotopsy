@@ -71,6 +71,7 @@ type Context struct {
 	excHandlersByCode    map[int][]cluster.ExceptionHandlerEntry
 	pcDescByCode         map[int][]cluster.PcDescriptorEntry
 	paramTypeByCodeIndex map[int]*cluster.NamedObject
+	classNameToID        map[string]int
 }
 
 // LoadContext opens libPath and runs the full static-analysis setup
@@ -169,7 +170,11 @@ func (c *Context) ensureDecompileMaps() {
 	layouts := BuildClassLayouts(result, pl, c.Info.Version.CompressedPointers)
 	perClass := map[int32]map[int32]string{}
 	offsetNames := map[int32]map[string]bool{}
+	c.classNameToID = make(map[string]int, len(layouts))
 	for _, cl := range layouts {
+		if cl.ClassName != "" && cl.ClassID > 0 {
+			c.classNameToID[cl.ClassName] = int(cl.ClassID)
+		}
 		if perClass[cl.ClassID] == nil {
 			perClass[cl.ClassID] = map[int32]string{}
 		}
@@ -299,6 +304,7 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 	// these).
 	c.ensureDecompileMaps()
 	fir.FieldNameResolver = c.fieldNameResolver
+	fir.ClassNameToID = c.classNameToID
 	if r.RefID >= 0 {
 		if cid, ok := c.receiverClassByCode[r.RefID]; ok && cid > 0 {
 			fir.ReceiverClassID = cid

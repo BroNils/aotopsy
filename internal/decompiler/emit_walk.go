@@ -130,6 +130,10 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	e.annotateInlineFrames(blk.StartVA, indent)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
+		// RegClass invariant: drop the tracked class of any register this
+		// instruction overwrites BEFORE lifting it, so a stale type can never
+		// survive a redefinition (see LiftState.RegClass).
+		e.state.clearWrittenRegClasses(ins)
 		switch ins.Op {
 		case OpCall:
 			e.emitCall(ins, indent)

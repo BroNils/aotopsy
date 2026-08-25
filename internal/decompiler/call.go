@@ -87,6 +87,11 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 
+	// A call overwrites the return register with a result of unknown class;
+	// drop any stale tracked type. emitDirectCall re-establishes it only when the
+	// callee is an allocation stub (`new <Class>`).
+	e.state.clearRegClass(e.fir.ReturnReg)
+
 	if va, ok := parseHexVA(ins.Target); ok {
 		e.emitDirectCall(tmpName, va, argsText, selectorHint, indent)
 		return
@@ -174,6 +179,12 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 		}
 	}
 	name = cleanCalleeName(name)
+	// If this call allocates a `new <Class>`, the return register now holds a
+	// fresh instance of that class -- record it so subsequent field accesses on
+	// the object resolve to real field names (audit-driven P2 / value typing).
+	if cid := e.fir.AllocatedClassID(name); cid > 0 {
+		e.state.setRegClass(e.fir.ReturnReg, cid)
+	}
 	// P7: Async/await detection. Calls to suspend_state_init_async_ep or
 	// suspend_state_await_ep indicate this is an async function. Mark it
 	// so the signature gets `async`. Await calls are rendered as `await`
