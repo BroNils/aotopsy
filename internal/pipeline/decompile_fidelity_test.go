@@ -34,6 +34,14 @@ func TestDecompileFidelityCensus(t *testing.T) {
 		name string
 		re   *regexp.Regexp
 	}
+	// hexEscapeRe / commentRe strip measurement false-positives before the
+	// category regexes run: `\x00` string-escape bytes match the rawReg pattern
+	// as "x00" (140k phantom hits on the string-heavy gt-arm64 sample), and
+	// register names listed inside generated `//` annotations are not
+	// reconstruction defects. Neither is a real residual, so both are removed to
+	// keep the census honest.
+	hexEscapeRe := regexp.MustCompile(`\\x[0-9a-fA-F]{2}`)
+	commentRe := regexp.MustCompile(`//[^\n]*`)
 	cats := []cat{
 		{"rawReg", regexp.MustCompile(`\b([wx]\d{1,2}|r[a-d]x|rsi|rdi|rbp|r[89]|r1[0-5])\b`)},
 		{"rawField", regexp.MustCompile(`\.f\d+\b`)},
@@ -89,6 +97,9 @@ func TestDecompileFidelityCensus(t *testing.T) {
 				fns++
 				src := art.Source
 				lines += strings.Count(src, "\n")
+				// Census measures reconstruction defects in the pseudocode, not
+				// in string literals or annotations; strip both first.
+				src = commentRe.ReplaceAllString(hexEscapeRe.ReplaceAllString(src, ""), "")
 				sumStats.TotalCalls += art.Stats.TotalCalls
 				sumStats.IndirectCalls += art.Stats.IndirectCalls
 				sumStats.SemanticDirectCalls += art.Stats.SemanticDirectCalls

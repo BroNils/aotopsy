@@ -406,6 +406,17 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
 	e.state.setReg(fir.ThreadReg, "THR")
 	e.state.setReg(fir.PoolReg, "PP")
+	// SPREG (ARM64 x15 / x86 rsp) and HEAP_BITS (ARM64 x28) are reserved
+	// registers with fixed meanings, verified against constants_arm64.h
+	// (SPREG=R15, HEAP_BITS=R28). Seeding them by name keeps computed
+	// stack addresses and write-barrier-mask math from leaking raw register
+	// tokens into the pseudocode.
+	if fir.StackReg != "" {
+		e.state.setReg(fir.StackReg, "SP")
+	}
+	if fir.HeapBitsReg != "" {
+		e.state.setReg(fir.HeapBitsReg, "HEAP_BITS")
+	}
 
 	// P7: Async state machine annotation. Dart compiles async functions
 	// into state machines: the function body is split at each await point,

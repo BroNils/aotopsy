@@ -73,6 +73,33 @@ var x86RegCanon = map[string]string{
 	"rsp": "rsp", "esp": "rsp", "spl": "rsp",
 }
 
+// stackComputedSlot recognises a symbolic value that is a computed SP-relative
+// address -- "SP", "(SP - k)", or "(SP + k)" -- and renders it as the same
+// [SP±k] stack-slot notation stackSlotExpr produces for direct base+disp
+// accesses. The seeds in EmitPseudocode name SPREG "SP", so a `sub xN, SP, #k`
+// followed by a store/load through xN surfaces here instead of leaking the raw
+// stack-pointer register. Returns ok=false for anything that is not an SP
+// address, leaving the caller's existing rendering untouched.
+func stackComputedSlot(expr string) (string, bool) {
+	expr = strings.TrimSpace(expr)
+	if expr == "SP" {
+		return "[SP]", true
+	}
+	if !strings.HasPrefix(expr, "(SP ") || !strings.HasSuffix(expr, ")") {
+		return "", false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(expr, "(SP "), ")")
+	// inner is "- k" or "+ k".
+	if len(inner) < 3 || (inner[0] != '-' && inner[0] != '+') || inner[1] != ' ' {
+		return "", false
+	}
+	num := strings.TrimSpace(inner[2:])
+	if !isAllDigits(num) {
+		return "", false
+	}
+	return "[SP" + string(inner[0]) + num + "]", true
+}
+
 // setReg writes val as the symbolic value of register dst, keyed by the
 // canonical physical register so every width view observes it. This is the
 // single write path for the register value-graph; all lifters route through it.

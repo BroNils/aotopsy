@@ -962,6 +962,17 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 		s.setReg(name, valExpr)
 		return fmt.Sprintf("%s = %s;", name, valExpr), true
 	}
+	// A store through SPREG resolves to a stack slot by REGISTER NAME, so it
+	// is correct even where the "SP" value seed was dropped at a merge join
+	// (which otherwise leaks the raw x15/rsp base into `x15 = ...`).
+	if base == fir.StackReg {
+		if op.hasDisp {
+			if slot, ok := stackSlotExpr(fir, base, op.memDisp); ok {
+				return fmt.Sprintf("%s = %s;", slot, valExpr), true
+			}
+		}
+		return fmt.Sprintf("[SP] = %s;", valExpr), true
+	}
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
 	if op.hasDisp {
@@ -974,6 +985,11 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 		} else {
 			lhs = fieldExpr(baseExpr, op.memDisp, dartFieldResolver(fir, s, base))
 		}
+	} else if slot, ok := stackComputedSlot(baseExpr); ok {
+		// A stored-through computed SP-relative address (sub xN, SP, #k;
+		// str src, [xN]) is a stack slot -- render it like the direct
+		// [SP-k] form stackSlotExpr produces, not a raw pointer deref.
+		lhs = slot
 	} else if !isSimpleLvalueExpr(baseExpr) {
 		// baseExpr is itself a compound expression (e.g. "(x15 - 32)",
 		// found testing against a real libapp.so where a computed
