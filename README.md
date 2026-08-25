@@ -29,7 +29,7 @@ the test suite on every change:
 
 | Metric | Value | What it means |
 |--------|-------|---------------|
-| **Name-recovery agreement** | **≥ 0.81** floor (worst band 86% across 19 Dart-version twins) | Recovered function names compared against each build's own ELF `.symtab`, the external ground truth — `TestSymtabDifferential`. |
+| **Name-recovery agreement** | **89.8%** overall (81.3% worst band, ≥ 0.81 gate floor) across 44 ground-truth builds | Recovered function names compared against each build's own ELF `.symtab`, the external ground truth — `TestSymtabDifferential`. Full per-build scoreboard: [BENCHMARK.md](BENCHMARK.md) (`make bench`). |
 | **Decompiler syntax validity** | **100%** valid Dart | Every emitted pseudocode function parses as Dart — `TestDecompileQualityCorpus`. |
 | **Fabrication rate** | **0%** | The §2 rule: never emit a guessed name, type, or call target as fact. Unknowns render honestly (`indirectCall`, `<unknown>`, `dynamic`). |
 
@@ -118,7 +118,7 @@ flowchart LR
     end
 ```
 
-[Blutter](https://github.com/aspect-sec/blutter) embeds the Dart VM to deserialize the snapshot through its own code paths. Perfect fidelity, but requires compiling a matching Dart SDK for every target version.
+[Blutter](https://github.com/worawit/blutter) embeds the Dart VM to deserialize the snapshot through its own code paths. Perfect fidelity, but requires compiling a matching Dart SDK for every target version — and it is ARM64-only, with no static x86_64 support. AOTopsy is the only static, version-independent analyzer with a native pseudocode decompiler and published ground-truth accuracy.
 
 AOTopsy parses the binary format directly. No VM, no SDK. The tradeoff: every format change across Dart versions must be modeled explicitly. There is no runtime to handle it automatically.
 

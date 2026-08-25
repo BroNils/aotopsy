@@ -32,9 +32,22 @@ Verify the archive you downloaded before running it:
 sha256sum -c SHA256SUMS.txt --ignore-missing
 ```
 
-Signed provenance (Sigstore cosign keyless signatures + SLSA build-provenance
-attestations) is being added to the release pipeline; once live, releases will document
-the exact `cosign verify-blob` and `gh attestation verify ./aotopsy` commands here.
+Releases cut by the automated pipeline (`.github/workflows/release.yml`) additionally
+ship a **keyless Sigstore signature** of the checksum file and a **SLSA build-provenance
+attestation** for each binary — no stored keys, bound to the GitHub Actions build via
+OIDC. Verify them with:
+
+```bash
+# checksum-file signature (cosign v2+):
+cosign verify-blob \
+  --bundle SHA256SUMS.txt.sigstore.json \
+  --certificate-identity-regexp 'https://github.com/BroNils/aotopsy/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS.txt
+
+# build provenance of a downloaded binary:
+gh attestation verify ./aotopsy --repo BroNils/aotopsy
+```
 
 ## Handling of analyzed apps
 
