@@ -7,15 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-26
+
+Reliability & public-trust release: verifiable accuracy, signed releases, and a hardened parser.
+
 ### Added
-- `SECURITY.md` — supported versions, private vulnerability reporting for parser bugs, and release-binary checksum verification.
-- GitHub Actions CI: cross-platform build + `vet` + test matrix (linux/amd64, darwin/arm64, windows/amd64) plus a linux `-race` + coverage job; runs on every push/PR to `main`/`develop`.
-- README **Accuracy & Honesty** section publishing named, ground-truth metrics: name-recovery agreement ≥ 0.81 vs the app's own ELF `.symtab` (19 Dart-version twins), 100% valid-Dart, 0% fabrication.
-- README **Limitations & Scope** section documenting the verified hard AOT floors (instance field names ~97–99% dropped by `Precompiler::DropFields`, local/captured names, truly polymorphic dispatch) versus engineering scope.
+- **Public name-recovery benchmark** — `BENCHMARK.md`, a ground-truth scoreboard scoring recovered names against each build's own ELF `.symtab`: 89.8% overall agreement across 44 builds (up to Dart 3.13.0 at 92.2%), 81.3% worst band. Regenerate with `make bench`. The accuracy claim no competing Flutter AOT tool publishes.
+- **Automated signed releases** — GoReleaser pipeline building linux/darwin/windows × amd64/arm64 with SHA256 checksums, a keyless (Sigstore/OIDC) cosign signature of the checksum file, per-archive SBOMs, and a SLSA build-provenance attestation. Triggered by pushing a `v*` tag.
+- **`aotopsy --version`** — reports version/commit/date, injected at release time.
+- **Fuzz-hardened parsers** — Go native fuzz targets on the untrusted-binary byte parsers (image header, instructions section, CodeSourceMap, PcDescriptors); crash-safe over ~3.7M executions, and permanent regression guards in CI.
+- **`SECURITY.md`** — supported versions, private vulnerability reporting for parser bugs, and release-binary verification (checksums + `cosign verify-blob` / `gh attestation verify`).
+- **CI** — cross-platform build + `vet` + test matrix (linux/amd64, darwin/arm64, windows/amd64) plus a linux `-race` + coverage job on every push/PR.
+- **README Accuracy & Honesty** and **Limitations & Scope** sections publishing named metrics (≥ 0.81 name-recovery floor, 100% valid-Dart, 0% fabrication) and the verified hard AOT floors (field names ~97–99% dropped by `Precompiler::DropFields`, local names, polymorphic dispatch).
 
 ### Changed
-- Dart coverage documented as **2.10 → 3.13** (3.13.2 is the current stable frontier; snapshot support is structure-based, not version-number-gated).
-- Fork attribution updated: the original `zboralski/unflutter` repository was removed by the author; credit retained, with a pointer to the `KristijanZic/unflutter` continuation.
+- Dart coverage documented as **2.10 → 3.13** (3.13.2 stable frontier; structure-based, not version-number-gated); 3.13.0 verified in the differential at 92.2%.
+- Fork attribution updated: the original `zboralski/unflutter` was removed by the author; credit retained, pointer to the `KristijanZic/unflutter` continuation. `blutter` link corrected to `worawit/blutter`.
+- CHANGELOG restructured to Keep a Changelog / SemVer.
 
 ## [1.0.0] - 2026-08-26
 
@@ -130,5 +138,6 @@ mindmap
       Parity reporting
 ```
 
-[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/BroNils/aotopsy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BroNils/aotopsy/releases/tag/v1.0.0
