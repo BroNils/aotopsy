@@ -249,7 +249,10 @@ func TestCallArityTrimming(t *testing.T) {
 	}
 }
 
-// TestNullRegIdentityMath verifies D11: identity folding and NULL_REG arithmetic normalizations.
+// TestNullRegIdentityMath verifies the SAFE numeric identity foldings (x+0, x-0,
+// x*1). It also verifies that NULL_REG arithmetic is NOT folded (audit A2):
+// NULL_REG (x22) holds a pointer to the null object, not the integer 0, so
+// `null + 10` must be preserved, not fabricated into `10`.
 func TestNullRegIdentityMath(t *testing.T) {
 	input := []string{
 		"x0 = null + 10;",
@@ -262,8 +265,8 @@ func TestNullRegIdentityMath(t *testing.T) {
 	out := printStmts(tree)
 	joined := strings.Join(out, "\n")
 
-	if strings.Contains(joined, "null + 10") {
-		t.Errorf("expected 'null + 10' to fold to 10, got:\n%s", joined)
+	if !strings.Contains(joined, "null + 10") {
+		t.Errorf("expected 'null + 10' to be PRESERVED (x22 is a pointer, not 0), got:\n%s", joined)
 	}
 	if strings.Contains(joined, "x + 0") {
 		t.Errorf("expected 'x + 0' to fold to x, got:\n%s", joined)
@@ -386,12 +389,14 @@ func TestCalleeNameCleaning(t *testing.T) {
 		want  string
 	}{
 		{
+			// Mixin chain is KEPT (audit A6): the full mixin-application class is
+			// the real owner; only @hash and the PCOffset suffix are stripped.
 			input: "__Set & _HashVMBase & SetMixin & _LinkedHashSetMixin@3099033.add_564794",
-			want:  "_LinkedHashSetMixin.add",
+			want:  "__Set & _HashVMBase & SetMixin & _LinkedHashSetMixin.add",
 		},
 		{
 			input: "_MixinApplication504&Object&DioMixin@18353248.post_b4594",
-			want:  "DioMixin.post",
+			want:  "_MixinApplication504&Object&DioMixin.post",
 		},
 		{
 			input: "new _Set@3099033_14b90",
@@ -415,8 +420,11 @@ func TestCalleeNameCleaning(t *testing.T) {
 	}
 }
 
-// TestArrayPlaceholderNormalization verifies D8: <Array> placeholder evaluates to [].
-func TestArrayPlaceholderNormalization(t *testing.T) {
+// TestArrayPlaceholderPreserved verifies audit A1: the `<Array>` /
+// `<GrowableObjectArray>` "unresolved value" placeholder is NOT rewritten to an
+// empty list literal `[]`. Doing so would fabricate a concrete value where the
+// analysis actually has none. The placeholder must survive.
+func TestArrayPlaceholderPreserved(t *testing.T) {
 	input := []string{
 		`return "<Array>";`,
 		`x0 = "<GrowableObjectArray>";`,
@@ -426,11 +434,11 @@ func TestArrayPlaceholderNormalization(t *testing.T) {
 	out := printStmts(tree)
 	joined := strings.Join(out, "\n")
 
-	if strings.Contains(joined, `"<Array>"`) || strings.Contains(joined, `"<GrowableObjectArray>"`) {
-		t.Errorf("D8 violation: placeholder was not normalized:\n%s", joined)
+	if strings.Contains(joined, "[]") {
+		t.Errorf("A1 violation: unresolved placeholder was fabricated into []:\n%s", joined)
 	}
-	if !strings.Contains(joined, "return [];") {
-		t.Errorf("expected 'return [];', got:\n%s", joined)
+	if !strings.Contains(joined, "<Array>") || !strings.Contains(joined, "<GrowableObjectArray>") {
+		t.Errorf("expected placeholders preserved, got:\n%s", joined)
 	}
 }
 
@@ -636,31 +644,39 @@ func TestAsyncStreamAwaitFor(t *testing.T) {
 	}
 }
 
-// TestClosureInliningAndLambdaSynthesis verifies Phase 8: AllocateClosure allocations are inlined to call-sites.
-func TestClosureInliningAndLambdaSynthesis(t *testing.T) {
+// TestClosureInlining verifies closure-allocation inlining is SOUND (audit A4):
+// a context-free closure is inlined as its tear-off, but a closure that CAPTURES
+// a context is left intact (inlining it would drop the binding).
+func TestClosureInlining(t *testing.T) {
 	input := []string{
 		"dynamic processUsers(dynamic users) {",
-		"  final t0 = AllocateClosure(print, null);",
+		"  final t0 = AllocateClosure(print, null);", // no context -> inline
 		"  users.forEach(t0);",
-		"  final t1 = _Closure(User.getName, ctx);",
+		"  final t1 = _Closure(User.getName, ctx);", // captures ctx -> keep
 		"  final t2 = users.map(t1);",
 		"  return t2;",
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "AllocateClosure") || strings.Contains(compacted, "_Closure(") {
-		t.Errorf("Phase 8 violation: closure allocation was not inlined:\n%s", compacted)
+	if strings.Contains(compacted, "AllocateClosure") {
+		t.Errorf("context-free closure was not inlined:\n%s", compacted)
 	}
 	if !strings.Contains(compacted, "users.forEach(print);") {
 		t.Errorf("expected 'users.forEach(print);', got:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, "users.map(User.getName)") {
-		t.Errorf("expected 'users.map(User.getName)', got:\n%s", compacted)
+	// The context-capturing closure must survive verbatim (no binding dropped).
+	if !strings.Contains(compacted, "_Closure(User.getName, ctx)") {
+		t.Errorf("A4 violation: context-capturing closure was altered/dropped:\n%s", compacted)
+	}
+	if strings.Contains(compacted, "users.map(User.getName)") {
+		t.Errorf("A4 violation: closure with captured ctx was reduced to bare tear-off:\n%s", compacted)
 	}
 }
 
-// TestAnonymousClosureCallCleaning verifies Phase 8: anonymous closure callback names are cleaned to lambdas.
-func TestAnonymousClosureCallCleaning(t *testing.T) {
+// TestAnonymousClosurePreserved verifies audit A3: an anonymous-closure reference
+// is NOT rewritten into a synthesized lambda body. The closure's real body lives
+// in a separate function, so `(item) => process(item)` would be an invention.
+func TestAnonymousClosurePreserved(t *testing.T) {
 	input := []string{
 		"dynamic formatList(dynamic items) {",
 		"  final t0 = items.map(process.<anonymous closure>);",
@@ -668,11 +684,11 @@ func TestAnonymousClosureCallCleaning(t *testing.T) {
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "<anonymous closure>") {
-		t.Errorf("Phase 8 violation: raw <anonymous closure> remained:\n%s", compacted)
+	if strings.Contains(compacted, "=>") {
+		t.Errorf("A3 violation: a lambda body was fabricated:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, "items.map((item) => process(item))") {
-		t.Errorf("expected 'items.map((item) => process(item))', got:\n%s", compacted)
+	if !strings.Contains(compacted, "<anonymous closure>") {
+		t.Errorf("expected anonymous-closure reference preserved, got:\n%s", compacted)
 	}
 }
 

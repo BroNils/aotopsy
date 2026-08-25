@@ -75,21 +75,22 @@ func collectionIdiomsStmt(stmts []Stmt) ([]Stmt, bool) {
 				if subLine == nil {
 					break
 				}
-				// Check if this line is varName.add(...) or has addCallRe
+				// Only the INSTANCE form `varName.add(x)` with EXACTLY ONE argument
+				// is collapsed. The static/mixin form `_LinkedHashSetMixin.add(recv,
+				// elem, …)` on real output carries the receiver plus selector-hint
+				// registers (8-arg dumps), and guessing which token is the element
+				// produced garbage literals like `{"<Array>", x0, (PP+..).fNN, …}`
+				// (audit B1). If the add has more than one top-level argument, we do
+				// not know the element, so we stop collecting rather than fabricate.
 				t := strings.TrimSpace(subLine.Text)
-				if strings.HasPrefix(t, varName+".add(") || strings.HasPrefix(t, "_LinkedHashSetMixin.add(") || strings.HasPrefix(t, "_Set.add(") || strings.HasPrefix(t, "_GrowableList.add(") {
+				if strings.HasPrefix(t, varName+".add(") {
 					if m := addCallRe.FindStringSubmatch(t); m != nil {
 						elem := strings.TrimSpace(m[1])
-						// If the first argument is varName in static form: _LinkedHashSetMixin.add(s, elem)
-						if strings.HasPrefix(t, "_") && strings.Contains(elem, ",") {
-							parts := strings.SplitN(elem, ",", 2)
-							if strings.TrimSpace(parts[0]) == varName {
-								elem = strings.TrimSpace(parts[1])
-							}
+						if topLevelCommaCount(elem) == 0 {
+							elements = append(elements, elem)
+							k++
+							continue
 						}
-						elements = append(elements, elem)
-						k++
-						continue
 					}
 				}
 				break
@@ -255,6 +256,64 @@ func splitInterpolationParts(s string) []string {
 	return parts
 }
 
+// topLevelCommaCount counts commas that are not nested inside brackets or
+// quotes -- i.e. how many arguments a comma-separated list has, minus one.
+func topLevelCommaCount(s string) int {
+	n := 0
+	depth := 0
+	inQuote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inQuote != 0 {
+			if c == inQuote && (i == 0 || s[i-1] != '\\') {
+				inQuote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			inQuote = c
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// bracketsBalanced reports whether (), [] and {} are balanced in s (ignoring
+// quoted content). Used to reject regex captures that split a nested expression.
+func bracketsBalanced(s string) bool {
+	depth := 0
+	inQuote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inQuote != 0 {
+			if c == inQuote && (i == 0 || s[i-1] != '\\') {
+				inQuote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			inQuote = c
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
 func isSimpleIdent(s string) bool {
 	if s == "" {
 		return false
@@ -332,6 +391,12 @@ func nullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 					thenExpr := strings.TrimSpace(m[2])
 					elseExpr := strings.TrimSpace(m[3])
 
+					// Audit B3: the `[^?:]+?`/`[^;]+` capture is not bracket-aware,
+					// so a nested call/collection can be mis-split. Only rewrite
+					// when both arms are self-contained (balanced brackets).
+					if !bracketsBalanced(thenExpr) || !bracketsBalanced(elseExpr) {
+						return match
+					}
 					// (a != null) ? a : b -> a ?? b
 					if thenExpr == varName {
 						return fmt.Sprintf("%s ?? %s", varName, elseExpr)
@@ -352,6 +417,10 @@ func nullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 					thenExpr := strings.TrimSpace(m[2])
 					elseExpr := strings.TrimSpace(m[3])
 
+					// Audit B3: see note above -- require balanced arms.
+					if !bracketsBalanced(thenExpr) || !bracketsBalanced(elseExpr) {
+						return match
+					}
 					// (a == null) ? b : a -> a ?? b
 					if elseExpr == varName {
 						return fmt.Sprintf("%s ?? %s", varName, thenExpr)
@@ -378,8 +447,11 @@ func nullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 }
 
 var (
-	// newInstanceRe matches `final p = new Paint();` or `final p = Paint();`
-	newInstanceRe = regexp.MustCompile(`^(?:final\s+)?([A-Za-z_]\w*)\s*=\s*(?:new\s+)?([A-Z]\w*(?:\([^)]*\))?);$`)
+	// newInstanceRe matches `final p = new Paint();` or `final p = Paint();`.
+	// The constructor call PARENS are required (audit B2): without them a bare
+	// capitalized constant like `final p = Colors;` was matched and turned into
+	// `Colors()..`, fabricating a constructor call on a constant.
+	newInstanceRe = regexp.MustCompile(`^(?:final\s+)?([A-Za-z_]\w*)\s*=\s*(?:new\s+)?([A-Z]\w*\([^)]*\));$`)
 )
 
 // cascadeIdiomStmt collapses sequence of method/setter calls on a new instance into cascade notation `..`:

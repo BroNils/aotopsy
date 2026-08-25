@@ -3,20 +3,13 @@ package main
 // resolveArgRegIndices finds the common argument register indices from
 // a set of register masks collected from call sites.
 func resolveArgRegIndices(masks []uint8) ([]int, bool) {
-	if len(masks) == 0 {
+	// Require at least TWO call sites to agree before claiming a declared arity
+	// (audit C3): a single call site's ArgRegMask is explicitly documented as
+	// unreliable (CallEdge.ArgCountHint). With fewer than two sites we return
+	// "unresolved" and let the caller fall back to the honest intraprocedural
+	// liveness heuristic rather than trusting one noisy site.
+	if len(masks) < 2 {
 		return nil, false
-	}
-	if len(masks) == 1 {
-		if masks[0] == 0 {
-			return nil, false
-		}
-		var idx []int
-		for i := 0; i < 8; i++ {
-			if masks[0]&(1<<uint(i)) != 0 {
-				idx = append(idx, i)
-			}
-		}
-		return idx, len(idx) > 0
 	}
 	// For 2+ masks: count frequency of each bit across masks
 	counts := make([]int, 8)

@@ -42,6 +42,12 @@ var (
 func linearizeAsyncStmt(stmts []Stmt) ([]Stmt, bool) {
 	anyChanged := false
 
+	// The state-machine flatten (below) is only sound inside an async function.
+	// A plain `if (x == 0) {} else if (x == 1) {}` on non-async code is NOT a
+	// suspend-state dispatch and must not be linearized (audit B4). Gate it on
+	// real async evidence anywhere in the tree.
+	asyncEvidence := treeHasAsyncEvidence(stmts)
+
 	var walk func([]Stmt) ([]Stmt, bool)
 	walk = func(body []Stmt) ([]Stmt, bool) {
 		bodyChanged := false
@@ -193,7 +199,7 @@ func linearizeAsyncStmt(stmts []Stmt) ([]Stmt, bool) {
 				isStateMachine = false
 			}
 
-			if !isStateMachine {
+			if !isStateMachine || !asyncEvidence {
 				for ci := range c.Clauses {
 					var cChanged bool
 					c.Clauses[ci].Body, cChanged = walk(c.Clauses[ci].Body)
@@ -226,6 +232,37 @@ func linearizeAsyncStmt(stmts []Stmt) ([]Stmt, bool) {
 
 	res, changed := walk(stmts)
 	return res, changed || anyChanged
+}
+
+// treeHasAsyncEvidence reports whether any line in the statement tree carries a
+// marker of async lowering (await, _SuspendState, _StreamIterator, _returnAsync).
+// Used to gate the state-machine flatten so it never fires on ordinary
+// integer-dispatch if/else chains.
+func treeHasAsyncEvidence(stmts []Stmt) bool {
+	found := false
+	var scan func([]Stmt)
+	scan = func(body []Stmt) {
+		for _, s := range body {
+			if found {
+				return
+			}
+			if l := asLine(s); l != nil {
+				t := l.Text
+				if strings.Contains(t, "await") || strings.Contains(t, "_SuspendState") ||
+					strings.Contains(t, "_StreamIterator") || strings.Contains(t, "_returnAsync") {
+					found = true
+					return
+				}
+			}
+			if c := asConstruct(s); c != nil {
+				for ci := range c.Clauses {
+					scan(c.Clauses[ci].Body)
+				}
+			}
+		}
+	}
+	scan(stmts)
+	return found
 }
 
 // clauseCond extracts the condition string from clause ci.

@@ -29,14 +29,14 @@ type MethodDecl struct {
 
 // ClassDecl represents a reconstructed Dart class.
 type ClassDecl struct {
-	Name        string
-	LibraryURL  string
-	SuperClass  string
-	Interfaces  []string
-	Mixins      []string
-	IsAbstract  bool
-	Fields      []FieldDecl
-	Methods     []MethodDecl
+	Name       string
+	LibraryURL string
+	SuperClass string
+	Interfaces []string
+	Mixins     []string
+	IsAbstract bool
+	Fields     []FieldDecl
+	Methods    []MethodDecl
 }
 
 // LibraryDecl represents a reconstructed Dart library or module file.
@@ -209,34 +209,53 @@ func renderMethod(sb *strings.Builder, m MethodDecl, indent string) {
 		return
 	}
 
-	// If body is already braced, adjust indentation
+	// If body is already braced, re-base its inner block under `indent`.
 	if strings.HasPrefix(body, "{") && strings.HasSuffix(body, "}") {
-		inner := strings.TrimSpace(body[1 : len(body)-1])
-		if inner == "" {
+		inner := strings.Trim(body[1:len(body)-1], "\n")
+		if strings.TrimSpace(inner) == "" {
 			sb.WriteString(" {}\n")
 			return
 		}
 		sb.WriteString(" {\n")
-		lines := strings.Split(inner, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				sb.WriteString("\n")
-				continue
-			}
-			sb.WriteString(indent + "  " + strings.TrimSpace(line) + "\n")
-		}
+		writeReindentedBody(sb, inner, indent+"  ")
 		sb.WriteString(indent + "}\n")
 	} else {
-		// Single expression or body lines
 		sb.WriteString(" {\n")
-		lines := strings.Split(body, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				sb.WriteString("\n")
-				continue
-			}
-			sb.WriteString(indent + "  " + strings.TrimSpace(line) + "\n")
-		}
+		writeReindentedBody(sb, body, indent+"  ")
 		sb.WriteString(indent + "}\n")
+	}
+}
+
+// writeReindentedBody re-bases a decompiled body under `base` while PRESERVING
+// its relative nesting (audit D3). The old code TrimSpace'd every line and
+// prepended a fixed indent, which flattened all nested if/for/try bodies to the
+// same column. Here we strip only the common leading indentation shared by all
+// non-empty lines, then prepend `base`, so inner nesting survives.
+func writeReindentedBody(sb *strings.Builder, body, base string) {
+	lines := strings.Split(body, "\n")
+	common := -1
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		n := len(line) - len(strings.TrimLeft(line, " \t"))
+		if common < 0 || n < common {
+			common = n
+		}
+	}
+	if common < 0 {
+		common = 0
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			sb.WriteString("\n")
+			continue
+		}
+		if len(line) >= common {
+			line = line[common:]
+		} else {
+			line = strings.TrimLeft(line, " \t")
+		}
+		sb.WriteString(base + strings.TrimRight(line, " \t") + "\n")
 	}
 }

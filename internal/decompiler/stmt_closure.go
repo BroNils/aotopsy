@@ -1,41 +1,37 @@
 package decompiler
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 )
 
 var (
-	// allocateClosureRe matches `final t0 = AllocateClosure(fn, ctx);`, `final t0 = _Closure(fn, ctx);`, `final t0 = new _Closure(fn, ctx);`.
+	// allocateClosureRe matches `final t0 = AllocateClosure(fn, ctx);`,
+	// `final t0 = _Closure(fn, ctx);`, `final t0 = new _Closure(fn, ctx);`.
+	// Group 2 is the function/target, group 3 (optional) the captured context.
 	allocateClosureRe = regexp.MustCompile(`^(?:final\s+)?([A-Za-z_]\w*)\s*=\s*(?:new\s+)?(?:_?AllocateClosure\d*|_?Closure)\(([^,)]+)(?:,\s*([^)]*))?\);?$`)
-
-	// anonClosureRefRe matches `SomeClass.someMethod.<anonymous closure>` or `someFunc.<anonymous closure>`.
-	anonClosureRefRe = regexp.MustCompile(`^(?:[\w&@.]+\.)?<anonymous closure>$`)
-
-	// higherOrderCallRe matches `target.higherOrderMethod(arg)`
-	higherOrderCallRe = regexp.MustCompile(`^(.+)\.(map|where|forEach|then|catchError|whenComplete|firstWhere|lastWhere|singleWhere|any|every|fold|reduce|expand|takeWhile|skipWhile|sort|removeWhere|retainWhere|putIfAbsent|update|listen)\((.+)\)$`)
 )
 
-// closureInliningStmt inlines closure allocations and anonymous callback references directly into call-sites:
+// closureInliningStmt inlines a closure ALLOCATION temporary into its immediate
+// single use, but ONLY when doing so cannot change meaning:
 //
-//	final t0 = AllocateClosure(print, null);
+//	final t0 = AllocateClosure(print, null);   // no captured context
 //	items.forEach(t0);
 //	->
 //	items.forEach(print);
 //
-// And:
+// Two hard rules keep this from fabricating (audit sections A3/A4):
 //
-//	final t0 = AllocateClosure(User.getName, null);
-//	final t1 = users.map(t0);
-//	->
-//	final t1 = users.map(User.getName);
+//  1. It only fires when the captured context (group 3) is absent or `null`.
+//     `AllocateClosure(fn, ctx)` binds `ctx` into the closure; reducing it to
+//     the bare tear-off `fn` would silently DROP that binding, so a closure
+//     with a real context is left exactly as emitted.
 //
-// And:
-//
-//	final t0 = items.map(process.<anonymous closure>);
-//	->
-//	final t0 = items.map((x) => process(x));
+//  2. It NEVER synthesizes a lambda body. The body of an `<anonymous closure>`
+//     lives in a separate function that is not examined here, so inventing
+//     `(item) => fn(item)` would be a guess. The closure reference is moved
+//     verbatim; an anonymous-closure reference stays an honest
+//     `Owner.method.<anonymous closure>`.
 func closureInliningStmt(stmts []Stmt) ([]Stmt, bool) {
 	anyChanged := false
 
@@ -43,7 +39,7 @@ func closureInliningStmt(stmts []Stmt) ([]Stmt, bool) {
 	walk = func(body []Stmt) ([]Stmt, bool) {
 		bodyChanged := false
 		for i := 0; i < len(body); i++ {
-			// Recurse into nested constructs
+			// Recurse into nested constructs.
 			if c := asConstruct(body[i]); c != nil {
 				for ci := range c.Clauses {
 					var cChanged bool
@@ -58,42 +54,35 @@ func closureInliningStmt(stmts []Stmt) ([]Stmt, bool) {
 				continue
 			}
 
-			// Pattern 1: Inline AllocateClosure temporary into immediate subsequent call
 			mAlloc := allocateClosureRe.FindStringSubmatch(strings.TrimSpace(line.Text))
-			if mAlloc != nil {
-				tmpVar := mAlloc[1]
-				fnTarget := strings.TrimSpace(mAlloc[2])
+			if mAlloc == nil {
+				continue
+			}
+			tmpVar := mAlloc[1]
+			fnTarget := strings.TrimSpace(mAlloc[2])
+			ctx := strings.TrimSpace(mAlloc[3])
 
-				// If fnTarget is an anonymous closure like Foo.bar.<anonymous closure>, clean it
-				cleanFn := cleanClosureTarget(fnTarget)
-
-				// Look ahead for single-use call-site that consumes tmpVar
-				if i+1 < len(body) {
-					nextLine := asLine(body[i+1])
-					if nextLine != nil && isSingleIdentifierUse(nextLine.Text, tmpVar) {
-						// Replace tmpVar in next line with cleanFn
-						newText := replaceIdent(nextLine.Text, tmpVar, cleanFn)
-						if newText != nextLine.Text {
-							nextLine.Text = newText
-							// Drop the AllocateClosure allocation line
-							body = append(body[:i], body[i+1:]...)
-							bodyChanged = true
-							anyChanged = true
-							i--
-							continue
-						}
-					}
-				}
+			// Rule 1: a captured context cannot be dropped.
+			if ctx != "" && ctx != "null" {
+				continue
+			}
+			if fnTarget == "" {
+				continue
 			}
 
-			// Pattern 2: Rewrite direct anonymous closure in higher-order method call arguments
-			t := line.Text
-			if strings.Contains(t, "<anonymous closure>") {
-				newText := rewriteAnonClosureInCall(t)
-				if newText != t {
-					line.Text = newText
-					bodyChanged = true
-					anyChanged = true
+			// Inline into the immediately following single use, verbatim.
+			if i+1 < len(body) {
+				nextLine := asLine(body[i+1])
+				if nextLine != nil && isSingleIdentifierUse(nextLine.Text, tmpVar) {
+					newText := replaceIdent(nextLine.Text, tmpVar, fnTarget)
+					if newText != nextLine.Text {
+						nextLine.Text = newText
+						body = append(body[:i], body[i+1:]...)
+						bodyChanged = true
+						anyChanged = true
+						i--
+						continue
+					}
 				}
 			}
 		}
@@ -104,48 +93,7 @@ func closureInliningStmt(stmts []Stmt) ([]Stmt, bool) {
 	return res, changed || anyChanged
 }
 
-func cleanClosureTarget(fn string) string {
-	fn = strings.TrimSpace(fn)
-	if fn == "" {
-		return "()"
-	}
-	if anonClosureRefRe.MatchString(fn) {
-		prefix := strings.TrimSuffix(fn, ".<anonymous closure>")
-		prefix = strings.TrimSuffix(prefix, "<anonymous closure>")
-		if prefix != "" {
-			parts := strings.Split(prefix, ".")
-			shortName := parts[len(parts)-1]
-			return fmt.Sprintf("(item) => %s(item)", shortName)
-		}
-		return "(item) => item"
-	}
-	return fn
-}
-
-func rewriteAnonClosureInCall(text string) string {
-	// If text contains a call to .map(Foo.<anonymous closure>) etc.
-	idx := strings.Index(text, "<anonymous closure>")
-	if idx < 0 {
-		return text
-	}
-
-	// Extract the closure expression surrounding the index
-	start := idx
-	for start > 0 && (text[start-1] == '.' || text[start-1] == '_' || text[start-1] == '$' ||
-		(text[start-1] >= 'a' && text[start-1] <= 'z') ||
-		(text[start-1] >= 'A' && text[start-1] <= 'Z') ||
-		(text[start-1] >= '0' && text[start-1] <= '9') ||
-		text[start-1] == '@' || text[start-1] == '&') {
-		start--
-	}
-	end := idx + len("<anonymous closure>")
-	fullTarget := text[start:end]
-
-	cleaned := cleanClosureTarget(fullTarget)
-	return text[:start] + cleaned + text[end:]
-}
-
 func isSingleIdentifierUse(text, ident string) bool {
-	matches := regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`).FindAllString(text, -1)
+	matches := regexp.MustCompile(`\b`+regexp.QuoteMeta(ident)+`\b`).FindAllString(text, -1)
 	return len(matches) == 1
 }

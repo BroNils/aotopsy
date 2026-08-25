@@ -242,12 +242,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if len(argRegIdx) == 0 {
 		argRegIdx = inferLiveInArgIndices(fir)
 	}
-	// Real per-parameter type names are only trusted when their count
-	// EXACTLY matches the independently-verified arity above (and that
-	// arity was itself confidently resolved, not the raw-ArgRegs
-	// fallback) -- see FuncIR.ParamTypeNames' doc comment for why this
-	// cross-check exists at all.
-	trustParamTypes := len(argRegIdx) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
+	// Real per-parameter type names are only trusted when their count EXACTLY
+	// matches arity that was CONFIDENTLY resolved from cross-call-site evidence
+	// (fir.ArgRegIndices) -- NOT the intraprocedural-liveness heuristic
+	// (inferLiveInArgIndices) that fills argRegIdx when cross-site evidence is
+	// empty. Trusting types on a heuristic arity (audit C1) leaks confident-wrong
+	// parameter types; the liveness count is good enough to stop declaring 8 fake
+	// args, but not to vouch for per-parameter TYPES. Gate stays on ArgRegIndices.
+	trustParamTypes := len(fir.ArgRegIndices) > 0 && len(fir.ParamTypeNames) == len(argRegIdx)
 
 	argList := make([]string, len(argRegIdx))
 	// effectiveParamTypes holds exactly the types the signature displays:

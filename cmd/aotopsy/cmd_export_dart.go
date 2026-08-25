@@ -138,7 +138,14 @@ func cmdExportDart(args []string) error {
 		}
 		return effectiveClass
 	}
+	// Resolve each function's OWNING LIBRARY URL from its owner class (audit E2).
+	// Previously every function was dumped into one hardcoded
+	// "package:app/app.dart" file; now files are mapped by the real library URI
+	// so the export is genuinely modular. Uses the shared LibraryResolver so the
+	// mapping matches the rest of the pipeline.
+	libResolver := pipeline.NewLibraryResolver(result, pl)
 	codeRefToReceiverClassID := make(map[int]int, len(result.Codes))
+	codeRefToLibURL := make(map[int]string, len(result.Codes))
 	for _, ce := range result.Codes {
 		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok && owner != nil {
 			classRef := effectiveOwnerClassRef(owner)
@@ -146,6 +153,44 @@ func cmdExportDart(args []string) error {
 				if ci, ok2 := classByRef[classRef]; ok2 {
 					codeRefToReceiverClassID[ce.RefID] = int(ci.ClassID)
 				}
+				if url := libResolver.LibraryURLForClassRef(classRef); url != "" {
+					codeRefToLibURL[ce.RefID] = url
+				}
+			}
+			// Top-level functions have no class owner but their owner ref may be
+			// the library (or a PatchClass onto it); try that too.
+			if _, seen := codeRefToLibURL[ce.RefID]; !seen {
+				if url := libResolver.LibraryURLForClassRef(effectiveOwnerClassRef(owner)); url != "" {
+					codeRefToLibURL[ce.RefID] = url
+				}
+			}
+		}
+	}
+
+	// Ground-truth try/catch: map each Code to its ExceptionHandlers entries and
+	// decoded PcDescriptors, so the builder recovers exact try-region extents
+	// (via cluster.BuildTryRegions + ExpandOuterTryRegions) instead of guessing
+	// from branches. This mirrors decompile-native; export-dart previously lacked
+	// it entirely, so reconstructed source had no try/catch (audit E1).
+	excHandlersByRef := make(map[int][]cluster.ExceptionHandlerEntry, len(result.ExceptionHandlers))
+	for i := range result.ExceptionHandlers {
+		excHandlersByRef[result.ExceptionHandlers[i].RefID] = result.ExceptionHandlers[i].Handlers
+	}
+	codeRefToExcHandlers := make(map[int][]cluster.ExceptionHandlerEntry)
+	pcDescByRef := make(map[int][]cluster.PcDescriptorEntry, len(result.PcDescriptors))
+	for i := range result.PcDescriptors {
+		pcDescByRef[result.PcDescriptors[i].RefID] = result.PcDescriptors[i].Entries
+	}
+	codeRefToPcDesc := make(map[int][]cluster.PcDescriptorEntry)
+	for _, ce := range result.Codes {
+		if ce.ExceptionHandlersRef >= 0 {
+			if handlers, ok := excHandlersByRef[ce.ExceptionHandlersRef]; ok {
+				codeRefToExcHandlers[ce.RefID] = handlers
+			}
+		}
+		if ce.PcDescriptorsRef >= 0 {
+			if entries, ok := pcDescByRef[ce.PcDescriptorsRef]; ok {
+				codeRefToPcDesc[ce.RefID] = entries
 			}
 		}
 	}
@@ -162,6 +207,8 @@ func cmdExportDart(args []string) error {
 		pl:                     pl,
 		paramTypeByCodeIndex:   paramTypeByCodeIndex,
 		codeRefToReceiverClass: codeRefToReceiverClassID,
+		codeRefToExcHandlers:   codeRefToExcHandlers,
+		codeRefToPcDesc:        codeRefToPcDesc,
 	}
 
 	symbolLookup := func(va uint64) (string, bool) {
@@ -213,18 +260,24 @@ func cmdExportDart(args []string) error {
 
 		ownerClass := ""
 		methodName := funcName
-		libURL := "package:app/app.dart"
+		// Real owning library URL (audit E2); fall back to a single app bucket
+		// only when it genuinely could not be resolved.
+		libURL := codeRefToLibURL[r.RefID]
+		if libURL == "" {
+			libURL = "package:app/app.dart"
+		}
 
 		if idx := strings.Index(funcName, "."); idx > 0 {
 			ownerClass = funcName[:idx]
 			methodName = funcName[idx+1:]
 		}
 
-		if *appOnly {
-			if strings.HasPrefix(ownerClass, "dart:") || strings.HasPrefix(ownerClass, "_") ||
-				strings.HasPrefix(funcName, "package:flutter") || strings.HasPrefix(funcName, "dart:") {
-				continue
-			}
+		// --app-only skips SDK/Flutter framework code, classified by the RESOLVED
+		// library URL (dart:* / package:flutter*), not by a name-prefix heuristic.
+		// The old code also dropped every `_`-prefixed owner, which threw away the
+		// app's own private classes (audit E2).
+		if *appOnly && pipeline.IsFrameworkLibraryURL(libURL) {
+			continue
 		}
 
 		fir, err := funcIRBld.Build(r)

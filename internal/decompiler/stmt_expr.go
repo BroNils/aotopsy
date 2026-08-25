@@ -256,16 +256,22 @@ func constantFoldExpr(e Expr) Expr {
 	switch n := e.(type) {
 	case *Binary:
 		l, r := constantFoldExpr(n.L), constantFoldExpr(n.R)
-		// D11: Identity folding (x + 0 -> x, 0 + x -> x, x - 0 -> x, x * 1 -> x)
-		// and NULL_REG arithmetic (null + N -> N, x22 + N -> N)
+		// Numeric identity folding only: x+0, 0+x, x-0, x*1, 1*x -> x.
+		// These hold for any value (integer or tagged pointer), so they never
+		// fabricate.
+		//
+		// The NULL_REG arithmetic fold (null/x22 +/- N -> N) that used to live
+		// here was REMOVED: verified against dart-lang/sdk
+		// (runtime/vm/constants_arm64.h) `NULL_REG = R22 // Caches NullObject()`
+		// -- x22 holds a POINTER to the null object, not the integer 0, so
+		// `x22 + N` is field/address arithmetic on the null object, not `N`.
+		// Folding it invents a value (a section-A2 audit finding). The x86_64
+		// null-object register is handled the same way (never folded).
 		if a, aok := l.(*Atom); aok {
 			if a.Text == "0" && n.Op == "+" {
 				return r
 			}
 			if a.Text == "1" && n.Op == "*" {
-				return r
-			}
-			if (a.Text == "null" || a.Text == "x22") && (n.Op == "+" || n.Op == "-") {
 				return r
 			}
 		}
@@ -274,9 +280,6 @@ func constantFoldExpr(e Expr) Expr {
 				return l
 			}
 			if b.Text == "1" && n.Op == "*" {
-				return l
-			}
-			if (b.Text == "null" || b.Text == "x22") && n.Op == "+" {
 				return l
 			}
 		}
@@ -298,12 +301,14 @@ func constantFoldExpr(e Expr) Expr {
 		return &Unary{Op: n.Op, X: x}
 	case *Paren:
 		return &Paren{X: constantFoldExpr(n.X)}
-	case *Atom:
-		// D8: Value/Return placeholder normalization (<Array> -> [])
-		if n.Text == "\"<Array>\"" || n.Text == "<Array>" || n.Text == "\"<GrowableObjectArray>\"" || n.Text == "<GrowableObjectArray>" {
-			return &Atom{Text: "[]", P: precSelector}
-		}
 	}
+	// NOTE: the `<Array>`/`<GrowableObjectArray>` -> `[]` normalization that
+	// used to live here was REMOVED (section-A1 audit finding). `<Array>` is the
+	// honest "an Array-typed pool object whose value we could not resolve"
+	// placeholder (from `<CidName>` in ResolvePoolDisplay); rewriting it to an
+	// empty list literal `[]` asserts a concrete, usually-wrong value and hides
+	// the uncertainty -- exactly the fabrication the project forbids. An
+	// unresolved placeholder must stay a placeholder.
 	return e
 }
 

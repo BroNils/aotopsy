@@ -479,15 +479,23 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	e.emit(indent, "}")
 }
 
-// isStackOverflowCond reports whether a branch condition is a Dart
-// runtime stack-overflow check (CMP SP, THR.stack_limit).
+// isStackOverflowCond reports whether a branch condition is a Dart runtime
+// stack-overflow check: `CMP SP, [THR + stack_limit]`.
+//
+// It requires the SPECIFIC `stack_limit` thread-field token (audit D1), not just
+// any THR reference, so an ordinary comparison against some other THR field can
+// never be mistaken for the prologue guard and have its branch elided. The stack
+// pointer is x15 on ARM64 (verified: `SPREG = R15` in constants_arm64.h) and
+// rsp on x86_64.
 func isStackOverflowCond(cond string) bool {
 	if cond == "" {
 		return false
 	}
-	hasTHR := strings.Contains(cond, "THR") || strings.Contains(cond, "stack_limit")
-	hasSP := strings.Contains(cond, "x15") || strings.Contains(cond, "SP") || strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
-	return hasTHR && hasSP
+	if !strings.Contains(cond, "stack_limit") {
+		return false
+	}
+	return strings.Contains(cond, "x15") || strings.Contains(cond, "SP") ||
+		strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
 }
 
 func (e *emitter) buildCondition(ins Instr) (string, bool) {

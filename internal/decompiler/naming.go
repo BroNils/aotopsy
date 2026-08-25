@@ -57,9 +57,18 @@ func isIdentChar(c byte) bool {
 }
 
 // cleanCalleeName simplifies callee symbol names for pseudocode display:
-// 1. D4: Simplifies compound mixin chain (__A & _B & _C.method -> _C.method)
-// 2. D7: Strips PCOffset hex disambiguation suffixes (_564794, _233d64, _14b90)
-// 3. Strips library hash @NNNNNN from class names (_Set@3099033 -> _Set)
+//  1. Strips the library-disambiguation hash @NNNNNN (_Set@3099033 -> _Set).
+//  2. D7: Strips PCOffset hex disambiguation suffixes (_564794, _233d64, _14b90).
+//
+// It deliberately does NOT fold a mixin-application chain to its last component.
+// A synthetic class like `_Set&_HashVMBase&…&_LinkedHashSetMixin` is the ACTUAL
+// owning class of the method, so `<full chain>.add` is correct. Folding to the
+// last component (`_LinkedHashSetMixin.add`) asserts the DEFINING class, which is
+// wrong ~23% of the time -- the method is often defined on a superclass of the
+// mixin, not derivable from the class name (this is exactly why foldMixinOwner in
+// symtabdiff.go is COMPARISON-ONLY and never touches real output). Removed here
+// as audit finding A6: a verbose-but-correct owner beats a compact-but-fabricated
+// one.
 func cleanCalleeName(name string) string {
 	if name == "" {
 		return name
@@ -73,11 +82,6 @@ func cleanCalleeName(name string) string {
 		} else {
 			name = name[:atIdx]
 		}
-	}
-	// D4: Compound mixin chain simplification (both "A & B" and "A&B")
-	if strings.Contains(name, "&") {
-		parts := strings.Split(name, "&")
-		name = strings.TrimSpace(parts[len(parts)-1])
 	}
 	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
 	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {
