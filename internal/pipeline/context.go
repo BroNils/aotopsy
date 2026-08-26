@@ -75,6 +75,15 @@ type Context struct {
 	paramTypeByCodeIndex   map[int]*cluster.NamedObject
 	classNameToID          map[string]int
 	fieldTypeByClassOffset map[int]map[int64]int
+	// Signature/async enrichment — makes FuncIRFor a SUPERSET of the cmd
+	// funcIRBuilder so every consumer (export-dart, ffitrace, strxref, the census)
+	// gets parameter types, generics, named params, and async detection, not just
+	// the cmd path. (ArgRegIndices needs a whole-binary call-edge pass and stays
+	// opt-in on the cmd path.)
+	paramFuncTypeByRef map[int]*cluster.FuncTypeInfo
+	typeParams         *TypeParamResolver
+	funcTypeGenerics   map[int][]TypeParam
+	poolByIndex        map[int]cluster.PoolEntry
 	accessorFieldNames     map[int]map[int64]string
 }
 
@@ -278,6 +287,20 @@ func (c *Context) ensureDecompileMaps() {
 
 	c.closureParentByFunc = BuildClosureParents(result, pl)
 
+	// Signature enrichment (parameter types, generics, named params) + the pool
+	// index needed for SuspendState async detection — the same maps the cmd
+	// funcIRBuilder builds, so FuncIRFor produces an equally-enriched FuncIR.
+	c.paramFuncTypeByRef = make(map[int]*cluster.FuncTypeInfo, len(result.FuncTypes))
+	for i := range result.FuncTypes {
+		c.paramFuncTypeByRef[result.FuncTypes[i].RefID] = &result.FuncTypes[i]
+	}
+	c.typeParams = NewTypeParamResolver(result, pl)
+	c.funcTypeGenerics = BuildFuncTypeParamNames(result, pl)
+	c.poolByIndex = make(map[int]cluster.PoolEntry, len(result.Pool))
+	for i := range result.Pool {
+		c.poolByIndex[result.Pool[i].Index] = result.Pool[i]
+	}
+
 	// Exception handlers + PcDescriptors per Code, for ground-truth try/catch.
 	ehByRef := make(map[int][]cluster.ExceptionHandlerEntry, len(result.ExceptionHandlers))
 	for i := range result.ExceptionHandlers {
@@ -447,8 +470,63 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 			}
 		}
 		c.wireTryCatch(fir, r)
+		c.enrichSignatureAndAsync(fir, r)
 	}
 	return fir, nil
+}
+
+// enrichSignatureAndAsync attaches parameter types, generic type parameters,
+// named-parameter names, local type hints, and SuspendState async detection to
+// fir — the signature/async enrichment the cmd funcIRBuilder applies, so the
+// pipeline path (export-dart, ffitrace, strxref, census) produces the same
+// FuncIR rather than a poorer one.
+func (c *Context) enrichSignatureAndAsync(fir *decompiler.FuncIR, r cluster.CodeRange) {
+	ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
+	if owner, ok := ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil && owner.SignatureRefID > 0 {
+		if ft, ok := c.paramFuncTypeByRef[owner.SignatureRefID]; ok {
+			names := c.typeParams.ParamTypeNames(*ft)
+			if ft.HasImplicit && len(names) > 0 {
+				names = names[1:] // drop the implicit receiver's own type
+			}
+			fir.ParamTypeNames = names
+			fir.NamedParamNames = c.typeParams.NamedParamNames(*ft)
+		}
+		if params := c.funcTypeGenerics[owner.SignatureRefID]; len(params) > 0 {
+			out := make([]string, len(params))
+			for i, p := range params {
+				out[i] = p.String()
+			}
+			fir.TypeParamNames = out
+		}
+	}
+	if len(fir.ParamTypeNames) > 0 {
+		fir.LocalTypeHints = make(map[string]string)
+		for i, tn := range fir.ParamTypeNames {
+			if tn != "" {
+				fir.LocalTypeHints[fmt.Sprintf("arg%d", i)] = tn
+			}
+		}
+	}
+	// Async state machine: a SuspendState CID loaded from the pool marks the
+	// function as async (drives the await/async-for linearizer).
+	if !fir.IsAsync && c.Info != nil && c.Info.Version.CIDs.SuspendState != 0 {
+		for bi := range fir.Blocks {
+			for _, ins := range fir.Blocks[bi].Instrs {
+				if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
+					continue
+				}
+				if pe, ok := c.poolByIndex[ins.PoolIndex]; ok {
+					if cid, ok2 := c.Pool.RefCID[pe.RefID]; ok2 && cid == c.Info.Version.CIDs.SuspendState {
+						fir.IsAsync = true
+						break
+					}
+				}
+			}
+			if fir.IsAsync {
+				break
+			}
+		}
+	}
 }
 
 // wireTryCatch attaches ground-truth exception-handler + try-region metadata to
