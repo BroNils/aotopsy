@@ -35,7 +35,7 @@ the test suite on every change:
 
 The ground-truth twins are real production builds we cannot redistribute, so those
 differential gates run **locally**; public CI validates build + unit tests across the
-platform matrix (sample-dependent tests skip cleanly when the binary is absent). See
+platform matrix (sample-dependent tests skip cleanly when the binary is absent). How every number here is measured (ground truth, metric definitions, reproduction): [METHODOLOGY.md](METHODOLOGY.md). See
 [SECURITY.md](SECURITY.md) for release-binary verification and the honest scope below.
 
 ## Quick Start
