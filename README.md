@@ -20,7 +20,7 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 | Pseudocode | Architecture-neutral decompiled output from ARM64 or x86_64 machine code |
 | Dart Source Export | Whole-project modular `.dart` files reconstructed with classes, fields, and methods |
 
-Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier).
+Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier) — every modeled version parses cleanly on both architectures, see [COVERAGE.md](COVERAGE.md).
 
 ## Accuracy & Honesty
 

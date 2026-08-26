@@ -97,3 +97,6 @@ skills:
 
 bench: ## Regenerate BENCHMARK.md from the ground-truth symtab differential
 	@bash scripts/gen_benchmark.sh BENCHMARK.md
+
+coverage: ## Regenerate COVERAGE.md by parsing every local corpus sample
+	@bash scripts/gen_coverage.sh COVERAGE.md
