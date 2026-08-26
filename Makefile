@@ -100,3 +100,6 @@ bench: ## Regenerate BENCHMARK.md from the ground-truth symtab differential
 
 coverage: ## Regenerate COVERAGE.md by parsing every local corpus sample
 	@bash scripts/gen_coverage.sh COVERAGE.md
+
+analyze: build ## Cross-check export-dart output against the real Dart analyzer (SAMPLE=, DART=)
+	@bash scripts/analyze.sh

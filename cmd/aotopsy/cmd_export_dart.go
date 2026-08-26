@@ -416,6 +416,26 @@ func sanitizeDartIdent(s string) string {
 // generic `List<int>` (which is preceded by an identifier).
 var placeholderRe = regexp.MustCompile(`(^|[^\w])<([A-Za-z][^>]*)>`)
 
+// mixinChainRe matches a compacted mixin-application owner rendered by
+// compactMixinOwner, e.g. `__Map & …` or `A & B & …` — a chain of `&`-joined
+// tokens that CONTAINS the ellipsis. The ellipsis is what distinguishes it from a
+// real bitwise-and expression (`x17 & mask`), which must be left untouched.
+var mixinChainRe = regexp.MustCompile(`[\w$]+(?:\s*&\s*[\w$\x{2026}]+)+`)
+
+// atHashRe matches a `@<digits>` PC-offset disambiguator suffix that recovered
+// callee names carry (`method@3099033`); `@` is not valid in a Dart identifier.
+var atHashRe = regexp.MustCompile(`@\d+`)
+
+// opMethodReplacer rewrites operator-method call syntax that does not parse
+// (`x.[]=(...)`, `x.[](...)`) into valid (but undefined) identifier method calls,
+// preserving the operation name honestly.
+var opMethodReplacer = strings.NewReplacer(
+	".[]=(", ".op_index_set(",
+	".[](", ".op_index(",
+	".[]=", ".op_index_set",
+	".[]", ".op_index",
+)
+
 // sanitizeDartBody makes an emitted pseudocode body parse as Dart without
 // changing its meaning: standalone `<X>` placeholders become a valid (but
 // undefined) `unresolved_X` identifier — an honest "unknown value" that the
@@ -438,6 +458,24 @@ func sanitizeDartBody(body string) string {
 		}
 		return b.String()
 	})
+	// Collapse a compacted mixin owner to its base class (the first token), but
+	// only when the ellipsis marks it as a mixin chain — never a bitwise `&`.
+	body = mixinChainRe.ReplaceAllStringFunc(body, func(m string) string {
+		if !strings.Contains(m, "…") {
+			return m // real bitwise expression, leave it
+		}
+		base := m
+		if i := strings.IndexByte(m, '&'); i >= 0 {
+			base = strings.TrimSpace(m[:i])
+		}
+		return base
+	})
+	body = opMethodReplacer.Replace(body)
+	// An unrecoverable branch condition is rendered `/* cond */` (a comment, not an
+	// expression). Make it a valid, honestly-undefined identifier so the `if`
+	// parses; the semantics stay "unknown", not fabricated.
+	body = strings.ReplaceAll(body, "/* cond */", "unresolved_cond")
+	body = atHashRe.ReplaceAllString(body, "")
 	body = strings.ReplaceAll(body, ".(", "(")
 	return body
 }
