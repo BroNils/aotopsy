@@ -48,7 +48,7 @@ make build
 ./aotopsy _debug decompile-native --lib libapp.so --find MyClass  # find and decompile a function
 ```
 
-See `WORKFLOW.md` for the step-by-step methodology when you have a raw APK and don't know where to start.
+See [DEMO.md](DEMO.md) for a five-minute walkthrough on a real snapshot, or `WORKFLOW.md` for the step-by-step methodology when you have a raw APK and don't know where to start.
 
 ## How It Works
 

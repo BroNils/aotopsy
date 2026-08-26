@@ -42,6 +42,11 @@ numbers come only from builds where an independent ground truth exists.
 - **Gate:** `TestDecompileQualityCorpus` (F1), floor 0.95 on a golden subset.
 - **Property:** `TestDecompilerOutputInvariants` sweeps thousands of functions
   per sample on both architectures. Current: 100% valid.
+- **Cross-checked against the real frontend:** the `export-dart` output is run
+  through the actual Dart analyzer (`dart analyze`). `ValidateSource` is a fast
+  Go-side approximation; the analyzer is the authority. This cross-check drove the
+  declaration-name / stack-slot / placeholder fixes so recovered Dart parses (only
+  abstracted-body `undefined_identifier`s remain — the reconstruction floor).
 
 ### 3. Fabrication rate
 - **Definition:** any output that invents information the binary does not contain
