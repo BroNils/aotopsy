@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"aotopsy/internal/cluster"
@@ -286,10 +287,20 @@ func cmdExportDart(args []string) error {
 		}
 
 		art := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
-		body := art.Source
+		body := sanitizeDartBody(art.Source)
 
 		if idx := strings.Index(body, "{"); idx >= 0 {
 			body = body[idx:]
+		}
+
+		// Declaration names must be valid Dart identifiers, or the emitted file
+		// does not even parse. Recovered names carry keyword prefixes (a discarded
+		// constructor is "new X"), mixin `&`, dots, `@hash`, etc. Sanitize before
+		// emitting the class/method declaration. Verified against the real Dart
+		// analyzer: `dynamic new Size_25c()` -> `dynamic Size_25c()`.
+		methodName = sanitizeDartIdent(methodName)
+		if ownerClass != "" {
+			ownerClass = sanitizeDartIdent(ownerClass)
 		}
 
 		lib := getOrCreateLib(libURL)
@@ -352,4 +363,81 @@ func sanitizeLibraryPath(url string) string {
 		url += ".dart"
 	}
 	return filepath.Clean(url)
+}
+
+// dartReservedWords are keywords that cannot appear as a bare identifier in a
+// declaration. Recovered names that collide with one are prefixed so the emitted
+// Dart parses.
+var dartReservedWords = map[string]bool{
+	"new": true, "class": true, "return": true, "if": true, "else": true, "for": true,
+	"while": true, "do": true, "switch": true, "case": true, "default": true, "break": true,
+	"continue": true, "var": true, "final": true, "const": true, "void": true, "null": true,
+	"true": true, "false": true, "this": true, "super": true, "is": true, "as": true,
+	"in": true, "assert": true, "async": true, "await": true, "yield": true, "try": true,
+	"catch": true, "finally": true, "throw": true, "rethrow": true, "with": true,
+	"extends": true, "implements": true, "abstract": true, "static": true, "operator": true,
+	"typedef": true, "enum": true, "mixin": true, "extension": true, "factory": true,
+	"external": true, "part": true, "import": true, "export": true, "library": true,
+	"deferred": true, "covariant": true, "late": true, "required": true,
+}
+
+// sanitizeDartIdent turns a recovered function/class name into a valid Dart
+// identifier for a declaration: it drops the `new ` constructor-marker prefix,
+// replaces every non-identifier rune with `_`, avoids a leading digit, and
+// prefixes reserved words. Without this the exported .dart does not parse.
+func sanitizeDartIdent(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "new ")
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '_' || r == '$' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "_anon"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "_" + out
+	}
+	if dartReservedWords[out] {
+		out = "_" + out
+	}
+	return out
+}
+
+// placeholderRe matches a standalone honest placeholder like `<TypeArguments>` or
+// `<Instance_2300>` (a value the decompiler could not resolve), but NOT a real
+// generic `List<int>` (which is preceded by an identifier).
+var placeholderRe = regexp.MustCompile(`(^|[^\w])<([A-Za-z][^>]*)>`)
+
+// sanitizeDartBody makes an emitted pseudocode body parse as Dart without
+// changing its meaning: standalone `<X>` placeholders become a valid (but
+// undefined) `unresolved_X` identifier — an honest "unknown value" that the
+// analyzer flags as undefined rather than a hard syntax error — and an
+// empty named-constructor call `Name.(` becomes `Name(`.
+func sanitizeDartBody(body string) string {
+	body = placeholderRe.ReplaceAllStringFunc(body, func(m string) string {
+		sub := placeholderRe.FindStringSubmatch(m)
+		prefix, inner := sub[1], sub[2]
+		var b strings.Builder
+		b.WriteString(prefix)
+		b.WriteString("unresolved_")
+		for _, r := range inner {
+			switch {
+			case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+				b.WriteRune(r)
+			default:
+				b.WriteRune('_')
+			}
+		}
+		return b.String()
+	})
+	body = strings.ReplaceAll(body, ".(", "(")
+	return body
 }

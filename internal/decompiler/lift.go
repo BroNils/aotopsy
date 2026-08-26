@@ -608,9 +608,9 @@ func stackSlotExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 		return "", false
 	}
 	if off < 0 {
-		return fmt.Sprintf("[SP-%d]", -off), true
+		return fmt.Sprintf("stack_m%d", -off), true
 	}
-	return fmt.Sprintf("[SP+%d]", off), true
+	return fmt.Sprintf("stack_p%d", off), true
 }
 
 // threadFieldExpr renders a Thread-relative access using the SDK-derived
@@ -971,7 +971,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 				return fmt.Sprintf("%s = %s;", slot, valExpr), true
 			}
 		}
-		return fmt.Sprintf("[SP] = %s;", valExpr), true
+		return fmt.Sprintf("stack_sp = %s;", valExpr), true
 	}
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr

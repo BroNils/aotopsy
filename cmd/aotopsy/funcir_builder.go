@@ -66,15 +66,24 @@ func (b *funcIRBuilder) Build(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
-	if masks, ok := b.buildArgRegMasks()[funcVA]; ok {
-		if regIdx, confident := resolveArgRegIndices(masks); confident {
-			fir.ArgRegIndices = regIdx
+	// Optional enrichment dependencies: not every caller supplies them (the
+	// export-dart path builds a lighter FuncIR than decompile-native). Build must
+	// stay robust to a nil dep rather than panic on a nil function call.
+	if b.buildArgRegMasks != nil {
+		if masks, ok := b.buildArgRegMasks()[funcVA]; ok {
+			if regIdx, confident := resolveArgRegIndices(masks); confident {
+				fir.ArgRegIndices = regIdx
+			}
 		}
 	}
 	fir.ThreadStubOffsets = disasm.ThreadStubOffsets(b.info.Version.DartVersion, b.isARM64)
 	fir.ThreadFieldNames = pipeline.ThreadFieldOffsets(b.info.Version.DartVersion, b.isARM64, b.info.Version)
-	fir.ParamTypeNames = b.paramTypeNamesFor(r)
-	fir.TypeParamNames = b.genericParamNamesFor(r)
+	if b.paramTypeNamesFor != nil {
+		fir.ParamTypeNames = b.paramTypeNamesFor(r)
+	}
+	if b.genericParamNamesFor != nil {
+		fir.TypeParamNames = b.genericParamNamesFor(r)
+	}
 	// Item 11: Named parameter names for named optional parameters.
 	if b.namedParamNamesFor != nil {
 		fir.NamedParamNames = b.namedParamNamesFor(r)
@@ -187,7 +196,7 @@ func (b *funcIRBuilder) Build(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 	}
 
 	// P7: Async/await detection via SuspendState CID in pool loads.
-	if !fir.IsAsync && b.info.Version.CIDs.SuspendState != 0 {
+	if !fir.IsAsync && b.poolEntryByIndex != nil && b.info.Version.CIDs.SuspendState != 0 {
 		for bi := range fir.Blocks {
 			for _, ins := range fir.Blocks[bi].Instrs {
 				if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
