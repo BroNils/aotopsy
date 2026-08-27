@@ -99,6 +99,12 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	if fir.HeapBitsReg != "" {
 		s.setReg(fir.HeapBitsReg, "HEAP_BITS")
 	}
+	if fir.CodeReg != "" {
+		s.setReg(fir.CodeReg, "CODE")
+	}
+	if fir.ArgsDescReg != "" {
+		s.setReg(fir.ArgsDescReg, "argsDesc")
+	}
 	for ri := 0; ri < len(fir.ArgRegs); ri++ {
 		s.setReg(fir.ArgRegs[ri], fmt.Sprintf("arg%d", ri))
 	}

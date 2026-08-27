@@ -25,6 +25,11 @@ const (
 	// x86StackReg is the Dart stack pointer. constants_x64.h:
 	// `const Register SPREG = RSP;`.
 	x86StackReg = "rsp"
+	// CODE_REG=R12, ARGS_DESC_REG=R10 (constants_x64.h @3.12.2). Neither is in
+	// x86ArgRegs, so both leaked as raw registers before being seeded; CODE_REG
+	// (r12) was the single largest x86 raw-register leak.
+	x86CodeReg     = "r12"
+	x86ArgsDescReg = "r10"
 )
 
 var x86ArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
@@ -81,6 +86,8 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	fir.PoolIndexOf = disasm.X64PoolIndex
 	fir.ThreadReg = x86ThreadReg
 	fir.StackReg = x86StackReg
+	fir.CodeReg = x86CodeReg
+	fir.ArgsDescReg = x86ArgsDescReg
 
 	funcStart := insts[0].Addr
 	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative

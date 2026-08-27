@@ -96,6 +96,19 @@ type FuncIR struct {
 	// isPointerDecompression.
 	HeapBitsReg string
 
+	// CodeReg holds the current Code object pointer at function entry
+	// (CODE_REG: x24 on ARM64, r12 on x86_64). The prologue derives PP from it
+	// and the register allocator then freely REUSES it as a general register --
+	// which on x86_64 made it the single largest raw-register leak (2428
+	// occurrences in one 500-function sample) because its entry value was never
+	// seeded. Seeding it as the honest name "CODE" resolves every read that
+	// precedes a reassignment; a later `mov CODE_REG, x` overwrites it normally.
+	CodeReg string
+	// ArgsDescReg holds the arguments descriptor at entry (ARGS_DESC_REG: x4 on
+	// ARM64 -- which overlaps the x0..x7 arg display and so was already seeded --
+	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
+	ArgsDescReg string
+
 	// PoolIndexOf turns a byte displacement off PoolReg into an object-pool
 	// index. The arithmetic differs per architecture -- the ARM64 pool
 	// register is untagged and the x86_64 one is tagged, so the same slot

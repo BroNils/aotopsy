@@ -68,3 +68,18 @@ func trimAll(s string) string {
 	}
 	return out
 }
+
+// CODE_REG and ARGS_DESC_REG are seeded at entry so their reads before any
+// reassignment resolve to honest names instead of leaking the raw register.
+func TestSeedEntryStateSpecialRegs(t *testing.T) {
+	fir := newFuncIR("f", 0)
+	fir.ThreadReg, fir.PoolReg, fir.StackReg = "r14", "r15", "rsp"
+	fir.CodeReg, fir.ArgsDescReg = "r12", "r10"
+	s := seedEntryState(fir)
+	if got := s.Regs[canonReg("r12")]; got != "CODE" {
+		t.Errorf("CODE_REG seed = %q, want CODE", got)
+	}
+	if got := s.Regs[canonReg("r10")]; got != "argsDesc" {
+		t.Errorf("ARGS_DESC seed = %q, want argsDesc", got)
+	}
+}
