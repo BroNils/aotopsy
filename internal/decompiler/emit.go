@@ -87,14 +87,11 @@ type emitter struct {
 	// omittedStates stores register state snapshots at extraction points,
 	// so helper sub-emitters can receive live register aliases as parameters.
 	omittedStates map[int]*LiftState
-	// blockOut records each block's OUT register state (with real emission-time
-	// temp names) the first time its own instructions finish emitting. It is the
-	// per-block dataflow lattice point used by seedFromEmittedPreds to fill a
-	// successor's unknown live-in registers with values every already-emitted
-	// predecessor agrees on -- a forward join, purely additive and §2-safe (only
-	// agreed concrete values are propagated; any disagreement leaves the register
-	// unknown, i.e. honestly raw).
-	blockOut map[int]*LiftState
+	// blockEntryState is the per-block register state computed by the pre-emission
+	// reaching-definition fixpoint (computeEntryStates). seedFromFixpoint fills a
+	// block's unknown live-ins from it. Supersedes the already-emitted-predecessor
+	// forward join.
+	blockEntryState []*LiftState
 	callIdx       int
 	steps         int
 	budgetHit     bool
@@ -241,6 +238,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
+	// Pre-emission reaching-definition fixpoint: correct value state at each
+	// block entry regardless of the recursive walk's path (ssa.go).
+	e.blockEntryState = computeEntryStates(fir, pool)
 	// Map blocks to the try region covering them, for per-block annotation.
 	e.buildBlockTryIndex()
 	// Allocate up front so sub-emitters for helper functions share the same
