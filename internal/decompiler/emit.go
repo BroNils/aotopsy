@@ -584,6 +584,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// over the text here (constant folding, negated comparisons, wrapped
 	// member access, outer parens).
 	source = compactLines(source)
+	// Hoist long, repeated string literals to function-local consts. The
+	// control-flow walk re-emits blocks, so a compiler-generated character table
+	// can appear dozens of times in one function; naming it once is a large, safe
+	// size reduction (constants have no CSE-invariance hazard).
+	source = hoistStringLiterals(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
 	// Null-safety annotation (detect null-check patterns)
