@@ -162,7 +162,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				if !ok {
 					cond = "/* cond */"
 				}
-				if isStackOverflowCond(cond) {
+				if isStackOverflowCond(cond) || isWriteBarrierCond(cond) {
 					continue
 				}
 				var takenID = -1
@@ -228,7 +228,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				e.stats.NonLastBranch++
 			}
 		default:
-			if line, ok := ApplyOther(e.fir, e.state, ins); ok {
+			if line, ok := ApplyOther(e.fir, e.state, ins); ok && !isWriteBarrierStmt(line) {
 				e.emit(indent, "%s", line)
 			}
 		}
@@ -287,8 +287,15 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		// entry value, and pin the register to that local so its header read
 		// resolves to a name and its in-loop updates emit explicitly.
 		e.declareLoopPhis(id, indent)
-		// A4: Try while-loop condition (for-loop is a post-emit pass)
+		// A4: Try while-loop condition (for-loop is a post-emit pass). A recovered
+		// condition that is really a runtime stack-overflow or write-barrier check
+		// (a back-edge safepoint the loop detector latched onto) is not a source
+		// loop condition -- fall back to while(true) rather than printing the
+		// compiler bookkeeping as the loop guard.
 		loopCond := e.extractLoopCondition(id)
+		if loopCond != "" && (isStackOverflowCond(loopCond) || isWriteBarrierCond(loopCond)) {
+			loopCond = ""
+		}
 		if loopCond != "" {
 			e.emit(indent, "while (%s) {", loopCond)
 		} else {
@@ -480,6 +487,21 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		}
 	}
 
+	// Generational write-barrier check elision (see isWriteBarrierCond). The
+	// ZERO/EQ edge skips the barrier stub -- that is the normal continuation, and
+	// the store the check guards was already emitted, so follow it and drop the
+	// stub-call path entirely.
+	if isWriteBarrierCond(cond) {
+		normalID := takenID // b(&done, ZERO): the taken (== 0) edge skips the stub
+		if normalID < 0 {
+			normalID = fallID
+		}
+		if normalID >= 0 {
+			e.emitSuccessor(normalID, indent, depth)
+			return
+		}
+	}
+
 	savedState := e.state
 
 	e.emit(indent, "if (%s) {", cond)
@@ -512,6 +534,49 @@ func isStackOverflowCond(cond string) bool {
 	}
 	return strings.Contains(cond, "x15") || strings.Contains(cond, "SP") ||
 		strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
+}
+
+// isWriteBarrierCond reports whether a branch condition is a Dart generational
+// write-barrier check, which guards the call to the write-barrier stub AFTER a
+// store and carries no source-level meaning.
+//
+// SDK ground truth (verified against dart-lang/sdk @ 3.9.2,
+// runtime/vm/compiler/assembler/assembler_arm64.cc Assembler::StoreBarrier /
+// ArrayStoreBarrier): the compiler emits, right after the store,
+//
+//	and(scratch, TMP2, Operand(scratch, LSR, kBarrierOverlapShift))
+//	tst(scratch, Operand(HEAP_BITS, LSR, 32))
+//	b(&done, ZERO)                       // skip the stub when no barrier needed
+//
+// On ARM64 the mask lives in HEAP_BITS (R28); on x86_64 there is no such
+// register and the compiler ANDs against the THR.write_barrier_mask field
+// instead (SDK assembler_x64.cc Assembler::StoreBarrier:
+//
+//	movl(scratch, FieldAddress(object, tags_offset()))
+//	shrl(scratch, Immediate(kBarrierOverlapShift))
+//	andl(scratch, Address(THR, write_barrier_mask_offset()))
+//	testb(FieldAddress(value, tags_offset()), scratch); j(ZERO, &done)
+//
+// Both tokens (HEAP_BITS, write_barrier_mask) are barrier-only -- reserved
+// register / dedicated thread field that user Dart never reads -- so either one
+// appearing in a branch condition is unambiguously the barrier check. The store
+// it guards was already emitted, so eliding the branch drops pure GC bookkeeping.
+// (The `stack_limit`/`sentinel` tokens that sometimes appear alongside it are
+// stale-register lift artifacts from the prologue check; these two are the
+// reliable signal.)
+func isWriteBarrierCond(cond string) bool {
+	return strings.Contains(cond, "HEAP_BITS") || strings.Contains(cond, "write_barrier_mask")
+}
+
+// isWriteBarrierStmt reports whether an emitted statement is the write-barrier
+// scratch computation itself (`scratch = obj >> shift & THR.write_barrier_mask`).
+// On x86_64 the scratch is materialized into a statement rather than forwarded
+// into the branch condition, so the condition-level elision above never sees it;
+// the statement carries the barrier-only token and no source meaning, so it is
+// dropped. (Its register-state effect in ApplyOther is kept, harmless: the value
+// is barrier bookkeeping nothing real reads.)
+func isWriteBarrierStmt(line string) bool {
+	return strings.Contains(line, "write_barrier_mask") || strings.Contains(line, "HEAP_BITS")
 }
 
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
