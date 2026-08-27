@@ -84,6 +84,11 @@ type Context struct {
 	typeParams         *TypeParamResolver
 	funcTypeGenerics   map[int][]TypeParam
 	poolByIndex        map[int]cluster.PoolEntry
+	// argRegMasks aggregates per-callee argument-register masks from every direct
+	// call site (whole-binary pass). nil unless BuildArgRegMasks() was called;
+	// when set, FuncIRFor resolves ArgRegIndices for confident real arity. Opt-in
+	// because the pass disassembles the whole binary.
+	argRegMasks map[uint64][]uint8
 	accessorFieldNames     map[int]map[int64]string
 }
 
@@ -183,11 +188,8 @@ func (c *Context) ensureDecompileMaps() {
 	layouts := BuildClassLayouts(result, pl, c.Info.Version.CompressedPointers)
 	perClass := map[int32]map[int32]string{}
 	offsetNames := map[int32]map[string]bool{}
-	c.classNameToID = make(map[string]int, len(layouts))
+	c.classNameToID = BuildClassNameToID(layouts)
 	for _, cl := range layouts {
-		if cl.ClassName != "" && cl.ClassID > 0 {
-			c.classNameToID[cl.ClassName] = int(cl.ClassID)
-		}
 		if perClass[cl.ClassID] == nil {
 			perClass[cl.ClassID] = map[int32]string{}
 		}
@@ -254,36 +256,9 @@ func (c *Context) ensureDecompileMaps() {
 	}
 
 	// Field TYPE by (ownerClassID, byteOffset) -> the field's declared type's
-	// class ID. This types field-load chains (`this.a.b`): loading field `a` of a
-	// known class yields an object whose class is `a`'s declared type, so the
-	// next `.b` resolves. Only populated where the type resolves to a concrete
-	// class (v3.x TypeInfo.ClassID); elsewhere it degrades to unknown (honest).
-	typeClassByRef := make(map[int]int32, len(result.Types))
-	for i := range result.Types {
-		if result.Types[i].ClassID > 0 {
-			typeClassByRef[result.Types[i].RefID] = result.Types[i].ClassID
-		}
-	}
-	c.fieldTypeByClassOffset = map[int]map[int64]int{}
-	for i := range result.Fields {
-		f := &result.Fields[i]
-		if f.HostOffset < 0 || f.TypeRefID < 0 {
-			continue
-		}
-		tc, ok := typeClassByRef[f.TypeRefID]
-		if !ok || tc <= 0 {
-			continue
-		}
-		ownerClass, ok := classByRef[f.OwnerRefID]
-		if !ok || ownerClass.ClassID <= 0 {
-			continue
-		}
-		ocid := int(ownerClass.ClassID)
-		if c.fieldTypeByClassOffset[ocid] == nil {
-			c.fieldTypeByClassOffset[ocid] = map[int64]int{}
-		}
-		c.fieldTypeByClassOffset[ocid][int64(f.HostOffset)] = int(tc)
-	}
+	// class ID, for typing field-load chains (`this.a.b`). Shared helper so the
+	// cmd decompile path types chains identically.
+	c.fieldTypeByClassOffset = BuildFieldTypeByClassOffset(result)
 
 	c.closureParentByFunc = BuildClosureParents(result, pl)
 
@@ -441,6 +416,16 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 	}
 	fir.ThreadFieldNames = ThreadFieldOffsets(c.DartVersion, c.IsARM64, profile)
 
+	// Confident real arity from aggregated call-site arg-register masks (opt-in;
+	// only when BuildArgRegMasks was called).
+	if c.argRegMasks != nil {
+		if masks, ok := c.argRegMasks[funcVA]; ok {
+			if regIdx, confident := ResolveArgRegIndices(masks); confident {
+				fir.ArgRegIndices = regIdx
+			}
+		}
+	}
+
 	// Enrich: field names, receiver class, closure parent, and ground-truth
 	// try/catch -- the metadata that turns `.fNN` into `.fieldName` and recovers
 	// exception structure on the pipeline path (previously only the cmd path had
@@ -481,6 +466,11 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 // pipeline path (export-dart, ffitrace, strxref, census) produces the same
 // FuncIR rather than a poorer one.
 func (c *Context) enrichSignatureAndAsync(fir *decompiler.FuncIR, r cluster.CodeRange) {
+	// ensureDecompileMaps early-returns on a minimal Context (nil Result/Pool/Info),
+	// leaving the enrichment resolvers nil; nothing to attach then.
+	if c.Pool == nil || c.typeParams == nil {
+		return
+	}
 	ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
 	if owner, ok := ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil && owner.SignatureRefID > 0 {
 		if ft, ok := c.paramFuncTypeByRef[owner.SignatureRefID]; ok {
@@ -567,6 +557,55 @@ func (c *Context) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRange) {
 		})
 	}
 	fir.SnapTryRegionsToBlocks()
+}
+
+// BuildArgRegMasks runs the whole-binary call-edge pass that aggregates, per
+// callee, the argument-register mask observed at each direct call site. It is
+// opt-in (a caller that wants confident real arity in FuncIRFor calls it once
+// before decompiling) because it disassembles every function. After it runs,
+// FuncIRFor sets FuncIR.ArgRegIndices for callees with >= 2 agreeing sites.
+func (c *Context) BuildArgRegMasks() {
+	if c.argRegMasks != nil {
+		return
+	}
+	c.argRegMasks = make(map[uint64][]uint8)
+	symLk := func(va uint64) (string, bool) { s, ok := c.SymbolNames[va]; return s, ok && s != "" }
+	var thrFields map[int]string
+	if c.Info != nil {
+		thrFields = disasm.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
+	}
+	for _, r := range c.Ranges {
+		if r.Size == 0 {
+			continue
+		}
+		fStart := uint64(r.PCOffset) - c.CodeOff
+		fEnd := fStart + uint64(r.Size)
+		if fEnd > uint64(len(c.Code)) {
+			fEnd = uint64(len(c.Code))
+		}
+		if fStart >= fEnd {
+			continue
+		}
+		fVA := c.CodeVA + fStart
+		if c.IsARM64 {
+			insts := disasm.Disassemble(c.Code[fStart:fEnd], disasm.Options{BaseAddr: fVA})
+			if len(insts) == 0 {
+				continue
+			}
+			for _, e := range disasm.ExtractCallEdgesCFG(c.SymbolNames[fVA], insts, symLk, nil) {
+				if e.Kind == "bl" && e.ArgRegMask != 0 {
+					c.argRegMasks[e.TargetPC] = append(c.argRegMasks[e.TargetPC], e.ArgRegMask)
+				}
+			}
+			continue
+		}
+		scan := disasm.ScanX86FunctionCFG(c.Code[fStart:fEnd], fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
+		for _, e := range scan.Edges {
+			if e.Kind == "call" && e.ArgRegMask != 0 {
+				c.argRegMasks[e.TargetPC] = append(c.argRegMasks[e.TargetPC], e.ArgRegMask)
+			}
+		}
+	}
 }
 
 // FindStringRefs returns every ref ID (app-isolate OR VM-isolate --

@@ -15,9 +15,7 @@ import (
 	"time"
 
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/disasm"
 	"aotopsy/internal/pipeline"
 )
 
@@ -61,443 +59,47 @@ func cmdDecompileNative(args []string) error {
 		return fmt.Errorf("--filter only applies to --all (it is a name-based restriction on --all's full-binary sweep, not a standalone mode); did you mean --all --filter %q, or --from-main for a name-free reachability walk?", *filterSubstr)
 	}
 
-	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
-
-	sc, err := pipeline.LoadSnapshot(*libapp, opts)
+	ctx, err := pipeline.LoadContext(*libapp)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = sc.Close() }()
+	defer func() { _ = ctx.Close() }()
+	// Confident real arity needs the whole-binary call-site arg-mask pass (opt-in).
+	ctx.BuildArgRegMasks()
 
-	ef := sc.EF
-	info := sc.Info
-	result := sc.Result
-	table := sc.Table
-	ranges := sc.Ranges
-	code := sc.Code
-	codeOff := sc.CodeOff
-	codeVA := sc.CodeVA
-	isARM64 := sc.IsARM64
-	pl := sc.Pool
-	poolDisplay := sc.PoolDisplay
+	info := ctx.Info
+	result := ctx.Result
+	ranges := ctx.Ranges
+	codeOff := ctx.CodeOff
+	codeVA := ctx.CodeVA
+	isARM64 := ctx.IsARM64
+	pl := ctx.Pool
+	symbolNames := ctx.SymbolNames
+	symbolSizes := ctx.SymbolSizes
 
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch: %s\n", info.Version.DartVersion, ef.ELF.Machine)
-
-	// Build class layouts for field-name resolution in the decompiler.
-	// When fir.FieldNameResolver is set, fieldExpr emits base.fieldName
-	// instead of base.fNN.
-	//
-	// The lifter does not always know the receiver's class ID at fieldExpr
-	// time. So there are two maps: a per-class one (exact -- used whenever
-	// FuncIR.ReceiverClassID resolved the receiver) and a global fallback
-	// keyed by byte offset alone.
-	//
-	// The global fallback requires the name to be UNANIMOUS across every
-	// class that has a field at that offset. A previous revision relaxed it
-	// to a >50% majority vote, which is a name-fabricating rule: Dart field
-	// offsets are per-class, so offset 28 being `_hash` in six classes and
-	// `_length` in five means the six win and all eleven get printed as
-	// `_hash` -- five of them wrong, and indistinguishable in the output
-	// from a correctly resolved name. Emitting `f28` there is not a
-	// limitation to be papered over; it is the honest answer, and it is what
-	// the surrounding code's own rule for observed field types says
-	// ("a wrong concrete type is worse than no type, because callers treat
-	// KnownClass as authoritative" -- typetrack.InstanceFieldTypes).
-	classLayouts := pipeline.BuildClassLayouts(result, pl, info.Version.CompressedPointers)
-
-	// Per-class field name map: classID → byteOffset → fieldName
-	perClassFieldNames := map[int32]map[int32]string{}
-	// Global map: byteOffset → set of distinct names seen at that offset.
-	offsetNames := map[int32]map[string]bool{}
-	for _, cl := range classLayouts {
-		if perClassFieldNames[cl.ClassID] == nil {
-			perClassFieldNames[cl.ClassID] = map[int32]string{}
-		}
-		for _, f := range cl.Fields {
-			// Skip synthetic names (f_0x4, field_0x8)
-			if strings.HasPrefix(f.Name, "f_0x") || strings.HasPrefix(f.Name, "field_0x") {
-				continue
-			}
-			perClassFieldNames[cl.ClassID][f.ByteOffset] = f.Name
-			if offsetNames[f.ByteOffset] == nil {
-				offsetNames[f.ByteOffset] = map[string]bool{}
-			}
-			offsetNames[f.ByteOffset][f.Name] = true
-		}
-	}
-
-	// Global map: only offsets where every class agrees on the name.
-	globalFieldNames := map[int32]string{}
-	for off, names := range offsetNames {
-		if len(names) != 1 {
-			continue // ambiguous across classes -- emit fNN instead
-		}
-		for name := range names {
-			globalFieldNames[off] = name
-		}
-	}
-
-	fieldNameResolver := func(classID int, byteOffset int64) string {
-		// Try per-class resolution first (when classID is known).
-		// classID can come from ReceiverClassID (A2) or from typetrack.
-		if classID > 0 {
-			if classFields, ok := perClassFieldNames[int32(classID)]; ok {
-				if name, ok2 := classFields[int32(byteOffset)]; ok2 {
-					return name
-				}
-			}
-		}
-		// Fall back to the offset-only map, which only holds offsets whose
-		// name is the same in every class that has a field there.
-		if name, ok := globalFieldNames[int32(byteOffset)]; ok {
-			return name
-		}
-		return ""
-	}
-
-	// Build exception handler map: Code.RefID → []ExceptionHandlerEntry.
-	// Code.ExceptionHandlersRef points to an ExceptionHandlers object in
-	// result.ExceptionHandlers. We map that ref to the handler entries
-	// so the decompiler can emit try/catch structure.
-	excHandlersByRef := make(map[int][]cluster.ExceptionHandlerEntry)
-	for i := range result.ExceptionHandlers {
-		eh := &result.ExceptionHandlers[i]
-		excHandlersByRef[eh.RefID] = eh.Handlers
-	}
-	codeRefToExcHandlers := make(map[int][]cluster.ExceptionHandlerEntry)
-	for _, ce := range result.Codes {
-		if ce.ExceptionHandlersRef >= 0 {
-			if handlers, ok := excHandlersByRef[ce.ExceptionHandlersRef]; ok {
-				codeRefToExcHandlers[ce.RefID] = handlers
-			}
-		}
-	}
-
-	// Code.RefID -> decoded PcDescriptors. Their try_index is the only source
-	// for try-block EXTENTS; ExceptionHandlers above gives entry points only.
-	pcDescByRef := make(map[int][]cluster.PcDescriptorEntry, len(result.PcDescriptors))
-	for i := range result.PcDescriptors {
-		pcDescByRef[result.PcDescriptors[i].RefID] = result.PcDescriptors[i].Entries
-	}
-	codeRefToPcDesc := make(map[int][]cluster.PcDescriptorEntry)
-	for _, ce := range result.Codes {
-		if ce.PcDescriptorsRef >= 0 {
-			if entries, ok := pcDescByRef[ce.PcDescriptorsRef]; ok {
-				codeRefToPcDesc[ce.RefID] = entries
-			}
-		}
-	}
-
-	// Code.RefID -> decoded CodeSourceMap, and -> the inlined_id_to_function
-	// name table its PushFunction indices point into. Together these turn
-	// "this pc is in inline frame 3" into "this pc is inside Foo.bar".
-	csmByRef := make(map[int]*cluster.CodeSourceMapInfo, len(result.CodeSourceMaps))
-	for i := range result.CodeSourceMaps {
-		csmByRef[result.CodeSourceMaps[i].RefID] = &result.CodeSourceMaps[i]
-	}
-	arrayByRef := make(map[int]*cluster.ArrayInfo, len(result.Arrays))
-	for i := range result.Arrays {
-		arrayByRef[result.Arrays[i].RefID] = &result.Arrays[i]
-	}
-	codeRefToCSM := make(map[int]*cluster.CodeSourceMapInfo)
-	codeRefToInlinedNames := make(map[int][]string)
-	for _, ce := range result.Codes {
-		if ce.CodeSourceMapRef >= 0 {
-			if csm, ok := csmByRef[ce.CodeSourceMapRef]; ok {
-				codeRefToCSM[ce.RefID] = csm
-			}
-		}
-		if ce.InlinedFuncsRef < 0 {
-			continue
-		}
-		arr, ok := arrayByRef[ce.InlinedFuncsRef]
-		if !ok {
-			continue
-		}
-		names := make([]string, len(arr.ElementRefIDs))
-		for i, fnRef := range arr.ElementRefIDs {
-			if no, ok := pl.RefToNamed[fnRef]; ok {
-				owner := pl.ResolveOwnerName(no)
-				name := pl.ResolveName(no)
-				if name == "" {
-					name = pl.ResolveVMName(no)
-				}
-				switch {
-				case owner != "" && name != "":
-					names[i] = owner + "." + name
-				case name != "":
-					names[i] = name
-				}
-			}
-		}
-		codeRefToInlinedNames[ce.RefID] = names
-	}
-
-	// The typeInfoByRef / typeArgsByRef / resolveTypeName / resolveTypeArgs
-	// helpers that used to be built here are gone along with
-	// decompiler.FuncIR.GenericTypeArgs -- see that field's removal note.
-	// resolveTypeName also linear-scanned result.Classes on every call, which
-	// would have been O(types x classes) had it ever produced output.
-
-	// vmStubNames: VA->real-name map for the VM isolate's own stub Code
-	// objects (StackOverflowSharedWithoutFPURegs, etc.), parsed from a
-	// SEPARATE snapshot region (info.VmData) than the app's own isolate
-	// data. Best-effort: empty (not nil) if this Dart version hasn't been
-	// verified yet, or the region can't be parsed -- see
-	// pipeline.BuildVMStubSymbols's doc comment and ARCHITECTURE.md's
-	// "Stub naming" section.
-	vmStubNames := pipeline.BuildVMStubSymbols(info, opts)
-
-	// Build a whole-binary VA->name symbol table once, so cross-function
-	// call targets resolve to real names instead of sub_<hex>.
-	symbolNames := make(map[uint64]string, len(ranges))
-	symbolSizes := make(map[uint64]uint32, len(ranges))
-	for _, r := range ranges {
-		if r.Size == 0 {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
-		symbolSizes[funcVA] = r.Size
-		if r.RefID >= 0 {
-			symbolNames[funcVA] = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	// vmStubNames' entries live in an entirely different address range
-	// (info.VmInstructions, not info.IsolateInstructions/codeVA above) --
-	// merge them in directly rather than looking them up by an isolate
-	// funcVA that will never match a VM-region address. A direct call
-	// (BL/CALL) targeting a VM stub's real address resolves through this
-	// same map.
-	for va, name := range vmStubNames {
-		symbolNames[va] = name
-	}
-	// discardedFuncNames: names Instructions whose owning Code object was
-	// discarded by Dart AOT's release-build space optimization (the SAME
-	// population ResolveStubRanges labels "stubs" above, RefID==-1 --
-	// confirmed NOT a small fixed stub set but ordinary Dart functions,
-	// via Function.CodeIndex, the exact scheme dart-lang/sdk's own
-	// Deserializer::GetCodeAndEntryPointByIndex uses for runtime stack-
-	// trace symbolication. See pipeline.BuildDiscardedFunctionSymbols's
-	// doc comment and ARCHITECTURE.md's "Discarded-Code function naming"
-	// section for the full derivation.
-	discardedFuncNames := pipeline.BuildDiscardedFunctionSymbols(result.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased)
-	for va, name := range discardedFuncNames {
-		symbolNames[va] = name
-	}
-	// Shared-stub detection (ARM64 only, see disasm.DetectSharedStubCall's
-	// doc comment): a Code object whose OwnerRef doesn't resolve to any
-	// NamedObject at all has no Dart Function behind it -- Dart AOT's
-	// precompiler synthesizes these to share a common "call one THR-cached
-	// runtime entry point" sequence across call sites. Confirmed on a real
-	// sample: previously showed as opaque sub_<hex> despite being a
-	// perfectly resolvable Code object (RefID >= 0), just with an
-	// unresolvable owner.
-	// H-3 fix: get THR fields for x86_64 call edge annotation.
-	thrFields := disasm.THRFieldsWithProfile(info.Version.DartVersion, isARM64, info.Version)
-
-	if isARM64 {
-		if threadStubOffsets := disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64); len(threadStubOffsets) > 0 {
-			ownerByCodeRef := make(map[int]int, len(result.Codes))
-			for _, ce := range result.Codes {
-				ownerByCodeRef[ce.RefID] = ce.OwnerRef
-			}
-			for _, r := range ranges {
-				if r.RefID < 0 || r.Size == 0 {
-					continue
-				}
-				ownerRef, ok := ownerByCodeRef[r.RefID]
-				if !ok {
-					continue
-				}
-				if _, hasOwner := pl.RefToNamed[ownerRef]; hasOwner {
-					continue // real Function/Class owner -- not a candidate
-				}
-				fStart := uint64(r.PCOffset) - codeOff
-				fEnd := fStart + uint64(r.Size)
-				if fEnd > uint64(len(code)) {
-					continue
-				}
-				fVA := codeVA + fStart
-				insts := disasm.Disassemble(code[fStart:fEnd], disasm.Options{BaseAddr: fVA})
-				if name, ok := disasm.DetectSharedStubCall(insts, threadStubOffsets); ok {
-					symbolNames[fVA] = "SharedStub_" + name
-				}
-			}
-		}
-	}
 	symbolLookup := func(va uint64) (string, bool) {
-		name, ok := symbolNames[va]
-		return name, ok
-	}
-	poolLookup := func(idx int) (string, bool) {
-		s, ok := poolDisplay[idx]
-		if !ok {
-			return "", false
+		if n, ok := symbolNames[va]; ok && n != "" {
+			return n, true
 		}
-		return s, true
+		return "", false
 	}
-
-	// argRegMasks is a lazily-computed, whole-binary aggregation of every
-	// direct-call site's ArgRegMask (internal/disasm's
-	// inferCallArgRegMaskLocal for ARM64, inferX86CallArgRegMaskLocal for
-	// x86_64), keyed by callee VA -- built once, only if a decompile
-	// actually needs it, and reused across every function this invocation
-	// processes (relevant for --all/--from-main touching thousands of
-	// functions). Both architectures use the SAME downstream resolver
-	// (resolveArgRegIndices) and the SAME bit-position convention: bit i =
-	// the i'th calling-convention argument register (ArgRegs[i] in
-	// internal/decompiler's arm64.go/x86.go), even though the two arches'
-	// underlying register-index schemes differ (ARM64's X0-X7 are
-	// contiguous; x86_64's RDI/RSI/RDX/RCX/R8/R9 are not -- see x86.go's
-	// x86ArgRegBitPos for the remapping).
-	var argRegMasks map[uint64][]uint8
-	buildArgRegMasks := func() map[uint64][]uint8 {
-		if argRegMasks != nil {
-			return argRegMasks
-		}
-		argRegMasks = make(map[uint64][]uint8)
-		for _, r := range ranges {
-			if r.Size == 0 {
-				continue
-			}
-			fStart := uint64(r.PCOffset) - codeOff
-			fEnd := fStart + uint64(r.Size)
-			if fEnd > uint64(len(code)) {
-				fEnd = uint64(len(code))
-			}
-			if fStart >= fEnd {
-				continue
-			}
-			fVA := codeVA + fStart
-			if isARM64 {
-				insts := disasm.Disassemble(code[fStart:fEnd], disasm.Options{BaseAddr: fVA})
-				if len(insts) == 0 {
-					continue
-				}
-				for _, e := range disasm.ExtractCallEdgesCFG(symbolNames[fVA], insts, symbolLookup, nil) {
-					if e.Kind == "bl" && e.ArgRegMask != 0 {
-						argRegMasks[e.TargetPC] = append(argRegMasks[e.TargetPC], e.ArgRegMask)
-					}
-				}
-				continue
-			}
-			scan := disasm.ScanX86FunctionCFG(code[fStart:fEnd], fVA, symbolLookup, poolDisplay, symbolNames[fVA], thrFields)
-			for _, e := range scan.Edges {
-				if e.Kind == "call" && e.ArgRegMask != 0 {
-					argRegMasks[e.TargetPC] = append(argRegMasks[e.TargetPC], e.ArgRegMask)
-				}
+	poolLookup := func(off int) (string, bool) {
+		if ctx.PoolDisplay != nil {
+			if s, ok := ctx.PoolDisplay[off]; ok {
+				return s, true
 			}
 		}
-		return argRegMasks
+		return "", false
 	}
+	// One fully-enriched FuncIR builder, shared with every consumer.
+	buildFuncIR := ctx.FuncIRFor
 
-	// Real per-parameter type names (pipeline.TypeParamResolver), for a
-	// function's pseudocode signature -- see FuncIR.ParamTypeNames' doc
-	// comment for the count-match safety gate EmitPseudocode applies
-	// before trusting any of this.
-	paramTypeByCodeIndex := pipeline.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
-	paramFuncTypeByRef := make(map[int]*cluster.FuncTypeInfo, len(result.FuncTypes))
-	for i := range result.FuncTypes {
-		paramFuncTypeByRef[result.FuncTypes[i].RefID] = &result.FuncTypes[i]
-	}
-	typeParams := pipeline.NewTypeParamResolver(result, pl)
-	// poolEntryByIndex looks up a pool entry by its PP index.
-	poolByIndex := make(map[int]cluster.PoolEntry, len(result.Pool))
-	for _, pe := range result.Pool {
-		poolByIndex[pe.Index] = pe
-	}
-	poolEntryByIndex := func(idx int) (cluster.PoolEntry, bool) {
-		pe, ok := poolByIndex[idx]
-		return pe, ok
-	}
-	paramTypeNamesFor := func(r cluster.CodeRange) []string {
-		if r.RefID < 0 {
-			return nil
-		}
-		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
-		if !ok || owner.SignatureRefID <= 0 {
-			return nil
-		}
-		ft, ok := paramFuncTypeByRef[owner.SignatureRefID]
-		if !ok {
-			return nil
-		}
-		names := typeParams.ParamTypeNames(*ft)
-		if ft.HasImplicit && len(names) > 0 {
-			names = names[1:] // drop the implicit receiver's own type
-		}
-		return names
-	}
-
-	// Generic type PARAMETER names (the `<T>` in `runUnaryGuarded<T>`), a
-	// different thing from the parameter TYPES resolved just above. Source:
-	// FunctionType.type_parameters -> TypeParameters.names.
-	funcTypeGenerics := pipeline.BuildFuncTypeParamNames(result, pl)
-	// Closure -> declaring function, from ClosureData.parent_function.
-	closureParents := pipeline.BuildClosureParents(result, pl)
-	genericParamNamesFor := func(r cluster.CodeRange) []string {
-		if funcTypeGenerics == nil || r.RefID < 0 {
-			return nil
-		}
-		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
-		if !ok || owner.SignatureRefID <= 0 {
-			return nil
-		}
-		params := funcTypeGenerics[owner.SignatureRefID]
-		if len(params) == 0 {
-			return nil
-		}
-		// Render here so the decompiler stays unaware of how bounds resolve:
-		// "T" or "T extends NativeFunction".
-		out := make([]string, len(params))
-		for i, p := range params {
-			out[i] = p.String()
-		}
-		return out
-	}
-
-	// There is deliberately no per-function type-ARGUMENT hook here.
-	//
-	// A FunctionType holds type PARAMETERS (the `<T>` declaration, handled by
-	// genericParamNamesFor above); it holds no TypeArguments ref, because a
-	// type argument list belongs to an instantiation, not to a declaration.
-	// The TypeArguments objects a function mentions live in its object pool,
-	// one per call site, so anything that resolved them would be a
-	// per-instruction annotation and not a property of the function at all.
-	// A function-shaped hook could only ever return nil.
-
-	// Item 11: Named parameter names for named optional parameters.
-	// Resolves FunctionType.named_parameter_names → string list via
-	// TypeParamResolver.NamedParamNames.
-	namedParamNamesFor := func(r cluster.CodeRange) []string {
-		if r.RefID < 0 {
-			return nil
-		}
-		ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
-		if !ok || owner.SignatureRefID <= 0 {
-			return nil
-		}
-		ft, ok := paramFuncTypeByRef[owner.SignatureRefID]
-		if !ok {
-			return nil
-		}
-		return typeParams.NamedParamNames(*ft)
-	}
-
-	// A2: Build classByRef and codeRefToReceiverClassID BEFORE buildFuncIR
-	// so that ReceiverClassID can be set inside buildFuncIR.
+	// Reachability/pool helpers used by --from-main (not the builder).
 	ctEarly := info.Version.CIDs
 	classByRef := make(map[int]cluster.ClassInfo, len(result.Classes))
 	for _, ci := range result.Classes {
 		classByRef[ci.RefID] = ci
 	}
-	byCodeIndexForReceiver := pipeline.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
 	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
 		effectiveClass := funcObj.OwnerRefID
 		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
@@ -505,41 +107,10 @@ func cmdDecompileNative(args []string) error {
 		}
 		return effectiveClass
 	}
-	codeRefToReceiverClassID := make(map[int]int, len(result.Codes))
-	for _, ce := range result.Codes {
-		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndexForReceiver); ok && owner != nil {
-			classRef := effectiveOwnerClassRef(owner)
-			if classRef > 0 {
-				if ci, ok2 := classByRef[classRef]; ok2 {
-					codeRefToReceiverClassID[ce.RefID] = int(ci.ClassID)
-				}
-			}
-		}
+	poolByIndex := make(map[int]cluster.PoolEntry, len(result.Pool))
+	for _, pe := range result.Pool {
+		poolByIndex[pe.Index] = pe
 	}
-
-	funcIRBld := &funcIRBuilder{
-		code:                   code,
-		codeOff:                codeOff,
-		codeVA:                 codeVA,
-		symbolNames:            symbolNames,
-		isARM64:                isARM64,
-		info:                   info,
-		buildArgRegMasks:       buildArgRegMasks,
-		paramTypeNamesFor:      paramTypeNamesFor,
-		genericParamNamesFor:   genericParamNamesFor,
-		namedParamNamesFor:     namedParamNamesFor,
-		fieldNameResolver:      fieldNameResolver,
-		closureParents:         closureParents,
-		pl:                     pl,
-		paramTypeByCodeIndex:   paramTypeByCodeIndex,
-		codeRefToReceiverClass: codeRefToReceiverClassID,
-		codeRefToExcHandlers:   codeRefToExcHandlers,
-		codeRefToPcDesc:        codeRefToPcDesc,
-		codeRefToCSM:           codeRefToCSM,
-		codeRefToInlinedNames:  codeRefToInlinedNames,
-		poolEntryByIndex:       poolEntryByIndex,
-	}
-	buildFuncIR := funcIRBld.Build
 
 
 	// decompileRangeWithIR returns both the pseudocode Artifact and the
@@ -1030,34 +601,3 @@ func cmdDecompileNative(args []string) error {
 	}
 	return nil
 }
-
-// resolveArgRegIndices decides a confident real arity from a callee's
-// aggregated per-call-site ArgRegMask values (internal/disasm's
-// inferCallArgRegMaskLocal), one mask per direct call site targeting it.
-//
-// Uses the BITWISE-AND INTERSECTION across every call site, not majority
-// vote and not exact-equality. Verified necessary on a real sample:
-// MathTools.factorial(int n) (1 real parameter, in X1) has two call sites
-// -- self-recursion (mask 0b11, X0+X1: X0 there is the recursive call
-// preserving `n` across the call for the LATER `n * factorial(n-1)`
-// multiplication, not an argument) and the call from _runAll (mask 0b10,
-// X1 only). Exact-equality rejected both (0b11 != 0b10) even though the
-// real signal (X1) was consistent; the intersection (0b11 & 0b10 = 0b10)
-// correctly recovers X1-only. A register that is genuinely required is
-// set at EVERY call site with no exceptions; one that only sometimes
-// appears is call-site-specific noise (a preserved-across-call value, an
-// unrelated field store reusing the register, etc.) and must be dropped,
-// not trusted.
-//
-// An empty intersection (no bit survives) means unresolved -- callers
-// fall back to the full ArgRegs display.
-//
-// Requires at least 2 independent call sites. A single call site has
-// nothing to intersect against, so its mask (however clean-looking) is
-// unvalidated -- verified as a real risk on the same test binary:
-// _CompareHomePageState._runAll has exactly one call site (from
-// initState) on both architectures, and trusting that one site alone gave
-// a DIFFERENT arg count on ARM64 (2) than on x86_64 (1) for the SAME Dart
-// function -- real arity cannot differ by target architecture, so at
-// least one of those single-sample answers was wrong. Two or more call
-// sites are required before the intersection is trusted at all.
