@@ -67,6 +67,13 @@ func typedDeclarationsStmt(stmts []Stmt) ([]Stmt, bool) {
 			varName := m[1]
 			rhs := strings.TrimSpace(m[2])
 
+			// Phi induction locals (phi_bH_<reg>) are declared mutable and are
+			// reassigned every loop iteration; promoting them to `final` would
+			// produce invalid Dart (assignment to a final). Leave them as `var`.
+			if strings.HasPrefix(varName, "phi_b") {
+				continue
+			}
+
 			inferredType := inferTypeFromRHS(rhs)
 			if inferredType == "" {
 				continue

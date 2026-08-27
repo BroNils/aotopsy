@@ -72,7 +72,15 @@ func (e *emitter) appendHelperFunctions() {
 			tryMarked:      e.tryMarked,
 			inlineMarked:   e.inlineMarked,
 			tryOpened:      e.tryOpened,
-			handlerBlocks:  e.handlerBlocks}
+			handlerBlocks:  e.handlerBlocks,
+			// Per-FuncIR analyses are valid to share with helper sub-emitters so
+			// extracted loops keep both fixpoint live-in seeding and phi
+			// materialization; the phi bookkeeping maps are per-emitter, fresh.
+			loopHeaders:     e.loopHeaders,
+			blockEntryState: e.blockEntryState,
+			loopPhis:        e.loopPhis,
+			pinnedPhi:       make(map[string]string),
+			phiDeclared:     make(map[int]bool)}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,

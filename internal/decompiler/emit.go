@@ -92,6 +92,20 @@ type emitter struct {
 	// block's unknown live-ins from it. Supersedes the already-emitted-predecessor
 	// forward join.
 	blockEntryState []*LiftState
+	// loopPhis maps a loop-header block id to its loop-carried registers and each
+	// one's clean entry-initial value (computeLoopPhis). At the loop's entry the
+	// emitter declares an induction local `phi_bH_<reg>` initialized to that value
+	// and pins the register to it; the register's in-loop redefinitions are then
+	// emitted as explicit `phi_bH_<reg> = <update>;` statements instead of leaking
+	// the raw register token at the header read.
+	loopPhis map[int]map[string]string
+	// pinnedPhi maps a currently-pinned canonical register to its phi induction
+	// local name. While pinned, a redefinition of the register emits an update to
+	// the local and re-pins, rather than forwarding the raw value expression.
+	pinnedPhi map[string]string
+	// phiDeclared guards against re-declaring a header's induction locals if the
+	// loop-entry path is reached more than once.
+	phiDeclared map[int]bool
 	callIdx       int
 	steps         int
 	budgetHit     bool
@@ -219,9 +233,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		symbols:    symbols,
 		pool:       pool,
 		state:      newLiftState(fir.NullReg),
-		active:     make(map[int]bool),
-		visits:     make(map[int]int),
-		omittedSet: make(map[int]bool),
+		active:      make(map[int]bool),
+		visits:      make(map[int]int),
+		omittedSet:  make(map[int]bool),
+		pinnedPhi:   make(map[string]string),
+		phiDeclared: make(map[int]bool),
 	}
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
@@ -239,8 +255,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
 	// Pre-emission reaching-definition fixpoint: correct value state at each
-	// block entry regardless of the recursive walk's path (ssa.go).
-	e.blockEntryState = computeEntryStates(fir, pool)
+	// block entry regardless of the recursive walk's path (ssa.go). The same
+	// fixpoint's exit states drive loop-carried phi detection.
+	entryStates, exitStates := runFixpoint(fir, pool)
+	e.blockEntryState = entryStates
+	e.loopPhis = computeLoopPhis(fir, exitStates)
 	// Map blocks to the try region covering them, for per-block annotation.
 	e.buildBlockTryIndex()
 	// Allocate up front so sub-emitters for helper functions share the same

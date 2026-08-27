@@ -232,6 +232,10 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				e.emit(indent, "%s", line)
 			}
 		}
+		// SSA phi: if this instruction redefined a loop-carried (pinned)
+		// register, emit its update as an explicit assignment to the induction
+		// local and re-pin, so the loop body carries the value across iterations.
+		e.updatePinnedPhis(indent)
 	}
 
 	// Fallthrough / unconditional-jump successor for blocks whose last
@@ -278,6 +282,11 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 	// `while (true) { ... }` when the condition can be recovered.
 	isLoopHeader := e.loopHeaders[id]
 	if isLoopHeader && e.visits[id] == 0 {
+		// SSA phi materialization: declare an induction local for each
+		// loop-carried register just before the loop, initialized to its
+		// entry value, and pin the register to that local so its header read
+		// resolves to a name and its in-loop updates emit explicitly.
+		e.declareLoopPhis(id, indent)
 		// A4: Try while-loop condition (for-loop is a post-emit pass)
 		loopCond := e.extractLoopCondition(id)
 		if loopCond != "" {
