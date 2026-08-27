@@ -189,18 +189,10 @@ type x86BlockCFG struct {
 }
 
 func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
-	var out []x86DecodedInst
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			out = append(out, x86DecodedInst{Addr: addr, Len: 1})
-			off++
-			continue
-		}
-		out = append(out, x86DecodedInst{Addr: addr, Inst: inst, Len: length})
-		off += length
+	decoded := arch.DecodeX86(funcCode, funcVA)
+	out := make([]x86DecodedInst, 0, len(decoded))
+	for _, d := range decoded {
+		out = append(out, x86DecodedInst{Addr: d.VA, Inst: d.Inst, Len: d.Len})
 	}
 	return out
 }

@@ -963,18 +963,10 @@ func killX86ArgRegs(state *[31]TypeLattice) {
 
 // DecodeX86Function decodes a function's raw bytes into X86DecodedInst slice.
 func DecodeX86Function(funcCode []byte, funcVA uint64) []X86DecodedInst {
-	var out []X86DecodedInst
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			out = append(out, X86DecodedInst{Addr: addr, Len: 1})
-			off++
-			continue
-		}
-		out = append(out, X86DecodedInst{Addr: addr, Inst: inst, Len: length})
-		off += length
+	decoded := arch.DecodeX86(funcCode, funcVA)
+	out := make([]X86DecodedInst, 0, len(decoded))
+	for _, d := range decoded {
+		out = append(out, X86DecodedInst{Addr: d.VA, Inst: d.Inst, Len: d.Len})
 	}
 	return out
 }

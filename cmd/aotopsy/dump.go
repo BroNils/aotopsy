@@ -6,8 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/arch/x86/x86asm"
-
+	"aotopsy/internal/arch"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
@@ -193,31 +192,26 @@ func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.Symb
 	defer func() { _ = f.Close() }()
 
 	n := 0
-	for off := 0; off < len(code) && (maxSteps <= 0 || n < maxSteps); {
-		addr := baseVA + uint64(off)
-		inst, decErr := x86asm.Decode(code[off:], 64)
-		length := inst.Len
-		if decErr != nil || length <= 0 {
-			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", addr)
-			off++
-			n++
-			continue
+	arch.WalkX86(code, baseVA, func(d arch.X86Decoded) bool {
+		if maxSteps > 0 && n >= maxSteps {
+			return false
 		}
-		line := inst.String()
-		for _, arg := range inst.Args {
-			if rel, ok := arg.(x86asm.Rel); ok {
-				target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-				if name, ok := lookup(target); ok {
-					line += fmt.Sprintf("  ; -> %s", name)
-				} else {
-					line += fmt.Sprintf("  ; -> 0x%x", target)
-				}
-				break
+		if d.Bad {
+			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
+			n++
+			return true
+		}
+		line := d.Inst.String()
+		if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+			if name, ok := lookup(target); ok {
+				line += fmt.Sprintf("  ; -> %s", name)
+			} else {
+				line += fmt.Sprintf("  ; -> 0x%x", target)
 			}
 		}
-		_, _ = fmt.Fprintf(f, "0x%x: %s\n", addr, line)
-		off += length
+		_, _ = fmt.Fprintf(f, "0x%x: %s\n", d.VA, line)
 		n++
-	}
+		return true
+	})
 	return n, nil
 }

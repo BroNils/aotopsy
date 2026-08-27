@@ -134,15 +134,13 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 
 		rt := newX64RegTracker(12)
 
-		for off := 0; off < len(funcCode); {
-			addr := funcVA + uint64(off)
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				length = 1
-				off += length
+		maxHitReached := false
+		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+			addr := d.VA
+			inst := d.Inst
+			if d.Bad {
 				rt.tick()
-				continue
+				return true
 			}
 
 			if inst.Op == x86asm.CALL {
@@ -187,12 +185,12 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					}
 				}
 				rt.tick()
-				off += length
 				if maxHits > 0 && hits >= maxHits {
 					fmt.Fprintf(os.Stderr, "stopping at --max=%d indirect-call hits\n", maxHits)
-					return out, nil
+					maxHitReached = true
+					return false
 				}
-				continue
+				return true
 			}
 
 			// Track MOV dst, [R14+disp] (THR field load) / [R15+disp] (pool load)
@@ -212,8 +210,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						rt.kill(dstIdx)
 					}
 					rt.tick()
-					off += length
-					continue
+					return true
 				}
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && dstOK {
 					dstIdx := arch.X86CanonReg(dstReg)
@@ -237,8 +234,7 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						rt.kill(dstIdx)
 					}
 					rt.tick()
-					off += length
-					continue
+					return true
 				}
 				if dstOK {
 					rt.kill(arch.X86CanonReg(dstReg))
@@ -250,7 +246,11 @@ func scanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			}
 
 			rt.tick()
-			off += length
+			return true
+		})
+		if maxHitReached {
+			// Original stopped ALL processing (not just this function) at the cap.
+			return out, nil
 		}
 	}
 

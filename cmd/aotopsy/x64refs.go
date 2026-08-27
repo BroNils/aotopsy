@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
@@ -191,14 +192,10 @@ func cmdX64Refs(args []string) error {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 
-		for off := 0; off < len(funcCode); {
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				length = 1 // resync one byte at a time on decode failure
-			}
-			if err == nil {
-				for _, arg := range inst.Args {
+		capped := false
+		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+			if !d.Bad {
+				for _, arg := range d.Inst.Args {
 					mem, ok := arg.(x86asm.Mem)
 					if !ok || mem.Base != x86asm.R15 {
 						continue
@@ -211,16 +208,19 @@ func cmdX64Refs(args []string) error {
 					if *find != "" && !strings.Contains(display, *find) {
 						continue
 					}
-					addr := funcVA + uint64(off)
-					fmt.Printf("%s @ 0x%x  pp_idx=%d  codeRef=%d  funcStartVA=0x%x  %q\n", funcName, addr, poolIdx, r.RefID, funcVA, display)
+					fmt.Printf("%s @ 0x%x  pp_idx=%d  codeRef=%d  funcStartVA=0x%x  %q\n", funcName, d.VA, poolIdx, r.RefID, funcVA, display)
 					hits++
 				}
 			}
-			off += length
 			if *maxHits > 0 && hits >= *maxHits {
 				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", *maxHits)
-				return nil
+				capped = true
+				return false
 			}
+			return true
+		})
+		if capped {
+			return nil
 		}
 	}
 	fmt.Fprintf(os.Stderr, "total hits: %d\n", hits)
@@ -254,19 +254,14 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
 
 	funcCode := code[funcStart:funcEnd]
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			fmt.Printf("0x%x: <decode error: %v>\n", addr, err)
-			length = 1
-			off += length
-			continue
+	arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		if d.Bad {
+			fmt.Printf("0x%x: <decode error>\n", d.VA)
+			return true
 		}
-		text := inst.String()
+		text := d.Inst.String()
 		annotation := ""
-		for _, arg := range inst.Args {
+		for _, arg := range d.Inst.Args {
 			if mem, ok := arg.(x86asm.Mem); ok {
 				if mem.Base == x86asm.R15 {
 					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
@@ -279,25 +274,20 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 					annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
 				}
 			}
-			if rel, ok := arg.(x86asm.Rel); ok {
-				// Resolve JMP/Jcc/CALL rel targets to absolute VA --
-				// added to disambiguate whether a given address is
-				// reachable via normal control flow or only via a
-				// jump/deopt-landing-pad from elsewhere (useful for
-				// telling which of two candidate write sites in a
-				// function is on the normal path vs. a rare
-				// deopt/exception continuation).
-				target := addr + uint64(length) + uint64(int64(rel))
-				annotation += fmt.Sprintf("  ; -> 0x%x", target)
-			}
+		}
+		// Resolve JMP/Jcc/CALL rel targets to absolute VA -- added to
+		// disambiguate whether a given address is reachable via normal
+		// control flow or only via a jump/deopt-landing-pad from elsewhere.
+		if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+			annotation += fmt.Sprintf("  ; -> 0x%x", target)
 		}
 		marker := "  "
-		if addr == targetVA {
+		if d.VA == targetVA {
 			marker = "->"
 		}
-		fmt.Printf("%s 0x%x: %s%s\n", marker, addr, text, annotation)
-		off += length
-	}
+		fmt.Printf("%s 0x%x: %s%s\n", marker, d.VA, text, annotation)
+		return true
+	})
 	return nil
 }
 
@@ -336,31 +326,23 @@ func findCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 
-		for off := 0; off < len(funcCode); {
-			addr := funcVA + uint64(off)
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				length = 1
-				off += length
-				continue
-			}
-			if inst.Op == x86asm.CALL {
-				for _, arg := range inst.Args {
-					if rel, ok := arg.(x86asm.Rel); ok {
-						target := addr + uint64(length) + uint64(int64(rel))
-						if target == targetVA {
-							fmt.Printf("%s @ 0x%x  calls target\n", funcName, addr)
-							hits++
-						}
-					}
+		capped := false
+		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+			if !d.Bad && d.Inst.Op == x86asm.CALL {
+				if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok && target == targetVA {
+					fmt.Printf("%s @ 0x%x  calls target\n", funcName, d.VA)
+					hits++
 				}
 			}
-			off += length
 			if maxHits > 0 && hits >= maxHits {
 				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", maxHits)
-				return nil
+				capped = true
+				return false
 			}
+			return true
+		})
+		if capped {
+			return nil
 		}
 	}
 	fmt.Fprintf(os.Stderr, "total callers of 0x%x: %d\n", targetVA, hits)
@@ -421,23 +403,19 @@ func scanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		hashOps := 0
 		rotateOps := 0
 		total := 0
-		for off := 0; off < len(funcCode); {
-			inst, err := x86asm.Decode(funcCode[off:], 64)
-			length := inst.Len
-			if err != nil || length <= 0 {
-				length = 1
-				off += length
-				continue
+		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+			if d.Bad {
+				return true
 			}
 			total++
-			if hashShapedOp(inst.Op) {
+			if hashShapedOp(d.Inst.Op) {
 				hashOps++
 			}
-			if inst.Op == x86asm.ROL || inst.Op == x86asm.ROR {
+			if d.Inst.Op == x86asm.ROL || d.Inst.Op == x86asm.ROR {
 				rotateOps++
 			}
-			off += length
-		}
+			return true
+		})
 		if hashOps < minOps {
 			continue
 		}

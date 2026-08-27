@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
 )
 
@@ -370,31 +371,19 @@ func signExtend26(val uint32) int32 {
 func scanX86CallSites(sections []execSection, includeBranches bool) []CallSite {
 	var out []CallSite
 	for _, sec := range sections {
-		data := sec.Data
-		off := 0
-		for off < len(data) {
-			inst, err := x86asm.Decode(data[off:], 64)
-			if err != nil || inst.Len == 0 {
-				off++
-				continue
+		arch.WalkX86(sec.Data, sec.Addr, func(d arch.X86Decoded) bool {
+			if d.Bad {
+				return true
 			}
-			isCall := inst.Op == x86asm.CALL
-			isJmp := includeBranches && inst.Op == x86asm.JMP
+			isCall := d.Inst.Op == x86asm.CALL
+			isJmp := includeBranches && d.Inst.Op == x86asm.JMP
 			if isCall || isJmp {
-				for _, arg := range inst.Args {
-					if arg == nil {
-						continue
-					}
-					if rel, ok := arg.(x86asm.Rel); ok {
-						addr := sec.Addr + uint64(off)
-						target := uint64(int64(addr) + int64(inst.Len) + int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-						out = append(out, CallSite{FromVA: addr, TargetVA: target})
-						break
-					}
+				if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+					out = append(out, CallSite{FromVA: d.VA, TargetVA: target})
 				}
 			}
-			off += inst.Len
-		}
+			return true
+		})
 	}
 	return out
 }

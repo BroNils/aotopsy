@@ -6,8 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/arch/x86/x86asm"
-
+	"aotopsy/internal/arch"
 	"aotopsy/internal/callgraph"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
@@ -266,29 +265,21 @@ func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols
 	}
 	defer func() { _ = f.Close() }()
 
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", addr)
-			off++
-			continue
+	arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		if d.Bad {
+			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
+			return true
 		}
-		line := inst.String()
-		for _, arg := range inst.Args {
-			if rel, ok := arg.(x86asm.Rel); ok {
-				target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-				if name, ok := symbols(target); ok {
-					line += fmt.Sprintf("  ; -> %s", name)
-				} else {
-					line += fmt.Sprintf("  ; -> 0x%x", target)
-				}
-				break
+		line := d.Inst.String()
+		if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+			if name, ok := symbols(target); ok {
+				line += fmt.Sprintf("  ; -> %s", name)
+			} else {
+				line += fmt.Sprintf("  ; -> 0x%x", target)
 			}
 		}
-		_, _ = fmt.Fprintf(f, "0x%x: %s\n", addr, line)
-		off += length
-	}
+		_, _ = fmt.Fprintf(f, "0x%x: %s\n", d.VA, line)
+		return true
+	})
 	return nil
 }

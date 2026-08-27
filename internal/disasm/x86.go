@@ -253,18 +253,14 @@ type X86Inst struct {
 // pairs only -- everything ExtractX86THRAccesses/BuildAuditRecords need,
 // without the register-provenance bookkeeping ScanX86Function carries.
 func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
-	var out []X86Inst
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			out = append(out, X86Inst{Addr: addr, Text: "<bad>"})
-			off++
+	decoded := arch.DecodeX86(funcCode, funcVA)
+	out := make([]X86Inst, 0, len(decoded))
+	for _, d := range decoded {
+		if d.Bad {
+			out = append(out, X86Inst{Addr: d.VA, Text: "<bad>"})
 			continue
 		}
-		out = append(out, X86Inst{Addr: addr, Text: inst.String()})
-		off += length
+		out = append(out, X86Inst{Addr: d.VA, Text: d.Inst.String()})
 	}
 	return out
 }
@@ -276,14 +272,12 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 // optional (marks Resolved when the offset has a known name).
 func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
 	var out []THRAccess
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			off++
-			continue
+	arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		if d.Bad {
+			return true
 		}
+		addr := d.VA
+		inst := d.Inst
 		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
 			// DataSize is the operand size in bits but is 0 for many MOV
 			// encodings, yielding width=0. Prefer MemBytes (the memory
@@ -318,8 +312,8 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				}
 			}
 		}
-		off += length
-	}
+		return true
+	})
 	return out
 }
 

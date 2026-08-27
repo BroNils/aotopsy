@@ -54,15 +54,10 @@ type x86Inst struct {
 // resolve as "unresolved branch target" even though the bytes were right
 // there in the CodeRange the caller already sized correctly.
 func DecodeX86Range(data []byte, baseVA uint64) []x86Inst {
-	var out []x86Inst
-	off := 0
-	for off < len(data) {
-		inst, err := x86asm.Decode(data[off:], 64)
-		if err != nil || inst.Len == 0 {
-			break
-		}
-		out = append(out, x86Inst{Addr: baseVA + uint64(off), Len: inst.Len, Inst: inst})
-		off += inst.Len
+	decoded := arch.DecodeX86UntilBad(data, baseVA)
+	out := make([]x86Inst, 0, len(decoded))
+	for _, d := range decoded {
+		out = append(out, x86Inst{Addr: d.VA, Len: d.Len, Inst: d.Inst})
 	}
 	return out
 }
