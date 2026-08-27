@@ -361,10 +361,12 @@ explicitly in the tool, not silently tolerated.
 Two-step technique for verifying against Dart SDK source:
 
 1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`).
-   - Use `repo: "dart-lang/sdk"`.
+   - Use ONLY `query` + `repo` (e.g. `repo: "dart-lang/sdk"`). Do **NOT** pass `path` —
+     leaving it off returns wider results across the whole repo and surfaces more
+     knowledge (related call sites, other files, cross-arch counterparts) you would
+     otherwise miss by narrowing. This is intended: cast wide, then narrow with `gh api`.
    - Pass literal code/symbol in `query` (e.g. `"CheckStackOverflowInstr"`, `"NULL_REG"`).
    - ⚠️ **NEVER** put `repo:...` or `path:...` inside `query` — `query` matches literal text in files.
-   - Use `path` parameter (e.g. `"runtime/vm"`) to narrow results.
 2. **`gh api` @ version tag**: Once the path is found, fetch exact uncompressed source lines:
    `gh api -H "Accept: application/vnd.github.raw" "repos/dart-lang/sdk/contents/<path>?ref=<tag>"`
 
