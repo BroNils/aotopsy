@@ -3,7 +3,7 @@ package typetrack
 import (
 	"testing"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 )
 
 // --- isLDURH tests (Dart 2.x class ID extraction) ---
@@ -50,7 +50,7 @@ func TestIsLDURH(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		base, rt, imm9, ok := arm64dec.LDURH(tt.raw)
+		base, rt, imm9, ok := arm64.LDURH(tt.raw)
 		if ok != tt.wantOK {
 			t.Errorf("isLDURH(0x%08x) [%s]: ok = %v, want %v", tt.raw, tt.name, ok, tt.wantOK)
 			continue
@@ -73,7 +73,7 @@ func TestIsLDURH(t *testing.T) {
 func TestIsADD64ImmediateReservedShift(t *testing.T) {
 	// ADD X0, X0, #0x123, shift=0 (no shift) — normal case
 	raw := uint32(0x91000000) | (0x123 << 10) | (0 << 5) | 0
-	rd, rn, imm, ok := arm64dec.ADD64Immediate(raw)
+	rd, rn, imm, ok := arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=0 should be valid")
 	}
@@ -85,7 +85,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 
 	// ADD X0, X0, #0x123, shift=1 (LSL #12) — normal case
 	raw = uint32(0x91400000) | (0x123 << 10) | (0 << 5) | 0
-	_, _, imm, ok = arm64dec.ADD64Immediate(raw)
+	_, _, imm, ok = arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=1 should be valid")
 	}
@@ -95,7 +95,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 
 	// ADD X0, X0, #0x123, shift=2 (RESERVED) — should return imm=0
 	raw = uint32(0x91800000) | (0x123 << 10) | (0 << 5) | 0
-	_, _, imm, ok = arm64dec.ADD64Immediate(raw)
+	_, _, imm, ok = arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=2 should still return ok=true")
 	}
@@ -109,7 +109,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 func TestIsSUB64ImmediateReservedShift(t *testing.T) {
 	// SUB X0, X0, #0x123, shift=2 (RESERVED)
 	raw := uint32(0xD1800000) | (0x123 << 10) | (0 << 5) | 0
-	_, _, imm, ok := arm64dec.SUB64Immediate(raw)
+	_, _, imm, ok := arm64.SUB64Immediate(raw)
 	if !ok {
 		t.Error("SUB with shift=2 should still return ok=true")
 	}

@@ -3,7 +3,7 @@ package typetrack
 import (
 	"sort"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
@@ -280,22 +280,22 @@ func AnalyzeFunction(
 		var found bool
 
 		// Pattern 3.x: ADD/SUB X30, X0, #imm (rd=30, rn=0)
-		if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok && rd == 30 && rn == 0 {
+		if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == 30 && rn == 0 {
 			selectorOffset = imm
 			slotReg = 30
 			found = true
-		} else if rd, rn, imm, ok := arm64dec.SUB64Immediate(raw); ok && rd == 30 && rn == 0 {
+		} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == 30 && rn == 0 {
 			selectorOffset = -imm
 			slotReg = 30
 			found = true
 		}
 		// Pattern 2.x A: ADD/SUB X0, X0, #imm (rd=0, rn=0)
 		if !found {
-			if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok && rd == 0 && rn == 0 {
+			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == 0 && rn == 0 {
 				selectorOffset = imm
 				slotReg = 0
 				found = true
-			} else if rd, rn, imm, ok := arm64dec.SUB64Immediate(raw); ok && rd == 0 && rn == 0 {
+			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == 0 && rn == 0 {
 				selectorOffset = -imm
 				slotReg = 0
 				found = true
@@ -305,11 +305,11 @@ func AnalyzeFunction(
 		// This catches the case where LDURH loads class ID into Wn,
 		// then SUB Xn, Xn, #imm computes the slot in-place.
 		if !found {
-			if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok && rd == rn && rd < 31 {
+			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == rn && rd < 31 {
 				selectorOffset = imm
 				slotReg = rd
 				found = true
-			} else if rd, rn, imm, ok := arm64dec.SUB64Immediate(raw); ok && rd == rn && rd < 31 {
+			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == rn && rd < 31 {
 				selectorOffset = -imm
 				slotReg = rd
 				found = true
@@ -326,11 +326,11 @@ func AnalyzeFunction(
 		// implied class ID by kOriginElement.)
 		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
 		if !found {
-			if rd, ok := arm64dec.MOVOrr(raw); ok && rd == 30 {
+			if rd, ok := arm64.MOVOrr(raw); ok && rd == 30 {
 				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
 					ldrRaw := insts[j].Raw
-					if base, rm2, rt, ok := arm64dec.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm2 == 30 {
-						if blrReg, ok := arm64dec.BLR(insts[j+1].Raw); ok && blrReg == 30 {
+					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm2 == 30 {
+						if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == 30 {
 							selectorOffset = 0
 							slotReg = 30
 							found = true
@@ -347,10 +347,10 @@ func AnalyzeFunction(
 		// Check next instruction: LDR X30, [X21, XslotReg, LSL #3]
 		if i+1 < len(insts) {
 			ldrRaw := insts[i+1].Raw
-			if base, rm, rt, ok := arm64dec.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm == slotReg {
+			if base, rm, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm == slotReg {
 				// Check instruction after: BLR X30
 				if i+2 < len(insts) {
-					if blrReg, ok := arm64dec.BLR(insts[i+2].Raw); ok && blrReg == 30 {
+					if blrReg, ok := arm64.BLR(insts[i+2].Raw); ok && blrReg == 30 {
 						ctx.SelectorOffsets[insts[i+2].Addr] = selectorOffset
 					}
 				}
@@ -364,7 +364,7 @@ func AnalyzeFunction(
 	// This pattern is NOT caught by the ADD/SUB #imm scan above.
 	for i := 0; i < len(insts)-3; i++ {
 		// Look for MOVZ Xn, #imm16
-		movReg, movImm, movOK := arm64dec.MOVZ64(insts[i].Raw)
+		movReg, movImm, movOK := arm64.MOVZ64(insts[i].Raw)
 		if !movOK || movReg >= 31 {
 			continue
 		}
@@ -372,7 +372,7 @@ func AnalyzeFunction(
 		if i+1 >= len(insts) {
 			continue
 		}
-		addRd, _, addRm, addOK := arm64dec.ADD64Register(insts[i+1].Raw)
+		addRd, _, addRm, addOK := arm64.ADD64Register(insts[i+1].Raw)
 		if !addOK || addRm != movReg || addRd >= 31 {
 			continue
 		}
@@ -380,7 +380,7 @@ func AnalyzeFunction(
 		if i+2 >= len(insts) {
 			continue
 		}
-		base, rm, rt, ldrOK := arm64dec.LDRRegExtended(insts[i+2].Raw)
+		base, rm, rt, ldrOK := arm64.LDRRegExtended(insts[i+2].Raw)
 		if !ldrOK || base != 21 || rt != 30 || rm != addRd {
 			continue
 		}
@@ -388,7 +388,7 @@ func AnalyzeFunction(
 		if i+3 >= len(insts) {
 			continue
 		}
-		if blrReg, ok := arm64dec.BLR(insts[i+3].Raw); ok && blrReg == 30 {
+		if blrReg, ok := arm64.BLR(insts[i+3].Raw); ok && blrReg == 30 {
 			ctx.SelectorOffsets[insts[i+3].Addr] = movImm
 		}
 	}
@@ -402,7 +402,7 @@ func AnalyzeFunction(
 	// MOV Xp, Xn copies it, LDR uses Xp.
 	for i := 0; i < len(insts)-2; i++ {
 		// Look for LDURH Wn, [Xm,#1] (class ID extraction, 2.x style)
-		_, ldurhRt, ldurhImm9, ldurhOK := arm64dec.LDURH(insts[i].Raw)
+		_, ldurhRt, ldurhImm9, ldurhOK := arm64.LDURH(insts[i].Raw)
 		if !ldurhOK || ldurhImm9 != 1 || ldurhRt >= 31 {
 			continue
 		}
@@ -413,7 +413,7 @@ func AnalyzeFunction(
 		for j := i + 1; j < len(insts)-1 && j <= i+5; j++ {
 			jraw := insts[j].Raw
 			// Check for MOV Xp, Xn (ORR Xd, XZR, Xm) that bridges the class ID.
-			if movRd, movOK := arm64dec.MOVOrr(jraw); movOK && movRd < 31 {
+			if movRd, movOK := arm64.MOVOrr(jraw); movOK && movRd < 31 {
 				movRm := int((jraw >> 16) & 0x1F)
 				if movRm == classIdReg {
 					classIdReg = movRd
@@ -421,13 +421,13 @@ func AnalyzeFunction(
 				}
 			}
 			// Check for LDR X30, [X21, XclassIdReg, LSL #3]
-			base, rm, rt, ldrOK := arm64dec.LDRRegExtended(jraw)
+			base, rm, rt, ldrOK := arm64.LDRRegExtended(jraw)
 			if !ldrOK || base != 21 || rt != 30 || rm != classIdReg {
 				continue
 			}
 			// Next: BLR X30
 			if j+1 < len(insts) {
-				if blrReg, ok := arm64dec.BLR(insts[j+1].Raw); ok && blrReg == 30 {
+				if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == 30 {
 					ctx.SelectorOffsets[insts[j+1].Addr] = 0
 				}
 			}
@@ -494,7 +494,7 @@ func AnalyzeFunction(
 		var hasCmp bool // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
 			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm)
-			if _, rn, imm, ok := arm64dec.SUBS32Immediate(inst.Raw); ok {
+			if _, rn, imm, ok := arm64.SUBS32Immediate(inst.Raw); ok {
 				cmpReg = rn
 				cmpImm = imm
 				hasCmp = true
@@ -706,19 +706,19 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 
 	for i, inst := range insts {
 		// Check for BL (branch with link) — creates a new block after it.
-		if _, ok := arm64dec.BL(inst.Raw, inst.Addr); ok {
+		if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
 		}
 		// Check for BLR — same.
-		if _, ok := arm64dec.BLR(inst.Raw); ok {
+		if _, ok := arm64.BLR(inst.Raw); ok {
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
 		}
 		// Check for B (unconditional branch) — target is a leader, next inst is a leader.
-		if target, ok := arm64dec.B(inst.Raw, inst.Addr); ok {
+		if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
 			leaders[target] = true
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
@@ -766,7 +766,7 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 		fallThroughAddr := lastInst.Addr + uint64(lastInst.Size)
 
 		// Branch targets.
-		if target, ok := arm64dec.B(lastInst.Raw, lastInst.Addr); ok {
+		if target, ok := arm64.B(lastInst.Raw, lastInst.Addr); ok {
 			if bi, ok2 := addrToBlock[target]; ok2 {
 				blk.successors = append(blk.successors, bi)
 			}
@@ -785,13 +785,13 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			continue
 		}
 		// BL/BLR: fall-through to next block.
-		if _, ok := arm64dec.BL(lastInst.Raw, lastInst.Addr); ok {
+		if _, ok := arm64.BL(lastInst.Raw, lastInst.Addr); ok {
 			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
 				blk.successors = append(blk.successors, bi)
 			}
 			continue
 		}
-		if _, ok := arm64dec.BLR(lastInst.Raw); ok {
+		if _, ok := arm64.BLR(lastInst.Raw); ok {
 			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
 				blk.successors = append(blk.successors, bi)
 			}

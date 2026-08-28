@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
@@ -738,9 +738,9 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 	return bd, nil
 }
 
-// isBLRaw delegates to arm64dec.BL (shared single source).
+// isBLRaw delegates to arm64.BL (shared single source).
 func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
-	return arm64dec.BL(raw, pc)
+	return arm64.BL(raw, pc)
 }
 
 // resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display

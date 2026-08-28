@@ -1,7 +1,7 @@
 package typetrack
 
 import (
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
 
@@ -44,7 +44,7 @@ const receiverSlotFloor = 16 // 2 * 8: first parameter slot above saved FP/LR
 func RecoverReceiverStackSlotARM64(insts []disasm.Inst, ownerCID int, ctx *TypeContext) (int, bool) {
 	bestSlot, bestReg := -1, -1
 	for i := range insts {
-		if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(insts[i].Raw); ok && baseReg == 29 {
+		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(insts[i].Raw); ok && baseReg == 29 {
 			if byteOff >= receiverSlotFloor && byteOff > bestSlot {
 				bestSlot = byteOff
 				bestReg = int(insts[i].Raw & 0x1F) // Rt
@@ -66,16 +66,16 @@ func RecoverReceiverStackSlotARM64(insts []disasm.Inst, ownerCID int, ctx *TypeC
 func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *TypeContext) bool {
 	for i := range insts {
 		raw := insts[i].Raw
-		if base, off, ok := arm64dec.LDR64UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
+		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
 			return true
 		}
-		if base, off, _, ok := arm64dec.LDR32UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
+		if base, off, _, ok := arm64.LDR32UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
 			return true
 		}
-		if base, _, imm9, ok := arm64dec.LDUR32(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(imm9)) {
+		if base, _, imm9, ok := arm64.LDUR32(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(imm9)) {
 			return true
 		}
-		if base, _, imm9, ok := arm64dec.LDURH(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(imm9)) {
+		if base, _, imm9, ok := arm64.LDURH(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(imm9)) {
 			return true
 		}
 	}

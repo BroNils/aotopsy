@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
 )
@@ -328,14 +328,14 @@ func scanARM64CallSites(sections []execSection, includeBranches bool) []CallSite
 	return out
 }
 
-// decodeARM64BL delegates to arm64dec.BL (shared single source).
+// decodeARM64BL delegates to arm64.BL (shared single source).
 func decodeARM64BL(raw uint32, pc uint64) (uint64, bool) {
-	return arm64dec.BL(raw, pc)
+	return arm64.BL(raw, pc)
 }
 
-// decodeARM64B delegates to arm64dec.B (shared single source).
+// decodeARM64B delegates to arm64.B (shared single source).
 func decodeARM64B(raw uint32, pc uint64) (uint64, bool) {
-	return arm64dec.B(raw, pc)
+	return arm64.B(raw, pc)
 }
 
 // --- x86_64 call/branch scanning ---

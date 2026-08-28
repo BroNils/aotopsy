@@ -3,7 +3,7 @@ package disasm
 import (
 	"fmt"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/thraudit"
 )
@@ -19,7 +19,7 @@ type THRAccess struct {
 	Width     int    `json:"width"`             // 4 or 8
 	Resolved  bool   `json:"resolved"`          // whether THRFields has a name for this offset
 }
-// ARM64 instruction decoders are now shared from internal/arm64dec.
+// ARM64 instruction decoders are now shared from internal/arm64.
 
 // ExtractTHRAccesses scans decoded instructions for THR-relative memory operations.
 // Returns all THR accesses found. fields is optional (for marking resolved).
@@ -29,7 +29,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		raw := inst.Raw
 
 		// LDR X64 [X26, #imm]
-		if base, off, ok := arm64dec.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			dst := int(raw & 0x1F)
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
@@ -44,7 +44,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// LDR W32 [X26, #imm]
-		if base, off, dst, ok := arm64dec.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+		if base, off, dst, ok := arm64.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,
@@ -58,7 +58,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// STR X64 [X26, #imm]
-		if base, off, src, ok := arm64dec.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+		if base, off, src, ok := arm64.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,
@@ -73,7 +73,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// STR W32 [X26, #imm]
-		if base, off, src, ok := arm64dec.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+		if base, off, src, ok := arm64.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,

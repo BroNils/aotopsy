@@ -3,7 +3,7 @@ package disasm
 import (
 	"strconv"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/sdk"
 )
 
@@ -40,7 +40,7 @@ type CallEdge struct {
 }
 
 // ARM64 instruction decoders (isBL, isBLR, dstRegOfInst) are now shared
-// from internal/arm64dec.
+// from internal/arm64.
 
 // maxArgSetupBack bounds inferCallArgCountLocal's backward scan -- AOT-
 // generated argument setup is a short, contiguous instruction span
@@ -79,13 +79,13 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 	var mask uint8
 	for i, steps := callIdx-1, 0; i >= 0 && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
 		in := insts[i]
-		if _, ok := arm64dec.BL(in.Raw, in.Addr); ok {
+		if _, ok := arm64.BL(in.Raw, in.Addr); ok {
 			break
 		}
-		if _, ok := arm64dec.BLR(in.Raw); ok {
+		if _, ok := arm64.BLR(in.Raw); ok {
 			break
 		}
-		rd := arm64dec.DstRegOfInst(in.Raw)
+		rd := arm64.DstRegOfInst(in.Raw)
 		if rd < 0 || rd > 7 {
 			continue
 		}
@@ -103,7 +103,7 @@ func popcount8(m uint8) int {
 	return n
 }
 
-// isLDRRegExtended and isLDUR64 are now shared from internal/arm64dec.
+// isLDRRegExtended and isLDUR64 are now shared from internal/arm64.
 
 // ObjectFieldVia is the provenance string for a call target loaded out of an
 // object field, carrying the field's byte offset.

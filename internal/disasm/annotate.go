@@ -3,7 +3,7 @@ package disasm
 import (
 	"fmt"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/thraudit"
 )
@@ -14,19 +14,19 @@ import (
 type Annotator func(inst Inst) string
 
 // ARM64 register numbers for Dart AOT — now shared from internal/sdk.
-// Instruction decoders are now shared from internal/arm64dec.
+// Instruction decoders are now shared from internal/arm64.
 
 // IsLDR64UnsignedOffsetExported is the exported wrapper for external callers
-// (e.g. pipeline string-ref extraction). Delegates to arm64dec.
+// (e.g. pipeline string-ref extraction). Delegates to arm64.
 func IsLDR64UnsignedOffsetExported(raw uint32) (baseReg int, byteOffset int, ok bool) {
-	return arm64dec.LDR64UnsignedOffset(raw)
+	return arm64.LDR64UnsignedOffset(raw)
 }
 
 // PPAnnotator annotates LDR Xt, [X27, #imm] instructions with pool entry info.
 // pool maps pool index → display string.
 func PPAnnotator(pool map[int]string) Annotator {
 	return func(inst Inst) string {
-		baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(inst.Raw)
+		baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(inst.Raw)
 		if !ok || baseReg != sdk.ARM64PP {
 			return ""
 		}
@@ -45,7 +45,7 @@ func PPAnnotator(pool map[int]string) Annotator {
 // If fields is non-nil, resolved field names are included.
 func THRAnnotator(fields map[int]string) Annotator {
 	return func(inst Inst) string {
-		baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(inst.Raw)
+		baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(inst.Raw)
 		if !ok || baseReg != sdk.ARM64THR {
 			return ""
 		}
@@ -73,20 +73,20 @@ func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 		detected := false
 
 		// LDR X64 [X26, #imm]
-		if base, off, ok := arm64dec.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			byteOff, width = off, 8
 			detected = true
 		}
 		// LDR W32 [X26, #imm]
 		if !detected {
-			if base, off, _, ok := arm64dec.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+			if base, off, _, ok := arm64.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 				byteOff, width = off, 4
 				detected = true
 			}
 		}
 		// STR X64 [X26, #imm]
 		if !detected {
-			if base, off, _, ok := arm64dec.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+			if base, off, _, ok := arm64.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 				byteOff, width = off, 8
 				isStore = true
 				detected = true
@@ -94,7 +94,7 @@ func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 		}
 		// STR W32 [X26, #imm]
 		if !detected {
-			if base, off, _, ok := arm64dec.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+			if base, off, _, ok := arm64.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 				byteOff, width = off, 4
 				isStore = true
 				detected = true
@@ -212,7 +212,7 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 	// Do this BEFORE checking for register kills, because LDR reads the base
 	// register (addDestReg) before writing the destination register.
 	if p.addValid && p.addDestReg >= 0 {
-		baseReg, ldrOff, ldrOK := arm64dec.LDR64UnsignedOffset(inst.Raw)
+		baseReg, ldrOff, ldrOK := arm64.LDR64UnsignedOffset(inst.Raw)
 		if ldrOK && baseReg == p.addDestReg {
 			combined := p.addImm + ldrOff
 			if idx, idxOK := ARM64PoolIndex(combined); idxOK {
@@ -228,13 +228,13 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 
 	// If not consumed by LDR, check if current instruction kills the ADD dest.
 	if p.addValid && p.addDestReg >= 0 {
-		if arm64dec.DstRegOfInst(inst.Raw) == p.addDestReg {
+		if arm64.DstRegOfInst(inst.Raw) == p.addDestReg {
 			p.addValid = false
 		}
 	}
 
 	// Check if current instruction is a new ADD Xd, X27, #upper.
-	addRd, addRn, addImm, addOK := arm64dec.ADD64Immediate(inst.Raw)
+	addRd, addRn, addImm, addOK := arm64.ADD64Immediate(inst.Raw)
 	if addOK && addRn == sdk.ARM64PP {
 		p.addDestReg = addRd
 		p.addImm = addImm

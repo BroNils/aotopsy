@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 )
 
 func TestIsLDR64UnsignedOffset(t *testing.T) {
@@ -36,7 +36,7 @@ func TestIsLDR64UnsignedOffset(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base, off, ok := arm64dec.LDR64UnsignedOffset(tt.raw)
+			base, off, ok := arm64.LDR64UnsignedOffset(tt.raw)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -75,7 +75,7 @@ func TestIsADD64Immediate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rd, rn, imm, ok := arm64dec.ADD64Immediate(tt.raw)
+			rd, rn, imm, ok := arm64.ADD64Immediate(tt.raw)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

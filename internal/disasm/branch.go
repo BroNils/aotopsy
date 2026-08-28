@@ -1,6 +1,6 @@
 package disasm
 
-import "aotopsy/internal/arm64dec"
+import "aotopsy/internal/arch/arm64"
 // ARM64 branch instruction detection from raw 32-bit encoding.
 // These functions identify basic-block terminators and extract branch targets.
 
@@ -29,14 +29,14 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 	// B (unconditional): 000101 imm26
 	if raw&0xFC000000 == 0x14000000 {
 		imm26 := raw & 0x03FFFFFF
-		offset := arm64dec.SignExtend(imm26, 26) * 4
+		offset := arm64.SignExtend(imm26, 26) * 4
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset))}
 	}
 
 	// B.cond: 01010100 imm19 0 cond
 	if raw&0xFF000010 == 0x54000000 {
 		imm19 := (raw >> 5) & 0x7FFFF
-		offset := arm64dec.SignExtend(imm19, 19) * 4
+		offset := arm64.SignExtend(imm19, 19) * 4
 		// cond 0b1110 (AL) and 0b1111 (NV) always branch, so despite using
 		// the B.cond encoding these are UNCONDITIONAL. dart-lang/sdk's
 		// runtime/vm/constants_arm64.h at 3.9.2 names them
@@ -58,31 +58,31 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 	// CBZ: 0 sf 110100 imm19 Rt
 	if raw&0x7F000000 == 0x34000000 {
 		imm19 := (raw >> 5) & 0x7FFFF
-		offset := arm64dec.SignExtend(imm19, 19) * 4
+		offset := arm64.SignExtend(imm19, 19) * 4
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset)), Cond: true}
 	}
 
 	// CBNZ: 0 sf 110101 imm19 Rt
 	if raw&0x7F000000 == 0x35000000 {
 		imm19 := (raw >> 5) & 0x7FFFF
-		offset := arm64dec.SignExtend(imm19, 19) * 4
+		offset := arm64.SignExtend(imm19, 19) * 4
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset)), Cond: true}
 	}
 
 	// TBZ: 0 b5 110110 b40 imm14 Rt
 	if raw&0x7F000000 == 0x36000000 {
 		imm14 := (raw >> 5) & 0x3FFF
-		offset := arm64dec.SignExtend(imm14, 14) * 4
+		offset := arm64.SignExtend(imm14, 14) * 4
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset)), Cond: true}
 	}
 
 	// TBNZ: 0 b5 110111 b40 imm14 Rt
 	if raw&0x7F000000 == 0x37000000 {
 		imm14 := (raw >> 5) & 0x3FFF
-		offset := arm64dec.SignExtend(imm14, 14) * 4
+		offset := arm64.SignExtend(imm14, 14) * 4
 		return &BranchInfo{Target: uint64(int64(pc) + int64(offset)), Cond: true}
 	}
 
 	return nil
 }
-// signExtend is now shared from internal/arm64dec.SignExtend.
+// signExtend is now shared from internal/arm64.SignExtend.

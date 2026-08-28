@@ -1,4 +1,4 @@
-// Package arm64dec holds ARM64 instruction decoders — bit-field tests that
+// Package arm64 holds ARM64 instruction decoders — bit-field tests that
 // extract register operands and immediates from raw 32-bit instruction words.
 //
 // These decoders were previously duplicated between internal/disasm and
@@ -8,7 +8,7 @@
 //
 // All encodings are from the ARM Architecture Reference Manual and verified
 // against dart-lang/sdk's runtime/vm/compiler/assembler/assembler_arm64.h.
-package arm64dec
+package arm64
 
 // ── Branch instructions ───────────────────────────────────────────────
 

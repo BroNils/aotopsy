@@ -3,7 +3,7 @@ package disasm
 import (
 	"strconv"
 
-	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/arch/arm64"
 )
 
 // ExtractCallEdgesCFG is ExtractCallEdges's CFG-wide replacement: instead
@@ -169,7 +169,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 		}
 		for i := blk.Start; i < blk.End && i < len(insts); i++ {
 			inst := insts[i]
-			if target, ok := arm64dec.BL(inst.Raw, inst.Addr); ok {
+			if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 				argMask := inferCallArgRegMaskLocal(insts, i)
 				e := CallEdge{FromPC: inst.Addr, Kind: "bl", TargetPC: target, ArgCountHint: popcount8(argMask), ArgRegMask: argMask}
 				if symbols != nil {
@@ -180,7 +180,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 				edges = append(edges, e)
 				continue
 			}
-			if rn, ok := arm64dec.BLR(inst.Raw); ok {
+			if rn, ok := arm64.BLR(inst.Raw); ok {
 				var via string
 				if rn >= 0 && rn <= 30 {
 					via = regs[rn]
@@ -242,17 +242,17 @@ func meetLvalue(a, b lvalue) lvalue {
 // precompute pass never needs them; the final emission pass classifies
 // them inline before falling through to this function).
 func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, touched *[31]bool) {
-	if _, ok := arm64dec.BL(inst.Raw, inst.Addr); ok {
+	if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 		return
 	}
-	if _, ok := arm64dec.BLR(inst.Raw); ok {
+	if _, ok := arm64.BLR(inst.Raw); ok {
 		return
 	}
-	if base, _, dstR, ok := arm64dec.LDRRegExtended(inst.Raw); ok && base == regDT {
+	if base, _, dstR, ok := arm64.LDRRegExtended(inst.Raw); ok && base == regDT {
 		defineReg(regs, touched, dstR, "dispatch_table")
 		return
 	}
-	if base, dstR, off, ok := arm64dec.LDUR64(inst.Raw); ok {
+	if base, dstR, off, ok := arm64.LDUR64(inst.Raw); ok {
 		// A Code entry-point load inherits its base's provenance: the entry
 		// point OF Code X is X. See IsCodeEntryPointDisp.
 		//
@@ -277,12 +277,12 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 		}
 	}
 	if annotation != "" {
-		if rd := arm64dec.DstRegOfInst(inst.Raw); rd >= 0 {
+		if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 {
 			defineReg(regs, touched, rd, annotation)
 			return
 		}
 	}
-	if rd := arm64dec.DstRegOfInst(inst.Raw); rd >= 0 {
+	if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 {
 		killReg(regs, touched, rd)
 	}
 }

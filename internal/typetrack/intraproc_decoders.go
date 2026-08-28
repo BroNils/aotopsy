@@ -1,17 +1,17 @@
 package typetrack
 
-import "aotopsy/internal/arm64dec"
+import "aotopsy/internal/arch/arm64"
 
 // ARM64 instruction decoders (isBL, isBLR, isLDR64UnsignedOffset, isSTUR64,
-// isADD64Immediate, isUBFX, etc.) are now shared from internal/arm64dec.
+// isADD64Immediate, isUBFX, etc.) are now shared from internal/arm64.
 // This file retains only typetrack-specific helpers that are NOT instruction
 // decoders.
 
 // dstRegOfInst returns the destination register of common instructions,
 // or -1 if not detected. Used to kill types on unknown instructions.
-// Delegates to arm64dec.DstRegOfInst.
+// Delegates to arm64.DstRegOfInst.
 func dstRegOfInst(raw uint32) int {
-	return arm64dec.DstRegOfInst(raw)
+	return arm64.DstRegOfInst(raw)
 }
 
 // recordFieldStore records a field store for whole-program field-store → field-load tracking.
