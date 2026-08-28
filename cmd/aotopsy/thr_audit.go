@@ -7,7 +7,6 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -30,7 +29,7 @@ func cmdTHRAudit(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, info, result, err := pipeline.LoadSnapshotIsolate(*libapp, opts)
+	ef, info, result, err := analysis.LoadSnapshotIsolate(*libapp, opts)
 	if err != nil {
 		return err
 	}

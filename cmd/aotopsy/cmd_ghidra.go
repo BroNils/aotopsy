@@ -9,7 +9,6 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/elfx"
-	"aotopsy/internal/pipeline"
 )
 
 // cmdGhidra handles "aotopsy ghidra <libapp.so>" — full pipeline + Ghidra decompilation.
@@ -55,21 +54,21 @@ func cmdGhidra(args []string) error {
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
-	var pipeResult *pipeline.Result
+	var pipeResult *analysis.Result
 	if *from != "" {
 		// Reuse existing output: just regenerate signal + meta.
-		_, err := pipeline.RunSignalStage(*from, 2, false, quiet, os.Stderr)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}
-		metaPath, err := pipeline.RunMetaStage(*from, "", *all, quiet, os.Stderr)
+		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("meta: %w", err)
 		}
-		pipeResult = &pipeline.Result{OutDir: *from, MetaPath: metaPath}
+		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
-		pipeResult, err = pipeline.Run(pipeline.Opts{
+		pipeResult, err = analysis.Run(analysis.Opts{
 			LibPath:   libPath,
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,

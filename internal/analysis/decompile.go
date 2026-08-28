@@ -7,13 +7,12 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/pipeline"
 )
 
 // DecompileNativeDeps bundles everything the decompile-native command
 // needs from the already-parsed Context, so the CLI handler can be thin.
 type DecompileNativeDeps struct {
-	Ctx           *pipeline.Context
+	Ctx           *AnalysisContext
 	Libapp        string
 	IsARM64       bool
 	SymbolNames    map[uint64]string
@@ -34,7 +33,7 @@ type DecompileNativeDeps struct {
 // BuildDecompileNativeDeps loads a Context and builds all the closures
 // and lookup maps the decompile-native command needs.
 func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
-	ctx, err := pipeline.LoadContext(libapp)
+	ctx, err := LoadContext(libapp)
 	if err != nil {
 		return nil, err
 	}

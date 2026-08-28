@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"aotopsy/internal/ffitrace"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
@@ -31,7 +31,7 @@ func cmdFFITrace(args []string) error {
 		return fmt.Errorf("--lib is required")
 	}
 
-	ctx, err := pipeline.LoadContext(*libapp)
+	ctx, err := analysis.LoadContext(*libapp)
 	if err != nil {
 		return err
 	}

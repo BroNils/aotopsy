@@ -14,7 +14,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/snapshot"
 )
 
@@ -71,7 +71,7 @@ func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *naming.PoolLookups, 
 // cluster scan+fill, isolate + VM snapshot) and builds the descriptor set
 // for one libapp.so build.
 func Load(libPath string) (descriptors map[FuncDescriptor]int, dartVersion string, err error) {
-	sc, err := pipeline.LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
+	sc, err := analysis.LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
 		return nil, "", fmt.Errorf("funcdiff: %s: %w", libPath, err)
 	}

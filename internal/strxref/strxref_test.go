@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 // arm64Ret is the 4-byte little-endian encoding of ARM64 "ret".
@@ -20,7 +20,7 @@ func TestFindPoolReferences_FindsMatchingLoad(t *testing.T) {
 		0x60, 0x0F, 0x40, 0xF9, // ldr x0, [x27, #24] (pool index 1)
 		0xC0, 0x03, 0x5F, 0xD6, // ret
 	}
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		Code:        code,
 		CodeVA:      0x1000,
 		IsARM64:     true,
@@ -50,7 +50,7 @@ func TestFindPoolReferences_NoMatchForUnrelatedIndex(t *testing.T) {
 		0x60, 0x0F, 0x40, 0xF9, // ldr x0, [x27, #24] (pool index 1)
 		0xC0, 0x03, 0x5F, 0xD6, // ret
 	}
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		Code:        code,
 		CodeVA:      0x1000,
 		IsARM64:     true,
@@ -86,7 +86,7 @@ func TestFindPoolReferences_DefaultIsUnbounded(t *testing.T) {
 		ranges = append(ranges, cluster.CodeRange{RefID: i, PCOffset: off, Size: uint32(len(arm64Ret))})
 		symbolNames[0x1000+uint64(off)] = "synthetic_fn"
 	}
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		Code:        code,
 		CodeVA:      0x1000,
 		IsARM64:     true,
@@ -113,7 +113,7 @@ func TestFindPoolReferences_MaxScanNarrowsWhenSet(t *testing.T) {
 		code = append(code, arm64Ret...)
 		ranges = append(ranges, cluster.CodeRange{RefID: i, PCOffset: off, Size: uint32(len(arm64Ret))})
 	}
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		Code:        code,
 		CodeVA:      0x1000,
 		IsARM64:     true,

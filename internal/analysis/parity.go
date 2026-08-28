@@ -12,7 +12,6 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/pipeline"
 )
 
 // ParityRow is one row of the parity report.
@@ -83,7 +82,7 @@ func RunParity(samplesDir, outDir string) error {
 func runParitySample(libpath, hash string, opts dartfmt.Options) ParityRow {
 	row := ParityRow{SampleHash: hash}
 
-	ef, info, result, err := pipeline.LoadSnapshotIsolate(libpath, opts)
+	ef, info, result, err := LoadSnapshotIsolate(libpath, opts)
 	if err != nil {
 		row.Status = "EXTRACT_FAIL"
 		row.Error = err.Error()

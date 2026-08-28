@@ -10,7 +10,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/strutil"
 )
 
@@ -48,7 +48,7 @@ func cmdExportDart(args []string) error {
 		return fmt.Errorf("creating output directory: %w", err)
 	}
 
-	ctx, err := pipeline.LoadContext(*libapp)
+	ctx, err := analysis.LoadContext(*libapp)
 	if err != nil {
 		return err
 	}
@@ -78,7 +78,7 @@ func cmdExportDart(args []string) error {
 		}
 		return effectiveClass
 	}
-	libResolver := pipeline.NewLibraryResolver(result, pl)
+	libResolver := analysis.NewLibraryResolver(result, pl)
 	codeRefToLibURL := make(map[int]string, len(result.Codes))
 	for _, ce := range result.Codes {
 		owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
@@ -154,7 +154,7 @@ func cmdExportDart(args []string) error {
 		// library URL (dart:* / package:flutter*), not by a name-prefix heuristic.
 		// The old code also dropped every `_`-prefixed owner, which threw away the
 		// app's own private classes (audit E2).
-		if *appOnly && pipeline.IsFrameworkLibraryURL(libURL) {
+		if *appOnly && analysis.IsFrameworkLibraryURL(libURL) {
 			continue
 		}
 

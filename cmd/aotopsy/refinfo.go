@@ -7,7 +7,6 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
 )
 
 func cmdRefInfo(args []string) error {
@@ -36,7 +35,7 @@ func cmdRefInfo(args []string) error {
 	}
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
-	sc, err := pipeline.LoadSnapshot(*libapp, opts)
+	sc, err := analysis.LoadSnapshot(*libapp, opts)
 	if err != nil {
 		return err
 	}

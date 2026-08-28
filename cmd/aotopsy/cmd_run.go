@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/cli"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
-// cmdRun handles "aotopsy <libapp.so>" — full pipeline.
+// cmdRun handles "aotopsy <libapp.so>" — full analysis.
 func cmdRun(args []string) error {
 	// Go's flag package stops at the first non-flag arg.
 	// If the first arg is a file path (not a flag), move it to the end
@@ -42,7 +42,7 @@ func cmdRun(args []string) error {
 		if *outDir == "" {
 			*outDir = *from
 		}
-		result, err := pipeline.Run(pipeline.Opts{
+		result, err := analysis.Run(analysis.Opts{
 			FromDir:   *from,
 			OutDir:    *outDir,
 			Signal:    true,
@@ -71,7 +71,7 @@ func cmdRun(args []string) error {
 		*outDir = defaultOutDir(libPath)
 	}
 
-	result, err := pipeline.Run(pipeline.Opts{
+	result, err := analysis.Run(analysis.Opts{
 		LibPath:   libPath,
 		OutDir:    *outDir,
 		MaxSteps:  *maxSteps,
@@ -92,7 +92,7 @@ func cmdRun(args []string) error {
 	return nil
 }
 
-func printSummary(result *pipeline.Result) {
+func printSummary(result *analysis.Result) {
 	fmt.Fprintf(os.Stderr, "\n%ssummary%s\n", cli.Pink, cli.Reset)
 	fmt.Fprintf(os.Stderr, "  %soutput:%s     %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.OutDir, cli.Reset)
 	if result.DartVersion != "" {

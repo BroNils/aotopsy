@@ -9,7 +9,6 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -46,7 +45,7 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 		MaxSteps: maxSteps,
 	}
 
-	ef, info, err := pipeline.LoadSnapshotRaw(libapp, opts)
+	ef, info, err := LoadSnapshotRaw(libapp, opts)
 	if err != nil {
 		return err
 	}

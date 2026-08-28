@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/pipeline"
 )
 
 // sampleSpec describes expected thresholds for a sample.
@@ -68,12 +67,12 @@ func TestDisasmPipelineThresholds(t *testing.T) {
 			}
 
 			outDir := t.TempDir()
-			_, err := pipeline.Run(pipeline.Opts{
+			_, err := Run(Opts{
 				LibPath: libapp,
 				OutDir:  outDir,
 			})
 			if err != nil {
-				t.Fatalf("pipeline.Run: %v", err)
+				t.Fatalf("Run: %v", err)
 			}
 
 			// Check functions.jsonl.

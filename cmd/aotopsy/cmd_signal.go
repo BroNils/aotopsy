@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/cli"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 // cmdSignalPipeline handles "aotopsy signal <libapp.so>" — full pipeline through signal.
@@ -34,7 +34,7 @@ func cmdSignalPipeline(args []string) error {
 		if *outDir == "" {
 			*outDir = *from
 		}
-		sigResult, err := pipeline.RunSignalStage(*from, *k, false, quiet, os.Stderr)
+		sigResult, err := analysis.RunSignalStage(*from, *k, false, quiet, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -55,7 +55,7 @@ func cmdSignalPipeline(args []string) error {
 		*outDir = defaultOutDir(libPath)
 	}
 
-	result, err := pipeline.Run(pipeline.Opts{
+	result, err := analysis.Run(analysis.Opts{
 		LibPath:  libPath,
 		OutDir:   *outDir,
 		MaxSteps: *maxSteps,
@@ -67,11 +67,11 @@ func cmdSignalPipeline(args []string) error {
 		return err
 	}
 
-	printSignalSummary(&pipeline.SignalResult{SignalCount: result.SignalCount}, result.OutDir, libPath)
+	printSignalSummary(&analysis.SignalResult{SignalCount: result.SignalCount}, result.OutDir, libPath)
 	return nil
 }
 
-func printSignalSummary(sig *pipeline.SignalResult, outDir, libPath string) {
+func printSignalSummary(sig *analysis.SignalResult, outDir, libPath string) {
 	absOut, _ := filepath.Abs(outDir)
 	signalHTML := filepath.Join(absOut, "signal.html")
 

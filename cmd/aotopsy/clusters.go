@@ -7,7 +7,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/snapshot"
 )
 
@@ -30,7 +30,7 @@ func cmdClusters(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
+	ef, info, err := analysis.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
 		return err
 	}

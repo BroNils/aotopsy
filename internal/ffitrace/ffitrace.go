@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 // Finding is one FFI-relevant observation: either a resolved (or
@@ -95,7 +95,7 @@ const defaultMaxScan = 500
 // processed -- callers (and this package's own regression tests) can
 // use the scanned count to verify bounding actually took effect,
 // rather than only inferring it indirectly from findings.
-func Trace(ctx *pipeline.Context, opts Options) ([]Finding, int) {
+func Trace(ctx *analysis.AnalysisContext, opts Options) ([]Finding, int) {
 	maxScan := opts.MaxScan
 	if maxScan == 0 && !opts.AllowUnbounded {
 		maxScan = defaultMaxScan
@@ -157,7 +157,7 @@ func Trace(ctx *pipeline.Context, opts Options) ([]Finding, int) {
 // it does not follow control flow across blocks or through a cached
 // field read; see the Finding.Resolved field, which is false whenever
 // no such literal was found in scope).
-func findDynamicLibraryCalls(ctx *pipeline.Context, fir *decompiler.FuncIR, funcVA uint64) []Finding {
+func findDynamicLibraryCalls(ctx *analysis.AnalysisContext, fir *decompiler.FuncIR, funcVA uint64) []Finding {
 	var out []Finding
 	for _, blk := range fir.Blocks {
 		var lastPoolLiteral string

@@ -9,7 +9,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
@@ -44,7 +44,7 @@ func cmdDump(args []string) error {
 	}
 
 	// Open ELF + extract snapshots.
-	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
+	ef, info, err := analysis.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
 		return err
 	}

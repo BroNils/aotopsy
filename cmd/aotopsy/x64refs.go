@@ -10,7 +10,6 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/frida"
-	"aotopsy/internal/pipeline"
 )
 
 func cmdX64Refs(args []string) error {
@@ -35,7 +34,7 @@ func cmdX64Refs(args []string) error {
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 
-	sc, err := pipeline.LoadSnapshot(*libapp, opts)
+	sc, err := analysis.LoadSnapshot(*libapp, opts)
 	if err != nil {
 		return err
 	}
