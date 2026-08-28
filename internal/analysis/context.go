@@ -568,6 +568,9 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 // before decompiling) because it disassembles every function. After it runs,
 // FuncIRFor sets FuncIR.ArgRegIndices for callees with >= 2 agreeing sites.
 func (c *AnalysisContext) BuildArgRegMasks() {
+	if c.Enrichment == nil {
+		c.Enrichment = &DecompileEnrichment{}
+	}
 	if c.Enrichment.ArgRegMasks != nil {
 		return
 	}
