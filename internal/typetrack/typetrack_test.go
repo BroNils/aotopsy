@@ -3,6 +3,7 @@ package typetrack
 import (
 	"testing"
 
+	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/cluster"
 )
 
@@ -209,14 +210,14 @@ func TestIsBLR(t *testing.T) {
 	// Encoding: 1101011|0|0|01|11111|0000|0|0|10000|00000
 	// Rn = 16 (bits 5-9)
 	raw := uint32(0xD63F0200)
-	rn, ok := isBLR(raw)
+	rn, ok := arm64dec.BLR(raw)
 	if !ok || rn != 16 {
 		t.Fatalf("isBLR(0x%x) = (%d, %v), want (16, true)", raw, rn, ok)
 	}
 
 	// Not a BLR
 	raw = uint32(0x94000000) // BL
-	_, ok = isBLR(raw)
+	_, ok = arm64dec.BLR(raw)
 	if ok {
 		t.Fatalf("isBLR(BL) should be false")
 	}
@@ -226,7 +227,7 @@ func TestIsBL(t *testing.T) {
 	// BL with imm26=1 → target = PC + 4
 	raw := uint32(0x94000001)
 	pc := uint64(0x1000)
-	target, ok := isBL(raw, pc)
+	target, ok := arm64dec.BL(raw, pc)
 	if !ok || target != 0x1004 {
 		t.Fatalf("isBL(0x%x, 0x%x) = (0x%x, %v), want (0x1004, true)", raw, pc, target, ok)
 	}
@@ -237,7 +238,7 @@ func TestIsLDR64UnsignedOffset(t *testing.T) {
 	// Encoding: 11|111|0|01|01|000000000000|11011|00000
 	// = 0xF9400000 | (27 << 5) = 0xF9400360
 	raw := uint32(0xF9400360)
-	baseReg, byteOff, ok := isLDR64UnsignedOffset(raw)
+	baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw)
 	if !ok || baseReg != 27 || byteOff != 0 {
 		t.Fatalf("isLDR64UnsignedOffset(0x%x) = (%d, %d, %v), want (27, 0, true)", raw, baseReg, byteOff, ok)
 	}
@@ -245,7 +246,7 @@ func TestIsLDR64UnsignedOffset(t *testing.T) {
 	// LDR X1, [X27, #8] → pool index 1
 	// imm12 = 1, so raw = 0xF9400000 | (1 << 10) | (27 << 5) | 1
 	raw = uint32(0xF9400361) | (1 << 10)
-	baseReg, byteOff, ok = isLDR64UnsignedOffset(raw)
+	baseReg, byteOff, ok = arm64dec.LDR64UnsignedOffset(raw)
 	if !ok || baseReg != 27 || byteOff != 8 {
 		t.Fatalf("isLDR64UnsignedOffset(0x%x) = (%d, %d, %v), want (27, 8, true)", raw, baseReg, byteOff, ok)
 	}
@@ -256,7 +257,7 @@ func TestIsADD64Immediate(t *testing.T) {
 	// Encoding: sf=1|0|0|100010|00|000000010000|10101|00000
 	// = 0x91000000 | (16 << 10) | (21 << 5) | 0
 	raw := uint32(0x91000000) | (16 << 10) | (21 << 5)
-	rd, rn, imm, ok := isADD64Immediate(raw)
+	rd, rn, imm, ok := arm64dec.ADD64Immediate(raw)
 	if !ok || rd != 0 || rn != 21 || imm != 16 {
 		t.Fatalf("isADD64Immediate(0x%x) = (%d, %d, %d, %v), want (0, 21, 16, true)", raw, rd, rn, imm, ok)
 	}
@@ -267,7 +268,7 @@ func TestIsLDUR64(t *testing.T) {
 	// Encoding: 11|111|0|00|01|000000000|00|00001|00000
 	// = 0xF8400000 | (1 << 5)
 	raw := uint32(0xF8400020)
-	base, rt, ok := isLDUR64(raw)
+	base, rt, _, ok := arm64dec.LDUR64(raw)
 	if !ok || base != 1 || rt != 0 {
 		t.Fatalf("isLDUR64(0x%x) = (%d, %d, %v), want (1, 0, true)", raw, base, rt, ok)
 	}

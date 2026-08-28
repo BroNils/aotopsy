@@ -5,65 +5,22 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
-// ARM64 Dart AOT reserved-register convention, verified directly against
-// dart-lang/sdk's runtime/vm/constants_arm64.h (fetched this session, not
-// assumed from memory): CODE_REG=x24, THR=x26 (Thread*), PP=x27 (object
-// pool pointer), HEAP_BITS=x28 (write_barrier_mask/heap_base -- NOT the
-// thread register, easy to confuse with x28 by analogy to x86_64's
-// r14=THR), FPREG=x29, LR=x30. Used for naming/classification only, not
-// decoding.
-const (
-	arm64PoolReg   = "x27"
-	arm64ThreadReg = "x26"
-	arm64FrameReg  = "x29"
-	arm64LinkReg   = "x30"
-	arm64ReturnReg = "x0"
-	// arm64NullReg holds Object::null() for the whole of generated code.
-	// dart-lang/sdk's runtime/vm/constants_arm64.h declares
-	//   const Register NULL_REG = R22;  // Caches NullObject() value.
-	// unchanged at tags 2.12.0, 3.1.0 and 3.9.2. There is no x64
-	// equivalent -- constants_x64.h defines no NULL_REG, and x86_64 loads
-	// null from the object pool instead -- so this is ARM64-only.
-	//
-	// Checked against the samples before relying on it: across 65113
-	// disassembled 2.12 instructions nothing writes X22 at all, and the
-	// only four writes in 77611 instructions of the 3.x sample are
-	// `LDR X22, [X26,#120]` (THR.object_null) in FFI trampolines, which
-	// restore the same value. So the register holds null everywhere it is
-	// read, and reading it as `null` is not an inference.
-	arm64NullReg = "x22"
-	// arm64HeapBitsReg holds `write_barrier_mask << 32 | heap_base >> 32`.
-	// constants_arm64.h: `const Register HEAP_BITS = R28;`. Shifted left by
-	// 32 it is heap_base, which is how compressed pointers are decompressed.
-	arm64HeapBitsReg = "x28"
-	// arm64CodeReg / arm64ArgsDescReg: CODE_REG=R24, ARGS_DESC_REG=R4
-	// (constants_arm64.h @3.12.2). ARGS_DESC (x4) overlaps the x0..x7 arg
-	// display, so it was already seeded; CODE_REG (x24) was not.
-	arm64CodeReg     = "x24"
-	arm64ArgsDescReg = "x4"
-	// arm64StackReg is the Dart stack pointer. constants_arm64.h spells it
-	// twice: `R15 = 15, // SP in Dart code` and `const Register SPREG = R15;`.
-	// The hardware SP (CSP) is a different register and is not used for Dart
-	// frames.
-	arm64StackReg = "x15"
-)
+// ARM64 Dart AOT reserved-register roles are now defined in internal/sdk,
+// verified against runtime/vm/constants_arm64.h @3.12.2. This file wires
+// them into the FuncIR; the constants themselves are shared with disasm,
+// typetrack, and signal.
 
-// arm64ArgRegs is a DISPLAY convention (arg0..arg7 = x0..x7), not a
-// verified claim about Dart's real AOT calling convention. Checked
-// against dart-lang/sdk's flow_graph_compiler_arm64.cc this session:
-// Dart's OWN calling convention for a checked/generic entry loads
-// parameters off the Dart stack (e.g. "LoadFromOffset(R0, SP, ...)"),
-// not fixed argument registers the way a C ABI does -- only the
-// "unchecked entry" fast path for a small fixed positional-arg count
-// uses registers directly, and x0-x7 (matching AAPCS64's own C-ABI
-// argument registers) is the plausible, but not exhaustively re-verified
-// in this porting session, register set for that path. Treat x0..x7 as
-// a readable label, not ground truth -- same caveat x86.go's ArgRegs
-// documents for x86_64.
-var arm64ArgRegs = []string{"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"}
+// arm64ArgRegs is the SDK-verified Dart calling-convention argument
+// register set (constants_arm64.h DartCallingConvention::kCpuRegistersForArgs
+// = {R1, R2, R3, R5, R6, R7}), NOT the C ABI x0–x7. The previous x0–x7 list
+// included R0 (kClassIdReg) and R4 (ARGS_DESC_REG), which are NOT argument
+// registers — declaring them as args leaked confident-wrong parameter names.
+var arm64ArgRegs = sdk.DartArgRegNames(sdk.ArchARM64)
 
 // BuildARM64IR lifts a disassembled ARM64 function (as produced by
 // aotopsy's existing internal/disasm.Disassemble+BuildCFG) into the
@@ -75,18 +32,18 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	cfg := disasm.BuildCFG(name, insts)
 	fir := newFuncIR(name, insts[0].Addr)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
 	// PP is untagged on ARM64, so the displacement is a plain 16+8*index.
 	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
-	fir.ThreadReg = arm64ThreadReg
-	fir.NullReg = arm64NullReg
-	fir.HeapBitsReg = arm64HeapBitsReg
-	fir.StackReg = arm64StackReg
-	fir.CodeReg = arm64CodeReg
-	fir.ArgsDescReg = arm64ArgsDescReg
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
+	fir.NullReg = sdk.ARM64NullRegStr
+	fir.HeapBitsReg = sdk.ARM64HeapBitsStr
+	fir.StackReg = sdk.ARM64StackRegStr
+	fir.CodeReg = sdk.ARM64CodeRegStr
+	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
@@ -191,23 +148,9 @@ func liftARM64Instr(inst disasm.Inst) Instr {
 	return ir
 }
 
-// decodeARM64BLTarget mirrors internal/symbolmap's decodeARM64BL (kept
-// duplicated here rather than shared, to keep this package independent of
-// symbolmap's ELF-scan-specific concerns).
+// decodeARM64BLTarget delegates to arm64dec.BL (shared single source).
 func decodeARM64BLTarget(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x94000000 {
-		return 0, false
-	}
-	imm26 := raw & 0x03FFFFFF
-	sign := uint32(1) << 25
-	mask := sign - 1
-	var offset int32
-	if imm26&sign != 0 {
-		offset = int32(imm26|^mask) * 4 //nolint:gosec // imm26 is a 26-bit field; result fits in int32
-	} else {
-		offset = int32(imm26&mask) * 4 //nolint:gosec // imm26 is a 26-bit field; result fits in int32
-	}
-	return uint64(int64(pc) + int64(offset)), true //nolint:gosec // signed branch offset re-added to a real VA; result is a valid address by construction
+	return arm64dec.BL(raw, pc)
 }
 
 // firstOperandReg extracts the first register token from an ARM64
@@ -274,7 +217,7 @@ func firstOperandToken(operands string) string {
 // variants) -- a load from the object pool register.
 func isARM64PoolLoad(operands string) bool {
 	lower := strings.ToLower(operands)
-	return strings.Contains(lower, "["+arm64PoolReg) || strings.Contains(lower, "[ "+arm64PoolReg)
+	return strings.Contains(lower, "["+sdk.ARM64PoolRegStr) || strings.Contains(lower, "[ "+sdk.ARM64PoolRegStr)
 }
 
 // arm64PoolIndex extracts the #imm offset from a "[x27, #imm]" operand

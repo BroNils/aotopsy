@@ -10,6 +10,7 @@ import (
 
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/pipeline"
+	"aotopsy/internal/sdk"
 )
 
 // FridaMetadata is the JSON structure exported for Frida scripts.
@@ -167,16 +168,16 @@ func cmdFridaExport(args []string) error {
 func buildFridaMetadata(ctx *pipeline.Context, dir string) FridaMetadata {
 	isARM64 := ctx.IsARM64
 	arch := "x64"
-	thrReg := "r14"
-	ppReg := "r15"
+	thrReg := sdk.X86ThreadRegStr
+	ppReg := sdk.X86PoolRegStr
 	dtReg := "rax" // loaded from THR at runtime
 	heapBaseReg := "rbp" // not used on x86_64
 	if isARM64 {
 		arch = "arm64"
-		thrReg = "x26"
-		ppReg = "x27"
+		thrReg = sdk.ARM64ThreadRegStr
+		ppReg = sdk.ARM64PoolRegStr
 		dtReg = "x21"
-		heapBaseReg = "x28"
+		heapBaseReg = sdk.ARM64HeapBitsStr
 	}
 
 	// Header bit layout

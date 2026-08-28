@@ -1,6 +1,10 @@
 package decompiler
 
-import "testing"
+import (
+	"testing"
+
+	"aotopsy/internal/sdk"
+)
 
 func TestIsCleanPhiInit(t *testing.T) {
 	cases := map[string]bool{
@@ -73,13 +77,13 @@ func trimAll(s string) string {
 // reassignment resolve to honest names instead of leaking the raw register.
 func TestSeedEntryStateSpecialRegs(t *testing.T) {
 	fir := newFuncIR("f", 0)
-	fir.ThreadReg, fir.PoolReg, fir.StackReg = "r14", "r15", "rsp"
-	fir.CodeReg, fir.ArgsDescReg = "r12", "r10"
+	fir.ThreadReg, fir.PoolReg, fir.StackReg = sdk.X86ThreadRegStr, sdk.X86PoolRegStr, sdk.X86StackRegStr
+	fir.CodeReg, fir.ArgsDescReg = sdk.X86CodeRegStr, sdk.X86ArgsDescStr
 	s := seedEntryState(fir)
-	if got := s.Regs[canonReg("r12")]; got != "CODE" {
-		t.Errorf("CODE_REG seed = %q, want CODE", got)
+	if got := s.Regs[canonReg(sdk.X86CodeRegStr)]; got != sdk.SymCode {
+		t.Errorf("CODE_REG seed = %q, want %s", got, sdk.SymCode)
 	}
-	if got := s.Regs[canonReg("r10")]; got != "argsDesc" {
-		t.Errorf("ARGS_DESC seed = %q, want argsDesc", got)
+	if got := s.Regs[canonReg(sdk.X86ArgsDescStr)]; got != sdk.SymArgsDesc {
+		t.Errorf("ARGS_DESC seed = %q, want %s", got, sdk.SymArgsDesc)
 	}
 }

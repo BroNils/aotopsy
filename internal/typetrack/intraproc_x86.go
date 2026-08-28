@@ -6,16 +6,17 @@ import (
 
 	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 	"golang.org/x/arch/x86/x86asm"
 )
 
-// x86_64 register constants (matching dart-lang/sdk constants_x64.h).
+// x86_64 register constants — PP/THR/SP now shared from internal/sdk.
+// The ones below are typetrack-specific (not in the SDK's reserved-register
+// set, but used by the type lattice for class-id and allocation tracking).
 const (
-	x86RegPP  = 15 // R15 = object pool pointer
-	x86RegTHR = 14 // R14 = thread pointer
-	x86RegRCX = 1  // kClassIdReg (DispatchTableNullErrorABI)
-	x86RegRAX = 0  // return value / allocation result
-	x86RegRDI = 7  // SysV arg 0 (receiver for instance methods)
+	x86RegRCX = sdk.X86ClassIdReg // kClassIdReg (DispatchTableNullErrorABI)
+	x86RegRAX = 0 // return value / allocation result
+	x86RegRDI = 7 // SysV arg 0 (receiver for instance methods)
 )
 
 // x86ArgRegCanon lists Dart's OWN calling-convention integer argument
@@ -31,7 +32,12 @@ const (
 // (losing class-id type info needed for dispatch resolution) and NOT
 // killing RBX (leaving stale type info after calls that could propagate
 // incorrect types).
-var x86ArgRegCanon = [6]int{7, 6, 2, 3, 8, 9}
+var x86ArgRegCanon = func() [6]int {
+	r := sdk.DartArgRegisters(sdk.ArchX86)
+	var arr [6]int
+	copy(arr[:], r)
+	return arr
+}()
 
 // X86DecodedInst is a decoded x86_64 instruction with its address.
 type X86DecodedInst struct {
@@ -101,9 +107,12 @@ func AnalyzeFunctionX86(
 
 	blockEntry := make([][31]TypeLattice, len(blocks))
 	blockExit := make([][31]TypeLattice, len(blocks))
-	blockEntry[0] = entryTypes
-	for off, t := range entryStack {
-		blockStackEntry[0][off] = t
+	blockEntry[0] = entryTypes
+
+	for off, t := range entryStack {
+
+		blockStackEntry[0][off] = t
+
 	}
 
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }
@@ -429,7 +438,7 @@ func transferInstructionX86(
 			// which are Dart objects with fields -- the same exclusions
 			// ARM64's STUR handler applies.
 			if baseIdx >= 0 && baseIdx < 31 &&
-				baseIdx != x86RegPP && baseIdx != x86RegTHR && baseIdx != 4 /*RSP*/ &&
+				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR && baseIdx != sdk.X86SPReg &&
 				state[baseIdx].Kind == LatticeKnownClass {
 				recordFieldAccess(result, state[baseIdx].ClassID, int32(mem.Disp), true, inst.Addr)
 				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
@@ -476,7 +485,7 @@ func transferInstructionX86(
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
 			baseIdx := arch.X86CanonReg(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
-			if baseIdx == x86RegPP {
+			if baseIdx == sdk.X86PP {
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
 				if !poolIdxOK {
 					return
@@ -499,7 +508,7 @@ func transferInstructionX86(
 				return
 			}
 			// THR load: MOV reg, [R14+disp] → KnownStub.
-			if baseIdx == x86RegTHR {
+			if baseIdx == sdk.X86THR {
 				byteOff := int(mem.Disp)
 				stubName := ""
 				if ctx.AllocStubOffsets != nil {
@@ -543,7 +552,7 @@ func transferInstructionX86(
 			// selector-offset scan possible, so x86_64 dispatch resolution was
 			// dead on every version up to 2.18.
 			if ctx.ClassIDIsHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == 1 && baseIdx >= 0 && baseIdx < 31 &&
-				baseIdx != x86RegPP && baseIdx != x86RegTHR {
+				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
 				if state[baseIdx].Kind == LatticeKnownClass {
 					state[dstIdx] = KnownClass(state[baseIdx].ClassID)
 				} else {
@@ -642,7 +651,7 @@ func transferInstructionX86(
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
 			baseIdx := arch.X86CanonReg(mem.Base)
 			// LEA reg, [THR+disp] → load dispatch table base.
-			if baseIdx == x86RegTHR && mem.Disp != 0 {
+			if baseIdx == sdk.X86THR && mem.Disp != 0 {
 				// This loads the dispatch table array from Thread.
 				// Mark as KnownDispatchIndex(0) so subsequent CALL [reg+RCX*8+disp]
 				// can compute the slot.
@@ -859,7 +868,7 @@ func transferInstructionX86(
 	// downstream saw an untyped receiver.
 	if ins.Op == x86asm.ADD && len(ins.Args) >= 2 && ctx.THRFields != nil {
 		if mem, memOK := ins.Args[1].(x86asm.Mem); memOK &&
-			arch.X86CanonReg(mem.Base) == x86RegTHR {
+			arch.X86CanonReg(mem.Base) == sdk.X86THR {
 			if name, found := ctx.THRFields[int(mem.Disp)]; found && name == "heap_base" {
 				return // same object, wider register: leave the lattice alone
 			}

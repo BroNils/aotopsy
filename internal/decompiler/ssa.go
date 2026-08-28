@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // This file implements a pre-emission reaching-definition FIXPOINT over the CFG
@@ -88,22 +90,22 @@ func (s *LiftState) clobberReg(reg string) {
 func seedEntryState(fir *FuncIR) *LiftState {
 	s := newLiftState(fir.NullReg)
 	if fir.ThreadReg != "" {
-		s.setReg(fir.ThreadReg, "THR")
+		s.setReg(fir.ThreadReg, sdk.SymTHR)
 	}
 	if fir.PoolReg != "" {
-		s.setReg(fir.PoolReg, "PP")
+		s.setReg(fir.PoolReg, sdk.SymPP)
 	}
 	if fir.StackReg != "" {
-		s.setReg(fir.StackReg, "SP")
+		s.setReg(fir.StackReg, sdk.SymSP)
 	}
 	if fir.HeapBitsReg != "" {
-		s.setReg(fir.HeapBitsReg, "HEAP_BITS")
+		s.setReg(fir.HeapBitsReg, sdk.SymHeapBits)
 	}
 	if fir.CodeReg != "" {
-		s.setReg(fir.CodeReg, "CODE")
+		s.setReg(fir.CodeReg, sdk.SymCode)
 	}
 	if fir.ArgsDescReg != "" {
-		s.setReg(fir.ArgsDescReg, "argsDesc")
+		s.setReg(fir.ArgsDescReg, sdk.SymArgsDesc)
 	}
 	for ri := 0; ri < len(fir.ArgRegs); ri++ {
 		s.setReg(fir.ArgRegs[ri], fmt.Sprintf("arg%d", ri))

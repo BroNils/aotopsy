@@ -4,7 +4,9 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // This file holds the per-instruction-type handlers that transferInstruction
@@ -36,22 +38,22 @@ func handleStackStore(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 0a-pre. STUR Xt, [X29, #imm9] → save to stack (signed offset).
-	if base, rt, imm9, ok := isSTUR64(raw); ok && base == 29 {
+	if base, rt, imm9, ok := arm64dec.STUR64(raw); ok && base == 29 {
 		if rt < 31 {
 			tc.stackTypes[imm9] = tc.state[rt]
 		}
 		// Don't return — STUR doesn't kill the source register
 	}
 	// 0a-pre-bis. STUR Xt, [X15, #imm9] → shadow stack (signed offset).
-	if base, rt, imm9, ok := isSTUR64(raw); ok && base == 15 {
+	if base, rt, imm9, ok := arm64dec.STUR64(raw); ok && base == sdk.ARM64SPReg {
 		if rt < 31 {
 			tc.stackTypes[imm9+0x10000] = tc.state[rt]
 		}
 	}
 	// 0a-pre-ter. STUR Xt, [Xn, #imm9] → object field store (signed offset).
-	if base, rt, imm9, ok := isSTUR64(raw); ok {
+	if base, rt, imm9, ok := arm64dec.STUR64(raw); ok {
 		if rt < 31 && base < 31 && base != 29 && base != 15 &&
-			base != regPP && base != regTHR && base != regDT {
+			base != sdk.ARM64PP && base != sdk.ARM64THR && base != regDT {
 			if tc.state[base].Kind == LatticeKnownClass {
 				recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), true, tc.inst.Addr)
 			}
@@ -64,21 +66,21 @@ func handleStackStore(tc *transferCtx) bool {
 	}
 
 	// 0a-pre-quater. STUR Wt, [X29, #imm9] → compressed stack store.
-	if base, rt, imm9, ok := isSTUR32(raw); ok && base == 29 {
+	if base, rt, imm9, ok := arm64dec.STUR32(raw); ok && base == 29 {
 		if rt < 31 {
 			tc.stackTypes[imm9] = tc.state[rt]
 		}
 	}
 	// 0a-pre-quater-bis. STUR Wt, [X15, #imm9] → compressed shadow stack.
-	if base, rt, imm9, ok := isSTUR32(raw); ok && base == 15 {
+	if base, rt, imm9, ok := arm64dec.STUR32(raw); ok && base == sdk.ARM64SPReg {
 		if rt < 31 {
 			tc.stackTypes[imm9+0x10000] = tc.state[rt]
 		}
 	}
 	// 0a-pre-quater-ter. STUR Wt, [Xn, #imm9] → compressed object field store.
-	if base, rt, imm9, ok := isSTUR32(raw); ok {
+	if base, rt, imm9, ok := arm64dec.STUR32(raw); ok {
 		if rt < 31 && base < 31 && base != 29 && base != 15 &&
-			base != regPP && base != regTHR && base != regDT {
+			base != sdk.ARM64PP && base != sdk.ARM64THR && base != regDT {
 			if tc.state[base].Kind == LatticeKnownClass {
 				recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), true, tc.inst.Addr)
 			}
@@ -91,7 +93,7 @@ func handleStackStore(tc *transferCtx) bool {
 	}
 
 	// 0a. STR Xt, [X29, #imm] → save to stack (unsigned offset).
-	if baseReg, byteOff, ok := isSTR64UnsignedOffset(raw); ok && baseReg == 29 {
+	if baseReg, byteOff, _, ok := arm64dec.STR64UnsignedOffset(raw); ok && baseReg == 29 {
 		rt := int(raw & 0x1F)
 		if rt < 31 {
 			tc.stackTypes[byteOff] = tc.state[rt]
@@ -100,7 +102,7 @@ func handleStackStore(tc *transferCtx) bool {
 	}
 
 	// 0a-bis. STR Xt, [X15, #imm] → shadow stack (unsigned offset).
-	if baseReg, byteOff, ok := isSTR64UnsignedOffset(raw); ok && baseReg == 15 {
+	if baseReg, byteOff, _, ok := arm64dec.STR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64SPReg {
 		rt := int(raw & 0x1F)
 		if rt < 31 {
 			tc.stackTypes[byteOff+0x10000] = tc.state[rt]
@@ -109,10 +111,10 @@ func handleStackStore(tc *transferCtx) bool {
 	}
 
 	// 0a-ter. STR Xt, [Xn, #imm] → object field store (unsigned offset).
-	if baseReg, byteOff, ok := isSTR64UnsignedOffset(raw); ok {
+	if baseReg, byteOff, _, ok := arm64dec.STR64UnsignedOffset(raw); ok {
 		rt := int(raw & 0x1F)
 		if rt < 31 && baseReg < 31 && baseReg != 29 && baseReg != 15 &&
-			baseReg != regPP && baseReg != regTHR && baseReg != regDT {
+			baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != regDT {
 			if tc.state[baseReg].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
 				key := tc.state[baseReg].ClassID*100000 + byteOff
 				tc.stackTypes[key+0x20000] = tc.state[rt]
@@ -130,7 +132,7 @@ func handleStackLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 0b. LDR Xt, [X29, #imm] → load from stack.
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == 29 {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg == 29 {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			return true
@@ -144,7 +146,7 @@ func handleStackLoad(tc *transferCtx) bool {
 	}
 
 	// 0b-bis. LDR Xt, [X15, #imm] → load from shadow stack.
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == 15 {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64SPReg {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			return true
@@ -167,7 +169,7 @@ func handleStackLoad(tc *transferCtx) bool {
 			imm7 -= 128
 		}
 		byteOff := imm7 * 8
-		if rn == 15 {
+		if rn == sdk.ARM64SPReg {
 			if rt1 < 31 {
 				tc.stackTypes[byteOff+0x10000] = tc.state[rt1]
 			}
@@ -188,7 +190,7 @@ func handleStackLoad(tc *transferCtx) bool {
 			imm7 -= 128
 		}
 		byteOff := imm7 * 8
-		if rn == 15 {
+		if rn == sdk.ARM64SPReg {
 			if rt1 < 31 {
 				if t, ok2 := tc.stackTypes[byteOff+0x10000]; ok2 {
 					tc.state[rt1] = t
@@ -213,7 +215,7 @@ func handleStackLoad(tc *transferCtx) bool {
 // handleTHRLoad handles case 0-THR: LDR Xt, [X26, #imm] → KnownStub.
 func handleTHRLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == regTHR {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64THR {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			return true
@@ -239,7 +241,7 @@ func handleTHRLoad(tc *transferCtx) bool {
 // Also handles 2-level PP addressing: ADD Xt, X27, #imm → LDR Xd, [Xt, #imm].
 func handlePPLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg == regPP {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64PP {
 		tc.ctx.PPLoads++
 		return resolvePPLoad(tc, byteOff)
 	}
@@ -247,7 +249,7 @@ func handlePPLoad(tc *transferCtx) bool {
 	// The SDK's LoadWordFromPoolIndex emits ADD Xd, PP, #upper20 then
 	// LDR Xd, [Xd, #lower12] when the pool offset exceeds 12-bit range.
 	// Track PP-derived base registers via a dedicated lattice kind.
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg < 31 {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg < 31 {
 		if tc.state[baseReg].Kind == LatticePPBase {
 			fullOffset := tc.state[baseReg].PPBaseOffset + byteOff
 			tc.ctx.PPLoads++
@@ -336,7 +338,7 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 1b. LDR Xt, [Xn, #imm] where Xn has KnownDispatchIndex.
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok && baseReg < 31 {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok && baseReg < 31 {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			return true
@@ -350,7 +352,7 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 	}
 
 	// 2. LDR Xt, [X21, Xm, LSL #3] → dispatch table load.
-	if base, rm, rt, ok := isLDRRegExtended(raw); ok && base == regDT {
+	if base, rm, rt, ok := arm64dec.LDRRegExtended(raw); ok && base == regDT {
 		if rt >= 31 {
 			return true
 		}
@@ -387,7 +389,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 3. ADD Xd, X21, #imm → KnownDispatchIndex(imm/8).
-	if rd, rn, imm, ok := isADD64Immediate(raw); ok && rn == regDT {
+	if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok && rn == regDT {
 		if rd >= 31 {
 			return true
 		}
@@ -397,7 +399,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 	}
 
 	// 4. ADD Xd, Xn, #imm where Xn is KnownDispatchIndex or KnownClass.
-	if rd, rn, imm, ok := isADD64Immediate(raw); ok {
+	if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok {
 		if rd >= 31 || rn >= 31 {
 			// Fall through to default kill
 		} else if tc.state[rn].Kind == LatticeKnownDispatchIndex {
@@ -415,7 +417,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 	}
 
 	// 4b. SUB Xd, Xn, #imm — dispatch slot with negative offset.
-	if rd, rn, imm, ok := isSUB64Immediate(raw); ok {
+	if rd, rn, imm, ok := arm64dec.SUB64Immediate(raw); ok {
 		if rd >= 31 || rn >= 31 {
 			// Fall through to default kill
 		} else if tc.state[rn].Kind == LatticeKnownDispatchIndex {
@@ -433,9 +435,9 @@ func handleDispatchArith(tc *transferCtx) bool {
 	}
 
 	// 4c. ADD Xd, Xn, Xm (register-register) — dispatch slot or decompression.
-	if rd, rn, rm, ok := isADD64Register(raw); ok {
+	if rd, rn, rm, ok := arm64dec.ADD64Register(raw); ok {
 		if rd < 31 && rn < 31 && tc.state[rn].Kind == LatticeKnownClass {
-			if rm == 28 { // X28 = HEAP_BITS — decompress
+			if rm == sdk.ARM64HeapBits { // HEAP_BITS — decompress
 				tc.state[rd] = tc.state[rn]
 				return true
 			}
@@ -454,7 +456,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 	// The SDK's LoadWordFromPoolIndex emits this when the pool offset
 	// exceeds 12-bit range: ADD Xd, PP, #upper20 → LDR Xd, [Xd, #lower12].
 	// Track the PP base offset so handlePPLoad can resolve the full index.
-	if rd, rn, imm, ok := isADD64Immediate(raw); ok && rn == regPP && rd < 31 {
+	if rd, rn, imm, ok := arm64dec.ADD64Immediate(raw); ok && rn == sdk.ARM64PP && rd < 31 {
 		tc.state[rd] = TypeLattice{Kind: LatticePPBase, PPBaseOffset: imm}
 		return true
 	}
@@ -468,7 +470,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 5. LDUR Xt, [Xn, #imm9] — field/header/stack load.
-	if base, rt, ok := isLDUR64(raw); ok {
+	if base, rt, _, ok := arm64dec.LDUR64(raw); ok {
 		if rt >= 31 {
 			return true
 		}
@@ -484,7 +486,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 			return true
 		}
-		if base == 15 {
+		if base == sdk.ARM64SPReg {
 			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
 				tc.state[rt] = t
 			} else {
@@ -546,7 +548,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 	}
 
 	// 5-ldurh. LDURH Wt, [Xn, #imm9] — 16-bit load (Dart 2.x class ID).
-	if base, rt, imm9, ok := isLDURH(raw); ok {
+	if base, rt, imm9, ok := arm64dec.LDURH(raw); ok {
 		if rt >= 31 {
 			return true
 		}
@@ -558,7 +560,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 			return true
 		}
-		if base == 15 {
+		if base == sdk.ARM64SPReg {
 			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
 				tc.state[rt] = t
 			} else {
@@ -586,7 +588,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 	}
 
 	// 5-compressed. LDUR Wt, [Xn, #imm9] — 32-bit compressed pointer load.
-	if base, rt, imm9, ok := isLDUR32(raw); ok {
+	if base, rt, imm9, ok := arm64dec.LDUR32(raw); ok {
 		if rt >= 31 {
 			return true
 		}
@@ -598,7 +600,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 			return true
 		}
-		if base == 15 {
+		if base == sdk.ARM64SPReg {
 			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
 				tc.state[rt] = t
 			} else {
@@ -638,7 +640,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 	}
 
 	// 5b. LDR Xt, [Xn, #imm] (unsigned offset) — field load.
-	if baseReg, byteOff, ok := isLDR64UnsignedOffset(raw); ok {
+	if baseReg, byteOff, ok := arm64dec.LDR64UnsignedOffset(raw); ok {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			// Don't return — let other handlers process
@@ -659,7 +661,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 					}
 				}
 			}
-		} else if baseReg < 31 && baseReg != regPP && baseReg != regTHR && baseReg != regDT && baseReg != 29 && baseReg != 15 {
+		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != regDT && baseReg != 29 && baseReg != 15 {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
 				key := tc.state[baseReg].ClassID*100000 + byteOff
 				if storedType, ok2 := tc.stackTypes[key+0x20000]; ok2 && storedType.Kind != LatticeTop {
@@ -678,11 +680,11 @@ func handleFieldLoad(tc *transferCtx) bool {
 	}
 
 	// 5b-compressed. LDR Wt, [Xn, #imm] (unsigned offset) — compressed field load.
-	if baseReg, byteOff, ok := isLDR32UnsignedOffset(raw); ok {
+	if baseReg, byteOff, _, ok := arm64dec.LDR32UnsignedOffset(raw); ok {
 		rt := int(raw & 0x1F)
 		if rt >= 31 {
 			// Don't return — let other handlers process
-		} else if baseReg < 31 && baseReg != regPP && baseReg != regTHR && baseReg != regDT && baseReg != 29 && baseReg != 15 {
+		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != regDT && baseReg != 29 && baseReg != 15 {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
 				key := tc.state[baseReg].ClassID*100000 + byteOff
 				if storedType, ok2 := tc.stackTypes[key+0x20000]; ok2 && storedType.Kind != LatticeTop {

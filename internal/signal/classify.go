@@ -6,6 +6,8 @@ package signal
 import (
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // Categories for string signal classification.
@@ -431,36 +433,10 @@ func ClassifyString(value string) []string {
 
 // IsMundaneTHR returns true for THR field names that represent allocations,
 // write barriers, or type checks — noise in the signal graph.
+// Now delegates to sdk.IsMundaneStub so the classification is shared with
+// the decompiler's async stub classifier.
 func IsMundaneTHR(name string) bool {
-	lower := strings.ToLower(name)
-	mundanePatterns := []string{
-		"allocate",
-		"write_barrier",
-		"store_buffer",
-		"type_test",
-		"subtype_check",
-		"call_to_runtime", // matches both the SDK name and the old _ep spelling
-		"stack_overflow",
-		"null_error",
-		"range_error",
-		"error_", // covers null_error, range_error, write_error, etc.
-		"deoptimize",
-		"megamorphic_call",
-		"switchable_call",
-		"monomorphic_",
-		"lazy_deopt",
-		"safepoint",
-	}
-	for _, p := range mundanePatterns {
-		if strings.Contains(lower, p) {
-			// Exception: call_native_through_safepoint_ep is interesting (FFI/JNI).
-			if strings.Contains(lower, "native") {
-				return false
-			}
-			return true
-		}
-	}
-	return false
+	return sdk.IsMundaneStub(name)
 }
 
 // Severity levels for signal categories.

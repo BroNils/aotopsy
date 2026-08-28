@@ -3,6 +3,8 @@ package decompiler
 import (
 	"fmt"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // applyOtherARM64 handles ARM64-only mnemonics in ApplyOther's switch.
@@ -42,7 +44,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			// The well-known Dart object class-id bitfield idiom
 			// (lsb=12 / 0xc, width=20 / 0x14 on ARM64) renders directly as
 			// classId(...) instead of the generic bitField(...) form.
-			if ok1 && ok2 && pos == 12 && width == 20 {
+			if ok1 && ok2 && pos == sdk.ClassIdTagPosV3 && width == sdk.ClassIdTagSizeV3 {
 				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
 			}
 			s.setReg(dst, expr)
@@ -88,10 +90,10 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 		if len(ops) >= 3 {
 			dst1 := strings.ToLower(strings.TrimSpace(ops[0]))
 			dst2 := strings.ToLower(strings.TrimSpace(ops[1]))
-			if (dst1 == "x29" || dst1 == "fp" || dst1 == arm64FrameReg) &&
-				(dst2 == "x30" || dst2 == "lr" || dst2 == arm64LinkReg) {
+			if (dst1 == "x29" || dst1 == "fp" || dst1 == sdk.ARM64FrameRegStr) &&
+				(dst2 == "x30" || dst2 == "lr" || dst2 == sdk.ARM64LinkRegStr) {
 				memOp := parseOperand(ops[2])
-				if memOp.isMem && (memOp.memBase == "x15" || memOp.memBase == "sp" || memOp.memBase == "csp") {
+			if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
 					// Epilogue frame restore — elide in high-level pseudocode
 					return "", false, true
 				}
@@ -110,10 +112,10 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 		if len(ops) >= 3 {
 			src1 := strings.ToLower(strings.TrimSpace(ops[0]))
 			src2 := strings.ToLower(strings.TrimSpace(ops[1]))
-			if (src1 == "x29" || src1 == "fp" || src1 == arm64FrameReg) &&
-				(src2 == "x30" || src2 == "lr" || src2 == arm64LinkReg) {
+			if (src1 == "x29" || src1 == "fp" || src1 == sdk.ARM64FrameRegStr) &&
+				(src2 == "x30" || src2 == "lr" || src2 == sdk.ARM64LinkRegStr) {
 				memOp := parseOperand(ops[2])
-				if memOp.isMem && (memOp.memBase == "x15" || memOp.memBase == "sp" || memOp.memBase == "csp") {
+			if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
 					// Prologue frame pointer & link register save — elide in high-level pseudocode
 					return "", false, true
 				}

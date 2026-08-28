@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // Ground truth for the x86_64 GDT (global dispatch table) call pattern,
@@ -87,9 +88,9 @@ func (rt *x64RegTracker) lookup(idx int) string {
 	return rt.defs[idx].note
 }
 
-const canonR14 = 14 // THR
-const canonR15 = 15 // PP
-const canonRCX = 1  // DispatchTableNullErrorABI::kClassIdReg
+const canonR14 = sdk.X86THR
+const canonR15 = sdk.X86PP
+const canonRCX = sdk.X86ClassIdReg
 
 // IndirectCall represents one CALL site whose target is NOT a plain
 // rip-relative immediate (Rel arg) -- i.e. a register or memory operand.

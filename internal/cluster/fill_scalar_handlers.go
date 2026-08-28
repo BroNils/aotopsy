@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -186,7 +187,7 @@ func readTypeScalar(s *dartfmt.Stream, si int, ref int, i, count int, op ScalarO
 		if classIDShift == 0 {
 			classIDShift = 3
 		}
-		return &TypeInfo{RefID: ref, ClassID: int32((v >> classIDShift) & 0xFFFFF)}, nil
+		return &TypeInfo{RefID: ref, ClassID: int32((v >> classIDShift) & ((1 << sdk.ClassIdTagSizeV3) - 1))}, nil
 	}
 	// Fallback: skip this scalar to keep stream aligned.
 	if err := skipScalar(s, op); err != nil {

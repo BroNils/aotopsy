@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 func sanitizeTailCallName(target string) string {
@@ -209,10 +211,7 @@ func (e *emitter) extractLoopCondition(id int) string {
 		return ""
 	}
 	// Skip stack overflow checks — they are not real loop conditions.
-	// Pattern: "x15 <= THR.f56" or similar comparisons involving THR
-	// and the stack pointer register.
-	if strings.Contains(cond, "THR.") && (strings.Contains(cond, "x15") ||
-		strings.Contains(cond, "SP") || strings.Contains(cond, "stack_limit")) {
+	if sdk.IsStackOverflowCond(cond) {
 		return ""
 	}
 

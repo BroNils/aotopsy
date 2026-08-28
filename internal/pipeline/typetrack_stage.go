@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/snapshot"
@@ -400,6 +401,18 @@ func runTypeInference(
 			})
 			funcInstsARM64[name] = insts
 
+			// Pre-3.4.3 receiver-slot recovery from CODE when arity was absent
+			// from the snapshot (2.14..3.3.0). See receiver_recovery.go.
+			if receiverOnStack {
+				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
+					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+						if slot, ok := typetrack.RecoverReceiverStackSlotARM64(insts, ownerCID, ctx); ok {
+							ctx.FuncReceiverStackSlot[name] = slot
+						}
+					}
+				}
+			}
+
 			// Collect BL edges for inter-procedural propagation.
 			for _, inst := range insts {
 				if target, ok := isBLRaw(inst.Raw, inst.Addr); ok {
@@ -421,6 +434,17 @@ func runTypeInference(
 		} else {
 			insts := typetrack.DecodeX86Function(funcCode, funcVA)
 			funcInstsX86[name] = insts
+
+			// Pre-3.4.3 receiver-slot recovery from CODE (x86_64). See above.
+			if receiverOnStack {
+				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
+					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+						if slot, ok := typetrack.RecoverReceiverStackSlotX86(insts, ownerCID, ctx); ok {
+							ctx.FuncReceiverStackSlot[name] = slot
+						}
+					}
+				}
+			}
 
 			// Collect CALL rel32 edges for inter-procedural propagation.
 			for _, inst := range insts {
@@ -711,18 +735,9 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 	return bd, nil
 }
 
-// isBLRaw detects ARM64 BL instruction. Returns target address.
-// This is a local copy of the pattern in typetrack/intraproc.go to avoid
-// exporting it from the typetrack package.
+// isBLRaw delegates to arm64dec.BL (shared single source).
 func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x94000000 {
-		return 0, false
-	}
-	imm26 := int32(raw & 0x03FFFFFF)
-	if imm26&(1<<25) != 0 {
-		imm26 |= ^int32(0x03FFFFFF)
-	}
-	return uint64(int64(pc) + int64(imm26)*4), true
+	return arm64dec.BL(raw, pc)
 }
 
 // resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display

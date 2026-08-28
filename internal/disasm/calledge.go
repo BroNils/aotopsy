@@ -1,8 +1,13 @@
 package disasm
 
-import "strconv"
+import (
+	"strconv"
 
-const regDT = 21 // X21 = dispatch table register
+	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/sdk"
+)
+
+const regDT = sdk.ARM64DT // X21 = dispatch table register (shared from sdk)
 
 // CallEdge represents a call site extracted from disassembly.
 type CallEdge struct {
@@ -34,81 +39,8 @@ type CallEdge struct {
 	ArgRegMask uint8 `json:"-"`
 }
 
-// isBL detects ARM64 BL (branch with link) instructions.
-// Encoding: 1 | 00101 | imm26
-// Mask: 0xFC000000, Value: 0x94000000
-// Returns the target address (sign-extended imm26 * 4 + PC).
-func isBL(raw uint32, pc uint64) (target uint64, ok bool) {
-	if raw&0xFC000000 != 0x94000000 {
-		return 0, false
-	}
-	imm26 := int32(raw & 0x03FFFFFF)
-	// Sign extend from 26 bits.
-	if imm26&(1<<25) != 0 {
-		imm26 |= ^int32(0x03FFFFFF)
-	}
-	target = uint64(int64(pc) + int64(imm26)*4)
-	return target, true
-}
-
-// isBLR detects ARM64 BLR (branch with link to register) instructions.
-// Encoding: 1101011 | 0 | 0 | 01 | 11111 | 0000 | 0 | 0 | Rn | 00000
-// Mask: 0xFFFFFC1F, Value: 0xD63F0000
-// Returns the register number.
-func isBLR(raw uint32) (rn int, ok bool) {
-	if raw&0xFFFFFC1F != 0xD63F0000 {
-		return 0, false
-	}
-	rn = int((raw >> 5) & 0x1F)
-	return rn, true
-}
-
-// dstRegOfInst returns the destination register of a data-processing or load
-// instruction, or -1 if not detected. Used by the register tracker to know
-// which register an annotated instruction defines.
-func dstRegOfInst(raw uint32) int {
-	// LDR X64 unsigned offset
-	if raw&0xFFC00000 == 0xF9400000 {
-		return int(raw & 0x1F)
-	}
-	// LDR W32 unsigned offset
-	if raw&0xFFC00000 == 0xB9400000 {
-		return int(raw & 0x1F)
-	}
-	// LDUR X64 (unscaled offset): size=11|111|V=0|00|opc=01|imm9|00|Rn|Rt
-	// Mask: 0xFFE00C00, Value: 0xF8400000
-	if raw&0xFFE00C00 == 0xF8400000 {
-		return int(raw & 0x1F)
-	}
-	// LDUR W32 (unscaled offset): size=10|111|V=0|00|opc=01|imm9|00|Rn|Rt
-	if raw&0xFFE00C00 == 0xB8400000 {
-		return int(raw & 0x1F)
-	}
-	// LDR X64 register offset: size=11|111|V=0|01|opc=01|1|Rm|option|S|10|Rn|Rt
-	// Mask: 0xFFE00C00, Value: 0xF8600800
-	if raw&0xFFE00C00 == 0xF8600800 {
-		return int(raw & 0x1F)
-	}
-	// ADD X64 immediate
-	if raw&0xFF000000 == 0x91000000 {
-		return int(raw & 0x1F)
-	}
-	// SUB X64 immediate
-	if raw&0xFF000000 == 0xD1000000 {
-		return int(raw & 0x1F)
-	}
-	// MOV (alias of ORR Rd, XZR, Rm) - wide: MOVZ/MOVK/MOVN
-	if raw&0xFF800000 == 0xD2800000 || // MOVZ X
-		raw&0xFF800000 == 0xF2800000 || // MOVK X
-		raw&0xFF800000 == 0x92800000 { // MOVN X
-		return int(raw & 0x1F)
-	}
-	// UBFX/UBFM (bit field extract): sf=1|opc=10|100110|N=1|...
-	if raw&0xFF800000 == 0xD3000000 {
-		return int(raw & 0x1F)
-	}
-	return -1
-}
+// ARM64 instruction decoders (isBL, isBLR, dstRegOfInst) are now shared
+// from internal/arm64dec.
 
 // maxArgSetupBack bounds inferCallArgCountLocal's backward scan -- AOT-
 // generated argument setup is a short, contiguous instruction span
@@ -147,13 +79,13 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 	var mask uint8
 	for i, steps := callIdx-1, 0; i >= 0 && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
 		in := insts[i]
-		if _, ok := isBL(in.Raw, in.Addr); ok {
+		if _, ok := arm64dec.BL(in.Raw, in.Addr); ok {
 			break
 		}
-		if _, ok := isBLR(in.Raw); ok {
+		if _, ok := arm64dec.BLR(in.Raw); ok {
 			break
 		}
-		rd := dstRegOfInst(in.Raw)
+		rd := arm64dec.DstRegOfInst(in.Raw)
 		if rd < 0 || rd > 7 {
 			continue
 		}
@@ -165,59 +97,13 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 func popcount8(m uint8) int {
 	n := 0
 	for m != 0 {
-		n += int(m & 1)
-		m >>= 1
+		n++
+		m &= m - 1
 	}
 	return n
 }
 
-// isLDRRegExtended detects LDR Xt, [Xn, Xm, LSL #3] (64-bit register offset).
-// Returns base, index register, and destination register.
-func isLDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
-	// Encoding: 11|111|V=0|01|opc=01|1|Rm|option|S|10|Rn|Rt
-	//
-	// option (15:13) and S (12) are part of the match: without them the mask
-	// also accepts the UNSCALED `LDR Xt, [Xn, Xm]`, whose index is not
-	// multiplied by 8, and reading one of those as a dispatch-table load makes
-	// the slot arithmetic wrong by a factor of eight. Measured on the 3.12.2
-	// arm64 .text: 3412 scaled, 280 unscaled, no other extend option at all.
-	// The same tightening and the same measurement are in typetrack's
-	// isLDRRegExtended.
-	//
-	// NOTE the killer in dstRegOfInst above deliberately keeps the LOOSE mask:
-	// every LDR-register-offset writes Rt whether or not it is scaled, so a
-	// tightened mask there would leave those 280 destinations holding stale
-	// types. Detector tight, killer loose.
-	if raw&0xFFE0FC00 != 0xF8607800 {
-		return 0, 0, 0, false
-	}
-	rt = int(raw & 0x1F)
-	base = int((raw >> 5) & 0x1F)
-	rm = int((raw >> 16) & 0x1F)
-	return base, rm, rt, true
-}
-
-// isLDUR64 detects LDUR Xt, [Xn, #imm9] (64-bit unscaled immediate) and
-// returns the signed imm9 alongside the registers.
-//
-// The offset used to be discarded. It is the only thing that distinguishes one
-// object-field call site from another, and without it every such site got the
-// bare provenance "object_field" -- which made the largest bucket of
-// unresolved indirect calls (954 of 1666 on the 3.12.2 arm64 sample, 57%)
-// impossible to break down at all, let alone act on.
-func isLDUR64(raw uint32) (base, rt, off int, ok bool) {
-	if raw&0xFFE00C00 != 0xF8400000 {
-		return 0, 0, 0, false
-	}
-	rt = int(raw & 0x1F)
-	base = int((raw >> 5) & 0x1F)
-	// imm9 is signed, bits 20:12.
-	imm9 := int32(raw>>12) & 0x1FF
-	if imm9&0x100 != 0 {
-		imm9 -= 0x200
-	}
-	return base, rt, int(imm9), true
-}
+// isLDRRegExtended and isLDUR64 are now shared from internal/arm64dec.
 
 // ObjectFieldVia is the provenance string for a call target loaded out of an
 // object field, carrying the field's byte offset.
@@ -238,8 +124,8 @@ const ObjectFieldVia = "object_field"
 // (raw_object.h, identical at 2.12.0 and 3.12.2; the header stays 8 bytes even
 // on compressed-pointer builds, so the offsets do not move.)
 const (
-	codeEntryPointDisp            = 0x7
-	codeMonomorphicEntryPointDisp = 0xf
+	codeEntryPointDisp            = sdk.CodeEntryPointDisp
+	codeMonomorphicEntryPointDisp = sdk.CodeMonomorphicEntryPointDisp
 )
 
 // IsCodeEntryPointDisp reports whether a load displacement reads one of a Code

@@ -60,9 +60,9 @@ type knownGap struct {
 	reason   string
 }
 
-// arityGapReason is shared by every metric that depends on knowing a
-// function's parameter count, because they all fail for the same measured
-// reason.
+// Background on the (now-closed) arity/receiver cliff, kept because it explains
+// why the recovery in receiver_recovery.go was needed and why 2.14.0 still
+// differs.
 //
 // Before 3.4.3 there is no register calling convention: the receiver arrives
 // on the caller's stack at FP + (1 + num_fixed_parameters) * 8, so seeding
@@ -92,27 +92,40 @@ type knownGap struct {
 // which is exactly where the metrics jump back: field_type_declared_hits goes
 // 1782 (3.3.0) -> 13465 (3.4.3) on arm64.
 //
-// So this is a real AOT limitation, not a parser bug, and it is recorded here
-// rather than fixed. What it would take to close is recovering the receiver
-// slot from the CODE instead of the snapshot -- see docs/ROADMAP.md; that is
-// a heuristic and has not been attempted, so nothing here claims it works.
-const arityGapReason = "num_fixed_parameters is absent from the snapshot: " +
-	"packed_fields_ stopped carrying it at 2.14 and FunctionType reaches it " +
-	"through a WeakSerializationReference the AOT serializer drops. " +
-	"Only the versions from 3.4.3 on, which pass the receiver in a register, " +
-	"are unaffected. Measured: 84% arity coverage at 2.12, 51% at 2.13, " +
-	"12-14% from 2.14 on."
+// This cliff is now CLOSED by CODE-based receiver-slot recovery
+// (typetrack.RecoverReceiverStackSlot*, wired in typetrack_stage.go): when the
+// snapshot lacks num_fixed_parameters, the receiver slot is recovered as the
+// highest frame-pointer load offset whose loaded register is used as the base of
+// an owner-class field access (the second condition rules out static methods, so
+// owner field names are never fabricated). Measured on 3.3.0/arm64:
+// field_type_declared_hits 1782 -> 12925, matching the 3.4.3 register-convention
+// band, and the resolved fields match the 3.4.3 output for the same source. So
+// field_type_declared/instance/accessor no longer collapse on 2.15..3.3.0.
+//
+// Two residual gaps remain, both distinct from the (now-fixed) receiver cliff:
+const storeResidualReason = "field_type_store_hits tracks store->load field-type " +
+	"propagation, a separate and sparser mechanism than receiver-based field-type " +
+	"resolution; the receiver-slot recovery that closed declared/instance hits does " +
+	"not feed it, so 3.3.0 store hits stay below the same-source median."
+
+// 2.14.0 is the LAST uncompressed-pointer Dart version (2.15 enabled pointer
+// compression). The receiver IS recovered there -- field ACCESSES resolve with
+// correct class ids (field_accessor_xref is populated) -- but the field's
+// DECLARED TYPE does not resolve: FieldTypes ends up empty because the
+// uncompressed era resolves Field.TypeRefID -> Type -> ClassID differently, the
+// same family of Type-object boundary bugs already recorded for 2.16-2.19. This
+// is a separate, not-yet-root-caused issue in Type resolution, NOT the receiver
+// cliff, and it affects only this single version.
+const uncompressedTypeResolutionReason = "2.14.0 is the last uncompressed-pointer " +
+	"version; its receiver is recovered (field accesses resolve) but the field's " +
+	"declared TYPE does not (FieldTypes empty -- uncompressed-era Field.TypeRefID -> " +
+	"Type -> ClassID resolution, same family as the 2.16-2.19 Type boundary bugs). " +
+	"Separate from the receiver cliff; not yet root-caused."
 
 var knownGaps = []knownGap{
-	// The differential's neighbour rule flags the LAST version before 3.4.3
-	// because its window straddles that boundary; 3.2.5 and earlier sit in a
-	// low band whose neighbours are equally low, so only 3.3.0 and the
-	// partially-affected 2.13.0 surface. All of them are the same measured
-	// limitation.
-	{metric: "field_accessor_xref", versions: []string{"3.3.0/arm64", "3.3.0/x64"}, reason: arityGapReason},
-	{metric: "field_type_declared_hits", versions: []string{"3.3.0/x64", "2.13.0/x64"}, reason: arityGapReason},
-	{metric: "field_type_instance_hits", versions: []string{"3.3.0/x64"}, reason: arityGapReason},
-	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/x64"}, reason: arityGapReason},
+	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/x64"}, reason: storeResidualReason},
+	{metric: "field_type_declared_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
+	{metric: "field_type_instance_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
 }
 
 func gapAllows(metric, version string) (string, bool) {

@@ -6,20 +6,10 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 
 	"aotopsy/internal/arch"
+	"aotopsy/internal/sdk"
 )
 
-// x86_64 Dart AOT reserved-register roles, confirmed directly against
-// dart-lang/sdk's runtime/vm/constants_x64.h: `const Register PP = R15;`,
-// `const Register THR = R14;`. Unlike ARM64 (a fixed 4-byte instruction
-// width, handled by Inst/Disassemble/ExtractCallEdges above), x86_64's
-// variable-length instructions make materializing a full []Inst slice and
-// re-walking it for call-edge extraction awkward, so this file scans each
-// function in a single pass instead -- the same design internal/decompiler
-// and cmd/aotopsy/gdtcall.go already use for x86_64.
-const (
-	x86RegPP  = 15 // R15
-	x86RegTHR = 14 // R14
-)
+// x86_64 Dart AOT reserved-register roles are now shared from internal/sdk.
 
 // x86RegProvenance records a register's last known origin. Note: no
 // time-based expiry field -- that was the old fixed-window design
@@ -84,12 +74,19 @@ type X86ScanResult struct {
 	StringRefs []StringRefRecord
 }
 
-// x86ArgRegCanon lists the SysV AMD64 ABI's integer argument registers, in
-// calling-convention order, as canonX86Reg's canonical indices (RDI=7,
-// RSI=6, RDX=2, RCX=1, R8=8, R9=9 -- NOT contiguous, unlike ARM64's X0-X7).
-// Mirrors x86ArgRegs in internal/decompiler/x86.go; position i here is
-// ArgRegs[i] there.
-var x86ArgRegCanon = [6]int{7, 6, 2, 1, 8, 9}
+// x86ArgRegCanon lists Dart's calling-convention argument registers, in
+// parameter order, as canonical indices (RDI=7, RSI=6, RDX=2, RBX=3,
+// R8=8, R9=9). This is Dart's OWN convention
+// (DartCallingConvention::kCpuRegistersForArgs in constants_x64.h), NOT
+// the SysV C ABI — the C ABI's 4th arg is RCX, but Dart uses RBX.
+// RCX is kClassIdReg, not an argument register.
+// Shared via sdk.DartArgRegisters(sdk.ArchX86).
+var x86ArgRegCanon = func() [6]int {
+	r := sdk.DartArgRegisters(sdk.ArchX86)
+	var arr [6]int
+	copy(arr[:], r)
+	return arr
+}()
 
 // x86ArgRegBitPos returns which bit of an inferCallArgRegMaskLocal-style
 // mask a canonical register index corresponds to (its position in
@@ -184,7 +181,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			// register's fixed role before falling back to the tracker.
 			var baseNote string
 			switch arch.X86CanonReg(mem.Base) {
-			case x86RegTHR:
+			case sdk.X86THR:
 				// A THR-relative call with NO index register is a call
 				// through a Thread slot -- a stub entry point -- not a
 				// dispatch-table call. This used to claim `dispatch_table`
@@ -220,7 +217,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				} else {
 					baseNote = "dispatch_table"
 				}
-			case x86RegPP:
+			case sdk.X86PP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
@@ -295,14 +292,14 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8 // last-resort fallback
 			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
 						DstReg: arch.X86CanonReg(dstReg), Width: width, Resolved: resolved,
 					})
 				}
-			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
+			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{

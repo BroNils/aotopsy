@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdk"
 )
 
 // TestCFGVerificationCoverageCorrectness tests that VerifyCFG accurately
@@ -10,11 +12,11 @@ import (
 func TestCFGVerificationCoverageCorrectness(t *testing.T) {
 	fir := newFuncIR("test_structured_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	// 3-block simple if/else function
 	fir.addBlock(Block{
@@ -66,11 +68,11 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 	// 1. ARM64 test
 	armFir := newFuncIR("arm64_sample", 0x4000)
 	armFir.ArgRegs = arm64ArgRegs
-	armFir.FrameReg = arm64FrameReg
-	armFir.ReturnReg = arm64ReturnReg
-	armFir.LinkReg = arm64LinkReg
-	armFir.PoolReg = arm64PoolReg
-	armFir.ThreadReg = arm64ThreadReg
+	armFir.FrameReg = sdk.ARM64FrameRegStr
+	armFir.ReturnReg = sdk.ARM64ReturnRegStr
+	armFir.LinkReg = sdk.ARM64LinkRegStr
+	armFir.PoolReg = sdk.ARM64PoolRegStr
+	armFir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	armFir.addBlock(Block{
 		ID:      0,
@@ -88,10 +90,10 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 	// 2. x86_64 test
 	x64Fir := newFuncIR("x64_sample", 0x5000)
 	x64Fir.ArgRegs = x86ArgRegs
-	x64Fir.FrameReg = x86FrameReg
-	x64Fir.ReturnReg = x86ReturnReg
-	x64Fir.PoolReg = x86PoolReg
-	x64Fir.ThreadReg = x86ThreadReg
+	x64Fir.FrameReg = sdk.X86FrameRegStr
+	x64Fir.ReturnReg = sdk.X86ReturnRegStr
+	x64Fir.PoolReg = sdk.X86PoolRegStr
+	x64Fir.ThreadReg = sdk.X86ThreadRegStr
 
 	x64Fir.addBlock(Block{
 		ID:      0,
@@ -118,8 +120,8 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 func TestLoopStructuringQuality(t *testing.T) {
 	fir := newFuncIR("loop_sample", 0x6000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
 
 	// Block 0: Header, cmp x0, #10; b.ge -> Block 2 (exit), else Block 1 (body)
 	fir.addBlock(Block{
@@ -164,12 +166,12 @@ func TestLoopStructuringQuality(t *testing.T) {
 func TestStackOverflowElision(t *testing.T) {
 	fir := newFuncIR("check_stack_fn", 0x7000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
-	fir.StackReg = arm64StackReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
+	fir.StackReg = sdk.ARM64StackRegStr
 
 	// Block 0: Prologue stack overflow check
 	// ldr ip0, [x26, #0x58] (THR.stack_limit)
@@ -220,14 +222,14 @@ func TestStackOverflowElision(t *testing.T) {
 func TestCallArityTrimming(t *testing.T) {
 	fir := newFuncIR("test_call_arity", 0x8000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
 
 	// Block 0: Call a function with only x0 assigned
 	fir.addBlock(Block{
 		ID:      0,
 		StartVA: 0x8000,
 		Instrs: []Instr{
-			{Addr: 0x8000, Op: OpOther, Src: "mov x0, #42"},
+			{Addr: 0x8000, Op: OpOther, Src: "mov x1, #42"},
 			{Addr: 0x8004, Op: OpCall, Src: "bl 0x9000", Target: "0x9000"},
 			{Addr: 0x8008, Op: OpReturn, Src: "ret"},
 		},
@@ -244,7 +246,7 @@ func TestCallArityTrimming(t *testing.T) {
 	if strings.Contains(art.Source, "x1, x2, x3, x4, x5, x6, x7") {
 		t.Errorf("D2 violation: call emitted trailing unassigned registers:\n%s", art.Source)
 	}
-	if !strings.Contains(art.Source, "printInt(42)") && !strings.Contains(art.Source, "printInt(x0)") {
+	if !strings.Contains(art.Source, "printInt(42)") && !strings.Contains(art.Source, "printInt(x1)") {
 		t.Errorf("expected call with trimmed arguments, got:\n%s", art.Source)
 	}
 }
@@ -285,7 +287,7 @@ func TestIntraproceduralArityInference(t *testing.T) {
 	// Case 1: 0-arg function (static constant return)
 	fir0 := newFuncIR("getConstant", 0x1000)
 	fir0.ArgRegs = arm64ArgRegs
-	fir0.ReturnReg = arm64ReturnReg
+	fir0.ReturnReg = sdk.ARM64ReturnRegStr
 	fir0.addBlock(Block{
 		ID:      0,
 		StartVA: 0x1000,
@@ -302,12 +304,12 @@ func TestIntraproceduralArityInference(t *testing.T) {
 	// Case 2: 1-arg getter (reads receiver x0)
 	fir1 := newFuncIR("isCupertino", 0x2000)
 	fir1.ArgRegs = arm64ArgRegs
-	fir1.ReturnReg = arm64ReturnReg
+	fir1.ReturnReg = sdk.ARM64ReturnRegStr
 	fir1.addBlock(Block{
 		ID:      0,
 		StartVA: 0x2000,
 		Instrs: []Instr{
-			{Addr: 0x2000, Op: OpOther, Src: "ldr x0, [x0, #16]"},
+			{Addr: 0x2000, Op: OpOther, Src: "ldr x1, [x1, #16]"},
 			{Addr: 0x2004, Op: OpReturn, Src: "ret"},
 		},
 	})
@@ -322,12 +324,12 @@ func TestIntraproceduralArityInference(t *testing.T) {
 	// Case 3: 2-arg setter (reads receiver x0 and value x1)
 	fir2 := newFuncIR("setRadius", 0x3000)
 	fir2.ArgRegs = arm64ArgRegs
-	fir2.ReturnReg = arm64ReturnReg
+	fir2.ReturnReg = sdk.ARM64ReturnRegStr
 	fir2.addBlock(Block{
 		ID:      0,
 		StartVA: 0x3000,
 		Instrs: []Instr{
-			{Addr: 0x3000, Op: OpOther, Src: "str x1, [x0, #24]"},
+			{Addr: 0x3000, Op: OpOther, Src: "str x2, [x1, #24]"},
 			{Addr: 0x3004, Op: OpReturn, Src: "ret"},
 		},
 	})
@@ -344,8 +346,8 @@ func TestIntraproceduralArityInference(t *testing.T) {
 func Test2LevelPPAddressing(t *testing.T) {
 	fir := newFuncIR("test_pool_2level", 0x4000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
-	fir.PoolReg = arm64PoolReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
 	fir.PoolIndexOf = func(disp int64) (int, bool) {
 		// disp = 16 + 8 * idx
 		if disp < 16 || (disp-16)%8 != 0 {
@@ -447,13 +449,13 @@ func TestArrayPlaceholderPreserved(t *testing.T) {
 func TestTailCallSymbolResolution(t *testing.T) {
 	fir := newFuncIR("caller", 0x5000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
 
 	fir.addBlock(Block{
 		ID:      0,
 		StartVA: 0x5000,
 		Instrs: []Instr{
-			{Addr: 0x5000, Op: OpOther, Src: "mov x0, #10"},
+			{Addr: 0x5000, Op: OpOther, Src: "mov x1, #10"},
 			{Addr: 0x5004, Op: OpJump, Src: "b 0x6000", Target: "0x6000"},
 		},
 	})
@@ -469,7 +471,7 @@ func TestTailCallSymbolResolution(t *testing.T) {
 	if strings.Contains(art.Source, "tailCall_") {
 		t.Errorf("D10 violation: emitted tailCall_ placeholder:\n%s", art.Source)
 	}
-	if !strings.Contains(art.Source, "return MathTools.factorial(10);") && !strings.Contains(art.Source, "return MathTools.factorial(x0);") {
+	if !strings.Contains(art.Source, "return MathTools.factorial(10);") && !strings.Contains(art.Source, "return MathTools.factorial(x1);") {
 		t.Errorf("expected clean symbol tail call, got:\n%s", art.Source)
 	}
 }
@@ -536,7 +538,7 @@ func TestReturnTypeEmission(t *testing.T) {
 	fir := newFuncIR("computeScore", 0x4000)
 	fir.ReturnType = "int"
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
 
 	fir.addBlock(Block{
 		ID:      0,

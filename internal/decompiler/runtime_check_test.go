@@ -1,6 +1,10 @@
 package decompiler
 
-import "testing"
+import (
+	"testing"
+
+	"aotopsy/internal/sdk"
+)
 
 // isWriteBarrierCond keys on HEAP_BITS (R28), which only ever holds the
 // write-barrier mask -- so any branch condition mentioning it is the barrier
@@ -17,7 +21,7 @@ func TestIsWriteBarrierCond(t *testing.T) {
 		"(value._tag & r11l >> 2 & THR.write_barrier_mask) == 0",
 	}
 	for _, c := range barrier {
-		if !isWriteBarrierCond(c) {
+		if !sdk.IsWriteBarrierCond(c) {
 			t.Errorf("isWriteBarrierCond(%q) = false, want true", c)
 		}
 	}
@@ -28,7 +32,7 @@ func TestIsWriteBarrierCond(t *testing.T) {
 		"",
 	}
 	for _, c := range notBarrier {
-		if isWriteBarrierCond(c) {
+		if sdk.IsWriteBarrierCond(c) {
 			t.Errorf("isWriteBarrierCond(%q) = true, want false", c)
 		}
 	}
@@ -43,7 +47,7 @@ func TestIsWriteBarrierStmt(t *testing.T) {
 		"x16 = x17 & HEAP_BITS >> 32;",
 	}
 	for _, l := range drop {
-		if !isWriteBarrierStmt(l) {
+		if !sdk.IsWriteBarrierStmt(l) {
 			t.Errorf("isWriteBarrierStmt(%q) = false, want true", l)
 		}
 	}
@@ -53,7 +57,7 @@ func TestIsWriteBarrierStmt(t *testing.T) {
 		"return null;",
 	}
 	for _, l := range keep {
-		if isWriteBarrierStmt(l) {
+		if sdk.IsWriteBarrierStmt(l) {
 			t.Errorf("isWriteBarrierStmt(%q) = true, want false", l)
 		}
 	}
@@ -62,13 +66,13 @@ func TestIsWriteBarrierStmt(t *testing.T) {
 // The stack-overflow recognizer must still require both the stack_limit field
 // AND the stack pointer, so an ordinary THR-field compare is never elided.
 func TestIsStackOverflowCond(t *testing.T) {
-	if !isStackOverflowCond("CMP SP, THR.stack_limit") {
+	if !sdk.IsStackOverflowCond("CMP SP, THR.stack_limit") {
 		t.Error("prologue stack check should be recognized")
 	}
-	if isStackOverflowCond("x0 < THR.stack_limit") {
+	if sdk.IsStackOverflowCond("x0 < THR.stack_limit") {
 		t.Error("a stack_limit compare without the stack pointer must NOT be elided")
 	}
-	if isStackOverflowCond("x8 != null") {
+	if sdk.IsStackOverflowCond("x8 != null") {
 		t.Error("ordinary condition must not be a stack check")
 	}
 }

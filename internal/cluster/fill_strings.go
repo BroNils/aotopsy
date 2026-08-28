@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -194,9 +195,9 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		//   v3.0+:       kClassIdTagPos=12, kClassIdTagSize=20 → bits 12-31
 		var cid int
 		if profile.PreV32Format {
-			cid = int((uint32(tags) >> 16) & 0xFFFF)
+			cid = int((uint32(tags) >> sdk.ClassIdTagPosV2) & ((1 << sdk.ClassIdTagSizeV2) - 1))
 		} else {
-			cid = int((uint32(tags) >> 12) & ((1 << 20) - 1))
+			cid = int((uint32(tags) >> sdk.ClassIdTagPosV3) & ((1 << sdk.ClassIdTagSizeV3) - 1))
 		}
 
 		// Check if this is a string object.

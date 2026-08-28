@@ -8,6 +8,7 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 
 	"aotopsy/internal/arch"
+	"aotopsy/internal/sdk"
 )
 
 // ScanX86FunctionCFG is ScanX86Function's CFG-wide replacement, exactly
@@ -329,7 +330,7 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
 			dstIdx := arch.X86CanonReg(dstReg)
 			switch arch.X86CanonReg(mem.Base) {
-			case x86RegTHR:
+			case sdk.X86THR:
 				// H-3 fix: annotate THR loads with field names when available.
 				if thrFields != nil {
 					if name, ok := thrFields[int(mem.Disp)]; ok {
@@ -340,7 +341,7 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 				} else {
 					x86Define(regs, touched, dstIdx, "dispatch_table")
 				}
-			case x86RegPP:
+			case sdk.X86PP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
@@ -409,7 +410,7 @@ func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringR
 		return poolStringRef{}, false
 	}
 	mem, ok := inst.Args[1].(x86asm.Mem)
-	if !ok || arch.X86CanonReg(mem.Base) != x86RegPP {
+	if !ok || arch.X86CanonReg(mem.Base) != sdk.X86PP {
 		return poolStringRef{}, false
 	}
 	poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)

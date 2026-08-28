@@ -9,30 +9,18 @@ import (
 
 	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
-// x86_64 Dart AOT reserved-register convention (confirmed empirically
-// against this project's own live captures):
-// PP=r15 (object pool pointer), THR=r14 (Thread*). Dart's x64 calling
-// convention is NOT plain SysV; RDI/RSI/RDX/RCX/R8/R9 are used here only
-// as a readable arg0..arg5 naming convention for pseudocode display, not
-// a claim about the real Dart ABI's exact register assignment.
-const (
-	x86PoolReg   = "r15"
-	x86ThreadReg = "r14"
-	x86FrameReg  = "rbp"
-	x86ReturnReg = "rax"
-	// x86StackReg is the Dart stack pointer. constants_x64.h:
-	// `const Register SPREG = RSP;`.
-	x86StackReg = "rsp"
-	// CODE_REG=R12, ARGS_DESC_REG=R10 (constants_x64.h @3.12.2). Neither is in
-	// x86ArgRegs, so both leaked as raw registers before being seeded; CODE_REG
-	// (r12) was the single largest x86 raw-register leak.
-	x86CodeReg     = "r12"
-	x86ArgsDescReg = "r10"
-)
+// x86_64 Dart AOT reserved-register roles are now defined in internal/sdk,
+// verified against runtime/vm/constants_x64.h @3.12.2.
 
-var x86ArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
+// x86ArgRegs is the SDK-verified Dart calling-convention argument register
+// set (constants_x64.h DartCallingConvention::kCpuRegistersForArgs =
+// {RDI, RSI, RDX, RBX, R8, R9}), NOT the C ABI {RDI, RSI, RDX, RCX, R8, R9}.
+// The previous list had RCX instead of RBX — RCX is kClassIdReg, not an
+// argument register.
+var x86ArgRegs = sdk.DartArgRegNames(sdk.ArchX86)
 
 // x86Inst is one decoded x86_64 instruction, kept minimal (this package
 // doesn't need a general-purpose x86 disassembler elsewhere, unlike
@@ -78,16 +66,16 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	}
 	fir := newFuncIR(name, insts[0].Addr)
 	fir.ArgRegs = x86ArgRegs
-	fir.FrameReg = x86FrameReg
-	fir.ReturnReg = x86ReturnReg
-	fir.PoolReg = x86PoolReg
+	fir.FrameReg = sdk.X86FrameRegStr
+	fir.ReturnReg = sdk.X86ReturnRegStr
+	fir.PoolReg = sdk.X86PoolRegStr
 	// PP is tagged on x86_64, so FieldAddress has already subtracted the
 	// heap-object tag and the displacement is 16+8*index-1.
 	fir.PoolIndexOf = disasm.X64PoolIndex
-	fir.ThreadReg = x86ThreadReg
-	fir.StackReg = x86StackReg
-	fir.CodeReg = x86CodeReg
-	fir.ArgsDescReg = x86ArgsDescReg
+	fir.ThreadReg = sdk.X86ThreadRegStr
+	fir.StackReg = sdk.X86StackRegStr
+	fir.CodeReg = sdk.X86CodeRegStr
+	fir.ArgsDescReg = sdk.X86ArgsDescStr
 
 	funcStart := insts[0].Addr
 	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
@@ -334,7 +322,7 @@ func isX86PoolLoad(in x86Inst) bool {
 		if !ok {
 			continue
 		}
-		if strings.ToLower(mem.Base.String()) == x86PoolReg {
+		if strings.ToLower(mem.Base.String()) == sdk.X86PoolRegStr {
 			return true
 		}
 	}
@@ -351,7 +339,7 @@ func isX86PoolLoad(in x86Inst) bool {
 func x86PoolIndex(in x86Inst) int {
 	for _, arg := range in.Inst.Args {
 		mem, ok := arg.(x86asm.Mem)
-		if !ok || strings.ToLower(mem.Base.String()) != x86PoolReg {
+		if !ok || strings.ToLower(mem.Base.String()) != sdk.X86PoolRegStr {
 			continue
 		}
 		idx, idxOK := disasm.X64PoolIndex(mem.Disp)

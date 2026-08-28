@@ -2,13 +2,15 @@ package disasm
 
 import (
 	"testing"
+
+	"aotopsy/internal/arm64dec"
 )
 
 func TestIsBL(t *testing.T) {
 	// BL #0x1234 at PC=0x1000:
 	// imm26 = 0x1234/4 = 0x48D, encoding: 0x94000000 | 0x48D = 0x9400048D
 	raw := uint32(0x9400048D)
-	target, ok := isBL(raw, 0x1000)
+	target, ok := arm64dec.BL(raw, 0x1000)
 	if !ok {
 		t.Fatal("isBL failed to detect BL")
 	}
@@ -20,7 +22,7 @@ func TestIsBL(t *testing.T) {
 	// Negative offset: BL #-8 at PC=0x2000.
 	// imm26 = -2 (signed), encoded as 0x03FFFFFE
 	raw = 0x94000000 | 0x03FFFFFE
-	target, ok = isBL(raw, 0x2000)
+	target, ok = arm64dec.BL(raw, 0x2000)
 	if !ok {
 		t.Fatal("isBL failed for negative offset")
 	}
@@ -30,7 +32,7 @@ func TestIsBL(t *testing.T) {
 	}
 
 	// Non-BL instruction should not match.
-	_, ok = isBL(0xD503201F, 0) // NOP
+	_, ok = arm64dec.BL(0xD503201F, 0) // NOP
 	if ok {
 		t.Error("isBL matched NOP")
 	}
@@ -39,7 +41,7 @@ func TestIsBL(t *testing.T) {
 func TestIsBLR(t *testing.T) {
 	// BLR X16: 1101 0110 0011 1111 0000 00 10000 00000 = 0xD63F0200
 	raw := uint32(0xD63F0200)
-	rn, ok := isBLR(raw)
+	rn, ok := arm64dec.BLR(raw)
 	if !ok {
 		t.Fatal("isBLR failed")
 	}
@@ -48,7 +50,7 @@ func TestIsBLR(t *testing.T) {
 	}
 
 	// BLR X30: 0xD63F03C0
-	rn, ok = isBLR(0xD63F03C0)
+	rn, ok = arm64dec.BLR(0xD63F03C0)
 	if !ok {
 		t.Fatal("isBLR X30 failed")
 	}
@@ -57,7 +59,7 @@ func TestIsBLR(t *testing.T) {
 	}
 
 	// Non-BLR.
-	_, ok = isBLR(0xD503201F)
+	_, ok = arm64dec.BLR(0xD503201F)
 	if ok {
 		t.Error("isBLR matched NOP")
 	}

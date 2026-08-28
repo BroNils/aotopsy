@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdk"
 )
 
 // TestEmitSimpleBranch builds a tiny synthetic FuncIR by hand (bypassing
@@ -12,11 +14,11 @@ import (
 func TestEmitSimpleBranch(t *testing.T) {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	// block 0: cmp x0, x1; b.eq -> block 1 (taken) else block 2 (fallthrough)
 	fir.addBlock(Block{
@@ -65,11 +67,11 @@ func TestEmitSimpleBranch(t *testing.T) {
 func TestEmitCallWithSymbol(t *testing.T) {
 	fir := newFuncIR("caller_fn", 0x2000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	fir.addBlock(Block{
 		ID:      0,
@@ -174,11 +176,11 @@ func TestReplaceIdentToken(t *testing.T) {
 func simpleRetFir(argRegIndices []int, paramTypeNames []string) *FuncIR {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 	fir.ArgRegIndices = argRegIndices
 	fir.ParamTypeNames = paramTypeNames
 	fir.addBlock(Block{
@@ -296,11 +298,11 @@ func TestLiftStateClone_LocalsShared(t *testing.T) {
 func TestApplyOther_NewMnemonics(t *testing.T) {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	tests := []struct {
 		name string

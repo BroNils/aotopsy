@@ -19,6 +19,7 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 
 	"aotopsy/internal/arch"
+	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/disasm"
 )
 
@@ -327,38 +328,14 @@ func scanARM64CallSites(sections []execSection, includeBranches bool) []CallSite
 	return out
 }
 
-// decodeARM64BL decodes "BL imm26": 100101 imm26.
+// decodeARM64BL delegates to arm64dec.BL (shared single source).
 func decodeARM64BL(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x94000000 {
-		return 0, false
-	}
-	imm26 := raw & 0x03FFFFFF
-	offset := signExtend26(imm26) * 4
-	return uint64(int64(pc) + int64(offset)), true //nolint:gosec // signed branch offset re-added to a real VA; result is a valid address by construction
+	return arm64dec.BL(raw, pc)
 }
 
-// decodeARM64B decodes unconditional "B imm26": 000101 imm26 (distinct
-// from BL only in the top opcode bit).
+// decodeARM64B delegates to arm64dec.B (shared single source).
 func decodeARM64B(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x14000000 {
-		return 0, false
-	}
-	imm26 := raw & 0x03FFFFFF
-	offset := signExtend26(imm26) * 4
-	return uint64(int64(pc) + int64(offset)), true //nolint:gosec // signed branch offset re-added to a real VA; result is a valid address by construction
-}
-
-// signExtend26 sign-extends a 26-bit immediate field to a signed 32-bit
-// value; val is always masked to 26 bits by the caller, so the int32
-// conversions below never lose information.
-func signExtend26(val uint32) int32 {
-	const bits = 26
-	sign := uint32(1) << (bits - 1)
-	mask := sign - 1
-	if val&sign != 0 {
-		return int32(val | ^mask) //nolint:gosec // val is a 26-bit field; result fits in int32
-	}
-	return int32(val & mask) //nolint:gosec // val is a 26-bit field; result fits in int32
+	return arm64dec.B(raw, pc)
 }
 
 // --- x86_64 call/branch scanning ---
