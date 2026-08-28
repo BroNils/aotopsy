@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"aotopsy/internal/lattice"
+	"aotopsy/internal/callgraph"
 )
 
 // DOT renders the callgraph in Graphviz DOT format.
 // Style: NASA/Bauhaus — geometric, monochrome, thin rules, sparse color.
-func DOT(g *lattice.Graph, title string) string {
+func DOT(g *callgraph.Graph, title string) string {
 	const (
 		nasaBlue = "#0B3D91"
 		nasaRed  = "#FC3D21"

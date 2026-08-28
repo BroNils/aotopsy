@@ -15,9 +15,7 @@ import (
 	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
-
-	"aotopsy/internal/lattice"
-	"aotopsy/internal/lattice/render"
+	"aotopsy/internal/callgraph/render"
 )
 
 // RunDisasmStageX86 is RunDisasmStage's x86_64 counterpart: same output
@@ -219,7 +217,7 @@ func RunDisasmStageX86(
 		if opts.Graph {
 			lcfg, nblocks := callgraph.BuildX86FuncCFG(name, funcCode, funcVA, scan.Edges)
 			if nblocks > 1 {
-				g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
+				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
 				dot := render.DOTCFG(g, name)
 				dotPath := filepath.Join(cfgDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".dot")
 				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"aotopsy/internal/lattice"
+	"aotopsy/internal/callgraph"
 )
 
 // maxBlockCalls limits how many calls to show in a single block label.
@@ -13,7 +13,7 @@ const maxBlockCalls = 10
 // DOTCFG renders the CFG in Graphviz DOT format.
 // Style: Japanese minimalist — ma (間), kanso (簡素), shibumi (渋み).
 // Ink on washi: sumi strokes, one vermillion accent, generous emptiness.
-func DOTCFG(g *lattice.CFGGraph, title string) string {
+func DOTCFG(g *callgraph.CFGGraph, title string) string {
 	const (
 		sumi   = "#2D2D2D" // 墨 ink black
 		ai     = "#2D4A7A" // 藍 indigo
@@ -216,7 +216,7 @@ func DOTCFG(g *lattice.CFGGraph, title string) string {
 }
 
 // ResolveTarget follows chains of empty blocks to find the next visible block.
-func ResolveTarget(f *lattice.FuncCFG, blockID int, visible map[int]bool) int {
+func ResolveTarget(f *callgraph.FuncCFG, blockID int, visible map[int]bool) int {
 	visited := map[int]bool{}
 	for !visible[blockID] {
 		if visited[blockID] || blockID < 0 || blockID >= len(f.Blocks) {
@@ -240,7 +240,7 @@ func blockNodeID(funcIdx, blockID int) string {
 // buildBlockLabel creates an HTML label showing calls in order.
 // Washi palette: sumi for callees, cha for args, enji for strings, ai for booleans.
 // When dark=true (entry blocks), uses light colors for readability on sumi background.
-func buildBlockLabel(block *lattice.BasicBlock, funcName string, dark bool) string {
+func buildBlockLabel(block *callgraph.BasicBlock, funcName string, dark bool) string {
 	var (
 		textColor string
 		propColor string

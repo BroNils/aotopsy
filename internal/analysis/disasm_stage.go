@@ -19,8 +19,7 @@ import (
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
-	"aotopsy/internal/lattice"
-	"aotopsy/internal/lattice/render"
+	"aotopsy/internal/callgraph/render"
 )
 
 // DisasmResult holds summary stats from the disassembly stage.
@@ -284,7 +283,7 @@ func RunDisasmStage(
 		if opts.Graph {
 			lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
 			if nblocks > 1 {
-				g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
+				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
 				out.cfgDot = render.DOTCFG(g, name)
 				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
 			}
