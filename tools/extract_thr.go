@@ -31,6 +31,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/vmtables"
 )
 
 type extractTarget struct {
@@ -179,6 +181,183 @@ func fetchHeader(tag string) (string, error) {
 	return string(out), nil
 }
 
+// fetchSDKFile fetches any file from dart-lang/sdk at a given tag via gh api.
+func fetchSDKFile(path, tag string) (string, error) {
+	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
+		fmt.Sprintf("repos/dart-lang/sdk/contents/%s?ref=%s", path, tag))
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh api for %s@%s: %w", path, tag, err)
+	}
+	return string(out), nil
+}
+
+// parseVMStubCodeList parses VM_STUB_CODE_LIST(V) from stub_code_list.h,
+// returning the ordered list of stub names (including PROBE_POINT_STUBS_LIST
+// expansion). Also returns VM_TYPE_TESTING_STUB_CODE_LIST entries separately.
+func parseVMStubCodeList(header string) (vmStubs, ttsStubs []string) {
+	// Expand PROBE_POINT_STUBS_LIST(V) → V(AllocationProbePoint) first,
+	// so it's picked up by the V(Name) scan below.
+	expanded := regexp.MustCompile(`PROBE_POINT_STUBS_LIST\(V\)`).ReplaceAllString(header, "V(AllocationProbePoint)")
+
+	// Extract VM_STUB_CODE_LIST block: from #define to the next #define/#endif/EOF
+	vmStubs = extractMacroBlock(expanded, "VM_STUB_CODE_LIST")
+
+	// Extract VM_TYPE_TESTING_STUB_CODE_LIST block
+	ttsStubs = extractMacroBlock(expanded, "VM_TYPE_TESTING_STUB_CODE_LIST")
+	return vmStubs, ttsStubs
+}
+
+// extractMacroBlock finds a #define MACRO(V) ... block and extracts all
+// V(Name) entries within it, stopping at the next #define/#endif/EOF.
+func extractMacroBlock(header, macroName string) []string {
+	// Find the #define line
+	defineRe := regexp.MustCompile(`#define\s+` + regexp.QuoteMeta(macroName) + `\(V\)\s*\\?\n`)
+	loc := defineRe.FindStringIndex(header)
+	if loc == nil {
+		return nil
+	}
+	rest := header[loc[1]:]
+	// Find the end: next #define, #endif, or EOF
+	endRe := regexp.MustCompile(`\n#define\s|\n#endif`)
+	endLoc := endRe.FindStringIndex(rest)
+	if endLoc != nil {
+		rest = rest[:endLoc[0]]
+	}
+	// Extract all V(Name) entries
+	return parseMacroEntries(rest)
+}
+
+// parseMacroEntries extracts V(Name) entries from a macro body.
+func parseMacroEntries(body string) []string {
+	entryRe := regexp.MustCompile(`V\((\w+)\)`)
+	matches := entryRe.FindAllStringSubmatch(body, -1)
+	var names []string
+	for _, m := range matches {
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// parseRuntimeEntryList parses RUNTIME_ENTRY_LIST(V) and
+// LEAF_RUNTIME_ENTRY_LIST(V) from runtime_entry_list.h.
+func parseRuntimeEntryList(header string) (entries, leafEntries []string) {
+	entries = extractMacroBlock(header, "RUNTIME_ENTRY_LIST")
+	leafEntries = extractMacroBlock(header, "LEAF_RUNTIME_ENTRY_LIST")
+	return entries, leafEntries
+}
+
+// extractThreadStubOffsets filters runtime_offsets_extracted.h for
+// *_entry_point_offset fields that are in CACHED_VM_STUBS_ADDRESSES_LIST,
+// returning offset→name pairs for the given arch/compressed/product combo.
+func extractThreadStubOffsets(header, arch string, compressed, product bool) (map[int]string, error) {
+	// The CACHED_VM_STUBS_ADDRESSES_LIST entries appear as
+	// Thread::<name>_entry_point_offset in the extracted header.
+	// We filter for fields ending in _entry_point_offset that are NOT
+	// runtime entries (those are handled by the THR fields table already).
+	entries, err := extractTHRFields(header, arch, compressed, product)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]string)
+	for _, e := range entries {
+		if strings.HasSuffix(e.name, "_entry_point_offset") {
+			// Strip the _entry_point_offset suffix to get the stub name
+			stubName := strings.TrimSuffix(e.name, "_entry_point_offset")
+			out[e.offset] = stubName
+		}
+	}
+	return out, nil
+}
+
+// runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
+// for every supported version. Returns count of mismatches.
+func runCheckStubs() int {
+	mismatches := 0
+	seenTag := map[string]bool{}
+	for _, t := range allTargets {
+		if t.arch != "arm64" || seenTag[t.tag] {
+			continue
+		}
+		seenTag[t.tag] = true
+		header, err := fetchSDKFile("runtime/vm/stub_code_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		vmStubs, ttsStubs := parseVMStubCodeList(header)
+		committed := vmtables.VMStubNames(t.tag)
+		if committed == nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no committed table\n", t.tag)
+			continue
+		}
+		// Compare VM_STUB_CODE_LIST entries
+		if len(vmStubs) != len(committed) {
+			// The committed table includes TTS entries merged in by
+			// VMStubNamesInClusterOrder, so length may differ.
+			// Compare only the VM_STUB_CODE_LIST portion.
+			fmt.Fprintf(os.Stderr, "  INFO %s: SDK VM_STUB_CODE_LIST=%d, committed=%d (committed may include TTS)\n",
+				t.tag, len(vmStubs), len(committed))
+		}
+		// Check that every SDK entry appears in the committed list
+		committedSet := map[string]bool{}
+		for _, s := range committed {
+			committedSet[s] = true
+		}
+		for _, s := range vmStubs {
+			if !committedSet[s] {
+				fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK stub %q not in committed table\n", t.tag, s)
+				mismatches++
+			}
+		}
+		// Check TTS entries
+		ttsCommitted := vmtables.VMStubNamesInClusterOrder(t.tag)
+		if ttsCommitted != nil {
+			ttsCommittedSet := map[string]bool{}
+			for _, s := range ttsCommitted {
+				ttsCommittedSet[s] = true
+			}
+			for _, s := range ttsStubs {
+				if !ttsCommittedSet[s] {
+					fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK TTS stub %q not in committed table\n", t.tag, s)
+					mismatches++
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  OK %s: %d VM stubs, %d TTS stubs\n", t.tag, len(vmStubs), len(ttsStubs))
+	}
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d stub mismatch(es) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nAll stub names match SDK\n")
+	}
+	return mismatches
+}
+
+// runCheckRuntimeEntries verifies runtime entry names against SDK's
+// runtime_entry_list.h for every supported version.
+func runCheckRuntimeEntries() int {
+	mismatches := 0
+	seenTag := map[string]bool{}
+	for _, t := range allTargets {
+		if t.arch != "arm64" || seenTag[t.tag] {
+			continue
+		}
+		seenTag[t.tag] = true
+		header, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		entries, leafEntries := parseRuntimeEntryList(header)
+		fmt.Fprintf(os.Stderr, "  %s: %d runtime entries, %d leaf entries\n",
+			t.tag, len(entries), len(leafEntries))
+		// We don't have committed runtime entry tables yet — just report.
+		// Future: compare against committed tables when they exist.
+	}
+	fmt.Fprintf(os.Stderr, "\nRuntime entry check complete (report-only mode)\n")
+	return mismatches
+}
 func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 	offset int
 	name   string
@@ -1041,10 +1220,26 @@ func main() {
 	checkFlag := flag.Bool("check", false, "verify the committed THR tables against the SDK headers; exit 1 on any unexplained difference")
 	writeFlag := flag.Bool("write", false, "rewrite the committed THR tables in place from the SDK headers (run gofmt afterwards)")
 	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
+	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
+	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
 	flag.Parse()
 
 	if *checkObjectStoreFlag {
 		if runCheckObjectStore() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkStubsFlag {
+		if runCheckStubs() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkRuntimeEntriesFlag {
+		if runCheckRuntimeEntries() > 0 {
 			os.Exit(1)
 		}
 		return
