@@ -84,7 +84,7 @@ func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *T
 
 // RecoverReceiverStackSlotX86 is the x86_64 counterpart: the highest positive
 // [RBP+disp] load, validated by an owner-field access off the loaded register.
-func RecoverReceiverStackSlotX86(insts []X86DecodedInst, ownerCID int, ctx *TypeContext) (int, bool) {
+func RecoverReceiverStackSlotX86(insts []sdk.X86Decoded, ownerCID int, ctx *TypeContext) (int, bool) {
 	bestSlot := -1
 	var bestReg x86asm.Reg
 	for i := range insts {
@@ -94,7 +94,7 @@ func RecoverReceiverStackSlotX86(insts []X86DecodedInst, ownerCID int, ctx *Type
 		}
 		dst, dok := in.Args[0].(x86asm.Reg)
 		mem, mok := in.Args[1].(x86asm.Mem)
-	if !dok || !mok || sdk.X86CanonReg(mem.Base) != 5 || mem.Index != 0 {
+		if !dok || !mok || sdk.X86CanonReg(mem.Base) != 5 || mem.Index != 0 {
 			continue
 		}
 		if off := int(mem.Disp); off >= receiverSlotFloor && off > bestSlot {
@@ -111,7 +111,7 @@ func RecoverReceiverStackSlotX86(insts []X86DecodedInst, ownerCID int, ctx *Type
 	return bestSlot, true
 }
 
-func x86RegUsedAsOwnerFieldBase(insts []X86DecodedInst, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
+func x86RegUsedAsOwnerFieldBase(insts []sdk.X86Decoded, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
 	rc := sdk.X86CanonReg(reg)
 	for i := range insts {
 		in := insts[i].Inst
@@ -122,7 +122,7 @@ func x86RegUsedAsOwnerFieldBase(insts []X86DecodedInst, reg x86asm.Reg, ownerCID
 		if !ok || mem.Index != 0 {
 			continue
 		}
-	if sdk.X86CanonReg(mem.Base) != rc {
+		if sdk.X86CanonReg(mem.Base) != rc {
 			continue
 		}
 		if ctx.OwnerHasFieldAt(ownerCID, int32(mem.Disp)) {

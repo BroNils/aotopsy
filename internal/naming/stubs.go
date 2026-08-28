@@ -3,7 +3,6 @@ package naming
 // This file merges vmstubs.go, discardedfuncs.go, typeteststubs.go, and ttscall.go
 // into a single stubs.go for reduced file count.
 
-
 import (
 	"fmt"
 	"os"
@@ -13,8 +12,8 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/vmtables"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
 // BuildVMStubSymbols parses the VM-isolate snapshot region (info.VmData,
@@ -121,7 +120,6 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 	return out
 }
 
-
 // BuildDiscardedFunctionSymbols names Instructions that have NO owning Code
 // object in the snapshot -- Dart AOT release builds discard most Function's
 // Code wrapper by default (Code::IsDiscarded, gated on
@@ -209,8 +207,6 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 	}
 	return out
 }
-
-
 
 // Type-testing stubs.
 //

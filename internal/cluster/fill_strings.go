@@ -9,63 +9,6 @@ import (
 	"aotopsy/internal/snapshot"
 )
 
-// ReadFillStrings parses the Fill section of the snapshot to extract string
-// values. It processes clusters in order, extracting strings from String
-// clusters and skipping non-string clusters. Extracted strings are stored
-// in result.Strings with their ref IDs for later correlation.
-//
-// Deprecated: Use ReadFill for full fill parsing including name extraction.
-// ReadFillStrings is no longer called by any production code path -- it is
-// retained only for backward compatibility. ReadFill already handles strings
-// (via the FillString and FillROData cases) and named objects, so callers
-// should use it directly instead of the previous ReadFillStrings + ReadFill
-// two-step pattern.
-func ReadFillStrings(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, snapshotSize int64) error {
-	if result.FillStart <= 0 || result.FillStart >= len(data) {
-		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
-	}
-
-	s := dartfmt.NewStreamAt(data, result.FillStart)
-	ct := profile.CIDs
-
-	for i := range result.Clusters {
-		cm := &result.Clusters[i]
-		kind := ClassifyAlloc(cm.CID, ct)
-
-		if kind == AllocString {
-			// ROData strings (non-compressed-pointers or SplitCanonical) have no fill data.
-			// Extract string bytes from the data image region instead.
-			if profile.SplitCanonical || !profile.CompressedPointers {
-				objStart := dataImageObjStart(len(data), snapshotSize, profile)
-				// C-3 fix: StringRODataPerSubclass (≤2.12) has no abstract
-				// kStringCid cluster — OneByteString/TwoByteString each carry
-				// their own real deltas directly. Was hardcoded to only
-				// ct.String, missing all strings for Dart 2.12.
-				isStringCluster := cm.CID == ct.String ||
-					(profile.StringRODataPerSubclass && (cm.CID == ct.OneByteString || cm.CID == ct.TwoByteString))
-				if objStart > 0 && len(cm.Lengths) > 0 && isStringCluster {
-					strs := extractRODataStrings(data, cm, ct, objStart, profile, isVM)
-					result.Strings = append(result.Strings, strs...)
-				}
-				continue
-			}
-			strings, err := readFillStrings(s, cm, profile.OldStringFormat, profile.CIDs)
-			if err != nil {
-				return fmt.Errorf("fill: cluster %d (String): %w", i, err)
-			}
-			result.Strings = append(result.Strings, strings...)
-		} else {
-			// C-3 fix: was `break` — stopped at the first non-string cluster,
-			// missing string clusters that appear later in the cluster order
-			// (e.g., Dart 2.12 has Instance/TypeArguments/etc. before
-			// OneByteString). Now skip non-string clusters instead.
-			continue
-		}
-	}
-
-	return nil
-}
-
 // readFillStrings reads the fill data for a String cluster.
 // When oldFormat is true (≤2.14), length is plain ReadUnsigned and
 // isTwoByte is determined by the cluster CID (ct.TwoByteString).

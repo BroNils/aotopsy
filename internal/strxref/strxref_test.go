@@ -3,8 +3,8 @@ package strxref
 import (
 	"testing"
 
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cluster"
 )
 
 // arm64Ret is the 4-byte little-endian encoding of ARM64 "ret".

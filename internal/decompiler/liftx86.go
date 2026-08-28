@@ -501,8 +501,6 @@ func x86CondRegBitFromTest(prev *x86Inst, jccOp x86asm.Op) (string, int) {
 	return "", 0
 }
 
-
-
 // applyOtherX86 handles x86_64-only mnemonics in ApplyOther's switch.
 // Returns (line, hasLine, handled=true) if the mnemonic was consumed,
 // (handled=false) if it should fall through to the shared/ARM64 cases.

@@ -61,5 +61,3 @@ func FuncRelPathFromQualified(qualifiedName, owner string) string {
 	}
 	return strutil.SanitizeFilename(qualifiedName)
 }
-
-

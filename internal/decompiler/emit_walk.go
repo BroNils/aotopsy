@@ -604,4 +604,3 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 	e.emit(indent, "// unresolved jump target")
 	e.stats.UnresolvedCF++
 }
-

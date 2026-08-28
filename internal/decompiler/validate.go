@@ -94,7 +94,7 @@ func ValidateSource(src string) []Problem {
 		}
 		// Brace accounting, ignoring braces inside strings and comments --
 		// a `"{"` in a literal is not structure. See braceDelta.
-	depth += stmt.BraceDelta(text)
+		depth += stmt.BraceDelta(text)
 		if depth < 0 {
 			add("brace-depth-negative")
 			depth = 0

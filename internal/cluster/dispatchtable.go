@@ -156,8 +156,8 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// type-inference stage -- no typetrack_report.json and every BLR edge left
 	// unresolved. It went unnoticed because the only samples this was ever run
 	// against were 3.7.0 and 3.10.7, where reading both is correct.
-	readInitial := dartVersionAtLeast(profile.DartVersion, "2.18.0")
-	readShared := dartVersionAtLeast(profile.DartVersion, "3.5.0")
+	readInitial := snapshot.VersionAtLeast(profile.DartVersion, "2.18.0")
+	readShared := snapshot.VersionAtLeast(profile.DartVersion, "3.5.0")
 	tables := make([]string, 0, 2)
 	if readInitial {
 		tables = append(tables, "initial_field_table")

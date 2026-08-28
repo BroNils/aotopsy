@@ -341,7 +341,7 @@ func (p *exprParser) parsePrimary() (Expr, bool) {
 			p.i++ // the dot
 			for p.i < len(p.s) {
 				n := p.s[p.i]
-			if IsIdentChar(n) || isOperatorStart(n) {
+				if IsIdentChar(n) || isOperatorStart(n) {
 					p.i++
 					continue
 				}
@@ -394,7 +394,7 @@ func suffixAfter(s string, i int) (int, bool) {
 		return end + 1, true
 	case '.':
 		j := i + 1
-	for j < len(s) && (IsIdentChar(s[j]) || s[j] == '.') {
+		for j < len(s) && (IsIdentChar(s[j]) || s[j] == '.') {
 			j++
 		}
 		if j == i+1 {

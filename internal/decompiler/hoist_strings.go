@@ -47,7 +47,7 @@ func hoistStringLiterals(source string) string {
 		depth := 1
 		j := i + 1
 		for j < len(lines) && depth > 0 {
-		depth += stmt.BraceDelta(lines[j])
+			depth += stmt.BraceDelta(lines[j])
 			if depth == 0 {
 				break
 			}

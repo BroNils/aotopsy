@@ -1,6 +1,7 @@
 package disasm
 
 import "aotopsy/internal/sdk"
+
 // Object-pool index arithmetic.
 //
 // A Dart AOT function reaches a pool entry through the object-pool register

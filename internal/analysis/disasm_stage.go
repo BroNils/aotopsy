@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"aotopsy/internal/callgraph"
+	"aotopsy/internal/callgraph/render"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
@@ -19,7 +20,6 @@ import (
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
-	"aotopsy/internal/callgraph/render"
 )
 
 // DisasmResult holds summary stats from the disassembly stage.
@@ -55,7 +55,7 @@ func RunDisasmStage(
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
 		if r.RefID >= 0 {
-		symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
+			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -206,7 +206,7 @@ func RunDisasmStage(
 			ownerName = ci.OwnerName
 			name = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-			name = naming.ElfStubName(elfFuncSyms, funcVA, name)
+				name = naming.ElfStubName(elfFuncSyms, funcVA, name)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
@@ -237,7 +237,7 @@ func RunDisasmStage(
 			return
 		}
 
-	out.entry = strutil.DisasmIndexEntry{
+		out.entry = strutil.DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,

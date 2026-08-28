@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/analysis"
 )
 
 type poolRecord struct {

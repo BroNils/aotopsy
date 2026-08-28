@@ -250,12 +250,12 @@ func buildBlockLabel(block *callgraph.BasicBlock, funcName string, dark bool) st
 	if dark {
 		textColor = "#FAF6F0" // kinari
 		propColor = "#D4C5A9" // light cha
-		strColor  = "#E8A0A0" // light enji
+		strColor = "#E8A0A0"  // light enji
 		boolColor = "#8FAED4" // light ai
 	} else {
 		textColor = "#2D2D2D" // sumi
 		propColor = "#8B7355" // cha
-		strColor  = "#9B2335" // enji
+		strColor = "#9B2335"  // enji
 		boolColor = "#2D4A7A" // ai
 	}
 

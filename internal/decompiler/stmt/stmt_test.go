@@ -36,7 +36,7 @@ func TestStmtRoundTripIsExact(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := strings.Split(tc.src, "\n")
-		got := strings.Join(PrintStmts(ParseStmts(lines)), "\n")
+			got := strings.Join(PrintStmts(ParseStmts(lines)), "\n")
 			if got != tc.src {
 				t.Errorf("round trip changed the source\n--- want ---\n%s\n--- got ---\n%s", tc.src, got)
 			}

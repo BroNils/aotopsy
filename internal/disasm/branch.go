@@ -1,6 +1,7 @@
 package disasm
 
 import "aotopsy/internal/arch/arm64"
+
 // ARM64 branch instruction detection from raw 32-bit encoding.
 // These functions identify basic-block terminators and extract branch targets.
 
@@ -85,4 +86,5 @@ func DecodeBranch(raw uint32, pc uint64) *BranchInfo {
 
 	return nil
 }
+
 // signExtend is now shared from internal/arm64.SignExtend.

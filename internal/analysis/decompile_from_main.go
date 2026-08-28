@@ -16,30 +16,30 @@ import (
 // FromMainDeps bundles everything RunFromMain needs from the
 // already-parsed snapshot/pool state.
 type FromMainDeps struct {
-	Ranges                []cluster.CodeRange
-	CodeOff, CodeVA       uint64
-	SymbolNames            map[uint64]string
-	BuildFuncIR            func(cluster.CodeRange) (*decompiler.FuncIR, error)
-	CallTargetsOf          func(*decompiler.FuncIR) []uint64
-	LibraryURLForCodeRef   func(int) string
-	LibraryURLForClassRef  func(int) string
-	IsFrameworkLibraryURL  func(string) bool
-	FunctionsByOwnerClassRef map[int][]uint64
+	Ranges                    []cluster.CodeRange
+	CodeOff, CodeVA           uint64
+	SymbolNames               map[uint64]string
+	BuildFuncIR               func(cluster.CodeRange) (*decompiler.FuncIR, error)
+	CallTargetsOf             func(*decompiler.FuncIR) []uint64
+	LibraryURLForCodeRef      func(int) string
+	LibraryURLForClassRef     func(int) string
+	IsFrameworkLibraryURL     func(string) bool
+	FunctionsByOwnerClassRef  map[int][]uint64
 	ClassRefTouchedByPoolLoad func(poolIndex int) int
-	SymbolLookup           decompiler.SymbolLookup
-	PoolLookup             decompiler.PoolLookup
-	MaxFuncs               int
-	W                      *bufio.Writer
-	CombinedPath           string
-	DebugTrace             bool
-	GcEveryN               int
-	StartTime              time.Time
-	IsARM64                bool
-	GenFrida               bool
-	GenFridaOut            string
-	FridaOpts              frida.FridaOptions
-	LibPath                string
-	OutDir                 string
+	SymbolLookup              decompiler.SymbolLookup
+	PoolLookup                decompiler.PoolLookup
+	MaxFuncs                  int
+	W                         *bufio.Writer
+	CombinedPath              string
+	DebugTrace                bool
+	GcEveryN                  int
+	StartTime                 time.Time
+	IsARM64                   bool
+	GenFrida                  bool
+	GenFridaOut               string
+	FridaOpts                 frida.FridaOptions
+	LibPath                   string
+	OutDir                    string
 }
 
 // RunFromMain implements --from-main: a BFS over the real call graph

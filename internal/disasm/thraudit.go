@@ -19,6 +19,7 @@ type THRAccess struct {
 	Width     int    `json:"width"`             // 4 or 8
 	Resolved  bool   `json:"resolved"`          // whether THRFields has a name for this offset
 }
+
 // ARM64 instruction decoders are now shared from internal/arm64.
 
 // ExtractTHRAccesses scans decoded instructions for THR-relative memory operations.

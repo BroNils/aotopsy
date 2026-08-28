@@ -65,7 +65,7 @@ type AnalysisContext struct {
 	DartVersion string
 
 	// Enrichment holds lazy-built decompile maps. Nil until ensureDecompileMaps.
-	Enrichment *DecompileEnrichment
+	Enrichment      *DecompileEnrichment
 	enrichmentBuilt bool
 }
 
@@ -110,7 +110,7 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		funcVA := sc.CodeVA + funcStart
 		symbolSizes[funcVA] = r.Size
 		if r.RefID >= 0 {
-		symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
+			symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
 		} else {
 			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}

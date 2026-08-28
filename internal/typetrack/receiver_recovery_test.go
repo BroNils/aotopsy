@@ -11,9 +11,9 @@ import (
 //	0x1a3590  a0 0b 40 f9  LDR  X0, [X29,#16]   -- receiver load from FP+16
 //	0x1a3594  01 b0 40 b8  LDUR W1, [X0,#11]    -- field read off the receiver
 const (
-	rawLDR_X0_X29_16  = 0xf9400ba0
-	rawLDUR_W1_X0_11  = 0xb840b001
-	rawLDR_X3_X29_8   = 0xf94007a3 // a decoy: lower FP offset (should not win)
+	rawLDR_X0_X29_16 = 0xf9400ba0
+	rawLDUR_W1_X0_11 = 0xb840b001
+	rawLDR_X3_X29_8  = 0xf94007a3 // a decoy: lower FP offset (should not win)
 )
 
 func newCtxWithOwnerField(ownerCID int, rawFieldOff int32) *TypeContext {

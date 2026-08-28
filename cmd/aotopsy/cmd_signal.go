@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"aotopsy/internal/cli"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 )
 
 // cmdSignalPipeline handles "aotopsy signal <libapp.so>" — full pipeline through signal.

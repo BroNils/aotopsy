@@ -711,7 +711,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			if mnemonic != "lea" && fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.setReg(dst, thrStubSentinelPrefix + name)
+						s.setReg(dst, thrStubSentinelPrefix+name)
 						return "", false
 					}
 				}

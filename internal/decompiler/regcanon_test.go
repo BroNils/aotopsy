@@ -41,9 +41,9 @@ func TestCanonRegAliasingIsSymmetric(t *testing.T) {
 
 func TestStackComputedSlot(t *testing.T) {
 	cases := []struct {
-		in    string
-		out   string
-		ok    bool
+		in  string
+		out string
+		ok  bool
 	}{
 		{"SP", "stack_sp", true},
 		{"(SP - 8)", "stack_m8", true},

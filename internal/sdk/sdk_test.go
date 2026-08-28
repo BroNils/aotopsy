@@ -45,11 +45,11 @@ func TestDartArgRegNames(t *testing.T) {
 
 func TestIsWriteBarrierCond(t *testing.T) {
 	cases := map[string]bool{
-		"(x17 & HEAP_BITS >> 32) == 0":           true,
-		"(v & THR.write_barrier_mask) == 0":      true,
-		"x8 != null":                             false,
-		"THR.stack_limit < SP":                   false,
-		"":                                       false,
+		"(x17 & HEAP_BITS >> 32) == 0":      true,
+		"(v & THR.write_barrier_mask) == 0": true,
+		"x8 != null":                        false,
+		"THR.stack_limit < SP":              false,
+		"":                                  false,
 	}
 	for cond, want := range cases {
 		if got := IsWriteBarrierCond(cond); got != want {

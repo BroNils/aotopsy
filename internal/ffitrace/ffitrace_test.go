@@ -3,9 +3,9 @@ package ffitrace
 import (
 	"testing"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/analysis"
 )
 
 // arm64Ret is the 4-byte little-endian encoding of ARM64 "ret" (0xD65F03C0)

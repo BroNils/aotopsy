@@ -8,12 +8,12 @@ import (
 )
 
 func GenerateFridaScriptFromMeta(metaPath string) string {
-// from frida_metadata.json. The script:
-// 1. Loads metadata
-// 2. Hooks all named functions (entry/exit logging)
-// 3. Probes all unresolved BLR sites (reads target register at runtime)
-// 4. Extracts class IDs from object headers at BLR sites
-// 5. Sends results back via send() for frida-import to consume
+	// from frida_metadata.json. The script:
+	// 1. Loads metadata
+	// 2. Hooks all named functions (entry/exit logging)
+	// 3. Probes all unresolved BLR sites (reads target register at runtime)
+	// 4. Extracts class IDs from object headers at BLR sites
+	// 5. Sends results back via send() for frida-import to consume
 	// Read metadata
 	data, err := os.ReadFile(metaPath)
 	if err != nil {

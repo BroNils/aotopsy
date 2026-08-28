@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cluster"
 )
 
 // cmdDispatchTable implements "aotopsy _debug dispatch-table --lib

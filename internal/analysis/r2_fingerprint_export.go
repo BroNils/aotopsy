@@ -33,7 +33,7 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLoo
 		funcVA := codeVA + funcStart
 		var name string
 		if r.RefID >= 0 {
-		name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
+			name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -93,7 +93,7 @@ func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *na
 
 		var name string
 		if r.RefID >= 0 {
-		name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
+			name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)
 		}

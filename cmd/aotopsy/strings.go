@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/analysis"
 	"aotopsy/internal/strxref"
 )
 

@@ -10,8 +10,8 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"aotopsy/internal/decompiler"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/decompiler"
 )
 
 // Reference is one function that loads one of the target pool indices.

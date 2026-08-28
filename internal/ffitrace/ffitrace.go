@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"aotopsy/internal/decompiler"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/decompiler"
 )
 
 // Finding is one FFI-relevant observation: either a resolved (or

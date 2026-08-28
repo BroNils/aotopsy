@@ -23,17 +23,17 @@ import "strings"
 type StubRole int
 
 const (
-	StubRoleNone     StubRole = iota // not a recognized stub
-	StubRoleAsyncInit                // enters an async function
-	StubRoleAsyncAwait               // suspends at an await point
-	StubRoleAsyncReturn              // completes an async function
-	StubRoleAllocate                 // allocation stub (AllocateObject, etc.)
-	StubRoleWriteBarrier             // write barrier stub
-	StubRoleStackOverflow            // stack overflow check stub
-	StubRoleTypeTest                 // type test / subtype check stub
-	StubRoleSafepoint                // safepoint / deoptimization stub
-	StubRoleRuntime                  // call_to_runtime / other runtime stub
-	StubRoleError                    // null_error / range_error / etc.
+	StubRoleNone          StubRole = iota // not a recognized stub
+	StubRoleAsyncInit                     // enters an async function
+	StubRoleAsyncAwait                    // suspends at an await point
+	StubRoleAsyncReturn                   // completes an async function
+	StubRoleAllocate                      // allocation stub (AllocateObject, etc.)
+	StubRoleWriteBarrier                  // write barrier stub
+	StubRoleStackOverflow                 // stack overflow check stub
+	StubRoleTypeTest                      // type test / subtype check stub
+	StubRoleSafepoint                     // safepoint / deoptimization stub
+	StubRoleRuntime                       // call_to_runtime / other runtime stub
+	StubRoleError                         // null_error / range_error / etc.
 )
 
 // vmStubTerminators are how a Thread-table stub slot name ends. Requiring one

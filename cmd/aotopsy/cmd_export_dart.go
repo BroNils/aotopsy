@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/analysis"
 	"aotopsy/internal/strutil"
 )
 

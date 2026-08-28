@@ -72,10 +72,11 @@ func TestSwitchDispatchDetected(t *testing.T) {
 // the class hierarchy and contains expected entries.
 //
 // Ground truth: compare_sample/lib/ground_truth.dart declares:
-//   abstract class Shape { ... }
-//   class Circle extends Shape { ... }
-//   class Square extends Shape { ... }
-//   class Triangle extends Shape { ... }
+//
+//	abstract class Shape { ... }
+//	class Circle extends Shape { ... }
+//	class Square extends Shape { ... }
+//	class Triangle extends Shape { ... }
 //
 // So Shape should have 3 subclasses: Circle, Square, Triangle.
 func TestCHASubclassesBuilt(t *testing.T) {
@@ -154,7 +155,8 @@ func TestCHASubclassesBuilt(t *testing.T) {
 // decompiler pipeline which is not available in clusterOnly mode.
 //
 // Ground truth: compare_sample/lib/ground_truth.dart declares:
-//   Future<int> asyncCompute(int a, int b) async { ... }
+//
+//	Future<int> asyncCompute(int a, int b) async { ... }
 //
 // LIMITATION: In AOT PRODUCT, async state machine is compiled as a tail call
 // to a resume function, without recognizable stub calls. Full async detection

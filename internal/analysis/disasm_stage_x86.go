@@ -7,15 +7,15 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/callgraph"
+	"aotopsy/internal/callgraph/render"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
-	"aotopsy/internal/callgraph/render"
 )
 
 // RunDisasmStageX86 is RunDisasmStage's x86_64 counterpart: same output
@@ -45,7 +45,7 @@ func RunDisasmStageX86(
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
 		if r.RefID >= 0 {
-		symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
+			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -146,7 +146,7 @@ func RunDisasmStageX86(
 			ownerName = ci.OwnerName
 			name = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-			name = naming.ElfStubName(elfFuncSyms, funcVA, name)
+				name = naming.ElfStubName(elfFuncSyms, funcVA, name)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)

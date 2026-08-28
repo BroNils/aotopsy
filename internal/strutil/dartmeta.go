@@ -29,14 +29,14 @@ type FlutterMetaTHRField struct {
 
 // FlutterMetaJSON is the top-level flutter_meta.json structure.
 type FlutterMetaJSON struct {
-	Version        string                `json:"version"`
-	DartVersion    string                `json:"dart_version,omitempty"`
-	PointerSize    int                   `json:"pointer_size,omitempty"`
-	Functions      []FlutterMetaFunc     `json:"functions"`
-	Comments       []FlutterMetaComment  `json:"comments"`
-	FocusFunctions []string              `json:"focus_functions,omitempty"`
+	Version        string                 `json:"version"`
+	DartVersion    string                 `json:"dart_version,omitempty"`
+	PointerSize    int                    `json:"pointer_size,omitempty"`
+	Functions      []FlutterMetaFunc      `json:"functions"`
+	Comments       []FlutterMetaComment   `json:"comments"`
+	FocusFunctions []string               `json:"focus_functions,omitempty"`
 	Classes        []FlutterMetaJSONClass `json:"classes,omitempty"`
-	THRFields      []FlutterMetaTHRField `json:"thr_fields,omitempty"`
+	THRFields      []FlutterMetaTHRField  `json:"thr_fields,omitempty"`
 }
 
 // FlutterMetaComment is a comment entry for flutter_meta.json.
@@ -48,9 +48,9 @@ type FlutterMetaComment struct {
 // FlutterMetaJSONClass is a class layout entry in flutter_meta.json.
 // Aliased from pipeline.DartClassLayout to avoid pipeline import.
 type FlutterMetaJSONClass struct {
-	ClassName    string            `json:"class_name"`
-	ClassID      int32             `json:"class_id"`
-	InstanceSize int32             `json:"instance_size"`
+	ClassName    string             `json:"class_name"`
+	ClassID      int32              `json:"class_id"`
+	InstanceSize int32              `json:"instance_size"`
 	Fields       []FlutterMetaField `json:"fields"`
 }
 
@@ -69,9 +69,9 @@ func WriteDartMeta(outDir, dartVersion string, compressed bool, ptrSize int, thr
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Offset < fields[j].Offset })
 
 	meta := FlutterMetaJSON{
-		DartVersion:    dartVersion,
-		PointerSize:    ptrSize,
-		THRFields:      fields,
+		DartVersion: dartVersion,
+		PointerSize: ptrSize,
+		THRFields:   fields,
 	}
 
 	f, err := os.Create(filepath.Join(outDir, "dart_meta.json"))

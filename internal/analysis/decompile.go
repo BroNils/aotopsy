@@ -12,19 +12,19 @@ import (
 // DecompileNativeDeps bundles everything the decompile-native command
 // needs from the already-parsed Context, so the CLI handler can be thin.
 type DecompileNativeDeps struct {
-	Ctx           *AnalysisContext
-	Libapp        string
-	IsARM64       bool
-	SymbolNames    map[uint64]string
-	SymbolSizes   map[uint64]uint32
-	PoolDisplay    map[int]string
-	BuildFuncIR    func(cluster.CodeRange) (*decompiler.FuncIR, error)
-	SymbolLookup   decompiler.SymbolLookup
-	PoolLookup     decompiler.PoolLookup
+	Ctx                  *AnalysisContext
+	Libapp               string
+	IsARM64              bool
+	SymbolNames          map[uint64]string
+	SymbolSizes          map[uint64]uint32
+	PoolDisplay          map[int]string
+	BuildFuncIR          func(cluster.CodeRange) (*decompiler.FuncIR, error)
+	SymbolLookup         decompiler.SymbolLookup
+	PoolLookup           decompiler.PoolLookup
 	DecompileRangeWithIR func(cluster.CodeRange) (*decompiler.FuncIR, decompiler.Artifact, error)
 	// Library classification for --from-main
-	LibraryURLForCodeRef     func(int) string
-	LibraryURLForClassRef    func(int) string
+	LibraryURLForCodeRef      func(int) string
+	LibraryURLForClassRef     func(int) string
 	IsFrameworkLibraryURL     func(string) bool
 	FunctionsByOwnerClassRef  map[int][]uint64
 	ClassRefTouchedByPoolLoad func(poolIndex int) int
@@ -177,18 +177,18 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 	}
 
 	return &DecompileNativeDeps{
-		Ctx:           ctx,
-		Libapp:        libapp,
-		IsARM64:       ctx.IsARM64,
-		SymbolNames:    symbolNames,
-		SymbolSizes:   symbolSizes,
-		PoolDisplay:    ctx.PoolDisplay,
-		BuildFuncIR:    buildFuncIR,
-		SymbolLookup:   symbolLookup,
-		PoolLookup:     poolLookup,
-		DecompileRangeWithIR: decompileRangeWithIR,
-		LibraryURLForCodeRef:     libraryURLForCodeRef,
-		LibraryURLForClassRef:    libraryURLForClassRef,
+		Ctx:                       ctx,
+		Libapp:                    libapp,
+		IsARM64:                   ctx.IsARM64,
+		SymbolNames:               symbolNames,
+		SymbolSizes:               symbolSizes,
+		PoolDisplay:               ctx.PoolDisplay,
+		BuildFuncIR:               buildFuncIR,
+		SymbolLookup:              symbolLookup,
+		PoolLookup:                poolLookup,
+		DecompileRangeWithIR:      decompileRangeWithIR,
+		LibraryURLForCodeRef:      libraryURLForCodeRef,
+		LibraryURLForClassRef:     libraryURLForClassRef,
 		IsFrameworkLibraryURL:     isFrameworkLibraryURL,
 		FunctionsByOwnerClassRef:  functionsByOwnerClassRef,
 		ClassRefTouchedByPoolLoad: classRefTouchedByPoolLoad,

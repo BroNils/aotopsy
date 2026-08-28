@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"aotopsy/internal/ffitrace"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/ffitrace"
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":

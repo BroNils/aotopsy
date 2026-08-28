@@ -1017,7 +1017,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		// Without compressed pointers, they use ROData (no fill).
 		if profile.CompressedPointers {
 			spec := FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
-			if cid == ct.CompressedStackMaps && dartVersionAtLeast(profile.DartVersion, "2.15.0") {
+			if cid == ct.CompressedStackMaps && snapshot.VersionAtLeast(profile.DartVersion, "2.15.0") {
 				spec.InlineBytesLengthShift = 2
 			}
 			return spec
@@ -1076,7 +1076,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 // typeClassIDShift returns where type_class_id starts in UntaggedType's packed
 // flags word for a given Dart version. See FillSpec.TypeClassIDShift.
 func typeClassIDShift(dartVersion string) uint {
-	if dartVersionAtLeast(dartVersion, "3.5.0") {
+	if snapshot.VersionAtLeast(dartVersion, "3.5.0") {
 		return 3
 	}
 	return 4
@@ -1128,7 +1128,7 @@ var (
 
 // packedParamLayoutFor picks the layout for a Dart version.
 func packedParamLayoutFor(dartVersion string) PackedParamLayout {
-	if dartVersionAtLeast(dartVersion, "2.14.0") {
+	if snapshot.VersionAtLeast(dartVersion, "2.14.0") {
 		return packedParams214
 	}
 	return packedParamsPre214
@@ -1175,7 +1175,7 @@ var (
 
 // funcPackedFieldsFor picks the layout for a Dart version.
 func funcPackedFieldsFor(dartVersion string) FuncPackedFieldsLayout {
-	if dartVersionAtLeast(dartVersion, "2.12.0") {
+	if snapshot.VersionAtLeast(dartVersion, "2.12.0") {
 		return funcPackedFields212
 	}
 	return funcPackedFields210
@@ -1185,9 +1185,9 @@ func funcPackedFieldsFor(dartVersion string) FuncPackedFieldsLayout {
 // Function.data for a Dart version. See specFunction.
 func functionRefLayoutFor(dartVersion string) FunctionRefLayout {
 	switch {
-	case dartVersionAtLeast(dartVersion, "2.14.0"):
+	case snapshot.VersionAtLeast(dartVersion, "2.14.0"):
 		return functionRefs214
-	case dartVersionAtLeast(dartVersion, "2.12.0"):
+	case snapshot.VersionAtLeast(dartVersion, "2.12.0"):
 		return functionRefs212
 	default:
 		return functionRefs210

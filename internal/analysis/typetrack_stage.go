@@ -14,8 +14,9 @@ import (
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/naming"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
 	"aotopsy/internal/vmtables"
@@ -329,7 +330,7 @@ func runTypeInference(
 	if isARM64 {
 		funcInstsARM64 = make(map[string][]disasm.Inst, len(ranges))
 	} else {
-		funcInstsX86 = make(map[string][]typetrack.X86DecodedInst, len(ranges))
+		funcInstsX86 = make(map[string][]sdk.X86Decoded, len(ranges))
 	}
 	// DartCallingConvention (kCpuRegistersForArgs) first appears in
 	// constants_arm64.h at 3.4.3; before it, every argument including the
@@ -463,7 +464,7 @@ func runTypeInference(
 						if calleeName != "" {
 							blEdges[name] = append(blEdges[name], typetrack.BLEdge{
 								Callee: calleeName,
-								CallPC: inst.Addr,
+								CallPC: inst.VA,
 							})
 						}
 					}
@@ -677,7 +678,7 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 				e.Candidates = res.Candidates
 				bd.Monomorphic++
 			}
-	} else if name := naming.TtsCallTarget(e.Via, ttsByPoolIndex); name != "" {
+		} else if name := naming.TtsCallTarget(e.Via, ttsByPoolIndex); name != "" {
 			// A call through a pool slot holding a Type invokes that type's
 			// testing stub -- GenerateIndirectTTSCall, see ttscall.go. One
 			// known callee, so it counts as a stub rather than a Dart-level
@@ -799,13 +800,13 @@ func resolveViaPoolDisplay(via string) string {
 }
 
 // x86CallRelTarget returns the absolute target of a CALL rel32 instruction.
-func x86CallRelTarget(d typetrack.X86DecodedInst) (uint64, bool) {
+func x86CallRelTarget(d sdk.X86Decoded) (uint64, bool) {
 	for _, arg := range d.Inst.Args {
 		if arg == nil {
 			continue
 		}
 		if rel, ok := arg.(x86asm.Rel); ok {
-			return d.Addr + uint64(d.Len) + uint64(int64(rel)), true
+			return d.VA + uint64(d.Len) + uint64(int64(rel)), true
 		}
 	}
 	return 0, false

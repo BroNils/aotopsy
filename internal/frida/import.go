@@ -19,21 +19,21 @@ type FridaRuntimeResult struct {
 }
 
 type FridaDispatchResolution struct {
-	BLRAddr   string `json:"blr_addr"`
-	FromFunc  string `json:"from_func"`
-	TargetVA  string `json:"target_va"`
+	BLRAddr    string `json:"blr_addr"`
+	FromFunc   string `json:"from_func"`
+	TargetVA   string `json:"target_va"`
 	TargetName string `json:"target_name,omitempty"`
-	ClassID   int    `json:"class_id,omitempty"`
+	ClassID    int    `json:"class_id,omitempty"`
 }
 
 type FridaTypeSnapshot struct {
-	FuncVA    string            `json:"func_va"`
-	Registers map[string]int    `json:"registers"`
+	FuncVA    string         `json:"func_va"`
+	Registers map[string]int `json:"registers"`
 }
 
 type FridaHeapObject struct {
-	Address  string `json:"address"`
-	ClassID  int    `json:"class_id"`
+	Address   string `json:"address"`
+	ClassID   int    `json:"class_id"`
 	ClassName string `json:"class_name,omitempty"`
 }
 

@@ -35,7 +35,7 @@ type Artifact struct {
 }
 
 const (
-	maxDepth      = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
+	maxDepth = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
 	// Re-emission cap. Lowered from 24: coverage is set by each block's FIRST
 	// emission (unaffected here), so anything above this only DUPLICATES already-
 	// emitted code. On dense 100+ block state machines (chunked-JSON parser) the
@@ -109,11 +109,11 @@ type emitter struct {
 	// phiDeclared guards against re-declaring a header's induction locals if the
 	// loop-entry path is reached more than once.
 	phiDeclared map[int]bool
-	callIdx       int
-	steps         int
-	budgetHit     bool
-	stats         Stats
-	loopHeaders   map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	callIdx     int
+	steps       int
+	budgetHit   bool
+	stats       Stats
+	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -232,10 +232,10 @@ func (e *emitter) annotateBlockTry(id, indent int) {
 func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact {
 	fir.ComputePreds() // A3: compute predecessors for if/else inlining
 	e := &emitter{
-		fir:        fir,
-		symbols:    symbols,
-		pool:       pool,
-		state:      newLiftState(fir.NullReg),
+		fir:         fir,
+		symbols:     symbols,
+		pool:        pool,
+		state:       newLiftState(fir.NullReg),
 		active:      make(map[int]bool),
 		visits:      make(map[int]int),
 		omittedSet:  make(map[int]bool),

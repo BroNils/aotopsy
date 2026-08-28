@@ -67,7 +67,7 @@ type Block struct {
 	StartVA uint64
 	Instrs  []Instr
 	Succs   []Succ
-	IsTerm  bool // ends in RET or a branch out of the function
+	IsTerm  bool  // ends in RET or a branch out of the function
 	Preds   []int // predecessor block IDs (computed by ComputePreds)
 }
 
@@ -342,8 +342,8 @@ func (f *FuncIR) AllocatedClassID(calleeName string) int {
 
 // SwitchCase is one case in a recovered switch dispatch.
 type SwitchCase struct {
-	Index   int    // case value (0-based)
-	BlockID int    // target block ID in FuncIR.Blocks
+	Index   int // case value (0-based)
+	BlockID int // target block ID in FuncIR.Blocks
 }
 
 // TryRegionEntry is one recovered try block: a PC range plus the handler it

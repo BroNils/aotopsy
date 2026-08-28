@@ -355,7 +355,7 @@ func scanX86CallSites(sections []execSection, includeBranches bool) []CallSite {
 			isCall := d.Inst.Op == x86asm.CALL
 			isJmp := includeBranches && d.Inst.Op == x86asm.JMP
 			if isCall || isJmp {
-			if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+				if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
 					out = append(out, CallSite{FromVA: d.VA, TargetVA: target})
 				}
 			}

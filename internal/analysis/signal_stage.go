@@ -96,11 +96,11 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			if sf.Role == "" {
 				continue
 			}
-		relPath := naming.FuncRelPathFromQualified(sf.Name, sf.Owner)
+			relPath := naming.FuncRelPathFromQualified(sf.Name, sf.Owner)
 			path := filepath.Join(asmDir, relPath+".txt")
 			data, err := os.ReadFile(path)
 			if err != nil {
-			flatPath := filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".txt")
+				flatPath := filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".txt")
 				data, err = os.ReadFile(flatPath)
 				if err != nil {
 					continue
@@ -238,7 +238,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 				return nil, fmt.Errorf("write signal_cfg.dot: %w", err)
 			}
 			logf("  %s->%s %s%s%s (%d functions, %d bytes)\n",
-			cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), strutil.FileSize(cfgPath))
+				cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), strutil.FileSize(cfgPath))
 		}
 	}
 
@@ -279,7 +279,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			} else if err != nil {
 				logf("  %s!%s dot render failed for %s: %v\n%s\n", cli.Red, cli.Reset, filepath.Base(df), err, out)
 			} else {
-			logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, strutil.FileSize(svgPath))
+				logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, strutil.FileSize(svgPath))
 			}
 		}
 	}
@@ -306,7 +306,7 @@ func BuildSignalContent(
 			FromPC:     pc,
 			Kind:       er.Kind,
 			TargetName: er.Target,
-		TargetPC:   strutil.ParseHexAddr(er.Target),
+			TargetPC:   strutil.ParseHexAddr(er.Target),
 			Via:        er.Via,
 		}
 		edgesByFunc[er.FromFunc] = append(edgesByFunc[er.FromFunc], ce)
@@ -329,18 +329,18 @@ func BuildSignalContent(
 			continue
 		}
 
-	relPath := naming.FuncRelPathFromQualified(sf.Name, sf.Owner)
+		relPath := naming.FuncRelPathFromQualified(sf.Name, sf.Owner)
 		binPath := filepath.Join(asmDir, relPath+".bin")
 		data, err := os.ReadFile(binPath)
 		if err != nil {
-		binPath = filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".bin")
+			binPath = filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".bin")
 			data, err = os.ReadFile(binPath)
 		}
 		if err != nil || len(data) < 4 {
 			continue
 		}
 
-	baseAddr := strutil.ParseHexAddr(fr.PC)
+		baseAddr := strutil.ParseHexAddr(fr.PC)
 		if baseAddr == 0 {
 			continue
 		}
@@ -386,7 +386,7 @@ func BuildSignalContent(
 				if callee == "" {
 					callee = e.Via
 				}
-			if signal.IsInterestingCallee(callee) && !seenCalls[callee] {
+				if signal.IsInterestingCallee(callee) && !seenCalls[callee] {
 					seenCalls[callee] = true
 					calls = append(calls, callee)
 				}

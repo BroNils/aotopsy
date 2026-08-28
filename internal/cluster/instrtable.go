@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
-	"strings"
 
 	"aotopsy/internal/snapshot"
 )
@@ -46,46 +45,10 @@ type CodeRange struct {
 // Verified via gh api at tags 2.12.0, 2.18.0 (kMaxObjectAlignment),
 // and 2.19.0, 3.9.2 (kObjectStartAlignment).
 func dataImageAlignment(profile *snapshot.VersionProfile) int64 {
-	if dartVersionAtLeast(profile.DartVersion, "2.19.0") {
+	if snapshot.VersionAtLeast(profile.DartVersion, "2.19.0") {
 		return 64
 	}
 	return 16
-}
-
-// dartVersionAtLeast compares a Dart version string (e.g. "3.9.2") against
-// a minimum version (e.g. "2.19.0"). Returns true if version >= minimum.
-// Only handles the standard A.B.C format used by Dart SDK tags.
-func dartVersionAtLeast(version, minimum string) bool {
-	v := parseDartVersion(version)
-	m := parseDartVersion(minimum)
-	if v[0] != m[0] {
-		return v[0] > m[0]
-	}
-	if v[1] != m[1] {
-		return v[1] > m[1]
-	}
-	return v[2] >= m[2]
-}
-
-// parseDartVersion parses "A.B.C" into [3]int.
-func parseDartVersion(s string) [3]int {
-	var v [3]int
-	parts := strings.SplitN(s, ".", 3)
-	for i, p := range parts {
-		if i >= 3 {
-			break
-		}
-		n := 0
-		for _, c := range p {
-			if c >= '0' && c <= '9' {
-				n = n*10 + int(c-'0')
-			} else {
-				break
-			}
-		}
-		v[i] = n
-	}
-	return v
 }
 
 // oneByteStringHeaderSize is the size of a OneByteString object header in the

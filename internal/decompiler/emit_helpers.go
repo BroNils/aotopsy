@@ -297,7 +297,6 @@ func invertCondition(cond string) string {
 	return "!(" + cond + ")"
 }
 
-
 // inferReturnTypeFromName infers a Dart function's return type from its name
 // using Dart naming conventions. Returns "dynamic" when unknown.
 //

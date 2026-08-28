@@ -41,9 +41,9 @@ func cmdFindLibappBatch(args []string) error {
 		if !strings.HasSuffix(e.Name(), ".zip") {
 			continue
 		}
-	path := filepath.Join(*dir, e.Name())
-	s := summary{Name: e.Name()}
-	result, err := analysis.FindLibappInZip(path)
+		path := filepath.Join(*dir, e.Name())
+		s := summary{Name: e.Name()}
+		result, err := analysis.FindLibappInZip(path)
 		if err != nil {
 			s.Error = err.Error()
 		} else {

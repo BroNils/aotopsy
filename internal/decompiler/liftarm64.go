@@ -252,8 +252,6 @@ func arm64PoolIndex(operands string) int {
 	return idx
 }
 
-
-
 // applyOtherARM64 handles ARM64-only mnemonics in ApplyOther's switch.
 // Returns (line, hasLine, handled=true) if the mnemonic was consumed,
 // (handled=false) if it should fall through to the shared/x86 cases.
@@ -303,7 +301,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.setReg(dst, thrStubSentinelPrefix + name)
+						s.setReg(dst, thrStubSentinelPrefix+name)
 						return "", false, true
 					}
 				}
@@ -340,7 +338,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if (dst1 == "x29" || dst1 == "fp" || dst1 == sdk.ARM64FrameRegStr) &&
 				(dst2 == "x30" || dst2 == "lr" || dst2 == sdk.ARM64LinkRegStr) {
 				memOp := parseOperand(ops[2])
-			if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
+				if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
 					// Epilogue frame restore — elide in high-level pseudocode
 					return "", false, true
 				}
@@ -362,7 +360,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			if (src1 == "x29" || src1 == "fp" || src1 == sdk.ARM64FrameRegStr) &&
 				(src2 == "x30" || src2 == "lr" || src2 == sdk.ARM64LinkRegStr) {
 				memOp := parseOperand(ops[2])
-			if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
+				if memOp.isMem && (memOp.memBase == sdk.ARM64StackRegStr || memOp.memBase == "sp" || memOp.memBase == "csp") {
 					// Prologue frame pointer & link register save — elide in high-level pseudocode
 					return "", false, true
 				}

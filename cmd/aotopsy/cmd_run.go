@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"aotopsy/internal/cli"
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 )
 
 // cmdRun handles "aotopsy <libapp.so>" — full analysis.

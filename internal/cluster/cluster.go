@@ -382,4 +382,3 @@ func FindClusterDataStart(data []byte) (int, error) {
 	}
 	return 0, fmt.Errorf("cluster: unterminated features string")
 }
-

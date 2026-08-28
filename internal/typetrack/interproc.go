@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // sortedKeysInsts, sortedKeysX86 and sortedEdgeKeys return map keys in a
@@ -87,7 +88,7 @@ type InterResult struct {
 type FuncInstsARM64 map[string][]disasm.Inst
 
 // FuncInstsX86 holds x86_64 function instructions for RunInterprocedural.
-type FuncInstsX86 map[string][]X86DecodedInst
+type FuncInstsX86 map[string][]sdk.X86Decoded
 
 // RunInterprocedural runs the inter-procedural fixed-point algorithm:
 //  1. For each function, run intra-procedural analysis with current

@@ -322,7 +322,6 @@ func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	}
 }
 
-
 // Helper to parse first JSON object from JSONL.
 func parseFirstJSON(t *testing.T, path string) map[string]interface{} {
 	t.Helper()

@@ -14,7 +14,6 @@ import (
 	"aotopsy/internal/strutil"
 )
 
-
 // RunMetaStage generates flutter_meta.json from existing disasm output.
 func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writer) (string, error) {
 	if log == nil {
@@ -125,7 +124,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 		}
 		strAdded := 0
 		for _, sr := range stringRefs {
-		addr := strutil.NormalizeHexAddr(sr.PC)
+			addr := strutil.NormalizeHexAddr(sr.PC)
 			if seen[addr] {
 				continue
 			}
@@ -134,7 +133,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 			if len(val) > 80 {
 				val = val[:77] + "..."
 			}
-		comments = append(comments, strutil.FlutterMetaComment{
+			comments = append(comments, strutil.FlutterMetaComment{
 				Addr: addr,
 				Text: fmt.Sprintf("str: %q", val),
 			})

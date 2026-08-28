@@ -74,7 +74,7 @@ func InlineSingleUseTempsStmt(stmts []Stmt) ([]Stmt, bool) {
 			// Check if the single use is in the immediately following statement (i+1).
 			if i+1 < len(body) {
 				nextLine := asLine(body[i+1])
-			if nextLine != nil && !nextLine.isLabel() && ReferencesIdent(nextLine.Text, temp) {
+				if nextLine != nil && !nextLine.isLabel() && ReferencesIdent(nextLine.Text, temp) {
 					re := identBoundaryRe(temp)
 					inlinedText := re.ReplaceAllString(nextLine.Text, rhs)
 					nextLine.Text = inlinedText
@@ -89,13 +89,13 @@ func InlineSingleUseTempsStmt(stmts []Stmt) ([]Stmt, bool) {
 			}
 
 			// If rhs is pure (no function calls or state modification), check subsequent siblings.
-		if !HasSideEffect(rhs) {
+			if !HasSideEffect(rhs) {
 				for j := i + 1; j < len(body); j++ {
 					targetLine := asLine(body[j])
 					if targetLine == nil || targetLine.isLabel() {
 						break // do not cross construct boundaries or labels
 					}
-				if ReferencesIdent(targetLine.Text, temp) {
+					if ReferencesIdent(targetLine.Text, temp) {
 						re := identBoundaryRe(temp)
 						targetLine.Text = re.ReplaceAllString(targetLine.Text, rhs)
 

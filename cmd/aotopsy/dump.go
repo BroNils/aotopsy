@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
-	"aotopsy/internal/analysis"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )

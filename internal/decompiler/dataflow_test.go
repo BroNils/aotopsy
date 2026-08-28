@@ -58,10 +58,10 @@ func TestSeedFromFixpointNeverOverridesKnown(t *testing.T) {
 // A nil fixpoint slot (or out-of-range id) is a safe no-op.
 func TestSeedFromFixpointNilSafe(t *testing.T) {
 	e := &emitter{state: newLiftStateWith(map[string]string{"x8": "keep"})}
-	e.seedFromFixpoint(0)  // blockEntryState nil
+	e.seedFromFixpoint(0) // blockEntryState nil
 	e.blockEntryState = []*LiftState{nil}
-	e.seedFromFixpoint(0)  // slot nil
-	e.seedFromFixpoint(9)  // out of range
+	e.seedFromFixpoint(0) // slot nil
+	e.seedFromFixpoint(9) // out of range
 	if got := e.state.Regs["x8"]; got != "keep" {
 		t.Errorf("x8 = %q, want keep (no-op paths must not mutate state)", got)
 	}

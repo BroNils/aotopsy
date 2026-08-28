@@ -26,10 +26,10 @@ type sarifTool struct {
 }
 
 type sarifDriver struct {
-	Name           string       `json:"name"`
-	Version        string       `json:"version"`
-	InformationURI string       `json:"informationUri"`
-	Rules          []sarifRule  `json:"rules"`
+	Name           string      `json:"name"`
+	Version        string      `json:"version"`
+	InformationURI string      `json:"informationUri"`
+	Rules          []sarifRule `json:"rules"`
 }
 
 type sarifRule struct {
@@ -50,10 +50,10 @@ type sarifRuleConfig struct {
 }
 
 type sarifResult struct {
-	RuleID             string            `json:"ruleId"`
-	Level              string            `json:"level"`
-	Message            sarifDescription  `json:"message"`
-	Locations          []sarifLocation   `json:"locations"`
+	RuleID              string            `json:"ruleId"`
+	Level               string            `json:"level"`
+	Message             sarifDescription  `json:"message"`
+	Locations           []sarifLocation   `json:"locations"`
 	PartialFingerprints map[string]string `json:"partialFingerprints"`
 }
 
@@ -71,7 +71,7 @@ type sarifArtifactLocation struct {
 }
 
 type sarifRegion struct {
-	StartLine int          `json:"startLine"`
+	StartLine int           `json:"startLine"`
 	Snippet   *sarifSnippet `json:"snippet,omitempty"`
 }
 
@@ -83,66 +83,66 @@ type sarifSnippet struct {
 // Category strings are duplicated from signal/classify.go to keep output
 // independent of the signal package.
 var ruleLevel = map[string]string{
-	"rooting":         "error",
-	"anti_analysis":   "error",
-	"ssl_pinning":     "warning",
-	"accessibility":   "error",
-	"fraud":           "error",
-	"dynamic_load":    "warning",
-	"ipc":             "note",
-	"covert_channel":  "error",
-	"drm_bypass":      "warning",
-	"obfuscation":     "warning",
-	"crypto_const":    "note",
-	"method_channel":  "note",
-	"plugin":          "note",
-	"encryption":      "note",
-	"auth":            "note",
-	"net":             "note",
-	"base64":          "warning",
-	"sim":             "warning",
-	"sms":             "warning",
-	"contacts":        "warning",
-	"location":        "warning",
-	"device":          "warning",
-	"data":            "warning",
-	"camera":          "warning",
-	"webview":         "note",
-	"blockchain":      "note",
-	"gambling":        "note",
-	"attribution":     "note",
+	"rooting":        "error",
+	"anti_analysis":  "error",
+	"ssl_pinning":    "warning",
+	"accessibility":  "error",
+	"fraud":          "error",
+	"dynamic_load":   "warning",
+	"ipc":            "note",
+	"covert_channel": "error",
+	"drm_bypass":     "warning",
+	"obfuscation":    "warning",
+	"crypto_const":   "note",
+	"method_channel": "note",
+	"plugin":         "note",
+	"encryption":     "note",
+	"auth":           "note",
+	"net":            "note",
+	"base64":         "warning",
+	"sim":            "warning",
+	"sms":            "warning",
+	"contacts":       "warning",
+	"location":       "warning",
+	"device":         "warning",
+	"data":           "warning",
+	"camera":         "warning",
+	"webview":        "note",
+	"blockchain":     "note",
+	"gambling":       "note",
+	"attribution":    "note",
 }
 
 // ruleDescription maps categories to human-readable descriptions.
 var ruleDescription = map[string]string{
-	"rooting":         "Root/jailbreak detection or bypass code found",
-	"anti_analysis":   "Anti-debugging, anti-frida, or emulator detection found",
-	"ssl_pinning":     "SSL/TLS certificate pinning implementation detected",
-	"accessibility":   "Accessibility service abuse — potential keylogger or screen capture",
-	"fraud":           "Fraud, phishing, or banking-related patterns detected",
-	"dynamic_load":    "Dynamic code loading via DynamicLibrary or reflection",
-	"ipc":             "Android IPC usage — Binder, ServiceManager, ContentProvider",
-	"covert_channel":  "Covert communication channel — Tor, proxy, DNS tunnel",
-	"drm_bypass":      "DRM bypass or circumvention code detected",
-	"obfuscation":     "Code obfuscation detected — short meaningless identifiers",
-	"crypto_const":    "Known cryptographic algorithm constants detected",
-	"method_channel":  "Flutter MethodChannel usage detected",
-	"plugin":          "Flutter plugin integration detected",
-	"encryption":      "Encryption-related keyword detected",
-	"auth":            "Authentication-related keyword detected",
-	"net":             "Network communication detected",
-	"base64":          "High-entropy string — potential API key or secret",
-	"sim":             "SIM card or telephony access",
-	"sms":             "SMS read or send capability",
-	"contacts":        "Contact list access",
-	"location":        "Location or GPS access",
-	"device":          "Device fingerprinting or identification",
-	"data":            "Bulk data collection pattern",
-	"camera":          "Camera access",
-	"webview":         "WebView usage with JavaScript bridge",
-	"blockchain":      "Blockchain or cryptocurrency wallet",
-	"gambling":        "Gambling or betting patterns",
-	"attribution":     "Install attribution or campaign tracking",
+	"rooting":        "Root/jailbreak detection or bypass code found",
+	"anti_analysis":  "Anti-debugging, anti-frida, or emulator detection found",
+	"ssl_pinning":    "SSL/TLS certificate pinning implementation detected",
+	"accessibility":  "Accessibility service abuse — potential keylogger or screen capture",
+	"fraud":          "Fraud, phishing, or banking-related patterns detected",
+	"dynamic_load":   "Dynamic code loading via DynamicLibrary or reflection",
+	"ipc":            "Android IPC usage — Binder, ServiceManager, ContentProvider",
+	"covert_channel": "Covert communication channel — Tor, proxy, DNS tunnel",
+	"drm_bypass":     "DRM bypass or circumvention code detected",
+	"obfuscation":    "Code obfuscation detected — short meaningless identifiers",
+	"crypto_const":   "Known cryptographic algorithm constants detected",
+	"method_channel": "Flutter MethodChannel usage detected",
+	"plugin":         "Flutter plugin integration detected",
+	"encryption":     "Encryption-related keyword detected",
+	"auth":           "Authentication-related keyword detected",
+	"net":            "Network communication detected",
+	"base64":         "High-entropy string — potential API key or secret",
+	"sim":            "SIM card or telephony access",
+	"sms":            "SMS read or send capability",
+	"contacts":       "Contact list access",
+	"location":       "Location or GPS access",
+	"device":         "Device fingerprinting or identification",
+	"data":           "Bulk data collection pattern",
+	"camera":         "Camera access",
+	"webview":        "WebView usage with JavaScript bridge",
+	"blockchain":     "Blockchain or cryptocurrency wallet",
+	"gambling":       "Gambling or betting patterns",
+	"attribution":    "Install attribution or campaign tracking",
 }
 
 // SignalFinding is a single security finding from signal analysis.

@@ -69,7 +69,6 @@ func trimmed(line string) string {
 	return strings.TrimSpace(line)
 }
 
-
 // Pre-compiled regexes for the text-based annotation passes. These were
 // previously compiled inside loops (regex.MustCompile called per line),
 // which is both slow and a Go anti-pattern. Each regex is compiled once
@@ -209,7 +208,6 @@ func semanticArgName(typeName string, idx int) string {
 	}
 	return ""
 }
-
 
 // --- Expression Simplification (lightweight SSA-style) ---
 

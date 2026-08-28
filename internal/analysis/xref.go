@@ -9,8 +9,8 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/naming"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/naming"
 )
 
 // Cross-referencing JSONL outputs (gap-analysis §6).

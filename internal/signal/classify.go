@@ -461,6 +461,7 @@ func IsInterestingCallee(name string) bool {
 	}
 	return true
 }
+
 // Severity levels for signal categories.
 const (
 	SeverityHigh   = "high"

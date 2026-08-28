@@ -1,9 +1,9 @@
 package main
 
 import (
+	"aotopsy/internal/frida"
 	"fmt"
 	"os"
-	"aotopsy/internal/frida"
 )
 
 // Command describes one CLI subcommand. The registry replaces the
@@ -18,11 +18,6 @@ type Command struct {
 	// Debug marks _debug subcommands. When true, the command is listed
 	// under "aotopsy _debug" help, not top-level help.
 	Debug bool
-
-	// Deprecated marks commands that still work but print a warning.
-	// DeprecatedRepl is the replacement shown in the warning.
-	Deprecated     bool
-	DeprecatedRepl string
 
 	// Special handles non-standard dispatch logic that cannot be expressed
 	// as a simple Run(args) call (e.g. "signal" with --in flag, or the
@@ -51,23 +46,9 @@ var primaryCommands = []Command{
 	{Name: "export-dart", Short: "Export decompiled Dart project structure to .dart files", Run: cmdExportDart},
 	{Name: "_debug", Short: "Internal commands", Run: cmdDebug},
 
-	// Deprecated commands — still work, print a warning.
-	{Name: "disasm", Short: "Disassemble and dump symbols", Run: cmdDisasm, Deprecated: true, DeprecatedRepl: "aotopsy <libapp.so>"},
-	{Name: "dump", Short: "Disassemble and dump symbols", Run: cmdDump, Deprecated: true, DeprecatedRepl: "aotopsy _debug dump"},
-	{Name: "strings", Short: "Extract strings from snapshot", Run: cmdStrings, Deprecated: true, DeprecatedRepl: "aotopsy _debug strings"},
-	{Name: "graph", Short: "Extract named object graph", Run: cmdGraph, Deprecated: true, DeprecatedRepl: "aotopsy _debug graph"},
-	{Name: "clusters", Short: "Parse clusters", Run: cmdClusters, Deprecated: true, DeprecatedRepl: "aotopsy _debug clusters"},
-	{Name: "render", Short: "Render callgraph and HTML from JSONL", Run: cmdRender, Deprecated: true, DeprecatedRepl: "aotopsy _debug render"},
-	{Name: "thr-audit", Short: "Audit THR-relative memory accesses", Run: cmdTHRAudit, Deprecated: true, DeprecatedRepl: "aotopsy _debug thr-audit"},
-	{Name: "thr-cluster", Short: "Cluster unresolved THR offsets", Run: cmdTHRCluster, Deprecated: true, DeprecatedRepl: "aotopsy _debug thr-cluster"},
-	{Name: "thr-classify", Short: "Classify unresolved THR offsets", Run: cmdTHRClassify, Deprecated: true, DeprecatedRepl: "aotopsy _debug thr-classify"},
-	{Name: "find-libapp-batch", Short: "Batch find-libapp + report", Run: cmdFindLibappBatch, Deprecated: true, DeprecatedRepl: "aotopsy _debug find-libapp-batch"},
-	{Name: "dart2-buckets", Short: "Dart 2.x bucket analysis", Run: cmdDart2Buckets, Deprecated: true, DeprecatedRepl: "aotopsy _debug dart2-buckets"},
-
 	// "signal" has special dispatch: --in flag means old form, otherwise new.
 	{Name: "signal", Short: "Signal analysis", Special: func(cmd string, allArgs []string) (bool, error) {
 		if hasFlag(allArgs[1:], "-in", "--in") {
-			deprecationWarning("signal --in", "aotopsy signal <libapp.so>")
 			return true, cmdSignal(allArgs[1:])
 		}
 		return true, cmdSignalPipeline(allArgs[1:])
@@ -116,7 +97,7 @@ Usage:
   aotopsy <libapp.so>                         Full analysis pipeline
 `)
 	for _, c := range primaryCommands {
-		if c.Deprecated || c.Debug || c.Name == "_debug" || c.Special != nil {
+		if c.Debug || c.Name == "_debug" || c.Special != nil {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "  aotopsy %-36s %s\n", c.Name+" <args>", c.Short)

@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/vmtables"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
 // CodeNameInfo holds resolved function and owner names for a code ref.
@@ -37,7 +37,6 @@ type CodeNameInfo struct {
 	// see CodeNameInfo.Qualified and BuildClosureParents.
 	EnclosingFunction string
 }
-
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
 type PoolLookups struct {

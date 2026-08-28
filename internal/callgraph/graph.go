@@ -46,8 +46,6 @@ func (g *Graph) Dedup() {
 	g.Edges = edges
 }
 
-
-
 // CallSite records a call found during bytecode or source scanning.
 type CallSite struct {
 	Offset int

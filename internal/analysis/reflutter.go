@@ -44,11 +44,11 @@ type ReFlutterImportOptions struct {
 
 // ReFlutterImportResult holds the summary of the import.
 type ReFlutterImportResult struct {
-	Libraries      int
-	Functions      int
-	ClassesFields  int
-	EnrichedCount  int
-	OutputDir      string
+	Libraries     int
+	Functions     int
+	ClassesFields int
+	EnrichedCount int
+	OutputDir     string
 }
 
 // RunReFlutterImport parses reFlutter's dump.dart, loads the libapp.so context

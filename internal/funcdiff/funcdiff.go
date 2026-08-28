@@ -11,10 +11,10 @@ import (
 	"fmt"
 	"sort"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/analysis"
 	"aotopsy/internal/snapshot"
 )
 

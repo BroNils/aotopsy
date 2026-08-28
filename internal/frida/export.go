@@ -2,23 +2,23 @@ package frida
 
 // FridaMetadata is the JSON structure exported for Frida scripts.
 type FridaMetadata struct {
-	DartVersion        string                 `json:"dart_version"`
-	Architecture       string                 `json:"architecture"`
-	CompressedPointers bool                   `json:"compressed_pointers"`
-	PointerSize        int                    `json:"pointer_size"`
-	ModuleBase         string                 `json:"module_base"`
-	THRFields          map[int]string         `json:"thr_fields"`
-	THRReg             string                 `json:"thr_reg"`
-	PPReg              string                 `json:"pp_reg"`
-	DTReg              string                 `json:"dt_reg"`
-	HeapBaseReg        string                 `json:"heap_base_reg"`
-	HeaderBitOffset    int                    `json:"header_bit_offset"`
-	HeaderBitWidth     int                    `json:"header_bit_width"`
-	Functions          []FridaFunction        `json:"functions"`
-	UnresolvedBLRs     []FridaUnresolvedBLR   `json:"unresolved_blrs"`
-	DispatchTable      []FridaDispatchEntry   `json:"dispatch_table"`
-	StringRefs         []FridaStringRef       `json:"string_refs"`
-	FFICallSites       []FridaFFICallSite     `json:"ffi_call_sites"`
+	DartVersion        string               `json:"dart_version"`
+	Architecture       string               `json:"architecture"`
+	CompressedPointers bool                 `json:"compressed_pointers"`
+	PointerSize        int                  `json:"pointer_size"`
+	ModuleBase         string               `json:"module_base"`
+	THRFields          map[int]string       `json:"thr_fields"`
+	THRReg             string               `json:"thr_reg"`
+	PPReg              string               `json:"pp_reg"`
+	DTReg              string               `json:"dt_reg"`
+	HeapBaseReg        string               `json:"heap_base_reg"`
+	HeaderBitOffset    int                  `json:"header_bit_offset"`
+	HeaderBitWidth     int                  `json:"header_bit_width"`
+	Functions          []FridaFunction      `json:"functions"`
+	UnresolvedBLRs     []FridaUnresolvedBLR `json:"unresolved_blrs"`
+	DispatchTable      []FridaDispatchEntry `json:"dispatch_table"`
+	StringRefs         []FridaStringRef     `json:"string_refs"`
+	FFICallSites       []FridaFFICallSite   `json:"ffi_call_sites"`
 }
 
 type FridaFunction struct {
