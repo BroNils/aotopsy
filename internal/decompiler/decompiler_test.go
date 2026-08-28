@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/sdk"
 )
 
@@ -163,10 +164,10 @@ func TestParseOperandNegativeDisplacement(t *testing.T) {
 
 func TestReplaceIdentToken(t *testing.T) {
 	in := "x29.f0 + x2 - x29foo"
-	out := replaceIdentToken(in, "x29", "framePointer")
+	out := compare.ReplaceIdentToken(in, "x29", "framePointer")
 	want := "framePointer.f0 + x2 - x29foo"
 	if out != want {
-		t.Errorf("replaceIdentToken: got %q want %q", out, want)
+		t.Errorf("ReplaceIdentToken: got %q want %q", out, want)
 	}
 }
 

@@ -3,10 +3,12 @@ package disasm
 import (
 	"fmt"
 	"testing"
+
+	"aotopsy/internal/vmtables"
 )
 
 func TestRuntimeEntryMerge(t *testing.T) {
-	fields := THRFields("3.10.7", true)
+	fields := vmtables.THRFields("3.10.7", true)
 
 	// Check a few runtime entry offsets. The suffix is "_entry_point", the
 	// same spelling runtime_offsets_extracted.h uses for the entry-point
@@ -45,7 +47,7 @@ func TestRuntimeEntryMerge(t *testing.T) {
 }
 
 func TestRuntimeEntryV217Merge(t *testing.T) {
-	fields := THRFields("2.17.6", true)
+	fields := vmtables.THRFields("2.17.6", true)
 
 	// v2.17.6 base 0x2d8 = AllocateArray
 	checks := []struct {
@@ -75,7 +77,7 @@ func TestRuntimeEntryV217Merge(t *testing.T) {
 }
 
 func TestTHRContextAnnotator_RuntimeEntry(t *testing.T) {
-	fields := THRFields("3.10.7", true)
+	fields := vmtables.THRFields("3.10.7", true)
 
 	// LDR X5, [X26,#1128] → 0x468 → ArgumentErrorUnboxedInt64_entry_point
 	// Raw encoding: 45 37 42 f9 = 0xf9423745

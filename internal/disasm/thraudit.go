@@ -5,6 +5,7 @@ import (
 
 	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/thraudit"
 )
 
 // THRAccess describes a single THR-relative memory access in the instruction stream.
@@ -89,31 +90,15 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 	return result
 }
 
-// THRAuditRecord is a JSONL output record for thr-audit.
-type THRAuditRecord struct {
-	Sample      string   `json:"sample"`
-	DartVersion string   `json:"dart_version"`
-	PC          string   `json:"pc"`
-	Insn        string   `json:"insn"`
-	THROffset   string   `json:"thr_offset"`
-	IsStore     bool     `json:"is_store"`
-	DstReg      int      `json:"dst_reg,omitempty"`
-	SrcReg      int      `json:"src_reg,omitempty"`
-	Width       int      `json:"width"`
-	FuncName    string   `json:"func_name"`
-	Resolved    bool     `json:"resolved"`
-	Context     []string `json:"context"`
-}
-
 // BuildAuditRecords converts THRAccess entries into audit records with context.
-func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersion, funcName string) []THRAuditRecord {
+func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
 	// Build PC→index map for context lookup.
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
 		pcIdx[inst.Addr] = i
 	}
 
-	records := make([]THRAuditRecord, 0, len(accesses))
+	records := make([]thraudit.THRAuditRecord, 0, len(accesses))
 	for _, a := range accesses {
 		// Build context: prev 2, current, next 2
 		var ctx []string
@@ -130,7 +115,7 @@ func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersio
 			}
 		}
 
-		rec := THRAuditRecord{
+		rec := thraudit.THRAuditRecord{
 			Sample:      sample,
 			DartVersion: dartVersion,
 			PC:          fmt.Sprintf("0x%x", a.PC),

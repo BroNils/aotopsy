@@ -12,6 +12,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 )
 
@@ -125,9 +126,9 @@ func runParitySample(libpath, hash string, opts dartfmt.Options) parityRow {
 	for i := range result.Named {
 		refToNamed[result.Named[i].RefID] = &result.Named[i]
 	}
-	byCodeIndex := pipeline.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
+	byCodeIndex := naming.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
 	for _, ce := range result.Codes {
-		if _, ok := pipeline.ResolveCodeOwner(ce, refToNamed, byCodeIndex); ok {
+		if _, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex); ok {
 			row.CodeMap++
 		}
 	}

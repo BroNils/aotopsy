@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/naming"
 )
 
 // Library cross-referencing: the consumer for the Script/Library capture,
@@ -23,12 +24,12 @@ import (
 // libraryURLForClassRef), so the pipeline and the decompiler command resolve
 // libraries the same way instead of maintaining two copies.
 type LibraryResolver struct {
-	pl         *PoolLookups
+	pl         *naming.PoolLookups
 	classByRef map[int]cluster.ClassInfo
 }
 
 // NewLibraryResolver builds the class-ref index needed for library lookups.
-func NewLibraryResolver(result *cluster.Result, pl *PoolLookups) *LibraryResolver {
+func NewLibraryResolver(result *cluster.Result, pl *naming.PoolLookups) *LibraryResolver {
 	byRef := make(map[int]cluster.ClassInfo, len(result.Classes))
 	for _, ci := range result.Classes {
 		byRef[ci.RefID] = ci
@@ -93,7 +94,7 @@ type LibraryFunctionsRecord struct {
 // methods) too. Functions whose library cannot be resolved are collected under
 // the empty URL and reported as such rather than dropped, so the counts always
 // add up to the number of Function objects present.
-func BuildLibraryFunctions(result *cluster.Result, pl *PoolLookups) []LibraryFunctionsRecord {
+func BuildLibraryFunctions(result *cluster.Result, pl *naming.PoolLookups) []LibraryFunctionsRecord {
 	if pl == nil || pl.CT == nil {
 		return nil
 	}
@@ -159,7 +160,7 @@ func BuildLibraryFunctions(result *cluster.Result, pl *PoolLookups) []LibraryFun
 }
 
 // ownerDisplayName resolves a class ref to its name for qualification.
-func ownerDisplayName(pl *PoolLookups, classRef int) string {
+func ownerDisplayName(pl *naming.PoolLookups, classRef int) string {
 	no, ok := pl.RefToNamed[classRef]
 	if !ok {
 		return ""

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // Sanity checks on emitted pseudocode.
@@ -73,7 +75,7 @@ func ValidateSource(src string) []Problem {
 	lines := strings.Split(src, "\n")
 	texts := make([]string, len(lines))
 	for i, line := range lines {
-		_, text, ok := splitIndent(line)
+		_, text, ok := stmt.SplitIndent(line)
 		if !ok {
 			text = strings.TrimSpace(line)
 		}
@@ -92,7 +94,7 @@ func ValidateSource(src string) []Problem {
 		}
 		// Brace accounting, ignoring braces inside strings and comments --
 		// a `"{"` in a literal is not structure. See braceDelta.
-		depth += braceDelta(text)
+	depth += stmt.BraceDelta(text)
 		if depth < 0 {
 			add("brace-depth-negative")
 			depth = 0

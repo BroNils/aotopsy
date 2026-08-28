@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 )
 
@@ -108,8 +110,7 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 		t.Errorf("x86_64 pseudocode validation failed: %v\nSource:\n%s", probs, x64Art.Source)
 	}
 
-	// Check ident stats
-	idStats := collectIdentStats(armArt.Source)
+	idStats := compare.CollectIdentStats(armArt.Source)
 	if len(idStats) == 0 {
 		t.Errorf("expected ident stats on ARM64, got 0")
 	}
@@ -262,9 +263,9 @@ func TestNullRegIdentityMath(t *testing.T) {
 		"x2 = y - 0;",
 		"x3 = 10 * 1;",
 	}
-	tree := parseStmts(input)
-	cleanExprs(tree)
-	out := printStmts(tree)
+	tree := stmt.ParseStmts(input)
+	stmt.CleanExprs(tree)
+	out := stmt.PrintStmts(tree)
 	joined := strings.Join(out, "\n")
 
 	if !strings.Contains(joined, "null + 10") {
@@ -432,9 +433,9 @@ func TestArrayPlaceholderPreserved(t *testing.T) {
 		`return "<Array>";`,
 		`x0 = "<GrowableObjectArray>";`,
 	}
-	tree := parseStmts(input)
-	cleanExprs(tree)
-	out := printStmts(tree)
+	tree := stmt.ParseStmts(input)
+	stmt.CleanExprs(tree)
+	out := stmt.PrintStmts(tree)
 	joined := strings.Join(out, "\n")
 
 	if strings.Contains(joined, "[]") {

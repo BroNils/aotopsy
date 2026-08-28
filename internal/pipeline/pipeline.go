@@ -1,8 +1,9 @@
 // Package pipeline orchestrates aotopsy's ARM64 disassembly/call-graph/
 // signal/Ghidra-IDA-metadata pipeline (Run) and its x86_64 counterpart's
 // narrower disassembly/call-edge/signal stage (RunDisasmStageX86, in
-// disasm_stage_x86.go), plus the shared name-resolution/pool-lookup
-// surface (PoolLookups, helpers.go) most cmd/aotopsy files read from.
+// disasm_stage_x86.go). The shared name-resolution/pool-lookup surface
+// (PoolLookups, BuildPoolLookups, etc.) lives in internal/naming, which
+// pipeline imports and which cmd/aotopsy files read from directly.
 package pipeline
 
 import (
@@ -16,7 +17,9 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/signal"
+	"aotopsy/internal/vmtables"
 )
 
 // Opts controls pipeline execution.
@@ -221,13 +224,13 @@ func Run(opts Opts) (*Result, error) {
 	_ = poolImmFile.Close()
 
 	// Write dart_meta.json.
-	thrFields := disasm.THRFieldsWithProfile(info.Version.DartVersion, isARM64, info.Version)
+	thrFields := vmtables.THRFieldsWithProfile(info.Version.DartVersion, isARM64, info.Version)
 	ptrSize := 8
 	if info.Version.CompressedPointers {
 		ptrSize = 4
 	}
 	result.PointerSize = ptrSize
-	if err := WriteDartMeta(opts.OutDir, info.Version.DartVersion, info.Version.CompressedPointers, ptrSize, thrFields); err != nil {
+	if err := naming.WriteDartMeta(opts.OutDir, info.Version.DartVersion, info.Version.CompressedPointers, ptrSize, thrFields); err != nil {
 		return nil, fmt.Errorf("write dart_meta.json: %w", err)
 	}
 
@@ -258,9 +261,9 @@ func Run(opts Opts) (*Result, error) {
 	// Reads functions.jsonl, call_edges.jsonl, string_refs.jsonl
 	// produced by the disasm stage, and dispatch_table.jsonl produced
 	// by the type inference stage.
-	funcs, _ := ReadJSONL[disasm.FuncRecord](filepath.Join(opts.OutDir, "functions.jsonl"))
-	edges, _ := ReadJSONL[disasm.CallEdgeRecord](filepath.Join(opts.OutDir, "call_edges.jsonl"))
-	stringRefs, _ := ReadJSONL[disasm.StringRefRecord](filepath.Join(opts.OutDir, "string_refs.jsonl"))
+	funcs, _ := naming.ReadJSONL[disasm.FuncRecord](filepath.Join(opts.OutDir, "functions.jsonl"))
+	edges, _ := naming.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(opts.OutDir, "call_edges.jsonl"))
+	stringRefs, _ := naming.ReadJSONL[disasm.StringRefRecord](filepath.Join(opts.OutDir, "string_refs.jsonl"))
 	if err := writeXrefJSONL(opts.OutDir, clResult, pl, funcs, edges, stringRefs, info.Version.CompressedPointers); err != nil {
 		opts.logf("  xref: %v\n", err)
 	}
@@ -345,7 +348,7 @@ func Run(opts Opts) (*Result, error) {
 // writeCapturedJSONL writes all captured-data JSONL files from the fill-phase
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Errors are logged but non-fatal (captured data is supplementary).
-func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *PoolLookups, layouts []DartClassLayout, log io.Writer) {
+func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, log io.Writer) {
 	type writeJob struct {
 		filename string
 		label    string
@@ -387,45 +390,45 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *PoolLookups, l
 	var entries []entry
 
 	if len(scripts) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "scripts.jsonl"), scripts)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "scripts.jsonl"), scripts)
 		entries = append(entries, entry{"scripts.jsonl", "scripts", n, err})
 	}
 	if len(loadingUnits) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "loading_units.jsonl"), loadingUnits)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "loading_units.jsonl"), loadingUnits)
 		entries = append(entries, entry{"loading_units.jsonl", "loading_units", n, err})
 	}
 	if len(kpis) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "kpi.jsonl"), kpis)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "kpi.jsonl"), kpis)
 		entries = append(entries, entry{"kpi.jsonl", "kpi", n, err})
 	}
 	if len(instances) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "instances.jsonl"), instances)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "instances.jsonl"), instances)
 		entries = append(entries, entry{"instances.jsonl", "instances", n, err})
 	}
 	if len(contexts) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "contexts.jsonl"), contexts)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "contexts.jsonl"), contexts)
 		entries = append(entries, entry{"contexts.jsonl", "contexts", n, err})
 	}
 	if len(typeArgs) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "type_arguments.jsonl"), typeArgs)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "type_arguments.jsonl"), typeArgs)
 		entries = append(entries, entry{"type_arguments.jsonl", "type_arguments", n, err})
 	}
 	if len(excHandlers) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "exception_handlers.jsonl"), excHandlers)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "exception_handlers.jsonl"), excHandlers)
 		entries = append(entries, entry{"exception_handlers.jsonl", "exception_handlers", n, err})
 	}
 	if len(icdata) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "icdata.jsonl"), icdata)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "icdata.jsonl"), icdata)
 		entries = append(entries, entry{"icdata.jsonl", "icdata", n, err})
 	}
 	if len(closureData) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "closure_data.jsonl"), closureData)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "closure_data.jsonl"), closureData)
 		entries = append(entries, entry{"closure_data.jsonl", "closure_data", n, err})
 	}
 	// Consumer for the Script/Library capture: gap §6 "No library ->
 	// functions xref".
 	if len(libFuncs) > 0 {
-		n, err := WriteJSONLFile(filepath.Join(opts.OutDir, "library_functions.jsonl"), libFuncs)
+		n, err := naming.WriteJSONLFile(filepath.Join(opts.OutDir, "library_functions.jsonl"), libFuncs)
 		entries = append(entries, entry{"library_functions.jsonl", "library_functions", n, err})
 	}
 
@@ -456,7 +459,7 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 	result.OutDir = outDir
 
 	// Count existing functions.
-	funcs, err := ReadJSONL[disasm.FuncRecord](filepath.Join(opts.FromDir, "functions.jsonl"))
+	funcs, err := naming.ReadJSONL[disasm.FuncRecord](filepath.Join(opts.FromDir, "functions.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("read functions.jsonl: %w", err)
 	}

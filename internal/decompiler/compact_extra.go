@@ -5,7 +5,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // Pre-compiled regexes for the text-based annotation passes. These were
@@ -89,7 +90,7 @@ func applyArgRenaming(source string, paramTypes []string) string {
 	lines := strings.Split(source, "\n")
 	for i := range lines {
 		for oldName, newName := range renames {
-			lines[i] = replaceIdent(lines[i], oldName, newName)
+			lines[i] = stmt.ReplaceIdent(lines[i], oldName, newName)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -148,125 +149,6 @@ func semanticArgName(typeName string, idx int) string {
 	return ""
 }
 
-// identRegexCache caches compiled regexes for replaceIdent, keyed by
-// the identifier being replaced. regex.MustCompile is too expensive to
-// call per-line per-rename inside applyArgRenaming's nested loop.
-var identRegexCache sync.Map
-
-// replaceIdent replaces whole-word identifiers, not substrings.
-// It skips matches inside string literals (between unescaped quotes)
-// to avoid corrupting string constants like print("arg0").
-func replaceIdent(line, old, new string) string {
-	var re *regexp.Regexp
-	if cached, ok := identRegexCache.Load(old); ok {
-		re = cached.(*regexp.Regexp)
-	} else {
-		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(old) + `\b`)
-		identRegexCache.Store(old, re)
-	}
-	// Split on string literals, only replace in non-literal segments.
-	// Handles both "..." and '...' quoting.
-	var result strings.Builder
-	i := 0
-	for i < len(line) {
-		// Find next quote.
-		quoteIdx := strings.IndexAny(line[i:], "\"'")
-		if quoteIdx < 0 {
-			// No more strings — replace in the rest.
-			result.WriteString(re.ReplaceAllString(line[i:], new))
-			break
-		}
-		quotePos := i + quoteIdx
-		quote := line[quotePos]
-		// Replace in the segment before the quote.
-		result.WriteString(re.ReplaceAllString(line[i:quotePos], new))
-		// Copy the string literal verbatim (including the closing quote).
-		result.WriteByte(quote)
-		j := quotePos + 1
-		for j < len(line) {
-			if line[j] == '\\' && j+1 < len(line) {
-				// Escaped char — copy both bytes.
-				result.WriteByte(line[j])
-				result.WriteByte(line[j+1])
-				j += 2
-				continue
-			}
-			if line[j] == quote {
-				result.WriteByte(line[j])
-				j++
-				break
-			}
-			result.WriteByte(line[j])
-			j++
-		}
-		i = j
-	}
-	return result.String()
-}
-
-// --- Dead-store elimination ---
-
-// simpleAssignRe matches a whole-line simple assignment `name = expr;`.
-var simpleAssignRe = regexp.MustCompile(`^(\w+)\s*=\s*(.+);$`)
-
-// hasSideEffect reports whether an assignment's right-hand side may do more
-// than compute a value. Anything containing a call (`(`) or an assignment is
-// treated as effectful, so its store is never eliminated.
-func hasSideEffect(expr string) bool {
-	return strings.ContainsAny(expr, "()") || strings.Contains(expr, "=")
-}
-
-// --- Copy propagation ---
-
-// referencesIdent reports whether expr mentions ident as a whole word.
-func referencesIdent(expr, ident string) bool {
-	var re *regexp.Regexp
-	if cached, ok := identRegexCache.Load(ident); ok {
-		re = cached.(*regexp.Regexp)
-	} else {
-		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
-		identRegexCache.Store(ident, re)
-	}
-	return re.MatchString(expr)
-}
-
-// anyAssignRe matches any assignment target at the start of a statement,
-// including `final x = ...` declarations, for any identifier (not just tN).
-var anyAssignRe = regexp.MustCompile(`^(?:final\s+)?([A-Za-z_]\w*)\s*=[^=]`)
-
-// replaceExactSubstring replaces old with new in s, but only when old
-// appears as a complete token (not part of a larger identifier).
-func replaceExactSubstring(s, old, new string) string {
-	idx := 0
-	for {
-		pos := strings.Index(s[idx:], old)
-		if pos < 0 {
-			break
-		}
-		absPos := idx + pos
-		// Check character before
-		if absPos > 0 {
-			c := s[absPos-1]
-			if isIdentChar(c) || c == '.' {
-				idx = absPos + len(old)
-				continue
-			}
-		}
-		// Check character after
-		afterPos := absPos + len(old)
-		if afterPos < len(s) {
-			c := s[afterPos]
-			if isIdentChar(c) || c == '.' {
-				idx = afterPos
-				continue
-			}
-		}
-		// Replace
-		s = s[:absPos] + new + s[afterPos:]
-		idx = absPos + len(new)
-	}
-	return s
-}
 
 // --- Expression Simplification (lightweight SSA-style) ---
 

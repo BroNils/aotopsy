@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/strutil"
 )
 
@@ -18,7 +19,7 @@ import (
 // via `r2 -i aotopsy.r2 libapp.so`.
 //
 // Item 18: r2flutter / radare2 integration.
-func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, codeVA, codeOff uint64) error {
+func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLookups, codeVA, codeOff uint64) error {
 	type r2Entry struct {
 		va   uint64
 		name string
@@ -32,7 +33,7 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, c
 		funcVA := codeVA + funcStart
 		var name string
 		if r.RefID >= 0 {
-			name = QualifiedCodeName(r.RefID, pl, r.PCOffset)
+		name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -65,7 +66,7 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, c
 // writeFunctionFingerprints writes function_fingerprints.jsonl —
 // SHA-256 hashes of each function's instruction bytes, for use
 // with the cross-sample name transfer dictionary (Item 13/15).
-func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *PoolLookups, code []byte, codeOff, codeVA uint64) error {
+func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLookups, code []byte, codeOff, codeVA uint64) error {
 	path := filepath.Join(outDir, "function_fingerprints.jsonl")
 	f, err := os.Create(path)
 	if err != nil {
@@ -92,7 +93,7 @@ func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *Po
 
 		var name string
 		if r.RefID >= 0 {
-			name = QualifiedCodeName(r.RefID, pl, r.PCOffset)
+		name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			name = fmt.Sprintf("stub_%x", r.PCOffset)
 		}

@@ -153,7 +153,7 @@ type FuncIR struct {
 	// (dart-lang/sdk's CACHED_VM_STUBS_ADDRESSES_LIST in thread.h, e.g.
 	// write_barrier_entry_point_ or stack_overflow_shared_..._entry_point_).
 	// Set by the caller (decompile_native_cmd.go) from a per-Dart-version,
-	// per-arch table (internal/disasm.ThreadStubOffsets) BEFORE
+	// per-arch table (internal/vmtables.ThreadStubOffsets) BEFORE
 	// EmitPseudocode runs -- nil/empty means "not verified for this
 	// version/arch", in which case THR-relative loads render as a plain
 	// field access (THR.fNN) same as before this feature existed.
@@ -161,7 +161,7 @@ type FuncIR struct {
 
 	// ThreadFieldNames maps a THR-relative byte displacement to the Thread
 	// field it names, from the same SDK-derived tables as ThreadStubOffsets
-	// (internal/disasm.THRFields) but covering every field rather than only
+	// (internal/vmtables.THRFields) but covering every field rather than only
 	// the cached stub entry points.
 	//
 	// Three of those fields cache VM OBJECTS rather than addresses --

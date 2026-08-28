@@ -14,8 +14,10 @@ import (
 	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
+	"aotopsy/internal/vmtables"
 )
 
 // RunTypeInferenceStage runs the whole-program type inference engine
@@ -33,7 +35,7 @@ import (
 func RunTypeInferenceStage(
 	opts *Opts,
 	isARM64 bool,
-	pl *PoolLookups,
+	pl *naming.PoolLookups,
 	clResult *cluster.Result,
 	ranges []cluster.CodeRange,
 	code []byte,
@@ -92,7 +94,7 @@ func RunTypeInferenceStage(
 func runTypeInference(
 	outDir string,
 	clResult *cluster.Result,
-	pl *PoolLookups,
+	pl *naming.PoolLookups,
 	ranges []cluster.CodeRange,
 	code []byte,
 	codeOff uint64,
@@ -116,7 +118,7 @@ func runTypeInference(
 	}
 
 	// 2. Build TypeContext.
-	byCodeIndex := CodeIndexToFunc(clResult, info.Version.CIDs, info.Version.CodeIndexOneBased)
+	byCodeIndex := naming.CodeIndexToFunc(clResult, info.Version.CIDs, info.Version.CodeIndexOneBased)
 
 	// Build CodeRefToName map from CodeNames.
 	codeRefToName := make(map[int]string, len(pl.CodeNames))
@@ -285,7 +287,7 @@ func runTypeInference(
 	}
 
 	// Get allocation stub offsets from ThreadStubOffsets (arch-independent).
-	allocStubOffsets := disasm.ThreadStubOffsets(info.Version.DartVersion, isARM64)
+	allocStubOffsets := vmtables.ThreadStubOffsets(info.Version.DartVersion, isARM64)
 
 	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets)
 
@@ -490,7 +492,7 @@ func runTypeInference(
 	interResult := typetrack.RunInterprocedural(ctx, funcInstsARM64, funcInstsX86, blEdges, maxIter, isARM64, blTargetToName)
 
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
-	bd, err := rewriteCallEdges(outDir, interResult, buildTTSCallTargets(clResult.Pool, pl))
+	bd, err := rewriteCallEdges(outDir, interResult, naming.BuildTTSCallTargets(clResult.Pool, pl))
 	if err != nil {
 		return bd, ctx, fmt.Errorf("rewrite call_edges: %w", err)
 	}
@@ -524,7 +526,7 @@ func writeFieldAccessorXref(
 	ctx *typetrack.TypeContext,
 	interResult *typetrack.InterResult,
 	clResult *cluster.Result,
-	pl *PoolLookups,
+	pl *naming.PoolLookups,
 	compressedPtrs bool,
 ) error {
 	if interResult == nil || ctx == nil {
@@ -628,7 +630,7 @@ type BLRBreakdown = typetrack.BLRBreakdown
 func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPoolIndex map[int]string) (BLRBreakdown, error) {
 	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
-	edges, err := ReadJSONL[disasm.CallEdgeRecord](edgesPath)
+	edges, err := naming.ReadJSONL[disasm.CallEdgeRecord](edgesPath)
 	if err != nil {
 		return bd, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
@@ -674,7 +676,7 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 				e.Candidates = res.Candidates
 				bd.Monomorphic++
 			}
-		} else if name := ttsCallTarget(e.Via, ttsByPoolIndex); name != "" {
+	} else if name := naming.TtsCallTarget(e.Via, ttsByPoolIndex); name != "" {
 			// A call through a pool slot holding a Type invokes that type's
 			// testing stub -- GenerateIndirectTTSCall, see ttscall.go. One
 			// known callee, so it counts as a stub rather than a Dart-level

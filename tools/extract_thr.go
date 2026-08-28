@@ -11,7 +11,7 @@
 // Outputs Go map literals suitable for pasting into thrfields.go.
 //
 // -check re-extracts every target and compares it against the tables
-// committed in internal/disasm/thrfields*.go, exiting non-zero on any
+// committed in internal/vmtables/thrfields*.go, exiting non-zero on any
 // unexplained difference. Without it, a new Dart SDK version silently
 // shifts Thread offsets and every THR annotation the tool prints becomes
 // wrong with no signal at all -- these tables cannot be validated by any
@@ -240,7 +240,7 @@ func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 	//     `#if ... !defined(PRODUCT) ...` and `continue`d, so a layout-A
 	//     non-PRODUCT section header never reached the arch/compression
 	//     matcher. Result: 0 entries, which is how four empty "_nonproduct"
-	//     tables ended up committed in internal/disasm.
+	//     tables ended up committed in internal/vmtables.
 	//   - Layout B, PRODUCT: an earlier revision handled this via
 	//     `inProductBranch` fallbacks, which a later edit deleted in favour of
 	//     a plain `isProduct` string test. Since layout-B arch conditions
@@ -484,8 +484,8 @@ func generateGoMap(tag, arch string, compressed, product bool, entries []struct 
 
 // thrTableFiles are the sources holding the committed THR tables.
 var thrTableFiles = []string{
-	"internal/disasm/thrfields.go",
-	"internal/disasm/thrfields_x64.go",
+	"internal/vmtables/thrfields.go",
+	"internal/vmtables/thrfields_x64.go",
 }
 
 // handDerivedFields are Thread fields that runtime_offsets_extracted.h does
@@ -507,7 +507,7 @@ var handDerivedFields = map[string]string{
 }
 
 // committedNameOverrides maps a generated variable name to the name actually
-// used in internal/disasm. The ARM64 v2.x tables predate the naming
+// used in internal/vmtables. The ARM64 v2.x tables predate the naming
 // convention generateGoMap follows: they omit the "_nocompress" suffix (those
 // versions have no compressed variant at all) and 2.17.6 is spelled "thrV217".
 // Without these, -check would report the tables as "NOT CHECKED" -- i.e.

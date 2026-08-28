@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,6 +10,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
+	"aotopsy/internal/frida"
 )
 
 // fromMainDeps bundles everything runFromMain needs from cmdDecompileNative's
@@ -47,7 +47,7 @@ type fromMainDeps struct {
 	isARM64                   bool
 	genFrida                  bool
 	genFridaOut               string
-	fridaOpts                 fridaOptions
+	fridaOpts                 frida.FridaOptions
 	libPath                   string
 	outDir                    string
 }
@@ -144,8 +144,8 @@ func runFromMain(d fromMainDeps) error {
 	queue := []uint64{mainVA}
 	emitted, skipped, frameworkSkipped, unknownLibrary := 0, 0, 0, 0
 	var agg decompiler.Stats
-	var fridaHooks []fridaHook
-	var fridaProbes []fridaProbe
+	var fridaHooks []frida.FridaHook
+	var fridaProbes []frida.FridaProbe
 	fridaProbesDropped := 0
 
 	for len(queue) > 0 {
@@ -193,22 +193,12 @@ func runFromMain(d fromMainDeps) error {
 			}
 			art := decompiler.EmitPseudocode(fir, d.symbolLookup, d.poolLookup)
 			_, _ = fmt.Fprintf(d.w, "// === %s (PCOffset=0x%x) ===\n%s\n\n", art.FunctionName, r.PCOffset, art.Source)
-			agg.TotalCalls += art.Stats.TotalCalls
-			agg.IndirectCalls += art.Stats.IndirectCalls
-			agg.SemanticDirectCalls += art.Stats.SemanticDirectCalls
-			agg.SemanticIndirectCalls += art.Stats.SemanticIndirectCalls
-			agg.PlaceholderIfs += art.Stats.PlaceholderIfs
-			agg.UnresolvedCF += art.Stats.UnresolvedCF
-			agg.RawRegisterCalls += art.Stats.RawRegisterCalls
-			// Same three missing fields as in --all's fold; kept in sync.
-			agg.NonLastBranch += art.Stats.NonLastBranch
-			agg.TryBlocks += art.Stats.TryBlocks
-			agg.CatchHandlers += art.Stats.CatchHandlers
+			aggregateStats(&agg, art.Stats)
 			emitted++
 			if d.genFrida {
-				fridaHooks = append(fridaHooks, fridaHook{VA: va, Name: art.FunctionName, ArgRegs: realArgRegs(fir)})
-				for _, p := range collectIndirectCallProbes(fir) {
-					if len(fridaProbes) >= maxFridaProbes {
+				fridaHooks = append(fridaHooks, frida.FridaHook{VA: va, Name: art.FunctionName, ArgRegs: frida.RealArgRegs(fir)})
+				for _, p := range frida.CollectIndirectCallProbes(fir) {
+					if len(fridaProbes) >= frida.MaxFridaProbes {
 						fridaProbesDropped++
 						continue
 					}
@@ -268,13 +258,12 @@ func runFromMain(d fromMainDeps) error {
 
 	fmt.Fprintf(os.Stderr, "emitted %d functions (skipped %d, %d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
 		emitted, skipped, frameworkSkipped, unknownLibrary, classTouched, d.combinedPath, time.Since(d.startTime).Round(time.Second))
-	statsData, _ := json.MarshalIndent(agg, "", "  ")
-	fmt.Fprintf(os.Stderr, "aggregate stats: %s\n", statsData)
+	printAggregateStats(agg)
 	if d.genFrida {
 		if fridaProbesDropped > 0 {
-			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes)\n", fridaProbesDropped, maxFridaProbes)
+			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes)\n", fridaProbesDropped, frida.MaxFridaProbes)
 		}
-		if err := writeFridaScript(d.genFridaOut, d.outDir, d.libPath, d.isARM64, fridaHooks, fridaProbes, d.fridaOpts); err != nil {
+		if err := frida.WriteFridaScript(d.genFridaOut, d.outDir, d.libPath, d.isARM64, fridaHooks, fridaProbes, d.fridaOpts); err != nil {
 			return err
 		}
 	}

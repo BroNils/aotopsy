@@ -9,6 +9,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -243,7 +244,7 @@ func listToplevelFunctions(result *cluster.Result, pl *poolLookups, ct *snapshot
 	// strengthens exactly the cross-architecture structural correlation
 	// this function exists for: two candidates with the same param COUNT
 	// can now also be told apart by param TYPES when both resolve.
-	typeParams := pipeline.NewTypeParamResolver(result, pl)
+	typeParams := naming.NewTypeParamResolver(result, pl)
 
 	count := 0
 	for _, no := range result.Named {

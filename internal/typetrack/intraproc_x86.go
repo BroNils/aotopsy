@@ -4,7 +4,6 @@ import (
 	"sort"
 	"strings"
 
-	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
 	"golang.org/x/arch/x86/x86asm"
@@ -83,8 +82,8 @@ func AnalyzeFunctionX86(
 		if !ok {
 			continue
 		}
-		baseReg := arch.X86CanonReg(mem.Base)
-		idxReg := arch.X86CanonReg(mem.Index)
+		baseReg := sdk.X86CanonReg(mem.Base)
+		idxReg := sdk.X86CanonReg(mem.Index)
 		// Check: CALL [RAX + RCX*8 + disp32]
 		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
 			ctx.SelectorOffsets[inst.Addr] = int(mem.Disp / 8)
@@ -169,7 +168,7 @@ func AnalyzeFunctionX86(
 		// than with the bug.
 		eqSucc := -1
 		if hasCmp && cmpReg >= 0 && cmpReg < 31 && len(blk.insts) > 0 {
-			eqSucc = arch.X86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
+		eqSucc = sdk.X86EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
 		}
 		if eqSucc >= 0 {
 			ctx.NarrowShape++
@@ -265,15 +264,15 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 			isBranch = true
 		case x86asm.JMP:
 			isBranch = true
-			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
+			if t, ok := sdk.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					leaders[idx] = true
 				}
 			}
 		default:
-			if arch.IsX86CondJump(d.Inst.Op) {
+			if sdk.IsX86CondJump(d.Inst.Op) {
 				isBranch = true
-				if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
+				if t, ok := sdk.X86RelTarget(d.Inst, d.Addr, d.Len); ok && t >= funcStart && t < funcEnd {
 					if idx, ok2 := addrToIdx[t]; ok2 {
 						leaders[idx] = true
 					}
@@ -312,24 +311,24 @@ func buildBlocksX86(insts []X86DecodedInst) []x86BasicBlock {
 		case x86asm.RET:
 			// terminal
 		case x86asm.JMP:
-			if t, ok := arch.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
+		if t, ok := sdk.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
+			if idx, ok2 := addrToIdx[t]; ok2 {
+				if tb, ok3 := leaderToBlock[idx]; ok3 {
+					blk.successors = append(blk.successors, tb)
+					continue
+				}
+			}
+		}
+	default:
+		if sdk.IsX86CondJump(last.Inst.Op) {
+			if t, ok := sdk.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					if tb, ok3 := leaderToBlock[idx]; ok3 {
 						blk.successors = append(blk.successors, tb)
-						continue
 					}
 				}
 			}
-		default:
-			if arch.IsX86CondJump(last.Inst.Op) {
-				if t, ok := arch.X86RelTarget(last.Inst, last.Addr, last.Len); ok {
-					if idx, ok2 := addrToIdx[t]; ok2 {
-						if tb, ok3 := leaderToBlock[idx]; ok3 {
-							blk.successors = append(blk.successors, tb)
-						}
-					}
-				}
-			}
+		}
 			// Fall-through successor (for non-jump and cond-jump false branch).
 			lastInst := blk.insts[len(blk.insts)-1]
 			fallThroughAddr := lastInst.Addr + uint64(lastInst.Len)
@@ -356,7 +355,7 @@ func isX86CmpRegImm(inst X86DecodedInst) (reg, imm int, ok bool) {
 	if !isReg {
 		return 0, 0, false
 	}
-	idx := arch.X86CanonReg(r)
+	idx := sdk.X86CanonReg(r)
 	if idx < 0 || idx >= 31 {
 		return 0, 0, false
 	}
@@ -383,7 +382,7 @@ func isX86HeaderLoad(prev *X86DecodedInst, dstIdx int) bool {
 	if !ok {
 		return false
 	}
-	if arch.X86CanonReg(dstReg) != dstIdx {
+	if sdk.X86CanonReg(dstReg) != dstIdx {
 		return false
 	}
 	mem, ok := p.Args[1].(x86asm.Mem)
@@ -423,10 +422,10 @@ func transferInstructionX86(
 	// consults simply did not exist for this architecture.
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
-			baseIdx := arch.X86CanonReg(mem.Base)
+			baseIdx := sdk.X86CanonReg(mem.Base)
 			if baseIdx == 5 { // RBP = frame register
 				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := arch.X86CanonReg(srcReg)
+					srcIdx := sdk.X86CanonReg(srcReg)
 					if srcIdx >= 0 && srcIdx < 31 {
 						stackTypes[int(mem.Disp)] = state[srcIdx]
 					}
@@ -442,7 +441,7 @@ func transferInstructionX86(
 				state[baseIdx].Kind == LatticeKnownClass {
 				recordFieldAccess(result, state[baseIdx].ClassID, int32(mem.Disp), true, inst.Addr)
 				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := arch.X86CanonReg(srcReg)
+					srcIdx := sdk.X86CanonReg(srcReg)
 					if srcIdx >= 0 && srcIdx < 31 && state[srcIdx].Kind == LatticeKnownClass {
 						recordFieldStore(ctx, state[baseIdx].ClassID, int32(mem.Disp), state[srcIdx].ClassID)
 					}
@@ -454,10 +453,10 @@ func transferInstructionX86(
 	// H-4 fix 1b: Stack load: MOV reg, [RBP+disp] → load type from stack.
 	if (ins.Op == x86asm.MOV || ins.Op == x86asm.MOVZX) && len(ins.Args) >= 2 {
 		if dstReg, dstOK := ins.Args[0].(x86asm.Reg); dstOK {
-			dstIdx := arch.X86CanonReg(dstReg)
+			dstIdx := sdk.X86CanonReg(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
 				if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-					baseIdx := arch.X86CanonReg(mem.Base)
+					baseIdx := sdk.X86CanonReg(mem.Base)
 					if baseIdx == 5 { // RBP
 						if t, ok2 := stackTypes[int(mem.Disp)]; ok2 {
 							state[dstIdx] = t
@@ -477,13 +476,13 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := arch.X86CanonReg(dstReg)
+		dstIdx := sdk.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		// MOV/MOVZX reg, [mem] — memory load.
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-			baseIdx := arch.X86CanonReg(mem.Base)
+			baseIdx := sdk.X86CanonReg(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
 			if baseIdx == sdk.X86PP {
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
@@ -623,7 +622,7 @@ func transferInstructionX86(
 		}
 		// MOV reg, reg — copy type.
 		if srcReg, ok := ins.Args[1].(x86asm.Reg); ok {
-			srcIdx := arch.X86CanonReg(srcReg)
+			srcIdx := sdk.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 31 {
 				state[dstIdx] = state[srcIdx]
 			} else {
@@ -644,12 +643,12 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := arch.X86CanonReg(dstReg)
+		dstIdx := sdk.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-			baseIdx := arch.X86CanonReg(mem.Base)
+			baseIdx := sdk.X86CanonReg(mem.Base)
 			// LEA reg, [THR+disp] → load dispatch table base.
 			if baseIdx == sdk.X86THR && mem.Disp != 0 {
 				// This loads the dispatch table array from Thread.
@@ -690,12 +689,12 @@ func transferInstructionX86(
 		if !dstOK {
 			return
 		}
-		dstIdx := arch.X86CanonReg(dstReg)
+		dstIdx := sdk.X86CanonReg(dstReg)
 		if dstIdx < 0 || dstIdx >= 31 {
 			return
 		}
 		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			srcIdx := arch.X86CanonReg(srcReg)
+			srcIdx := sdk.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 31 {
 				if state[srcIdx].Kind == LatticeKnownClass {
 					// SHR/AND on KnownClass preserves KnownClass (class ID extraction).
@@ -735,8 +734,8 @@ func transferInstructionX86(
 
 		// CALL [mem] — indirect call (dispatch table or object field).
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
-			idxReg := arch.X86CanonReg(mem.Index)
-			baseReg := arch.X86CanonReg(mem.Base)
+			idxReg := sdk.X86CanonReg(mem.Index)
+			baseReg := sdk.X86CanonReg(mem.Base)
 			// Diagnose the dispatch-call shape before trying to resolve it,
 			// so a failure says WHICH half was unknown. Resolving needs both
 			// the table register and cid_reg typed; the counters separate
@@ -826,7 +825,7 @@ func transferInstructionX86(
 		// CALL reg — indirect call through register.
 		// H-4 fix: Check if the register holds KnownStub (THR-cached stub).
 		if reg, ok := ins.Args[0].(x86asm.Reg); ok {
-			regIdx := arch.X86CanonReg(reg)
+			regIdx := sdk.X86CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && state[regIdx].Kind == LatticeKnownStub {
 				sn := state[regIdx].StubName
 				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
@@ -868,7 +867,7 @@ func transferInstructionX86(
 	// downstream saw an untyped receiver.
 	if ins.Op == x86asm.ADD && len(ins.Args) >= 2 && ctx.THRFields != nil {
 		if mem, memOK := ins.Args[1].(x86asm.Mem); memOK &&
-			arch.X86CanonReg(mem.Base) == sdk.X86THR {
+			sdk.X86CanonReg(mem.Base) == sdk.X86THR {
 			if name, found := ctx.THRFields[int(mem.Disp)]; found && name == "heap_base" {
 				return // same object, wider register: leave the lattice alone
 			}
@@ -891,7 +890,7 @@ func transferInstructionX86(
 	// all 61428 opportunities.
 	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
 		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			dstIdx := arch.X86CanonReg(dstReg)
+			dstIdx := sdk.X86CanonReg(dstReg)
 			if dstIdx >= 0 && dstIdx < 31 {
 				state[dstIdx] = Top()
 			}
@@ -972,7 +971,7 @@ func killX86ArgRegs(state *[31]TypeLattice) {
 
 // DecodeX86Function decodes a function's raw bytes into X86DecodedInst slice.
 func DecodeX86Function(funcCode []byte, funcVA uint64) []X86DecodedInst {
-	decoded := arch.DecodeX86(funcCode, funcVA)
+	decoded := sdk.DecodeX86(funcCode, funcVA)
 	out := make([]X86DecodedInst, 0, len(decoded))
 	for _, d := range decoded {
 		out = append(out, X86DecodedInst{Addr: d.VA, Inst: d.Inst, Len: d.Len})

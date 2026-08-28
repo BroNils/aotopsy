@@ -9,11 +9,12 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/arch"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/frida"
 	"aotopsy/internal/pipeline"
+	"aotopsy/internal/sdk"
 )
 
 // cmdX64Refs disassembles every function in an x86_64 libapp.so (using
@@ -158,7 +159,7 @@ func cmdX64Refs(args []string) error {
 				return fmt.Errorf("no range contains VA 0x%x", targetVA)
 			}
 		}
-		calls, err := scanIndirectCalls(scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
+		calls, err := frida.ScanIndirectCalls(scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
 		if err != nil {
 			return err
 		}
@@ -193,7 +194,7 @@ func cmdX64Refs(args []string) error {
 		}
 
 		capped := false
-		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
 			if !d.Bad {
 				for _, arg := range d.Inst.Args {
 					mem, ok := arg.(x86asm.Mem)
@@ -254,7 +255,7 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
 
 	funcCode := code[funcStart:funcEnd]
-	arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
 		if d.Bad {
 			fmt.Printf("0x%x: <decode error>\n", d.VA)
 			return true
@@ -278,7 +279,7 @@ func dumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 		// Resolve JMP/Jcc/CALL rel targets to absolute VA -- added to
 		// disambiguate whether a given address is reachable via normal
 		// control flow or only via a jump/deopt-landing-pad from elsewhere.
-		if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+		if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
 			annotation += fmt.Sprintf("  ; -> 0x%x", target)
 		}
 		marker := "  "
@@ -327,9 +328,9 @@ func findCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 		}
 
 		capped := false
-		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
 			if !d.Bad && d.Inst.Op == x86asm.CALL {
-				if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok && target == targetVA {
+			if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok && target == targetVA {
 					fmt.Printf("%s @ 0x%x  calls target\n", funcName, d.VA)
 					hits++
 				}
@@ -403,7 +404,7 @@ func scanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		hashOps := 0
 		rotateOps := 0
 		total := 0
-		arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
 			if d.Bad {
 				return true
 			}

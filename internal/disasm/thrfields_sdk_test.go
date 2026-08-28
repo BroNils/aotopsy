@@ -13,7 +13,7 @@ import (
 // TestTHRTablesMatchSDK runs `go run tools/extract_thr.go -check`, which
 // re-extracts every Thread offset table from dart-lang/sdk's
 // runtime_offsets_extracted.h and diffs it against the tables committed in
-// thrfields.go / thrfields_x64.go.
+// thrfields.go / thrfields_x64.go (now in internal/vmtables/).
 //
 // These tables cannot be validated by local testing: a wrong offset produces
 // a plausible-looking annotation ("THR.allocate_object_stub") that is simply
@@ -34,7 +34,7 @@ func TestTHRTablesMatchSDK(t *testing.T) {
 	t.Logf("extract_thr -check output:\n%s", out)
 	if err != nil {
 		t.Fatalf("THR tables disagree with the Dart SDK headers: %v\n"+
-			"Run `go run tools/extract_thr.go -write && gofmt -w internal/disasm/` to regenerate,\n"+
+			"Run `go run tools/extract_thr.go -write && gofmt -w internal/vmtables/` to regenerate,\n"+
 			"then review the diff before committing.", err)
 	}
 }

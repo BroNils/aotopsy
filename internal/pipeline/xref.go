@@ -9,6 +9,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/naming"
 )
 
 // Cross-referencing JSONL outputs (gap-analysis §6).
@@ -47,7 +48,7 @@ type AddressCallersXref struct {
 }
 
 // writeXrefJSONL writes cross-referencing JSONL files.
-func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord, compressedPtrs bool) error {
+func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord, compressedPtrs bool) error {
 	// 1. string_value_xref.jsonl — string value → functions
 	// Also build from pool string entries if stringRefs is empty.
 	stringFuncs := map[string]map[string]bool{}
@@ -152,7 +153,7 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *PoolLookups, fu
 		Target   string `json:"target,omitempty"`
 		SlotInfo string `json:"slot_info,omitempty"`
 	}
-	if dtEntries, err := ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
+	if dtEntries, err := naming.ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
 		selectorTargets := map[int][]string{}
 		for _, entry := range dtEntries {
 			if entry.Kind != "code" {

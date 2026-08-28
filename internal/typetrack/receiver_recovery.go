@@ -2,8 +2,8 @@ package typetrack
 
 import (
 	"aotopsy/internal/arm64dec"
-	"aotopsy/internal/arch"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -94,7 +94,7 @@ func RecoverReceiverStackSlotX86(insts []X86DecodedInst, ownerCID int, ctx *Type
 		}
 		dst, dok := in.Args[0].(x86asm.Reg)
 		mem, mok := in.Args[1].(x86asm.Mem)
-		if !dok || !mok || arch.X86CanonReg(mem.Base) != 5 || mem.Index != 0 {
+	if !dok || !mok || sdk.X86CanonReg(mem.Base) != 5 || mem.Index != 0 {
 			continue
 		}
 		if off := int(mem.Disp); off >= receiverSlotFloor && off > bestSlot {
@@ -112,7 +112,7 @@ func RecoverReceiverStackSlotX86(insts []X86DecodedInst, ownerCID int, ctx *Type
 }
 
 func x86RegUsedAsOwnerFieldBase(insts []X86DecodedInst, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
-	rc := arch.X86CanonReg(reg)
+	rc := sdk.X86CanonReg(reg)
 	for i := range insts {
 		in := insts[i].Inst
 		if in.Op != x86asm.MOV || len(in.Args) < 2 {
@@ -122,7 +122,7 @@ func x86RegUsedAsOwnerFieldBase(insts []X86DecodedInst, reg x86asm.Reg, ownerCID
 		if !ok || mem.Index != 0 {
 			continue
 		}
-		if arch.X86CanonReg(mem.Base) != rc {
+	if sdk.X86CanonReg(mem.Base) != rc {
 			continue
 		}
 		if ctx.OwnerHasFieldAt(ownerCID, int32(mem.Disp)) {

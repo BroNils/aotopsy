@@ -1,6 +1,10 @@
 package decompiler
 
-import "strings"
+import (
+	"strings"
+
+	"aotopsy/internal/decompiler/stmt"
+)
 
 // compactLines runs the structural readability passes to a fixed point.
 //
@@ -26,28 +30,28 @@ import "strings"
 // is still a documented, not-yet-ported subset -- see
 // knowledge/SESSION_HANDOFF_2026-07-17_AOTOPSY_UNIVERSAL_RE_PLATFORM.md.
 func compactLines(source string) string {
-	tree := parseStmts(strings.Split(source, "\n"))
+	tree := stmt.ParseStmts(strings.Split(source, "\n"))
 	for pass := 0; pass < 16; pass++ {
 		var changed bool
-		tree, changed = compactTree(tree)
+		tree, changed = stmt.CompactTree(tree)
 		var c0, c4, c5, c6, c7, c8, c9, c10, c11 bool
-		tree, c9 = linearizeAsyncStmt(tree)
-		tree, c6 = forInLoopRecoveryStmt(tree)
-		tree, c10 = closureInliningStmt(tree)
-		tree, c0 = collectionIdiomsStmt(tree)
-		tree, c5 = stringInterpolationIdiomStmt(tree)
-		tree, c7 = nullAwareIdiomStmt(tree)
-		c1 := copyPropagationStmt(tree)
-		c2 := commonSubexpressionEliminationStmt(tree)
-		tree, c4 = inlineSingleUseTempsStmt(tree)
-		tree, c8 = cascadeIdiomStmt(tree)
-		tree, c11 = typedDeclarationsStmt(tree)
-		c3 := cleanExprs(tree)
+		tree, c9 = stmt.LinearizeAsyncStmt(tree)
+		tree, c6 = stmt.ForInLoopRecoveryStmt(tree)
+		tree, c10 = stmt.ClosureInliningStmt(tree)
+		tree, c0 = stmt.CollectionIdiomsStmt(tree)
+		tree, c5 = stmt.StringInterpolationIdiomStmt(tree)
+		tree, c7 = stmt.NullAwareIdiomStmt(tree)
+		c1 := stmt.CopyPropagationStmt(tree)
+		c2 := stmt.CommonSubexpressionEliminationStmt(tree)
+		tree, c4 = stmt.InlineSingleUseTempsStmt(tree)
+		tree, c8 = stmt.CascadeIdiomStmt(tree)
+		tree, c11 = stmt.TypedDeclarationsStmt(tree)
+		c3 := stmt.CleanExprs(tree)
 		if !changed && !c0 && !c1 && !c2 && !c3 && !c4 && !c5 && !c6 && !c7 && !c8 && !c9 && !c10 && !c11 {
 			break
 		}
 	}
-	return strings.Join(printStmts(tree), "\n")
+	return strings.Join(stmt.PrintStmts(tree), "\n")
 }
 
 func leadingIndent(line string) int {
@@ -62,9 +66,3 @@ func trimmed(line string) string {
 	return strings.TrimSpace(line)
 }
 
-// isTerminatorStmt reports whether a trimmed line is a statement that
-// unconditionally exits its enclosing block (return/continue/break).
-func isTerminatorStmt(t string) bool {
-	return strings.HasPrefix(t, "return ") || t == "return;" ||
-		t == "continue;" || t == "break;"
-}

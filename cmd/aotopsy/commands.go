@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"aotopsy/internal/frida"
 )
 
 // Command describes one CLI subcommand. The registry replaces the
@@ -38,8 +39,8 @@ var primaryCommands = []Command{
 	{Name: "ida", Short: "IDA headless decompilation", Run: cmdIDA},
 	{Name: "doctor", Short: "Diagnostic scan", Run: cmdDoctor},
 	{Name: "find-libapp", Short: "Find Dart library in APK", Run: cmdFindLibapp},
-	{Name: "frida-export", Short: "Export metadata for Frida scripts", Run: cmdFridaExport},
-	{Name: "frida-import", Short: "Import Frida runtime results", Run: cmdFridaImport},
+	{Name: "frida-export", Short: "Export metadata for Frida scripts", Run: frida.CmdFridaExport},
+	{Name: "frida-import", Short: "Import Frida runtime results", Run: frida.CmdFridaImport},
 	{Name: "reflutter-import", Short: "Import reFlutter dump", Run: cmdReflutterImport},
 	{Name: "parity", Short: "Corpus parity report", Run: cmdParity},
 	{Name: "inventory", Short: "Sample inventory", Run: cmdInventory},

@@ -10,6 +10,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 )
 
@@ -69,7 +70,7 @@ func cmdExportDart(args []string) error {
 	// fully-enriched Context.FuncIRFor -- export-dart no longer builds its own
 	// (previously partial) FuncIR builder, so its output matches decompile-native.
 	ctEarly := info.Version.CIDs
-	paramTypeByCodeIndex := pipeline.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
+	paramTypeByCodeIndex := naming.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
 	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
 		effectiveClass := funcObj.OwnerRefID
 		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
@@ -80,7 +81,7 @@ func cmdExportDart(args []string) error {
 	libResolver := pipeline.NewLibraryResolver(result, pl)
 	codeRefToLibURL := make(map[int]string, len(result.Codes))
 	for _, ce := range result.Codes {
-		owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
+		owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
 		if !ok || owner == nil {
 			continue
 		}

@@ -6,12 +6,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"aotopsy/internal/arch"
 	"aotopsy/internal/callgraph"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 
 	"aotopsy/internal/lattice"
@@ -28,7 +29,7 @@ import (
 // BuildCFG chain.
 func RunDisasmStageX86(
 	opts *Opts,
-	pl *PoolLookups,
+	pl *naming.PoolLookups,
 	poolDisplay map[int]string,
 	clResult *cluster.Result,
 	ranges []cluster.CodeRange,
@@ -45,17 +46,17 @@ func RunDisasmStageX86(
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
 		if r.RefID >= 0 {
-			symbols[va] = QualifiedCodeName(r.RefID, pl, r.PCOffset)
+		symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 	}
 	// Merge VM stub symbols and discarded function symbols (F-036).
 	// Same pattern as RunDisasmStage and LoadContext (context.go:170-175).
-	for va, name := range BuildVMStubSymbols(info, fmtOpts) {
+	for va, name := range naming.BuildVMStubSymbols(info, fmtOpts) {
 		symbols[va] = name
 	}
-	for va, name := range BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
+	for va, name := range naming.BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
 		symbols[va] = name
 	}
 	lookup := disasm.PlaceholderLookup(symbols)
@@ -146,25 +147,25 @@ func RunDisasmStageX86(
 			ownerName = ci.OwnerName
 			name = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-				name = elfStubName(elfFuncSyms, funcVA, name)
+			name = naming.ElfStubName(elfFuncSyms, funcVA, name)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 			name = funcName
 		}
 
-		if err := writeX86ASM(asmDir, FuncRelPath(ownerName, funcName, r.PCOffset), funcCode, funcVA, lookup); err != nil {
+		if err := writeX86ASM(asmDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset), funcCode, funcVA, lookup); err != nil {
 			return nil, fmt.Errorf("write asm %s: %w", name, err)
 		}
 
-		entry := DisasmIndexEntry{
+		entry := naming.DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,
 			OwnerRef:  r.OwnerRef,
 			PCOffset:  r.PCOffset,
 			Size:      r.Size,
-			File:      filepath.ToSlash(filepath.Join("asm", FuncRelPath(ownerName, funcName, r.PCOffset)+".txt")),
+			File:      filepath.ToSlash(filepath.Join("asm", naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".txt")),
 		}
 		if err := enc.Encode(entry); err != nil {
 			return nil, fmt.Errorf("write index: %w", err)
@@ -219,7 +220,7 @@ func RunDisasmStageX86(
 			if nblocks > 1 {
 				g := &lattice.CFGGraph{Funcs: []*lattice.FuncCFG{lcfg}}
 				dot := render.DOTCFG(g, name)
-				dotPath := filepath.Join(cfgDir, FuncRelPath(ownerName, funcName, r.PCOffset)+".dot")
+				dotPath := filepath.Join(cfgDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".dot")
 				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
 					return nil, fmt.Errorf("mkdir cfg: %w", err)
 				}
@@ -265,13 +266,13 @@ func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols
 	}
 	defer func() { _ = f.Close() }()
 
-	arch.WalkX86(funcCode, funcVA, func(d arch.X86Decoded) bool {
+	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
 		if d.Bad {
 			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
 			return true
 		}
 		line := d.Inst.String()
-		if target, ok := arch.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+		if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := symbols(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)
 			} else {

@@ -5,6 +5,7 @@ import (
 
 	"aotopsy/internal/arm64dec"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/thraudit"
 )
 
 // Annotator returns an optional inline comment for an instruction.
@@ -114,7 +115,7 @@ func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 
 		// Unresolved — classify from context.
 		rec := buildContextRecord(insts, i, byteOff, isStore, width)
-		cls := classifyFromContext(rec)
+		cls := thraudit.ClassifyFromContext(rec)
 
 		label := thrAnnotationLabel(byteOff, isStore, width, cls)
 		anns[inst.Addr] = label
@@ -130,7 +131,7 @@ func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 
 // buildContextRecord constructs a THRAuditRecord from instruction context
 // for classification. Only the fields needed by classifyFromContext are populated.
-func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int) THRAuditRecord {
+func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int) thraudit.THRAuditRecord {
 	var ctx []string
 	for d := -2; d <= 2; d++ {
 		j := idx + d
@@ -143,7 +144,7 @@ func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int)
 		}
 	}
 
-	return THRAuditRecord{
+	return thraudit.THRAuditRecord{
 		THROffset: fmt.Sprintf("0x%x", byteOff),
 		Insn:      insts[idx].Text,
 		IsStore:   isStore,
@@ -153,14 +154,14 @@ func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int)
 }
 
 // thrAnnotationLabel builds the disasm annotation string for an unresolved THR access.
-func thrAnnotationLabel(byteOff int, isStore bool, width int, cls THRClass) string {
+func thrAnnotationLabel(byteOff int, isStore bool, width int, cls thraudit.THRClass) string {
 	var classTag string
 	switch cls {
-	case ClassRuntimeEntrypoint:
+	case thraudit.ClassRuntimeEntrypoint:
 		classTag = "RUNTIME_ENTRY"
-	case ClassObjectStoreCache:
+	case thraudit.ClassObjectStoreCache:
 		classTag = "OBJSTORE"
-	case ClassIsolateGroupPtr:
+	case thraudit.ClassIsolateGroupPtr:
 		classTag = "ISO_GROUP"
 	default:
 		classTag = "UNKNOWN"

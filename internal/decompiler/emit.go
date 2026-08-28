@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 
+	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/strutil"
 )
@@ -609,7 +611,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Item 17: IdentStats-based re-classification pass from flutterdec.
 	// Renames generic temps (t0, t1) to semantic names (result, flag,
 	// counter, accumulator) based on usage patterns.
-	source = applyIdentReclassification(source)
+	source = compare.ApplyIdentReclassification(source)
 
 	visited := make(map[int]bool, len(e.visits))
 	for id, count := range e.visits {
@@ -626,11 +628,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	}
 }
 
-// labelDeclRe matches an emitted block label line, gotoRe a reference to one.
-var (
-	labelDeclRe = regexp.MustCompile(`^\s*block_(\d+):;$`)
-	gotoRefRe   = regexp.MustCompile(`goto block_(\d+);`)
-)
+// gotoRefRe matches a `goto block_N;` reference.
+var gotoRefRe = regexp.MustCompile(`goto block_(\d+);`)
 
 // dropUnusedLabels reconciles block labels and gotos so the emitted text is
 // internally consistent:
@@ -649,13 +648,13 @@ func dropUnusedLabels(source string) string {
 		for _, m := range gotoRefRe.FindAllStringSubmatch(line, -1) {
 			used[m[1]] = true
 		}
-		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
 			declared[m[1]] = true
 		}
 	}
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
 			if !used[m[1]] {
 				continue
 			}

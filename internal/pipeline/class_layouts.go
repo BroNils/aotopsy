@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/naming"
 )
 
 type DartClassLayout struct {
@@ -21,7 +22,7 @@ type DartFieldLayout struct {
 }
 
 // BuildClassLayouts joins ClassInfo + FieldInfo + string lookups into class layouts.
-func BuildClassLayouts(result *cluster.Result, pl *PoolLookups, compressedPtrs bool) []DartClassLayout {
+func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compressedPtrs bool) []DartClassLayout {
 	var wordSize int32 = 8
 	if compressedPtrs {
 		wordSize = 4

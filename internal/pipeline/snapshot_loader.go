@@ -6,6 +6,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 )
 
@@ -35,7 +36,7 @@ type SnapshotContext struct {
 	VMResult    *cluster.Result // VM snapshot cluster result (nil if no VM snapshot)
 	Table       *cluster.InstructionsTable
 	Ranges      []cluster.CodeRange
-	Pool        *PoolLookups
+	Pool        *naming.PoolLookups
 	PoolDisplay map[int]string
 
 	// Code is the raw instructions-image byte slice; CodeVA is the
@@ -149,9 +150,9 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 	}
 
 	// Pool lookups + display.
-	pl := BuildPoolLookups(result, info.Version.CIDs, vmResult,
+	pl := naming.BuildPoolLookups(result, info.Version.CIDs, vmResult,
 		info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
-	poolDisplay := ResolvePoolDisplay(result.Pool, pl)
+	poolDisplay := naming.ResolvePoolDisplay(result.Pool, pl)
 
 	return &SnapshotContext{
 		EF:          ef,

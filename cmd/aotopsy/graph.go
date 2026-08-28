@@ -9,6 +9,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 )
 
@@ -242,9 +243,9 @@ func cmdGraph(args []string) error {
 		// than trusting ce.OwnerRef directly -- Code.OwnerRef is confirmed
 		// unreliable on some real snapshots (Dart 3.7.0 x86_64: ~5.4% of
 		// functions get a bogus shared owner resolving to CID 61/Mint).
-		byCodeIndex := pipeline.CodeIndexToFunc(pt.result, ct, info.Version.CodeIndexOneBased)
+		byCodeIndex := naming.CodeIndexToFunc(pt.result, ct, info.Version.CodeIndexOneBased)
 		for _, ce := range pt.result.Codes {
-			if owner, ok := pipeline.ResolveCodeOwner(ce, refToNamed, byCodeIndex); ok {
+		if owner, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex); ok {
 				edge := graphEdge{
 					FromRef: ce.RefID,
 					ToRef:   owner.RefID,
@@ -271,9 +272,9 @@ func cmdGraph(args []string) error {
 	var codeMapCount int
 
 	for _, pt := range parsed {
-		byCodeIndex := pipeline.CodeIndexToFunc(pt.result, ct, info.Version.CodeIndexOneBased)
+		byCodeIndex := naming.CodeIndexToFunc(pt.result, ct, info.Version.CodeIndexOneBased)
 		for _, ce := range pt.result.Codes {
-			owner, ok := pipeline.ResolveCodeOwner(ce, refToNamed, byCodeIndex)
+		owner, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex)
 			if !ok {
 				continue
 			}

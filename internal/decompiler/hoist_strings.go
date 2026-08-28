@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // dartStringLiteralRe matches a double-quoted Dart string literal, honoring
@@ -45,7 +47,7 @@ func hoistStringLiterals(source string) string {
 		depth := 1
 		j := i + 1
 		for j < len(lines) && depth > 0 {
-			depth += braceDelta(lines[j])
+		depth += stmt.BraceDelta(lines[j])
 			if depth == 0 {
 				break
 			}

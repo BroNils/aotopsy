@@ -297,21 +297,6 @@ func invertCondition(cond string) string {
 	return "!(" + cond + ")"
 }
 
-// extractIterVarFromCond extracts the iterator variable name from a condition
-// like "local_8 < 10" or "local_m8 != arg0".
-func extractIterVarFromCond(cond string) string {
-	// Look for local_NN or local_mNN at the start of the condition
-	for _, op := range []string{" < ", " <= ", " != ", " > ", " >= ", " == "} {
-		idx := strings.Index(cond, op)
-		if idx > 0 {
-			left := strings.TrimSpace(cond[:idx])
-			if strings.HasPrefix(left, "local_") {
-				return left
-			}
-		}
-	}
-	return ""
-}
 
 // inferReturnTypeFromName infers a Dart function's return type from its name
 // using Dart naming conventions. Returns "dynamic" when unknown.

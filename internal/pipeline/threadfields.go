@@ -1,11 +1,11 @@
 package pipeline
 
 import (
-	"aotopsy/internal/disasm"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
-// ThreadFieldOffsets adapts disasm's Thread field table (keyed by int) to the
+// ThreadFieldOffsets adapts vmtables's Thread field table (keyed by int) to the
 // int64 keys the decompiler's memory-displacement handling uses.
 //
 // This exists as one shared helper because the decompiler now DEPENDS on the
@@ -19,7 +19,7 @@ import (
 // which left the ffitrace and --from-main paths with a nil table. Only
 // cmd/aotopsy's decompile-native path populated it.
 func ThreadFieldOffsets(dartVersion string, isARM64 bool, profile *snapshot.VersionProfile) map[int64]string {
-	src := disasm.THRFieldsWithProfile(dartVersion, isARM64, profile)
+	src := vmtables.THRFieldsWithProfile(dartVersion, isARM64, profile)
 	if len(src) == 0 {
 		return nil
 	}

@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // --- countArgs tests ---
@@ -169,9 +171,9 @@ func TestExtractIterVarFromCond(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got := extractIterVarFromCond(tt.cond)
+		got := stmt.ExtractIterVarFromCond(tt.cond)
 		if got != tt.want {
-			t.Errorf("extractIterVarFromCond(%q) = %q, want %q", tt.cond, got, tt.want)
+			t.Errorf("ExtractIterVarFromCond(%q) = %q, want %q", tt.cond, got, tt.want)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/arm64dec"
+	"aotopsy/internal/vmtables"
 )
 
 func TestIsBL(t *testing.T) {
@@ -103,7 +104,7 @@ func TestExtractCallEdgesCFG_BLR_WithProvenance(t *testing.T) {
 		{Addr: 0x1004, Raw: blrX16, Text: "BLR X16"},
 	}
 
-	thrFields := THRFields("3.10.7", true)
+	thrFields := vmtables.THRFields("3.10.7", true)
 	thrAnn := THRContextAnnotator(insts, thrFields)
 
 	edges := ExtractCallEdgesCFG("test_fn", insts, nil, []Annotator{thrAnn})

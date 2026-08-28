@@ -85,7 +85,7 @@ const (
 
 const (
 	// x86_64 canonical register numbers (RAX=0 .. R15=15, matching
-	// arch.X86CanonReg).
+	// sdk.X86CanonReg).
 	X86PP        = 15 // PP   = R15 — object pool pointer
 	X86THR       = 14 // THR  = R14 — thread pointer
 	X86CodeReg   = 12 // CODE_REG = R12 — current Code object

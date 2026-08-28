@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"aotopsy/internal/frida"
 
 	"aotopsy/internal/pipeline"
 )
@@ -171,9 +172,9 @@ func cmdReflutterImport(args []string) error {
 	// clobbers the merge with the pristine original (this was invisible before
 	// the M-13 fix, since the "merged" file was always byte-identical to the
 	// original anyway; now that enrichment actually changes content, order matters).
-	copyStaticFiles(*staticDir, *outDir)
+	frida.CopyStaticFiles(*staticDir, *outDir)
 
-	// Write merged functions (must come after copyStaticFiles -- see above)
+	// Write merged functions (must come after frida.CopyStaticFiles -- see above)
 	os.WriteFile(filepath.Join(*outDir, "functions.jsonl"),
 		[]byte(strings.Join(mergedFuncs, "\n")+"\n"), 0644)
 

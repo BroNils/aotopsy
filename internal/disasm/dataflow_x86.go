@@ -7,7 +7,6 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/arch"
 	"aotopsy/internal/sdk"
 )
 
@@ -190,7 +189,7 @@ type x86BlockCFG struct {
 }
 
 func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
-	decoded := arch.DecodeX86(funcCode, funcVA)
+	decoded := sdk.DecodeX86(funcCode, funcVA)
 	out := make([]x86DecodedInst, 0, len(decoded))
 	for _, d := range decoded {
 		out = append(out, x86DecodedInst{Addr: d.VA, Inst: d.Inst, Len: d.Len})
@@ -230,12 +229,12 @@ func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
 			kind[i] = kRet
 		case d.Inst.Op == x86asm.JMP:
 			kind[i] = kJmp
-			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
+			if t, ok := sdk.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
-		case arch.IsX86CondJump(d.Inst.Op):
+		case sdk.IsX86CondJump(d.Inst.Op):
 			kind[i] = kJcc
-			if t, ok := arch.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
+			if t, ok := sdk.X86RelTarget(d.Inst, d.Addr, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
 		default:
@@ -319,7 +318,7 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			return
 		}
 		if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && inst.Op == x86asm.MOV {
-			dstIdx, srcIdx := arch.X86CanonReg(dstReg), arch.X86CanonReg(srcReg)
+			dstIdx, srcIdx := sdk.X86CanonReg(dstReg), sdk.X86CanonReg(srcReg)
 			if srcIdx >= 0 && srcIdx < 16 && regs[srcIdx] != "" {
 				x86Define(regs, touched, dstIdx, regs[srcIdx])
 			} else {
@@ -328,8 +327,8 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			return
 		}
 		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
-			dstIdx := arch.X86CanonReg(dstReg)
-			switch arch.X86CanonReg(mem.Base) {
+			dstIdx := sdk.X86CanonReg(dstReg)
+			switch sdk.X86CanonReg(mem.Base) {
 			case sdk.X86THR:
 				// H-3 fix: annotate THR loads with field names when available.
 				if thrFields != nil {
@@ -356,7 +355,7 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 				// A Code entry-point load inherits its base's provenance --
 				// the entry point OF Code X is X. Same rule as ARM64's
 				// touchInstrEffect; see IsCodeEntryPointDisp.
-				baseIdx := arch.X86CanonReg(mem.Base)
+				baseIdx := sdk.X86CanonReg(mem.Base)
 				if IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
 					x86Define(regs, touched, dstIdx, regs[baseIdx])
 				} else {
@@ -365,12 +364,12 @@ func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]b
 			}
 			return
 		}
-		x86Kill(regs, touched, arch.X86CanonReg(dstReg))
+		x86Kill(regs, touched, sdk.X86CanonReg(dstReg))
 		return
 	}
 	if len(inst.Args) >= 1 {
 		if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-			x86Kill(regs, touched, arch.X86CanonReg(dstReg))
+			x86Kill(regs, touched, sdk.X86CanonReg(dstReg))
 		}
 	}
 }
@@ -410,7 +409,7 @@ func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringR
 		return poolStringRef{}, false
 	}
 	mem, ok := inst.Args[1].(x86asm.Mem)
-	if !ok || arch.X86CanonReg(mem.Base) != sdk.X86PP {
+	if !ok || sdk.X86CanonReg(mem.Base) != sdk.X86PP {
 		return poolStringRef{}, false
 	}
 	poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)

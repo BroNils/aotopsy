@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
+	"aotopsy/internal/frida"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 )
 
@@ -132,25 +132,6 @@ func cmdDecompileNative(args []string) error {
 		return fir, artifact, nil
 	}
 
-	// callTargetsOf extracts every resolved direct-call target VA from a
-	// FuncIR's blocks -- used by --from-main's reachability walk to
-	// discover callees without re-running EmitPseudocode's full
-	// text-emission pipeline just to find call sites.
-	callTargetsOf := func(fir *decompiler.FuncIR) []uint64 {
-		var out []uint64
-		for _, blk := range fir.Blocks {
-			for _, ins := range blk.Instrs {
-				if ins.Op != decompiler.OpCall || ins.Target == "" {
-					continue
-				}
-				if va, err := strconv.ParseUint(strings.TrimPrefix(ins.Target, "0x"), 16, 64); err == nil {
-					out = append(out, va)
-				}
-			}
-		}
-		return out
-	}
-
 	// --- --from-main support: classify each function's owning library as
 	// framework/SDK (dart:*, package:flutter*) vs. application code, so a
 	// reachability walk from main() can decompile only the app's own code
@@ -166,10 +147,10 @@ func cmdDecompileNative(args []string) error {
 	// some real snapshots (Dart 3.7.0 x86_64: ~5.4% of functions get a
 	// bogus shared owner resolving to CID 61/Mint), which would
 	// misclassify those functions' library (framework vs. app) here.
-	byCodeIndex := pipeline.CodeIndexToFunc(result, ct, info.Version.CodeIndexOneBased)
+	byCodeIndex := naming.CodeIndexToFunc(result, ct, info.Version.CodeIndexOneBased)
 	codeOwnerFunc := make(map[int]int, len(result.Codes))
 	for _, ce := range result.Codes {
-		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndex); ok {
+		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndex); ok {
 			codeOwnerFunc[ce.RefID] = owner.RefID
 		}
 	}
@@ -316,17 +297,9 @@ func cmdDecompileNative(args []string) error {
 		statsData, _ := json.MarshalIndent(art.Stats, "", "  ")
 		fmt.Fprintf(os.Stderr, "stats: %s\n", statsData)
 		if *genFrida {
-			hook := fridaHook{VA: targetVA, Name: art.FunctionName, ArgRegs: realArgRegs(fir)}
-			probes := collectIndirectCallProbes(fir)
-			script := generateFridaScriptWithOptions(*libapp, isARM64, []fridaHook{hook}, probes,
-				fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin})
-			if *genFridaOut == "" {
-				fmt.Println("\n// --- Frida script (--gen-frida) ---")
-				fmt.Println(script)
-			} else if err := os.WriteFile(*genFridaOut, []byte(script), 0o600); err != nil {
-				return fmt.Errorf("write %s: %w", *genFridaOut, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "Frida script written to %s\n", *genFridaOut)
+			if err := emitSingleFuncFrida(*libapp, isARM64, fir, art, targetVA, *genFridaOut,
+			frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin}); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -380,12 +353,6 @@ func cmdDecompileNative(args []string) error {
 	defer func() { _ = outFile.Close() }()
 	w := bufio.NewWriterSize(outFile, 256*1024)
 
-	emitted := 0
-	skipped := 0
-	var agg decompiler.Stats
-	var fridaHooks []fridaHook
-	var fridaProbes []fridaProbe
-	fridaProbesDropped := 0
 	const gcEveryN = 250
 	startTime := time.Now()
 	// Temporary diagnostic: print+flush every attempted function's VA
@@ -419,185 +386,33 @@ func cmdDecompileNative(args []string) error {
 			isARM64:                   isARM64,
 			genFrida:                  *genFrida,
 			genFridaOut:               *genFridaOut,
-			fridaOpts:                 fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
+			fridaOpts:                 frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
 			libPath:                   *libapp,
 			outDir:                    *outDir,
 		})
 	}
 
-	// rangeMatchesFilter applies --filter (if set) on top of the base
-	// Size!=0/RefID>=0 eligibility check, so a filtered run's --skip/--max
-	// counts and "N total matching functions" figure are ALL computed
-	// against the SAME (filtered) set -- default (no --filter) still
-	// covers the full framework, unchanged; --filter is purely additive.
-	rangeMatchesFilter := func(r cluster.CodeRange) bool {
-		if r.Size == 0 || r.RefID < 0 {
-			return false
-		}
-		if *filterSubstr == "" {
-			return true
-		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
-		return strings.Contains(symbolNames[funcVA], *filterSubstr)
-	}
-
-	totalMatching := 0
-	for _, r := range ranges {
-		if rangeMatchesFilter(r) {
-			totalMatching++
-		}
-	}
-	if *skipFuncs >= totalMatching {
-		fmt.Fprintf(os.Stderr, "--skip %d >= %d total matching functions -- nothing to do, this shard is past the end\n", *skipFuncs, totalMatching)
-		return nil
-	}
-
-	matched := 0
-	// P3: Class method reconstruction — sort matched ranges by owner name
-	// so methods of the same class are contiguous, then emit real
-	// `class Owner { ... }` syntax. This avoids invalid Dart (multiple
-	// class declarations for the same class).
-	type ownerRange struct {
-		r     cluster.CodeRange
-		owner string
-	}
-	var matchedRanges []ownerRange
-	for _, r := range ranges {
-		if !rangeMatchesFilter(r) {
-			continue
-		}
-		owner := ""
-		if r.RefID >= 0 {
-			if ci, ok := pl.CodeNames[r.RefID]; ok && ci.OwnerName != "" {
-				owner = ci.OwnerName
-			}
-		}
-		matchedRanges = append(matchedRanges, ownerRange{r: r, owner: owner})
-	}
-	sort.SliceStable(matchedRanges, func(i, j int) bool {
-		return matchedRanges[i].owner < matchedRanges[j].owner
+	return runDecompileLoop(decompLoopDeps{
+		ranges:               ranges,
+		codeOff:              codeOff,
+		codeVA:               codeVA,
+		symbolNames:          symbolNames,
+		filterSubstr:         *filterSubstr,
+		skipFuncs:            *skipFuncs,
+		maxFuncs:             *maxFuncs,
+		debugTrace:           debugTrace,
+		decompileRangeWithIR: decompileRangeWithIR,
+		w:                    w,
+		combinedPath:         combinedPath,
+		gcEveryN:             gcEveryN,
+		startTime:            startTime,
+		pl:                   pl,
+		genFrida:             *genFrida,
+		genFridaOut:          *genFridaOut,
+		outDir:               *outDir,
+		libapp:               *libapp,
+		isARM64:              isARM64,
+		genFridaStalker:      *genFridaStalker,
+		genFridaStalkerMin:   *genFridaStalkerMin,
 	})
-
-	type classBuffer struct {
-		owner     string
-		artifacts []decompiler.Artifact
-	}
-	var curClass *classBuffer
-	flushClass := func() {
-		if curClass == nil || len(curClass.artifacts) == 0 {
-			curClass = nil
-			return
-		}
-		_, _ = fmt.Fprintf(w, "class %s {\n", curClass.owner)
-		for _, art := range curClass.artifacts {
-			body := strings.ReplaceAll(art.Source, "\n", "\n  ")
-			_, _ = fmt.Fprintf(w, "  // === %s ===\n  %s\n\n", art.FunctionName, body)
-		}
-		_, _ = fmt.Fprintf(w, "}\n\n")
-		curClass = nil
-	}
-	for _, mr := range matchedRanges {
-		r := mr.r
-		matched++
-		if matched <= *skipFuncs {
-			continue // this shard's --skip window hasn't started yet
-		}
-		if *maxFuncs > 0 && emitted >= *maxFuncs {
-			break
-		}
-
-		if debugTrace {
-			funcStart := uint64(r.PCOffset) - codeOff
-			funcVA := codeVA + funcStart
-			fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s\n", funcVA, r.Size, symbolNames[funcVA])
-		}
-
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					skipped++
-					fmt.Fprintf(os.Stderr, "warning: recovered panic decompiling range (PCOffset=0x%x): %v\n", r.PCOffset, rec)
-				}
-			}()
-
-			fir, art, err := decompileRangeWithIR(r)
-			if err != nil {
-				skipped++
-				return
-			}
-			// P3: Class method reconstruction — buffer per class, emit
-			// real `class Owner { ... }` when owner changes.
-			ownerName := mr.owner
-			if ownerName != "" {
-				// Function belongs to a class — buffer it.
-				if curClass == nil || curClass.owner != ownerName {
-					flushClass()
-					curClass = &classBuffer{owner: ownerName}
-				}
-				curClass.artifacts = append(curClass.artifacts, art)
-			} else {
-				// Standalone function (stub, top-level) — flush any open
-				// class, then emit directly.
-				flushClass()
-				_, _ = fmt.Fprintf(w, "// === %s (PCOffset=0x%x) ===\n%s\n\n", art.FunctionName, r.PCOffset, art.Source)
-			}
-			agg.TotalCalls += art.Stats.TotalCalls
-			agg.IndirectCalls += art.Stats.IndirectCalls
-			agg.SemanticDirectCalls += art.Stats.SemanticDirectCalls
-			agg.SemanticIndirectCalls += art.Stats.SemanticIndirectCalls
-			agg.PlaceholderIfs += art.Stats.PlaceholderIfs
-			agg.UnresolvedCF += art.Stats.UnresolvedCF
-			agg.RawRegisterCalls += art.Stats.RawRegisterCalls
-			// These three were missing from the fold, so the aggregate JSON
-			// reported 0 for them no matter what the per-function artifacts
-			// said. Observed: "try_blocks": 0 on a run that emitted 10.
-			agg.NonLastBranch += art.Stats.NonLastBranch
-			agg.TryBlocks += art.Stats.TryBlocks
-			agg.CatchHandlers += art.Stats.CatchHandlers
-			emitted++
-			if *genFrida {
-				funcStart := uint64(r.PCOffset) - codeOff
-				fridaHooks = append(fridaHooks, fridaHook{VA: codeVA + funcStart, Name: art.FunctionName, ArgRegs: realArgRegs(fir)})
-				for _, p := range collectIndirectCallProbes(fir) {
-					if len(fridaProbes) >= maxFridaProbes {
-						fridaProbesDropped++
-						continue
-					}
-					fridaProbes = append(fridaProbes, p)
-				}
-			}
-		}()
-
-		if emitted > 0 && emitted%gcEveryN == 0 {
-			if err := w.Flush(); err != nil {
-				return fmt.Errorf("flush %s: %w", combinedPath, err)
-			}
-			runtime.GC()
-			debug.FreeOSMemory()
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			fmt.Fprintf(os.Stderr, "progress: %d emitted, %d skipped, heap=%dMiB, elapsed=%s\n",
-				emitted, skipped, m.HeapAlloc/1024/1024, time.Since(startTime).Round(time.Second))
-		}
-	}
-	// P3: flush last class buffer.
-	flushClass()
-	if err := w.Flush(); err != nil {
-		return fmt.Errorf("final flush %s: %w", combinedPath, err)
-	}
-	fmt.Fprintf(os.Stderr, "emitted %d functions (skipped %d) to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
-		emitted, skipped, combinedPath, time.Since(startTime).Round(time.Second), *skipFuncs, *skipFuncs+emitted+skipped, totalMatching)
-	statsData, _ := json.MarshalIndent(agg, "", "  ")
-	fmt.Fprintf(os.Stderr, "aggregate stats: %s\n", statsData)
-	if *genFrida {
-		if fridaProbesDropped > 0 {
-			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", fridaProbesDropped, maxFridaProbes)
-		}
-		if err := writeFridaScript(*genFridaOut, *outDir, *libapp, isARM64, fridaHooks, fridaProbes,
-			fridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin}); err != nil {
-			return err
-		}
-	}
-	return nil
 }

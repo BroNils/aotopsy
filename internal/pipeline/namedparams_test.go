@@ -3,6 +3,8 @@ package pipeline
 import (
 	"os"
 	"testing"
+
+	"aotopsy/internal/naming"
 )
 
 // TestNamedParamNames_Chain verifies named-parameter recovery against a real
@@ -42,8 +44,8 @@ func TestNamedParamNames_Chain(t *testing.T) {
 	if len(res.FuncTypes) == 0 {
 		t.Fatal("no FunctionType objects captured")
 	}
-	pl := BuildPoolLookups(res, nil, nil, true, "", false)
-	r := NewTypeParamResolver(res, pl)
+	pl := naming.BuildPoolLookups(res, nil, nil, true, "", false)
+	r := naming.NewTypeParamResolver(res, pl)
 
 	var (
 		named, positionalOptional int

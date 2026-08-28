@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"aotopsy/internal/decompiler"
+	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/snapshot"
 )
 
@@ -20,7 +20,7 @@ func cmdCompareBlutter(args []string) error {
 	blutterDir := args[0]
 	aotopsyDir := args[1]
 
-	result, err := decompiler.CompareBlutter(blutterDir, aotopsyDir)
+	result, err := compare.CompareBlutter(blutterDir, aotopsyDir)
 	if err != nil {
 		return fmt.Errorf("compare: %w", err)
 	}
@@ -69,7 +69,7 @@ func cmdApplyFingerprintDict(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read dictionary: %w", err)
 	}
-	dict := decompiler.ImportDictionary(string(data))
+	dict := compare.ImportDictionary(string(data))
 	fmt.Printf("Dictionary loaded: %d entries (%d named)\n",
 		dict.Size(), dict.NamedCount())
 	fpPath := filepath.Join(aotopsyDir, "function_fingerprints.jsonl")
@@ -110,7 +110,7 @@ func cmdImportDarter(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read darter output: %w", err)
 	}
-	var snap decompiler.DarterSnapshot
+	var snap compare.DarterSnapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return fmt.Errorf("parse darter JSON: %w", err)
 	}
@@ -128,11 +128,11 @@ func cmdImportDarter(args []string) error {
 			break
 		}
 	}
-	if only := decompiler.DarterVersionSupport(supported); len(only) > 0 {
+	if only := compare.DarterVersionSupport(supported); len(only) > 0 {
 		fmt.Printf("Darter-only coverage (%d versions): %s\n",
 			len(only), strings.Join(only, ", "))
 	}
-	r2 := decompiler.ImportDarter(&snap)
+	r2 := compare.ImportDarter(&snap)
 	if err := r2.Write(outputPath); err != nil {
 		return fmt.Errorf("write r2 script: %w", err)
 	}

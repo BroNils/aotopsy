@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/naming"
 )
 
 type ScriptRecord struct {
@@ -13,7 +14,7 @@ type ScriptRecord struct {
 }
 
 // BuildScripts joins cluster.ScriptInfo + PoolLookups string table → script records.
-func BuildScripts(result *cluster.Result, pl *PoolLookups) []ScriptRecord {
+func BuildScripts(result *cluster.Result, pl *naming.PoolLookups) []ScriptRecord {
 	var records []ScriptRecord
 	for _, si := range result.Scripts {
 		url := pl.RefToStr[si.URLRef]

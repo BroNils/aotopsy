@@ -13,6 +13,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
@@ -30,7 +31,7 @@ type FuncDescriptor string
 // cmd/aotopsy/refinfo.go's listToplevelFunctions owner-resolution),
 // with the VM base-object string table as a fallback for synthetic "::"
 // top-level-scope class names.
-func Build(result *cluster.Result, pl *pipeline.PoolLookups, ct *snapshot.CIDTable) map[FuncDescriptor]int {
+func Build(result *cluster.Result, pl *naming.PoolLookups, ct *snapshot.CIDTable) map[FuncDescriptor]int {
 	out := make(map[FuncDescriptor]int)
 	for i := range result.Named {
 		no := &result.Named[i]
@@ -50,7 +51,7 @@ func Build(result *cluster.Result, pl *pipeline.PoolLookups, ct *snapshot.CIDTab
 	return out
 }
 
-func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *pipeline.PoolLookups, ct *snapshot.CIDTable) string {
+func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *naming.PoolLookups, ct *snapshot.CIDTable) string {
 	effectiveClass := no.OwnerRefID
 	if owner, ok := pl.RefToNamed[no.OwnerRefID]; ok && owner.CID == ct.PatchClass {
 		effectiveClass = owner.OwnerRefID

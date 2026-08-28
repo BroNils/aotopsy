@@ -9,8 +9,11 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/thraudit"
+	"aotopsy/internal/vmtables"
 )
 
 func cmdTHRAudit(args []string) error {
@@ -113,10 +116,10 @@ func cmdTHRAudit(args []string) error {
 	// some real snapshots (Dart 3.7.0 x86_64: ~5.4% of functions get a
 	// bogus shared owner resolving to CID 61/Mint), which would show up
 	// here as an unnamed/misattributed function in the audit report.
-	byCodeIndex := pipeline.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
-	codeNames := make(map[int]pipeline.CodeNameInfo)
+	byCodeIndex := naming.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
+	codeNames := make(map[int]naming.CodeNameInfo)
 	for _, ce := range result.Codes {
-		owner, ok := pipeline.ResolveCodeOwner(ce, refToNamed, byCodeIndex)
+		owner, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex)
 		if !ok {
 			continue
 		}
@@ -125,7 +128,7 @@ func cmdTHRAudit(args []string) error {
 		if isCtor && fn != "" {
 			fn = "new " + fn
 		}
-		codeNames[ce.RefID] = pipeline.CodeNameInfo{
+		codeNames[ce.RefID] = naming.CodeNameInfo{
 			FuncName:      fn,
 			OwnerName:     resolveOwnerName(owner),
 			IsConstructor: isCtor,
@@ -140,8 +143,7 @@ func cmdTHRAudit(args []string) error {
 	}
 	lookup := disasm.PlaceholderLookup(symbols)
 
-	// THR fields for resolved marking.
-	thrFields := disasm.THRFields(dartVersion, isARM64)
+	thrFields := vmtables.THRFields(dartVersion, isARM64)
 
 	// Open output.
 	outFile, err := os.Create(*outPath)
@@ -181,7 +183,7 @@ func cmdTHRAudit(args []string) error {
 
 		funcName := codeNames[r.RefID].Qualified(r.PCOffset)
 
-		var records []disasm.THRAuditRecord
+		var records []thraudit.THRAuditRecord
 		if isARM64 {
 			insts := disasm.Disassemble(funcCode, disasm.Options{
 				BaseAddr: funcVA,

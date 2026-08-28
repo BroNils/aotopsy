@@ -10,7 +10,9 @@ import (
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
 // Context bundles everything a per-function tool (FFI-target tracing,
@@ -18,14 +20,13 @@ import (
 // from the existing static pipeline, built once per libapp.so and
 // reused across however many functions get analyzed in one run.
 //
-// This factors out cmd/aotopsy/decompile_native_cmd.go's setup
-// sequence (elfx.Open -> snapshot.Extract -> cluster.ScanClusters/
-// ReadFill -> ParseInstructionsTable -> ResolveCodeRanges ->
-// BuildPoolLookups) into a reusable, exported entry point, WITHOUT
-// modifying decompile_native_cmd.go itself -- that command's own
-// inline copy stays as-is to avoid regressing an already-verified
-// code path; new callers should use LoadContext instead of
-// duplicating the sequence again.
+// This factors out the ELF→snapshot→cluster→pool-lookup setup sequence
+// (elfx.Open -> snapshot.Extract -> cluster.ScanClusters/ReadFill ->
+// ParseInstructionsTable -> ResolveCodeRanges -> BuildPoolLookups) into a
+// reusable, exported entry point. cmd/aotopsy/decompile_native_cmd.go (and
+// its --from-main helper in decompile_native_from_main.go) now calls
+// LoadContext instead of duplicating the sequence; new callers should do
+// the same.
 type Context struct {
 	EF     *elfx.File
 	Info   *snapshot.Info
@@ -39,7 +40,7 @@ type Context struct {
 	// fallback instead (see LoadContext).
 	InstrTable *cluster.InstructionsTable
 
-	Pool *PoolLookups
+	Pool *naming.PoolLookups
 
 	// PoolDisplay maps object-pool index -> human-readable display string
 	// (quoted for literal strings, e.g. `"libbatteryOpt.so"`), mirroring
@@ -81,8 +82,8 @@ type Context struct {
 	// the cmd path. (ArgRegIndices needs a whole-binary call-edge pass and stays
 	// opt-in on the cmd path.)
 	paramFuncTypeByRef map[int]*cluster.FuncTypeInfo
-	typeParams         *TypeParamResolver
-	funcTypeGenerics   map[int][]TypeParam
+	typeParams         *naming.TypeParamResolver
+	funcTypeGenerics   map[int][]naming.TypeParam
 	poolByIndex        map[int]cluster.PoolEntry
 	// argRegMasks aggregates per-callee argument-register masks from every direct
 	// call site (whole-binary pass). nil unless BuildArgRegMasks() was called;
@@ -111,15 +112,15 @@ func LoadContext(libPath string) (ctx *Context, err error) {
 		funcVA := sc.CodeVA + funcStart
 		symbolSizes[funcVA] = r.Size
 		if r.RefID >= 0 {
-			symbolNames[funcVA] = QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
+		symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
 		} else {
 			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 	}
-	for va, name := range BuildVMStubSymbols(sc.Info, dartfmtOptionsDefault()) {
+	for va, name := range naming.BuildVMStubSymbols(sc.Info, dartfmtOptionsDefault()) {
 		symbolNames[va] = name
 	}
-	for va, name := range BuildDiscardedFunctionSymbols(sc.Result.Named, sc.Info.Version.CIDs, sc.Table, sc.Pool, sc.CodeVA, sc.CodeOff, sc.Info.Version.CodeIndexOneBased) {
+	for va, name := range naming.BuildDiscardedFunctionSymbols(sc.Result.Named, sc.Info.Version.CIDs, sc.Table, sc.Pool, sc.CodeVA, sc.CodeOff, sc.Info.Version.CodeIndexOneBased) {
 		symbolNames[va] = name
 	}
 
@@ -232,7 +233,7 @@ func (c *Context) ensureDecompileMaps() {
 	}
 
 	// Receiver class per Code, via owner Function -> (PatchClass hop) -> Class.
-	c.paramTypeByCodeIndex = CodeIndexToFunc(result, ct, c.Info.Version.CodeIndexOneBased)
+	c.paramTypeByCodeIndex = naming.CodeIndexToFunc(result, ct, c.Info.Version.CodeIndexOneBased)
 	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
 	for i := range result.Classes {
 		classByRef[result.Classes[i].RefID] = &result.Classes[i]
@@ -246,7 +247,7 @@ func (c *Context) ensureDecompileMaps() {
 	}
 	c.receiverClassByCode = make(map[int]int, len(result.Codes))
 	for _, ce := range result.Codes {
-		if owner, ok := ResolveCodeOwner(ce, pl.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil {
+		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil {
 			if classRef := effectiveClassRef(owner); classRef > 0 {
 				if ci, ok2 := classByRef[classRef]; ok2 {
 					c.receiverClassByCode[ce.RefID] = int(ci.ClassID)
@@ -260,7 +261,7 @@ func (c *Context) ensureDecompileMaps() {
 	// cmd decompile path types chains identically.
 	c.fieldTypeByClassOffset = BuildFieldTypeByClassOffset(result)
 
-	c.closureParentByFunc = BuildClosureParents(result, pl)
+	c.closureParentByFunc = naming.BuildClosureParents(result, pl)
 
 	// Signature enrichment (parameter types, generics, named params) + the pool
 	// index needed for SuspendState async detection — the same maps the cmd
@@ -269,8 +270,8 @@ func (c *Context) ensureDecompileMaps() {
 	for i := range result.FuncTypes {
 		c.paramFuncTypeByRef[result.FuncTypes[i].RefID] = &result.FuncTypes[i]
 	}
-	c.typeParams = NewTypeParamResolver(result, pl)
-	c.funcTypeGenerics = BuildFuncTypeParamNames(result, pl)
+	c.typeParams = naming.NewTypeParamResolver(result, pl)
+	c.funcTypeGenerics = naming.BuildFuncTypeParamNames(result, pl)
 	c.poolByIndex = make(map[int]cluster.PoolEntry, len(result.Pool))
 	for i := range result.Pool {
 		c.poolByIndex[result.Pool[i].Index] = result.Pool[i]
@@ -403,7 +404,7 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
-	fir.ThreadStubOffsets = disasm.ThreadStubOffsets(c.DartVersion, c.IsARM64)
+	fir.ThreadStubOffsets = vmtables.ThreadStubOffsets(c.DartVersion, c.IsARM64)
 	// Both tables, not just the stub one. ThreadFieldNames is what
 	// applyStore consults to recognise the vm_tag store that marks an FFI
 	// call target, so leaving it nil disables that detection silently --
@@ -447,7 +448,7 @@ func (c *Context) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
 		}
 		if len(c.closureParentByFunc) > 0 {
 			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-			if owner, ok := ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok {
+		if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok {
 				if parent := c.closureParentByFunc[owner.RefID]; parent != "" &&
 					parent != fir.Name && !strings.HasPrefix(fir.Name, parent+"_") {
 					fir.EnclosingFunction = parent
@@ -472,7 +473,7 @@ func (c *Context) enrichSignatureAndAsync(fir *decompiler.FuncIR, r cluster.Code
 		return
 	}
 	ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-	if owner, ok := ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil && owner.SignatureRefID > 0 {
+	if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.paramTypeByCodeIndex); ok && owner != nil && owner.SignatureRefID > 0 {
 		if ft, ok := c.paramFuncTypeByRef[owner.SignatureRefID]; ok {
 			names := c.typeParams.ParamTypeNames(*ft)
 			if ft.HasImplicit && len(names) > 0 {
@@ -572,7 +573,7 @@ func (c *Context) BuildArgRegMasks() {
 	symLk := func(va uint64) (string, bool) { s, ok := c.SymbolNames[va]; return s, ok && s != "" }
 	var thrFields map[int]string
 	if c.Info != nil {
-		thrFields = disasm.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
+		thrFields = vmtables.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
 	}
 	for _, r := range c.Ranges {
 		if r.Size == 0 {

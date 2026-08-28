@@ -69,7 +69,7 @@ flowchart TD
         SU[strutil<br/>shared utilities]
         ARCH[arch<br/>shared x86 primitives]
         CLI[cli<br/>ANSI colors]
-        LAT[lattice<br/>graph IR]
+        NAMING[naming<br/>name resolution]
         PIPE[pipeline<br/>orchestration]
     end
     TOOLS[tools/<br/>THR extractor]
@@ -85,7 +85,7 @@ flowchart TD
     PIPE --> DISASM
     PIPE --> SIG
     PIPE --> TT
-    CLUST --> DART
+    PIPE --> NAMING
     CLUST --> SNAP
     DISASM --> DART
     DISASM --> ARCH
@@ -96,10 +96,11 @@ flowchart TD
     TT --> ARCH
     FFI --> PIPE
     FFI --> DEC
+    FFI --> NAMING
     SX --> PIPE
     SX --> DEC
     FD --> CLUST
-    FD --> PIPE
+    FD --> NAMING
     SM --> DISASM
     FP --> ELFX
     CG --> DISASM
@@ -108,8 +109,7 @@ flowchart TD
 ```
 
 - `cmd/aotopsy/` — CLI entry point, command handlers
-- `internal/` — library packages (21 packages, see ARCHITECTURE.md)
-- `tools/` — standalone utilities (THR table extractor)
+- `internal/` — library packages (22 packages, see ARCHITECTURE.md)
 - `ghidra_scripts/` — Ghidra integration (Python)
 - `ida_scripts/` — IDA integration (Python)
 
@@ -152,7 +152,7 @@ grep for known symbols instead.
 ## Key Conventions
 
 - `commands.go`'s command registry (`primaryCommands`/`debugCommands`) is the source of truth for command dispatch — always check it
-- `PoolLookups` (`pipeline.PoolLookups`) is the central name-resolution surface
+- `PoolLookups` (`naming.PoolLookups`) is the central name-resolution surface
 - PatchClass hop: `OwnerRefID` may point at a PatchClass (CID 6), not the real Class
 - `DetectVersion` returns a copy to prevent data races
 - `LiftState.Clone` shares Locals by reference (intentional for cross-branch visibility)

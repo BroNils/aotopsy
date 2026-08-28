@@ -16,6 +16,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 
 	"aotopsy/internal/lattice"
@@ -37,7 +38,7 @@ type DisasmResult struct {
 // RunDisasmStage executes the per-function disassembly loop.
 func RunDisasmStage(
 	opts *Opts,
-	pl *PoolLookups,
+	pl *naming.PoolLookups,
 	poolDisplay map[int]string,
 	clResult *cluster.Result,
 	ranges []cluster.CodeRange,
@@ -55,7 +56,7 @@ func RunDisasmStage(
 	for _, r := range ranges {
 		va := codeVA + uint64(r.PCOffset) - codeOff
 		if r.RefID >= 0 {
-			symbols[va] = QualifiedCodeName(r.RefID, pl, r.PCOffset)
+		symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
 			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -66,10 +67,10 @@ func RunDisasmStage(
 	// pattern (context.go:170-175). Without this, the signal graph's
 	// IsInterestingCallee filter excludes real signal functions because
 	// it filters out sub_* and 0x.. names. (F-036)
-	for va, name := range BuildVMStubSymbols(info, fmtOpts) {
+	for va, name := range naming.BuildVMStubSymbols(info, fmtOpts) {
 		symbols[va] = name
 	}
-	for va, name := range BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
+	for va, name := range naming.BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
 		symbols[va] = name
 	}
 	lookup := disasm.PlaceholderLookup(symbols)
@@ -169,7 +170,7 @@ func RunDisasmStage(
 	type funcOutput struct {
 		skip       bool
 		filename   string
-		entry      DisasmIndexEntry
+		entry      naming.DisasmIndexEntry
 		funcRec    disasm.FuncRecord
 		name       string
 		edgeRecs   []disasm.CallEdgeRecord
@@ -206,7 +207,7 @@ func RunDisasmStage(
 			ownerName = ci.OwnerName
 			name = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-				name = elfStubName(elfFuncSyms, funcVA, name)
+			name = naming.ElfStubName(elfFuncSyms, funcVA, name)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
@@ -223,7 +224,7 @@ func RunDisasmStage(
 		thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
 		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, peep.Annotate}
 
-		filename := FuncRelPath(ownerName, funcName, r.PCOffset)
+		filename := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
 		out.filename = filename
 
 		// Per-function files live at unique paths, so they can be written
@@ -237,7 +238,7 @@ func RunDisasmStage(
 			return
 		}
 
-		out.entry = DisasmIndexEntry{
+		out.entry = naming.DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,
