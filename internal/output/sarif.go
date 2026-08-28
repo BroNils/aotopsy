@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"aotopsy/internal/signal"
 )
 
 // SARIF 2.1.0 types — subset sufficient for AOTopsy security findings.
@@ -28,22 +26,19 @@ type sarifTool struct {
 }
 
 type sarifDriver struct {
-	Name           string      `json:"name"`
-	Version        string      `json:"version"`
-	InformationURI string      `json:"informationUri"`
-	Rules          []sarifRule `json:"rules"`
+	Name           string       `json:"name"`
+	Version        string       `json:"version"`
+	InformationURI string       `json:"informationUri"`
+	Rules          []sarifRule  `json:"rules"`
 }
 
 type sarifRule struct {
-	ID               string           `json:"id"`
-	Name             string           `json:"name"`
-	ShortDescription sarifDescription `json:"shortDescription"`
-	// Pointer so an absent description is omitted: `omitempty` on a
-	// struct value has no effect and emitted {"text":""}.
-	FullDescription *sarifDescription `json:"fullDescription,omitempty"`
-	HelpURI         string            `json:"helpUri,omitempty"`
-	DefaultConfig   sarifRuleConfig   `json:"defaultConfiguration"`
-	Properties      map[string]string `json:"properties,omitempty"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	ShortDescription sarifDescription  `json:"shortDescription"`
+	HelpURI          string            `json:"helpUri"`
+	DefaultConfig    sarifRuleConfig   `json:"defaultConfiguration"`
+	Properties       map[string]string `json:"properties"`
 }
 
 type sarifDescription struct {
@@ -55,11 +50,11 @@ type sarifRuleConfig struct {
 }
 
 type sarifResult struct {
-	RuleID              string            `json:"ruleId"`
-	Level               string            `json:"level"`
-	Message             sarifDescription  `json:"message"`
-	Locations           []sarifLocation   `json:"locations"`
-	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
+	RuleID             string            `json:"ruleId"`
+	Level              string            `json:"level"`
+	Message            sarifDescription  `json:"message"`
+	Locations          []sarifLocation   `json:"locations"`
+	PartialFingerprints map[string]string `json:"partialFingerprints"`
 }
 
 type sarifLocation struct {
@@ -76,9 +71,8 @@ type sarifArtifactLocation struct {
 }
 
 type sarifRegion struct {
-	StartLine   int           `json:"startLine"`
-	StartColumn int           `json:"startColumn,omitempty"`
-	Snippet     *sarifSnippet `json:"snippet,omitempty"`
+	StartLine int          `json:"startLine"`
+	Snippet   *sarifSnippet `json:"snippet,omitempty"`
 }
 
 type sarifSnippet struct {
@@ -86,67 +80,69 @@ type sarifSnippet struct {
 }
 
 // ruleLevel maps signal categories to SARIF severity levels.
+// Category strings are duplicated from signal/classify.go to keep output
+// independent of the signal package.
 var ruleLevel = map[string]string{
-	signal.CatRooting:       "error",
-	signal.CatAntiAnalysis:  "error",
-	signal.CatSSLPinning:    "warning",
-	signal.CatAccessibility: "error",
-	signal.CatFraud:         "error",
-	signal.CatDynamicLoad:   "warning",
-	signal.CatIPC:           "note",
-	signal.CatCovertChannel: "error",
-	signal.CatDRMBypass:     "warning",
-	signal.CatObfuscation:   "warning",
-	signal.CatCryptoConst:   "note",
-	signal.CatMethodChannel: "note",
-	signal.CatPlugin:        "note",
-	signal.CatEncryption:    "note",
-	signal.CatAuth:          "note",
-	signal.CatNet:           "note",
-	signal.CatBase64Key:     "warning",
-	signal.CatSIM:           "warning",
-	signal.CatSMS:           "warning",
-	signal.CatContacts:      "warning",
-	signal.CatLocation:      "warning",
-	signal.CatDeviceInfo:    "warning",
-	signal.CatDataCollect:   "warning",
-	signal.CatCamera:        "warning",
-	signal.CatWebView:       "note",
-	signal.CatBlockchain:    "note",
-	signal.CatGambling:      "note",
-	signal.CatAttribution:   "note",
+	"rooting":         "error",
+	"anti_analysis":   "error",
+	"ssl_pinning":     "warning",
+	"accessibility":   "error",
+	"fraud":           "error",
+	"dynamic_load":    "warning",
+	"ipc":             "note",
+	"covert_channel":  "error",
+	"drm_bypass":      "warning",
+	"obfuscation":     "warning",
+	"crypto_const":    "note",
+	"method_channel":  "note",
+	"plugin":          "note",
+	"encryption":      "note",
+	"auth":            "note",
+	"net":             "note",
+	"base64":          "warning",
+	"sim":             "warning",
+	"sms":             "warning",
+	"contacts":        "warning",
+	"location":        "warning",
+	"device":          "warning",
+	"data":            "warning",
+	"camera":          "warning",
+	"webview":         "note",
+	"blockchain":      "note",
+	"gambling":        "note",
+	"attribution":     "note",
 }
 
 // ruleDescription maps categories to human-readable descriptions.
 var ruleDescription = map[string]string{
-	signal.CatRooting:       "Root/jailbreak detection or bypass code found",
-	signal.CatAntiAnalysis:  "Anti-debugging, anti-frida, or emulator detection found",
-	signal.CatSSLPinning:    "SSL/TLS certificate pinning implementation detected",
-	signal.CatAccessibility: "Accessibility service abuse — potential keylogger or screen capture",
-	signal.CatFraud:         "Fraud, phishing, or banking-related patterns detected",
-	signal.CatDynamicLoad:   "Dynamic code loading via DynamicLibrary or reflection",
-	signal.CatIPC:           "Android IPC usage — Binder, ServiceManager, ContentProvider",
-	signal.CatCovertChannel: "Covert communication channel — Tor, proxy, DNS tunnel",
-	signal.CatDRMBypass:     "DRM bypass or circumvention code detected",
-	signal.CatObfuscation:   "Code obfuscation detected — short meaningless identifiers",
-	signal.CatCryptoConst:   "Known cryptographic algorithm constants detected",
-	signal.CatMethodChannel: "Flutter MethodChannel usage detected",
-	signal.CatPlugin:        "Flutter plugin integration detected",
-	signal.CatEncryption:    "Encryption-related keyword detected",
-	signal.CatAuth:          "Authentication-related keyword detected",
-	signal.CatNet:           "Network communication detected",
-	signal.CatBase64Key:     "High-entropy string — potential API key or secret",
-	signal.CatSIM:           "SIM card or telephony access",
-	signal.CatSMS:           "SMS read or send capability",
-	signal.CatContacts:      "Contact list access",
-	signal.CatLocation:      "Location or GPS access",
-	signal.CatDeviceInfo:    "Device fingerprinting or identification",
-	signal.CatDataCollect:   "Bulk data collection pattern",
-	signal.CatCamera:        "Camera access",
-	signal.CatWebView:       "WebView usage with JavaScript bridge",
-	signal.CatBlockchain:    "Blockchain or cryptocurrency wallet",
-	signal.CatGambling:      "Gambling or betting patterns",
-	signal.CatAttribution:   "Install attribution or campaign tracking",
+	"rooting":         "Root/jailbreak detection or bypass code found",
+	"anti_analysis":   "Anti-debugging, anti-frida, or emulator detection found",
+	"ssl_pinning":     "SSL/TLS certificate pinning implementation detected",
+	"accessibility":   "Accessibility service abuse — potential keylogger or screen capture",
+	"fraud":           "Fraud, phishing, or banking-related patterns detected",
+	"dynamic_load":    "Dynamic code loading via DynamicLibrary or reflection",
+	"ipc":             "Android IPC usage — Binder, ServiceManager, ContentProvider",
+	"covert_channel":  "Covert communication channel — Tor, proxy, DNS tunnel",
+	"drm_bypass":      "DRM bypass or circumvention code detected",
+	"obfuscation":     "Code obfuscation detected — short meaningless identifiers",
+	"crypto_const":    "Known cryptographic algorithm constants detected",
+	"method_channel":  "Flutter MethodChannel usage detected",
+	"plugin":          "Flutter plugin integration detected",
+	"encryption":      "Encryption-related keyword detected",
+	"auth":            "Authentication-related keyword detected",
+	"net":             "Network communication detected",
+	"base64":          "High-entropy string — potential API key or secret",
+	"sim":             "SIM card or telephony access",
+	"sms":             "SMS read or send capability",
+	"contacts":        "Contact list access",
+	"location":        "Location or GPS access",
+	"device":          "Device fingerprinting or identification",
+	"data":            "Bulk data collection pattern",
+	"camera":          "Camera access",
+	"webview":         "WebView usage with JavaScript bridge",
+	"blockchain":      "Blockchain or cryptocurrency wallet",
+	"gambling":        "Gambling or betting patterns",
+	"attribution":     "Install attribution or campaign tracking",
 }
 
 // SignalFinding is a single security finding from signal analysis.
