@@ -9,59 +9,34 @@ import (
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/naming"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/signal"
+	"aotopsy/internal/strutil"
 )
 
-// FlutterMetaFunc is a function entry in flutter_meta.json.
-type FlutterMetaFunc struct {
-	Addr       string `json:"addr"`
-	Name       string `json:"name"`
-	Size       int    `json:"size"`
-	Owner      string `json:"owner,omitempty"`
-	ParamCount int    `json:"param_count,omitempty"`
-}
-
-// FlutterMetaTHRField is a THR (thread) struct field.
-type FlutterMetaTHRField struct {
-	Offset int    `json:"offset"`
-	Name   string `json:"name"`
-}
-
-// FlutterMetaJSON is the top-level flutter_meta.json structure.
-type FlutterMetaJSON struct {
-	Version        string                `json:"version"`
-	DartVersion    string                `json:"dart_version,omitempty"`
-	PointerSize    int                   `json:"pointer_size,omitempty"`
-	Functions      []FlutterMetaFunc     `json:"functions"`
-	Comments       []naming.FlutterMetaComment  `json:"comments"`
-	FocusFunctions []string              `json:"focus_functions,omitempty"`
-	Classes        []DartClassLayout     `json:"classes,omitempty"`
-	THRFields      []FlutterMetaTHRField `json:"thr_fields,omitempty"`
-}
 
 // RunMetaStage generates flutter_meta.json from existing disasm output.
 func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writer) (string, error) {
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := naming.MakeLogf(quiet, log)
-	stagef := naming.MakeStagef(quiet, log)
+	logf := cli.MakeLogf(quiet, log)
+	stagef := cli.MakeStagef(quiet, log)
 
 	if outPath == "" {
 		outPath = filepath.Join(inDir, "flutter_meta.json")
 	}
 
 	// 1. Read functions.jsonl.
-	funcs, err := naming.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
+	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
 	if err != nil {
 		return "", fmt.Errorf("read functions.jsonl: %w", err)
 	}
 	stagef("meta", "%s%d%s functions", cli.Gold, len(funcs), cli.Reset)
 
-	metaFuncs := make([]FlutterMetaFunc, len(funcs))
+	metaFuncs := make([]strutil.FlutterMetaFunc, len(funcs))
 	for i, f := range funcs {
-		metaFuncs[i] = FlutterMetaFunc{
+		metaFuncs[i] = strutil.FlutterMetaFunc{
 			Addr:       f.PC,
 			Name:       f.Name,
 			Size:       f.Size,
@@ -96,7 +71,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	// 2b. Read dart_meta.json for pointer size and THR fields.
 	var pointerSize int
 	var dartVersion string
-	var thrFields []FlutterMetaTHRField
+	var thrFields []strutil.FlutterMetaTHRField
 	dmPath := filepath.Join(inDir, "dart_meta.json")
 	if dmData, err := os.ReadFile(dmPath); err == nil {
 		var dm struct {
@@ -111,7 +86,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 			dartVersion = dm.DartVersion
 			pointerSize = dm.PointerSize
 			for _, f := range dm.THRFields {
-				thrFields = append(thrFields, FlutterMetaTHRField{Offset: f.Offset, Name: f.Name})
+				thrFields = append(thrFields, strutil.FlutterMetaTHRField{Offset: f.Offset, Name: f.Name})
 			}
 			logf("  %sdart:%s %s  %sptr_size:%s %d  %sthr_fields:%s %d\n",
 				cli.Muted, cli.Reset, dartVersion, cli.Muted, cli.Reset, pointerSize, cli.Muted, cli.Reset, len(thrFields))
@@ -122,7 +97,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	}
 
 	// 2c. Read class layouts.
-	classLayouts, err := naming.ReadJSONL[DartClassLayout](filepath.Join(inDir, "classes.jsonl"))
+	classLayouts, err := jsonutil.ReadJSONL[strutil.FlutterMetaJSONClass](filepath.Join(inDir, "classes.jsonl"))
 	if err != nil {
 		logf("  %s! classes.jsonl: %v%s\n", cli.Red, err, cli.Reset)
 		classLayouts = nil
@@ -132,7 +107,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 
 	// 3. Extract comments from asm/*.txt files.
 	asmDir := filepath.Join(inDir, "asm")
-	comments, err := naming.ExtractAsmComments(asmDir)
+	comments, err := strutil.ExtractAsmComments(asmDir)
 	if err != nil {
 		logf("  %s! asm comments: %v%s\n", cli.Red, err, cli.Reset)
 		comments = nil
@@ -140,7 +115,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	logf("  %scomments:%s %d from asm files\n", cli.Muted, cli.Reset, len(comments))
 
 	// 3b. Merge string references as comments.
-	stringRefs, err := naming.ReadJSONL[disasm.StringRefRecord](filepath.Join(inDir, "string_refs.jsonl"))
+	stringRefs, err := jsonutil.ReadJSONL[disasm.StringRefRecord](filepath.Join(inDir, "string_refs.jsonl"))
 	if err != nil {
 		logf("  %s! string_refs.jsonl: %v%s\n", cli.Red, err, cli.Reset)
 	} else {
@@ -150,7 +125,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 		}
 		strAdded := 0
 		for _, sr := range stringRefs {
-		addr := naming.NormalizeHexAddr(sr.PC)
+		addr := strutil.NormalizeHexAddr(sr.PC)
 			if seen[addr] {
 				continue
 			}
@@ -159,7 +134,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 			if len(val) > 80 {
 				val = val[:77] + "..."
 			}
-		comments = append(comments, naming.FlutterMetaComment{
+		comments = append(comments, strutil.FlutterMetaComment{
 				Addr: addr,
 				Text: fmt.Sprintf("str: %q", val),
 			})
@@ -169,7 +144,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	}
 
 	// 4. Write flutter_meta.json.
-	meta := FlutterMetaJSON{
+	meta := strutil.FlutterMetaJSON{
 		Version:        "1",
 		DartVersion:    dartVersion,
 		PointerSize:    pointerSize,
@@ -194,7 +169,7 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 		return "", fmt.Errorf("close output: %w", err)
 	}
 
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, naming.FileSize(outPath))
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, strutil.FileSize(outPath))
 
 	return outPath, nil
 }

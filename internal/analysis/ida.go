@@ -1,4 +1,4 @@
-package main
+package analysis
 
 import (
 	"fmt"
@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-// findPython locates a python3 binary that can import idapro.
+// FindPython locates a python3 binary that can import idapro.
 // Search order: explicit flag, PATH candidates, conda base, IDA bundled.
-func findPython(explicit string) (string, error) {
+func FindPython(explicit string) (string, error) {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err == nil {
 			return explicit, nil
@@ -63,8 +63,8 @@ Or specify a python that has it:
   aotopsy ida --python /path/to/python3 --in <dir>`)
 }
 
-// findIDAScript locates ida_scripts/aotopsy_apply.py.
-func findIDAScript() (string, error) {
+// FindIDAScript locates ida_scripts/aotopsy_apply.py.
+func FindIDAScript() (string, error) {
 	exe, _ := os.Executable()
 	exeDir := filepath.Dir(exe)
 	homeDir, _ := os.UserHomeDir()
@@ -87,8 +87,8 @@ func findIDAScript() (string, error) {
 	return "", fmt.Errorf("cannot find ida_scripts/aotopsy_apply.py; run from the aotopsy project root or install with 'make install'")
 }
 
-// countDecompiledFiles counts .c files in a directory tree.
-func countDecompiledFiles(dir string) int {
+// CountDecompiledFiles counts .c files in a directory tree.
+func CountDecompiledFiles(dir string) int {
 	count := 0
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".c") {

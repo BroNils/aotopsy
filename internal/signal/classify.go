@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
 )
 
@@ -439,6 +440,27 @@ func IsMundaneTHR(name string) bool {
 	return sdk.IsMundaneStub(name)
 }
 
+// IsInterestingCallee returns true if the callee name represents a real named
+// function rather than VM internals, stubs, or dispatch noise.
+func IsInterestingCallee(name string) bool {
+	if name == "" {
+		return false
+	}
+	switch {
+	case len(name) > 4 && name[:4] == "sub_":
+		return false
+	case len(name) > 2 && name[0] == '0' && name[1] == 'x':
+		return false
+	// object_field carries a field offset suffix, so match by prefix.
+	case name == "dispatch_table" || strings.HasPrefix(name, disasm.ObjectFieldVia):
+		return false
+	case len(name) > 4 && name[:4] == "THR.":
+		return false
+	case len(name) > 3 && name[:3] == "PP[":
+		return false
+	}
+	return true
+}
 // Severity levels for signal categories.
 const (
 	SeverityHigh   = "high"

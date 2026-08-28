@@ -15,10 +15,10 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/output"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
-
+	"aotopsy/internal/strutil"
 	"aotopsy/internal/lattice"
 	"aotopsy/internal/lattice/render"
 )
@@ -170,7 +170,7 @@ func RunDisasmStage(
 	type funcOutput struct {
 		skip       bool
 		filename   string
-		entry      naming.DisasmIndexEntry
+		entry      strutil.DisasmIndexEntry
 		funcRec    disasm.FuncRecord
 		name       string
 		edgeRecs   []disasm.CallEdgeRecord
@@ -238,7 +238,7 @@ func RunDisasmStage(
 			return
 		}
 
-		out.entry = naming.DisasmIndexEntry{
+	out.entry = strutil.DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,

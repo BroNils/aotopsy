@@ -423,3 +423,22 @@ func sanitizeCallName(s string) string {
 	}
 	return safeFuncName(s)
 }
+
+// CallTargetsOf extracts every resolved direct-call target VA from a
+// FuncIR's blocks -- used by --from-main's reachability walk to
+// discover callees without re-running EmitPseudocode's full
+// text-emission pipeline just to find call sites.
+func CallTargetsOf(fir *FuncIR) []uint64 {
+	var out []uint64
+	for _, blk := range fir.Blocks {
+		for _, ins := range blk.Instrs {
+			if ins.Op != OpCall || ins.Target == "" {
+				continue
+			}
+			if va, err := strconv.ParseUint(strings.TrimPrefix(ins.Target, "0x"), 16, 64); err == nil {
+				out = append(out, va)
+			}
+		}
+	}
+	return out
+}

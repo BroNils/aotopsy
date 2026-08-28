@@ -1,4 +1,4 @@
-package main
+package analysis
 
 import (
 	"fmt"
@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 )
 
-// copyGhidraArtifacts copies Ghidra scripts into outDir/ghidra/.
-func copyGhidraArtifacts(outDir string) error {
-	scriptDir, err := findScriptPath()
+// CopyGhidraArtifacts copies Ghidra scripts into outDir/ghidra/.
+func CopyGhidraArtifacts(outDir string) error {
+	scriptDir, err := FindScriptPath()
 	if err != nil {
 		return err
 	}
@@ -35,9 +35,9 @@ func copyGhidraArtifacts(outDir string) error {
 	return nil
 }
 
-// copyIDAArtifacts copies IDA scripts into outDir/ida/.
-func copyIDAArtifacts(outDir string) error {
-	scriptPath, err := findIDAScript()
+// CopyIDAArtifacts copies IDA scripts into outDir/ida/.
+func CopyIDAArtifacts(outDir string) error {
+	scriptPath, err := FindIDAScript()
 	if err != nil {
 		return err
 	}

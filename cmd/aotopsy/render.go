@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/naming"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/render"
 	"aotopsy/internal/strutil"
 )
@@ -265,7 +265,7 @@ func runDot(dotPath, outPath, format string) error {
 	return cmd.Run()
 }
 
-// readJSONL delegates to naming.ReadJSONL.
+// readJSONL delegates to jsonutil.ReadJSONL.
 func readJSONL[T any](path string) ([]T, error) {
-	return naming.ReadJSONL[T](path)
+	return jsonutil.ReadJSONL[T](path)
 }

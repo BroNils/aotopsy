@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/pipeline"
 )
@@ -85,19 +86,19 @@ func cmdIDA(args []string) error {
 	}
 
 	// Step 2: Copy script into artifact directory.
-	if copyErr := copyIDAArtifacts(pipeResult.OutDir); copyErr != nil {
+	if copyErr := analysis.CopyIDAArtifacts(pipeResult.OutDir); copyErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not copy IDA script: %v\n", copyErr)
 	}
 
 	// Step 3: Find python3 with idapro.
-	python, err := findPython(*pythonBin)
+	python, err := analysis.FindPython(*pythonBin)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "python: %s\n", python)
 
 	// Step 4: Find IDA script.
-	scriptPath, err := findIDAScript()
+	scriptPath, err := analysis.FindIDAScript()
 	if err != nil {
 		return err
 	}
@@ -123,7 +124,7 @@ func cmdIDA(args []string) error {
 		return fmt.Errorf("ida script failed: %w", err)
 	}
 
-	cCount := countDecompiledFiles(absDecompDir)
+	cCount := analysis.CountDecompiledFiles(absDecompDir)
 	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
 
 	return nil

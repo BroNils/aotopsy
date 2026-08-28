@@ -1,4 +1,9 @@
-package main
+// Package analysis contains business logic extracted from cmd/aotopsy
+// that is not CLI plumbing: Ghidra/IDA launcher discovery, artifact
+// copying, find-libapp, inventory, reflutter import, parity, refinfo,
+// x64refs, graph, strings/clusters/objects, thr-audit, decompile-native
+// loop/reachability, and export-dart sanitization.
+package analysis
 
 import (
 	"fmt"
@@ -8,28 +13,28 @@ import (
 	"strings"
 )
 
-// ghidraLauncher holds the command and any prefix args needed to run Ghidra headless.
+// GhidraLauncher holds the command and any prefix args needed to run Ghidra headless.
 // For Ghidra <12 (Jython): cmd=analyzeHeadless, prefix=nil.
 // For Ghidra 12+ (PyGhidra): cmd=pyghidraRun, prefix=["-H"].
-type ghidraLauncher struct {
-	cmd    string   // path to the launcher binary
-	prefix []string // args inserted before analyzeHeadless args (e.g. ["-H"])
+type GhidraLauncher struct {
+	Cmd    string   // path to the launcher binary
+	Prefix []string // args inserted before analyzeHeadless args (e.g. ["-H"])
 }
 
-// findGhidra locates the Ghidra installation and returns a launcher.
+// FindGhidra locates the Ghidra installation and returns a launcher.
 // Search order:
 //  1. --ghidra-home flag
 //  2. GHIDRA_HOME or AOTOPSY_GHIDRA_HOME environment variable
 //  3. analyzeHeadless in PATH
 //  4. ghidraRun in PATH → derive installation directory
 //  5. brew --prefix ghidra
-func findGhidra(explicitHome string) (launcher ghidraLauncher, ghidraHome string, err error) {
+func FindGhidra(explicitHome string) (launcher GhidraLauncher, ghidraHome string, err error) {
 	// 1. Explicit --ghidra-home.
 	if explicitHome != "" {
 		if l, home, ok := probeGhidraHome(explicitHome); ok {
 			return l, home, nil
 		}
-		return ghidraLauncher{}, "", fmt.Errorf("analyzeHeadless not found in %s", explicitHome)
+		return GhidraLauncher{}, "", fmt.Errorf("analyzeHeadless not found in %s", explicitHome)
 	}
 
 	// 2. GHIDRA_HOME or AOTOPSY_GHIDRA_HOME environment variable.
@@ -44,7 +49,7 @@ func findGhidra(explicitHome string) (launcher ghidraLauncher, ghidraHome string
 	// 3. analyzeHeadless in PATH.
 	if ah, err := exec.LookPath("analyzeHeadless"); err == nil {
 		home := filepath.Dir(filepath.Dir(ah))
-		return ghidraLauncher{cmd: ah}, home, nil
+		return GhidraLauncher{Cmd: ah}, home, nil
 	}
 
 	// 4. ghidraRun in PATH → parse to find install dir.
@@ -69,7 +74,7 @@ func findGhidra(explicitHome string) (launcher ghidraLauncher, ghidraHome string
 		}
 	}
 
-	return ghidraLauncher{}, "", fmt.Errorf(`Ghidra not found
+	return GhidraLauncher{}, "", fmt.Errorf(`Ghidra not found
 
 Install Ghidra:
   brew install ghidra
@@ -86,7 +91,7 @@ Or pass --ghidra-home:
 // Caskroom layout (home/ghidra_*/support/analyzeHeadless).
 // For Ghidra 12+ with pyghidraRun, returns a launcher that uses it
 // so Python scripts work (PyGhidra replaces Jython).
-func probeGhidraHome(home string) (launcher ghidraLauncher, ghidraHome string, ok bool) {
+func probeGhidraHome(home string) (launcher GhidraLauncher, ghidraHome string, ok bool) {
 	// Direct: home/support/analyzeHeadless
 	ah := filepath.Join(home, "support", "analyzeHeadless")
 	if _, err := os.Stat(ah); err == nil {
@@ -105,18 +110,18 @@ func probeGhidraHome(home string) (launcher ghidraLauncher, ghidraHome string, o
 			}
 		}
 	}
-	return ghidraLauncher{}, "", false
+	return GhidraLauncher{}, "", false
 }
 
-// makeLauncher returns a ghidraLauncher for the given Ghidra home.
+// makeLauncher returns a GhidraLauncher for the given Ghidra home.
 // If pyghidraRun exists (Ghidra 12+), uses it with -H flag so Python scripts work.
 // Otherwise falls back to analyzeHeadless directly.
-func makeLauncher(home, analyzeHeadless string) ghidraLauncher {
+func makeLauncher(home, analyzeHeadless string) GhidraLauncher {
 	pyghidra := filepath.Join(home, "support", "pyghidraRun")
 	if _, err := os.Stat(pyghidra); err == nil {
-		return ghidraLauncher{cmd: pyghidra, prefix: []string{"-H"}}
+		return GhidraLauncher{Cmd: pyghidra, Prefix: []string{"-H"}}
 	}
-	return ghidraLauncher{cmd: analyzeHeadless}
+	return GhidraLauncher{Cmd: analyzeHeadless}
 }
 
 // deriveGhidraHome reads the ghidraRun shell script to find the real install path.
@@ -153,9 +158,9 @@ func deriveGhidraHome(ghidraRunPath string) string {
 	return ""
 }
 
-// findScriptPath returns the path to the ghidra_scripts directory.
+// FindScriptPath returns the path to the ghidra_scripts directory.
 // Validates that ALL required scripts exist, not just one.
-func findScriptPath() (string, error) {
+func FindScriptPath() (string, error) {
 	exe, _ := os.Executable()
 	exeDir := filepath.Dir(exe)
 
@@ -187,8 +192,8 @@ func findScriptPath() (string, error) {
 	return "", fmt.Errorf("cannot find ghidra_scripts/ with both aotopsy_apply.py and aotopsy_prescript.py\n  checked: %s\n  fix: run 'make install' or run from the aotopsy project root", strings.Join(candidates, ", "))
 }
 
-// findJavaHome tries to locate a suitable JDK for Ghidra.
-func findJavaHome(ghidraHome string) string {
+// FindJavaHome tries to locate a suitable JDK for Ghidra.
+func FindJavaHome(ghidraHome string) string {
 	// Check if the ghidraRun wrapper sets JAVA_HOME.
 	gr := filepath.Join(ghidraHome, "ghidraRun")
 	if data, err := os.ReadFile(gr); err == nil {
@@ -225,9 +230,9 @@ func findJavaHome(ghidraHome string) string {
 	return ""
 }
 
-// sanitizeProjectName builds a Ghidra project name from a directory basename.
+// SanitizeProjectName builds a Ghidra project name from a directory basename.
 // Strips characters that Java/Ghidra reject in project names (colon, etc.).
-func sanitizeProjectName(base string) string {
+func SanitizeProjectName(base string) string {
 	if base == "" || base == "." {
 		return "aotopsy_decompile"
 	}
@@ -240,9 +245,9 @@ func sanitizeProjectName(base string) string {
 	return "aotopsy_" + clean
 }
 
-// sanitizeGhidraPath returns an absolute path safe for Java/Ghidra.
+// SanitizeGhidraPath returns an absolute path safe for Java/Ghidra.
 // If the resolved path contains ':', relocates to ~/.aotopsy/ghidra-projects/.
-func sanitizeGhidraPath(projectDir string) string {
+func SanitizeGhidraPath(projectDir string) string {
 	abs, _ := filepath.Abs(projectDir)
 	if !strings.Contains(abs, ":") {
 		return abs

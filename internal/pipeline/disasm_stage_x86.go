@@ -14,6 +14,7 @@ import (
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/strutil"
 
 	"aotopsy/internal/lattice"
 	"aotopsy/internal/lattice/render"
@@ -158,7 +159,7 @@ func RunDisasmStageX86(
 			return nil, fmt.Errorf("write asm %s: %w", name, err)
 		}
 
-		entry := naming.DisasmIndexEntry{
+		entry := strutil.DisasmIndexEntry{
 			Name:      funcName,
 			OwnerName: ownerName,
 			RefID:     r.RefID,

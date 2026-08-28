@@ -15,6 +15,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
 	"aotopsy/internal/vmtables"
@@ -630,7 +631,7 @@ type BLRBreakdown = typetrack.BLRBreakdown
 func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPoolIndex map[int]string) (BLRBreakdown, error) {
 	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
-	edges, err := naming.ReadJSONL[disasm.CallEdgeRecord](edgesPath)
+	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](edgesPath)
 	if err != nil {
 		return bd, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}

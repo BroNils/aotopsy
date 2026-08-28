@@ -38,29 +38,6 @@ type CodeNameInfo struct {
 	EnclosingFunction string
 }
 
-// isAllocationStubOwner reports whether a Code's owner makes it the allocation
-// stub for a class.
-//
-// UntaggedCode.owner_ is a Function, a Class, or an AbstractType, and the SDK
-// names each differently. For the Class case (analyze_snapshot_api_impl.cc):
-//
-//	if (owner.IsClass()) {
-//	  js_.PrintfProperty("name", "new %s", Class::Cast(owner).ScrubbedNameCString());
-//	  js_.PrintPropertyBool("is_stub", true);
-//	}
-//
-// so the canonical name carries the same "new " a constructor does. The ELF
-// symbol table agrees: on the 3.12.2 arm64 sample it holds 1231 symbols
-// starting with "new ", of which we were marking 306 -- every one of the other
-// 925 was a Code whose owner is a Class (918) and which we therefore named
-// with the bare class name.
-//
-// This is deliberately keyed on the owner's CID and not on "the name matches
-// its class", which would be a guess: a method may legitimately share its
-// class's name.
-func isAllocationStubOwner(owner *cluster.NamedObject, ct *snapshot.CIDTable) bool {
-	return owner != nil && ct != nil && ct.Class != 0 && owner.CID == ct.Class
-}
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
 type PoolLookups struct {
@@ -349,95 +326,6 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	return l
 }
 
-// CodeIndexToFunc maps a Code's ClusterIndex to its unambiguous owning
-// Function NamedObject via the Function->CodeIndex direction (the
-// REVERSE of Code.OwnerRef). This is the reliable cross-reference
-// cmd/aotopsy/refinfo.go's findOwnerViaCodeIndex already validated by
-// hand: Code.OwnerRef is confirmed unreliable for some real snapshots
-// (e.g. Dart 3.7.0 x86_64 produces a bogus shared OwnerRef for ~5.4% of
-// all functions, all resolving to CID 61/Mint, which is never a legal
-// Code owner), while Function.CodeIndex == Code.ClusterIndex has not
-// shown this failure mode. A ClusterIndex is dropped (left unmapped,
-// not guessed) if more than one Function claims it, so ambiguous cases
-// fall back to the OwnerRef-based lookup in ResolveCodeOwner instead of
-// picking one arbitrarily. Exported so every direct Code.OwnerRef
-// consumer in cmd/aotopsy (graph/parity/thr-audit/decompile-native's
-// --from-main library classification) can share this same reliable
-// cross-reference instead of trusting the buggy field directly.
-//
-// codeIndexOneBased must be true for Dart ≥2.16 (Function.code_index is
-// 1-based: 0=LazyCompile stub, 1+=Code cluster index). For ≤2.15 it is
-// 0-based (direct ref into Code cluster). See VersionProfile.CodeIndexOneBased.
-func CodeIndexToFunc(result *cluster.Result, ct *snapshot.CIDTable, codeIndexOneBased bool) map[int]*cluster.NamedObject {
-	if ct == nil {
-		return nil
-	}
-	m := make(map[int]*cluster.NamedObject)
-	ambiguous := make(map[int]bool)
-	for i := range result.Named {
-		no := &result.Named[i]
-		if no.CID != ct.Function || no.CodeIndex < 0 {
-			continue
-		}
-		// Convert Function.code_index (1-based for ≥2.16) to Code.ClusterIndex (0-based).
-		clusterIdx := no.CodeIndex
-		if codeIndexOneBased {
-			clusterIdx = no.CodeIndex - 1
-		}
-		if clusterIdx < 0 {
-			continue // code_index 0 = LazyCompile stub (≥2.16), no Code object
-		}
-		if _, exists := m[clusterIdx]; exists {
-			ambiguous[clusterIdx] = true
-			continue
-		}
-		m[clusterIdx] = no
-	}
-	for idx := range ambiguous {
-		delete(m, idx)
-	}
-	return m
-}
-
-// ResolveCodeOwner finds the Function/Closure/FfiTrampolineData
-// NamedObject that owns ce, preferring the reliable CodeIndex
-// cross-reference (see CodeIndexToFunc's doc comment) over the
-// documented-unreliable Code.OwnerRef, and falling back to OwnerRef
-// only when no CodeIndex match exists (e.g. deferred code with
-// ClusterIndex == -1, or Dart versions/architectures where the
-// cross-reference wasn't populated) -- so this is a strict correctness
-// improvement, never a regression versus the old OwnerRef-only lookup.
-func ResolveCodeOwner(ce cluster.CodeEntry, refToNamed map[int]*cluster.NamedObject, byCodeIndex map[int]*cluster.NamedObject) (*cluster.NamedObject, bool) {
-	if ce.ClusterIndex >= 0 {
-		if owner, ok := byCodeIndex[ce.ClusterIndex]; ok {
-			return owner, true
-		}
-	}
-	if ce.OwnerRef <= 0 {
-		return nil, false
-	}
-	owner, ok := refToNamed[ce.OwnerRef]
-	return owner, ok
-}
-
-func (l *PoolLookups) ResolveName(no *cluster.NamedObject) string {
-	if no.NameRefID >= 0 {
-		if s, ok := l.RefToStr[no.NameRefID]; ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
-	if no.NameRefID >= 0 {
-		if s, ok := l.VmRefToStr[no.NameRefID]; ok {
-			return s
-		}
-	}
-	return ""
-}
-
 // StringForRef resolves a ref ID to a string, falling back to the VM
 // snapshot's strings for base-object refs.
 //
@@ -485,6 +373,24 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 		return ""
 	}
 	return l.resolveClassName(owner, 0)
+}
+
+func (l *PoolLookups) ResolveName(no *cluster.NamedObject) string {
+	if no.NameRefID >= 0 {
+		if s, ok := l.RefToStr[no.NameRefID]; ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
+	if no.NameRefID >= 0 {
+		if s, ok := l.VmRefToStr[no.NameRefID]; ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // resolveClassName turns a Class-or-PatchClass NamedObject into a class name,

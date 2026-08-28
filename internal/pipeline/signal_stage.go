@@ -13,10 +13,12 @@ import (
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
 	"aotopsy/internal/render"
 	"aotopsy/internal/signal"
+	"aotopsy/internal/strutil"
 )
 
 // SignalResult holds summary stats from the signal stage.
@@ -31,23 +33,23 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := naming.MakeLogf(quiet, log)
-	stagef := naming.MakeStagef(quiet, log)
+	logf := cli.MakeLogf(quiet, log)
+	stagef := cli.MakeStagef(quiet, log)
 
 	// Read functions.jsonl.
-	funcs, err := naming.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
+	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("read functions.jsonl: %w", err)
 	}
 
 	// Read call_edges.jsonl.
-	edges, err := naming.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(inDir, "call_edges.jsonl"))
+	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(inDir, "call_edges.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
 
 	// Read string_refs.jsonl.
-	stringRefs, err := naming.ReadJSONL[disasm.StringRefRecord](filepath.Join(inDir, "string_refs.jsonl"))
+	stringRefs, err := jsonutil.ReadJSONL[disasm.StringRefRecord](filepath.Join(inDir, "string_refs.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("read string_refs.jsonl: %w", err)
 	}
@@ -98,7 +100,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			path := filepath.Join(asmDir, relPath+".txt")
 			data, err := os.ReadFile(path)
 			if err != nil {
-			flatPath := filepath.Join(asmDir, naming.SanitizeFilename(sf.Name)+".txt")
+			flatPath := filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".txt")
 				data, err = os.ReadFile(flatPath)
 				if err != nil {
 					continue
@@ -130,7 +132,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		return nil, fmt.Errorf("write signal_graph.json: %w", err)
 	}
 	_ = jsonFile.Close()
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, jsonPath, cli.Reset, naming.FileSize(jsonPath))
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, jsonPath, cli.Reset, strutil.FileSize(jsonPath))
 
 	// Write signal.html.
 	htmlFile, err := os.Create(outPath)
@@ -158,7 +160,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if err := htmlFile.Close(); err != nil {
 		return nil, fmt.Errorf("close signal.html: %w", err)
 	}
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, naming.FileSize(outPath))
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, outPath, cli.Reset, strutil.FileSize(outPath))
 
 	// Write signal.dot.
 	dotPath := filepath.Join(inDir, "signal.dot")
@@ -166,7 +168,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	if err := os.WriteFile(dotPath, []byte(dotContent), 0644); err != nil {
 		return nil, fmt.Errorf("write signal.dot: %w", err)
 	}
-	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, dotPath, cli.Reset, naming.FileSize(dotPath))
+	logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, dotPath, cli.Reset, strutil.FileSize(dotPath))
 
 	// Write SARIF report.
 	var findings []output.SignalFinding
@@ -218,7 +220,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
 			sarifPath := filepath.Join(inDir, "report.sarif")
-			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, naming.FileSize(sarifPath), len(findings))
+			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, strutil.FileSize(sarifPath), len(findings))
 		}
 	}
 
@@ -236,7 +238,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 				return nil, fmt.Errorf("write signal_cfg.dot: %w", err)
 			}
 			logf("  %s->%s %s%s%s (%d functions, %d bytes)\n",
-			cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), naming.FileSize(cfgPath))
+			cli.Muted, cli.Reset, cli.Blue, cfgPath, cli.Reset, len(content), strutil.FileSize(cfgPath))
 		}
 	}
 
@@ -257,7 +259,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		}
 		for _, df := range dotFiles {
 			svgPath := strings.TrimSuffix(df, ".dot") + ".svg"
-			dfSize := naming.FileSize(df)
+			dfSize := strutil.FileSize(df)
 			if dfSize > largeDOTThreshold {
 				logf("  %s!%s skipping SVG for %s (%d KB), too large for dot\n",
 					cli.Red, cli.Reset, filepath.Base(df), dfSize/1024)
@@ -277,7 +279,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			} else if err != nil {
 				logf("  %s!%s dot render failed for %s: %v\n%s\n", cli.Red, cli.Reset, filepath.Base(df), err, out)
 			} else {
-			logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, naming.FileSize(svgPath))
+			logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, svgPath, cli.Reset, strutil.FileSize(svgPath))
 			}
 		}
 	}
@@ -299,12 +301,12 @@ func BuildSignalContent(
 ) map[string]*render.SignalFuncContent {
 	edgesByFunc := make(map[string][]disasm.CallEdge)
 	for _, er := range edgeRecords {
-		pc := naming.ParseHexAddr(er.FromPC)
+		pc := strutil.ParseHexAddr(er.FromPC)
 		ce := disasm.CallEdge{
 			FromPC:     pc,
 			Kind:       er.Kind,
 			TargetName: er.Target,
-		TargetPC:   naming.ParseHexAddr(er.Target),
+		TargetPC:   strutil.ParseHexAddr(er.Target),
 			Via:        er.Via,
 		}
 		edgesByFunc[er.FromFunc] = append(edgesByFunc[er.FromFunc], ce)
@@ -331,14 +333,14 @@ func BuildSignalContent(
 		binPath := filepath.Join(asmDir, relPath+".bin")
 		data, err := os.ReadFile(binPath)
 		if err != nil {
-		binPath = filepath.Join(asmDir, naming.SanitizeFilename(sf.Name)+".bin")
+		binPath = filepath.Join(asmDir, strutil.SanitizeFilename(sf.Name)+".bin")
 			data, err = os.ReadFile(binPath)
 		}
 		if err != nil || len(data) < 4 {
 			continue
 		}
 
-	baseAddr := naming.ParseHexAddr(fr.PC)
+	baseAddr := strutil.ParseHexAddr(fr.PC)
 		if baseAddr == 0 {
 			continue
 		}
@@ -384,7 +386,7 @@ func BuildSignalContent(
 				if callee == "" {
 					callee = e.Via
 				}
-			if naming.IsInterestingCallee(callee) && !seenCalls[callee] {
+			if signal.IsInterestingCallee(callee) && !seenCalls[callee] {
 					seenCalls[callee] = true
 					calls = append(calls, callee)
 				}

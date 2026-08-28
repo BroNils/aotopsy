@@ -10,6 +10,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/jsonutil"
 )
 
 // Cross-referencing JSONL outputs (gap-analysis §6).
@@ -153,7 +154,7 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 		Target   string `json:"target,omitempty"`
 		SlotInfo string `json:"slot_info,omitempty"`
 	}
-	if dtEntries, err := naming.ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
+	if dtEntries, err := jsonutil.ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
 		selectorTargets := map[int][]string{}
 		for _, entry := range dtEntries {
 			if entry.Kind != "code" {

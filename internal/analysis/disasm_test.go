@@ -1,4 +1,4 @@
-package main
+package analysis
 
 import (
 	"encoding/json"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/pipeline"
 )
 
 // sampleSpec describes expected thresholds for a sample.
@@ -67,12 +68,12 @@ func TestDisasmPipelineThresholds(t *testing.T) {
 			}
 
 			outDir := t.TempDir()
-			err := cmdDisasm([]string{
-				"--lib", libapp,
-				"--out", outDir,
+			_, err := pipeline.Run(pipeline.Opts{
+				LibPath: libapp,
+				OutDir:  outDir,
 			})
 			if err != nil {
-				t.Fatalf("cmdDisasm: %v", err)
+				t.Fatalf("pipeline.Run: %v", err)
 			}
 
 			// Check functions.jsonl.
