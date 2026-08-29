@@ -9,7 +9,7 @@
     "call_edges.jsonl": 39853,
     "classes.jsonl": 1859,
     "dispatch_table.jsonl": 28930,
-    "field_accessor_xref.jsonl": 1837,
+    "field_accessor_xref.jsonl": 1833,
     "functions.jsonl": 8045,
     "index.jsonl": 8045,
     "pool_immediates.jsonl": 165,
@@ -20,16 +20,16 @@
   },
   "sha256": {
     "address_callers_xref.jsonl": "b4c11ccdd401090e13a00e0a858367edb99977bd70d0f99ba4c3e9b9a9828d8e",
-    "call_edges.jsonl": "2e40d8f608751e7de24676939f7c12c29d2cd78b889bed65f135efb35cf300fb",
+    "call_edges.jsonl": "7e21f70c66292db1cae9ef32f5edbca426a4242f7b12613cb19037f168d11b14",
     "classes.jsonl": "b7c0de322fd5c770e11852194bcc2d6a05b7b54bc5db3b8bf177d057594cc2eb",
     "dispatch_table.jsonl": "939a8a26d8119057db0148f0d574222d301de6328f71a53b41e12c4d5d8d16eb",
-    "field_accessor_xref.jsonl": "ac998a28776750654be9f0eac959165e7e9f994b62f6617750fdf9c58860a8a3",
+    "field_accessor_xref.jsonl": "b2cf25aec6e978d9eac607cffc911baa3d796fb9d36764c53bf266c5b0e282f8",
     "functions.jsonl": "9e98af921c0e725d9608baa19336fe02db00eda95aece6b4105296925bf19aed",
     "index.jsonl": "352ea874d186552222b15f79564c32e99b0b95827417d6a12d34cdd9e2cfc6f3",
     "pool_immediates.jsonl": "e74928179374c3bfda1f765827f715603e7a5169235df35cdbca18cf8bc9360a",
     "string_refs.jsonl": "059efc45a79d8d965b0ea3cf9a1d3fd7c5b62a4bd24d76d28f84e5a9fc1a7278",
     "string_value_xref.jsonl": "5b44edbf2e1a7693cfef6fbc7cfa3b42cada7509b01dead3e52cc8e7cd760f74",
-    "typetrack_report.json": "e267da1125b9e008d8d12a413a2139319dda7155085b398bea564b8fdd204d29",
+    "typetrack_report.json": "7269129d30c53d092ff91a5273e095467c8d346a6839bc7656fae1ec8e0b8557",
     "unresolved_thr.jsonl": "ab284d587becdce14e28ffdef7111bb94d8a25d60baffd92fdaf52f2e0db4c49"
   }
 }
