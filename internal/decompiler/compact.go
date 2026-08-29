@@ -470,9 +470,3 @@ func localTypeInference(source string, paramTypes []string, irHints map[string]s
 
 	return strings.Join(out, "\n")
 }
-
-// applyLocalTypeHints is retained for backward compatibility with tests.
-// It delegates to localTypeInference with irHints set and no paramTypes.
-func applyLocalTypeHints(source string, hints map[string]string) string {
-	return localTypeInference(source, nil, hints)
-}

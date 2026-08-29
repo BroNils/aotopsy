@@ -7,7 +7,7 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-// The tests here are what internal/pipeline's TestDecompilerFeatures claimed
+// The tests here are what internal/analysis's TestDecompilerFeatures claimed
 // to be. That test's doc comment promised it "checks that decompiler output
 // contains expected features (ffi_call, field names, etc.)", and its body
 // counted the lines in functions.jsonl -- a file the decompiler does not

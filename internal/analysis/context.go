@@ -24,7 +24,7 @@ import (
 // (elfx.Open -> snapshot.Extract -> cluster.ScanClusters/ReadFill ->
 // ParseInstructionsTable -> ResolveCodeRanges -> BuildPoolLookups) into a
 // reusable, exported entry point. cmd/aotopsy/decompile_native_cmd.go (and
-// its --from-main helper in decompile_native_from_main.go) now calls
+// the decompiler engine in internal/analysis) now calls
 // LoadContext instead of duplicating the sequence; new callers should do
 // the same.
 type AnalysisContext struct {

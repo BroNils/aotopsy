@@ -35,7 +35,7 @@ package vmtables
 //
 // Verified on 3.12.2 ARM64 and x86_64. The other supported versions share
 // the same two SDK lists and the same serializer, so the same composition
-// applies; internal/pipeline's symbol-table differential gate is what would
+// applies; internal/analysis's symbol-table differential gate is what would
 // catch it if a symbol-bearing sample of another version ever says otherwise.
 
 // vmTypeTestingStubNames is VM_TYPE_TESTING_STUB_CODE_LIST from

@@ -17,7 +17,7 @@ import (
 // defects by category, so the SSA/metadata/value-resolution work that follows is
 // driven by measured gaps rather than guesswork.
 //
-//	AOTOPSY_FIDELITY=1 go test ./internal/pipeline/ -run TestDecompileFidelityCensus -v -timeout 60m
+//	AOTOPSY_FIDELITY=1 go test ./internal/analysis/ -run TestDecompileFidelityCensus -v -timeout 60m
 func TestDecompileFidelityCensus(t *testing.T) {
 	if os.Getenv("AOTOPSY_FIDELITY") == "" {
 		t.Skip("set AOTOPSY_FIDELITY=1 to run the fidelity census")

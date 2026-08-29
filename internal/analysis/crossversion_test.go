@@ -44,7 +44,7 @@ import (
 //
 // Running it needs the samples, which are gitignored:
 //
-//	go test ./internal/pipeline/ -run CrossVersion -v
+//	go test ./internal/analysis/ -run CrossVersion -v
 
 // knownGap records a metric that is legitimately zero-or-near-zero on some
 // versions for a reason that has been MEASURED but not yet explained, so the

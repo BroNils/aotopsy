@@ -336,7 +336,7 @@ func UBFX(raw uint32) (rd, rn int, lsb, width int, ok bool) {
 // Encoding: sf=1 | 01 | 01010 | 00 | 0 | Rm | 000000 | Rn=31 | Rd
 // Mask: 0xFF200000, Value: 0xAA000000
 func MOVOrr(raw uint32) (rd int, ok bool) {
-	if raw&0xFF20001F == 0xAA000000 {
+	if raw&0xFF200000 == 0xAA000000 {
 		// Check Rn=31 (XZR)
 		if (raw>>5)&0x1F == 31 {
 			return int(raw & 0x1F), true
@@ -356,12 +356,24 @@ func DstRegOfInst(raw uint32) int {
 	if raw&0xFFC00000 == 0xB9400000 {
 		return int(raw & 0x1F)
 	}
+	// LDR X register extended (scaled or unscaled)
+	if raw&0xFFE0FC00 == 0xF8607800 || raw&0xFFE0FC00 == 0xF8606800 || raw&0xFFE00C00 == 0xF8600800 {
+		return int(raw & 0x1F)
+	}
+	// LDR W register extended
+	if raw&0xFFE0FC00 == 0xB8607800 || raw&0xFFE0FC00 == 0xB8606800 || raw&0xFFE00C00 == 0xB8600800 {
+		return int(raw & 0x1F)
+	}
 	// LDUR X64
 	if raw&0xFFE00C00 == 0xF8400000 {
 		return int(raw & 0x1F)
 	}
 	// LDUR W32
 	if raw&0xFFE00C00 == 0xB8400000 {
+		return int(raw & 0x1F)
+	}
+	// LDURH W16
+	if raw&0xFFE00C00 == 0x78400000 {
 		return int(raw & 0x1F)
 	}
 	// ADD Xd, Xn, #imm
@@ -372,8 +384,8 @@ func DstRegOfInst(raw uint32) int {
 	if raw&0xFF000000 == 0xD1000000 {
 		return int(raw & 0x1F)
 	}
-	// MOVZ Xd, #imm
-	if raw&0xFFE00000 == 0xD2800000 {
+	// MOVZ / MOVK / MOVN Xd, #imm (mask 0xFF800000 covers bits 31-23)
+	if raw&0xFF800000 == 0xD2800000 || raw&0xFF800000 == 0xF2800000 || raw&0xFF800000 == 0x92800000 {
 		return int(raw & 0x1F)
 	}
 	// UBFX
@@ -385,7 +397,7 @@ func DstRegOfInst(raw uint32) int {
 		return int(raw & 0x1F)
 	}
 	// ORR (MOV alias)
-	if raw&0xFF20001F == 0xAA000000 {
+	if raw&0xFF200000 == 0xAA000000 {
 		if (raw>>5)&0x1F == 31 {
 			return int(raw & 0x1F)
 		}

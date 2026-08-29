@@ -128,31 +128,24 @@ const ObjectFieldVia = "object_field"
 //
 // (raw_object.h, identical at 2.12.0 and 3.12.2; the header stays 8 bytes even
 // on compressed-pointer builds, so the offsets do not move.)
-const (
-	codeEntryPointDisp            = sdk.CodeEntryPointDisp
-	codeMonomorphicEntryPointDisp = sdk.CodeMonomorphicEntryPointDisp
-)
-
 // IsCodeEntryPointDisp reports whether a load displacement reads one of a Code
-// object's entry points.
+// object's entry points across compressed and uncompressed modes.
 //
 // This matters because such a load is not really an "object field" at all: the
 // entry point OF Code X is X, so a call through it calls X. Wherever the base
 // register's provenance is known, the loaded value inherits it rather than
 // becoming anonymous.
 //
-// Measured on the 3.12.2 arm64 sample: of the 523 indirect calls whose target
-// is loaded at one of these two displacements, 500 (96%) take their base
-// straight out of the object pool -- the shape is
-//
-//	LDR  X30, [X27,#744]   ; PP[91]
-//	LDUR X30, [X30,#7]
-//	BLR  X30
-//
-// and the remaining 23 are two-level pool addressing, which is still the pool.
-// Discarding the base's provenance here is what left those calls unresolved.
+// Displacements covered:
+//   Compressed (Dart 2.18+): 0x3 (normal), 0xb (monomorphic), 0x7 (unchecked), 0xf (mono unchecked)
+//   Uncompressed (Dart 2.10–2.17): 0x7 (normal), 0x17 (monomorphic), 0xf (unchecked), 0x1f (mono unchecked)
 func IsCodeEntryPointDisp(off int) bool {
-	return off == codeEntryPointDisp || off == codeMonomorphicEntryPointDisp
+	switch off {
+	case 0x3, 0x7, 0xb, 0xf, 0x17, 0x1f:
+		return true
+	default:
+		return false
+	}
 }
 
 // ObjectFieldViaAt formats the provenance for an object-field load at off.

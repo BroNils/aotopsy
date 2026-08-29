@@ -498,6 +498,6 @@ type SymbolLookup func(va uint64) (name string, ok bool)
 // PoolLookup resolves an object-pool slot index to a display string
 // (e.g. a literal value, a selector name, or a class/library hint),
 // reusing aotopsy's own already-more-accurate pool resolution
-// (internal/pipeline.ResolvePoolDisplay) instead of flutterdec's raw
+// (internal/analysis.ResolvePoolDisplay) instead of flutterdec's raw
 // "pool[N]" placeholder.
 type PoolLookup func(idx int) (display string, ok bool)

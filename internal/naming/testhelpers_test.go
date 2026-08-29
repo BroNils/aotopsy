@@ -14,10 +14,10 @@ import (
 // expensive stage, so these tests can run against very large libapp.so files
 // (tens of MB) without the memory cost of a full Run.
 //
-// This is a copy of the same helper in internal/pipeline/loadingunit_test.go,
+// This is a copy of the same helper in internal/analysis/loadingunit_test.go,
 // kept here so naming tests that need a real cluster.Result can load one
-// without importing the pipeline package (which would create an import cycle
-// in test binaries: pipeline imports naming, so naming cannot import pipeline).
+// without importing the analysis package (which would create an import cycle
+// in test binaries: analysis imports naming, so naming cannot import analysis).
 func clusterOnly(t *testing.T, libPath string) *cluster.Result {
 	t.Helper()
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}

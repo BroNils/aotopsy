@@ -171,12 +171,34 @@ const (
 	// to convert between tagged and untagged offsets.
 	HeapObjectTag = 1
 
-	// CodeEntryPointDisp is the byte offset of the checked entry point from
-	// a tagged Code object pointer. raw_object.h: Code::entry_point_ is at
-	// offset 7 from the tagged pointer (field offset 6 + kHeapObjectTag).
-	CodeEntryPointDisp = 0x7
-	// CodeMonomorphicEntryPointDisp is the byte offset of the monomorphic
-	// entry point from a tagged Code object pointer.
+	// Entry point load displacements: in Dart AOT, field accesses use
+	// FieldAddress(base, disp) = Address(base, disp - kHeapObjectTag).
+	// With kHeapObjectTag = 1, emitted instruction displacements are (field_offset - 1).
+	//
+	// Uncompressed mode (Dart 2.10–2.17 & uncompressed 3.x, word_size = 8):
+	//   kNormal:               field offset  8 -> displacement 0x7 (7)
+	//   kMonomorphic:          field offset 24 -> displacement 0x17 (23)
+	//   kUnchecked:            field offset 16 -> displacement 0xf (15)
+	//   kMonomorphicUnchecked: field offset 32 -> displacement 0x1f (31)
+	//
+	// Compressed mode (Dart 2.18+ / 3.x, compressed_ptr = 4, word_size = 8):
+	//   kNormal:               field offset  4 -> displacement 0x3 (3)
+	//   kMonomorphic:          field offset 12 -> displacement 0xb (11)
+	//   kUnchecked:            field offset  8 -> displacement 0x7 (7)
+	//   kMonomorphicUnchecked: field offset 16 -> displacement 0xf (15)
+
+	CodeEntryPointDispUncompressed               = 0x7
+	CodeMonomorphicEntryPointDispUncompressed    = 0x17
+	CodeUncheckedEntryPointDispUncompressed      = 0xf
+	CodeMonomorphicUncheckedDispUncompressed     = 0x1f
+
+	CodeEntryPointDispCompressed                 = 0x3
+	CodeMonomorphicEntryPointDispCompressed      = 0xb
+	CodeUncheckedEntryPointDispCompressed        = 0x7
+	CodeMonomorphicUncheckedDispCompressed       = 0xf
+
+	// Deprecated aliases maintained for compatibility:
+	CodeEntryPointDisp            = 0x7
 	CodeMonomorphicEntryPointDisp = 0xf
 )
 

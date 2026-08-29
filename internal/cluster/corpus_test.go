@@ -30,7 +30,7 @@ import (
 //
 // So: the tests are driven by samplecorpus.Registry, and every per-binary
 // number lives in a committed record keyed by the input's SHA-256 -- the same
-// arrangement internal/pipeline's golden test uses, for the same reason. A
+// arrangement internal/analysis's golden test uses, for the same reason. A
 // different local binary skips rather than fails, because a different input is
 // not a regression. A MISSING record fails, because self-recording baselines
 // cannot catch anything.

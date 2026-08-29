@@ -35,7 +35,7 @@ import (
 // Recording is therefore explicit -- a missing record fails rather than
 // filling itself in.
 //
-//	AOTOPSY_TEST_SAMPLE_ARM64=... go test ./internal/pipeline/ -run Golden
+//	AOTOPSY_TEST_SAMPLE_ARM64=... go test ./internal/analysis/ -run Golden
 //	AOTOPSY_UPDATE_GOLDEN=1 ...                                # rewrite records
 
 // goldenFiles are the pipeline outputs covered. Anything derived from the
@@ -116,7 +116,7 @@ func runGolden(t *testing.T, env, name string) {
 		t.Fatalf("no golden record at %s\n"+
 			"  The records are committed to the repo, so a missing one means either a\n"+
 			"  newly added sample or a deleted file -- not something to fill in silently.\n"+
-			"  To record it deliberately: AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden\n"+
+			"  To record it deliberately: AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/analysis/ -run Golden\n"+
 			"  then review the new file before committing it.", goldenPath)
 	}
 	if haveGolden && !update && want.InputSHA256 != inputHash {

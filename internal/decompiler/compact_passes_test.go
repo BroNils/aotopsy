@@ -178,7 +178,7 @@ func TestExtractIterVarFromCond(t *testing.T) {
 	}
 }
 
-// --- A1: applyLocalTypeHints tests ---
+// --- A1: localTypeInference tests ---
 
 func TestApplyLocalTypeHints(t *testing.T) {
 	hints := map[string]string{
@@ -190,12 +190,12 @@ func TestApplyLocalTypeHints(t *testing.T) {
   local_m8 = arg1;
   return local_8;
 }`
-	result := applyLocalTypeHints(source, hints)
+	result := localTypeInference(source, nil, hints)
 	if !strings.Contains(result, "local_8: int") {
-		t.Error("applyLocalTypeHints should annotate local_8 as int")
+		t.Error("localTypeInference should annotate local_8 as int")
 	}
 	if !strings.Contains(result, "local_m8: String") {
-		t.Error("applyLocalTypeHints should annotate local_m8 as String")
+		t.Error("localTypeInference should annotate local_m8 as String")
 	}
 }
 

@@ -63,7 +63,7 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	}
 
 	// codeVA is NOT persisted in any static output artifact — it's derived fresh
-	// from the ELF/snapshot every run (see internal/pipeline/context.go).
+	// from the ELF/snapshot every run (see internal/analysis/context.go).
 	ctx, err := LoadContext(opts.LibPath)
 	if err != nil {
 		return nil, fmt.Errorf("load context for --lib %s: %w", opts.LibPath, err)
