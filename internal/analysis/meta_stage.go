@@ -70,19 +70,22 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 	// 2b. Read dart_meta.json for pointer size and THR fields.
 	var pointerSize int
 	var dartVersion string
+	var compressedPointers bool
 	var thrFields []strutil.FlutterMetaTHRField
 	dmPath := filepath.Join(inDir, "dart_meta.json")
 	if dmData, err := os.ReadFile(dmPath); err == nil {
 		var dm struct {
-			DartVersion string `json:"dart_version"`
-			PointerSize int    `json:"pointer_size"`
-			THRFields   []struct {
+			DartVersion        string `json:"dart_version"`
+			CompressedPointers bool   `json:"compressed_pointers"`
+			PointerSize        int    `json:"pointer_size"`
+			THRFields          []struct {
 				Offset int    `json:"offset"`
 				Name   string `json:"name"`
 			} `json:"thr_fields"`
 		}
 		if err := json.Unmarshal(dmData, &dm); err == nil {
 			dartVersion = dm.DartVersion
+			compressedPointers = dm.CompressedPointers
 			pointerSize = dm.PointerSize
 			for _, f := range dm.THRFields {
 				thrFields = append(thrFields, strutil.FlutterMetaTHRField{Offset: f.Offset, Name: f.Name})
@@ -144,14 +147,15 @@ func RunMetaStage(inDir, outPath string, decompAll bool, quiet bool, log io.Writ
 
 	// 4. Write flutter_meta.json.
 	meta := strutil.FlutterMetaJSON{
-		Version:        "1",
-		DartVersion:    dartVersion,
-		PointerSize:    pointerSize,
-		Functions:      metaFuncs,
-		Comments:       comments,
-		FocusFunctions: focusFuncs,
-		Classes:        classLayouts,
-		THRFields:      thrFields,
+		Version:            "1",
+		DartVersion:        dartVersion,
+		CompressedPointers: compressedPointers,
+		PointerSize:        pointerSize,
+		Functions:          metaFuncs,
+		Comments:           comments,
+		FocusFunctions:     focusFuncs,
+		Classes:            classLayouts,
+		THRFields:          thrFields,
 	}
 
 	f, err := os.Create(outPath)

@@ -69,6 +69,9 @@ func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *T
 		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
 			return true
 		}
+		if base, _, off, ok := arm64.LDUR64(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
+			return true
+		}
 		if base, off, _, ok := arm64.LDR32UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
 			return true
 		}

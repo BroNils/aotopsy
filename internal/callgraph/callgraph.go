@@ -1,6 +1,6 @@
 // Package callgraph converts aotopsy's disassembly output (ARM64 via
 // internal/disasm, x86_64 via internal/decompiler's x86 CFG lifter, see
-// cfg_x86.go) into aotopsy/internal/lattice graph types for DOT
+// cfgx86.go) into aotopsy/internal/lattice graph types for DOT
 // rendering and whole-binary call-graph construction.
 package callgraph
 

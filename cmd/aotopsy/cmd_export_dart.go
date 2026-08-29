@@ -73,8 +73,10 @@ func cmdExportDart(args []string) error {
 	paramTypeByCodeIndex := naming.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
 	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
 		effectiveClass := funcObj.OwnerRefID
-		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
-			effectiveClass = owner.OwnerRefID
+		if ctEarly != nil && ctEarly.PatchClass != 0 {
+			if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
+				effectiveClass = owner.OwnerRefID
+			}
 		}
 		return effectiveClass
 	}

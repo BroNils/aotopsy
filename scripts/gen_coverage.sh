@@ -8,7 +8,7 @@ TMP=""
 if [ -z "$ROWS" ]; then
   TMP="$(mktemp)"; ROWS="$TMP"
   echo "Parsing every corpus sample present locally (this is heavy)..." >&2
-  AOTOPSY_COVERAGE=1 go test ./internal/pipeline/ -run TestCoverageCensus -count=1 -timeout 30m -v 2>&1 \
+  AOTOPSY_COVERAGE=1 go test ./internal/analysis/ -run TestCoverageCensus -count=1 -timeout 30m -v 2>&1 \
     | grep -oE "COVROW	.*" | sed 's/^COVROW	//' | sort -u > "$ROWS" || true
 fi
 trap '[ -n "$TMP" ] && rm -f "$TMP"' EXIT

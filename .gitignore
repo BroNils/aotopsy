@@ -64,6 +64,7 @@ GEMINI.md
 /findpool305
 /aotopsy
 aotopsy_*
+*.exe
 docs/roadmap/
 docs/SESSION-HANDOFF*.md
 docs/SESSION_HANDOFF*.md

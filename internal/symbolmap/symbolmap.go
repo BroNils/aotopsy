@@ -314,28 +314,18 @@ func scanARM64CallSites(sections []execSection, includeBranches bool) []CallSite
 	for _, sec := range sections {
 		insts := disasm.Disassemble(sec.Data, disasm.Options{BaseAddr: sec.Addr})
 		for _, inst := range insts {
-			if target, ok := decodeARM64BL(inst.Raw, inst.Addr); ok {
+			if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 				out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target})
 				continue
 			}
 			if includeBranches {
-				if target, ok := decodeARM64B(inst.Raw, inst.Addr); ok {
+				if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
 					out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target})
 				}
 			}
 		}
 	}
 	return out
-}
-
-// decodeARM64BL delegates to arm64.BL (shared single source).
-func decodeARM64BL(raw uint32, pc uint64) (uint64, bool) {
-	return arm64.BL(raw, pc)
-}
-
-// decodeARM64B delegates to arm64.B (shared single source).
-func decodeARM64B(raw uint32, pc uint64) (uint64, bool) {
-	return arm64.B(raw, pc)
 }
 
 // --- x86_64 call/branch scanning ---

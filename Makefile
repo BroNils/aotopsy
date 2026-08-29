@@ -11,7 +11,7 @@ build:
 	go build -o $(BINARY) ./cmd/aotopsy
 
 test:
-	go test ./...
+	go test ./cmd/... ./internal/... ./tools/...
 
 fuzz:
 	go test -fuzz=FuzzELFOpen -fuzztime=30s ./internal/elfx/
@@ -89,7 +89,7 @@ install: build
 
 clean:
 	rm -f $(BINARY)
-	go clean ./...
+	go clean ./cmd/... ./internal/... ./tools/...
 
 skills:
 	@echo "Available skills:"

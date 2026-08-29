@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // ClassifiedStringRef is a string reference with its signal categories.
@@ -111,7 +112,7 @@ func BuildSignalGraph(
 			continue
 		}
 		thrName := e.Via[4:]
-		if IsMundaneTHR(thrName) {
+		if sdk.IsMundaneStub(thrName) {
 			continue
 		}
 		// Mark the calling function as signal.
@@ -161,7 +162,7 @@ func BuildSignalGraph(
 			// x86_64 call_indirect edges don't use THR. prefix
 			// (THR-cached calls are classified as direct "call"),
 			// so this filter is a no-op on x86_64 — correct.
-			if strings.HasPrefix(e.Via, "THR.") && IsMundaneTHR(e.Via[4:]) {
+			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
 				continue
 			}
 			to = e.Via
@@ -271,7 +272,7 @@ func BuildSignalGraph(
 				continue
 			}
 			// Skip mundane THR.
-			if strings.HasPrefix(e.Via, "THR.") && IsMundaneTHR(e.Via[4:]) {
+			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
 				continue
 			}
 			to = e.Via

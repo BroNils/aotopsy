@@ -419,7 +419,7 @@ func runTypeInference(
 
 			// Collect BL edges for inter-procedural propagation.
 			for _, inst := range insts {
-				if target, ok := isBLRaw(inst.Raw, inst.Addr); ok {
+				if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 					calleeName := ""
 					for _, fr := range funcRanges {
 						if target >= fr.start && target < fr.end {
@@ -739,18 +739,13 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 	return bd, nil
 }
 
-// isBLRaw delegates to arm64.BL (shared single source).
-func isBLRaw(raw uint32, pc uint64) (uint64, bool) {
-	return arm64.BL(raw, pc)
-}
-
 // resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display
 // string in its Via annotation.
 //
 // Via annotations for pool-loaded objects look like:
 //
 //	"PP[123] foo"   (ARM64, annotate.go)
-//	"pp[123] foo"   (x86_64, x86.go / dataflow_x86.go)
+//	"pp[123] foo"   (x86_64, x86.go / dataflowx86.go)
 //
 // and the register provenance behind them is a real forward dataflow over the
 // function's CFG (ExtractCallEdgesCFG), so the named slot is the value that

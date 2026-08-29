@@ -150,7 +150,7 @@ func RunInterprocedural(
 	// The struct does not exist before 3.x on x64 -- 2.x passed arguments
 	// on the stack, which is the documented reason x86_64 2.x recovers no
 	// receiver types at all.
-	argRegOrder := dartArgRegisters(isARM64)
+	argRegOrder := sdk.DartArgRegisters(isARM64)
 
 	if isARM64 {
 		funcCount = len(funcInstsARM64)

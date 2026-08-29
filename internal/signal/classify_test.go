@@ -1,6 +1,10 @@
 package signal
 
-import "testing"
+import (
+	"testing"
+
+	"aotopsy/internal/sdk"
+)
 
 func TestClassifyURL(t *testing.T) {
 	cats := ClassifyString("https://api.icloseli.com/oauth/accessToken")
@@ -252,7 +256,7 @@ func TestClassifyAttribution(t *testing.T) {
 	}
 }
 
-func TestIsMundaneTHR(t *testing.T) {
+func TestIsMundaneStub(t *testing.T) {
 	mundane := []string{
 		"AllocateArray_ep",
 		"AllocateObject_ep",
@@ -263,7 +267,7 @@ func TestIsMundaneTHR(t *testing.T) {
 		"call_to_runtime_ep",
 	}
 	for _, name := range mundane {
-		if !IsMundaneTHR(name) {
+		if !sdk.IsMundaneStub(name) {
 			t.Errorf("expected %q to be mundane", name)
 		}
 	}
@@ -273,7 +277,7 @@ func TestIsMundaneTHR(t *testing.T) {
 		"active_exception_ep",
 	}
 	for _, name := range interesting {
-		if IsMundaneTHR(name) {
+		if sdk.IsMundaneStub(name) {
 			t.Errorf("expected %q to NOT be mundane", name)
 		}
 	}

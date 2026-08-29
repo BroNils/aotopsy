@@ -71,7 +71,7 @@ func liftARM64Instr(inst disasm.Inst) Instr {
 		ir.Op = OpReturn
 	case mnemonic == "bl":
 		ir.Op = OpCall
-		if target, ok := decodeARM64BLTarget(inst.Raw, inst.Addr); ok {
+		if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 			ir.Target = fmt.Sprintf("0x%x", target)
 		}
 	case mnemonic == "blr":
@@ -146,11 +146,6 @@ func liftARM64Instr(inst disasm.Inst) Instr {
 		ir.Target = firstOperandReg(inst.Operands)
 	}
 	return ir
-}
-
-// decodeARM64BLTarget delegates to arm64.BL (shared single source).
-func decodeARM64BLTarget(raw uint32, pc uint64) (uint64, bool) {
-	return arm64.BL(raw, pc)
 }
 
 // firstOperandReg extracts the first register token from an ARM64

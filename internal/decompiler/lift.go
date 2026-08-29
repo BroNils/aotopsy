@@ -625,8 +625,8 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 // `THR.orientation` and `THR.tilt`. Thread has no such fields.
 //
 // Rendering `THR.f88` instead says only what is known. THR offsets that ARE
-// identified come from the SDK-derived tables in internal/disasm
-// (thrfields.go / thrfields_x64.go), applied by the annotator, not from
+// identified come from the SDK-derived tables in internal/vmtables
+// (thrfields.go / thrfieldsx64.go), applied by the annotator, not from
 // class layouts.
 func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, int64) string {
 	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg ||

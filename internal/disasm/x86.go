@@ -14,7 +14,7 @@ import (
 // x86RegProvenance records a register's last known origin. Note: no
 // time-based expiry field -- that was the old fixed-window design
 // (see MODIFICATIONS.md / ARCHITECTURE.md's "x86_64 port status");
-// ScanX86FunctionCFG (dataflow_x86.go) tracks provenance via a real
+// ScanX86FunctionCFG (dataflowx86.go) tracks provenance via a real
 // CFG-wide dataflow instead, and only uses x86RegTracker as a small
 // read-only adapter so classifyX86Call below doesn't need two lookup
 // call shapes.
@@ -203,7 +203,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				// sits in almost every function prologue.
 				//
 				// Naming them off the Thread field table is the same thing
-				// the MOV path next door already does (dataflow_x86.go), and
+				// the MOV path next door already does (dataflowx86.go), and
 				// it makes them resolve as stubs, which is what ARM64's
 				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
 				if mem.Index == 0 {

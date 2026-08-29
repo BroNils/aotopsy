@@ -130,9 +130,6 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 		}
 		return libraryURLForClassRef(effectiveOwnerClassRef(funcObj))
 	}
-	isFrameworkLibraryURL := func(url string) bool {
-		return strings.HasPrefix(url, "dart:") || strings.HasPrefix(url, "package:flutter")
-	}
 
 	// Class-touch expansion support.
 	classIDToClassRef := make(map[int32]int, len(result.Classes))
@@ -189,7 +186,7 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 		DecompileRangeWithIR:      decompileRangeWithIR,
 		LibraryURLForCodeRef:      libraryURLForCodeRef,
 		LibraryURLForClassRef:     libraryURLForClassRef,
-		IsFrameworkLibraryURL:     isFrameworkLibraryURL,
+		IsFrameworkLibraryURL:     IsFrameworkLibraryURL,
 		FunctionsByOwnerClassRef:  functionsByOwnerClassRef,
 		ClassRefTouchedByPoolLoad: classRefTouchedByPoolLoad,
 	}, nil

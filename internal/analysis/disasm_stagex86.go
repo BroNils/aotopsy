@@ -22,8 +22,8 @@ import (
 // contract (functions.jsonl, call_edges.jsonl, string_refs.jsonl,
 // index.jsonl, an empty unresolved_thr.jsonl, asm/*.txt, and, with
 // --graph, cfg/*.dot + callgraph.dot), built on internal/disasm's
-// x86.go/dataflow_x86.go (ScanX86FunctionCFG) and internal/callgraph's
-// cfg_x86.go (BuildX86FuncCFG, itself built on internal/decompiler's x86
+// x86.go/dataflowx86.go (ScanX86FunctionCFG) and internal/callgraph's
+// cfgx86.go (BuildX86FuncCFG, itself built on internal/decompiler's x86
 // CFG lifter) instead of the ARM64-only Disassemble/ExtractCallEdgesCFG/
 // BuildCFG chain.
 func RunDisasmStageX86(

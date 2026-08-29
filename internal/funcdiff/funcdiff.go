@@ -53,8 +53,10 @@ func Build(result *cluster.Result, pl *naming.PoolLookups, ct *snapshot.CIDTable
 
 func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *naming.PoolLookups, ct *snapshot.CIDTable) string {
 	effectiveClass := no.OwnerRefID
-	if owner, ok := pl.RefToNamed[no.OwnerRefID]; ok && owner.CID == ct.PatchClass {
-		effectiveClass = owner.OwnerRefID
+	if ct != nil && ct.PatchClass != 0 {
+		if owner, ok := pl.RefToNamed[no.OwnerRefID]; ok && owner.CID == ct.PatchClass {
+			effectiveClass = owner.OwnerRefID
+		}
 	}
 	classObj, ok := pl.RefToNamed[effectiveClass]
 	if !ok {

@@ -42,6 +42,26 @@ type CallEdge struct {
 // ARM64 instruction decoders (isBL, isBLR, dstRegOfInst) are now shared
 // from internal/arm64.
 
+var arm64ArgRegCanon = func() [6]int {
+	r := sdk.DartArgRegisters(sdk.ArchARM64)
+	var arr [6]int
+	copy(arr[:], r)
+	return arr
+}()
+
+// arm64ArgRegBitPos returns which bit of an inferCallArgRegMaskLocal mask a
+// canonical ARM64 register index corresponds to (its position in
+// arm64ArgRegCanon / DartCallingConvention kCpuRegistersForArgs), or -1 if it
+// isn't one of the 6 argument registers.
+func arm64ArgRegBitPos(canonIdx int) int {
+	for i, c := range arm64ArgRegCanon {
+		if c == canonIdx {
+			return i
+		}
+	}
+	return -1
+}
+
 // maxArgSetupBack bounds inferCallArgCountLocal's backward scan -- AOT-
 // generated argument setup is a short, contiguous instruction span
 // immediately before the call; anything further back belongs to earlier,
@@ -49,32 +69,16 @@ type CallEdge struct {
 const maxArgSetupBack = 12
 
 // inferCallArgCountLocal scans backward from insts[callIdx] (a "bl"
-// instruction) counting how many of the X0-X7 argument registers were
-// freshly defined in the immediate lead-up to this specific call -- the
-// natural argument-setup pattern AOT-compiled Dart emits directly before a
-// direct call (verified against a real sample: `MOV X1, #0x6` as the
-// single instruction immediately preceding `BL MathTools.factorial`,
-// matching the real `factorial(6)` call in source). Stops at the first
-// earlier BL/BLR (a previous, unrelated call's own setup) or after
-// maxArgSetupBack instructions, whichever comes first.
-//
-// This is intentionally a LOCAL, per-call-site signal, not ground truth on
-// its own: register-allocator reuse can define a register for a reason
-// unrelated to this call (see ARCHITECTURE.md), so callers MUST aggregate
-// this across every call site targeting the same callee and only trust it
-// on cross-site agreement -- a single site's hint is not reliable alone.
+// instruction) counting how many argument registers were freshly defined in
+// the immediate lead-up to this specific call.
 func inferCallArgCountLocal(insts []Inst, callIdx int) int {
 	return popcount8(inferCallArgRegMaskLocal(insts, callIdx))
 }
 
 // inferCallArgRegMaskLocal is inferCallArgCountLocal's underlying primitive:
-// same backward scan, but returns WHICH of X0-X7 were touched (bit i set =
-// Xi touched) rather than just a count. Needed because the real argument
-// registers are not always a contiguous X0..Xn-1 run -- a verified real
-// sample had exactly X1 set (bit 1) with X0 untouched, for a genuine
-// single-parameter function. Aggregating and comparing masks (not just
-// counts) across call sites is what lets callers tell "X1 only" apart from
-// "X0 only" instead of conflating both into "1 argument".
+// same backward scan, but returns WHICH of the 6 argument registers were
+// touched (bit i set = arm64ArgRegCanon[i] touched) rather than just a count.
+// Uses 0-based argument position indexing matching inferX86CallArgRegMaskLocal.
 func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 	var mask uint8
 	for i, steps := callIdx-1, 0; i >= 0 && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
@@ -86,10 +90,11 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 			break
 		}
 		rd := arm64.DstRegOfInst(in.Raw)
-		if rd < 0 || rd > 7 {
+		pos := arm64ArgRegBitPos(rd)
+		if pos < 0 {
 			continue
 		}
-		mask |= 1 << uint(rd)
+		mask |= 1 << uint(pos)
 	}
 	return mask
 }

@@ -106,7 +106,7 @@ var allTargets = []extractTarget{
 	{"2.17.6", "x64", false, true},
 	// x86_64 + non-compressed + PRODUCT (3.x desktop AOT). Compressed
 	// pointers are the Android/iOS default, but a desktop `dart compile exe`
-	// / Flutter desktop build is 64-bit uncompressed, and thrfields_x64.go
+	// / Flutter desktop build is 64-bit uncompressed, and thrfieldsx64.go
 	// carries a table for it -- so it must be regenerable and checkable
 	// like every other one.
 	{"3.9.2", "x64", false, true},
@@ -664,7 +664,7 @@ func generateGoMap(tag, arch string, compressed, product bool, entries []struct 
 // thrTableFiles are the sources holding the committed THR tables.
 var thrTableFiles = []string{
 	"internal/vmtables/thrfields.go",
-	"internal/vmtables/thrfields_x64.go",
+	"internal/vmtables/thrfieldsx64.go",
 }
 
 // handDerivedFields are Thread fields that runtime_offsets_extracted.h does
@@ -922,7 +922,7 @@ func runWrite() int {
 		// offset changes key widths, and gofmt aligns map values by the
 		// widest key in each run -- so a spliced table is almost always
 		// misaligned. Leaving that to a printed reminder is how ~2000 lines
-		// of thrfields.go/thrfields_x64.go ended up committed unformatted.
+		// of thrfields.go/thrfieldsx64.go ended up committed unformatted.
 		formatted, ferr := format.Source([]byte(out))
 		if ferr != nil {
 			// Keep the unformatted result rather than losing the rewrite;

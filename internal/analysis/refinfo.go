@@ -3,6 +3,7 @@ package analysis
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/naming"
@@ -289,8 +290,8 @@ func ParseRefIDs(s string) ([]int, error) {
 
 func splitCommas(s string) []string {
 	var out []string
-	for _, part := range splitString(s, ",") {
-		part = trimSpace(part)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
 		if part != "" {
 			out = append(out, part)
 		}

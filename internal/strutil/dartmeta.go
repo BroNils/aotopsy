@@ -29,14 +29,15 @@ type FlutterMetaTHRField struct {
 
 // FlutterMetaJSON is the top-level flutter_meta.json structure.
 type FlutterMetaJSON struct {
-	Version        string                 `json:"version"`
-	DartVersion    string                 `json:"dart_version,omitempty"`
-	PointerSize    int                    `json:"pointer_size,omitempty"`
-	Functions      []FlutterMetaFunc      `json:"functions"`
-	Comments       []FlutterMetaComment   `json:"comments"`
-	FocusFunctions []string               `json:"focus_functions,omitempty"`
-	Classes        []FlutterMetaJSONClass `json:"classes,omitempty"`
-	THRFields      []FlutterMetaTHRField  `json:"thr_fields,omitempty"`
+	Version            string                 `json:"version,omitempty"`
+	DartVersion        string                 `json:"dart_version,omitempty"`
+	CompressedPointers bool                   `json:"compressed_pointers"`
+	PointerSize        int                    `json:"pointer_size,omitempty"`
+	Functions          []FlutterMetaFunc      `json:"functions,omitempty"`
+	Comments           []FlutterMetaComment   `json:"comments,omitempty"`
+	FocusFunctions     []string               `json:"focus_functions,omitempty"`
+	Classes            []FlutterMetaJSONClass `json:"classes,omitempty"`
+	THRFields          []FlutterMetaTHRField  `json:"thr_fields,omitempty"`
 }
 
 // FlutterMetaComment is a comment entry for flutter_meta.json.
@@ -69,9 +70,10 @@ func WriteDartMeta(outDir, dartVersion string, compressed bool, ptrSize int, thr
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Offset < fields[j].Offset })
 
 	meta := FlutterMetaJSON{
-		DartVersion: dartVersion,
-		PointerSize: ptrSize,
-		THRFields:   fields,
+		DartVersion:        dartVersion,
+		CompressedPointers: compressed,
+		PointerSize:        ptrSize,
+		THRFields:          fields,
 	}
 
 	f, err := os.Create(filepath.Join(outDir, "dart_meta.json"))

@@ -1,7 +1,7 @@
 // Package analysis orchestrates aotopsy's ARM64 disassembly/call-graph/
 // signal/Ghidra-IDA-metadata pipeline (Run) and its x86_64 counterpart's
 // narrower disassembly/call-edge/signal stage (RunDisasmStageX86, in
-// disasm_stage_x86.go). The shared name-resolution/pool-lookup surface
+// disasm_stagex86.go). The shared name-resolution/pool-lookup surface
 // (PoolLookups, BuildPoolLookups, etc.) lives in internal/naming, which
 // analysis imports and which cmd/aotopsy files read from directly.
 package analysis

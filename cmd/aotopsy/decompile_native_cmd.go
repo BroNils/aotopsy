@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"aotopsy/internal/analysis"
@@ -167,6 +166,3 @@ func cmdDecompileNative(args []string) error {
 		GenFridaStalkerMin:   *genFridaStalkerMin,
 	})
 }
-
-// suppress unused import warning
-var _ = strings.Split

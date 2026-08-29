@@ -180,7 +180,7 @@ func cmdDump(args []string) error {
 
 // writeX86ASMBlob disassembles a flat x86_64 code region (not per-function
 // -- dump's whole point is a single raw sequential pass) and writes an
-// annotated listing, mirroring internal/pipeline/disasm_stage_x86.go's
+// annotated listing, mirroring internal/analysis/disasm_stagex86.go's
 // writeX86ASM but for one large blob instead of many small function
 // ranges, matching this command's own ARM64 path (disasm.Disassemble +
 // output.WriteASM/WriteASMSingle over the whole region).

@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -33,7 +34,7 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	} else {
 		funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 	}
-	fmt.Fprintf(stderr(), "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
+	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
 
 	funcCode := code[funcStart:funcEnd]
 	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
@@ -105,7 +106,7 @@ func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 				}
 			}
 			if maxHits > 0 && hits >= maxHits {
-				fmt.Fprintf(stderr(), "stopping at --max=%d hits\n", maxHits)
+				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", maxHits)
 				capped = true
 				return false
 			}
@@ -115,7 +116,7 @@ func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 			return nil
 		}
 	}
-	fmt.Fprintf(stderr(), "total callers of 0x%x: %d\n", targetVA, hits)
+	fmt.Fprintf(os.Stderr, "total callers of 0x%x: %d\n", targetVA, hits)
 	return nil
 }
 
@@ -200,7 +201,7 @@ func ScanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		fmt.Printf("%s @ 0x%x  size=%d  hashOps=%d  rotateOps=%d  totalInstrs=%d  density=%.2f\n",
 			res.funcName, res.funcVA, res.size, res.hashOps, res.rotateOps, res.total, density)
 	}
-	fmt.Fprintf(stderr(), "total functions with >= %d hash-shaped ops: %d\n", minOps, len(results))
+	fmt.Fprintf(os.Stderr, "total functions with >= %d hash-shaped ops: %d\n", minOps, len(results))
 	return nil
 }
 
@@ -259,7 +260,7 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 				}
 			}
 			if maxHits > 0 && hits >= maxHits {
-				fmt.Fprintf(stderr(), "stopping at --max=%d hits\n", maxHits)
+				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", maxHits)
 				capped = true
 				return false
 			}
@@ -269,6 +270,6 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 			return nil
 		}
 	}
-	fmt.Fprintf(stderr(), "total hits: %d\n", hits)
+	fmt.Fprintf(os.Stderr, "total hits: %d\n", hits)
 	return nil
 }

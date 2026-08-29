@@ -74,3 +74,20 @@ func TestOwnerHasFieldAt(t *testing.T) {
 		t.Error("no field at raw 40 -- must not report one")
 	}
 }
+
+func TestRecoverReceiverStackSlotARM64_LDUR64(t *testing.T) {
+	// LDUR X1, [X0, #7] -- 64-bit pointer field load off receiver at raw offset 7
+	rawLDUR64_X1_X0_7 := uint32(0xF8407001)
+	ctx := newCtxWithOwnerField(200, 7)
+	insts := []disasm.Inst{
+		{Raw: rawLDR_X0_X29_16}, // FP+16, receiver
+		{Raw: rawLDUR64_X1_X0_7}, // LDUR64 field access off X0 at offset 7 -> validates
+	}
+	slot, ok := RecoverReceiverStackSlotARM64(insts, 200, ctx)
+	if !ok {
+		t.Fatal("expected receiver slot to be recovered via LDUR64")
+	}
+	if slot != 16 {
+		t.Errorf("slot = %d, want 16", slot)
+	}
+}

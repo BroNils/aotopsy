@@ -769,5 +769,3 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 	}
 	return display
 }
-
-// DartClassLayout is a resolved class definition ready for export.

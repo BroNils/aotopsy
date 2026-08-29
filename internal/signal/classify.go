@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/sdk"
 )
 
 // Categories for string signal classification.
@@ -430,14 +429,6 @@ func ClassifyString(value string) []string {
 	// measurement is ObfuscationRatio, applied by the signal stage.
 
 	return cats
-}
-
-// IsMundaneTHR returns true for THR field names that represent allocations,
-// write barriers, or type checks — noise in the signal graph.
-// Now delegates to sdk.IsMundaneStub so the classification is shared with
-// the decompiler's async stub classifier.
-func IsMundaneTHR(name string) bool {
-	return sdk.IsMundaneStub(name)
 }
 
 // IsInterestingCallee returns true if the callee name represents a real named

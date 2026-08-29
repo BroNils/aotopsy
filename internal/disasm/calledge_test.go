@@ -123,3 +123,39 @@ func TestExtractCallEdgesCFG_BLR_WithProvenance(t *testing.T) {
 	}
 	t.Logf("via = %q", e.Via)
 }
+
+func TestInferCallArgRegMaskLocal(t *testing.T) {
+	// MOV X1, #10 (imm mov to R1 -> arg pos 0)
+	// MOV X2, #20 (imm mov to R2 -> arg pos 1)
+	// MOV X4, #0  (imm mov to R4 -> ARGS_DESC_REG, not an arg register -> pos -1)
+	// MOV X5, #30 (imm mov to R5 -> arg pos 3)
+	// BL target
+	movX1 := uint32(0xD2800141) // MOV X1, #10
+	movX2 := uint32(0xD2800282) // MOV X2, #20
+	movX4 := uint32(0xD2800004) // MOV X4, #0
+	movX5 := uint32(0xD28003C5) // MOV X5, #30
+	blTarget := uint32(0x94000002)
+
+	insts := []Inst{
+		{Addr: 0x1000, Raw: movX1},
+		{Addr: 0x1004, Raw: movX2},
+		{Addr: 0x1008, Raw: movX4},
+		{Addr: 0x100C, Raw: movX5},
+		{Addr: 0x1010, Raw: blTarget},
+	}
+
+	mask := inferCallArgRegMaskLocal(insts, 4)
+	// Expected bits set:
+	// pos 0 (R1) -> bit 0 (1)
+	// pos 1 (R2) -> bit 1 (2)
+	// R4 is ignored -> no bit
+	// pos 3 (R5) -> bit 3 (8)
+	// Total expected mask = 1 | 2 | 8 = 11 (0b1011)
+	wantMask := uint8(0b1011)
+	if mask != wantMask {
+		t.Errorf("inferCallArgRegMaskLocal mask = 0b%b, want 0b%b", mask, wantMask)
+	}
+	if gotCount := inferCallArgCountLocal(insts, 4); gotCount != 3 {
+		t.Errorf("inferCallArgCountLocal count = %d, want 3", gotCount)
+	}
+}
