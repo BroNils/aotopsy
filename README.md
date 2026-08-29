@@ -214,8 +214,11 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 | `call_edges.jsonl` | BL/BLR edges with resolved targets and provenance |
 | `classes.jsonl` | Field names, offsets, instance sizes per class |
 | `string_refs.jsonl` | String references from object pool loads |
+| `dispatch_table.jsonl`| Inferred dispatch table receiver types and target mapping |
 | `signal.html` | Behavioral signal report with context graph |
+| `dart_meta.json` | Snapshot metadata, compressed pointers flag, THR layout |
 | `flutter_meta.json` | Unified metadata for Ghidra/IDA (ARM64 only) |
+| `aotopsy.sarif` | SARIF 2.1.0 security finding report (for GitHub Code Scanning) |
 | `asm/*.txt` | Annotated disassembly per function |
 | `cfg/*.dot` | Per-function CFGs (with `--graph`) |
 
@@ -224,25 +227,32 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 ```
 cmd/aotopsy/          CLI entry point and command handlers
 internal/
+  analysis/           Pipeline orchestration, snapshot loader, and analysis engines
+  sdk/                Dart VM ground-truth facts, register mappings, and predicates
+  vmtables/           Versioned THR field offsets, stub names, and stub orders
+  thraudit/           Thread-relative memory access audit and classification
+  arch/arm64/         Centralized ARM64 bitmask instruction decoders
+  naming/             Central pool lookups, name resolution, and stub builders
   elfx/               ELF validation and symbol extraction
   snapshot/           Snapshot region extraction, version profiles
   dartfmt/            Dart VM variable-length integer encoding
   cluster/            Two-phase snapshot deserialization (alloc + fill)
   disasm/             ARM64 + x86_64 decode, CFG, call-edge provenance
-  callgraph/          Lattice graph builders for DOT rendering
-  signal/             Behavioral string classification
+  callgraph/          Call graph construction and DOT rendering
+  signal/             Behavioral string and malware signal classification
   render/             HTML/DOT/SVG visualization
-  output/             JSONL serialization
+  output/             JSONL and SARIF 2.1.0 serialization
   decompiler/         Dart-AOT pseudocode decompiler (both architectures)
-  typetrack/          Whole-program type inference for BLR resolution
+  typetrack/          Whole-program type inference and receiver recovery
   fingerprint/        Build-id and version marker identification
   funcdiff/           Function-set diffing between builds
   symbolmap/          Stripped-vs-unstripped symbol resolution
   ffitrace/           Static dart:ffi call-site tracing
   strxref/            String-to-function cross-referencing
-  strutil/            Shared string utilities
-  pipeline/           Pipeline orchestration and name resolution
-tools/                Standalone utilities (THR table extractor)
+  strutil/            Dart syntax sanitization and metadata serialization
+  jsonutil/           Generic JSONL stream readers and writers
+  frida/              Frida runtime hook and probe generation
+tools/                Standalone utilities (THR table extractor and validator)
 ghidra_scripts/       Ghidra integration (Python)
 ida_scripts/          IDA integration (Python)
 ```

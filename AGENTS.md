@@ -28,7 +28,7 @@ already been crashed several times by analysis runs. Rules that actually work:
   pipelines at once. That combination has killed the VM.
 - **Never run the full pipeline on a big real app** (e.g. a 129k-function
   libapp.so). For big-binary verification use the cluster-only harness
-  (`clusterOnly` in `internal/pipeline/loadingunit_test.go`): ELF → snapshot →
+  (`clusterOnly` in `internal/analysis/loadingunit_test.go`): ELF → snapshot →
   alloc → fill, skipping disassembly. It handles a 22 MB libapp.so in ~0.06 s.
 - `aotopsy _debug decompile-native --all` on a real app is the single most
   dangerous command here — see its own `--max` help text.
@@ -50,6 +50,12 @@ Build just the binary: `go build -o aotopsy ./cmd/aotopsy/`
 flowchart TD
     CLI_ENTRY[cmd/aotopsy<br/>CLI entry point]
     subgraph "internal/"
+        ANALYSIS[analysis<br/>pipeline orchestration & snapshot loader]
+        SDK[sdk<br/>Dart VM facts, registers, predicates]
+        VMT[vmtables<br/>versioned tables]
+        THRAUDIT[thraudit<br/>audit & classification]
+        ARM64[arch/arm64<br/>bitmask decoders]
+        NAMING[naming<br/>pool lookups & stub resolution]
         ELFX[elfx<br/>ELF validation]
         SNAP[snapshot<br/>version profiles]
         DART[dartfmt<br/>wire encoding]
@@ -58,46 +64,50 @@ flowchart TD
         CG[callgraph<br/>DOT rendering]
         SIG[signal<br/>behavioral classification]
         REND[render<br/>HTML/DOT/SVG]
-        OUT[output<br/>JSONL serialization]
+        OUT[output<br/>JSONL & SARIF 2.1.0]
         DEC[decompiler<br/>pseudocode]
-        TT[typetrack<br/>type inference]
+        TT[typetrack<br/>type inference & receiver recovery]
         FP[fingerprint<br/>version ID]
         FD[funcdiff<br/>function diffing]
         SM[symbolmap<br/>symbol resolution]
         FFI[ffitrace<br/>dart:ffi tracing]
         SX[strxref<br/>string cross-ref]
-        SU[strutil<br/>shared utilities]
-        ARCH[arch<br/>shared x86 primitives]
+        SU[strutil<br/>shared utilities & metadata]
+        JU[jsonutil<br/>JSONL streams]
+        FRIDA[frida<br/>script generator]
         CLI[cli<br/>ANSI colors]
-        NAMING[naming<br/>name resolution]
-        PIPE[pipeline<br/>orchestration]
     end
     TOOLS[tools/<br/>THR extractor]
     GHIDRA[ghidra_scripts/<br/>Python]
     IDA[ida_scripts/<br/>Python]
 
-    CLI_ENTRY --> PIPE
+    CLI_ENTRY --> ANALYSIS
     CLI_ENTRY --> DEC
     CLI_ENTRY --> DISASM
-    PIPE --> ELFX
-    PIPE --> SNAP
-    PIPE --> CLUST
-    PIPE --> DISASM
-    PIPE --> SIG
-    PIPE --> TT
-    PIPE --> NAMING
+    ANALYSIS --> ELFX
+    ANALYSIS --> SNAP
+    ANALYSIS --> CLUST
+    ANALYSIS --> DISASM
+    ANALYSIS --> SIG
+    ANALYSIS --> TT
+    ANALYSIS --> NAMING
+    ANALYSIS --> OUT
     CLUST --> SNAP
     DISASM --> DART
-    DISASM --> ARCH
+    DISASM --> ARM64
+    DISASM --> SDK
+    DISASM --> VMT
     DEC --> DISASM
-    DEC --> ARCH
+    DEC --> SDK
+    DEC --> ARM64
     TT --> DISASM
     TT --> CLUST
-    TT --> ARCH
-    FFI --> PIPE
+    TT --> SDK
+    TT --> ARM64
+    FFI --> ANALYSIS
     FFI --> DEC
     FFI --> NAMING
-    SX --> PIPE
+    SX --> ANALYSIS
     SX --> DEC
     FD --> CLUST
     FD --> NAMING
@@ -109,7 +119,7 @@ flowchart TD
 ```
 
 - `cmd/aotopsy/` — CLI entry point, command handlers
-- `internal/` — library packages (22 packages, see ARCHITECTURE.md)
+- `internal/` — library packages (24 packages, see ARCHITECTURE.md)
 - `ghidra_scripts/` — Ghidra integration (Python)
 - `ida_scripts/` — IDA integration (Python)
 
@@ -312,15 +322,15 @@ index was off by two slots, while the regression test only checked loose
 ranges ("50-300 signal", "20000-50000 edge"). The total looked reasonable,
 every line was wrong.
 
-### 1. Golden output (`internal/pipeline/golden_test.go`)
+### 1. Golden output (`internal/analysis/golden_test.go`)
 
 SHA-256 per output file is compared against records in
-`internal/pipeline/testdata/golden/`. The key is the input binary's SHA-256,
+`internal/analysis/testdata/golden/`. The key is the input binary's SHA-256,
 so pointing at a different `libapp.so` will SKIP (not fail).
 
 ```bash
-go test ./internal/pipeline/ -run Golden                    # verify
-AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # re-record
+go test ./internal/analysis/ -run Golden                    # verify
+AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/analysis/ -run Golden   # re-record
 ```
 
 If it fails: **do not re-record immediately**. First find what changed;
