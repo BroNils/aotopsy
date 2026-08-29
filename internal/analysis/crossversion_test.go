@@ -259,6 +259,9 @@ var crossVersionMetrics = []crossVersionMetric{
 }
 
 func TestCrossVersionDifferential(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping heavy cross-version differential in short mode")
+	}
 	sets := samplecorpus.SourceSets()
 	if len(sets) == 0 {
 		t.Skip("no source set with two or more members in samplecorpus.Registry")
