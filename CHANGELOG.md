@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Framework URL Classification** — unified `IsFrameworkLibraryURL` usage across decompiler and analysis stages.
 - **Cross-Version Metric Gaps** — updated differential testing known gaps for Dart 2.13.0/arm64 store hits.
 
+## [1.1.0] - 2026-08-26
 
 Reliability & public-trust release: verifiable accuracy, signed releases, and a hardened parser.
 

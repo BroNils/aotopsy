@@ -5,21 +5,22 @@ Copyright 2024 Anthony Zboralski
 
 Fork modifications Copyright 2024 The AOTopsy Authors.
 
-This project includes vendored code from lattice
+This project includes code derived from lattice
 (https://github.com/zboralski/lattice) by Anthony Zboralski,
-licensed under BSD-3-Clause. The vendored copy in internal/lattice/
-has been modified for AOTopsy-specific needs.
+licensed under BSD-3-Clause, consolidated in internal/callgraph/
+and modified for AOTopsy-specific needs.
 
 This project derives data tables from the Dart SDK source code,
 which is licensed under the BSD 3-Clause License. Specifically:
 
 - CID (Class ID) tables in internal/snapshot/version.go are derived
   from dart-lang/sdk's runtime/vm/class_id.h
-- Thread (THR) field offsets in internal/disasm/thrfields.go are derived
-  from dart-lang/sdk's runtime/runtime_offsets_extracted.h
-- Thread stub entry-point names in internal/disasm/stubnames.go and
-  internal/disasm/threadstubs.go are derived from
-  dart-lang/sdk's runtime/runtime_entry_list.h
+- Thread (THR) field offsets in internal/vmtables/thrfields.go and
+  internal/vmtables/thrfieldsx64.go are derived from
+  dart-lang/sdk's runtime/runtime_offsets_extracted.h
+- Thread stub entry-point names in internal/vmtables/stubnames.go and
+  internal/vmtables/threadstubs.go are derived from
+  dart-lang/sdk's runtime/vm/stub_code_list.h and runtime_entry_list.h
 - Snapshot format constants in internal/snapshot/version.go are derived
   from dart-lang/sdk's runtime/vm/snapshot.h
 
