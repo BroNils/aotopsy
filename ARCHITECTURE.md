@@ -142,6 +142,14 @@ Ready-to-run Frida script generator (`generator.go`, `export.go`, `import.go`):
 
 Behavioral and security signal classification: crypto algorithms, network endpoints, authentication, SIM/SMS, location, device fingerprinting, and malware patterns.
 
+### `internal/jsonutil`
+
+Generic JSONL stream readers (`ReadJSONL[T]`) and writers (`WriteJSONLFile`), extracted from the pipeline package so every consumer shares one implementation instead of copy-pasting bufio.Scanner loops.
+
+### `internal/cli`
+
+ANSI color constants and logging helpers (`MakeLogf`, `MakeStagef`) for CLI stage output, extracted from the pipeline package.
+
 ### `cmd/aotopsy`
 
 Thin CLI entry point (~30–60 lines per handler). Dispatches primary user commands and `_debug` diagnostic subcommands directly to `internal/analysis`.

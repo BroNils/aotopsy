@@ -155,6 +155,22 @@ type TypeContext struct {
 	// UnlinkedCall.target_name gives the method name being called.
 	PoolUnlinkedCallNames map[int]string
 
+	// MethodNameToSelectorOffsets maps method name → list of selector
+	// offsets where that method appears in the dispatch table. Built from
+	// DispatchBySlot + DispatchCodeIndexToName in buildDispatchTables.
+	// Used by resolveBLR to resolve UnlinkedCall BLR sites: when the BLR
+	// register carries an UnlinkedCall with target_name "foo", we look up
+	// "foo" here to find the selector offset(s), then call selectorCandidates
+	// to enumerate all class implementations of that selector.
+	MethodNameToSelectorOffsets map[string][]int
+
+	// PoolClosureFunctionNames maps PP index → function name for Closure
+	// objects in the pool. Built from Closure.SignatureRefID (which captures
+	// the Function ref at index 3). Used to resolve closure dispatch BLR:
+	// when a BLR's register was loaded from a pool Closure, the target
+	// function name is looked up here.
+	PoolClosureFunctionNames map[int]string
+
 	// PoolCodeNames maps PP index to function name for Code objects.
 	PoolCodeNames map[int]string
 
@@ -518,6 +534,7 @@ func BuildTypeContext(
 
 	// SUPER FEATURE 3: Pool UnlinkedCall names.
 	ctx.PoolUnlinkedCallNames = buildPoolUnlinkedCallNames(clResult, pl)
+	ctx.PoolClosureFunctionNames = buildPoolClosureFunctionNames(clResult, pl)
 	if pl.PoolCodeNames != nil {
 		ctx.PoolCodeNames = pl.PoolCodeNames
 	}

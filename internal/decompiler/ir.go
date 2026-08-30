@@ -11,6 +11,7 @@ package decompiler
 
 import (
 	"sort"
+	"aotopsy/internal/cluster"
 	"strings"
 )
 
@@ -223,6 +224,13 @@ type FuncIR struct {
 	// reader that a run of instructions is really a callee the compiler inlined,
 	// which is otherwise invisible in the pseudocode.
 	InlineFrames map[uint64][]string `json:"-"`
+
+	// StackMaps holds decoded CompressedStackMaps entries for this function,
+	// giving per-PC register/spill liveness at GC safepoints. Populated by
+	// the caller from Code.CompressedStackMapsRef before EmitPseudocode runs.
+	// Used by the emitter to kill dead temps at safepoints and improve
+	// register reuse tracking. Empty/absent means no CSM data available.
+	StackMaps []cluster.StackMapEntry `json:"-"`
 
 	// TryRegions holds recovered try blocks with their PC extents, populated by
 	// the caller from PcDescriptors before EmitPseudocode runs. Unlike

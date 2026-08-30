@@ -89,6 +89,24 @@ type DecompileEnrichment struct {
 	PoolByIndex            map[int]cluster.PoolEntry
 	ArgRegMasks            map[uint64][]uint8
 	AccessorFieldNames     map[int]map[int64]string
+	// InlinedFuncNamesByCodeRef maps Code.RefID → list of inlined function
+	// display names, indexed by the inlined_id_to_function Array's element
+	// index. Built from Code.InlinedFuncsRef (an Array of Function refs)
+	// in ensureDecompileMaps. Used by FuncIRFor to populate fir.InlineFrames
+	// from CodeSourceMap entries.
+	InlinedFuncNamesByCodeRef map[int][]string
+	// CodeSourceMapsByRef maps CodeSourceMap ref ID → decoded CodeSourceMapInfo.
+	// Built from result.CodeSourceMaps in ensureDecompileMaps.
+	CodeSourceMapsByRef map[int]*cluster.CodeSourceMapInfo
+	// DecodedStackMapsByCodeRef maps Code.RefID → decoded CompressedStackMaps
+	// entries. Built from result.CompressedStackMaps payloads via
+	// cluster.DecodeCompressedStackMaps in ensureDecompileMaps. Used by
+	// FuncIRFor to populate fir.StackMaps for register liveness at safepoints.
+	DecodedStackMapsByCodeRef map[int][]cluster.StackMapEntry
+	// CodeSourceMapRefByCodeRef maps Code.RefID → CodeSourceMap ref ID.
+	// Built in ensureDecompileMaps so wireInlineFrames can look up the CSM
+	// ref in O(1) instead of looping through result.Codes per function.
+	CodeSourceMapRefByCodeRef map[int]int
 }
 
 // LoadContext opens libPath and runs the full static-analysis setup
@@ -299,6 +317,80 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 		}
 	}
 
+	// Inline frames: build Code.RefID → inlined function name list from
+	// Code.InlinedFuncsRef (an Array of Function refs), and CodeSourceMap
+	// ref → decoded CodeSourceMapInfo. These populate fir.InlineFrames in
+	// FuncIRFor, restoring the inline frame annotations the old
+	// funcir_builder.go wired before the refactor dropped them.
+	arrayByRef := make(map[int]*cluster.ArrayInfo, len(result.Arrays))
+	for i := range result.Arrays {
+		arrayByRef[result.Arrays[i].RefID] = &result.Arrays[i]
+	}
+	c.Enrichment.CodeSourceMapsByRef = make(map[int]*cluster.CodeSourceMapInfo, len(result.CodeSourceMaps))
+	for i := range result.CodeSourceMaps {
+		c.Enrichment.CodeSourceMapsByRef[result.CodeSourceMaps[i].RefID] = &result.CodeSourceMaps[i]
+	}
+	c.Enrichment.InlinedFuncNamesByCodeRef = make(map[int][]string)
+	for _, ce := range result.Codes {
+		if ce.InlinedFuncsRef < 0 {
+			continue
+		}
+		arr, ok := arrayByRef[ce.InlinedFuncsRef]
+		if !ok {
+			continue
+		}
+		names := make([]string, len(arr.ElementRefIDs))
+		for i, fnRef := range arr.ElementRefIDs {
+			if no, ok := pl.RefToNamed[fnRef]; ok {
+				owner := pl.ResolveOwnerName(no)
+				name := pl.ResolveName(no)
+				if name == "" {
+					name = pl.ResolveVMName(no)
+				}
+				switch {
+				case owner != "" && name != "":
+					names[i] = owner + "." + name
+				case name != "":
+					names[i] = name
+				}
+			}
+		}
+		c.Enrichment.InlinedFuncNamesByCodeRef[ce.RefID] = names
+	}
+
+	// FP-1: Decode CompressedStackMaps payloads and map them by Code.RefID.
+	// Each Code has a CompressedStackMapsRef pointing to a CSM object whose
+	// raw payload was captured in result.CompressedStackMaps. Decoding gives
+	// per-PC register/spill liveness at safepoints.
+	csmByRef := make(map[int]*cluster.CompressedStackMapsInfo, len(result.CompressedStackMaps))
+	for i := range result.CompressedStackMaps {
+		csmByRef[result.CompressedStackMaps[i].RefID] = &result.CompressedStackMaps[i]
+	}
+	c.Enrichment.DecodedStackMapsByCodeRef = make(map[int][]cluster.StackMapEntry)
+	for _, ce := range result.Codes {
+		if ce.CompressedStackMapsRef < 0 {
+			continue
+		}
+		csm, ok := csmByRef[ce.CompressedStackMapsRef]
+		if !ok || len(csm.Payload) == 0 {
+			continue
+		}
+		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		c.Enrichment.DecodedStackMapsByCodeRef[ce.RefID] = entries
+	}
+
+	// Build Code.RefID → CodeSourceMap ref ID map for O(1) lookup in
+	// wireInlineFrames (avoids looping through result.Codes per function).
+	c.Enrichment.CodeSourceMapRefByCodeRef = make(map[int]int, len(result.Codes))
+	for _, ce := range result.Codes {
+		if ce.CodeSourceMapRef >= 0 {
+			c.Enrichment.CodeSourceMapRefByCodeRef[ce.RefID] = ce.CodeSourceMapRef
+		}
+	}
+
 	c.buildAccessorFieldNames()
 }
 
@@ -459,6 +551,11 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 		}
 		c.wireTryCatch(fir, r)
 		c.enrichSignatureAndAsync(fir, r)
+		c.wireInlineFrames(fir, r)
+		c.wireSwitchCases(fir, r)
+		if sms, ok := c.Enrichment.DecodedStackMapsByCodeRef[r.RefID]; ok && len(sms) > 0 {
+			fir.StackMaps = sms
+		}
 	}
 	return fir, nil
 }
@@ -522,6 +619,59 @@ func (c *AnalysisContext) enrichSignatureAndAsync(fir *decompiler.FuncIR, r clus
 	}
 }
 
+// wireInlineFrames populates fir.InlineFrames from the CodeSourceMap and
+// inlined_id_to_function Array, restoring the inline frame annotations that
+// tell the emitter which blocks contain code inlined from another function.
+// The old funcir_builder.go wired this; the refactor dropped it, leaving
+// annotateInlineFrames as dead code.
+func (c *AnalysisContext) wireInlineFrames(fir *decompiler.FuncIR, r cluster.CodeRange) {
+	if c.Enrichment == nil {
+		return
+	}
+	inlinedNames, hasNames := c.Enrichment.InlinedFuncNamesByCodeRef[r.RefID]
+	if !hasNames || len(inlinedNames) == 0 {
+		return
+	}
+	// Find this Code's CodeSourceMap ref via the pre-built O(1) map.
+	csmRef, ok := c.Enrichment.CodeSourceMapRefByCodeRef[r.RefID]
+	if !ok || csmRef < 0 {
+		return
+	}
+	csm, ok := c.Enrichment.CodeSourceMapsByRef[csmRef]
+	if !ok || len(csm.Entries) == 0 {
+		return
+	}
+	// For each block, find the inline stack at the block's start VA (relative
+	// to the function entry). The CSM entries use PC offsets relative to the
+	// Code's entry point.
+	for bi := range fir.Blocks {
+		blockVA := fir.Blocks[bi].StartVA
+		pcOffset := uint32(blockVA - fir.EntryVA)
+		frames, _, ok := csm.InlineStackAt(pcOffset)
+		if !ok || len(frames) <= 1 {
+			continue // frames[0] is the root function; >1 means inlined
+		}
+		// Resolve frame indices to function names. frames is a stack of
+		// inlined function indices into the inlined_id_to_function Array.
+		// Index 0 is the root function (already named by fir.Name), so we
+		// skip it and report only the inlined callees.
+		var names []string
+		for _, idx := range frames[1:] { // skip root
+			if int(idx) >= 0 && int(idx) < len(inlinedNames) {
+				if n := inlinedNames[idx]; n != "" {
+					names = append(names, n)
+				}
+			}
+		}
+		if len(names) > 0 {
+			if fir.InlineFrames == nil {
+				fir.InlineFrames = make(map[uint64][]string)
+			}
+			fir.InlineFrames[blockVA] = names
+		}
+	}
+}
+
 // wireTryCatch attaches ground-truth exception-handler + try-region metadata to
 // fir from the per-Code tables, matching the cmd path's construction.
 func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRange) {
@@ -560,6 +710,35 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 		})
 	}
 	fir.SnapTryRegionsToBlocks()
+}
+
+// wireSwitchCases detects IndirectGoto patterns (br xN on ARM64) and
+// populates fir.SwitchCases, restoring the switch/case recovery the old
+// cmd funcir_builder.go wired before the refactor dropped it. Dart AOT
+// uses IndirectGotoInstr for switches with >=16 cases (kJumpTableMinExpressions
+// = 16, verified against dart-lang/sdk kernel_to_il.cc @3.9.2).
+func (c *AnalysisContext) wireSwitchCases(fir *decompiler.FuncIR, r cluster.CodeRange) {
+	if !c.IsARM64 || len(fir.Blocks) == 0 {
+		return
+	}
+	for bi := range fir.Blocks {
+		for _, ins := range fir.Blocks[bi].Instrs {
+			if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
+				continue
+			}
+			var cases []decompiler.SwitchCase
+			for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
+				cases = append(cases, decompiler.SwitchCase{
+					Index:   len(cases),
+					BlockID: fir.Blocks[ci].ID,
+				})
+			}
+			if len(cases) >= 2 {
+				fir.SwitchCases = cases
+			}
+			break
+		}
+	}
 }
 
 // BuildArgRegMasks runs the whole-binary call-edge pass that aggregates, per

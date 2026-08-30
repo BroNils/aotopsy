@@ -63,7 +63,7 @@ numbers come only from builds where an independent ground truth exists.
 - **Computed by:** `TestCoverageCensus` parses every corpus sample present locally,
   end-to-end (ELF → snapshot → cluster alloc+fill → instructions → disasm). A
   format AOTopsy did not model would raise `unknown CID` and fail.
-- Current: 91 sample builds across 23 Dart versions, both architectures, 0 failures,
+- Current: 93 sample builds across 23 Dart versions, both architectures, 0 failures,
   up to Dart 3.13.0. The Dart 3.13 49-cluster set is verified handled against
   `runtime/vm/app_snapshot.cc@3.13.2`.
 - **Reproduce:** `make coverage`.

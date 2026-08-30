@@ -181,6 +181,12 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if codeIndexOneBased {
 			idx = no.CodeIndex - 1 // slot 0 reserved for LazyCompile
 		}
+		// FP-5: Deferred loading unit support would subtract a base bias
+		// here, but NumBaseObjects from the cluster header is NOT that bias —
+		// it is the count of VM-isolate base objects already accounted for in
+		// ref numbering. The deferred loading unit bias comes from a separate
+		// Deserializer field not available in the cluster header. Until a
+		// deferred loading unit sample exists, this remains a no-op.
 		if idx < 0 || idx >= firstEntryWithCode || idx >= len(table.Entries) {
 			continue // not a discarded entry (or out of range) -- already handled by the normal Code cluster path
 		}

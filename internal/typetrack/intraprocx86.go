@@ -821,15 +821,35 @@ func transferInstructionX86(
 			regIdx := sdk.X86CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && state[regIdx].Kind == LatticeKnownStub {
 				sn := state[regIdx].StubName
-				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
-					if state[x86RegRDI].Kind == LatticeKnownClass {
-						state[x86RegRAX] = state[x86RegRDI]
-						killX86ArgRegs(state)
-						return
+			if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
+				if state[x86RegRDI].Kind == LatticeKnownClass {
+					state[x86RegRAX] = state[x86RegRDI]
+					killX86ArgRegs(state)
+					return
+				}
+			}
+			// FP-8: UnlinkedCall BLR resolution on x86_64.
+			// When the call register holds a KnownStub with "UnlinkedCall:"
+			// prefix, use MethodNameToSelectorOffsets to resolve via the
+			// dispatch table, same as ARM64's handleBLR.
+			if strings.HasPrefix(sn, "UnlinkedCall:") {
+				methodName := sn[len("UnlinkedCall:"):]
+				if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
+					res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1}
+					var allTargets []string
+					for _, selOff := range selectorOffsets {
+						allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
 					}
+					applySelectorCandidates(&res, allTargets)
+					result.BLRResolutions = append(result.BLRResolutions, res)
+				} else {
+					result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
+						PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
+					})
 				}
 			}
 		}
+	}
 		state[x86RegRAX] = Top()
 		killX86ArgRegs(state)
 		return

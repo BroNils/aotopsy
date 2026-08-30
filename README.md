@@ -20,7 +20,7 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 | Pseudocode | Architecture-neutral decompiled output from ARM64 or x86_64 machine code |
 | Dart Source Export | Whole-project modular `.dart` files reconstructed with classes, fields, and methods |
 
-Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier) — every modeled version parses cleanly on both architectures, see [COVERAGE.md](COVERAGE.md).
+Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier) — every modeled version parses cleanly on both architectures, see [COVERAGE.md](COVERAGE.md) (93 sample builds, 0 failures).
 
 ## Accuracy & Honesty
 
@@ -252,6 +252,7 @@ internal/
   strutil/            Dart syntax sanitization and metadata serialization
   jsonutil/           Generic JSONL stream readers and writers
   frida/              Frida runtime hook and probe generation
+  cli/                ANSI color helpers for CLI output
 tools/                Standalone utilities (THR table extractor and validator)
 ghidra_scripts/       Ghidra integration (Python)
 ida_scripts/          IDA integration (Python)
@@ -267,9 +268,12 @@ Requires Go 1.25+.
 make build      # build ./aotopsy
 make install    # install to ~/.aotopsy/bin
 make test       # run tests
+make bench      # regenerate BENCHMARK.md (needs local ground-truth twins)
+make coverage   # regenerate COVERAGE.md (needs local corpus samples)
+make analyze    # cross-check export-dart output against `dart analyze`
 ```
 
-Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set.
+Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set. Public CI runs build + unit tests + vet across linux/amd64, darwin/arm64, and windows/amd64, plus a race+coverage job.
 
 ## Releases & Branches
 

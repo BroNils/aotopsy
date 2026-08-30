@@ -158,6 +158,11 @@ type Result struct {
 	// generic parameter declarations. Consumed via FuncTypeInfo.TypeParamsRefID
 	// to reconstruct `<T>` in decompiler signatures (gap §2.3).
 	TypeParameters []TypeParametersInfo
+
+	// Closures holds Closure objects' function refs, enabling closure
+	// dispatch BLR resolution. Each Closure's function ref (index 3 in
+	// ReadFromTo) points to the Function the closure wraps.
+	Closures []ClosureInfo
 }
 
 // ScanClusters reads the clustered snapshot header and cluster tags from

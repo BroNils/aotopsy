@@ -214,6 +214,7 @@ const (
 	PoolElementSize = 8
 )
 
+
 // ── Class ID bitfield constants ───────────────────────────────────────
 //
 // Source: runtime/vm/raw_object.h, UntaggedObject class tags.

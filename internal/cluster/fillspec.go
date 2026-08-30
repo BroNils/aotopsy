@@ -397,6 +397,10 @@ func specNamespace() FillSpec {
 
 func specClosure() FillSpec {
 	// ReadFromTo = 6 refs. No scalars in AOT PRODUCT.
+	// FP-9: Closure function ref capture is done via a dedicated ClosureInfo
+	// path in readFillRefs (see isClosure case), NOT via OwnerIdx/SignatureIdx
+	// here, because setting those would create NamedObject entries and change
+	// the corpus `named` count.
 	return FillSpec{Kind: FillRefs, NumRefs: 6, NameIdx: -1, OwnerIdx: -1}
 }
 
