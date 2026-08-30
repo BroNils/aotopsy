@@ -91,3 +91,79 @@ func TestRecordsSortedByPC(t *testing.T) {
 		t.Errorf("records not sorted by PC: %s, %s, %s", records[0].PC, records[1].PC, records[2].PC)
 	}
 }
+
+func TestMergeRuntime(t *testing.T) {
+	edges := []disasm.CallEdgeRecord{
+		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A.foo"},
+		{FromFunc: "F", FromPC: "0x2000", Kind: "blr", Via: "THR.stub"},
+		{FromFunc: "F", FromPC: "0x3000", Kind: "blr"},
+	}
+	c := NewCollector()
+	c.FromCallEdges(edges)
+
+	// Runtime confirms 0x1000 (exact match) and 0x3000 (was unknown).
+	rt := []RuntimeResolution{
+		{PC: "0x1000", Function: "F", TargetName: "A.foo"},
+		{PC: "0x3000", Function: "F", TargetName: "B.bar"},
+	}
+	c.MergeRuntime(rt)
+	records := c.Records()
+
+	// 0x1000: exact → runtime_confirmed
+	if records[0].Confidence != "runtime_confirmed" {
+		t.Errorf("0x1000 confidence = %s, want runtime_confirmed", records[0].Confidence)
+	}
+	if records[0].Result["runtime_target"] != "A.foo" {
+		t.Errorf("0x1000 runtime_target = %v, want A.foo", records[0].Result["runtime_target"])
+	}
+
+	// 0x2000: stub, no runtime match → stays stub
+	if records[1].Confidence != "stub" {
+		t.Errorf("0x2000 confidence = %s, want stub (no runtime match)", records[1].Confidence)
+	}
+
+	// 0x3000: unknown → runtime_confirmed
+	if records[2].Confidence != "runtime_confirmed" {
+		t.Errorf("0x3000 confidence = %s, want runtime_confirmed", records[2].Confidence)
+	}
+}
+
+func TestCoverage(t *testing.T) {
+	edges := []disasm.CallEdgeRecord{
+		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A.foo"},
+		{FromFunc: "F", FromPC: "0x2000", Kind: "bl", Target: "B.bar"},
+		{FromFunc: "F", FromPC: "0x3000", Kind: "blr"},
+	}
+	c := NewCollector()
+	c.FromCallEdges(edges)
+
+	rt := []RuntimeResolution{
+		{PC: "0x1000", TargetName: "A.foo"},   // match
+		{PC: "0x2000", TargetName: "C.baz"},   // conflict
+		{PC: "0x3000", TargetName: "D.qux"},   // runtime confirmed (was unknown)
+		{PC: "0x9999", TargetName: "E.only"},  // runtime only
+	}
+	rep := c.Coverage(rt)
+
+	if rep.BothMatch != 1 {
+		t.Errorf("BothMatch = %d, want 1", rep.BothMatch)
+	}
+	if rep.BothConflict != 1 {
+		t.Errorf("BothConflict = %d, want 1", rep.BothConflict)
+	}
+	if rep.RuntimeConfirmed != 1 {
+		t.Errorf("RuntimeConfirmed = %d, want 1", rep.RuntimeConfirmed)
+	}
+	if rep.StaticOnly != 0 {
+		t.Errorf("StaticOnly = %d, want 0", rep.StaticOnly)
+	}
+	if rep.RuntimeOnly != 1 {
+		t.Errorf("RuntimeOnly = %d, want 1", rep.RuntimeOnly)
+	}
+	if rep.TotalStatic != 3 {
+		t.Errorf("TotalStatic = %d, want 3", rep.TotalStatic)
+	}
+	if rep.TotalRuntime != 4 {
+		t.Errorf("TotalRuntime = %d, want 4", rep.TotalRuntime)
+	}
+}

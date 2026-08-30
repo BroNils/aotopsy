@@ -135,6 +135,88 @@ func (c *Collector) WriteJSONL(path string) error {
 	return nil
 }
 
+// RuntimeResolution is one runtime-observed dispatch resolution from Frida.
+type RuntimeResolution struct {
+	PC         string `json:"pc"`
+	Function   string `json:"function"`
+	TargetName string `json:"target_name"`
+}
+
+// MergeRuntime marks static evidence records that are confirmed by runtime
+// observation. A static evidence record is "confirmed" when its PC matches
+// a runtime resolution's PC and (if the static record has a target) the
+// targets match.
+//
+// Records that have no runtime match keep their original confidence.
+// Records that DO match get their confidence upgraded to "runtime_confirmed"
+// and a "runtime_target" field added to their Result.
+func (c *Collector) MergeRuntime(resolutions []RuntimeResolution) {
+	// Build PC → runtime target map.
+	rtByPC := make(map[string]string, len(resolutions))
+	for _, r := range resolutions {
+		rtByPC[r.PC] = r.TargetName
+	}
+
+	for i := range c.records {
+		rec := &c.records[i]
+		if rtTarget, ok := rtByPC[rec.PC]; ok {
+			if rec.Result == nil {
+				rec.Result = map[string]any{}
+			}
+			rec.Result["runtime_target"] = rtTarget
+			// Upgrade confidence: exact/stub/static_inferred → runtime_confirmed.
+			// polymorphic stays polymorphic (runtime confirmed ONE of many).
+			// unknown → runtime_confirmed (runtime observed what static couldn't).
+			switch rec.Confidence {
+			case "exact", "stub", "static_inferred", "unknown":
+				rec.Confidence = "runtime_confirmed"
+			case "polymorphic":
+				// Keep polymorphic but note runtime confirmed one candidate.
+				rec.Result["runtime_confirmed_candidate"] = rtTarget
+			}
+		}
+	}
+}
+
+// CoverageReport summarizes how many static predictions were confirmed,
+// contradicted, or left unobserved by runtime evidence.
+type CoverageReport struct {
+	StaticOnly        int `json:"static_only"`
+	RuntimeOnly       int `json:"runtime_only"`
+	BothMatch         int `json:"both_match"`
+	BothConflict      int `json:"both_conflict"`
+	RuntimeConfirmed  int `json:"runtime_confirmed"`
+	TotalStatic       int `json:"total_static"`
+	TotalRuntime      int `json:"total_runtime"`
+}
+
+// Coverage computes a summary of static vs runtime evidence overlap.
+func (c *Collector) Coverage(resolutions []RuntimeResolution) CoverageReport {
+	rep := CoverageReport{TotalStatic: len(c.records), TotalRuntime: len(resolutions)}
+	rtByPC := make(map[string]string, len(resolutions))
+	for _, r := range resolutions {
+		rtByPC[r.PC] = r.TargetName
+	}
+	seenPCs := make(map[string]bool)
+	for _, rec := range c.records {
+		if rtTarget, ok := rtByPC[rec.PC]; ok {
+			seenPCs[rec.PC] = true
+			staticTarget, _ := rec.Result["target"].(string)
+			if staticTarget != "" && staticTarget == rtTarget {
+				rep.BothMatch++
+			} else if staticTarget != "" && staticTarget != rtTarget {
+				rep.BothConflict++
+			} else {
+				rep.RuntimeConfirmed++
+			}
+		} else {
+			rep.StaticOnly++
+		}
+	}
+	rep.RuntimeOnly = len(resolutions) - len(seenPCs)
+	return rep
+}
+
 // classifyEdgeConfidence maps a CallEdgeRecord's fields to a confidence string.
 func classifyEdgeConfidence(e disasm.CallEdgeRecord) string {
 	if e.Target != "" {
