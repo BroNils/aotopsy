@@ -22,15 +22,6 @@ import (
 // argument register.
 var x86ArgRegs = sdk.DartArgRegNames(sdk.ArchX86)
 
-// x86Inst is one decoded x86_64 instruction, kept minimal (this package
-// doesn't need a general-purpose x86 disassembler elsewhere, unlike
-// ARM64 which aotopsy already has via internal/disasm).
-type x86Inst struct {
-	Addr uint64
-	Len  int
-	Inst x86asm.Inst
-}
-
 // DecodeX86Range decodes every instruction in the ENTIRE given byte range
 // starting at baseVA, stopping only at a decode error or end of data --
 // matching internal/disasm.Disassemble's ARM64 convention exactly.
@@ -46,13 +37,8 @@ type x86Inst struct {
 // first return to be silently missing, making the recursive call/branch
 // resolve as "unresolved branch target" even though the bytes were right
 // there in the CodeRange the caller already sized correctly.
-func DecodeX86Range(data []byte, baseVA uint64) []x86Inst {
-	decoded := x86.DecodeUntilBad(data, baseVA)
-	out := make([]x86Inst, 0, len(decoded))
-	for _, d := range decoded {
-		out = append(out, x86Inst{Addr: d.VA, Len: d.Len, Inst: d.Inst})
-	}
-	return out
+func DecodeX86Range(data []byte, baseVA uint64) []x86.Decoded {
+	return x86.DecodeUntilBad(data, baseVA)
 }
 
 // BuildX86IR lifts a decoded x86_64 instruction range into FuncIR, using
@@ -60,11 +46,11 @@ func DecodeX86Range(data []byte, baseVA uint64) []x86Inst {
 // internal/disasm.BuildCFG (kept as a local, simpler implementation since
 // x86 instructions are variable-length and carry structured Args, unlike
 // ARM64's fixed 4-byte raw-encoding approach).
-func BuildX86IR(name string, insts []x86Inst) *FuncIR {
+func BuildX86IR(name string, insts []x86.Decoded) *FuncIR {
 	if len(insts) == 0 {
 		return newFuncIR(name, 0)
 	}
-	fir := newFuncIR(name, insts[0].Addr)
+	fir := newFuncIR(name, insts[0].VA)
 	fir.ArgRegs = x86ArgRegs
 	fir.FrameReg = sdk.X86FrameRegStr
 	fir.ReturnReg = sdk.X86ReturnRegStr
@@ -77,12 +63,12 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 	fir.CodeReg = sdk.X86CodeRegStr
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
 
-	funcStart := insts[0].Addr
-	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
+	funcStart := insts[0].VA
+	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
 
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, in := range insts {
-		addrToIdx[in.Addr] = i
+		addrToIdx[in.VA] = i
 	}
 
 	leaders := map[int]bool{0: true}
@@ -123,9 +109,9 @@ func BuildX86IR(name string, insts []x86Inst) *FuncIR {
 		if i+1 < len(sorted) {
 			end = sorted[i+1]
 		}
-		blocks[i] = Block{ID: i, StartVA: insts[start].Addr}
+		blocks[i] = Block{ID: i, StartVA: insts[start].VA}
 		for j := start; j < end; j++ {
-			var prev *x86Inst
+			var prev *x86.Decoded
 			if j > start {
 				prev = &insts[j-1]
 			}
@@ -193,19 +179,19 @@ const (
 	branchCond
 )
 
-func classifyX86Branch(in x86Inst) (branchKind, uint64, bool) {
+func classifyX86Branch(in x86.Decoded) (branchKind, uint64, bool) {
 	op := in.Inst.Op
 	if op == x86asm.RET {
 		return branchRet, 0, false
 	}
 	if x86.IsCondJump(op) {
-		if tgt, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
+		if tgt, ok := x86.RelTarget(in.Inst, in.VA, in.Len); ok {
 			return branchCond, tgt, true
 		}
 		return branchCond, 0, false
 	}
 	if op == x86asm.JMP {
-		if tgt, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
+		if tgt, ok := x86.RelTarget(in.Inst, in.VA, in.Len); ok {
 			return branchJmpDirect, tgt, true
 		}
 		return branchJmpIndirect, 0, false
@@ -236,16 +222,16 @@ func x86CondOp(op x86asm.Op) string {
 	return "?"
 }
 
-func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool, prev *x86Inst) Instr {
+func liftX86Instr(in x86.Decoded, k branchKind, tgt uint64, hasTgt bool, prev *x86.Decoded) Instr {
 	src := strings.ToLower(in.Inst.String())
-	ir := Instr{Addr: in.Addr, Src: src, PoolIndex: -1}
+	ir := Instr{Addr: in.VA, Src: src, PoolIndex: -1}
 
 	switch {
 	case k == branchRet:
 		ir.Op = OpReturn
 	case in.Inst.Op == x86asm.CALL:
 		ir.Op = OpCall
-		if r, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
+		if r, ok := x86.RelTarget(in.Inst, in.VA, in.Len); ok {
 			ir.Target = fmt.Sprintf("0x%x", r)
 		} else {
 			ir.Target = x86IndirectTargetText(in)
@@ -299,7 +285,7 @@ func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool, prev *x86In
 // x86IndirectTargetText renders an indirect call/jump target operand as
 // readable text (register name, or a "[base+disp]" memory description)
 // for the emitter's call-intent resolution to inspect.
-func x86IndirectTargetText(in x86Inst) string {
+func x86IndirectTargetText(in x86.Decoded) string {
 	for _, arg := range in.Inst.Args {
 		if arg == nil {
 			continue
@@ -316,7 +302,7 @@ func x86IndirectTargetText(in x86Inst) string {
 
 // isX86PoolLoad recognizes "mov reg, [r15+disp]" -- a load from the
 // object pool register.
-func isX86PoolLoad(in x86Inst) bool {
+func isX86PoolLoad(in x86.Decoded) bool {
 	for _, arg := range in.Inst.Args {
 		mem, ok := arg.(x86asm.Mem)
 		if !ok {
@@ -336,7 +322,7 @@ func isX86PoolLoad(in x86Inst) bool {
 // slots further into the pool array than ARM64's does, unlike ARM64
 // where idx is a plain byteOff/8 with no adjustment, per
 // internal/disasm/annotate.go's PPAnnotator).
-func x86PoolIndex(in x86Inst) int {
+func x86PoolIndex(in x86.Decoded) int {
 	for _, arg := range in.Inst.Args {
 		mem, ok := arg.(x86asm.Mem)
 		if !ok || strings.ToLower(mem.Base.String()) != sdk.X86PoolRegStr {
@@ -372,7 +358,7 @@ func x86PoolIndex(in x86Inst) int {
 // If we can't identify the flag-setting instruction (prev is nil or
 // not CMP/TEST/BT), fall back to "cmp" — the emitter will use
 // LastCmp if available, or print a placeholder if not.
-func classifyX86Condition(jcc x86asm.Inst, prev *x86Inst) string {
+func classifyX86Condition(jcc x86asm.Inst, prev *x86.Decoded) string {
 	if prev == nil {
 		return "cmp"
 	}
@@ -457,7 +443,7 @@ func x86TestPowerOfTwoBit(inst x86asm.Inst) int {
 
 // x86CondRegFromTest extracts the register name from a `TEST reg, reg`
 // instruction (the register being tested for zero/nonzero).
-func x86CondRegFromTest(prev *x86Inst) string {
+func x86CondRegFromTest(prev *x86.Decoded) string {
 	if prev == nil || prev.Inst.Op != x86asm.TEST || len(prev.Inst.Args) < 1 {
 		return ""
 	}
@@ -471,7 +457,7 @@ func x86CondRegFromTest(prev *x86Inst) string {
 // a `TEST reg, (1 << N)` or `BT reg, N` instruction.
 // For TEST: JE means bit is 0, JNE means bit is 1.
 // For BT:   JB (JC) means bit is 1, JAE (JNC) means bit is 0.
-func x86CondRegBitFromTest(prev *x86Inst, jccOp x86asm.Op) (string, int) {
+func x86CondRegBitFromTest(prev *x86.Decoded, jccOp x86asm.Op) (string, int) {
 	if prev == nil {
 		return "", 0
 	}

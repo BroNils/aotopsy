@@ -27,7 +27,7 @@ import (
 // Returns nil if no table is available (annotations fall back to THR+0xNN).
 //
 // H-2/H-3 fix: now supports x86_64 for all versions with compressed pointers
-// (2.18+). x86_64 tables are in thrfieldsx64.go (auto-generated).
+// (2.18+). x86_64 tables are in thrfieldsx86.go (auto-generated).
 // Dart 2.10–2.16 ARM64 tables (non-compressed pointers) extracted via
 // tools/extract_thr.go (M-4 fix).
 //

@@ -68,7 +68,7 @@ func GenerateFridaScriptFromMeta(metaPath string) string {
 			if i > 0 {
 				sb.WriteString(",\n")
 			}
-			sb.WriteString(fmt.Sprintf("  '%s': '%s'", f.VA, EscapeJS(f.Name)))
+			sb.WriteString(fmt.Sprintf("  '%s': '%s'", f.VA, escapeJS(f.Name)))
 		}
 	} else {
 		sb.WriteString(fmt.Sprintf("var FUNC_MAP = {\n"))
@@ -76,7 +76,7 @@ func GenerateFridaScriptFromMeta(metaPath string) string {
 			if i > 0 {
 				sb.WriteString(",\n")
 			}
-			sb.WriteString(fmt.Sprintf("  '%s': '%s'", f.VA, EscapeJS(f.Name)))
+			sb.WriteString(fmt.Sprintf("  '%s': '%s'", f.VA, escapeJS(f.Name)))
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\n};\n\n"))
@@ -91,7 +91,7 @@ func GenerateFridaScriptFromMeta(metaPath string) string {
 			if i > 0 {
 				sb.WriteString(",\n")
 			}
-			sb.WriteString(fmt.Sprintf("  %d: '%s'", d.Index, EscapeJS(d.Target)))
+			sb.WriteString(fmt.Sprintf("  %d: '%s'", d.Index, escapeJS(d.Target)))
 		}
 	} else {
 		sb.WriteString(fmt.Sprintf("var DISPATCH_MAP = {\n"))
@@ -99,7 +99,7 @@ func GenerateFridaScriptFromMeta(metaPath string) string {
 			if i > 0 {
 				sb.WriteString(",\n")
 			}
-			sb.WriteString(fmt.Sprintf("  %d: '%s'", d.Index, EscapeJS(d.Target)))
+			sb.WriteString(fmt.Sprintf("  %d: '%s'", d.Index, escapeJS(d.Target)))
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\n};\n\n"))
@@ -107,7 +107,7 @@ func GenerateFridaScriptFromMeta(metaPath string) string {
 	// THR field map
 	sb.WriteString(fmt.Sprintf("var THR_FIELDS = {\n"))
 	for off, name := range meta.THRFields {
-		sb.WriteString(fmt.Sprintf("  0x%x: '%s',\n", off, EscapeJS(name)))
+		sb.WriteString(fmt.Sprintf("  0x%x: '%s',\n", off, escapeJS(name)))
 	}
 	sb.WriteString(fmt.Sprintf("};\n\n"))
 
@@ -165,7 +165,7 @@ function safeReadString(p, maxLen) {
 			sb.WriteString(",\n")
 		}
 		sb.WriteString(fmt.Sprintf("  {addr: '%s', func: '%s', reg: '%s', via: '%s'}",
-			blr.VA, EscapeJS(blr.FromFunc), blr.Reg, blr.Via))
+			blr.VA, escapeJS(blr.FromFunc), blr.Reg, blr.Via))
 	}
 	sb.WriteString(fmt.Sprintf("\n];\n\n"))
 
@@ -296,7 +296,7 @@ installHooks();
 
 	return sb.String()
 }
-func EscapeJS(s string) string {
+func escapeJS(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "'", "\\'")
 	s = strings.ReplaceAll(s, "\n", "\\n")

@@ -120,7 +120,7 @@ const maxX86ArgSetupBack = 16
 // bitwise-AND intersection, not trust one site alone (see
 // cmd/aotopsy/decompile_native_cmd.go's resolveArgRegIndices and its
 // doc comment for why intersection, not exact-equality or majority).
-func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
+func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx int) uint8 {
 	var mask uint8
 	for i, steps := callIdx-1, 0; i >= 0 && steps < maxX86ArgSetupBack; i, steps = i-1, steps+1 {
 		d := insts[i]
@@ -243,7 +243,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 // for thr-audit's context window, sitting alongside ScanX86Function's
 // CallEdge/StringRefRecord-oriented output above.
 type X86Inst struct {
-	Addr uint64
+	VA   uint64
 	Text string
 }
 
@@ -255,10 +255,10 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 	out := make([]X86Inst, 0, len(decoded))
 	for _, d := range decoded {
 		if d.Bad {
-			out = append(out, X86Inst{Addr: d.VA, Text: "<bad>"})
+			out = append(out, X86Inst{VA: d.VA, Text: "<bad>"})
 			continue
 		}
-		out = append(out, X86Inst{Addr: d.VA, Text: d.Inst.String()})
+		out = append(out, X86Inst{VA: d.VA, Text: d.Inst.String()})
 	}
 	return out
 }
@@ -321,7 +321,7 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
-		pcIdx[inst.Addr] = i
+		pcIdx[inst.VA] = i
 	}
 
 	records := make([]thraudit.THRAuditRecord, 0, len(accesses))
@@ -335,7 +335,7 @@ func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dart
 					if d == 0 {
 						prefix = "> "
 					}
-					ctx = append(ctx, fmt.Sprintf("%s0x%x: %s", prefix, allInsts[j].Addr, allInsts[j].Text))
+					ctx = append(ctx, fmt.Sprintf("%s0x%x: %s", prefix, allInsts[j].VA, allInsts[j].Text))
 				}
 			}
 		}

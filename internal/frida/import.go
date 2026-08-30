@@ -11,14 +11,14 @@ import (
 
 // FridaRuntimeResult is the JSON structure produced by Frida scripts
 // that aotopsy frida-import consumes.
-type FridaRuntimeResult struct {
-	DispatchResolutions []FridaDispatchResolution `json:"dispatch_resolutions"`
-	TypeSnapshots       []FridaTypeSnapshot       `json:"type_snapshots"`
+type fridaRuntimeResult struct {
+	DispatchResolutions []fridaDispatchResolution `json:"dispatch_resolutions"`
+	TypeSnapshots       []fridaTypeSnapshot       `json:"type_snapshots"`
 	CallGraph           map[string]int            `json:"call_graph"`
-	HeapObjects         []FridaHeapObject         `json:"heap_objects"`
+	HeapObjects         []fridaHeapObject         `json:"heap_objects"`
 }
 
-type FridaDispatchResolution struct {
+type fridaDispatchResolution struct {
 	BLRAddr    string `json:"blr_addr"`
 	FromFunc   string `json:"from_func"`
 	TargetVA   string `json:"target_va"`
@@ -26,12 +26,12 @@ type FridaDispatchResolution struct {
 	ClassID    int    `json:"class_id,omitempty"`
 }
 
-type FridaTypeSnapshot struct {
+type fridaTypeSnapshot struct {
 	FuncVA    string         `json:"func_va"`
 	Registers map[string]int `json:"registers"`
 }
 
-type FridaHeapObject struct {
+type fridaHeapObject struct {
 	Address   string `json:"address"`
 	ClassID   int    `json:"class_id"`
 	ClassName string `json:"class_name,omitempty"`
@@ -54,7 +54,7 @@ func CmdFridaImport(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read frida results: %v", err)
 	}
-	var result FridaRuntimeResult
+	var result fridaRuntimeResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("parse frida results: %v", err)
 	}
@@ -75,7 +75,7 @@ func CmdFridaImport(args []string) error {
 	}
 
 	// Build resolution map from Frida results
-	resolutionMap := make(map[string]FridaDispatchResolution)
+	resolutionMap := make(map[string]fridaDispatchResolution)
 	for _, r := range result.DispatchResolutions {
 		resolutionMap[r.BLRAddr] = r
 	}

@@ -8,7 +8,7 @@ import "golang.org/x/arch/x86/x86asm"
 //
 // Every analysis layer that walks x86 code needs exactly these three facts plus
 // the bad-byte flag; they previously each declared their own near-identical
-// struct (disasm.x86DecodedInst, typetrack.X86DecodedInst, decompiler.x86Inst)
+// struct (disasm.x86DecodedInst, decompiler.x86Inst)
 // and their own copy of the decode loop below. Those structs still exist where a
 // layer wants richer per-instruction state, but they are now built by adapting
 // this one canonical sweep instead of re-implementing it.

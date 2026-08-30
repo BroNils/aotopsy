@@ -66,7 +66,7 @@ The central source of truth for ground-truth Dart VM architecture facts, registe
 
 ### `internal/vmtables` & `internal/thraudit`
 
-- **`internal/vmtables`**: Generated, versioned tables for Thread-relative offsets (`thrfields.go`, `thrfieldsx64.go`), stub names (`stubnames.go`), stub orderings (`stuborder.go`), and thread stubs (`threadstubs.go`) covering Dart 2.10 through 3.13+.
+- **`internal/vmtables`**: Generated, versioned tables for Thread-relative offsets (`thrfields.go`, `thrfieldsx86.go`), stub names (`stubnames.go`), stub orderings (`stuborder.go`), and thread stubs (`threadstubs.go`) covering Dart 2.10 through 3.13+.
 - **`internal/thraudit`**: Audit and security classification (`thrclassify.go`) of thread field accesses.
 
 ### `internal/arch/arm64`

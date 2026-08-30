@@ -374,7 +374,7 @@ func BuildSignalContent(
 			x86Insts := disasm.DecodeX86Simple(data, baseAddr)
 			instAddrs = instAddrs[:0]
 			for _, inst := range x86Insts {
-				instAddrs = append(instAddrs, inst.Addr)
+				instAddrs = append(instAddrs, inst.VA)
 			}
 		}
 

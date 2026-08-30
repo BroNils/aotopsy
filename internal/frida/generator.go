@@ -111,7 +111,7 @@ type FridaOptions struct {
 	StalkerMinCalls int
 }
 
-func GenerateFridaScript(libPath string, isARM64 bool, hooks []FridaHook, probes []FridaProbe) string {
+func generateFridaScript(libPath string, isARM64 bool, hooks []FridaHook, probes []FridaProbe) string {
 	return GenerateFridaScriptWithOptions(libPath, isARM64, hooks, probes, FridaOptions{})
 }
 
@@ -135,7 +135,7 @@ func GenerateFridaScriptWithOptions(libPath string, isARM64 bool, hooks []FridaH
 		fmt.Fprintf(&b, "//   reproducible crash on at least one real hardened app -- test cautiously\n")
 		fmt.Fprintf(&b, "//   (non-critical build/account first), and if the target dies right as a\n")
 		fmt.Fprintf(&b, "//   probe would fire, don't just retry: that's very likely this exact hazard,\n")
-		fmt.Fprintf(&b, "//   not a fluke. See GenerateFridaScript's doc comment in generator.go.\n")
+		fmt.Fprintf(&b, "//   not a fluke. See generateFridaScript's doc comment in generator.go.\n")
 	}
 	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "const MODULE_NAME = %q;\n", moduleName)

@@ -22,7 +22,7 @@ import (
 //
 // This factors out the ELF→snapshot→cluster→pool-lookup setup sequence
 // (elfx.Open -> snapshot.Extract -> cluster.ScanClusters/ReadFill ->
-// ParseInstructionsTable -> ResolveCodeRanges -> BuildPoolLookups) into a
+// ParseInstructionsTable -> ResolveCodeRanges -> naming.BuildPoolLookups) into a
 // reusable, exported entry point. cmd/aotopsy/decompile_native_cmd.go (and
 // the decompiler engine in internal/analysis) now calls
 // LoadContext instead of duplicating the sequence; new callers should do

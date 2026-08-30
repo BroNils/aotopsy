@@ -48,18 +48,18 @@ type regProvenance struct {
 	age  int
 }
 
-// X64RegTracker tracks register provenance for x86_64 indirect-call
+// X86RegTracker tracks register provenance for x86_64 indirect-call
 // classification.
-type X64RegTracker struct {
+type X86RegTracker struct {
 	defs [16]regProvenance
 	w    int
 }
 
-func NewX64RegTracker(w int) *X64RegTracker {
-	return &X64RegTracker{w: w}
+func NewX86RegTracker(w int) *X86RegTracker {
+	return &X86RegTracker{w: w}
 }
 
-func (rt *X64RegTracker) tick() {
+func (rt *X86RegTracker) tick() {
 	for i := range rt.defs {
 		if rt.defs[i].note != "" {
 			rt.defs[i].age++
@@ -70,30 +70,26 @@ func (rt *X64RegTracker) tick() {
 	}
 }
 
-func (rt *X64RegTracker) define(idx int, note string) {
+func (rt *X86RegTracker) define(idx int, note string) {
 	if idx < 0 || idx > 15 {
 		return
 	}
 	rt.defs[idx] = regProvenance{note: note}
 }
 
-func (rt *X64RegTracker) kill(idx int) {
+func (rt *X86RegTracker) kill(idx int) {
 	if idx < 0 || idx > 15 {
 		return
 	}
 	rt.defs[idx] = regProvenance{}
 }
 
-func (rt *X64RegTracker) lookup(idx int) string {
+func (rt *X86RegTracker) lookup(idx int) string {
 	if idx < 0 || idx > 15 {
 		return ""
 	}
 	return rt.defs[idx].note
 }
-
-const CanonR14 = sdk.X86THR
-const CanonR15 = sdk.X86PP
-const CanonRCX = sdk.X86ClassIdReg
 
 // IndirectCall represents one CALL site whose target is NOT a plain
 // rip-relative immediate (Rel arg) -- i.e. a register or memory operand.
@@ -136,7 +132,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 
-		rt := NewX64RegTracker(12)
+		rt := NewX86RegTracker(12)
 
 		maxHitReached := false
 		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
@@ -173,7 +169,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					if mem, ok := arg.(x86asm.Mem); ok {
 						baseNote := rt.lookup(x86.CanonReg(mem.Base))
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
-						if x86.CanonReg(mem.Index) == CanonRCX && mem.Scale == 8 && baseNote == "dispatch_table" {
+						if x86.CanonReg(mem.Index) == sdk.X86ClassIdReg && mem.Scale == 8 && baseNote == "dispatch_table" {
 							ic.Kind = "gdt"
 							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via RCX)", mem.Disp)
 						} else if baseNote != "" {
@@ -218,7 +214,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 				}
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && dstOK {
 					dstIdx := x86.CanonReg(dstReg)
-					if x86.CanonReg(mem.Base) == CanonR14 && mem.Index == 0 {
+					if x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 						// Any THR-relative field load. We cannot know the exact
 						// dispatch_table_array_offset without the live Thread
 						// layout for this build, so treat every THR-sourced
@@ -227,7 +223,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						// shape, which only the real dispatch table load
 						// produces on the call side.
 						rt.define(dstIdx, "dispatch_table")
-					} else if x86.CanonReg(mem.Base) == CanonR15 {
+					} else if x86.CanonReg(mem.Base) == sdk.X86PP {
 						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							rt.define(dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))

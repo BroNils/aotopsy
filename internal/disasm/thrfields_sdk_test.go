@@ -13,7 +13,7 @@ import (
 // TestTHRTablesMatchSDK runs `go run tools/extract_thr.go -check`, which
 // re-extracts every Thread offset table from dart-lang/sdk's
 // runtime_offsets_extracted.h and diffs it against the tables committed in
-// thrfields.go / thrfieldsx64.go (now in internal/vmtables/).
+// thrfields.go / thrfieldsx86.go (now in internal/vmtables/).
 //
 // These tables cannot be validated by local testing: a wrong offset produces
 // a plausible-looking annotation ("THR.allocate_object_stub") that is simply

@@ -464,7 +464,7 @@ func QualifiedCodeName(refID int, pl *PoolLookups, pcOffset uint32) string {
 // internal/cluster/fillspec.go's specType). Pre-3.x snapshots (where
 // type_class_id is its own separate ref -- TypeClassIdIsRef=true in the
 // version profile) have NO Type->ClassID resolution implemented
-// anywhere in this pipeline yet. Confirmed empirically, not assumed: a
+// anywhere in this analysis yet. Confirmed empirically, not assumed: a
 // real Dart 2.12.0 sample resolved 0/202 sampled parameter_types
 // elements (Result.Types was simply empty for it, not an indexing
 // mistake -- real Dart 3.7.0 and 3.10.7 samples resolved ~70% of
@@ -760,7 +760,7 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 			// that consumes it (an FP load vs an integer load). The previous code
 			// guessed "double" purely from the exponent-field bit pattern (audit
 			// A7), which mis-renders any large integer whose bits happen to fall
-			// in the exponent range as a bogus float -- in the SHARED pipeline
+			// in the exponent range as a bogus float -- in the SHARED analysis
 			// pool display, affecting every consumer. We render the raw value
 			// here; float interpretation belongs in the decompiler's FP-load
 			// operand path where the type is actually known.

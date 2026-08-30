@@ -150,7 +150,7 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		for i := blk.Start; i < blk.End; i++ {
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
-				e := classifyX86Call(d.Inst, d.Addr, d.Len, symbols, fakeRT, poolDisplay, thrFields)
+				e := classifyX86Call(d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
 				if e.TargetPC != 0 {
 					argMask := inferX86CallArgRegMaskLocal(insts, i)
 					e.ArgRegMask = argMask
@@ -165,7 +165,7 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 			}
 			if pd, ok := poolStringRefFor(d, poolDisplay); ok {
 				res.StringRefs = append(res.StringRefs, StringRefRecord{
-					Func: funcName, PC: fmt.Sprintf("0x%x", d.Addr),
+					Func: funcName, PC: fmt.Sprintf("0x%x", d.VA),
 					Kind: "PP", PoolIdx: pd.idx, Value: pd.value,
 				})
 			}
@@ -178,24 +178,13 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 // registers instead of ARM64's 31.
 type x86NoWindowRegs [16]string
 
-type x86DecodedInst struct {
-	Addr uint64
-	Inst x86asm.Inst
-	Len  int
-}
-
 type x86BlockCFG struct {
 	Start, End int // indices into the flat decoded-instruction slice
 	Succs      []Succ
 }
 
-func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
-	decoded := x86.Decode(funcCode, funcVA)
-	out := make([]x86DecodedInst, 0, len(decoded))
-	for _, d := range decoded {
-		out = append(out, x86DecodedInst{Addr: d.VA, Inst: d.Inst, Len: d.Len})
-	}
-	return out
+func decodeX86Flat(funcCode []byte, funcVA uint64) []x86.Decoded {
+	return x86.Decode(funcCode, funcVA)
 }
 
 // buildX86Blocks partitions a flat instruction slice into basic blocks:
@@ -204,13 +193,13 @@ func decodeX86Flat(funcCode []byte, funcVA uint64) []x86DecodedInst {
 // leader-inducing instruction, matching ARM64's BuildCFG (BL doesn't
 // split blocks there either), so provenance flows through call sites
 // exactly like it does across ARM64 BLs.
-func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
-	funcStart := insts[0].Addr
-	funcEnd := insts[len(insts)-1].Addr + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
+func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
+	funcStart := insts[0].VA
+	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
 
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, d := range insts {
-		addrToIdx[d.Addr] = i
+		addrToIdx[d.VA] = i
 	}
 
 	const (
@@ -230,12 +219,12 @@ func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
 			kind[i] = kRet
 		case d.Inst.Op == x86asm.JMP:
 			kind[i] = kJmp
-			if t, ok := x86.RelTarget(d.Inst, d.Addr, d.Len); ok {
+			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
 		case x86.IsCondJump(d.Inst.Op):
 			kind[i] = kJcc
-			if t, ok := x86.RelTarget(d.Inst, d.Addr, d.Len); ok {
+			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 				target[i], hasTarget[i] = t, true
 			}
 		default:
@@ -311,7 +300,7 @@ func buildX86Blocks(insts []x86DecodedInst) []x86BlockCFG {
 // effect to regs -- the CALL classification itself is handled by the
 // caller (ScanX86FunctionCFG), since CALL doesn't define a register the
 // way MOV/LEA do.
-func touchX86InstrEffect(d x86DecodedInst, regs *x86NoWindowRegs, touched *[16]bool, poolDisplay map[int]string, thrFields map[int]string) {
+func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool, poolDisplay map[int]string, thrFields map[int]string) {
 	inst := d.Inst
 	if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
 		dstReg, dstOK := inst.Args[0].(x86asm.Reg)
@@ -401,7 +390,7 @@ type poolStringRef struct {
 // string_refs.jsonl -- split out from touchX86InstrEffect so the
 // local-effect precompute pass (which doesn't need string refs, only
 // register touch/kill bookkeeping) doesn't pay for it twice.
-func poolStringRefFor(d x86DecodedInst, poolDisplay map[int]string) (poolStringRef, bool) {
+func poolStringRefFor(d x86.Decoded, poolDisplay map[int]string) (poolStringRef, bool) {
 	inst := d.Inst
 	if inst.Op != x86asm.MOV || len(inst.Args) < 2 {
 		return poolStringRef{}, false

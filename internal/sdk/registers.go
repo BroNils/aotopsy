@@ -196,10 +196,6 @@ const (
 	CodeMonomorphicEntryPointDispCompressed      = 0xb
 	CodeUncheckedEntryPointDispCompressed        = 0x7
 	CodeMonomorphicUncheckedDispCompressed       = 0xf
-
-	// Deprecated aliases maintained for compatibility:
-	CodeEntryPointDisp            = 0x7
-	CodeMonomorphicEntryPointDisp = 0xf
 )
 
 // ── Pool index layout constants ───────────────────────────────────────

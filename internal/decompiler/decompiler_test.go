@@ -126,8 +126,8 @@ func TestDecodeX86RangeMultipleReturns(t *testing.T) {
 	if len(insts) != 5 {
 		t.Fatalf("DecodeX86Range: got %d instructions, want 5 (decoding must not stop at the first RET); insts=%+v", len(insts), insts)
 	}
-	if insts[len(insts)-1].Addr != 0x1006 {
-		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].Addr)
+	if insts[len(insts)-1].VA != 0x1006 {
+		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].VA)
 	}
 }
 
