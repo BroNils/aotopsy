@@ -36,15 +36,15 @@ func TestWriteSARIF(t *testing.T) {
 		t.Fatalf("WriteSARIF failed: %v", err)
 	}
 
-	sarifPath := filepath.Join(tempDir, "report.sarif")
+	sarifPath := filepath.Join(tempDir, "aotopsy.sarif")
 	data, err := os.ReadFile(sarifPath)
 	if err != nil {
-		t.Fatalf("read report.sarif: %v", err)
+		t.Fatalf("read aotopsy.sarif: %v", err)
 	}
 
 	var log sarifLog
 	if err := json.Unmarshal(data, &log); err != nil {
-		t.Fatalf("unmarshal report.sarif: %v", err)
+		t.Fatalf("unmarshal aotopsy.sarif: %v", err)
 	}
 
 	if log.Version != "2.1.0" {

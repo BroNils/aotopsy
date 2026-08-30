@@ -723,7 +723,7 @@ func transferInstructionX86(
 			if result.BLCallSiteTypes == nil {
 				result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 			}
-			result.BLCallSiteTypes[callTarget] = *state
+			result.BLCallSiteTypes[inst.VA] = *state
 		}
 
 		// CALL [mem] — indirect call (dispatch table or object field).

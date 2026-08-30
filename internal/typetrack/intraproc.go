@@ -732,6 +732,16 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
+		} else if raw := inst.Raw; raw&0xFF000010 == 0x54000000 {
+			// B.AL (cond=14) / B.NV (cond=15) — unconditional despite B.cond
+			// encoding. isCondBranch returns false for these; treat as
+			// unconditional branch: target is a leader, NO fall-through.
+			imm19 := int32(raw>>5) & 0x7FFFF
+			if imm19&(1<<18) != 0 {
+				imm19 |= ^int32(0x7FFFF)
+			}
+			target := uint64(int64(inst.Addr) + int64(imm19)*4)
+			leaders[target] = true
 		}
 	}
 
@@ -780,6 +790,17 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			}
 			// Fall-through (if not the last instruction overall).
 			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+				blk.successors = append(blk.successors, bi)
+			}
+			continue
+		} else if raw := lastInst.Raw; raw&0xFF000010 == 0x54000000 {
+			// B.AL (cond=14) / B.NV (cond=15) — unconditional, no fall-through.
+			imm19 := int32(raw>>5) & 0x7FFFF
+			if imm19&(1<<18) != 0 {
+				imm19 |= ^int32(0x7FFFF)
+			}
+			target := uint64(int64(lastInst.Addr) + int64(imm19)*4)
+			if bi, ok2 := addrToBlock[target]; ok2 {
 				blk.successors = append(blk.successors, bi)
 			}
 			continue

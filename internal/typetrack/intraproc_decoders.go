@@ -55,10 +55,19 @@ func recordAllocationSite(ctx *TypeContext, callPC uint64, classID int) {
 }
 
 // isCondBranch detects conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
-// Returns the list of target addresses (branch target + fall-through).
+// Returns the list of target addresses (branch target only — fall-through is
+// implied by the caller). Returns false for B.AL (cond=14) and B.NV (cond=15)
+// because those are unconditional despite using the B.cond encoding.
 func isCondBranch(raw uint32, pc uint64) ([]uint64, bool) {
 	// B.cond: 0101 0100 | imm19 | 0 | cond
 	if raw&0xFF000010 == 0x54000000 {
+		// cond 0b1110 (AL) and 0b1111 (NV) always branch — they are
+		// unconditional despite using the B.cond encoding. Return false
+		// so the caller treats them as unconditional (no fall-through).
+		// This matches disasm.DecodeBranch's handling.
+		if cond := raw & 0xF; cond == 14 || cond == 15 {
+			return nil, false
+		}
 		imm19 := int32(raw>>5) & 0x7FFFF
 		if imm19&(1<<18) != 0 {
 			imm19 |= ^int32(0x7FFFF)

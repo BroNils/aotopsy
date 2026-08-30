@@ -219,7 +219,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		if err := output.WriteSARIF(inDir, findings, "1.0.0"); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
-			sarifPath := filepath.Join(inDir, "report.sarif")
+			sarifPath := filepath.Join(inDir, "aotopsy.sarif")
 			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, strutil.FileSize(sarifPath), len(findings))
 		}
 	}

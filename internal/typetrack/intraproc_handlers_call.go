@@ -154,7 +154,7 @@ func handleBL(tc *transferCtx) bool {
 		}
 		var callSiteState [31]TypeLattice
 		copy(callSiteState[:], tc.state[:])
-		tc.result.BLCallSiteTypes[target] = callSiteState
+		tc.result.BLCallSiteTypes[tc.inst.Addr] = callSiteState
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {

@@ -5,31 +5,31 @@
   "func_count": 7714,
   "class_count": 1575,
   "lines": {
-    "address_callers_xref.jsonl": 4105,
+    "address_callers_xref.jsonl": 4109,
     "call_edges.jsonl": 40502,
     "classes.jsonl": 1575,
     "dispatch_table.jsonl": 18929,
-    "field_accessor_xref.jsonl": 2870,
+    "field_accessor_xref.jsonl": 3091,
     "functions.jsonl": 7714,
     "index.jsonl": 7714,
     "pool_immediates.jsonl": 49,
     "string_refs.jsonl": 3163,
     "string_value_xref.jsonl": 1303,
-    "typetrack_report.json": 38,
+    "typetrack_report.json": 39,
     "unresolved_thr.jsonl": 127
   },
   "sha256": {
-    "address_callers_xref.jsonl": "232385fbf667f54e59805c4753261f6b4848bab96d8ba48efb468765be9bb4aa",
-    "call_edges.jsonl": "6245064f9af9583fb217f100413ed9c4079279796feadad9e0a31468eb745c42",
+    "address_callers_xref.jsonl": "5b4321bf3f09f6868d53467220ec124ad15dd61acfcaa5bd5fb0388ef63ca73f",
+    "call_edges.jsonl": "990c460ec299c7423b63fd64d100492e20b4f75a3750fc938591ee7fcd28b359",
     "classes.jsonl": "31929d6ef87f14c1fbd0ae0f02026d90d9b75f223451933525889f5600ae3851",
     "dispatch_table.jsonl": "06e8a1d5213fa7ec3cae99a359cf5d66fca796f0dc86c35de5e7d6a075ef1690",
-    "field_accessor_xref.jsonl": "0c16b39f701b0524db4685a1c998e182b400967b0c9ad1d2b06bbe2040f52035",
+    "field_accessor_xref.jsonl": "ba2ea8e02b29a987294db6cf84223fba743d3f833b2bc91df44d2691a3d54c61",
     "functions.jsonl": "d6e842ef5538e682c14218ccae906c560ebe45f85971899911c4dcb3ca3a0cfd",
     "index.jsonl": "9dc292aaf7c252ec87bea3d00085eccd7d060c6bcf70f3973096cdfdba6310e9",
     "pool_immediates.jsonl": "26552bc0a29cb07f0570f307dbc49979d0a6e1f9e3bbbd72f40f3364bd6bb778",
     "string_refs.jsonl": "269e96f54bdf717496a69180145836b7353cb9d5dac98e21f4a7fc82a9076295",
     "string_value_xref.jsonl": "367d5b735d83bf9b0ba5693317af92a78d962dd0a072568d6f95c5bb3c908beb",
-    "typetrack_report.json": "ac47fdca260105981bdf8bc1e808910b87c42d03ada703f496d596f77d241d54",
+    "typetrack_report.json": "eee155a99c36575043aa80caecc99ea074ec0be08f22e366a625aacddd1484f2",
     "unresolved_thr.jsonl": "628a4c3fa9ade07f210e1eaa41b8fd9fb39cffc6dd1bb0bcf0cfc19a142138ad"
   }
 }

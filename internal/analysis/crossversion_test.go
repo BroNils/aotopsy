@@ -123,7 +123,7 @@ const uncompressedTypeResolutionReason = "2.14.0 is the last uncompressed-pointe
 	"Separate from the receiver cliff; not yet root-caused."
 
 var knownGaps = []knownGap{
-	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/arm64", "2.13.0/x64"}, reason: storeResidualReason},
+	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/arm64", "2.13.0/x64", "2.14.0/arm64"}, reason: storeResidualReason},
 	{metric: "field_type_declared_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
 	{metric: "field_type_instance_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
 }

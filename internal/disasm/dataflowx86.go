@@ -325,10 +325,10 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 					if name, ok := thrFields[int(mem.Disp)]; ok {
 						x86Define(regs, touched, dstIdx, "THR."+name)
 					} else {
-						x86Define(regs, touched, dstIdx, "dispatch_table")
+						x86Define(regs, touched, dstIdx, fmt.Sprintf("THR.f%d", mem.Disp))
 					}
 				} else {
-					x86Define(regs, touched, dstIdx, "dispatch_table")
+					x86Define(regs, touched, dstIdx, fmt.Sprintf("THR.f%d", mem.Disp))
 				}
 			case sdk.X86PP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)

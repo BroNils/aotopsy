@@ -233,7 +233,7 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 		}},
 	}
 
-	path := filepath.Join(dir, "report.sarif")
+	path := filepath.Join(dir, "aotopsy.sarif")
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("sarif: create %s: %w", path, err)
