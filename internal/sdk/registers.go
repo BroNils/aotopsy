@@ -259,3 +259,60 @@ const (
 	// an equality test, or the block does not have exactly two successors.
 	SuccUnknown = -1
 )
+
+// ── FPU/SIMD calling convention ──────────────────────────────────────
+//
+// Source: runtime/vm/constants_arm64.h @3.12.2:
+//   DartCallingConvention::kFpuRegistersForArgs[] = {V0, V1, V2, V3, V4, V5}
+//   kReturnFpuReg = V0
+// Source: runtime/vm/constants_x64.h @3.12.2:
+//   DartCallingConvention::kFpuRegistersForArgs[] = {XMM1, XMM2, XMM3, XMM4, XMM5, XMM6}
+//   kReturnFpuReg = XMM0
+//
+// Dart passes double/float/SIMD arguments through dedicated FPU registers,
+// separate from the GPR argument set. The return value for FP returns uses
+// a dedicated FPU return register (V0 on ARM64, XMM0 on x86_64).
+
+// RegisterClass distinguishes GPR from FPU registers for type tracking.
+type RegisterClass int
+
+const (
+	GPR RegisterClass = iota
+	FPU
+)
+
+// ARM64FpuArgRegNames returns the FPU argument register names (V0-V5) in
+// parameter order, for the decompiler's pseudocode display.
+func ARM64FpuArgRegNames() []string {
+	return []string{"v0", "v1", "v2", "v3", "v4", "v5"}
+}
+
+// ARM64FpuReturnRegName is the FPU return register name for ARM64.
+const ARM64FpuReturnRegName = "v0"
+
+// X86FpuArgRegNames returns the FPU argument register names (XMM1-XMM6) in
+// parameter order, for the decompiler's pseudocode display.
+func X86FpuArgRegNames() []string {
+	return []string{"xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6"}
+}
+
+// X86FpuReturnRegName is the FPU return register name for x86_64.
+const X86FpuReturnRegName = "xmm0"
+
+// DartFpuArgRegNames returns the FPU argument register names for the
+// selected architecture.
+func DartFpuArgRegNames(isARM64 bool) []string {
+	if isARM64 {
+		return ARM64FpuArgRegNames()
+	}
+	return X86FpuArgRegNames()
+}
+
+// FpuReturnRegName returns the FPU return register name for the selected
+// architecture.
+func FpuReturnRegName(isARM64 bool) string {
+	if isARM64 {
+		return ARM64FpuReturnRegName
+	}
+	return X86FpuReturnRegName
+}

@@ -44,6 +44,8 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.StackReg = sdk.ARM64StackRegStr
 	fir.CodeReg = sdk.ARM64CodeRegStr
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
+	fir.FpuArgRegs = sdk.ARM64FpuArgRegNames()
+	fir.FpuReturnReg = sdk.ARM64FpuReturnRegName
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
@@ -374,6 +376,69 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			return line1, handled, true
+		}
+		return "", false, true
+	case "fadd", "fsub", "fmul", "fdiv", "fmov", "fneg", "fsqrt", "fabs":
+		// ARM64 FPU arithmetic. These operate on Dn/Sn/Qn registers.
+		// fmov is a register-to-register copy (like mov for GPR).
+		// The others are binary ops: fadd Dd, Dn, Dm → Dd = Dn + Dm.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			if mnemonic == "fmov" && len(ops) >= 2 {
+				s.setReg(dst, operandExpr(fir, s, ops[1]))
+			} else if len(ops) >= 3 {
+				src1 := operandExpr(fir, s, ops[1])
+				src2 := operandExpr(fir, s, ops[2])
+				var op string
+				switch mnemonic {
+				case "fadd":
+					op = "+"
+				case "fsub":
+					op = "-"
+				case "fmul":
+					op = "*"
+				case "fdiv":
+					op = "/"
+				case "fneg":
+					s.setReg(dst, fmt.Sprintf("-(%s)", src1))
+					return "", false, true
+				case "fsqrt":
+					s.setReg(dst, fmt.Sprintf("sqrt(%s)", src1))
+					return "", false, true
+				case "fabs":
+					s.setReg(dst, fmt.Sprintf("abs(%s)", src1))
+					return "", false, true
+				}
+				s.setReg(dst, fmt.Sprintf("(%s %s %s)", src1, op, src2))
+			}
+		}
+		return "", false, true
+	case "fcmp":
+		// FPU compare: fcmp Dn, Dm — sets flags like cmp but for doubles.
+		if len(ops) >= 2 {
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
+			s.HasCmp = true
+		}
+		return "", false, true
+	case "fcvt":
+		// FCVT converts between FP precisions: fcvt Dd, Sn (single→double).
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
+		}
+		return "", false, true
+	case "scvtf", "ucvtf":
+		// SCVTF/UCVTF: integer to FP conversion.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, fmt.Sprintf("(%s).toDouble()", operandExpr(fir, s, ops[1])))
+		}
+		return "", false, true
+	case "fcvtzs", "fcvtzu":
+		// FCVTZS/FCVTZU: FP to integer conversion (truncate toward zero).
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, fmt.Sprintf("(%s).toInt()", operandExpr(fir, s, ops[1])))
 		}
 		return "", false, true
 	}

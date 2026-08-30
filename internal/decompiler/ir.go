@@ -110,6 +110,16 @@ type FuncIR struct {
 	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
 	ArgsDescReg string
 
+	// FpuArgRegs holds the FPU argument register names (ARM64: v0-v5;
+	// x86_64: xmm1-xmm6) in calling-convention order. Used by the lifter
+	// to recognize FPU argument patterns and by the emitter to display
+	// double/float parameters. Empty when the architecture has no FPU
+	// calling convention (not currently the case for either supported arch).
+	FpuArgRegs []string
+	// FpuReturnReg holds the FPU return register name (ARM64: v0; x86_64:
+	// xmm0). Used to recognize double return values.
+	FpuReturnReg string
+
 	// PoolIndexOf turns a byte displacement off PoolReg into an object-pool
 	// index. The arithmetic differs per architecture -- the ARM64 pool
 	// register is untagged and the x86_64 one is tagged, so the same slot

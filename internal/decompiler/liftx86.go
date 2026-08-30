@@ -62,6 +62,8 @@ func BuildX86IR(name string, insts []x86.Decoded) *FuncIR {
 	fir.StackReg = sdk.X86StackRegStr
 	fir.CodeReg = sdk.X86CodeRegStr
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
+	fir.FpuArgRegs = sdk.X86FpuArgRegNames()
+	fir.FpuReturnReg = sdk.X86FpuReturnRegName
 
 	funcStart := insts[0].VA
 	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
@@ -522,6 +524,107 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 		if len(ops) >= 1 {
 			dst := strings.ToLower(ops[0])
 			s.setReg(dst, "/* pop */")
+		}
+		return "", false, true
+	case "addsd", "subsd", "mulsd", "divsd", "minsd", "maxsd":
+		// x86_64 scalar double arithmetic (SSE2).
+		// addsd xmm, xmm/mem → xmm = xmm + src
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			var op string
+			switch mnemonic {
+			case "addsd":
+				op = "+"
+			case "subsd":
+				op = "-"
+			case "mulsd":
+				op = "*"
+			case "divsd":
+				op = "/"
+			case "minsd":
+				s.setReg(dst, fmt.Sprintf("min(%s, %s)", s.lookupReg(dst), src))
+				return "", false, true
+			case "maxsd":
+				s.setReg(dst, fmt.Sprintf("max(%s, %s)", s.lookupReg(dst), src))
+				return "", false, true
+			}
+			old := s.lookupReg(dst)
+			if old == "" {
+				old = "0.0"
+			}
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", old, op, src))
+		}
+		return "", false, true
+	case "addss", "subss", "mulss", "divss":
+		// x86_64 scalar single (float32) arithmetic.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			var op string
+			switch mnemonic {
+			case "addss":
+				op = "+"
+			case "subss":
+				op = "-"
+			case "mulss":
+				op = "*"
+			case "divss":
+				op = "/"
+			}
+			old := s.lookupReg(dst)
+			if old == "" {
+				old = "0.0"
+			}
+			s.setReg(dst, fmt.Sprintf("(%s %s %s)", old, op, src))
+		}
+		return "", false, true
+	case "sqrtsd":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, fmt.Sprintf("sqrt(%s)", operandExpr(fir, s, ops[1])))
+		}
+		return "", false, true
+	case "ucomisd", "comisd":
+		// Double compare — sets flags like cmp.
+		if len(ops) >= 2 {
+			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
+			s.HasCmp = true
+		}
+		return "", false, true
+	case "cvtsi2sd", "cvtsi2ss":
+		// Integer to double/float conversion.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, fmt.Sprintf("(%s).toDouble()", operandExpr(fir, s, ops[1])))
+		}
+		return "", false, true
+	case "cvttsd2si", "cvttss2si":
+		// Double/float to integer (truncate toward zero).
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, fmt.Sprintf("(%s).toInt()", operandExpr(fir, s, ops[1])))
+		}
+		return "", false, true
+	case "cvtsd2ss":
+		// Double to float (precision narrowing).
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
+		}
+		return "", false, true
+	case "cvtss2sd":
+		// Float to double (precision widening).
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
+		}
+		return "", false, true
+	case "movsd", "movss":
+		// SSE move: movsd xmm, xmm/mem — register-to-register copy.
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			s.setReg(dst, operandExpr(fir, s, ops[1]))
 		}
 		return "", false, true
 	}
