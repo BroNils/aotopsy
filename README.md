@@ -219,6 +219,7 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 | `dart_meta.json` | Snapshot metadata, compressed pointers flag, THR layout |
 | `flutter_meta.json` | Unified metadata for Ghidra/IDA (ARM64 only) |
 | `aotopsy.sarif` | SARIF 2.1.0 security finding report (for GitHub Code Scanning) |
+| `evidence.jsonl` | Unified evidence model with confidence and provenance per call site |
 | `asm/*.txt` | Annotated disassembly per function |
 | `cfg/*.dot` | Per-function CFGs (with `--graph`) |
 
@@ -252,6 +253,7 @@ internal/
   strxref/            String-to-function cross-referencing
   strutil/            Dart syntax sanitization and metadata serialization
   jsonutil/           Generic JSONL stream readers and writers
+  evidence/           Unified evidence model with confidence and provenance
   frida/              Frida runtime hook and probe generation
   cli/                ANSI color helpers for CLI output
 tools/                Standalone utilities (THR table extractor and validator)

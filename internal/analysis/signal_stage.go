@@ -13,6 +13,7 @@ import (
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
@@ -222,6 +223,16 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 			sarifPath := filepath.Join(inDir, "aotopsy.sarif")
 			logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, strutil.FileSize(sarifPath), len(findings))
 		}
+	}
+
+	// Write evidence.jsonl — unified evidence model from call edges.
+	evidencePath := filepath.Join(inDir, "evidence.jsonl")
+	evCollector := evidence.NewCollector()
+	evCollector.FromCallEdges(edges)
+	if err := evCollector.WriteJSONL(evidencePath); err != nil {
+		logf("  %swarning: evidence: %v%s\n", cli.Gold, err, cli.Reset)
+	} else {
+		logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, evidencePath, cli.Reset, strutil.FileSize(evidencePath))
 	}
 
 	// Build connected signal CFG.
