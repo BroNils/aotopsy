@@ -13,23 +13,18 @@ another. So a fresh clone won't have it — that's normal, not missing.
 If it doesn't exist yet, create your own with sample paths and integration
 test env vars for your machine.
 
-## ⚠️ Host memory: 6 GB. Read this before running anything heavy.
+## ⚠️ Host memory limits — read before running anything heavy
 
-This dev box is a WSL2 VM with `memory=6GB` + 4 GB swap (`.wslconfig`). It has
-already been crashed several times by analysis runs. Rules that actually work:
+This repo's analysis pipeline is memory-intensive. The specific host RAM,
+swap, and `ulimit` values for your machine are in **`AGENTS-local.md`** — read
+that file before running any heavy test or pipeline. The universal rules:
 
-- **Cap below VM RAM, not above it.** `ulimit -v 2500000` (~2.5 GB). Setting it
-  to 8 GB is a *fake* guard: the limit can never trigger before the VM itself
-  runs out, so the VM dies instead of the process. `ulimit -v` is also
-  per-process, so it says nothing about the sum of concurrent processes.
-- **One heavy thing at a time, in the foreground.** Never background a pipeline
-  run and keep working: `go test` in this repo runs full `Run()` pipelines of
-  its own, so a background analysis plus a foreground `go test` is two
-  pipelines at once. That combination has killed the VM.
+- **One heavy thing at a time, in the foreground.** `go test` in this repo
+  runs full `Run()` pipelines of its own.
 - **Never run the full pipeline on a big real app** (e.g. a 129k-function
-  libapp.so). For big-binary verification use the cluster-only harness
-  (`clusterOnly` in `internal/analysis/loadingunit_test.go`): ELF → snapshot →
-  alloc → fill, skipping disassembly. It handles a 22 MB libapp.so in ~0.06 s.
+  libapp.so). Use the cluster-only harness (`clusterOnly` in
+  `internal/analysis/loadingunit_test.go`): ELF → snapshot → alloc → fill,
+  skipping disassembly.
 - `aotopsy _debug decompile-native --all` on a real app is the single most
   dangerous command here — see its own `--max` help text.
 
@@ -137,27 +132,12 @@ Tests skip automatically if not set.
 
 ### ⚠️ A Flutter build tree holds SEVERAL libapp.so — most are stale
 
-`compare_sample/build` contains **five** `libapp.so` with five different hashes,
-built from different revisions of `lib/*.dart`. Verified by string-grepping them:
-
-| path | matches current source? |
-|---|---|
-| `build/app/intermediates/merged_native_libs/release/.../libapp.so` | yes |
-| `build/app/intermediates/stripped_native_libs/release/.../libapp.so` | yes |
-| `build/app/generated/jniLibs/copyJniLibsflutterBuildRelease/.../libapp.so` | yes |
-| `build/app/outputs/flutter-apk/extracted_arm64/lib/arm64-v8a/libapp.so` | **STALE** |
-| `build/app/outputs/flutter-apk/extracted_x64/lib/x86_64/libapp.so` | **STALE** |
-
-The `extracted_*` ones predate `ground_truth.dart` entirely and contain no
-`AntiInlineTools` / `safeDivide` / `tryCatchFinally`. Using them silently
-invalidates any "compare the .dart source to the binary" check — absent symbols
-look like tree-shaking or a parser bug when the code was simply never compiled
-in. **Point the env vars at `merged_native_libs`**, and before trusting a
-negative result (`--find X` returning 0 matches), confirm the symbol is in the
-file: `strings -n 6 libapp.so | grep -x X`.
-
-Timestamps do NOT reveal this — all five are same-day. Compare hashes and
-grep for known symbols instead.
+A Flutter build tree contains multiple `libapp.so` files with different hashes,
+and the `extracted_*` APK outputs are often stale (predate the current source).
+**Which paths are stale vs valid on your machine is documented in
+`AGENTS-local.md`** — always point env vars at `merged_native_libs`, not
+`extracted_*`. Before trusting a negative result (`--find X` returning 0
+matches), confirm the symbol is in the file: `strings -n 6 libapp.so | grep -x X`.
 
 ## Key Conventions
 
