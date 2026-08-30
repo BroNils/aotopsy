@@ -72,27 +72,34 @@ func handleBLR(tc *transferCtx) bool {
 				if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
 					res := BlrResolution{
 						PC: tc.inst.Addr, Reg: rn, SlotIndex: -1,
+						Confidence: "static_inferred",
 					}
 					var allTargets []string
 					for _, selOff := range selectorOffsets {
 						allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
 					}
 					applySelectorCandidates(&res, allTargets)
+					if res.Polymorphic {
+						res.Confidence = "polymorphic"
+					}
 					tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
 				} else {
 					tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 						PC: tc.inst.Addr, Reg: rn, TargetName: methodName, Resolved: true,
+						Confidence: "stub",
 					})
 				}
 			} else if strings.HasPrefix(sn, "PPCode:") {
 				funcName := sn[len("PPCode:"):]
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
+					Confidence: "stub",
 				})
 			} else if strings.HasPrefix(sn, "TTS:") {
 				stubName := sn[len("TTS:"):]
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
+					Confidence: "stub",
 				})
 			} else if strings.HasPrefix(sn, "Closure:") {
 				poolIdx := tc.state[rn].StubOff
@@ -100,12 +107,14 @@ func handleBLR(tc *transferCtx) bool {
 					if funcName, ok := tc.ctx.PoolClosureFunctionNames[poolIdx]; ok && funcName != "" {
 						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 							PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
+							Confidence: "stub",
 						})
 					}
 				}
 			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: sn, Resolved: true,
+					Confidence: "stub",
 				})
 			}
 		}

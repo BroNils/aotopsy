@@ -43,6 +43,14 @@ type BlrResolution struct {
 	// len(TargetNames) -- see maxPolymorphicNames.
 	Polymorphic bool
 	Candidates  int
+
+	// Confidence classifies how the resolution was derived:
+	//   "exact"          — direct slot lookup with known receiver class
+	//   "static_inferred" — selector scan fallback (receiver unknown, selector known)
+	//   "polymorphic"    — multiple candidates from selector scan
+	//   "stub"           — resolved via THR stub / pool Code / UnlinkedCall / TTS
+	//   "unknown"        — unresolved (Resolved=false)
+	Confidence string `json:"confidence,omitempty"`
 }
 
 // maxPolymorphicNames bounds how many callee names a polymorphic resolution
@@ -914,6 +922,7 @@ func resolveBLR(
 	res := BlrResolution{
 		PC:  inst.Addr,
 		Reg: rn,
+		Confidence: "unknown",
 	}
 
 	t := state[rn]
@@ -949,6 +958,11 @@ func resolveBLR(
 				imm = fromPreScan
 			}
 			applySelectorCandidates(&res, ctx.selectorCandidates(imm))
+			if res.Polymorphic {
+				res.Confidence = "polymorphic"
+			} else if res.Resolved {
+				res.Confidence = "static_inferred"
+			}
 			result.BLRResolutions = append(result.BLRResolutions, res)
 			return
 		}
@@ -960,6 +974,7 @@ func resolveBLR(
 		if name, ok := ctx.ResolveDispatchTarget(t.DispatchIndex); ok {
 			res.TargetName = name
 			res.Resolved = true
+			res.Confidence = "exact"
 		} else {
 			// SUPER FEATURE 2: slot exists but no name.
 			// Try to find the entry and resolve via CodeRange fallback.
@@ -967,6 +982,7 @@ func resolveBLR(
 				if name, ok3 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok3 && name != "" {
 					res.TargetName = name
 					res.Resolved = true
+					res.Confidence = "static_inferred"
 				}
 			}
 			// P5 CHA: if direct lookup failed, try subclass dispatch slots.
@@ -1015,6 +1031,11 @@ func resolveBLR(
 			res.SlotIndex = -1
 		}
 		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
+		if res.Polymorphic {
+			res.Confidence = "polymorphic"
+		} else if res.Resolved {
+			res.Confidence = "static_inferred"
+		}
 	case LatticeTop, LatticeBottom:
 		// No usable type for the call register -- fall back to the selector
 		// immediate the pre-scan recorded for this exact BLR.
@@ -1038,6 +1059,11 @@ func resolveBLR(
 			// Scan every class's slot at this selector immediate; see
 			// selectorCandidates for the index arithmetic and its SDK source.
 			applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
+			if res.Polymorphic {
+				res.Confidence = "polymorphic"
+			} else if res.Resolved {
+				res.Confidence = "static_inferred"
+			}
 		}
 	}
 

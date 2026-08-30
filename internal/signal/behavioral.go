@@ -116,13 +116,16 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 	// from disk, so the two analyses share identical edge data.
 	callerCallees := map[string]map[string]bool{}
 	for _, e := range edges {
-		if e.Target == "" {
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
 			continue
 		}
 		if callerCallees[e.FromFunc] == nil {
 			callerCallees[e.FromFunc] = map[string]bool{}
 		}
-		callerCallees[e.FromFunc][e.Target] = true
+		for _, t := range targets {
+			callerCallees[e.FromFunc][t] = true
+		}
 	}
 
 	var findings []TaintFinding
@@ -424,19 +427,24 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 	// Build call graph: caller → callees
 	callerCallees := map[string]map[string]bool{}
 	for _, e := range edges {
-		if e.Target == "" {
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
 			continue
 		}
 		// Resolve hex VA targets to their function name when possible.
-		if strings.HasPrefix(e.Target, "0x") {
-			if resolved, ok := pcToName[e.Target]; ok && resolved != "" {
-				e.Target = resolved
+		for i, t := range targets {
+			if strings.HasPrefix(t, "0x") {
+				if resolved, ok := pcToName[t]; ok && resolved != "" {
+					targets[i] = resolved
+				}
 			}
 		}
 		if callerCallees[e.FromFunc] == nil {
 			callerCallees[e.FromFunc] = map[string]bool{}
 		}
-		callerCallees[e.FromFunc][e.Target] = true
+		for _, t := range targets {
+			callerCallees[e.FromFunc][t] = true
+		}
 	}
 
 	// Identify behavioral patterns

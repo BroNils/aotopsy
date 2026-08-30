@@ -49,3 +49,25 @@ type StringRefRecord struct {
 	PoolIdx int    `json:"pool_idx"`
 	Value   string `json:"value"` // raw string value (unquoted)
 }
+
+// ResolvedTargets returns the callee name(s) for a call edge, in priority order:
+// 1. Target (direct call — single callee)
+// 2. Targets (polymorphic indirect call — multiple candidates)
+// 3. Via (indirect call with provenance but no resolved target — last resort)
+// 4. nil (truly unresolved)
+//
+// All consumers that need "what does this edge call?" should use this helper
+// instead of checking Target/Via/Candidates individually, so the resolution
+// policy is consistent across render, signal, callgraph, and xref.
+func (e CallEdgeRecord) ResolvedTargets() []string {
+	if e.Target != "" {
+		return []string{e.Target}
+	}
+	if len(e.Targets) > 0 {
+		return e.Targets
+	}
+	if e.Via != "" {
+		return []string{e.Via}
+	}
+	return nil
+}

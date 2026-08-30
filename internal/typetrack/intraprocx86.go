@@ -836,16 +836,20 @@ func transferInstructionX86(
 			if strings.HasPrefix(sn, "UnlinkedCall:") {
 				methodName := sn[len("UnlinkedCall:"):]
 				if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-					res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1}
+					res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
 					var allTargets []string
 					for _, selOff := range selectorOffsets {
 						allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
 					}
 					applySelectorCandidates(&res, allTargets)
+					if res.Polymorphic {
+						res.Confidence = "polymorphic"
+					}
 					result.BLRResolutions = append(result.BLRResolutions, res)
 				} else {
 					result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
 						PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
+						Confidence: "stub",
 					})
 				}
 			}
@@ -933,10 +937,12 @@ func resolveX86Dispatch(
 	res := BlrResolution{
 		PC:        inst.VA,
 		SlotIndex: slot,
+		Confidence: "unknown",
 	}
 	if name, ok := ctx.ResolveDispatchTarget(slot); ok {
 		res.TargetName = name
 		res.Resolved = true
+		res.Confidence = "exact"
 		ctx.DispatchHits++
 	} else {
 		// P4 reverse dispatch scan: if the slot doesn't directly resolve,
@@ -945,6 +951,11 @@ func resolveX86Dispatch(
 		// but a nearby slot has a valid Code target.
 		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
 		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
+		if res.Polymorphic {
+			res.Confidence = "polymorphic"
+		} else if res.Resolved {
+			res.Confidence = "static_inferred"
+		}
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
@@ -968,8 +979,12 @@ func resolveX86DispatchSelectorOffset(
 	res := BlrResolution{
 		PC:        inst.VA,
 		SlotIndex: -1,
+		Confidence: "static_inferred",
 	}
 	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
+	if res.Polymorphic {
+		res.Confidence = "polymorphic"
+	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
 }
 
