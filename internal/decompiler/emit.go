@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
@@ -24,6 +25,7 @@ type Stats struct {
 	NonLastBranch         int `json:"non_last_branch"`
 	TryBlocks             int `json:"try_blocks"`
 	CatchHandlers         int `json:"catch_handlers"`
+	CSMDeadRegsKilled     int `json:"csm_dead_regs_killed,omitempty"`
 }
 
 // Artifact is one function's emitted pseudocode plus its stats.
@@ -126,6 +128,13 @@ type emitter struct {
 	// curTryRegion is the try region currently open, stored as index+1 so the
 	// zero value means "none". Prevents a region re-opening inside itself.
 	curTryRegion int
+
+	// csmByPC maps a PC offset (relative to function entry) to the
+	// CompressedStackMaps entry at that offset. Built from fir.StackMaps
+	// in EmitPseudocode. Used by emitBlockBody to kill dead registers at
+	// GC safepoints, improving pseudocode quality by removing stores to
+	// registers that are dead at the safepoint.
+	csmByPC map[uint32]cluster.StackMapEntry
 	// tryOpened records regions already structured with real try/catch, so the
 	// many recursion paths into a region do not each emit their own.
 	tryOpened map[int]bool
@@ -276,6 +285,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if len(fir.TryRegions) > 0 {
 		e.tryOpened = make(map[int]bool, len(fir.TryRegions))
 		e.handlerBlocks = make(map[int]bool)
+	}
+	// Build CSM lookup map for dead-register elimination at safepoints.
+	if len(fir.StackMaps) > 0 {
+		e.csmByPC = make(map[uint32]cluster.StackMapEntry, len(fir.StackMaps))
+		for _, sm := range fir.StackMaps {
+			e.csmByPC[sm.PCOffset] = sm
+		}
 	}
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
