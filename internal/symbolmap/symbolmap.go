@@ -9,6 +9,7 @@
 package symbolmap
 
 import (
+	"aotopsy/internal/arch/x86"
 	"bytes"
 	"debug/elf"
 	"fmt"
@@ -20,7 +21,6 @@ import (
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/sdk"
 )
 
 // MatchKind classifies how a call-site's target VA was resolved.
@@ -338,14 +338,14 @@ func scanARM64CallSites(sections []execSection, includeBranches bool) []CallSite
 func scanX86CallSites(sections []execSection, includeBranches bool) []CallSite {
 	var out []CallSite
 	for _, sec := range sections {
-		sdk.WalkX86(sec.Data, sec.Addr, func(d sdk.X86Decoded) bool {
+		x86.Walk(sec.Data, sec.Addr, func(d x86.Decoded) bool {
 			if d.Bad {
 				return true
 			}
 			isCall := d.Inst.Op == x86asm.CALL
 			isJmp := includeBranches && d.Inst.Op == x86asm.JMP
 			if isCall || isJmp {
-				if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+				if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 					out = append(out, CallSite{FromVA: d.VA, TargetVA: target})
 				}
 			}

@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"aotopsy/internal/arch/x86"
 	"fmt"
 	"os"
 	"sort"
@@ -11,7 +12,6 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/sdk"
 )
 
 // DumpFuncDisasm finds the range containing targetVA and prints a full
@@ -37,7 +37,7 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
 
 	funcCode := code[funcStart:funcEnd]
-	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 		if d.Bad {
 			fmt.Printf("0x%x: <decode error>\n", d.VA)
 			return true
@@ -58,7 +58,7 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 				}
 			}
 		}
-		if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			annotation += fmt.Sprintf("  ; -> 0x%x", target)
 		}
 		marker := "  "
@@ -98,9 +98,9 @@ func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 		}
 
 		capped := false
-		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			if !d.Bad && d.Inst.Op == x86asm.CALL {
-				if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok && target == targetVA {
+				if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok && target == targetVA {
 					fmt.Printf("%s @ 0x%x  calls target\n", funcName, d.VA)
 					hits++
 				}
@@ -164,7 +164,7 @@ func ScanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		hashOps := 0
 		rotateOps := 0
 		total := 0
-		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			if d.Bad {
 				return true
 			}
@@ -240,7 +240,7 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 		}
 
 		capped := false
-		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			if !d.Bad {
 				for _, arg := range d.Inst.Args {
 					mem, ok := arg.(x86asm.Mem)

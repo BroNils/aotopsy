@@ -239,3 +239,27 @@ const (
 	// NOT an argument register (Dart uses RBX for the 4th arg, not RCX).
 	X86ClassIdReg = 1
 )
+
+// ── Equality-branch successor convention ──────────────────────────────
+//
+// Shared between ARM64 (typetrack/intraproc.go's equalitySuccessor, which
+// decodes a raw B.cond word) and x86_64 (arch/x86.EqualitySuccessor, which
+// switches on an x86asm.Op). The two functions are deliberately NOT merged
+// — their inputs are different types. Only the return convention is shared.
+//
+// Getting this backwards types a register on the wrong edge, which is
+// invisible in aggregate and wrong at every individual call site -- the same
+// failure mode as an off-by-one pool index.
+
+const (
+	// SuccEqual is the taken edge of an equality branch (B.EQ / JE): the
+	// values are equal along it.
+	SuccEqual = 0
+	// SuccNotEqual is the fall-through of an equality branch, and the taken
+	// edge of an inequality branch (B.NE / JNE): the values are equal along
+	// it.
+	SuccNotEqual = 1
+	// SuccUnknown means the branch says nothing about equality -- it is not
+	// an equality test, or the block does not have exactly two successors.
+	SuccUnknown = -1
+)

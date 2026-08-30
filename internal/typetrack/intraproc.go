@@ -665,7 +665,7 @@ func equalitySuccessor(last uint32, numSuccs int) int {
 	if last&0xFF000010 != 0x54000000 {
 		return sdk.SuccUnknown
 	}
-	// Same successor convention as sdk.X86EqualitySuccessor. The two
+	// Same successor convention as x86.EqualitySuccessor. The two
 	// functions are deliberately NOT merged -- one decodes a raw 32-bit
 	// B.cond word, the other switches on an x86asm.Op, and a single
 	// function taking both would be a union of unrelated inputs. Only the

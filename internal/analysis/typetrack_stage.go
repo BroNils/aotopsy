@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"aotopsy/internal/arch/x86"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,7 +17,6 @@ import (
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
 	"aotopsy/internal/vmtables"
@@ -330,7 +330,7 @@ func runTypeInference(
 	if isARM64 {
 		funcInstsARM64 = make(map[string][]disasm.Inst, len(ranges))
 	} else {
-		funcInstsX86 = make(map[string][]sdk.X86Decoded, len(ranges))
+		funcInstsX86 = make(map[string][]x86.Decoded, len(ranges))
 	}
 	// DartCallingConvention (kCpuRegistersForArgs) first appears in
 	// constants_arm64.h at 3.4.3; before it, every argument including the
@@ -795,7 +795,7 @@ func resolveViaPoolDisplay(via string) string {
 }
 
 // x86CallRelTarget returns the absolute target of a CALL rel32 instruction.
-func x86CallRelTarget(d sdk.X86Decoded) (uint64, bool) {
+func x86CallRelTarget(d x86.Decoded) (uint64, bool) {
 	for _, arg := range d.Inst.Args {
 		if arg == nil {
 			continue

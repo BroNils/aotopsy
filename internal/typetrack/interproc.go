@@ -1,6 +1,7 @@
 package typetrack
 
 import (
+	"aotopsy/internal/arch/x86"
 	"sort"
 	"strings"
 
@@ -88,7 +89,7 @@ type InterResult struct {
 type FuncInstsARM64 map[string][]disasm.Inst
 
 // FuncInstsX86 holds x86_64 function instructions for RunInterprocedural.
-type FuncInstsX86 map[string][]sdk.X86Decoded
+type FuncInstsX86 map[string][]x86.Decoded
 
 // RunInterprocedural runs the inter-procedural fixed-point algorithm:
 //  1. For each function, run intra-procedural analysis with current

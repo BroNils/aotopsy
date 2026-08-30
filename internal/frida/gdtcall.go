@@ -1,6 +1,7 @@
 package frida
 
 import (
+	"aotopsy/internal/arch/x86"
 	"fmt"
 	"os"
 
@@ -138,7 +139,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 		rt := NewX64RegTracker(12)
 
 		maxHitReached := false
-		sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			addr := d.VA
 			inst := d.Inst
 			if d.Bad {
@@ -155,7 +156,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break // direct call, already covered by findCallersOf
 					}
 					if reg, ok := arg.(x86asm.Reg); ok {
-						idx := sdk.X86CanonReg(reg)
+						idx := x86.CanonReg(reg)
 						note := rt.lookup(idx)
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
 						if note != "" {
@@ -170,9 +171,9 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break
 					}
 					if mem, ok := arg.(x86asm.Mem); ok {
-						baseNote := rt.lookup(sdk.X86CanonReg(mem.Base))
+						baseNote := rt.lookup(x86.CanonReg(mem.Base))
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
-						if sdk.X86CanonReg(mem.Index) == CanonRCX && mem.Scale == 8 && baseNote == "dispatch_table" {
+						if x86.CanonReg(mem.Index) == CanonRCX && mem.Scale == 8 && baseNote == "dispatch_table" {
 							ic.Kind = "gdt"
 							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via RCX)", mem.Disp)
 						} else if baseNote != "" {
@@ -206,7 +207,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					// closure/function pointer loaded a few instructions
 					// earlier (e.g. into RAX) and then shuffled into RCX
 					// before the CALL is still resolved.
-					dstIdx, srcIdx := sdk.X86CanonReg(dstReg), sdk.X86CanonReg(srcReg)
+					dstIdx, srcIdx := x86.CanonReg(dstReg), x86.CanonReg(srcReg)
 					if note := rt.lookup(srcIdx); note != "" {
 						rt.define(dstIdx, note)
 					} else {
@@ -216,8 +217,8 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					return true
 				}
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && dstOK {
-					dstIdx := sdk.X86CanonReg(dstReg)
-					if sdk.X86CanonReg(mem.Base) == CanonR14 && mem.Index == 0 {
+					dstIdx := x86.CanonReg(dstReg)
+					if x86.CanonReg(mem.Base) == CanonR14 && mem.Index == 0 {
 						// Any THR-relative field load. We cannot know the exact
 						// dispatch_table_array_offset without the live Thread
 						// layout for this build, so treat every THR-sourced
@@ -226,7 +227,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						// shape, which only the real dispatch table load
 						// produces on the call side.
 						rt.define(dstIdx, "dispatch_table")
-					} else if sdk.X86CanonReg(mem.Base) == CanonR15 {
+					} else if x86.CanonReg(mem.Base) == CanonR15 {
 						poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
 						if disp, ok := poolDisplay[poolIdx]; ok {
 							rt.define(dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
@@ -240,11 +241,11 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					return true
 				}
 				if dstOK {
-					rt.kill(sdk.X86CanonReg(dstReg))
+					rt.kill(x86.CanonReg(dstReg))
 				}
 			} else if len(inst.Args) >= 1 {
 				if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-					rt.kill(sdk.X86CanonReg(dstReg))
+					rt.kill(x86.CanonReg(dstReg))
 				}
 			}
 

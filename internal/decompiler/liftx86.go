@@ -1,6 +1,7 @@
 package decompiler
 
 import (
+	"aotopsy/internal/arch/x86"
 	"fmt"
 	"sort"
 	"strings"
@@ -46,7 +47,7 @@ type x86Inst struct {
 // resolve as "unresolved branch target" even though the bytes were right
 // there in the CodeRange the caller already sized correctly.
 func DecodeX86Range(data []byte, baseVA uint64) []x86Inst {
-	decoded := sdk.DecodeX86UntilBad(data, baseVA)
+	decoded := x86.DecodeUntilBad(data, baseVA)
 	out := make([]x86Inst, 0, len(decoded))
 	for _, d := range decoded {
 		out = append(out, x86Inst{Addr: d.VA, Len: d.Len, Inst: d.Inst})
@@ -197,14 +198,14 @@ func classifyX86Branch(in x86Inst) (branchKind, uint64, bool) {
 	if op == x86asm.RET {
 		return branchRet, 0, false
 	}
-	if sdk.IsX86CondJump(op) {
-		if tgt, ok := sdk.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
+	if x86.IsCondJump(op) {
+		if tgt, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
 			return branchCond, tgt, true
 		}
 		return branchCond, 0, false
 	}
 	if op == x86asm.JMP {
-		if tgt, ok := sdk.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
+		if tgt, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
 			return branchJmpDirect, tgt, true
 		}
 		return branchJmpIndirect, 0, false
@@ -244,7 +245,7 @@ func liftX86Instr(in x86Inst, k branchKind, tgt uint64, hasTgt bool, prev *x86In
 		ir.Op = OpReturn
 	case in.Inst.Op == x86asm.CALL:
 		ir.Op = OpCall
-		if r, ok := sdk.X86RelTarget(in.Inst, in.Addr, in.Len); ok {
+		if r, ok := x86.RelTarget(in.Inst, in.Addr, in.Len); ok {
 			ir.Target = fmt.Sprintf("0x%x", r)
 		} else {
 			ir.Target = x86IndirectTargetText(in)

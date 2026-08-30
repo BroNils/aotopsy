@@ -1,11 +1,11 @@
-package sdk
+package x86
 
 import "testing"
 
 // A trivial x86-64 sequence: NOP (0x90), INC ECX (0xFF 0xC1), RET (0xC3).
-func TestDecodeX86Basic(t *testing.T) {
+func TestDecodeBasic(t *testing.T) {
 	code := []byte{0x90, 0xff, 0xc1, 0xc3}
-	got := DecodeX86(code, 0x1000)
+	got := Decode(code, 0x1000)
 	if len(got) != 3 {
 		t.Fatalf("want 3 instructions, got %d: %+v", len(got), got)
 	}
@@ -22,10 +22,10 @@ func TestDecodeX86Basic(t *testing.T) {
 }
 
 // A bad leading byte is reported as Bad with Len 1, and the sweep continues.
-func TestDecodeX86BadByteRecovery(t *testing.T) {
+func TestDecodeBadByteRecovery(t *testing.T) {
 	// 0x06 is invalid in 64-bit mode; 0xc3 (RET) follows.
 	code := []byte{0x06, 0xc3}
-	got := DecodeX86(code, 0x2000)
+	got := Decode(code, 0x2000)
 	if len(got) != 2 {
 		t.Fatalf("want 2 slots, got %d", len(got))
 	}
@@ -37,20 +37,20 @@ func TestDecodeX86BadByteRecovery(t *testing.T) {
 	}
 }
 
-// DecodeX86UntilBad stops at the first undecodable byte, excluding it.
-func TestDecodeX86UntilBad(t *testing.T) {
+// DecodeUntilBad stops at the first undecodable byte, excluding it.
+func TestDecodeUntilBad(t *testing.T) {
 	code := []byte{0x90, 0x06, 0xc3}
-	got := DecodeX86UntilBad(code, 0x3000)
+	got := DecodeUntilBad(code, 0x3000)
 	if len(got) != 1 || got[0].VA != 0x3000 {
 		t.Fatalf("want only the NOP before the bad byte, got %+v", got)
 	}
 }
 
-// WalkX86 halts early when the callback returns false.
-func TestWalkX86EarlyStop(t *testing.T) {
+// Walk halts early when the callback returns false.
+func TestWalkEarlyStop(t *testing.T) {
 	code := []byte{0x90, 0x90, 0x90, 0xc3}
 	n := 0
-	WalkX86(code, 0x4000, func(d X86Decoded) bool {
+	Walk(code, 0x4000, func(d Decoded) bool {
 		n++
 		return n < 2
 	})

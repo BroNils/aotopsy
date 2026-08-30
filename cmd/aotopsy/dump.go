@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aotopsy/internal/arch/x86"
 	"flag"
 	"fmt"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -192,7 +192,7 @@ func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.Symb
 	defer func() { _ = f.Close() }()
 
 	n := 0
-	sdk.WalkX86(code, baseVA, func(d sdk.X86Decoded) bool {
+	x86.Walk(code, baseVA, func(d x86.Decoded) bool {
 		if maxSteps > 0 && n >= maxSteps {
 			return false
 		}
@@ -202,7 +202,7 @@ func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.Symb
 			return true
 		}
 		line := d.Inst.String()
-		if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := lookup(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)
 			} else {

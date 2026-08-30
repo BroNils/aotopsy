@@ -1,4 +1,4 @@
-package sdk
+package x86
 
 import (
 	"testing"
@@ -10,7 +10,7 @@ import (
 // value three widths in a single class-id check -- `MOV ECX, [RAX-1]`,
 // `SHR ECX, 0xc`, `CMP RCX, 0x8ca` -- so a table that misses one width breaks
 // the dataflow silently rather than loudly.
-func TestX86CanonRegFoldsAllWidths(t *testing.T) {
+func TestCanonRegFoldsAllWidths(t *testing.T) {
 	groups := [][]x86asm.Reg{
 		{x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL},
 		{x86asm.RCX, x86asm.ECX, x86asm.CX, x86asm.CL},
@@ -31,17 +31,17 @@ func TestX86CanonRegFoldsAllWidths(t *testing.T) {
 	}
 	for want, group := range groups {
 		for _, r := range group {
-			if got := X86CanonReg(r); got != want {
-				t.Errorf("X86CanonReg(%v) = %d, want %d", r, got, want)
+			if got := CanonReg(r); got != want {
+				t.Errorf("CanonReg(%v) = %d, want %d", r, got, want)
 			}
 		}
 	}
 	// The two registers Dart reserves must land where the analysis expects:
 	// constants_x64.h has `const Register PP = R15;` and `THR = R14;`.
-	if got := X86CanonReg(x86asm.R15); got != 15 {
+	if got := CanonReg(x86asm.R15); got != 15 {
 		t.Errorf("PP (R15) = %d, want 15", got)
 	}
-	if got := X86CanonReg(x86asm.R14); got != 14 {
+	if got := CanonReg(x86asm.R14); got != 14 {
 		t.Errorf("THR (R14) = %d, want 14", got)
 	}
 }
@@ -49,15 +49,15 @@ func TestX86CanonRegFoldsAllWidths(t *testing.T) {
 // Anything that is not a plain 64-bit GP register must be rejected rather
 // than aliased onto one -- high-byte registers especially, since AH is not
 // the low byte of RAX.
-func TestX86CanonRegRejectsNonGP(t *testing.T) {
+func TestCanonRegRejectsNonGP(t *testing.T) {
 	for _, r := range []x86asm.Reg{
 		x86asm.AH, x86asm.CH, x86asm.DH, x86asm.BH,
 		x86asm.X0, x86asm.X1,
 		x86asm.CS, x86asm.DS, x86asm.ES, x86asm.FS, x86asm.GS, x86asm.SS,
 		x86asm.Reg(0),
 	} {
-		if got := X86CanonReg(r); got != -1 {
-			t.Errorf("X86CanonReg(%v) = %d, want -1", r, got)
+		if got := CanonReg(r); got != -1 {
+			t.Errorf("CanonReg(%v) = %d, want -1", r, got)
 		}
 	}
 }
@@ -66,13 +66,13 @@ func TestX86CanonRegRejectsNonGP(t *testing.T) {
 // signed. The copies this replaced disagreed in form -- one computed in
 // int64, the others added a wrapped uint64 -- so a backward branch is the
 // case worth pinning.
-func TestX86RelTargetIsSignedAndEndRelative(t *testing.T) {
+func TestRelTargetIsSignedAndEndRelative(t *testing.T) {
 	// jmp .+0x10 : E9 10 00 00 00 at 0x1000, length 5 -> 0x1015
 	fwd, err := x86asm.Decode([]byte{0xe9, 0x10, 0x00, 0x00, 0x00}, 64)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got, ok := X86RelTarget(fwd, 0x1000, fwd.Len); !ok || got != 0x1015 {
+	if got, ok := RelTarget(fwd, 0x1000, fwd.Len); !ok || got != 0x1015 {
 		t.Errorf("forward: got 0x%x ok=%v, want 0x1015", got, ok)
 	}
 
@@ -81,7 +81,7 @@ func TestX86RelTargetIsSignedAndEndRelative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got, ok := X86RelTarget(back, 0x1000, back.Len); !ok || got != 0xff5 {
+	if got, ok := RelTarget(back, 0x1000, back.Len); !ok || got != 0xff5 {
 		t.Errorf("backward: got 0x%x ok=%v, want 0xff5", got, ok)
 	}
 
@@ -90,19 +90,19 @@ func TestX86RelTargetIsSignedAndEndRelative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if _, ok := X86RelTarget(noRel, 0x1000, noRel.Len); ok {
+	if _, ok := RelTarget(noRel, 0x1000, noRel.Len); ok {
 		t.Error("mov rax, rcx has no relative target")
 	}
 }
 
-func TestIsX86CondJump(t *testing.T) {
+func TestIsCondJump(t *testing.T) {
 	for _, op := range []x86asm.Op{x86asm.JE, x86asm.JNE, x86asm.JA, x86asm.JBE, x86asm.JRCXZ} {
-		if !IsX86CondJump(op) {
+		if !IsCondJump(op) {
 			t.Errorf("%v should be a conditional jump", op)
 		}
 	}
 	for _, op := range []x86asm.Op{x86asm.JMP, x86asm.CALL, x86asm.RET, x86asm.MOV, x86asm.CMP} {
-		if IsX86CondJump(op) {
+		if IsCondJump(op) {
 			t.Errorf("%v is not a conditional jump", op)
 		}
 	}
@@ -111,23 +111,23 @@ func TestIsX86CondJump(t *testing.T) {
 // JE proves equality on the taken edge; JNE proves it on the fall-through.
 // Getting this backwards types a register on the wrong edge, which nothing
 // downstream can detect.
-func TestX86EqualitySuccessor(t *testing.T) {
-	if got := X86EqualitySuccessor(x86asm.JE, 2); got != SuccEqual {
-		t.Errorf("JE = %d, want SuccEqual (%d)", got, SuccEqual)
+func TestEqualitySuccessor(t *testing.T) {
+	if got := EqualitySuccessor(x86asm.JE, 2); got != 0 { // SuccEqual
+		t.Errorf("JE = %d, want SuccEqual (0)", got)
 	}
-	if got := X86EqualitySuccessor(x86asm.JNE, 2); got != SuccNotEqual {
-		t.Errorf("JNE = %d, want SuccNotEqual (%d)", got, SuccNotEqual)
+	if got := EqualitySuccessor(x86asm.JNE, 2); got != 1 { // SuccNotEqual
+		t.Errorf("JNE = %d, want SuccNotEqual (1)", got)
 	}
 	// Magnitude tests learn nothing from a CMP about equality.
 	for _, op := range []x86asm.Op{x86asm.JA, x86asm.JB, x86asm.JG, x86asm.JL, x86asm.JMP} {
-		if got := X86EqualitySuccessor(op, 2); got != SuccUnknown {
-			t.Errorf("%v = %d, want SuccUnknown", op, got)
+		if got := EqualitySuccessor(op, 2); got != -1 { // SuccUnknown
+			t.Errorf("%v = %d, want SuccUnknown (-1)", op, got)
 		}
 	}
 	// Only a fully resolved two-way branch is usable.
 	for _, n := range []int{0, 1, 3} {
-		if got := X86EqualitySuccessor(x86asm.JE, n); got != SuccUnknown {
-			t.Errorf("JE with %d successors = %d, want SuccUnknown", n, got)
+		if got := EqualitySuccessor(x86asm.JE, n); got != -1 { // SuccUnknown
+			t.Errorf("JE with %d successors = %d, want SuccUnknown (-1)", n, got)
 		}
 	}
 }

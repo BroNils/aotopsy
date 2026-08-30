@@ -1,11 +1,11 @@
 package typetrack
 
 import (
+	"aotopsy/internal/arch/x86"
 	"testing"
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/sdk"
 )
 
 // The class-check sequence the x86_64 backend emits, taken verbatim from
@@ -20,10 +20,10 @@ import (
 // This is the chain that has to work for a dispatch call to resolve: the
 // header load yields Bottom, the shift preserves it, and the equality edge
 // of the branch turns it into a real class. Every stage was measured firing
-func x86Inst(addr uint64, op x86asm.Op, args ...x86asm.Arg) sdk.X86Decoded {
+func x86Inst(addr uint64, op x86asm.Op, args ...x86asm.Arg) x86.Decoded {
 	in := x86asm.Inst{Op: op}
 	copy(in.Args[:], args)
-	return sdk.X86Decoded{VA: addr, Inst: in, Len: 4}
+	return x86.Decoded{VA: addr, Inst: in, Len: 4}
 }
 
 func TestX86ClassCheckSequenceTypesTheComparedRegister(t *testing.T) {
@@ -31,7 +31,7 @@ func TestX86ClassCheckSequenceTypesTheComparedRegister(t *testing.T) {
 	// is only known to be successor 0 when the fall-through is present too.
 	// Addresses are 4 bytes apart so the JE at 0x10c falls through to 0x110
 	// and its Rel(4) target is 0x114.
-	insts := []sdk.X86Decoded{
+	insts := []x86.Decoded{
 		x86Inst(0x100, x86asm.MOV, x86asm.R9L, x86asm.Mem{Base: x86asm.RAX, Disp: -1}),
 		x86Inst(0x104, x86asm.SHR, x86asm.R9L, x86asm.Imm(0xc)),
 		x86Inst(0x108, x86asm.CMP, x86asm.R9, x86asm.Imm(0x8ca)),

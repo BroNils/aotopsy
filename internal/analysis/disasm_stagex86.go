@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"aotopsy/internal/arch/x86"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -265,13 +265,13 @@ func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols
 	}
 	defer func() { _ = f.Close() }()
 
-	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 		if d.Bad {
 			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
 			return true
 		}
 		line := d.Inst.String()
-		if target, ok := sdk.X86RelTarget(d.Inst, d.VA, d.Len); ok {
+		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := symbols(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)
 			} else {

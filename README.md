@@ -232,6 +232,7 @@ internal/
   vmtables/           Versioned THR field offsets, stub names, and stub orders
   thraudit/           Thread-relative memory access audit and classification
   arch/arm64/         Centralized ARM64 bitmask instruction decoders
+  arch/x86/           Centralized x86_64 decode primitives and register helpers
   naming/             Central pool lookups, name resolution, and stub builders
   elfx/               ELF validation and symbol extraction
   snapshot/           Snapshot region extraction, version profiles

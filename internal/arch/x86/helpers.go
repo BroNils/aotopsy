@@ -1,5 +1,11 @@
-// Package sdk holds instruction-set facts and shared decode primitives that
-// are true regardless of which analysis layer is asking.
+// Package x86 holds x86_64 instruction decode primitives — register
+// canonicalization, relative-branch resolution, conditional-jump
+// classification, and the linear decode sweep.
+//
+// These were previously in internal/sdk (x86_helpers.go, x86_decode.go),
+// mixed with SDK-verified facts (register roles, calling conventions).
+// They are instruction-decode helpers, not SDK facts, so they belong here
+// alongside internal/arch/arm64/decoders.go for symmetry.
 //
 // Three helpers below existed in three, three and two copies respectively --
 // in internal/disasm, internal/decompiler, internal/typetrack and
@@ -9,25 +15,18 @@
 // `call [r14+rcx*8+disp]` mistake elsewhere in this project: an
 // architecture fact written down several times, so a correction to one copy
 // leaves the others wrong.
-//
-// This package deliberately does NOT try to unify things that merely look
-// alike. `equalitySuccessor` (ARM64, decodes a raw B.cond word) and
-// `x86EqualitySuccessor` (x86_64, switches on an x86asm.Op) share a return
-// convention and nothing else; forcing them into one function would take a
-// union of unrelated inputs. The convention itself is shared instead, as
-// named constants below.
-package sdk
+package x86
 
 import "golang.org/x/arch/x86/x86asm"
 
-// X86CanonReg maps any width of an x86_64 general-purpose register to its
+// CanonReg maps any width of an x86_64 general-purpose register to its
 // canonical number 0..15 (RAX=0 .. R15=15), or -1 for anything else.
 //
 // Analysis code has to fold widths together because Dart AOT freely mixes
 // them for the same value -- `MOV ECX, [RAX-1]` then `SHR ECX, 0xc` then
 // `CMP RCX, 0x8ca` is one class-id check on one register, written three
 // widths.
-func X86CanonReg(r x86asm.Reg) int {
+func CanonReg(r x86asm.Reg) int {
 	switch r {
 	case x86asm.RAX, x86asm.EAX, x86asm.AX, x86asm.AL:
 		return 0
@@ -65,7 +64,7 @@ func X86CanonReg(r x86asm.Reg) int {
 	return -1
 }
 
-// X86RelTarget resolves a PC-relative branch or call to its absolute target.
+// RelTarget resolves a PC-relative branch or call to its absolute target.
 // addr is the instruction's address and length its encoded size; an x86 Rel
 // displacement is measured from the END of the instruction.
 //
@@ -78,7 +77,7 @@ func X86CanonReg(r x86asm.Reg) int {
 // `addr + uint64(length) + uint64(int64(rel))`; those agree for negative rel
 // only because two's-complement addition wraps, which is true but is not
 // something a reader should have to re-derive.
-func X86RelTarget(inst x86asm.Inst, addr uint64, length int) (uint64, bool) {
+func RelTarget(inst x86asm.Inst, addr uint64, length int) (uint64, bool) {
 	for _, arg := range inst.Args {
 		if arg == nil {
 			continue
@@ -91,14 +90,14 @@ func X86RelTarget(inst x86asm.Inst, addr uint64, length int) (uint64, bool) {
 	return 0, false
 }
 
-// IsX86CondJump reports whether op is a conditional branch.
+// IsCondJump reports whether op is a conditional branch.
 //
 // JCXZ/JECXZ/JRCXZ are included: they are conditional control flow even
 // though they test a register rather than the flags. Callers that care about
 // what a preceding CMP proves must check the specific opcode -- see
-// X86EqualitySuccessor -- rather than treating every conditional jump as
+// EqualitySuccessor -- rather than treating every conditional jump as
 // flag-driven.
-func IsX86CondJump(op x86asm.Op) bool {
+func IsCondJump(op x86asm.Op) bool {
 	switch op {
 	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
 		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
@@ -108,37 +107,22 @@ func IsX86CondJump(op x86asm.Op) bool {
 	return false
 }
 
-// Successor indices for the "which edge proves the compared values are
-// equal" question, shared by the ARM64 and x86_64 implementations.
-//
-// Getting this backwards types a register on the wrong edge, which is
-// invisible in aggregate and wrong at every individual call site -- the same
-// failure mode as an off-by-one pool index.
-const (
-	// SuccEqual is the taken edge of an equality branch (B.EQ / JE): the
-	// values are equal along it.
-	SuccEqual = 0
-	// SuccNotEqual is the fall-through of an equality branch, and the taken
-	// edge of an inequality branch (B.NE / JNE): the values are equal along
-	// it.
-	SuccNotEqual = 1
-	// SuccUnknown means the branch says nothing about equality -- it is not
-	// an equality test, or the block does not have exactly two successors.
-	SuccUnknown = -1
-)
-
-// X86EqualitySuccessor returns which successor edge of a two-way branch
+// EqualitySuccessor returns which successor edge of a two-way branch
 // proves the operands of the preceding comparison were equal, or
-// SuccUnknown.
-func X86EqualitySuccessor(op x86asm.Op, numSuccs int) int {
+// sdk.SuccUnknown.
+//
+// Successor convention constants (SuccEqual, SuccNotEqual, SuccUnknown)
+// live in internal/sdk because they are shared with ARM64's
+// equalitySuccessor in typetrack/intraproc.go.
+func EqualitySuccessor(op x86asm.Op, numSuccs int) int {
 	if numSuccs != 2 {
-		return SuccUnknown
+		return -1 // sdk.SuccUnknown
 	}
 	switch op {
 	case x86asm.JE:
-		return SuccEqual
+		return 0 // sdk.SuccEqual
 	case x86asm.JNE:
-		return SuccNotEqual
+		return 1 // sdk.SuccNotEqual
 	}
-	return SuccUnknown
+	return -1 // sdk.SuccUnknown
 }

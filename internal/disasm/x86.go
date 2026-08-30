@@ -1,6 +1,7 @@
 package disasm
 
 import (
+	"aotopsy/internal/arch/x86"
 	"fmt"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -136,7 +137,7 @@ func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
 		if !ok {
 			continue
 		}
-		pos := x86ArgRegBitPos(sdk.X86CanonReg(dstReg))
+		pos := x86ArgRegBitPos(x86.CanonReg(dstReg))
 		if pos < 0 {
 			continue
 		}
@@ -162,7 +163,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 		if reg, ok := arg.(x86asm.Reg); ok {
 			e.Kind = "call_indirect"
 			e.Reg = reg.String()
-			e.Via = rt.lookup(sdk.X86CanonReg(reg))
+			e.Via = rt.lookup(x86.CanonReg(reg))
 			return e
 		}
 		if mem, ok := arg.(x86asm.Mem); ok {
@@ -180,7 +181,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			// themselves are never "defined" that way, so check the base
 			// register's fixed role before falling back to the tracker.
 			var baseNote string
-			switch sdk.X86CanonReg(mem.Base) {
+			switch x86.CanonReg(mem.Base) {
 			case sdk.X86THR:
 				// A THR-relative call with NO index register is a call
 				// through a Thread slot -- a stub entry point -- not a
@@ -225,9 +226,9 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
 				}
 			default:
-				baseNote = rt.lookup(sdk.X86CanonReg(mem.Base))
+				baseNote = rt.lookup(x86.CanonReg(mem.Base))
 			}
-			if sdk.X86CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if x86.CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote
@@ -250,7 +251,7 @@ type X86Inst struct {
 // pairs only -- everything ExtractX86THRAccesses/BuildAuditRecords need,
 // without the register-provenance bookkeeping ScanX86Function carries.
 func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
-	decoded := sdk.DecodeX86(funcCode, funcVA)
+	decoded := x86.Decode(funcCode, funcVA)
 	out := make([]X86Inst, 0, len(decoded))
 	for _, d := range decoded {
 		if d.Bad {
@@ -269,7 +270,7 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 // optional (marks Resolved when the offset has a known name).
 func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
 	var out []THRAccess
-	sdk.WalkX86(funcCode, funcVA, func(d sdk.X86Decoded) bool {
+	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 		if d.Bad {
 			return true
 		}
@@ -292,19 +293,19 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8 // last-resort fallback
 			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && sdk.X86CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						DstReg: sdk.X86CanonReg(dstReg), Width: width, Resolved: resolved,
+						DstReg: x86.CanonReg(dstReg), Width: width, Resolved: resolved,
 					})
 				}
-			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && sdk.X86CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
+			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						IsStore: true, SrcReg: sdk.X86CanonReg(srcReg), Width: width, Resolved: resolved,
+						IsStore: true, SrcReg: x86.CanonReg(srcReg), Width: width, Resolved: resolved,
 					})
 				}
 			}

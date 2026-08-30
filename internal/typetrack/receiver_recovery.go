@@ -1,9 +1,9 @@
 package typetrack
 
 import (
+	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/sdk"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -87,7 +87,7 @@ func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *T
 
 // RecoverReceiverStackSlotX86 is the x86_64 counterpart: the highest positive
 // [RBP+disp] load, validated by an owner-field access off the loaded register.
-func RecoverReceiverStackSlotX86(insts []sdk.X86Decoded, ownerCID int, ctx *TypeContext) (int, bool) {
+func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeContext) (int, bool) {
 	bestSlot := -1
 	var bestReg x86asm.Reg
 	for i := range insts {
@@ -97,7 +97,7 @@ func RecoverReceiverStackSlotX86(insts []sdk.X86Decoded, ownerCID int, ctx *Type
 		}
 		dst, dok := in.Args[0].(x86asm.Reg)
 		mem, mok := in.Args[1].(x86asm.Mem)
-		if !dok || !mok || sdk.X86CanonReg(mem.Base) != 5 || mem.Index != 0 {
+		if !dok || !mok || x86.CanonReg(mem.Base) != 5 || mem.Index != 0 {
 			continue
 		}
 		if off := int(mem.Disp); off >= receiverSlotFloor && off > bestSlot {
@@ -114,8 +114,8 @@ func RecoverReceiverStackSlotX86(insts []sdk.X86Decoded, ownerCID int, ctx *Type
 	return bestSlot, true
 }
 
-func x86RegUsedAsOwnerFieldBase(insts []sdk.X86Decoded, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
-	rc := sdk.X86CanonReg(reg)
+func x86RegUsedAsOwnerFieldBase(insts []x86.Decoded, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
+	rc := x86.CanonReg(reg)
 	for i := range insts {
 		in := insts[i].Inst
 		if in.Op != x86asm.MOV || len(in.Args) < 2 {
@@ -125,7 +125,7 @@ func x86RegUsedAsOwnerFieldBase(insts []sdk.X86Decoded, reg x86asm.Reg, ownerCID
 		if !ok || mem.Index != 0 {
 			continue
 		}
-		if sdk.X86CanonReg(mem.Base) != rc {
+		if x86.CanonReg(mem.Base) != rc {
 			continue
 		}
 		if ctx.OwnerHasFieldAt(ownerCID, int32(mem.Disp)) {

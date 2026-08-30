@@ -20,10 +20,12 @@ flowchart TD
     ANALYSIS --> DEC[internal/decompiler<br/>Native Dart-AOT pseudocode decompiler]
     
     DISASM --> ARCH_ARM[internal/arch/arm64<br/>Bitmask decoders]
+    DISASM --> ARCH_X86[internal/arch/x86<br/>Decode primitives]
     DISASM --> SDK[internal/sdk<br/>VM facts, registers, predicates]
     DISASM --> VMT[internal/vmtables<br/>Versioned THR & stub tables]
     TT --> SDK
     TT --> ARCH_ARM
+    TT --> ARCH_X86
     DEC --> SDK
     DEC --> ARCH_ARM
 ```
@@ -70,6 +72,10 @@ The central source of truth for ground-truth Dart VM architecture facts, registe
 ### `internal/arch/arm64`
 
 Centralized bitmask instruction decoders (`decoders.go`): `LDR64UnsignedOffset`, `STR64UnsignedOffset`, `LDUR64`, `LDUR32`, `LDURH`, `DstRegOfInst`, `ADD64Immediate`, `SUB64Immediate`, `BL`, `BLR`, `B`, `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`. Shared across `disasm`, `decompiler`, `typetrack`, and `symbolmap`.
+
+### `internal/arch/x86`
+
+Centralized x86_64 decode primitives (`helpers.go`, `decode.go`): `CanonReg` (register width folding), `RelTarget` (PC-relative branch resolution), `IsCondJump` (conditional branch classification), `EqualitySuccessor` (which edge proves equality), `Walk`/`Decode`/`DecodeUntilBad` (linear decode sweep with bad-byte recovery). Shared across `disasm`, `decompiler`, `typetrack`, `analysis`, `frida`, and `symbolmap`.
 
 ### `internal/naming`
 
