@@ -51,6 +51,63 @@ func BLR(raw uint32) (rn int, ok bool) {
 	return int((raw >> 5) & 0x1F), true
 }
 
+// IsRet reports whether raw is a RET instruction (0xD65F03C0 / 0xD65F0000|Rn<<5).
+func IsRet(raw uint32) bool {
+	return raw&0xFFFFFC1F == 0xD65F0000
+}
+
+// IsBR decodes BR Xn (indirect branch). Returns register number.
+// Mask: 0xFFFFFC1F, Value: 0xD61F0000
+func IsBR(raw uint32) (rn int, ok bool) {
+	if raw&0xFFFFFC1F != 0xD61F0000 {
+		return 0, false
+	}
+	return int((raw >> 5) & 0x1F), true
+}
+
+// CondBranch detects ARM64 conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
+// Returns the branch target address (excluding fall-through) and true, or ok=false
+// if not a conditional branch.
+// Note: B.AL (cond=14) and B.NV (cond=15) are unconditional despite using the
+// B.cond encoding, so they return ok=false.
+func CondBranch(raw uint32, pc uint64) (target uint64, ok bool) {
+	// B.cond: 01010100 imm19 0 cond
+	if raw&0xFF000010 == 0x54000000 {
+		cond := raw & 0xF
+		if cond == 14 || cond == 15 {
+			return 0, false // unconditional AL/NV
+		}
+		imm19 := (raw >> 5) & 0x7FFFF
+		offset := SignExtend(imm19, 19) * 4
+		return uint64(int64(pc) + int64(offset)), true
+	}
+	// CBZ: 0 sf 110100 imm19 Rt
+	if raw&0x7F000000 == 0x34000000 {
+		imm19 := (raw >> 5) & 0x7FFFF
+		offset := SignExtend(imm19, 19) * 4
+		return uint64(int64(pc) + int64(offset)), true
+	}
+	// CBNZ: 0 sf 110101 imm19 Rt
+	if raw&0x7F000000 == 0x35000000 {
+		imm19 := (raw >> 5) & 0x7FFFF
+		offset := SignExtend(imm19, 19) * 4
+		return uint64(int64(pc) + int64(offset)), true
+	}
+	// TBZ: 0 b5 110110 b40 imm14 Rt
+	if raw&0x7F000000 == 0x36000000 {
+		imm14 := (raw >> 5) & 0x3FFF
+		offset := SignExtend(imm14, 14) * 4
+		return uint64(int64(pc) + int64(offset)), true
+	}
+	// TBNZ: 0 b5 110111 b40 imm14 Rt
+	if raw&0x7F000000 == 0x37000000 {
+		imm14 := (raw >> 5) & 0x3FFF
+		offset := SignExtend(imm14, 14) * 4
+		return uint64(int64(pc) + int64(offset)), true
+	}
+	return 0, false
+}
+
 // SignExtend sign-extends a value from the given bit width to int32.
 func SignExtend(val uint32, bits int) int32 {
 	sign := uint32(1) << (bits - 1)

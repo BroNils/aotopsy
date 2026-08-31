@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // namedIndirectTarget maps well-known ABI registers to a readable alias,
@@ -229,12 +231,12 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	//
 	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
 	// pre-pass in emit.go so the two cannot drift apart.
-	switch asyncStubRole(name) {
-	case asyncRoleInit:
+	switch sdk.ClassifyStubRole(name) {
+	case sdk.StubRoleAsyncInit:
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return false
-	case asyncRoleAwait:
+	case sdk.StubRoleAsyncAwait:
 		e.fir.IsAsync = true
 		if argsText != "" {
 			e.emit(indent, "final %s = await %s;", tmpName, argsText)
@@ -242,7 +244,7 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 			e.emit(indent, "final %s = await;", tmpName)
 		}
 		return true
-	case asyncRoleReturn:
+	case sdk.StubRoleAsyncReturn:
 		e.fir.IsAsync = true
 		if argsText != "" {
 			e.emit(indent, "return %s;", argsText)
@@ -312,12 +314,12 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
 		// snake_case Thread-table spellings.
-		switch asyncStubRole(stubName) {
-		case asyncRoleInit:
+		switch sdk.ClassifyStubRole(stubName) {
+		case sdk.StubRoleAsyncInit:
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
 			return false
-		case asyncRoleAwait:
+		case sdk.StubRoleAsyncAwait:
 			e.fir.IsAsync = true
 			if argsText != "" {
 				e.emit(indent, "final %s = await %s;", tmpName, argsText)
@@ -325,7 +327,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 				e.emit(indent, "final %s = await;", tmpName)
 			}
 			return true
-		case asyncRoleReturn:
+		case sdk.StubRoleAsyncReturn:
 			e.fir.IsAsync = true
 			if argsText != "" {
 				e.emit(indent, "return %s;", argsText)

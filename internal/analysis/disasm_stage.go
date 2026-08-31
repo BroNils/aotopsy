@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/callgraph"
 	"aotopsy/internal/callgraph/render"
 	"aotopsy/internal/cli"
@@ -18,6 +19,7 @@ import (
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -443,7 +445,7 @@ func ExtractStringRefs(insts []disasm.Inst, poolDisplay map[int]string, funcName
 		// object-pool pointer -- this whole function is only ever reached
 		// for ARM64 input (pipeline.Run rejects x86_64 before this stage
 		// runs), so 27 is not a magic number that needs to vary by arch.
-		if baseReg, byteOff, ok := disasm.IsLDR64UnsignedOffsetExported(inst.Raw); ok && baseReg == 27 {
+		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(inst.Raw); ok && baseReg == sdk.ARM64PP {
 			idx, idxOK := disasm.ARM64PoolIndex(byteOff)
 			if s, found := poolDisplay[idx]; idxOK && found && len(s) > 0 && s[0] == '"' {
 				val, err := strconv.Unquote(s)

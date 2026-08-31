@@ -363,8 +363,16 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	// raw payload was captured in result.CompressedStackMaps. Decoding gives
 	// per-PC register/spill liveness at safepoints.
 	csmByRef := make(map[int]*cluster.CompressedStackMapsInfo, len(result.CompressedStackMaps))
+	var globalTablePayload []byte
 	for i := range result.CompressedStackMaps {
 		csmByRef[result.CompressedStackMaps[i].RefID] = &result.CompressedStackMaps[i]
+		p := result.CompressedStackMaps[i].Payload
+		if len(p) >= 4 && globalTablePayload == nil {
+			flagsAndSize := uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16 | uint32(p[3])<<24
+			if flagsAndSize&1 != 0 { // GlobalTableBit
+				globalTablePayload = p
+			}
+		}
 	}
 	c.Enrichment.DecodedStackMapsByCodeRef = make(map[int][]cluster.StackMapEntry)
 	for _, ce := range result.Codes {
@@ -375,7 +383,7 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 		if !ok || len(csm.Payload) == 0 {
 			continue
 		}
-		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload)
+		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload, globalTablePayload)
 		if err != nil || len(entries) == 0 {
 			continue
 		}

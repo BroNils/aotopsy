@@ -35,6 +35,53 @@ type scalarState struct {
 	scriptFlags     byte
 	// LoadingUnit
 	loadingUnitID int32
+	// FfiTrampolineData
+	callbackID int32
+	ffiKind    uint8
+}
+
+// readFfiTrampolineScalar reads one scalar for an FfiTrampolineData cluster.
+func readFfiTrampolineScalar(s *dartfmt.Stream, si int, ss *scalarState, op ScalarOp) error {
+	switch op {
+	case OpTagged32, OpUint16, OpInt16:
+		v, err := s.ReadTagged32()
+		if err != nil {
+			return err
+		}
+		if si == 0 {
+			ss.callbackID = int32(v)
+		}
+		return nil
+	case OpTagged64:
+		v, err := s.ReadTagged64()
+		if err != nil {
+			return err
+		}
+		if si == 0 {
+			ss.callbackID = int32(v)
+		}
+		return nil
+	case OpUnsigned:
+		v, err := s.ReadUnsigned()
+		if err != nil {
+			return err
+		}
+		if si == 0 {
+			ss.callbackID = int32(v)
+		}
+		return nil
+	case OpBool, OpUint8, OpInt8:
+		b, err := s.ReadByte()
+		if err != nil {
+			return err
+		}
+		if si == 1 {
+			ss.ffiKind = uint8(b)
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 // readFunctionScalar reads one scalar for a Function cluster.

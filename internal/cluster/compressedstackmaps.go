@@ -37,13 +37,39 @@ type StackMapEntry struct {
 	NonSpillBits  []byte // bitmap: bit i = non-spill register i holds a live object
 }
 
+// IsSpillObject returns whether spill slot index holds a live tagged object pointer.
+func (e StackMapEntry) IsSpillObject(slotIndex int) bool {
+	if slotIndex < 0 {
+		return false
+	}
+	byteIdx := slotIndex / 8
+	bitIdx := uint(slotIndex % 8)
+	if byteIdx >= len(e.SpillSlotBits) {
+		return false
+	}
+	return (e.SpillSlotBits[byteIdx] & (1 << bitIdx)) != 0
+}
+
+// IsNonSpillObject returns whether non-spill register index holds a live tagged object pointer.
+func (e StackMapEntry) IsNonSpillObject(regIndex int) bool {
+	if regIndex < 0 {
+		return false
+	}
+	byteIdx := regIndex / 8
+	bitIdx := uint(regIndex % 8)
+	if byteIdx >= len(e.NonSpillBits) {
+		return false
+	}
+	return (e.NonSpillBits[byteIdx] & (1 << bitIdx)) != 0
+}
+
 // DecodeCompressedStackMaps decodes a CSM payload into per-PC register/spill
 // liveness entries. Returns entries sorted by PC offset.
 //
-// For global-table-referencing CSMs (UsesTableBit=true), this returns the
-// PC offsets only — the actual bitmap data lives in the global table CSM,
-// which must be decoded separately and cross-referenced by offset.
-func DecodeCompressedStackMaps(payload []byte) ([]StackMapEntry, error) {
+// For global-table-referencing CSMs (UsesTableBit=true), globalTable provides
+// the payload of the canonicalized global table CSM (whose GlobalTableBit=true)
+// to resolve each entry's spill and non-spill bitmaps.
+func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, error) {
 	if len(payload) < 4 {
 		return nil, nil
 	}
@@ -62,13 +88,21 @@ func DecodeCompressedStackMaps(payload []byte) ([]StackMapEntry, error) {
 
 	// Global table CSM: entries have no PC offset, just bitmaps.
 	if globalTableBit {
-		// Global table entries are not per-PC; they are referenced by offset.
-		// We decode them but return as a single entry at PC 0 for now.
 		spillBits, nonSpillBits, _, err := readCSMBitmapBody(data, pos)
 		if err != nil {
 			return nil, err
 		}
 		return []StackMapEntry{{PCOffset: 0, SpillSlotBits: spillBits, NonSpillBits: nonSpillBits}}, nil
+	}
+
+	// Prepare global table data if referenced.
+	var gtData []byte
+	if usesTableBit && len(globalTable) >= 4 {
+		gtFlagsAndSize := uint32(globalTable[0]) | uint32(globalTable[1])<<8 | uint32(globalTable[2])<<16 | uint32(globalTable[3])<<24
+		gtLen := gtFlagsAndSize >> 2
+		if int(gtLen)+4 <= len(globalTable) {
+			gtData = globalTable[4 : 4+int(gtLen)]
+		}
 	}
 
 	var entries []StackMapEntry
@@ -82,13 +116,21 @@ func DecodeCompressedStackMaps(payload []byte) ([]StackMapEntry, error) {
 				break
 			}
 			pos = newPos
-			_, newPos, err = readLEB128(data, pos)
+			gtOffset, newPos2, err := readLEB128(data, pos)
 			if err != nil {
 				break
 			}
-			pos = newPos
+			pos = newPos2
 			currentPC += uint32(pcDelta)
-			entries = append(entries, StackMapEntry{PCOffset: currentPC})
+			var spillBits, nonSpillBits []byte
+			if len(gtData) > 0 && int(gtOffset) < len(gtData) {
+				spillBits, nonSpillBits, _, _ = readCSMBitmapBody(gtData, int(gtOffset))
+			}
+			entries = append(entries, StackMapEntry{
+				PCOffset:      currentPC,
+				SpillSlotBits: spillBits,
+				NonSpillBits:  nonSpillBits,
+			})
 		} else {
 			// Standalone entry: PC delta + spill bits + non-spill bits + bitmap.
 			pcDelta, newPos, err := readLEB128(data, pos)
@@ -114,13 +156,15 @@ func DecodeCompressedStackMaps(payload []byte) ([]StackMapEntry, error) {
 			bitmap := data[pos : pos+totalBytes]
 			pos += totalBytes
 			currentPC += uint32(pcDelta)
-			spillBits := bitmap[:(int(spillCount)+7)/8]
-			nonSpillStart := (int(spillCount) + 7) / 8
-			nonSpillBits := bitmap[nonSpillStart : nonSpillStart+(int(nonSpillCount)+7)/8]
+			spillBytes := (int(spillCount) + 7) / 8
+			nonSpillBytes := (int(nonSpillCount) + 7) / 8
+			spillBits := bitmap[:spillBytes]
+			nonSpillStart := spillBytes
+			nonSpillBits := bitmap[nonSpillStart : nonSpillStart+nonSpillBytes]
 			entries = append(entries, StackMapEntry{
 				PCOffset:      currentPC,
-				SpillSlotBits:  append([]byte(nil), spillBits...),
-				NonSpillBits:   append([]byte(nil), nonSpillBits...),
+				SpillSlotBits: append([]byte(nil), spillBits...),
+				NonSpillBits:  append([]byte(nil), nonSpillBits...),
 			})
 		}
 	}

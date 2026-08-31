@@ -16,12 +16,6 @@ type Annotator func(inst Inst) string
 // ARM64 register numbers for Dart AOT — now shared from internal/sdk.
 // Instruction decoders are now shared from internal/arm64.
 
-// IsLDR64UnsignedOffsetExported is the exported wrapper for external callers
-// (e.g. pipeline string-ref extraction). Delegates to arm64.
-func IsLDR64UnsignedOffsetExported(raw uint32) (baseReg int, byteOffset int, ok bool) {
-	return arm64.LDR64UnsignedOffset(raw)
-}
-
 // PPAnnotator annotates LDR Xt, [X27, #imm] instructions with pool entry info.
 // pool maps pool index → display string.
 func PPAnnotator(pool map[int]string) Annotator {

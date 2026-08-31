@@ -1,9 +1,10 @@
 package typetrack
 
 import (
-	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -44,7 +45,7 @@ const receiverSlotFloor = 16 // 2 * 8: first parameter slot above saved FP/LR
 func RecoverReceiverStackSlotARM64(insts []disasm.Inst, ownerCID int, ctx *TypeContext) (int, bool) {
 	bestSlot, bestReg := -1, -1
 	for i := range insts {
-		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(insts[i].Raw); ok && baseReg == 29 {
+		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(insts[i].Raw); ok && baseReg == sdk.ARM64FrameReg {
 			if byteOff >= receiverSlotFloor && byteOff > bestSlot {
 				bestSlot = byteOff
 				bestReg = int(insts[i].Raw & 0x1F) // Rt

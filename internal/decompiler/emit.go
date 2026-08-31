@@ -369,7 +369,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 						// left untouched when that one was changed -- so the
 						// "fix" hardened the path that never fires and left
 						// the one that does. Both now share asyncStubRole.
-						if isAsyncStubName(name) {
+						if sdk.IsAsyncStubName(name) {
 							fir.IsAsync = true
 							break
 						}

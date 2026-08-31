@@ -618,7 +618,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closureInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
+			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
@@ -633,6 +633,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.ClosureData = append(result.ClosureData, closureDataInfos...)
 			result.TypeParameters = append(result.TypeParameters, typeParamInfos...)
 			result.Closures = append(result.Closures, closureInfos...)
+			result.FfiTrampolines = append(result.FfiTrampolines, ffiInfos...)
 
 		case FillDouble:
 			if err := skipFillDouble(s, cm, profile.PreCanonicalSplit); err != nil {
@@ -793,12 +794,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
-		// Pass the real profile through. Passing nil here used to panic:
-		// readFillRefs dereferences profile.CIDs to decide which CID-specific
-		// capture applies, so every FillRefs cluster reached from
-		// DebugFillPositions (aotopsy _debug clusters / _debug objects) hit a
-		// nil-pointer dereference.
-		_, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
+		_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)

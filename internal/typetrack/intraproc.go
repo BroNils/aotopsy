@@ -9,11 +9,6 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-// ARM64 register constants — now shared from internal/sdk.
-const (
-	regDT = sdk.ARM64DT // X21 = dispatch table register (typetrack-specific)
-)
-
 // BlrResolution is one indirect call site the analysis said something about.
 //
 // A site is one of three things, and they are NOT the same claim:
@@ -288,24 +283,24 @@ func AnalyzeFunction(
 		var found bool
 
 		// Pattern 3.x: ADD/SUB X30, X0, #imm (rd=30, rn=0)
-		if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == 30 && rn == 0 {
+		if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == sdk.ARM64LinkReg && rn == sdk.ARM64ReturnReg {
 			selectorOffset = imm
-			slotReg = 30
+			slotReg = sdk.ARM64LinkReg
 			found = true
-		} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == 30 && rn == 0 {
+		} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == sdk.ARM64LinkReg && rn == sdk.ARM64ReturnReg {
 			selectorOffset = -imm
-			slotReg = 30
+			slotReg = sdk.ARM64LinkReg
 			found = true
 		}
 		// Pattern 2.x A: ADD/SUB X0, X0, #imm (rd=0, rn=0)
 		if !found {
-			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == 0 && rn == 0 {
+			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == sdk.ARM64ReturnReg && rn == sdk.ARM64ReturnReg {
 				selectorOffset = imm
-				slotReg = 0
+				slotReg = sdk.ARM64ReturnReg
 				found = true
-			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == 0 && rn == 0 {
+			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == sdk.ARM64ReturnReg && rn == sdk.ARM64ReturnReg {
 				selectorOffset = -imm
-				slotReg = 0
+				slotReg = sdk.ARM64ReturnReg
 				found = true
 			}
 		}
@@ -334,13 +329,13 @@ func AnalyzeFunction(
 		// implied class ID by kOriginElement.)
 		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
 		if !found {
-			if rd, ok := arm64.MOVOrr(raw); ok && rd == 30 {
+			if rd, ok := arm64.MOVOrr(raw); ok && rd == sdk.ARM64LinkReg {
 				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
 					ldrRaw := insts[j].Raw
-					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm2 == 30 {
-						if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == 30 {
+					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm2 == sdk.ARM64LinkReg {
+						if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == sdk.ARM64LinkReg {
 							selectorOffset = 0
-							slotReg = 30
+							slotReg = sdk.ARM64LinkReg
 							found = true
 							ctx.SelectorOffsets[insts[j+1].Addr] = selectorOffset
 							break
@@ -355,10 +350,10 @@ func AnalyzeFunction(
 		// Check next instruction: LDR X30, [X21, XslotReg, LSL #3]
 		if i+1 < len(insts) {
 			ldrRaw := insts[i+1].Raw
-			if base, rm, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == 21 && rt == 30 && rm == slotReg {
+			if base, rm, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm == slotReg {
 				// Check instruction after: BLR X30
 				if i+2 < len(insts) {
-					if blrReg, ok := arm64.BLR(insts[i+2].Raw); ok && blrReg == 30 {
+					if blrReg, ok := arm64.BLR(insts[i+2].Raw); ok && blrReg == sdk.ARM64LinkReg {
 						ctx.SelectorOffsets[insts[i+2].Addr] = selectorOffset
 					}
 				}
@@ -389,14 +384,14 @@ func AnalyzeFunction(
 			continue
 		}
 		base, rm, rt, ldrOK := arm64.LDRRegExtended(insts[i+2].Raw)
-		if !ldrOK || base != 21 || rt != 30 || rm != addRd {
+		if !ldrOK || base != sdk.ARM64DT || rt != sdk.ARM64LinkReg || rm != addRd {
 			continue
 		}
 		// Next: BLR X30
 		if i+3 >= len(insts) {
 			continue
 		}
-		if blrReg, ok := arm64.BLR(insts[i+3].Raw); ok && blrReg == 30 {
+		if blrReg, ok := arm64.BLR(insts[i+3].Raw); ok && blrReg == sdk.ARM64LinkReg {
 			ctx.SelectorOffsets[insts[i+3].Addr] = movImm
 		}
 	}
@@ -430,12 +425,12 @@ func AnalyzeFunction(
 			}
 			// Check for LDR X30, [X21, XclassIdReg, LSL #3]
 			base, rm, rt, ldrOK := arm64.LDRRegExtended(jraw)
-			if !ldrOK || base != 21 || rt != 30 || rm != classIdReg {
+			if !ldrOK || base != sdk.ARM64DT || rt != sdk.ARM64LinkReg || rm != classIdReg {
 				continue
 			}
 			// Next: BLR X30
 			if j+1 < len(insts) {
-				if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == 30 {
+				if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == sdk.ARM64LinkReg {
 					ctx.SelectorOffsets[insts[j+1].Addr] = 0
 				}
 			}
@@ -897,7 +892,7 @@ func transferInstruction(
 	}
 
 	// 9. Default: if this instruction defines a register, kill its type.
-	if rd := dstRegOfInst(inst.Raw); rd >= 0 && rd < 31 {
+	if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 && rd < 31 {
 		state[rd] = Top()
 	}
 }

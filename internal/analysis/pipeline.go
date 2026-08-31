@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/signal"
@@ -344,6 +345,35 @@ func Run(opts Opts) (*Result, error) {
 		opts.logf("  fingerprints: %v\n", err)
 	}
 
+	// Step 9: Unified Evidence collection & export.
+	// Aggregates call edges, typetrack resolutions, and behavioral signals
+	// into evidence.jsonl with provenance and confidence classification.
+	evCollector := evidence.NewCollector()
+	if len(edges) > 0 {
+		evCollector.FromCallEdges(edges)
+	}
+	if err := evCollector.WriteJSONL(opts.OutDir); err != nil {
+		opts.logf("  evidence: %v\n", err)
+	}
+
+	// Step 10: Platform channels endpoint extraction.
+	// Scans for Flutter MethodChannel, BasicMessageChannel, and EventChannel endpoints.
+	channels := BuildPlatformChannels(clResult, pl, edges)
+	if len(channels) > 0 {
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "platform_channels.jsonl"), channels); err != nil {
+			opts.logf("  platform channels: %v\n", err)
+		}
+	}
+
+	// Step 11: Semantic topology de-obfuscation map.
+	// Infers class roles for obfuscated binaries based on superclass hierarchy and string accesses.
+	deobfMap := BuildDeobfuscationMap(clResult, pl, stringRefs)
+	if len(deobfMap) > 0 {
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "deobfuscate_map.jsonl"), deobfMap); err != nil {
+			opts.logf("  deobfuscate: %v\n", err)
+		}
+	}
+
 	return result, nil
 }
 
@@ -367,6 +397,7 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	icdata := BuildICData(clResult)
 	closureData := BuildClosureData(clResult)
 	libFuncs := BuildLibraryFunctions(clResult, pl)
+	ffiBridges := BuildFfiBridges(clResult, pl)
 
 	// Report the Code/loading-unit partition, and say plainly when it carries
 	// no information. A single-unit app (no deferred imports) yields one
@@ -432,6 +463,10 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	if len(libFuncs) > 0 {
 		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "library_functions.jsonl"), libFuncs)
 		entries = append(entries, entry{"library_functions.jsonl", "library_functions", n, err})
+	}
+	if len(ffiBridges) > 0 {
+		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "ffi_bridges.jsonl"), ffiBridges)
+		entries = append(entries, entry{"ffi_bridges.jsonl", "ffi_bridges", n, err})
 	}
 
 	for _, e := range entries {
