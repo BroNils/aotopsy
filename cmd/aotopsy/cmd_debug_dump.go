@@ -1,19 +1,20 @@
 package main
 
 import (
-	"aotopsy/internal/arch/x86"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 )
 
+// cmdDump handles "aotopsy _debug dump" for low-level sequential disassembly and placeholder symbol dumping.
 func cmdDump(args []string) error {
 	fs := flag.NewFlagSet("dump", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
@@ -39,7 +40,7 @@ func cmdDump(args []string) error {
 	}
 
 	// Create output directory.
-	if err := os.MkdirAll(*outDir, 0755); err != nil {
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
@@ -61,7 +62,7 @@ func cmdDump(args []string) error {
 	symbols := make(map[uint64]string)
 	var symList []output.SymbolEntry
 
-	// For now, generate sub_<addr> entries at the start of each region.
+	// Generate sub_<addr> entries at the start of each region.
 	if info.IsolateInstructions.VA != 0 {
 		name := fmt.Sprintf("sub_%x", info.IsolateInstructions.VA)
 		symbols[info.IsolateInstructions.VA] = name
@@ -90,12 +91,10 @@ func cmdDump(args []string) error {
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	if isARM64 {
-		// Extract actual code region from isolate instructions (skip Image + InstructionsSection headers).
 		if len(info.IsolateInstructions.Data) > 0 {
 			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
 			if err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "warning: could not parse isolate instructions image header: %v\n", err)
-				// Fall back to raw disassembly.
 				code = info.IsolateInstructions.Data
 				codeOff = 0
 				payloadLen = uint64(len(code))
@@ -114,7 +113,6 @@ func cmdDump(args []string) error {
 			_, _ = fmt.Fprintf(os.Stderr, "wrote %s/asm.txt (%d instructions)\n", *outDir, len(insts))
 		}
 
-		// Extract code from VM instructions.
 		if len(info.VmInstructions.Data) > 0 {
 			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data)
 			if err != nil {
@@ -178,14 +176,8 @@ func cmdDump(args []string) error {
 	return nil
 }
 
-// writeX86ASMBlob disassembles a flat x86_64 code region (not per-function
-// -- dump's whole point is a single raw sequential pass) and writes an
-// annotated listing, mirroring internal/analysis/disasm_stagex86.go's
-// writeX86ASM but for one large blob instead of many small function
-// ranges, matching this command's own ARM64 path (disasm.Disassemble +
-// output.WriteASM/WriteASMSingle over the whole region).
 func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.SymbolLookup, maxSteps int) (int, error) {
-	f, err := os.Create(path) //nolint:gosec // path is built from this run's own --out directory, not untrusted input
+	f, err := os.Create(path)
 	if err != nil {
 		return 0, err
 	}

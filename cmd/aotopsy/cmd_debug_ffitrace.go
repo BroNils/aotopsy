@@ -11,19 +11,14 @@ import (
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
-// static detection of dart:ffi DynamicLibrary.open/lookup call sites
-// (resolving the target native library + symbol name when passed as
-// literals) plus every function whose pseudocode already shows the
-// vm_tag native/FFI-leaf-call marker ("nativeCall(...)"). Pure static
-// analysis, no CPU emulation, no live device -- see docs/plan-phase1-
-// dart-aot-emulation-harness.md's Komponen H.
+// static detection of dart:ffi DynamicLibrary.open/lookup call sites.
 func cmdFFITrace(args []string) error {
 	fs := flag.NewFlagSet("ffi-trace", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	out := fs.String("out", "", "write findings as JSONL to this path (default: stdout)")
-	filter := fs.String("filter", "", "restrict to functions whose resolved name contains this substring -- prefer this over --allow-unbounded when a specific neighborhood is already known")
-	maxScan := fs.Int("max-scan", 0, "cap how many functions ffi-trace processes (0 = package default of 500). See ffitrace.Options's doc comment: a real Flutter app's libapp.so bundles the whole framework, and this project's own README/WORKFLOW.md document a confirmed whole-host crash history from unbounded full-binary sweeps of this same underlying operation -- also independently reproduced during this feature's own development (5.4GB RSS + 1.7GB swap on an 8149-function SAMPLE app, on a 5.8GB-RAM machine)")
-	allowUnbounded := fs.Bool("allow-unbounded", false, "scan EVERY function, no cap -- DANGEROUS on a resource-constrained host, see --max-scan's doc; prefer --filter to narrow scope instead")
+	filter := fs.String("filter", "", "restrict to functions whose resolved name contains this substring")
+	maxScan := fs.Int("max-scan", 0, "cap how many functions ffi-trace processes (0 = package default of 500)")
+	allowUnbounded := fs.Bool("allow-unbounded", false, "scan EVERY function, no cap")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

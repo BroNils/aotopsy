@@ -23,7 +23,9 @@ func cmdSDKCheck(args []string) error {
 	objectStoreOnly := fs.Bool("objectstore", false, "check ObjectStore field count only")
 	stubsOnly := fs.Bool("stubs", false, "check VM stub names only")
 	rootsOnly := fs.Bool("roots", false, "check roots prefix count only")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	all := !*thrOnly && !*objectStoreOnly && !*stubsOnly && !*rootsOnly
 	failed := false

@@ -12,16 +12,17 @@ import (
 	"aotopsy/internal/strxref"
 )
 
+// cmdStrings implements "aotopsy _debug strings" for searching and xref'ing strings in snapshots.
 func cmdStrings(args []string) error {
 	fs := flag.NewFlagSet("strings", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
-	which := fs.String("which", "both", "which snapshot: vm, isolate, or both. Was \"isolate\" by default -- confirmed a real, previously-unnoticed gap: VM-isolate strings (shared base objects across every app on this Dart SDK build, e.g. Dart's own internal runtime messages) were silently excluded from any search that didn't explicitly pass --which vm/both, even though they can contain real, searchable content. Defaulting to \"both\" now for exhaustive-by-default search; pass --which isolate explicitly to restore the old narrower behavior.")
+	which := fs.String("which", "both", "which snapshot: vm, isolate, or both")
 	maxLen := fs.Int("max-len", 200, "max display length per string (0 = unlimited)")
 	names := fs.Bool("names", false, "extract and display named objects (Function, Class, Library, Script)")
-	find := fs.String("find", "", "only show strings containing this substring (case-insensitive) -- makes a large dump actually usable")
-	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) actually load it from the object pool (internal/strxref, full-scan by default -- see --xref-max-scan). Requires --find.")
-	xrefMaxScan := fs.Int("xref-max-scan", 0, "cap how many functions --xref scans (0 = scan every function; measured safe even on a real 129k-function production app, see internal/strxref's doc comment -- set this only to narrow a run deliberately)")
+	find := fs.String("find", "", "only show strings containing this substring (case-insensitive)")
+	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) load it from the object pool")
+	xrefMaxScan := fs.Int("xref-max-scan", 0, "cap how many functions --xref scans (0 = scan all)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -30,7 +31,7 @@ func cmdStrings(args []string) error {
 		return fmt.Errorf("--lib is required")
 	}
 	if *xref && *find == "" {
-		return fmt.Errorf("--xref requires --find (cross-referencing every string in a real app would be enormous output, not narrower work -- see internal/strxref, which itself scans efficiently, but the OUTPUT needs a target)")
+		return fmt.Errorf("--xref requires --find")
 	}
 
 	opts := dartfmt.Options{
@@ -59,7 +60,6 @@ func cmdStrings(args []string) error {
 	var targets []target
 	switch {
 	case *names:
-		// Always parse both to build complete ref→string map.
 		targets = []target{
 			{"VM", info.VmData.Data, info.VmHeader.TotalSize},
 			{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
@@ -75,8 +75,6 @@ func cmdStrings(args []string) error {
 		}
 	}
 
-	// When --names is set, build a combined ref→string map from all snapshots
-	// so cross-snapshot refs (e.g., isolate name pointing to VM string) resolve.
 	type parsedTarget struct {
 		name   string
 		result *cluster.Result
@@ -102,9 +100,6 @@ func cmdStrings(args []string) error {
 			continue
 		}
 
-		// C-3 fix: Always use ReadFill (not the deprecated ReadFillStrings)
-		// to properly handle all cluster types including ROData strings for
-		// Dart 2.12 (StringRODataPerSubclass) and non-compressed-pointers.
 		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: fill error: %v\n", t.name, err)
 			continue
@@ -113,7 +108,6 @@ func cmdStrings(args []string) error {
 		parsed = append(parsed, parsedTarget{name: t.name, result: result})
 	}
 
-	// Build combined ref→string map across all snapshots.
 	refToStr := make(map[int]string)
 	if *names {
 		for _, pt := range parsed {
@@ -121,7 +115,6 @@ func cmdStrings(args []string) error {
 				refToStr[ps.RefID] = ps.Value
 			}
 		}
-		// Also build ref→named lookup for owner resolution.
 		refToNamed := make(map[int]*cluster.NamedObject)
 		for _, pt := range parsed {
 			for i := range pt.result.Named {
@@ -129,14 +122,12 @@ func cmdStrings(args []string) error {
 				refToNamed[no.RefID] = no
 			}
 		}
-		// Resolve owner names through the named object chain.
 		for _, pt := range parsed {
 			for i := range pt.result.Named {
 				no := &pt.result.Named[i]
 				if no.OwnerRefID >= 0 {
 					if owner, ok := refToNamed[no.OwnerRefID]; ok && owner.NameRefID >= 0 {
 						if _, ok := refToStr[no.OwnerRefID]; !ok {
-							// Store the owner's name string at the owner's ref ID.
 							if ownerName, ok := refToStr[owner.NameRefID]; ok {
 								refToStr[no.OwnerRefID] = ownerName
 							}
@@ -147,8 +138,6 @@ func cmdStrings(args []string) error {
 		}
 	}
 
-	// matchedRefIDs collects every string ref that passed --find, across
-	// both VM and Isolate tables, for the --xref pass below.
 	var matchedRefIDs []int
 	findLower := strings.ToLower(*find)
 
@@ -231,12 +220,6 @@ func cmdStrings(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
 
-		// Separate parse pass via analysis.LoadContext -- this command
-		// builds its own VM+Isolate string tables above (needed for the
-		// "which snapshot" dump format), not the Ranges/FuncIR machinery
-		// --xref needs, so this reuses Komponen A's shared context loader
-		// instead of duplicating decompile_native_cmd.go's setup a third
-		// time in this file.
 		ctx, err := analysis.LoadContext(*libapp)
 		if err != nil {
 			return fmt.Errorf("--xref: load context: %w", err)

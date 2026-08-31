@@ -10,16 +10,8 @@ import (
 	"aotopsy/internal/cluster"
 )
 
-// cmdDispatchTable implements "aotopsy _debug dispatch-table --lib
-// <path>": statically recovers real function/stub names for the AOT
-// snapshot's DispatchTable -- the mechanism EmitDispatchTableCall uses
-// for megamorphic/polymorphic instance dispatch, which carries no name
-// in the instruction stream at all (see ARCHITECTURE.md's "DispatchTable
-// parsing" section for the full investigation this implements, and
-// internal/cluster/dispatchtable.go's doc comments for the byte-level
-// format). Only works for Dart versions whose exact ObjectStore
-// roots-section layout has been verified (currently 3.7.0 and 3.10.7 --
-// see snapshot.VersionProfile.ObjectStoreAOTFieldCount).
+// cmdDispatchTable implements "aotopsy _debug dispatch-table --lib <path>":
+// statically recovers real function/stub names for the AOT snapshot's DispatchTable.
 func cmdDispatchTable(args []string) error {
 	fs := flag.NewFlagSet("dispatch-table", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")

@@ -12,6 +12,45 @@ import (
 	"aotopsy/internal/analysis"
 )
 
+// cmdFindLibapp finds Dart libapp.so in a single APK/ZIP.
+func cmdFindLibapp(args []string) error {
+	fs := flag.NewFlagSet("find-libapp", flag.ExitOnError)
+	apk := fs.String("apk", "", "Path to APK/zip file")
+	outDir := fs.String("out", "", "Output directory for find_libapp.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *apk == "" {
+		return fmt.Errorf("--apk is required")
+	}
+
+	result, err := analysis.FindLibappInZip(*apk)
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if *outDir != "" {
+		if err := os.MkdirAll(*outDir, 0o755); err != nil {
+			return err
+		}
+		base := strings.TrimSuffix(filepath.Base(*apk), filepath.Ext(*apk))
+		outPath := filepath.Join(*outDir, base+"_find_libapp.json")
+		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", outPath)
+	} else {
+		fmt.Println(string(data))
+	}
+	return nil
+}
+
+// cmdFindLibappBatch processes a directory of APK/ZIP files and produces batch summaries.
 func cmdFindLibappBatch(args []string) error {
 	fs := flag.NewFlagSet("find-libapp-batch", flag.ExitOnError)
 	dir := fs.String("dir", "samples/flutter", "Directory containing zip files")
@@ -48,7 +87,6 @@ func cmdFindLibappBatch(args []string) error {
 			s.Error = err.Error()
 		} else {
 			s.Result = result
-			// Write individual JSON.
 			data, _ := json.MarshalIndent(result, "", "  ")
 			base := strings.TrimSuffix(e.Name(), ".zip")
 			outPath := filepath.Join(*outDir, base+"_find_libapp.json")
@@ -64,7 +102,7 @@ func cmdFindLibappBatch(args []string) error {
 		return results[i].Name < results[j].Name
 	})
 
-	// Generate no_libapp_report.md — only entries that were NOT found via standard libapp.so path.
+	// Generate no_libapp_report.md
 	reportPath := filepath.Join(*outDir, "no_libapp_report.md")
 	f, err := os.Create(reportPath)
 	if err != nil {
@@ -87,7 +125,6 @@ func cmdFindLibappBatch(args []string) error {
 		if s.Result == nil {
 			continue
 		}
-		// Check if the standard path was the best match.
 		hasStandard := false
 		if s.Result.Best != nil {
 			p := s.Result.Best.PathInAPK

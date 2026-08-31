@@ -10,12 +10,35 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/render"
 	"aotopsy/internal/strutil"
 )
 
+// cmdGraph implements "aotopsy _debug graph" for extracting named object graphs.
+func cmdGraph(args []string) error {
+	fs := flag.NewFlagSet("graph", flag.ExitOnError)
+	libapp := fs.String("lib", "", "path to libapp.so")
+	maxSteps := fs.Int("max-steps", 0, "global loop cap")
+	which := fs.String("which", "isolate", "which snapshot: vm, isolate, or both")
+	outDir := fs.String("out", "", "output directory for JSONL files")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *libapp == "" {
+		return fmt.Errorf("--lib is required")
+	}
+	if *outDir == "" {
+		return fmt.Errorf("--out is required")
+	}
+
+	return analysis.RunGraph(*libapp, *outDir, *which, *maxSteps)
+}
+
+// cmdRender implements "aotopsy _debug render" for rendering DOT and HTML from JSONL output.
 func cmdRender(args []string) error {
 	fs := flag.NewFlagSet("render", flag.ExitOnError)
 	inDir := fs.String("in", "", "input directory (disasm output)")
@@ -40,14 +63,14 @@ func cmdRender(args []string) error {
 	}
 
 	// Read functions.jsonl.
-	funcs, err := readJSONL[disasm.FuncRecord](filepath.Join(*inDir, "functions.jsonl"))
+	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(*inDir, "functions.jsonl"))
 	if err != nil {
 		return fmt.Errorf("read functions.jsonl: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "read %d functions\n", len(funcs))
 
 	// Read call_edges.jsonl.
-	edges, err := readJSONL[disasm.CallEdgeRecord](filepath.Join(*inDir, "call_edges.jsonl"))
+	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(*inDir, "call_edges.jsonl"))
 	if err != nil {
 		return fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
@@ -57,7 +80,7 @@ func cmdRender(args []string) error {
 	unresTHRPath := filepath.Join(*inDir, "unresolved_thr.jsonl")
 	var unresTHR []disasm.UnresolvedTHRRecord
 	if _, err := os.Stat(unresTHRPath); err == nil {
-		unresTHR, err = readJSONL[disasm.UnresolvedTHRRecord](unresTHRPath)
+		unresTHR, err = jsonutil.ReadJSONL[disasm.UnresolvedTHRRecord](unresTHRPath)
 		if err != nil {
 			return fmt.Errorf("read unresolved_thr.jsonl: %w", err)
 		}
@@ -66,7 +89,7 @@ func cmdRender(args []string) error {
 
 	// Create render output directory.
 	renderDir := filepath.Join(*inDir, "render")
-	if err := os.MkdirAll(renderDir, 0755); err != nil {
+	if err := os.MkdirAll(renderDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir render: %w", err)
 	}
 
@@ -83,7 +106,7 @@ func cmdRender(args []string) error {
 	reachDOT := render.ReachabilityDOT(funcs, edges, reachable, entryPoints,
 		*title+" (reachable)", render.NASA)
 	reachDotPath := filepath.Join(renderDir, "reachable.dot")
-	if err := os.WriteFile(reachDotPath, []byte(reachDOT), 0644); err != nil {
+	if err := os.WriteFile(reachDotPath, []byte(reachDOT), 0o644); err != nil {
 		return fmt.Errorf("write reachable.dot: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", reachDotPath, len(reachDOT))
@@ -91,7 +114,7 @@ func cmdRender(args []string) error {
 	// Generate callgraph DOT.
 	dot := render.CallgraphDOT(funcs, edges, *title, render.NASA, *maxNodes)
 	dotPath := filepath.Join(renderDir, "callgraph.dot")
-	if err := os.WriteFile(dotPath, []byte(dot), 0644); err != nil {
+	if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
 		return fmt.Errorf("write callgraph.dot: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", dotPath, len(dot))
@@ -99,7 +122,7 @@ func cmdRender(args []string) error {
 	// Generate classgraph DOT.
 	classDOT := render.ClassgraphDOT(funcs, edges, *title+" (class level)", render.NASA, *maxNodes)
 	classDotPath := filepath.Join(renderDir, "classgraph.dot")
-	if err := os.WriteFile(classDotPath, []byte(classDOT), 0644); err != nil {
+	if err := os.WriteFile(classDotPath, []byte(classDOT), 0o644); err != nil {
 		return fmt.Errorf("write classgraph.dot: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", classDotPath, len(classDOT))
@@ -144,7 +167,7 @@ func cmdRender(args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: --cfg requires asm directory at %s\n", *asmDir)
 		} else {
 			cfgDir := filepath.Join(renderDir, "cfg")
-			if err := os.MkdirAll(cfgDir, 0755); err != nil {
+			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir cfg: %w", err)
 			}
 			cfgFuncs, err = generateCFGs(funcs, reachable, *asmDir, cfgDir, !*noDot)
@@ -173,8 +196,6 @@ func cmdRender(args []string) error {
 	return nil
 }
 
-// generateCFGs builds per-function CFG DOTs (and optionally SVGs) for reachable functions.
-// Returns the number of CFGs generated.
 func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, cfgDir string, genSVG bool) (int, error) {
 	count := 0
 	for _, f := range funcs {
@@ -185,47 +206,40 @@ func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, 
 			continue
 		}
 
-		// Load raw instructions from .bin file (named by sanitizeFilename).
 		safeName := strutil.SanitizeFilename(f.Name)
 		binPath := filepath.Join(asmDir, safeName+".bin")
 		data, err := os.ReadFile(binPath)
 		if err != nil {
-			continue // no .bin file for this function
+			continue
 		}
 		if len(data) < 4 {
 			continue
 		}
 
-		// Parse PC from function record.
 		pc, err := strconv.ParseUint(strings.TrimPrefix(f.PC, "0x"), 16, 64)
 		if err != nil {
 			continue
 		}
 
-		// Decode instructions.
 		insts := decodeRawInsts(data, pc)
 		if len(insts) == 0 {
 			continue
 		}
 
-		// Build CFG.
 		cfg := disasm.BuildCFG(f.Name, insts)
 		if len(cfg.Blocks) == 0 {
 			continue
 		}
 
-		// Render DOT.
 		dot := render.CFGDOT(cfg, render.NASA)
 		dotPath := filepath.Join(cfgDir, safeName+".dot")
-		if err := os.WriteFile(dotPath, []byte(dot), 0644); err != nil {
+		if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
 			return count, fmt.Errorf("write %s: %w", dotPath, err)
 		}
 
-		// Optional SVG.
 		if genSVG {
 			svgPath := filepath.Join(cfgDir, safeName+".svg")
 			if err := runDot(dotPath, svgPath, "svg"); err != nil {
-				// Non-fatal: skip SVG for this function.
 				fmt.Fprintf(os.Stderr, "  warning: CFG SVG failed for %s: %v\n", f.Name, err)
 			}
 		}
@@ -234,8 +248,6 @@ func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, 
 	return count, nil
 }
 
-// decodeRawInsts decodes ARM64 instructions from raw bytes.
-// Minimal decoder: just addr + raw + a text representation.
 func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
 	n := len(data) / 4
 	insts := make([]disasm.Inst, 0, n)
@@ -248,7 +260,6 @@ func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
 			Size: 4,
 			Text: fmt.Sprintf(".word 0x%08x", raw),
 		}
-		// Try to get a proper disassembly text.
 		text := disasm.DisasmOne(raw, addr)
 		if text != "" {
 			inst.Text = text
@@ -258,14 +269,8 @@ func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
 	return insts
 }
 
-// runDot invokes graphviz dot to produce the given format.
 func runDot(dotPath, outPath, format string) error {
 	cmd := exec.Command("dot", "-T"+format, "-o", outPath, dotPath)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// readJSONL delegates to jsonutil.ReadJSONL.
-func readJSONL[T any](path string) ([]T, error) {
-	return jsonutil.ReadJSONL[T](path)
 }

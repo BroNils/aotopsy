@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/frida"
 )
 
+// cmdDecompileNative implements "aotopsy _debug decompile-native" for Dart-AOT-aware pseudocode generation.
 func cmdDecompileNative(args []string) error {
 	fs := flag.NewFlagSet("decompile-native", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
