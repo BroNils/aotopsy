@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
@@ -12,18 +11,19 @@ import (
 	"aotopsy/internal/frida"
 )
 
+// cmdX64Refs implements "aotopsy _debug x64refs": x86_64 disasm/callers-of/hash-scan.
 func cmdX64Refs(args []string) error {
 	fs := flag.NewFlagSet("x64refs", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (x86_64)")
 	find := fs.String("find", "", "substring to search for in resolved pool-entry display strings (case-sensitive); empty = dump all pool refs found")
 	maxHits := fs.Int("max", 200, "stop after this many matches (0 = unlimited)")
-	disasmFuncVA := fs.String("disasm-func", "", "hex VA (e.g. 0x25a7ac4) of any address inside a function; dumps the full disassembly of that function with pool annotations")
-	callersOfVA := fs.String("callers-of", "", "hex VA of a function's ENTRY point; scans the whole binary for CALL rel32 instructions targeting it and prints the caller function + address")
-	indirectCalls := fs.Bool("indirect-calls", false, "scan the whole binary for CALL sites with a Reg/Mem operand (never a Rel) -- classifies GDT (dispatch-table) calls and pool-sourced indirect calls, both invisible to --callers-of's direct-call-only scan")
+	disasmFuncVA := fs.String("disasm-func", "", "hex VA of any address inside a function; dumps full disassembly with pool annotations")
+	callersOfVA := fs.String("callers-of", "", "hex VA of a function's ENTRY point; scans binary for CALL rel32 instructions targeting it")
+	indirectCalls := fs.Bool("indirect-calls", false, "scan binary for CALL sites with a Reg/Mem operand")
 	indirectInFunc := fs.String("indirect-calls-in", "", "hex VA of any address inside a function; restrict --indirect-calls to just that one function")
-	cidName := fs.Int("cid-name", -1, "resolve a class id (decimal, e.g. from a live GDT-call RCX capture) to its Dart class name via the snapshot's class cluster")
-	disasmByCodeIndex := fs.Int("disasm-by-code-index", -1, "Function.CodeIndex (from refinfo --siblings-of-owner) to disassemble -- resolves to a CodeRange by its cluster Index and dumps like --disasm-func")
-	hashScan := fs.Bool("hash-scan", false, "scan every function for XOR/ROL/ROR/ADD/AND/OR/NOT/SHL/SHR instruction density (a 'hash-shaped' loop) -- a heuristic for locating a hand-rolled or compiled hash/HMAC round; empirically, most positional hits turn out to be object/Map/dispatch plumbing rather than actual crypto, so treat matches as candidates to inspect, not confirmed hits")
+	cidName := fs.Int("cid-name", -1, "resolve a class id to its Dart class name via class cluster")
+	disasmByCodeIndex := fs.Int("disasm-by-code-index", -1, "Function.CodeIndex to disassemble")
+	hashScan := fs.Bool("hash-scan", false, "scan every function for hash-op instruction density")
 	hashScanMinOps := fs.Int("hash-scan-min-ops", 8, "minimum hash-op count for a function to be reported by --hash-scan")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -144,6 +144,3 @@ func cmdX64Refs(args []string) error {
 
 	return analysis.ScanPoolRefs(ranges, code, codeOff, codeVA, pl, poolDisplay, *find, *maxHits)
 }
-
-// suppress unused import warning
-var _ = strings.Split

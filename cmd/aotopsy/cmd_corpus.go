@@ -13,6 +13,23 @@ import (
 	"aotopsy/internal/analysis"
 )
 
+// cmdParity runs parity checks across sample subdirectories.
+func cmdParity(args []string) error {
+	fs := flag.NewFlagSet("parity", flag.ExitOnError)
+	samplesDir := fs.String("samples", "", "directory containing sample subdirs (each with libapp.so)")
+	outDir := fs.String("out", "", "output directory for parity.csv and summary")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *samplesDir == "" || *outDir == "" {
+		return fmt.Errorf("--samples and --out are required")
+	}
+
+	return analysis.RunParity(*samplesDir, *outDir)
+}
+
+// cmdInventory inventories sample ZIP/APK files and extracts version/snapshot metadata.
 func cmdInventory(args []string) error {
 	fs := flag.NewFlagSet("inventory", flag.ExitOnError)
 	dir := fs.String("dir", "samples/flutter", "Directory containing zip files")

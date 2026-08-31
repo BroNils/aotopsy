@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,4 +37,16 @@ func reorderPositionalArg(args []string) []string {
 	reordered = append(reordered, args[1:]...)
 	reordered = append(reordered, args[0])
 	return reordered
+}
+
+// splitLines splits byte data into non-empty trimmed lines.
+func splitLines(data []byte) [][]byte {
+	var lines [][]byte
+	for _, l := range bytes.Split(data, []byte("\n")) {
+		l = bytes.TrimSpace(l)
+		if len(l) > 0 {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }

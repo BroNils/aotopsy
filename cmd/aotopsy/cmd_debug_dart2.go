@@ -16,6 +16,7 @@ type dart2Bucket struct {
 	Features    string `json:"features"`
 }
 
+// cmdDart2Buckets implements "aotopsy _debug dart2-buckets": Dart 2.x bucket analysis.
 func cmdDart2Buckets(args []string) error {
 	fs := flag.NewFlagSet("dart2-buckets", flag.ExitOnError)
 	inventoryPath := fs.String("inventory", "", "path to flutter_inventory.jsonl")
@@ -28,7 +29,6 @@ func cmdDart2Buckets(args []string) error {
 		return fmt.Errorf("--inventory and --out are required")
 	}
 
-	// Read inventory.
 	data, err := os.ReadFile(*inventoryPath)
 	if err != nil {
 		return fmt.Errorf("read inventory: %w", err)
@@ -41,7 +41,6 @@ func cmdDart2Buckets(args []string) error {
 		Features     string `json:"features"`
 	}
 
-	// Parse rows, filter for unsupported Dart 2.x.
 	buckets := map[string]*dart2Bucket{}
 	lines := splitLines(data)
 	for _, line := range lines {
@@ -71,7 +70,6 @@ func cmdDart2Buckets(args []string) error {
 		b.Count++
 	}
 
-	// Sort by version then hash.
 	sorted := make([]*dart2Bucket, 0, len(buckets))
 	for _, b := range buckets {
 		sorted = append(sorted, b)
@@ -83,7 +81,6 @@ func cmdDart2Buckets(args []string) error {
 		return sorted[i].Hash < sorted[j].Hash
 	})
 
-	// Write output.
 	f, err := os.Create(*outPath)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
@@ -106,22 +103,4 @@ func cmdDart2Buckets(args []string) error {
 	}())
 
 	return nil
-}
-
-// splitLines splits data into non-empty lines.
-func splitLines(data []byte) [][]byte {
-	var lines [][]byte
-	start := 0
-	for i := 0; i < len(data); i++ {
-		if data[i] == '\n' {
-			if i > start {
-				lines = append(lines, data[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < len(data) {
-		lines = append(lines, data[start:])
-	}
-	return lines
 }

@@ -11,8 +11,7 @@ import (
 
 // cmdFingerprint implements "aotopsy _debug fingerprint --lib <path>":
 // build-id + Flutter/Dart engine version detection, ported from
-// flutterdec's engine_fingerprint.rs but arch-agnostic (works for both
-// ARM64 and x86_64 libapp.so, unlike the ARM64-only Rust original).
+// flutterdec's engine_fingerprint.rs but arch-agnostic (ARM64 and x86_64).
 func cmdFingerprint(args []string) error {
 	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
 	libPath := fs.String("lib", "", "path to libapp.so (or any ELF) to fingerprint")

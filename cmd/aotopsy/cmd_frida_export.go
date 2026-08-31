@@ -12,6 +12,7 @@ import (
 	"aotopsy/internal/frida"
 )
 
+// cmdFridaExport exports analysis metadata and generated hooks for Frida.
 func cmdFridaExport(args []string) error {
 	fs := flag.NewFlagSet("frida-export", flag.ExitOnError)
 	libPath := fs.String("lib", "", "path to libapp.so")
@@ -88,7 +89,7 @@ func cmdFridaExport(args []string) error {
 			*scriptPath = filepath.Join(dir, "frida_hooks.js")
 		}
 		script := frida.GenerateFridaScriptFromMeta(*outPath)
-		if err := os.WriteFile(*scriptPath, []byte(script), 0644); err != nil {
+		if err := os.WriteFile(*scriptPath, []byte(script), 0o644); err != nil {
 			return fmt.Errorf("write frida script: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "  Frida script: %s\n", *scriptPath)
