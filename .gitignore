@@ -88,3 +88,9 @@ AGENTS-local.md
 
 # GoReleaser build output
 dist/
+
+# Local agent/watchdog configuration
+[Ww][Aa][Tt][Cc][Hh][Dd][Oo][Gg].[Yy][Mm][Ll]
+WATCHDOG.yml
+watchdog.yml
+
