@@ -1,17 +1,16 @@
 package main
 
 import (
+	"aotopsy/internal/arch/x86"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"golang.org/x/arch/x86/x86asm"
-
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
-	"aotopsy/internal/pipeline"
 	"aotopsy/internal/snapshot"
 )
 
@@ -45,7 +44,7 @@ func cmdDump(args []string) error {
 	}
 
 	// Open ELF + extract snapshots.
-	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
+	ef, info, err := analysis.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
 		return err
 	}
@@ -181,7 +180,7 @@ func cmdDump(args []string) error {
 
 // writeX86ASMBlob disassembles a flat x86_64 code region (not per-function
 // -- dump's whole point is a single raw sequential pass) and writes an
-// annotated listing, mirroring internal/pipeline/disasm_stage_x86.go's
+// annotated listing, mirroring internal/analysis/disasm_stagex86.go's
 // writeX86ASM but for one large blob instead of many small function
 // ranges, matching this command's own ARM64 path (disasm.Disassemble +
 // output.WriteASM/WriteASMSingle over the whole region).
@@ -193,31 +192,26 @@ func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.Symb
 	defer func() { _ = f.Close() }()
 
 	n := 0
-	for off := 0; off < len(code) && (maxSteps <= 0 || n < maxSteps); {
-		addr := baseVA + uint64(off)
-		inst, decErr := x86asm.Decode(code[off:], 64)
-		length := inst.Len
-		if decErr != nil || length <= 0 {
-			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", addr)
-			off++
-			n++
-			continue
+	x86.Walk(code, baseVA, func(d x86.Decoded) bool {
+		if maxSteps > 0 && n >= maxSteps {
+			return false
 		}
-		line := inst.String()
-		for _, arg := range inst.Args {
-			if rel, ok := arg.(x86asm.Rel); ok {
-				target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-				if name, ok := lookup(target); ok {
-					line += fmt.Sprintf("  ; -> %s", name)
-				} else {
-					line += fmt.Sprintf("  ; -> 0x%x", target)
-				}
-				break
+		if d.Bad {
+			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
+			n++
+			return true
+		}
+		line := d.Inst.String()
+		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+			if name, ok := lookup(target); ok {
+				line += fmt.Sprintf("  ; -> %s", name)
+			} else {
+				line += fmt.Sprintf("  ; -> 0x%x", target)
 			}
 		}
-		_, _ = fmt.Fprintf(f, "0x%x: %s\n", addr, line)
-		off += length
+		_, _ = fmt.Fprintf(f, "0x%x: %s\n", d.VA, line)
 		n++
-	}
+		return true
+	})
 	return n, nil
 }

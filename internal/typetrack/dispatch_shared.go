@@ -8,7 +8,7 @@ import (
 
 // This file holds the dispatch-slot scanning logic shared between ARM64
 // (resolveBLR in intraproc.go) and x86_64 (resolveX86Dispatch in
-// intraproc_x86.go). Both architectures scan nearby dispatch table slots
+// intraprocx86.go). Both architectures scan nearby dispatch table slots
 // when a direct slot lookup fails, using the same candidate-collection
 // and deduplication rules.
 

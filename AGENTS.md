@@ -13,23 +13,18 @@ another. So a fresh clone won't have it — that's normal, not missing.
 If it doesn't exist yet, create your own with sample paths and integration
 test env vars for your machine.
 
-## ⚠️ Host memory: 6 GB. Read this before running anything heavy.
+## ⚠️ Host memory limits — read before running anything heavy
 
-This dev box is a WSL2 VM with `memory=6GB` + 4 GB swap (`.wslconfig`). It has
-already been crashed several times by analysis runs. Rules that actually work:
+This repo's analysis pipeline is memory-intensive. The specific host RAM,
+swap, and `ulimit` values for your machine are in **`AGENTS-local.md`** — read
+that file before running any heavy test or pipeline. The universal rules:
 
-- **Cap below VM RAM, not above it.** `ulimit -v 2500000` (~2.5 GB). Setting it
-  to 8 GB is a *fake* guard: the limit can never trigger before the VM itself
-  runs out, so the VM dies instead of the process. `ulimit -v` is also
-  per-process, so it says nothing about the sum of concurrent processes.
-- **One heavy thing at a time, in the foreground.** Never background a pipeline
-  run and keep working: `go test` in this repo runs full `Run()` pipelines of
-  its own, so a background analysis plus a foreground `go test` is two
-  pipelines at once. That combination has killed the VM.
+- **One heavy thing at a time, in the foreground.** `go test` in this repo
+  runs full `Run()` pipelines of its own.
 - **Never run the full pipeline on a big real app** (e.g. a 129k-function
-  libapp.so). For big-binary verification use the cluster-only harness
-  (`clusterOnly` in `internal/pipeline/loadingunit_test.go`): ELF → snapshot →
-  alloc → fill, skipping disassembly. It handles a 22 MB libapp.so in ~0.06 s.
+  libapp.so). Use the cluster-only harness (`clusterOnly` in
+  `internal/analysis/loadingunit_test.go`): ELF → snapshot → alloc → fill,
+  skipping disassembly.
 - `aotopsy _debug decompile-native --all` on a real app is the single most
   dangerous command here — see its own `--max` help text.
 
@@ -50,6 +45,12 @@ Build just the binary: `go build -o aotopsy ./cmd/aotopsy/`
 flowchart TD
     CLI_ENTRY[cmd/aotopsy<br/>CLI entry point]
     subgraph "internal/"
+        ANALYSIS[analysis<br/>pipeline orchestration & snapshot loader]
+        SDK[sdk<br/>Dart VM facts, registers, predicates]
+        VMT[vmtables<br/>versioned tables]
+        THRAUDIT[thraudit<br/>audit & classification]
+        ARM64[arch/arm64<br/>bitmask decoders]
+        NAMING[naming<br/>pool lookups & stub resolution]
         ELFX[elfx<br/>ELF validation]
         SNAP[snapshot<br/>version profiles]
         DART[dartfmt<br/>wire encoding]
@@ -58,48 +59,53 @@ flowchart TD
         CG[callgraph<br/>DOT rendering]
         SIG[signal<br/>behavioral classification]
         REND[render<br/>HTML/DOT/SVG]
-        OUT[output<br/>JSONL serialization]
+        OUT[output<br/>JSONL & SARIF 2.1.0]
         DEC[decompiler<br/>pseudocode]
-        TT[typetrack<br/>type inference]
+        TT[typetrack<br/>type inference & receiver recovery]
         FP[fingerprint<br/>version ID]
         FD[funcdiff<br/>function diffing]
         SM[symbolmap<br/>symbol resolution]
         FFI[ffitrace<br/>dart:ffi tracing]
         SX[strxref<br/>string cross-ref]
-        SU[strutil<br/>shared utilities]
-        ARCH[arch<br/>shared x86 primitives]
+        SU[strutil<br/>shared utilities & metadata]
+        JU[jsonutil<br/>JSONL streams]
+        FRIDA[frida<br/>script generator]
         CLI[cli<br/>ANSI colors]
-        LAT[lattice<br/>graph IR]
-        PIPE[pipeline<br/>orchestration]
     end
     TOOLS[tools/<br/>THR extractor]
     GHIDRA[ghidra_scripts/<br/>Python]
     IDA[ida_scripts/<br/>Python]
 
-    CLI_ENTRY --> PIPE
+    CLI_ENTRY --> ANALYSIS
     CLI_ENTRY --> DEC
     CLI_ENTRY --> DISASM
-    PIPE --> ELFX
-    PIPE --> SNAP
-    PIPE --> CLUST
-    PIPE --> DISASM
-    PIPE --> SIG
-    PIPE --> TT
-    CLUST --> DART
+    ANALYSIS --> ELFX
+    ANALYSIS --> SNAP
+    ANALYSIS --> CLUST
+    ANALYSIS --> DISASM
+    ANALYSIS --> SIG
+    ANALYSIS --> TT
+    ANALYSIS --> NAMING
+    ANALYSIS --> OUT
     CLUST --> SNAP
     DISASM --> DART
-    DISASM --> ARCH
+    DISASM --> ARM64
+    DISASM --> SDK
+    DISASM --> VMT
     DEC --> DISASM
-    DEC --> ARCH
+    DEC --> SDK
+    DEC --> ARM64
     TT --> DISASM
     TT --> CLUST
-    TT --> ARCH
-    FFI --> PIPE
+    TT --> SDK
+    TT --> ARM64
+    FFI --> ANALYSIS
     FFI --> DEC
-    SX --> PIPE
+    FFI --> NAMING
+    SX --> ANALYSIS
     SX --> DEC
     FD --> CLUST
-    FD --> PIPE
+    FD --> NAMING
     SM --> DISASM
     FP --> ELFX
     CG --> DISASM
@@ -108,8 +114,7 @@ flowchart TD
 ```
 
 - `cmd/aotopsy/` — CLI entry point, command handlers
-- `internal/` — library packages (21 packages, see ARCHITECTURE.md)
-- `tools/` — standalone utilities (THR table extractor)
+- `internal/` — library packages (24 packages, see ARCHITECTURE.md)
 - `ghidra_scripts/` — Ghidra integration (Python)
 - `ida_scripts/` — IDA integration (Python)
 
@@ -127,32 +132,17 @@ Tests skip automatically if not set.
 
 ### ⚠️ A Flutter build tree holds SEVERAL libapp.so — most are stale
 
-`compare_sample/build` contains **five** `libapp.so` with five different hashes,
-built from different revisions of `lib/*.dart`. Verified by string-grepping them:
-
-| path | matches current source? |
-|---|---|
-| `build/app/intermediates/merged_native_libs/release/.../libapp.so` | yes |
-| `build/app/intermediates/stripped_native_libs/release/.../libapp.so` | yes |
-| `build/app/generated/jniLibs/copyJniLibsflutterBuildRelease/.../libapp.so` | yes |
-| `build/app/outputs/flutter-apk/extracted_arm64/lib/arm64-v8a/libapp.so` | **STALE** |
-| `build/app/outputs/flutter-apk/extracted_x64/lib/x86_64/libapp.so` | **STALE** |
-
-The `extracted_*` ones predate `ground_truth.dart` entirely and contain no
-`AntiInlineTools` / `safeDivide` / `tryCatchFinally`. Using them silently
-invalidates any "compare the .dart source to the binary" check — absent symbols
-look like tree-shaking or a parser bug when the code was simply never compiled
-in. **Point the env vars at `merged_native_libs`**, and before trusting a
-negative result (`--find X` returning 0 matches), confirm the symbol is in the
-file: `strings -n 6 libapp.so | grep -x X`.
-
-Timestamps do NOT reveal this — all five are same-day. Compare hashes and
-grep for known symbols instead.
+A Flutter build tree contains multiple `libapp.so` files with different hashes,
+and the `extracted_*` APK outputs are often stale (predate the current source).
+**Which paths are stale vs valid on your machine is documented in
+`AGENTS-local.md`** — always point env vars at `merged_native_libs`, not
+`extracted_*`. Before trusting a negative result (`--find X` returning 0
+matches), confirm the symbol is in the file: `strings -n 6 libapp.so | grep -x X`.
 
 ## Key Conventions
 
 - `commands.go`'s command registry (`primaryCommands`/`debugCommands`) is the source of truth for command dispatch — always check it
-- `PoolLookups` (`pipeline.PoolLookups`) is the central name-resolution surface
+- `PoolLookups` (`naming.PoolLookups`) is the central name-resolution surface
 - PatchClass hop: `OwnerRefID` may point at a PatchClass (CID 6), not the real Class
 - `DetectVersion` returns a copy to prevent data races
 - `LiftState.Clone` shares Locals by reference (intentional for cross-branch visibility)
@@ -312,15 +302,15 @@ index was off by two slots, while the regression test only checked loose
 ranges ("50-300 signal", "20000-50000 edge"). The total looked reasonable,
 every line was wrong.
 
-### 1. Golden output (`internal/pipeline/golden_test.go`)
+### 1. Golden output (`internal/analysis/golden_test.go`)
 
 SHA-256 per output file is compared against records in
-`internal/pipeline/testdata/golden/`. The key is the input binary's SHA-256,
+`internal/analysis/testdata/golden/`. The key is the input binary's SHA-256,
 so pointing at a different `libapp.so` will SKIP (not fail).
 
 ```bash
-go test ./internal/pipeline/ -run Golden                    # verify
-AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/pipeline/ -run Golden   # re-record
+go test ./internal/analysis/ -run Golden                    # verify
+AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/analysis/ -run Golden   # re-record
 ```
 
 If it fails: **do not re-record immediately**. First find what changed;
@@ -361,10 +351,12 @@ explicitly in the tool, not silently tolerated.
 Two-step technique for verifying against Dart SDK source:
 
 1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`).
-   - Use `repo: "dart-lang/sdk"`.
+   - Use ONLY `query` + `repo` (e.g. `repo: "dart-lang/sdk"`). Do **NOT** pass `path` —
+     leaving it off returns wider results across the whole repo and surfaces more
+     knowledge (related call sites, other files, cross-arch counterparts) you would
+     otherwise miss by narrowing. This is intended: cast wide, then narrow with `gh api`.
    - Pass literal code/symbol in `query` (e.g. `"CheckStackOverflowInstr"`, `"NULL_REG"`).
    - ⚠️ **NEVER** put `repo:...` or `path:...` inside `query` — `query` matches literal text in files.
-   - Use `path` parameter (e.g. `"runtime/vm"`) to narrow results.
 2. **`gh api` @ version tag**: Once the path is found, fetch exact uncompressed source lines:
    `gh api -H "Accept: application/vnd.github.raw" "repos/dart-lang/sdk/contents/<path>?ref=<tag>"`
 

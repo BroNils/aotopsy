@@ -1,10 +1,12 @@
 package typetrack
 
 import (
+	"aotopsy/internal/arch/x86"
 	"sort"
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // sortedKeysInsts, sortedKeysX86 and sortedEdgeKeys return map keys in a
@@ -87,7 +89,7 @@ type InterResult struct {
 type FuncInstsARM64 map[string][]disasm.Inst
 
 // FuncInstsX86 holds x86_64 function instructions for RunInterprocedural.
-type FuncInstsX86 map[string][]X86DecodedInst
+type FuncInstsX86 map[string][]x86.Decoded
 
 // RunInterprocedural runs the inter-procedural fixed-point algorithm:
 //  1. For each function, run intra-procedural analysis with current
@@ -149,7 +151,7 @@ func RunInterprocedural(
 	// The struct does not exist before 3.x on x64 -- 2.x passed arguments
 	// on the stack, which is the documented reason x86_64 2.x recovers no
 	// receiver types at all.
-	argRegOrder := dartArgRegisters(isARM64)
+	argRegOrder := sdk.DartArgRegisters(isARM64)
 
 	if isARM64 {
 		funcCount = len(funcInstsARM64)

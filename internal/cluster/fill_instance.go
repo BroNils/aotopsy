@@ -19,7 +19,7 @@ import (
 // Cluster::ReadFill), while 2.12.0, 2.13.0 and 2.14.0 all carry the extra
 // Instance-cluster pair as well.
 func instanceCarriesUnboxedBitmap(profile *snapshot.VersionProfile) bool {
-	return dartVersionAtLeast(profile.DartVersion, "2.12.0")
+	return snapshot.VersionAtLeast(profile.DartVersion, "2.12.0")
 }
 
 // readFillInstance captures Instance fill data. Per object:

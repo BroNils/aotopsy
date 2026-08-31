@@ -9,6 +9,7 @@
 package symbolmap
 
 import (
+	"aotopsy/internal/arch/x86"
 	"bytes"
 	"debug/elf"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 )
 
@@ -312,52 +314,18 @@ func scanARM64CallSites(sections []execSection, includeBranches bool) []CallSite
 	for _, sec := range sections {
 		insts := disasm.Disassemble(sec.Data, disasm.Options{BaseAddr: sec.Addr})
 		for _, inst := range insts {
-			if target, ok := decodeARM64BL(inst.Raw, inst.Addr); ok {
+			if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 				out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target})
 				continue
 			}
 			if includeBranches {
-				if target, ok := decodeARM64B(inst.Raw, inst.Addr); ok {
+				if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
 					out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target})
 				}
 			}
 		}
 	}
 	return out
-}
-
-// decodeARM64BL decodes "BL imm26": 100101 imm26.
-func decodeARM64BL(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x94000000 {
-		return 0, false
-	}
-	imm26 := raw & 0x03FFFFFF
-	offset := signExtend26(imm26) * 4
-	return uint64(int64(pc) + int64(offset)), true //nolint:gosec // signed branch offset re-added to a real VA; result is a valid address by construction
-}
-
-// decodeARM64B decodes unconditional "B imm26": 000101 imm26 (distinct
-// from BL only in the top opcode bit).
-func decodeARM64B(raw uint32, pc uint64) (uint64, bool) {
-	if raw&0xFC000000 != 0x14000000 {
-		return 0, false
-	}
-	imm26 := raw & 0x03FFFFFF
-	offset := signExtend26(imm26) * 4
-	return uint64(int64(pc) + int64(offset)), true //nolint:gosec // signed branch offset re-added to a real VA; result is a valid address by construction
-}
-
-// signExtend26 sign-extends a 26-bit immediate field to a signed 32-bit
-// value; val is always masked to 26 bits by the caller, so the int32
-// conversions below never lose information.
-func signExtend26(val uint32) int32 {
-	const bits = 26
-	sign := uint32(1) << (bits - 1)
-	mask := sign - 1
-	if val&sign != 0 {
-		return int32(val | ^mask) //nolint:gosec // val is a 26-bit field; result fits in int32
-	}
-	return int32(val & mask) //nolint:gosec // val is a 26-bit field; result fits in int32
 }
 
 // --- x86_64 call/branch scanning ---
@@ -370,31 +338,19 @@ func signExtend26(val uint32) int32 {
 func scanX86CallSites(sections []execSection, includeBranches bool) []CallSite {
 	var out []CallSite
 	for _, sec := range sections {
-		data := sec.Data
-		off := 0
-		for off < len(data) {
-			inst, err := x86asm.Decode(data[off:], 64)
-			if err != nil || inst.Len == 0 {
-				off++
-				continue
+		x86.Walk(sec.Data, sec.Addr, func(d x86.Decoded) bool {
+			if d.Bad {
+				return true
 			}
-			isCall := inst.Op == x86asm.CALL
-			isJmp := includeBranches && inst.Op == x86asm.JMP
+			isCall := d.Inst.Op == x86asm.CALL
+			isJmp := includeBranches && d.Inst.Op == x86asm.JMP
 			if isCall || isJmp {
-				for _, arg := range inst.Args {
-					if arg == nil {
-						continue
-					}
-					if rel, ok := arg.(x86asm.Rel); ok {
-						addr := sec.Addr + uint64(off)
-						target := uint64(int64(addr) + int64(inst.Len) + int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
-						out = append(out, CallSite{FromVA: addr, TargetVA: target})
-						break
-					}
+				if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+					out = append(out, CallSite{FromVA: d.VA, TargetVA: target})
 				}
 			}
-			off += inst.Len
-		}
+			return true
+		})
 	}
 	return out
 }

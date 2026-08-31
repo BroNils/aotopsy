@@ -3,14 +3,14 @@ package ffitrace
 import (
 	"testing"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/pipeline"
 )
 
 // arm64Ret is the 4-byte little-endian encoding of ARM64 "ret" (0xD65F03C0)
 // -- used to build minimal, valid, non-crashing synthetic "functions" for
-// pipeline.Context.FuncIRFor without needing a real ELF/snapshot.
+// analysis.AnalysisContext.FuncIRFor without needing a real ELF/snapshot.
 var arm64Ret = []byte{0xC0, 0x03, 0x5F, 0xD6}
 
 // TestFindDynamicLibraryCalls_ResolvesLiteralArg verifies the happy path:
@@ -18,7 +18,7 @@ var arm64Ret = []byte{0xC0, 0x03, 0x5F, 0xD6}
 // resolved direct call to a symbol named like a dart:ffi DynamicLibrary
 // method produces a Finding with Resolved=true and the literal captured.
 func TestFindDynamicLibraryCalls_ResolvesLiteralArg(t *testing.T) {
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.open"},
 		PoolDisplay: map[int]string{7: `"libbatteryOpt.so"`},
 	}
@@ -53,7 +53,7 @@ func TestFindDynamicLibraryCalls_ResolvesLiteralArg(t *testing.T) {
 // preceding pool-load literal in scope must report Resolved=false, not
 // guess or fabricate a value -- per Komponen H's "don't guess" rule.
 func TestFindDynamicLibraryCalls_UnresolvedWithoutLiteral(t *testing.T) {
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup"},
 		PoolDisplay: map[int]string{},
 	}
@@ -79,7 +79,7 @@ func TestFindDynamicLibraryCalls_UnresolvedWithoutLiteral(t *testing.T) {
 // false positives are avoided: indirect (register-target) calls and
 // direct calls to unrelated symbols must not produce findings.
 func TestFindDynamicLibraryCalls_IgnoresIndirectAndUnrelatedCalls(t *testing.T) {
-	ctx := &pipeline.Context{
+	ctx := &analysis.AnalysisContext{
 		SymbolNames: map[uint64]string{0x2000: "SomeUnrelatedFunction"},
 		PoolDisplay: map[int]string{7: `"not_a_library_call"`},
 	}
@@ -146,14 +146,14 @@ func TestTrace_MaxScanOverridesDefault(t *testing.T) {
 	}
 }
 
-// syntheticContext builds a minimal, valid pipeline.Context with n
+// syntheticContext builds a minimal, valid analysis.AnalysisContext with n
 // bare-"ret" synthetic functions, laid out contiguously starting at VA
 // 0x1000, 4 bytes apart -- enough for FuncIRFor to disassemble without
 // a real ELF/snapshot. Only the fields FuncIRFor/Trace actually read
 // (Code, CodeVA, CodeOff, Ranges, SymbolNames, IsARM64, DartVersion,
 // PoolDisplay) are populated; EF/Info/Result/Pool/SymbolSizes are left
 // zero-valued since nothing under test touches them.
-func syntheticContext(n int) *pipeline.Context {
+func syntheticContext(n int) *analysis.AnalysisContext {
 	code := make([]byte, 0, n*len(arm64Ret))
 	ranges := make([]cluster.CodeRange, 0, n)
 	symbolNames := make(map[uint64]string, n)
@@ -163,7 +163,7 @@ func syntheticContext(n int) *pipeline.Context {
 		ranges = append(ranges, cluster.CodeRange{RefID: i, PCOffset: off, Size: uint32(len(arm64Ret))})
 		symbolNames[0x1000+uint64(off)] = "synthetic_fn"
 	}
-	return &pipeline.Context{
+	return &analysis.AnalysisContext{
 		Code:        code,
 		CodeVA:      0x1000,
 		CodeOff:     0,

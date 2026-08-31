@@ -3,6 +3,9 @@ package decompiler
 import (
 	"fmt"
 	"strings"
+
+	"aotopsy/internal/cluster"
+	"aotopsy/internal/sdk"
 )
 
 func identifyLoopHeaders(fir *FuncIR) map[int]bool {
@@ -128,11 +131,21 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// dangling goto.
 	e.emit(indent, "block_%d:;", id)
 	e.annotateInlineFrames(blk.StartVA, indent)
-	// Forward dataflow join: fill live-in registers every already-emitted
-	// predecessor agrees on but the taken path left unknown.
-	e.seedFromEmittedPreds(id)
+	// Reaching-definition fixpoint: fill live-in registers the recursive walk
+	// left unknown but a value-flow fixpoint proves consistent (see ssa.go).
+	e.seedFromFixpoint(id)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
+		// CSM liveness: if a CompressedStackMaps entry exists at this PC
+		// offset, kill registers that are dead at this safepoint. This
+		// removes stores to temporaries that the GC doesn't see as live,
+		// improving pseudocode quality (fewer dead assignments).
+		if e.csmByPC != nil && e.fir.EntryVA > 0 && ins.Addr >= e.fir.EntryVA {
+			pcOff := uint32(ins.Addr - e.fir.EntryVA)
+			if sm, ok := e.csmByPC[pcOff]; ok {
+				e.killDeadRegsAtSafepoint(sm)
+			}
+		}
 		// RegClass invariant: drop the tracked class of any register this
 		// instruction overwrites BEFORE lifting it, so a stale type can never
 		// survive a redefinition (see LiftState.RegClass).
@@ -162,7 +175,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				if !ok {
 					cond = "/* cond */"
 				}
-				if isStackOverflowCond(cond) {
+				if sdk.IsStackOverflowCond(cond) || sdk.IsWriteBarrierCond(cond) {
 					continue
 				}
 				var takenID = -1
@@ -228,15 +241,15 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				e.stats.NonLastBranch++
 			}
 		default:
-			if line, ok := ApplyOther(e.fir, e.state, ins); ok {
+			if line, ok := ApplyOther(e.fir, e.state, ins); ok && !sdk.IsWriteBarrierStmt(line) {
 				e.emit(indent, "%s", line)
 			}
 		}
+		// SSA phi: if this instruction redefined a loop-carried (pinned)
+		// register, emit its update as an explicit assignment to the induction
+		// local and re-pin, so the loop body carries the value across iterations.
+		e.updatePinnedPhis(indent)
 	}
-
-	// Record this block's OUT state (after its own instructions, before any
-	// successor recursion) for downstream forward joins.
-	e.recordBlockOut(id)
 
 	// Fallthrough / unconditional-jump successor for blocks whose last
 	// instruction wasn't itself a control-flow op (e.g. ends mid-block
@@ -282,8 +295,20 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 	// `while (true) { ... }` when the condition can be recovered.
 	isLoopHeader := e.loopHeaders[id]
 	if isLoopHeader && e.visits[id] == 0 {
-		// A4: Try while-loop condition (for-loop is a post-emit pass)
+		// SSA phi materialization: declare an induction local for each
+		// loop-carried register just before the loop, initialized to its
+		// entry value, and pin the register to that local so its header read
+		// resolves to a name and its in-loop updates emit explicitly.
+		e.declareLoopPhis(id, indent)
+		// A4: Try while-loop condition (for-loop is a post-emit pass). A recovered
+		// condition that is really a runtime stack-overflow or write-barrier check
+		// (a back-edge safepoint the loop detector latched onto) is not a source
+		// loop condition -- fall back to while(true) rather than printing the
+		// compiler bookkeeping as the loop guard.
 		loopCond := e.extractLoopCondition(id)
+		if loopCond != "" && (sdk.IsStackOverflowCond(loopCond) || sdk.IsWriteBarrierCond(loopCond)) {
+			loopCond = ""
+		}
 		if loopCond != "" {
 			e.emit(indent, "while (%s) {", loopCond)
 		} else {
@@ -458,7 +483,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// The slow path calls the runtime and exits/retries; the fallthrough
 	// is the normal body. Modeling this as 2-way if/else duplicates the entire body.
 	// We elide the check and continue directly into the normal function body.
-	if isStackOverflowCond(cond) {
+	if sdk.IsStackOverflowCond(cond) {
 		normalID := fallID
 		if strings.Contains(cond, ">") || strings.Contains(cond, "!=") {
 			normalID = takenID
@@ -468,6 +493,21 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 			if normalID < 0 {
 				normalID = takenID
 			}
+		}
+		if normalID >= 0 {
+			e.emitSuccessor(normalID, indent, depth)
+			return
+		}
+	}
+
+	// Generational write-barrier check elision (see isWriteBarrierCond). The
+	// ZERO/EQ edge skips the barrier stub -- that is the normal continuation, and
+	// the store the check guards was already emitted, so follow it and drop the
+	// stub-call path entirely.
+	if sdk.IsWriteBarrierCond(cond) {
+		normalID := takenID // b(&done, ZERO): the taken (== 0) edge skips the stub
+		if normalID < 0 {
+			normalID = fallID
 		}
 		if normalID >= 0 {
 			e.emitSuccessor(normalID, indent, depth)
@@ -490,24 +530,9 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	e.emit(indent, "}")
 }
 
-// isStackOverflowCond reports whether a branch condition is a Dart runtime
-// stack-overflow check: `CMP SP, [THR + stack_limit]`.
-//
-// It requires the SPECIFIC `stack_limit` thread-field token (audit D1), not just
-// any THR reference, so an ordinary comparison against some other THR field can
-// never be mistaken for the prologue guard and have its branch elided. The stack
-// pointer is x15 on ARM64 (verified: `SPREG = R15` in constants_arm64.h) and
-// rsp on x86_64.
-func isStackOverflowCond(cond string) bool {
-	if cond == "" {
-		return false
-	}
-	if !strings.Contains(cond, "stack_limit") {
-		return false
-	}
-	return strings.Contains(cond, "x15") || strings.Contains(cond, "SP") ||
-		strings.Contains(cond, "rsp") || strings.Contains(cond, "RSP")
-}
+// isStackOverflowCond and isWriteBarrierCond/Stmt are now in internal/sdk —
+// shared with disasm, typetrack, and signal. The SDK ground-truth comments
+// moved with them.
 
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
 	switch ins.CondKind {
@@ -591,3 +616,99 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 	e.stats.UnresolvedCF++
 }
 
+// killDeadRegsAtSafepoint uses CompressedStackMaps liveness data to drop
+// register values that are dead at a GC safepoint. The NonSpillBits bitmap
+// has bit i set when non-spill register i holds a live object at this PC.
+// Registers whose bit is clear and whose current value is a non-constant
+// expression (not a reserved register like THR/PP/SP) are killed, removing
+// dead stores from the pseudocode.
+//
+// This is conservative: it only kills registers that the CSM says are NOT
+// live, and only if the register currently holds a non-reserved value.
+// Reserved registers (THR, PP, SP, HEAP_BITS, CODE, argsDesc) are never
+// killed because they are function-invariant, not temporaries.
+func (e *emitter) killDeadRegsAtSafepoint(sm cluster.StackMapEntry) {
+	if len(sm.NonSpillBits) == 0 {
+		return
+	}
+	reserved := map[string]bool{
+		e.fir.ThreadReg: true, e.fir.PoolReg: true, e.fir.StackReg: true,
+		e.fir.HeapBitsReg: true, e.fir.CodeReg: true, e.fir.ArgsDescReg: true,
+		e.fir.NullReg: true, e.fir.FrameReg: true, e.fir.LinkReg: true,
+		e.fir.ReturnReg: true,
+	}
+	for reg := range e.state.Regs {
+		if reserved[reg] {
+			continue
+		}
+		// Try to map register name to a non-spill bitmap index.
+		// ARM64: x0-x30 → index 0-30. x86_64: rax-r15 → index 0-15.
+		idx := regNameToCSMIndex(reg, e.fir.ArgRegs)
+		if idx < 0 || idx >= len(sm.NonSpillBits)*8 {
+			continue
+		}
+		bit := sm.NonSpillBits[idx/8] & (1 << uint(idx%8))
+		if bit == 0 {
+			// Register is dead at this safepoint — kill it.
+			delete(e.state.Regs, reg)
+			e.stats.CSMDeadRegsKilled++
+		}
+	}
+}
+
+// regNameToCSMIndex maps a canonical register name to its index in the CSM
+// NonSpillBits bitmap. ARM64: x0-x30 → 0-30. x86_64: rax-r15 → 0-15.
+// Returns -1 for unrecognized names.
+func regNameToCSMIndex(reg string, argRegs []string) int {
+	// ARM64: x0-x30, w0-w30
+	if len(reg) >= 2 && (reg[0] == 'x' || reg[0] == 'w') {
+		n := 0
+		for _, c := range reg[1:] {
+			if c >= '0' && c <= '9' {
+				n = n*10 + int(c-'0')
+			} else {
+				return -1
+			}
+		}
+		if n <= 30 {
+			return n
+		}
+	}
+	// x86_64: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7,
+	// r8-r15 = 8-15. Also handle sub-width aliases (eax, ax, al, etc.)
+	switch reg {
+	case "rax", "eax", "ax", "al":
+		return 0
+	case "rcx", "ecx", "cx", "cl":
+		return 1
+	case "rdx", "edx", "dx", "dl":
+		return 2
+	case "rbx", "ebx", "bx", "bl":
+		return 3
+	case "rsp", "esp", "sp":
+		return 4
+	case "rbp", "ebp", "bp":
+		return 5
+	case "rsi", "esi", "si":
+		return 6
+	case "rdi", "edi", "di":
+		return 7
+	case "r8", "r8d", "r8w", "r8b":
+		return 8
+	case "r9", "r9d", "r9w", "r9b":
+		return 9
+	case "r10", "r10d", "r10w", "r10b":
+		return 10
+	case "r11", "r11d", "r11w", "r11b":
+		return 11
+	case "r12", "r12d", "r12w", "r12b":
+		return 12
+	case "r13", "r13d", "r13w", "r13b":
+		return 13
+	case "r14", "r14d", "r14w", "r14b":
+		return 14
+	case "r15", "r15d", "r15w", "r15b":
+		return 15
+	}
+	return -1
+}

@@ -4,14 +4,16 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdk"
 )
 
 // A block whose middle instruction is a branch: the emitter must produce a
 // goto whose label exists, and must not leave labels nobody jumps to.
 func TestNonLastBranchGotoHasLabel(t *testing.T) {
 	fir := newFuncIR("t", 0x1000)
-	fir.ThreadReg = "x26"
-	fir.PoolReg = "x27"
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
 	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
 		{Addr: 0x1000, Op: OpBranch, CondKind: "cmp", CondOp: "eq"},
 		{Addr: 0x1004, Op: OpReturn, Src: "ret"},
@@ -63,7 +65,7 @@ func TestGeneratorModifierPrecedence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		fir := newFuncIR("t", 0x1000)
-		fir.ThreadReg, fir.PoolReg = "x26", "x27"
+		fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
 		fir.IsAsync, fir.IsSyncStar, fir.IsAsyncStar = tt.isAsync, tt.isSyncStar, tt.isAsyncS
 		fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Addr: 0x1000, Op: OpReturn, Src: "ret"}}})
 		src := EmitPseudocode(fir, nil, nil).Source

@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // runCompact is the way these passes are actually reached in production.
@@ -12,11 +14,11 @@ func assertBalanced(t *testing.T, got string) {
 	t.Helper()
 	depth := 0
 	for _, line := range strings.Split(got, "\n") {
-		_, text, ok := splitIndent(line)
+		_, text, ok := stmt.SplitIndent(line)
 		if !ok {
 			continue
 		}
-		depth += braceDelta(text)
+		depth += stmt.BraceDelta(text)
 		if depth < 0 {
 			t.Fatalf("brace depth went negative:\n%s", got)
 		}

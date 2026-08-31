@@ -98,9 +98,9 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		BLRAtBottom           int `json:"blr_at_bottom,omitempty"`
 		BLRAtOther            int `json:"blr_at_other,omitempty"`
 		// Field type source breakdown.
-		FieldTypeDeclaredHits   int `json:"field_type_declared_hits,omitempty"`
-		FieldTypeInstanceHits   int `json:"field_type_instance_hits,omitempty"`
-		FieldTypeStoreHits      int `json:"field_type_store_hits,omitempty"`
+		FieldTypeDeclaredHits    int `json:"field_type_declared_hits,omitempty"`
+		FieldTypeInstanceHits    int `json:"field_type_instance_hits,omitempty"`
+		FieldTypeStoreHits       int `json:"field_type_store_hits,omitempty"`
 		FieldTypeDeclaredClasses int `json:"field_type_declared_classes,omitempty"`
 		FieldTypeStoreClasses    int `json:"field_type_store_classes,omitempty"`
 		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`

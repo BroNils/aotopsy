@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/elfx"
-	"aotopsy/internal/pipeline"
 )
 
 // cmdGhidra handles "aotopsy ghidra <libapp.so>" — full pipeline + Ghidra decompilation.
@@ -54,21 +54,21 @@ func cmdGhidra(args []string) error {
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
-	var pipeResult *pipeline.Result
+	var pipeResult *analysis.Result
 	if *from != "" {
 		// Reuse existing output: just regenerate signal + meta.
-		_, err := pipeline.RunSignalStage(*from, 2, false, quiet, os.Stderr)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}
-		metaPath, err := pipeline.RunMetaStage(*from, "", *all, quiet, os.Stderr)
+		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("meta: %w", err)
 		}
-		pipeResult = &pipeline.Result{OutDir: *from, MetaPath: metaPath}
+		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
-		pipeResult, err = pipeline.Run(pipeline.Opts{
+		pipeResult, err = analysis.Run(analysis.Opts{
 			LibPath:   libPath,
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,
@@ -91,18 +91,18 @@ func cmdGhidra(args []string) error {
 	// This ensures Ghidra always finds both scripts, regardless of install layout.
 	absOutDir, _ := filepath.Abs(pipeResult.OutDir)
 	scriptPath := filepath.Join(absOutDir, "ghidra")
-	if copyErr := copyGhidraArtifacts(pipeResult.OutDir); copyErr != nil {
+	if copyErr := analysis.CopyGhidraArtifacts(pipeResult.OutDir); copyErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not copy Ghidra scripts: %v\n", copyErr)
 		// Fallback: find scripts in their original location.
 		var findErr error
-		scriptPath, findErr = findScriptPath()
+		scriptPath, findErr = analysis.FindScriptPath()
 		if findErr != nil {
 			return fmt.Errorf("Ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
 		}
 	}
 
 	// Step 3: Find Ghidra.
-	ghLauncher, ghHome, err := findGhidra(*ghidraHome)
+	ghLauncher, ghHome, err := analysis.FindGhidra(*ghidraHome)
 	if err != nil {
 		return err
 	}
@@ -118,9 +118,9 @@ func cmdGhidra(args []string) error {
 	absMetaPath, _ := filepath.Abs(metaPath)
 	absDecompDir, _ := filepath.Abs(decompDir)
 
-	projectName := sanitizeProjectName(filepath.Base(filepath.Dir(pipeResult.OutDir)))
+	projectName := analysis.SanitizeProjectName(filepath.Base(filepath.Dir(pipeResult.OutDir)))
 
-	absProjDir := sanitizeGhidraPath(*projectDir)
+	absProjDir := analysis.SanitizeGhidraPath(*projectDir)
 	if err := os.MkdirAll(absProjDir, 0o755); err != nil {
 		return fmt.Errorf("create project dir: %w", err)
 	}
@@ -147,13 +147,13 @@ func cmdGhidra(args []string) error {
 
 	env := os.Environ()
 	if os.Getenv("JAVA_HOME") == "" {
-		javaHome := findJavaHome(ghHome)
+		javaHome := analysis.FindJavaHome(ghHome)
 		if javaHome != "" {
 			env = append(env, "JAVA_HOME="+javaHome)
 		}
 	}
 
-	cmd := exec.Command(ghLauncher.cmd, append(ghLauncher.prefix, ghidraArgs...)...)
+	cmd := exec.Command(ghLauncher.Cmd, append(ghLauncher.Prefix, ghidraArgs...)...)
 	cmd.Env = env
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -162,7 +162,7 @@ func cmdGhidra(args []string) error {
 		return fmt.Errorf("analyzeHeadless failed: %w", err)
 	}
 
-	cCount := countDecompiledFiles(absDecompDir)
+	cCount := analysis.CountDecompiledFiles(absDecompDir)
 	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
 
 	return nil
@@ -175,7 +175,7 @@ func launchGhidraGUI(ghidraHome, libPath, outDir string) error {
 		return fmt.Errorf("ghidraRun not found at %s", ghidraRun)
 	}
 
-	scriptPath, err := findScriptPath()
+	scriptPath, err := analysis.FindScriptPath()
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func launchGhidraGUI(ghidraHome, libPath, outDir string) error {
 
 	env := os.Environ()
 	if os.Getenv("JAVA_HOME") == "" {
-		javaHome := findJavaHome(ghidraHome)
+		javaHome := analysis.FindJavaHome(ghidraHome)
 		if javaHome != "" {
 			env = append(env, "JAVA_HOME="+javaHome)
 		}

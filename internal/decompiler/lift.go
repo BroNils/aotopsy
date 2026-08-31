@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // LiftState is the per-function symbolic-execution state: register and
@@ -568,49 +570,29 @@ func isPointerDecompression(fir *FuncIR, mnemonic, srcTok, shiftTok string) bool
 	}
 	// ARM64: the heap-bits register shifted left by 32.
 	if fir.HeapBitsReg != "" && strings.ToLower(strings.TrimSpace(srcTok)) == fir.HeapBitsReg {
-		spec := strings.ToLower(strings.TrimSpace(shiftTok))
-		i := strings.Index(spec, "#")
-		return strings.HasPrefix(spec, "lsl") && i >= 0 && strings.TrimSpace(spec[i+1:]) == "32"
+		return sdk.IsARM64PointerDecompression(srcTok, shiftTok)
 	}
 	// x86_64: an add of the Thread's heap_base field.
 	if fir.ThreadFieldNames != nil {
 		if op := parseOperand(srcTok); op.isMem && op.hasDisp &&
 			strings.ToLower(op.memBase) == fir.ThreadReg {
-			return fir.ThreadFieldNames[op.memDisp] == "heap_base"
+			return sdk.IsX86PointerDecompression(op.memBase, op.memDisp, fir.ThreadFieldNames)
 		}
 	}
 	return false
 }
 
-// cachedVMObjectValues are the Thread fields that cache a VM OBJECT rather
-// than an address, so loading one yields that object itself.
-//
-// dart-lang/sdk's thread.h lists them in CACHED_VM_OBJECTS_LIST alongside the
-// stub entry points; these three are the ones with a spelling in source.
-// x86_64 reaches null this way because constants_x64.h defines no NULL_REG --
-// where ARM64 reads R22, x64 reads Thread.
-var cachedVMObjectValues = map[string]string{
-	"object_null": "null",
-	"bool_true":   "true",
-	"bool_false":  "false",
-}
+// cachedVMObjectValues moved to internal/sdk.CachedVMObjectValue — shared
+// with disasm (annotation) and signal (classification).
 
 // stackSlotExpr renders a stack-pointer-relative access as a slot rather than
 // a field, reporting ok=false when the base is not the Dart stack pointer.
-//
-// The SDK names the register SPREG -- R15 on ARM64 ("SP in Dart code" in
-// constants_arm64.h), RSP on x86_64. A displacement off it is a stack slot,
-// so field notation misdescribes it: the output claimed `x15.m16` and
-// `rsp.f8` for stack traffic, and `rsp._tag` for an object header the stack
-// pointer does not have.
+// Uses sdk.StackSlotName for the naming convention (stack_pN/stack_mN/stack_sp).
 func stackSlotExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 	if fir.StackReg == "" || baseReg != fir.StackReg {
 		return "", false
 	}
-	if off < 0 {
-		return fmt.Sprintf("[SP-%d]", -off), true
-	}
-	return fmt.Sprintf("[SP+%d]", off), true
+	return sdk.StackSlotName(off), true
 }
 
 // threadFieldExpr renders a Thread-relative access using the SDK-derived
@@ -624,7 +606,7 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if v, isValue := cachedVMObjectValues[name]; isValue {
+	if v, isValue := sdk.CachedVMObjectValue(name); isValue {
 		return v, true
 	}
 	return "THR." + name, true
@@ -643,8 +625,8 @@ func threadFieldExpr(fir *FuncIR, baseReg string, off int64) (string, bool) {
 // `THR.orientation` and `THR.tilt`. Thread has no such fields.
 //
 // Rendering `THR.f88` instead says only what is known. THR offsets that ARE
-// identified come from the SDK-derived tables in internal/disasm
-// (thrfields.go / thrfields_x64.go), applied by the annotator, not from
+// identified come from the SDK-derived tables in internal/vmtables
+// (thrfields.go / thrfieldsx86.go), applied by the annotator, not from
 // class layouts.
 func dartFieldResolver(fir *FuncIR, s *LiftState, baseReg string) func(int64, int64) string {
 	if fir.FieldNameResolver == nil || baseReg == fir.ThreadReg ||
@@ -729,7 +711,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			if mnemonic != "lea" && fir.ThreadStubOffsets != nil {
 				if memOp := parseOperand(ops[1]); memOp.isMem && memOp.hasDisp && strings.ToLower(memOp.memBase) == fir.ThreadReg {
 					if name, ok := fir.ThreadStubOffsets[memOp.memDisp]; ok {
-						s.setReg(dst, thrStubSentinelPrefix + name)
+						s.setReg(dst, thrStubSentinelPrefix+name)
 						return "", false
 					}
 				}
@@ -971,7 +953,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 				return fmt.Sprintf("%s = %s;", slot, valExpr), true
 			}
 		}
-		return fmt.Sprintf("[SP] = %s;", valExpr), true
+		return fmt.Sprintf("stack_sp = %s;", valExpr), true
 	}
 	baseExpr := s.lookupReg(base)
 	lhs := baseExpr
@@ -1089,18 +1071,8 @@ func boolFromNullOffset(fir *FuncIR, mnemonic, lhs, imm string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	switch v {
-	case kTrueOffsetFromNull:
-		return "true", true
-	case kFalseOffsetFromNull:
-		return "false", true
-	}
-	return "", false
+	return sdk.BoolFromNullOffset(v)
 }
 
-// Offsets of the canonical bool objects from null, in bytes. See
-// boolFromNullOffset for the SDK references.
-const (
-	kTrueOffsetFromNull  = 32
-	kFalseOffsetFromNull = 48
-)
+// kTrueOffsetFromNull / kFalseOffsetFromNull moved to internal/sdk
+// (TrueOffsetFromNull / FalseOffsetFromNull).

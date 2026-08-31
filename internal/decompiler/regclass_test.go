@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdk"
 )
 
 // TestRegClassAllocationFieldTyping verifies that a field access on a freshly
@@ -13,8 +15,8 @@ import (
 func TestRegClassAllocationFieldTyping(t *testing.T) {
 	fir := newFuncIR("build_thing", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
-	fir.FrameReg = arm64FrameReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.FrameReg = sdk.ARM64FrameRegStr
 	fir.ClassNameToID = map[string]int{"Foo": 42}
 	fir.FieldNameResolver = func(classID int, off int64) string {
 		if classID == 42 && off == 8 {
@@ -68,8 +70,8 @@ func TestRegClassAllocationFieldTyping(t *testing.T) {
 func TestRegClassFieldTypeChain(t *testing.T) {
 	fir := newFuncIR("walk_chain", 0x2000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.ReturnReg = arm64ReturnReg
-	fir.FrameReg = arm64FrameReg
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.FrameReg = sdk.ARM64FrameRegStr
 	fir.ReceiverClassID = 10
 	fir.FieldNameResolver = func(classID int, off int64) string {
 		switch {
@@ -91,8 +93,8 @@ func TestRegClassFieldTypeChain(t *testing.T) {
 		ID:      0,
 		StartVA: 0x2000,
 		Instrs: []Instr{
-			{Addr: 0x2000, Op: OpOther, Src: "ldr x1, [x0, #7]"},  // x1 = this.child (class 20)
-			{Addr: 0x2004, Op: OpOther, Src: "str x2, [x1, #15]"}, // x1.inner = x2
+			{Addr: 0x2000, Op: OpOther, Src: "ldr x3, [x1, #7]"},  // x3 = this.child (class 20)
+			{Addr: 0x2004, Op: OpOther, Src: "str x2, [x3, #15]"}, // x3.inner = x2
 			{Addr: 0x2008, Op: OpReturn, Src: "ret"},
 		},
 	})

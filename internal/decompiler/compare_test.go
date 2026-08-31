@@ -1,6 +1,10 @@
 package decompiler
 
-import "testing"
+import (
+	"testing"
+
+	"aotopsy/internal/sdk"
+)
 
 // The three flag-setting compares, checked against how dart-lang/sdk's own
 // ARM64 assembler defines them (assembler_arm64.h at 3.9.2):
@@ -10,7 +14,7 @@ import "testing"
 //	tst(rn, o) -> ands(ZR, rn, o)   flags from rn & o
 func lastCmpOf(t *testing.T, srcs ...string) ([2]string, bool) {
 	t.Helper()
-	fir := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg}
+	fir := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr}
 	s := newLiftState("")
 	for _, src := range srcs {
 		ApplyOther(fir, s, Instr{Src: src})
@@ -112,15 +116,15 @@ func TestX86TestUsesBothOperands(t *testing.T) {
 //	assembler_arm64.h  add(dst, dst, Operand(HEAP_BITS, LSL, 32))
 //	assembler_x64.cc   movl(dest, slot); addq(dest, Address(THR, heap_base_offset()))
 func TestPointerDecompressionIsElided(t *testing.T) {
-	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
-		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg}
+	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+		NullReg: sdk.ARM64NullRegStr, HeapBitsReg: sdk.ARM64HeapBitsStr}
 	s := newLiftState(arm.NullReg)
 	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #32"})
 	if got := s.lookupReg("x0"); got != "x1" {
 		t.Errorf("ARM64 decompression should render as the operand alone, got %q", got)
 	}
 
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14",
+	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr,
 		ThreadFieldNames: map[int64]string{0x68: "heap_base"}}
 	sx := newLiftState("")
 	sx.Regs["rax"] = "obj"
@@ -133,8 +137,8 @@ func TestPointerDecompressionIsElided(t *testing.T) {
 // A shift that is not by 32, or a Thread field that is not heap_base, is
 // ordinary arithmetic and must survive.
 func TestNonDecompressionAddsSurvive(t *testing.T) {
-	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
-		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg}
+	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+		NullReg: sdk.ARM64NullRegStr, HeapBitsReg: sdk.ARM64HeapBitsStr}
 	s := newLiftState(arm.NullReg)
 	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #16"})
 	if got := s.lookupReg("x0"); got == "x1" {
@@ -145,7 +149,7 @@ func TestNonDecompressionAddsSurvive(t *testing.T) {
 		t.Errorf("only the heap-bits register marks decompression, got %q", got)
 	}
 
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14",
+	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr,
 		ThreadFieldNames: map[int64]string{0x68: "heap_base", 0x70: "stack_limit"}}
 	sx := newLiftState("")
 	sx.Regs["rax"] = "obj"
@@ -162,28 +166,28 @@ func TestNonDecompressionAddsSurvive(t *testing.T) {
 // which asserts an object header the stack pointer does not have. 4588 such
 // renderings on the 3.x ARM64 sample and 5150 on x86_64.
 func TestStackSlotsAreNotFields(t *testing.T) {
-	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
-		NullReg: arm64NullReg, HeapBitsReg: arm64HeapBitsReg, StackReg: arm64StackReg}
+	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+		NullReg: sdk.ARM64NullRegStr, HeapBitsReg: sdk.ARM64HeapBitsStr, StackReg: sdk.ARM64StackRegStr}
 	s := newLiftState(arm.NullReg)
 	ApplyOther(arm, s, Instr{Src: "ldr x0, [x15, #8]"})
-	if got := s.lookupReg("x0"); got != "[SP+8]" {
-		t.Errorf("ARM64 stack load = %q, want %q", got, "[SP+8]")
+	if got := s.lookupReg("x0"); got != "stack_p8" {
+		t.Errorf("ARM64 stack load = %q, want %q", got, "stack_p8")
 	}
 	line, ok := ApplyOther(arm, s, Instr{Src: "str x1, [x15, #-16]"})
-	if !ok || line != "[SP-16] = x1;" {
-		t.Errorf("ARM64 stack store = %q (ok=%v), want %q", line, ok, "[SP-16] = x1;")
+	if !ok || line != "stack_m16 = x1;" {
+		t.Errorf("ARM64 stack store = %q (ok=%v), want %q", line, ok, "stack_m16 = x1;")
 	}
 
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: "r15", ThreadReg: "r14", StackReg: x86StackReg}
+	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr, StackReg: sdk.X86StackRegStr}
 	sx := newLiftState("")
 	ApplyOther(x64, sx, Instr{Src: "mov rax, [rsp+0x8]"})
-	if got := sx.lookupReg("rax"); got != "[SP+8]" {
-		t.Errorf("x86_64 stack load = %q, want %q", got, "[SP+8]")
+	if got := sx.lookupReg("rax"); got != "stack_p8" {
+		t.Errorf("x86_64 stack load = %q, want %q", got, "stack_p8")
 	}
 	// -1 is the object-header offset for real objects; the stack pointer has
 	// no header, so it must not render as ._tag.
 	ApplyOther(x64, sx, Instr{Src: "mov rcx, [rsp-0x1]"})
-	if got := sx.lookupReg("rcx"); got != "[SP-1]" {
-		t.Errorf("x86_64 [rsp-1] = %q, want %q -- never ._tag", got, "[SP-1]")
+	if got := sx.lookupReg("rcx"); got != "stack_m1" {
+		t.Errorf("x86_64 [rsp-1] = %q, want %q -- never ._tag", got, "stack_m1")
 	}
 }

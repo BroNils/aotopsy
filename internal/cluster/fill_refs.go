@@ -12,10 +12,10 @@ import (
 // When spec.IsField is true, also extracts kind_bits and host_offset from scalars.
 // For ICData, Script, LoadingUnit, KernelProgramInfo: captures all refs and
 // scalars into CID-specific structured types.
-func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]NamedObject, []FuncTypeInfo, []FieldInfo, []TypeInfo, []ICDataInfo, []ScriptInfo, []LoadingUnitInfo, []KernelProgramInfoRef, []ClosureDataInfo, []TypeParametersInfo, error) {
+func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]NamedObject, []FuncTypeInfo, []FieldInfo, []TypeInfo, []ICDataInfo, []ScriptInfo, []LoadingUnitInfo, []KernelProgramInfoRef, []ClosureDataInfo, []TypeParametersInfo, []ClosureInfo, []FfiTrampolineInfo, error) {
 	count := int(cm.Count)
 	if count <= 0 {
-		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
 	}
 
 	// Capture into `named` (and thus RefToNamed) whenever there's either a
@@ -49,12 +49,13 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 	var kpiRefs []KernelProgramInfoRef
 	var closureDataInfos []ClosureDataInfo
 	var typeParamInfos []TypeParametersInfo
+	var ffiTrampolineInfos []FfiTrampolineInfo
 	// Second line of defence for the nil-profile crash fixed in
 	// fillOneCluster: a nil profile (or nil CID table) now disables
 	// CID-specific capture instead of panicking. The scalar/ref *stream
 	// reads* below are driven by spec, not by profile, so skipping capture
 	// keeps the stream aligned.
-	var isICData, isScript, isLoadingUnit, isKPI, isClosureData, isTypeParameters bool
+	var isICData, isScript, isLoadingUnit, isKPI, isClosureData, isTypeParameters, isClosure, isFfiTrampoline bool
 	// isOldType marks the Dart 2.10-2.15 Type layout, where type_class_id is
 	// a REF (a Smi) inside ReadFromTo rather than a scalar. Capturing it
 	// needs allRefs, so it has to be in the set below -- it was not, so the
@@ -74,7 +75,14 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		isKPI = cm.CID == profile.CIDs.KernelProgramInfo
 		isClosureData = cm.CID == profile.CIDs.ClosureData
 		isTypeParameters = profile.CIDs.TypeParameters != 0 && cm.CID == profile.CIDs.TypeParameters
+		isClosure = cm.CID == profile.CIDs.Closure
 		isOldType = profile.TypeClassIdIsRef && cm.CID == profile.CIDs.Type
+		isFfiTrampoline = profile.CIDs.FfiTrampolineData != 0 && cm.CID == profile.CIDs.FfiTrampolineData
+	}
+
+	var closures []ClosureInfo
+	if isClosure {
+		closures = make([]ClosureInfo, 0, count)
 	}
 
 	ref := cm.StartRef
@@ -82,7 +90,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		// v2.10: Read<bool>(is_canonical) — 1 raw byte before refs.
 		if spec.LeadingBool {
 			if _, err := s.ReadByte(); err != nil {
-				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d is_canonical: %w", i, count, err)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d is_canonical: %w", i, count, err)
 			}
 		}
 
@@ -107,10 +115,10 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		if spec.VarLenRefs {
 			n, err := s.ReadUnsigned()
 			if err != nil {
-				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d varlen length: %w", i, count, err)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d varlen length: %w", i, count, err)
 			}
 			if n < 0 || int(n) > 1<<20 {
-				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d varlen length %d out of range", i, count, n)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d varlen length %d out of range", i, count, n)
 			}
 			numRefs += int(n)
 		}
@@ -118,9 +126,9 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		for j := 0; j < numRefs; j++ {
 			r, err := readRef(s, fillRefUnsigned)
 			if err != nil {
-				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
 			}
-			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType {
+			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType || isClosure || isFfiTrampoline {
 				allRefs = append(allRefs, int(r))
 			}
 			if j == spec.NameIdx {
@@ -178,12 +186,12 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			switch {
 			case spec.IsFunction:
 				if err := readFunctionScalar(s, si, len(spec.Scalars), &ss, i, count, profile, op, funcPackedFieldsFor(profile.DartVersion)); err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 			case spec.IsFuncType:
 				fti, err := readFuncTypeScalar(s, si, ref, paramTypesRef, typeParamsRef, resultTypeRef, namedParamNamesRef, i, count, op, spec.PackedParams)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if fti != nil {
 					funcTypes = append(funcTypes, *fti)
@@ -191,7 +199,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			case spec.IsField:
 				fi, err := readFieldScalar(s, si, ref, nameRef, ownerRef, sigRef, fieldTypeRef, &ss, i, count, op)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if fi != nil {
 					fields = append(fields, *fi)
@@ -199,22 +207,26 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			case spec.IsType:
 				ti, err := readTypeScalar(s, si, ref, i, count, op, spec.TypeClassIDIsScalar0, spec.TypeClassIDShift)
 				if err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if ti != nil {
 					types = append(types, *ti)
 				}
 			case isScript:
 				if err := readScriptScalar(s, si, profile, &ss, i, count); err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 			case isLoadingUnit:
 				if err := readLoadingUnitScalar(s, &ss, i, count); err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
+				}
+			case isFfiTrampoline:
+				if err := readFfiTrampolineScalar(s, si, &ss, op); err != nil {
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 			default:
 				if err := skipScalar(s, op); err != nil {
-					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, fmt.Errorf("obj %d/%d scalar: %w", i, count, err)
+					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d scalar: %w", i, count, err)
 				}
 			}
 		}
@@ -237,6 +249,16 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				TargetNameRef: allRefs[0],
 				ArgsDescRef:   allRefs[1],
 				EntriesRef:    allRefs[2],
+			})
+		}
+		if isClosure && len(allRefs) >= 4 {
+			// UntaggedClosure ReadFromTo: instantiator_type_arguments(0),
+			// function_type_arguments(1), delayed_type_arguments(2),
+			// function(3), context(4), hash(5).
+			// FP-9: capture function ref (index 3) for closure dispatch.
+			closures = append(closures, ClosureInfo{
+				RefID:       ref,
+				FunctionRef: int(allRefs[3]),
 			})
 		}
 		if isScript && len(allRefs) >= 1 {
@@ -282,6 +304,17 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				ClosureRef:        allRefs[1],
 			}
 			closureDataInfos = append(closureDataInfos, cd)
+		}
+		if isFfiTrampoline && len(allRefs) >= 4 {
+			ffiTrampolineInfos = append(ffiTrampolineInfos, FfiTrampolineInfo{
+				RefID:                        ref,
+				SignatureTypeRef:             allRefs[0],
+				CSignatureRef:                allRefs[1],
+				CallbackTargetRef:            allRefs[2],
+				CallbackExceptionalReturnRef: allRefs[3],
+				CallbackID:                   ss.callbackID,
+				FfiFunctionKind:              ss.ffiKind,
+			})
 		}
 		// v2.x TypeClassIdIsRef: Type.type_class_id is a Smi ref.
 		// Capture it so BuildTypeContext can resolve it via MintValues.
@@ -335,7 +368,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		ref++
 	}
 
-	return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, nil
+	return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, nil
 }
 
 // funcRefOr returns ref when this spec actually captured that Function field,

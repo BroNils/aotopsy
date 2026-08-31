@@ -3,6 +3,9 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/sdk"
 )
 
 // TestEmitSimpleBranch builds a tiny synthetic FuncIR by hand (bypassing
@@ -12,11 +15,11 @@ import (
 func TestEmitSimpleBranch(t *testing.T) {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	// block 0: cmp x0, x1; b.eq -> block 1 (taken) else block 2 (fallthrough)
 	fir.addBlock(Block{
@@ -65,11 +68,11 @@ func TestEmitSimpleBranch(t *testing.T) {
 func TestEmitCallWithSymbol(t *testing.T) {
 	fir := newFuncIR("caller_fn", 0x2000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	fir.addBlock(Block{
 		ID:      0,
@@ -123,8 +126,8 @@ func TestDecodeX86RangeMultipleReturns(t *testing.T) {
 	if len(insts) != 5 {
 		t.Fatalf("DecodeX86Range: got %d instructions, want 5 (decoding must not stop at the first RET); insts=%+v", len(insts), insts)
 	}
-	if insts[len(insts)-1].Addr != 0x1006 {
-		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].Addr)
+	if insts[len(insts)-1].VA != 0x1006 {
+		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].VA)
 	}
 }
 
@@ -161,10 +164,10 @@ func TestParseOperandNegativeDisplacement(t *testing.T) {
 
 func TestReplaceIdentToken(t *testing.T) {
 	in := "x29.f0 + x2 - x29foo"
-	out := replaceIdentToken(in, "x29", "framePointer")
+	out := compare.ReplaceIdentToken(in, "x29", "framePointer")
 	want := "framePointer.f0 + x2 - x29foo"
 	if out != want {
-		t.Errorf("replaceIdentToken: got %q want %q", out, want)
+		t.Errorf("ReplaceIdentToken: got %q want %q", out, want)
 	}
 }
 
@@ -174,11 +177,11 @@ func TestReplaceIdentToken(t *testing.T) {
 func simpleRetFir(argRegIndices []int, paramTypeNames []string) *FuncIR {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 	fir.ArgRegIndices = argRegIndices
 	fir.ParamTypeNames = paramTypeNames
 	fir.addBlock(Block{
@@ -296,11 +299,11 @@ func TestLiftStateClone_LocalsShared(t *testing.T) {
 func TestApplyOther_NewMnemonics(t *testing.T) {
 	fir := newFuncIR("test_fn", 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
 
 	tests := []struct {
 		name string

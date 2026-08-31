@@ -155,6 +155,22 @@ type TypeContext struct {
 	// UnlinkedCall.target_name gives the method name being called.
 	PoolUnlinkedCallNames map[int]string
 
+	// MethodNameToSelectorOffsets maps method name → list of selector
+	// offsets where that method appears in the dispatch table. Built from
+	// DispatchBySlot + DispatchCodeIndexToName in buildDispatchTables.
+	// Used by resolveBLR to resolve UnlinkedCall BLR sites: when the BLR
+	// register carries an UnlinkedCall with target_name "foo", we look up
+	// "foo" here to find the selector offset(s), then call selectorCandidates
+	// to enumerate all class implementations of that selector.
+	MethodNameToSelectorOffsets map[string][]int
+
+	// PoolClosureFunctionNames maps PP index → function name for Closure
+	// objects in the pool. Built from Closure.SignatureRefID (which captures
+	// the Function ref at index 3). Used to resolve closure dispatch BLR:
+	// when a BLR's register was loaded from a pool Closure, the target
+	// function name is looked up here.
+	PoolClosureFunctionNames map[int]string
+
 	// PoolCodeNames maps PP index to function name for Code objects.
 	PoolCodeNames map[int]string
 
@@ -518,6 +534,7 @@ func BuildTypeContext(
 
 	// SUPER FEATURE 3: Pool UnlinkedCall names.
 	ctx.PoolUnlinkedCallNames = buildPoolUnlinkedCallNames(clResult, pl)
+	ctx.PoolClosureFunctionNames = buildPoolClosureFunctionNames(clResult, pl)
 	if pl.PoolCodeNames != nil {
 		ctx.PoolCodeNames = pl.PoolCodeNames
 	}
@@ -607,6 +624,41 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 		}
 	}
 	return 0, false
+}
+
+// OwnerHasFieldAt reports whether class receiverCID (or any superclass) declares
+// an instance field at the raw instruction offset rawOff (i.e. field_offset - 1,
+// the form that appears in `ldr Wt, [base, #rawOff]`). Unlike FieldValueClass it
+// does not require the field's TYPE to be known -- it only confirms a field
+// exists there. This is the validator for CODE-based receiver recovery: a
+// register loaded from the candidate receiver slot is the receiver only if it is
+// used as a base for a field that genuinely belongs to the owner class, which
+// rules out static methods (whose parameter 0 is not an owner instance) and so
+// prevents fabricating owner field names for a non-receiver value.
+func (ctx *TypeContext) OwnerHasFieldAt(ownerCID int, rawOff int32) bool {
+	lookupOff := rawOff + 1
+	cid := ownerCID
+	for cid >= 0 {
+		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
+			if _, ok := fields[lookupOff]; ok {
+				return true
+			}
+		}
+		if ctx.SuperClass == nil {
+			break
+		}
+		next, ok := ctx.SuperClass[cid]
+		if !ok || next < 0 || next == cid {
+			break
+		}
+		cid = next
+	}
+	if byOff, ok := ctx.InstanceFieldTypes[ownerCID]; ok {
+		if _, ok := byOff[lookupOff]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveDispatchTarget resolves a dispatch table slot to a function name.

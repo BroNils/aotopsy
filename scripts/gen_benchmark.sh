@@ -8,7 +8,7 @@ ROWS="$(mktemp)"
 trap 'rm -f "$ROWS"' EXIT
 
 echo "Running symtab differential (this needs the local ground-truth twins)..." >&2
-go test ./internal/pipeline/ -run TestSymtabDifferential -count=1 -timeout 60m -v 2>&1 \
+go test ./internal/analysis/ -run TestSymtabDifferential -count=1 -timeout 60m -v 2>&1 \
   | grep -oE "BENCHROW	.*" | sed 's/^BENCHROW	//' > "$ROWS" || true
 
 n="$(wc -l < "$ROWS" | tr -d ' ')"
@@ -39,7 +39,7 @@ worst="$(awk -F'	' 'NR==1||$2<m{m=$2} END{printf "%.1f", m}' "$ROWS")"
   # sort by version (natural), then name
   sort -V "$ROWS" | while IFS=$'\t' read -r name rate compared agree; do
     arch="arm64"; case "$name" in *x64*) arch="x64";; esac
-    ver="$(printf '%s' "$name" | sed -E 's/^dart-//; s/-gt//; s/-(arm64|x64)\.so$//|x64)\.so$//')"
+    ver="$(printf '%s' "$name" | sed -E 's/^dart-//; s/-gt//; s/-(arm64|x64)\.so$//')"
     printf '| %s | %s | %s%% | %s | %s |\n' "$ver" "$arch" "$rate" "$compared" "$agree"
   done
   echo

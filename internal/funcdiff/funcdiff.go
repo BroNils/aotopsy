@@ -11,9 +11,10 @@ import (
 	"fmt"
 	"sort"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 )
 
@@ -25,13 +26,27 @@ import (
 // segment flutterdec's descriptor has.
 type FuncDescriptor string
 
-// Build assembles descriptor -> ref ID for every Function NamedObject in
+// FuncInfo holds a function's descriptor and code size for change detection.
+type FuncInfo struct {
+	RefID    int
+	CodeSize int64 // PayloadInfo from CodeEntry (proxy for instruction count)
+}
+
+// Build assembles descriptor -> FuncInfo for every Function NamedObject in
 // a loaded snapshot, one hop through PatchClass (mirroring
 // cmd/aotopsy/refinfo.go's listToplevelFunctions owner-resolution),
 // with the VM base-object string table as a fallback for synthetic "::"
 // top-level-scope class names.
-func Build(result *cluster.Result, pl *pipeline.PoolLookups, ct *snapshot.CIDTable) map[FuncDescriptor]int {
-	out := make(map[FuncDescriptor]int)
+func Build(result *cluster.Result, pl *naming.PoolLookups, ct *snapshot.CIDTable) map[FuncDescriptor]FuncInfo {
+	out := make(map[FuncDescriptor]FuncInfo)
+	// Build Function RefID → code size map from CodeEntry.OwnerRef.
+	codeSizeByOwner := make(map[int]int64)
+	for i := range result.Codes {
+		ce := &result.Codes[i]
+		if ce.OwnerRef >= 0 {
+			codeSizeByOwner[ce.OwnerRef] = ce.PayloadInfo
+		}
+	}
 	for i := range result.Named {
 		no := &result.Named[i]
 		if no.CID != ct.Function {
@@ -44,16 +59,21 @@ func Build(result *cluster.Result, pl *pipeline.PoolLookups, ct *snapshot.CIDTab
 		}
 		desc := FuncDescriptor(ownerName + "::" + name)
 		if _, exists := out[desc]; !exists {
-			out[desc] = no.RefID
+			out[desc] = FuncInfo{
+				RefID:    no.RefID,
+				CodeSize: codeSizeByOwner[no.RefID],
+			}
 		}
 	}
 	return out
 }
 
-func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *pipeline.PoolLookups, ct *snapshot.CIDTable) string {
+func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *naming.PoolLookups, ct *snapshot.CIDTable) string {
 	effectiveClass := no.OwnerRefID
-	if owner, ok := pl.RefToNamed[no.OwnerRefID]; ok && owner.CID == ct.PatchClass {
-		effectiveClass = owner.OwnerRefID
+	if ct != nil && ct.PatchClass != 0 {
+		if owner, ok := pl.RefToNamed[no.OwnerRefID]; ok && owner.CID == ct.PatchClass {
+			effectiveClass = owner.OwnerRefID
+		}
 	}
 	classObj, ok := pl.RefToNamed[effectiveClass]
 	if !ok {
@@ -69,8 +89,8 @@ func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *pipeline.PoolLookups
 // Load runs aotopsy's standard fast-path parse (elfx -> snapshot ->
 // cluster scan+fill, isolate + VM snapshot) and builds the descriptor set
 // for one libapp.so build.
-func Load(libPath string) (descriptors map[FuncDescriptor]int, dartVersion string, err error) {
-	sc, err := pipeline.LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
+func Load(libPath string) (descriptors map[FuncDescriptor]FuncInfo, dartVersion string, err error) {
+	sc, err := analysis.LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
 		return nil, "", fmt.Errorf("funcdiff: %s: %w", libPath, err)
 	}
@@ -86,23 +106,26 @@ func Load(libPath string) (descriptors map[FuncDescriptor]int, dartVersion strin
 
 // Report is the result of diffing two builds' function descriptor sets.
 type Report struct {
-	OldPath      string   `json:"old_path"`
-	NewPath      string   `json:"new_path"`
-	OldVersion   string   `json:"old_dart_version"`
-	NewVersion   string   `json:"new_dart_version"`
-	OldCount     int      `json:"old_count"`
-	NewCount     int      `json:"new_count"`
-	CommonCount  int      `json:"common_count"`
-	AddedTotal   int      `json:"added_total"`
-	RemovedTotal int      `json:"removed_total"`
-	Added        []string `json:"added"`
-	Removed      []string `json:"removed"`
-	Truncated    bool     `json:"truncated"`
+	OldPath     string   `json:"old_path"`
+	NewPath     string   `json:"new_path"`
+	OldVersion  string   `json:"old_dart_version"`
+	NewVersion  string   `json:"new_dart_version"`
+	OldCount    int      `json:"old_count"`
+	NewCount    int      `json:"new_count"`
+	CommonCount int      `json:"common_count"`
+	AddedTotal  int      `json:"added_total"`
+	RemovedTotal int     `json:"removed_total"`
+	ChangedTotal int     `json:"changed_total"`
+	Added       []string `json:"added"`
+	Removed     []string `json:"removed"`
+	Changed     []string `json:"changed,omitempty"`
+	Truncated   bool     `json:"truncated"`
 }
 
-// Diff loads both builds and computes the added/removed/common function
-// descriptor sets (plain set difference/intersection -- flutterdec's
-// run_diff does no fuzzy matching either, and neither do we).
+// Diff loads both builds and computes the added/removed/common/changed
+// function descriptor sets. A function is "changed" when it exists in both
+// builds but has a different code size (PayloadInfo), indicating the
+// compiler emitted different instructions for the same named function.
 func Diff(oldPath, newPath string, topN int) (*Report, error) {
 	oldDescs, oldVer, err := Load(oldPath)
 	if err != nil {
@@ -113,13 +136,16 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 		return nil, err
 	}
 
-	var added, removed []string
+	var added, removed, changed []string
 	common := 0
-	for d := range newDescs {
-		if _, ok := oldDescs[d]; !ok {
+	for d, newInfo := range newDescs {
+		if oldInfo, ok := oldDescs[d]; !ok {
 			added = append(added, string(d))
 		} else {
 			common++
+			if oldInfo.CodeSize != newInfo.CodeSize {
+				changed = append(changed, string(d))
+			}
 		}
 	}
 	for d := range oldDescs {
@@ -129,6 +155,7 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 	}
 	sort.Strings(added)
 	sort.Strings(removed)
+	sort.Strings(changed)
 
 	rep := &Report{
 		OldPath:      oldPath,
@@ -140,6 +167,7 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 		CommonCount:  common,
 		AddedTotal:   len(added),
 		RemovedTotal: len(removed),
+		ChangedTotal: len(changed),
 	}
 	if topN > 0 && len(added) > topN {
 		rep.Added = added[:topN]
@@ -152,6 +180,12 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 		rep.Truncated = true
 	} else {
 		rep.Removed = removed
+	}
+	if topN > 0 && len(changed) > topN {
+		rep.Changed = changed[:topN]
+		rep.Truncated = true
+	} else {
+		rep.Changed = changed
 	}
 	return rep, nil
 }

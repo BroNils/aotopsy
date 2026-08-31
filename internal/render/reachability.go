@@ -20,10 +20,7 @@ func FindEntryPoints(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) [
 		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		if e.Target != "" {
-			blTargets[e.Target] = true
-		}
-		for _, t := range e.Targets {
+		for _, t := range e.ResolvedTargets() {
 			blTargets[t] = true
 		}
 	}
@@ -60,10 +57,7 @@ func ReachableSet(entryPoints []string, edges []disasm.CallEdgeRecord) map[strin
 		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
-		if e.Target != "" {
-			adj[e.FromFunc] = append(adj[e.FromFunc], e.Target)
-		}
-		adj[e.FromFunc] = append(adj[e.FromFunc], e.Targets...)
+		adj[e.FromFunc] = append(adj[e.FromFunc], e.ResolvedTargets()...)
 	}
 
 	reachable := make(map[string]bool)

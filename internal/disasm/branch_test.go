@@ -1,6 +1,10 @@
 package disasm
 
-import "testing"
+import (
+	"testing"
+
+	"aotopsy/internal/arch/arm64"
+)
 
 func TestDecodeBranch_RET(t *testing.T) {
 	// RET (X30) = 0xD65F03C0
@@ -117,7 +121,7 @@ func TestSignExtend(t *testing.T) {
 		{0x2000, 14, -8192}, // MSB set in 14-bit
 	}
 	for _, tc := range tests {
-		got := signExtend(tc.val, tc.bits)
+		got := arm64.SignExtend(tc.val, tc.bits)
 		if got != tc.want {
 			t.Errorf("signExtend(0x%x, %d) = %d, want %d", tc.val, tc.bits, got, tc.want)
 		}

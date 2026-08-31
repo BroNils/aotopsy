@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/elfx"
-	"aotopsy/internal/pipeline"
 )
 
 // cmdIDA handles "aotopsy ida <libapp.so>" — full pipeline + IDA decompilation.
@@ -52,20 +52,20 @@ func cmdIDA(args []string) error {
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
-	var pipeResult *pipeline.Result
+	var pipeResult *analysis.Result
 	if *from != "" {
-		_, err := pipeline.RunSignalStage(*from, 2, false, quiet, os.Stderr)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}
-		metaPath, err := pipeline.RunMetaStage(*from, "", *all, quiet, os.Stderr)
+		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("meta: %w", err)
 		}
-		pipeResult = &pipeline.Result{OutDir: *from, MetaPath: metaPath}
+		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
-		pipeResult, err = pipeline.Run(pipeline.Opts{
+		pipeResult, err = analysis.Run(analysis.Opts{
 			LibPath:   libPath,
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,
@@ -85,19 +85,19 @@ func cmdIDA(args []string) error {
 	}
 
 	// Step 2: Copy script into artifact directory.
-	if copyErr := copyIDAArtifacts(pipeResult.OutDir); copyErr != nil {
+	if copyErr := analysis.CopyIDAArtifacts(pipeResult.OutDir); copyErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not copy IDA script: %v\n", copyErr)
 	}
 
 	// Step 3: Find python3 with idapro.
-	python, err := findPython(*pythonBin)
+	python, err := analysis.FindPython(*pythonBin)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "python: %s\n", python)
 
 	// Step 4: Find IDA script.
-	scriptPath, err := findIDAScript()
+	scriptPath, err := analysis.FindIDAScript()
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func cmdIDA(args []string) error {
 		return fmt.Errorf("ida script failed: %w", err)
 	}
 
-	cCount := countDecompiledFiles(absDecompDir)
+	cCount := analysis.CountDecompiledFiles(absDecompDir)
 	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
 
 	return nil

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // ClassifiedStringRef is a string reference with its signal categories.
@@ -111,7 +112,7 @@ func BuildSignalGraph(
 			continue
 		}
 		thrName := e.Via[4:]
-		if IsMundaneTHR(thrName) {
+		if sdk.IsMundaneStub(thrName) {
 			continue
 		}
 		// Mark the calling function as signal.
@@ -147,29 +148,18 @@ func BuildSignalGraph(
 	fwd := make(map[string][]string) // caller → callees
 	rev := make(map[string][]string) // callee → callers
 	for _, e := range edges {
-		var to string
-		if e.Kind == "bl" || e.Kind == "call" {
-			if e.Target == "" {
-				continue
-			}
-			to = e.Target
-		} else if e.Kind == "blr" || e.Kind == "call_indirect" {
-			if e.Via == "" {
-				continue
-			}
-			// Skip mundane THR (same filter as allEdges).
-			// x86_64 call_indirect edges don't use THR. prefix
-			// (THR-cached calls are classified as direct "call"),
-			// so this filter is a no-op on x86_64 — correct.
-			if strings.HasPrefix(e.Via, "THR.") && IsMundaneTHR(e.Via[4:]) {
-				continue
-			}
-			to = e.Via
-		} else {
+		// Skip mundane THR stubs (same filter as allEdges).
+		if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
 			continue
 		}
-		fwd[e.FromFunc] = append(fwd[e.FromFunc], to)
-		rev[to] = append(rev[to], e.FromFunc)
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
+			continue
+		}
+		for _, to := range targets {
+			fwd[e.FromFunc] = append(fwd[e.FromFunc], to)
+			rev[to] = append(rev[to], e.FromFunc)
+		}
 	}
 
 	// BFS k hops from signal functions.
@@ -271,7 +261,7 @@ func BuildSignalGraph(
 				continue
 			}
 			// Skip mundane THR.
-			if strings.HasPrefix(e.Via, "THR.") && IsMundaneTHR(e.Via[4:]) {
+			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
 				continue
 			}
 			to = e.Via

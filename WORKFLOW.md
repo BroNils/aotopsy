@@ -25,8 +25,8 @@ flowchart TD
     Q2 -->|"I know a class name"| FIL[decompile-native --all --filter]
     Q2 -->|"I have one address"| FUNC[decompile-native --func]
     Q2 -->|"Locate by name first"| FIND[decompile-native --find]
-    Q2 -->|"Which function loads<br/>this string?"| XREF[strings --find --xref]
-    Q2 -->|"Does this app<br/>use dart:ffi?"| FFI[ffi-trace]
+    Q2 -->|"Which function loads<br/>this string?"| XREF[_debug strings --find --xref]
+    Q2 -->|"Does this app<br/>use dart:ffi?"| FFI[_debug ffi-trace]
     EXP --> DONE[Done]
     FULL --> WALL{Static analysis<br/>hit a wall?}
     FM --> WALL

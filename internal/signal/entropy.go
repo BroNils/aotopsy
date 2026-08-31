@@ -11,11 +11,11 @@ import (
 
 // EntropyFinding is a packed/encrypted section detection finding.
 type EntropyFinding struct {
-	Section    string  `json:"section"`
-	Offset     int     `json:"offset"`
-	Size       int     `json:"size"`
-	Entropy    float64 `json:"entropy"`
-	Verdict    string  `json:"verdict"` // "packed", "encrypted", "normal"
+	Section string  `json:"section"`
+	Offset  int     `json:"offset"`
+	Size    int     `json:"size"`
+	Entropy float64 `json:"entropy"`
+	Verdict string  `json:"verdict"` // "packed", "encrypted", "normal"
 }
 
 // ShannonEntropy computes the Shannon entropy of a byte slice.
@@ -82,8 +82,8 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 	if int(shstrtabOff)+40 > len(data) {
 		return findings, nil
 	}
-	shstrtabShOff := binary.LittleEndian.Uint64(data[shstrtabOff+24:shstrtabOff+32])
-	shstrtabSize := binary.LittleEndian.Uint64(data[shstrtabOff+32:shstrtabOff+40])
+	shstrtabShOff := binary.LittleEndian.Uint64(data[shstrtabOff+24 : shstrtabOff+32])
+	shstrtabSize := binary.LittleEndian.Uint64(data[shstrtabOff+32 : shstrtabOff+40])
 
 	// Analyze each section
 	for i := uint16(0); i < e_shnum; i++ {
@@ -91,11 +91,11 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 		if int(shOff)+40 > len(data) {
 			break
 		}
-		shName := binary.LittleEndian.Uint32(data[shOff:shOff+4])
-		shType := binary.LittleEndian.Uint32(data[shOff+4:shOff+8])
-		shAddr := binary.LittleEndian.Uint64(data[shOff+16:shOff+24])
-		shOffset := binary.LittleEndian.Uint64(data[shOff+24:shOff+32])
-		shSize := binary.LittleEndian.Uint64(data[shOff+32:shOff+40])
+		shName := binary.LittleEndian.Uint32(data[shOff : shOff+4])
+		shType := binary.LittleEndian.Uint32(data[shOff+4 : shOff+8])
+		shAddr := binary.LittleEndian.Uint64(data[shOff+16 : shOff+24])
+		shOffset := binary.LittleEndian.Uint64(data[shOff+24 : shOff+32])
+		shSize := binary.LittleEndian.Uint64(data[shOff+32 : shOff+40])
 
 		// Skip NOBITS sections (BSS)
 		if shType == 8 { // SHT_NOBITS

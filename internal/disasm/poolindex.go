@@ -1,5 +1,7 @@
 package disasm
 
+import "aotopsy/internal/sdk"
+
 // Object-pool index arithmetic.
 //
 // A Dart AOT function reaches a pool entry through the object-pool register
@@ -36,11 +38,10 @@ package disasm
 // and displacement/8 - 2 (x86_64, off by -1). The ARM64 error was visible on
 // the ground-truth sample: the string "factorial(6) = " sat at pool index
 // 5032 and was reported as loaded by 38 unrelated Flutter framework
-// functions, because their real index-5030 loads were labelled 5032.
 const (
-	poolElementsStartOffset = 16 // AOT_ObjectPool_elements_start_offset
-	poolElementSize         = 8  // AOT_ObjectPool_element_size
-	heapObjectTag           = 1
+	poolElementsStartOffset = sdk.PoolElementsStartOffset
+	poolElementSize         = sdk.PoolElementSize
+	heapObjectTag           = sdk.HeapObjectTag
 )
 
 // ARM64PoolIndex converts a byte displacement off the untagged ARM64 pool

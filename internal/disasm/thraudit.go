@@ -1,6 +1,12 @@
 package disasm
 
-import "fmt"
+import (
+	"fmt"
+
+	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
+	"aotopsy/internal/thraudit"
+)
 
 // THRAccess describes a single THR-relative memory access in the instruction stream.
 type THRAccess struct {
@@ -14,44 +20,7 @@ type THRAccess struct {
 	Resolved  bool   `json:"resolved"`          // whether THRFields has a name for this offset
 }
 
-// isLDR32UnsignedOffset detects LDR Wt, [Xn, #imm] (32-bit unsigned offset).
-// Encoding: size=10 | 111 | V=0 | 01 | opc=01 | imm12 | Rn | Rt
-// Mask: 0xFFC00000, Value: 0xB9400000
-func isLDR32UnsignedOffset(raw uint32) (baseReg int, byteOffset int, dstReg int, ok bool) {
-	if raw&0xFFC00000 != 0xB9400000 {
-		return 0, 0, 0, false
-	}
-	rn := int((raw >> 5) & 0x1F)
-	rt := int(raw & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	return rn, imm12 << 2, rt, true // scaled by 4 for 32-bit
-}
-
-// isSTR64UnsignedOffset detects STR Xt, [Xn, #imm] (64-bit unsigned offset).
-// Encoding: size=11 | 111 | V=0 | 01 | opc=00 | imm12 | Rn | Rt
-// Mask: 0xFFC00000, Value: 0xF9000000
-func isSTR64UnsignedOffset(raw uint32) (baseReg int, byteOffset int, srcReg int, ok bool) {
-	if raw&0xFFC00000 != 0xF9000000 {
-		return 0, 0, 0, false
-	}
-	rn := int((raw >> 5) & 0x1F)
-	rt := int(raw & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	return rn, imm12 << 3, rt, true
-}
-
-// isSTR32UnsignedOffset detects STR Wt, [Xn, #imm] (32-bit unsigned offset).
-// Encoding: size=10 | 111 | V=0 | 01 | opc=00 | imm12 | Rn | Rt
-// Mask: 0xFFC00000, Value: 0xB9000000
-func isSTR32UnsignedOffset(raw uint32) (baseReg int, byteOffset int, srcReg int, ok bool) {
-	if raw&0xFFC00000 != 0xB9000000 {
-		return 0, 0, 0, false
-	}
-	rn := int((raw >> 5) & 0x1F)
-	rt := int(raw & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	return rn, imm12 << 2, rt, true
-}
+// ARM64 instruction decoders are now shared from internal/arm64.
 
 // ExtractTHRAccesses scans decoded instructions for THR-relative memory operations.
 // Returns all THR accesses found. fields is optional (for marking resolved).
@@ -61,7 +30,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		raw := inst.Raw
 
 		// LDR X64 [X26, #imm]
-		if base, off, ok := isLDR64UnsignedOffset(raw); ok && base == regTHR {
+		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			dst := int(raw & 0x1F)
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
@@ -76,7 +45,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// LDR W32 [X26, #imm]
-		if base, off, dst, ok := isLDR32UnsignedOffset(raw); ok && base == regTHR {
+		if base, off, dst, ok := arm64.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,
@@ -90,7 +59,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// STR X64 [X26, #imm]
-		if base, off, src, ok := isSTR64UnsignedOffset(raw); ok && base == regTHR {
+		if base, off, src, ok := arm64.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,
@@ -105,7 +74,7 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 		}
 
 		// STR W32 [X26, #imm]
-		if base, off, src, ok := isSTR32UnsignedOffset(raw); ok && base == regTHR {
+		if base, off, src, ok := arm64.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			_, resolved := fields[off]
 			result = append(result, THRAccess{
 				PC:        inst.Addr,
@@ -122,31 +91,15 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 	return result
 }
 
-// THRAuditRecord is a JSONL output record for thr-audit.
-type THRAuditRecord struct {
-	Sample      string   `json:"sample"`
-	DartVersion string   `json:"dart_version"`
-	PC          string   `json:"pc"`
-	Insn        string   `json:"insn"`
-	THROffset   string   `json:"thr_offset"`
-	IsStore     bool     `json:"is_store"`
-	DstReg      int      `json:"dst_reg,omitempty"`
-	SrcReg      int      `json:"src_reg,omitempty"`
-	Width       int      `json:"width"`
-	FuncName    string   `json:"func_name"`
-	Resolved    bool     `json:"resolved"`
-	Context     []string `json:"context"`
-}
-
 // BuildAuditRecords converts THRAccess entries into audit records with context.
-func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersion, funcName string) []THRAuditRecord {
+func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
 	// Build PC→index map for context lookup.
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
 		pcIdx[inst.Addr] = i
 	}
 
-	records := make([]THRAuditRecord, 0, len(accesses))
+	records := make([]thraudit.THRAuditRecord, 0, len(accesses))
 	for _, a := range accesses {
 		// Build context: prev 2, current, next 2
 		var ctx []string
@@ -163,7 +116,7 @@ func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersio
 			}
 		}
 
-		rec := THRAuditRecord{
+		rec := thraudit.THRAuditRecord{
 			Sample:      sample,
 			DartVersion: dartVersion,
 			PC:          fmt.Sprintf("0x%x", a.PC),

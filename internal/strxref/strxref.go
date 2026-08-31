@@ -10,8 +10,8 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/pipeline"
 )
 
 // Reference is one function that loads one of the target pool indices.
@@ -51,7 +51,7 @@ type Options struct {
 // PoolIndex is in poolIndices, bounded per Options (unbounded by
 // default -- see Options' doc comment). Returns the matches and how
 // many functions were actually scanned.
-func FindPoolReferences(ctx *pipeline.Context, poolIndices []int, opts Options) ([]Reference, int) {
+func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts Options) ([]Reference, int) {
 	target := make(map[int]bool, len(poolIndices))
 	for _, idx := range poolIndices {
 		target[idx] = true

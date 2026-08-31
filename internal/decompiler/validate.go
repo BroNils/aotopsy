@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // Sanity checks on emitted pseudocode.
@@ -52,6 +54,15 @@ var (
 	// spike in them is a regression, so they are reported for counting
 	// rather than treated as malformed.
 	rePlaceholder = regexp.MustCompile(`/\* cond \*/|pool\[\?\]`)
+
+	// A `final [Type ]name = rhs;` declaration. Captures the declared name so a
+	// later reassignment to it can be detected (assigning to a final is invalid
+	// Dart -- a defect a value-forwarding pass can introduce by promoting a
+	// mutable `var` to `final`).
+	reFinalDecl = regexp.MustCompile(`^final\s+(?:[A-Za-z_]\w*\s+)?([A-Za-z_]\w*)\s*=`)
+	// A bare `name = rhs;` reassignment (not `==`, not a declaration, not a
+	// member/index store like `name.f = ` or `name[i] = `).
+	reBareAssign = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=\s*[^=]`)
 )
 
 // ValidateSource reports lines of emitted pseudocode that are known-bad
@@ -60,11 +71,15 @@ var (
 func ValidateSource(src string) []Problem {
 	var out []Problem
 	depth := 0
-	for i, line := range strings.Split(src, "\n") {
-		_, text, ok := splitIndent(line)
+	finalNames := map[string]int{} // name -> 1-based decl line
+	lines := strings.Split(src, "\n")
+	texts := make([]string, len(lines))
+	for i, line := range lines {
+		_, text, ok := stmt.SplitIndent(line)
 		if !ok {
 			text = strings.TrimSpace(line)
 		}
+		texts[i] = text
 		add := func(rule string) {
 			out = append(out, Problem{Line: i + 1, Text: text, Rule: rule})
 		}
@@ -74,12 +89,25 @@ func ValidateSource(src string) []Problem {
 		if reSpacedMemberOperator.MatchString(text) {
 			add("spaced-member-operator")
 		}
+		if m := reFinalDecl.FindStringSubmatch(text); m != nil {
+			finalNames[m[1]] = i + 1
+		}
 		// Brace accounting, ignoring braces inside strings and comments --
 		// a `"{"` in a literal is not structure. See braceDelta.
-		depth += braceDelta(text)
+		depth += stmt.BraceDelta(text)
 		if depth < 0 {
 			add("brace-depth-negative")
 			depth = 0
+		}
+	}
+	// Second pass: a bare reassignment to a name declared `final` is invalid.
+	for i, text := range texts {
+		m := reBareAssign.FindStringSubmatch(text)
+		if m == nil {
+			continue
+		}
+		if _, isFinal := finalNames[m[1]]; isFinal && reFinalDecl.FindStringSubmatch(text) == nil {
+			out = append(out, Problem{Line: i + 1, Text: text, Rule: "assign-to-final"})
 		}
 	}
 	if depth != 0 {
