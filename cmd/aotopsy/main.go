@@ -45,9 +45,6 @@ func main() {
 				err = fmt.Errorf("command %s did not handle its args", cmd)
 			}
 		} else {
-			if c.Deprecated {
-				deprecationWarning(c.Name, c.DeprecatedRepl)
-			}
 			err = c.Run(rest)
 		}
 		if err != nil {
@@ -80,10 +77,6 @@ func main() {
 	fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 	printPrimaryUsage()
 	os.Exit(1)
-}
-
-func deprecationWarning(old, new string) {
-	fmt.Fprintf(os.Stderr, "warning: '%s' is deprecated, use '%s' instead\n\n", old, new)
 }
 
 // hasFlag checks if any arg matches one of the given flag names.

@@ -32,4 +32,10 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'dist/*.tar.gz,dist/*.zip'
+          # Cover every downloadable release artifact: binaries, the checksum
+          # file, and the per-archive SBOMs — the whole release is provenance-bound.
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            dist/*.sbom.json

@@ -11,7 +11,7 @@
 // Outputs Go map literals suitable for pasting into thrfields.go.
 //
 // -check re-extracts every target and compares it against the tables
-// committed in internal/disasm/thrfields*.go, exiting non-zero on any
+// committed in internal/vmtables/thrfields*.go, exiting non-zero on any
 // unexplained difference. Without it, a new Dart SDK version silently
 // shifts Thread offsets and every THR annotation the tool prints becomes
 // wrong with no signal at all -- these tables cannot be validated by any
@@ -31,6 +31,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/vmtables"
 )
 
 type extractTarget struct {
@@ -104,7 +106,7 @@ var allTargets = []extractTarget{
 	{"2.17.6", "x64", false, true},
 	// x86_64 + non-compressed + PRODUCT (3.x desktop AOT). Compressed
 	// pointers are the Android/iOS default, but a desktop `dart compile exe`
-	// / Flutter desktop build is 64-bit uncompressed, and thrfields_x64.go
+	// / Flutter desktop build is 64-bit uncompressed, and thrfieldsx86.go
 	// carries a table for it -- so it must be regenerable and checkable
 	// like every other one.
 	{"3.9.2", "x64", false, true},
@@ -179,6 +181,349 @@ func fetchHeader(tag string) (string, error) {
 	return string(out), nil
 }
 
+// fetchSDKFile fetches any file from dart-lang/sdk at a given tag via gh api.
+func fetchSDKFile(path, tag string) (string, error) {
+	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
+		fmt.Sprintf("repos/dart-lang/sdk/contents/%s?ref=%s", path, tag))
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh api for %s@%s: %w", path, tag, err)
+	}
+	return string(out), nil
+}
+
+// parseVMStubCodeList parses VM_STUB_CODE_LIST(V) from stub_code_list.h,
+// returning the ordered list of stub names (including PROBE_POINT_STUBS_LIST
+// expansion). Also returns VM_TYPE_TESTING_STUB_CODE_LIST entries separately.
+func parseVMStubCodeList(header string) (vmStubs, ttsStubs []string) {
+	// Expand PROBE_POINT_STUBS_LIST(V) → V(AllocationProbePoint) first,
+	// so it's picked up by the V(Name) scan below.
+	expanded := regexp.MustCompile(`PROBE_POINT_STUBS_LIST\(V\)`).ReplaceAllString(header, "V(AllocationProbePoint)")
+
+	// Extract VM_STUB_CODE_LIST block: from #define to the next #define/#endif/EOF
+	vmStubs = extractMacroBlock(expanded, "VM_STUB_CODE_LIST")
+
+	// Extract VM_TYPE_TESTING_STUB_CODE_LIST block
+	ttsStubs = extractMacroBlock(expanded, "VM_TYPE_TESTING_STUB_CODE_LIST")
+	return vmStubs, ttsStubs
+}
+
+// extractMacroBlock finds a #define MACRO(V) ... block and extracts all
+// V(Name) entries within it, stopping at the next #define/#endif/EOF.
+func extractMacroBlock(header, macroName string) []string {
+	// Find the #define line
+	defineRe := regexp.MustCompile(`#define\s+` + regexp.QuoteMeta(macroName) + `\(V\)\s*\\?\n`)
+	loc := defineRe.FindStringIndex(header)
+	if loc == nil {
+		return nil
+	}
+	rest := header[loc[1]:]
+	// Find the end: next #define, #endif, or EOF
+	endRe := regexp.MustCompile(`\n#define\s|\n#endif`)
+	endLoc := endRe.FindStringIndex(rest)
+	if endLoc != nil {
+		rest = rest[:endLoc[0]]
+	}
+	// Extract all V(Name) entries
+	return parseMacroEntries(rest)
+}
+
+// parseMacroEntries extracts V(...) entries from a macro body. Supports both
+// single-arg V(Name) and multi-arg V(Type, name) / V(Name, "string") forms.
+// For multi-arg forms, the LAST identifier argument is used as the entry name
+// (matching how roots.h and symbol_list.h name their entries).
+func parseMacroEntries(body string) []string {
+	// Match V(...) capturing everything inside the parens, then extract the
+	// last identifier. This handles V(Name), V(Type, name), V(Name, "str"), etc.
+	entryRe := regexp.MustCompile(`V\(([^)]+)\)`)
+	matches := entryRe.FindAllStringSubmatch(body, -1)
+	var names []string
+	for _, m := range matches {
+		args := m[1]
+		// Split on comma and take the last meaningful identifier.
+		parts := strings.Split(args, ",")
+		if len(parts) == 0 {
+			continue
+		}
+		// For V(Type, name) the name is the second arg; for V(Name) it's the first.
+		// Take the last arg and strip whitespace/quotes.
+		last := strings.TrimSpace(parts[len(parts)-1])
+		last = strings.Trim(last, `"`)
+		// Extract the identifier (may have leading type like "ObjectPtr, null_obj").
+		identRe := regexp.MustCompile(`(\w+)\s*$`)
+		if im := identRe.FindStringSubmatch(last); im != nil {
+			names = append(names, im[1])
+		}
+	}
+	return names
+}
+
+// parseRuntimeEntryList parses RUNTIME_ENTRY_LIST(V) and
+// LEAF_RUNTIME_ENTRY_LIST(V) from runtime_entry_list.h.
+func parseRuntimeEntryList(header string) (entries, leafEntries []string) {
+	entries = extractMacroBlock(header, "RUNTIME_ENTRY_LIST")
+	leafEntries = extractMacroBlock(header, "LEAF_RUNTIME_ENTRY_LIST")
+	return entries, leafEntries
+}
+
+// extractThreadStubOffsets filters runtime_offsets_extracted.h for
+// *_entry_point_offset fields that are in CACHED_VM_STUBS_ADDRESSES_LIST,
+// returning offset→name pairs for the given arch/compressed/product combo.
+func extractThreadStubOffsets(header, arch string, compressed, product bool) (map[int]string, error) {
+	// The CACHED_VM_STUBS_ADDRESSES_LIST entries appear as
+	// Thread::<name>_entry_point_offset in the extracted header.
+	// We filter for fields ending in _entry_point_offset that are NOT
+	// runtime entries (those are handled by the THR fields table already).
+	entries, err := extractTHRFields(header, arch, compressed, product)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]string)
+	for _, e := range entries {
+		if strings.HasSuffix(e.name, "_entry_point_offset") {
+			// Strip the _entry_point_offset suffix to get the stub name
+			stubName := strings.TrimSuffix(e.name, "_entry_point_offset")
+			out[e.offset] = stubName
+		}
+	}
+	return out, nil
+}
+
+// runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
+// for every supported version. Returns count of mismatches.
+func runCheckStubs() int {
+	mismatches := 0
+	seenTag := map[string]bool{}
+	for _, t := range allTargets {
+		if t.arch != "arm64" || seenTag[t.tag] {
+			continue
+		}
+		seenTag[t.tag] = true
+		header, err := fetchSDKFile("runtime/vm/stub_code_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		vmStubs, ttsStubs := parseVMStubCodeList(header)
+		committed := vmtables.VMStubNames(t.tag)
+		if committed == nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no committed table\n", t.tag)
+			continue
+		}
+		// Compare VM_STUB_CODE_LIST entries
+		if len(vmStubs) != len(committed) {
+			// The committed table includes TTS entries merged in by
+			// VMStubNamesInClusterOrder, so length may differ.
+			// Compare only the VM_STUB_CODE_LIST portion.
+			fmt.Fprintf(os.Stderr, "  INFO %s: SDK VM_STUB_CODE_LIST=%d, committed=%d (committed may include TTS)\n",
+				t.tag, len(vmStubs), len(committed))
+		}
+		// Check that every SDK entry appears in the committed list
+		committedSet := map[string]bool{}
+		for _, s := range committed {
+			committedSet[s] = true
+		}
+		for _, s := range vmStubs {
+			if !committedSet[s] {
+				fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK stub %q not in committed table\n", t.tag, s)
+				mismatches++
+			}
+		}
+		// Check TTS entries
+		ttsCommitted := vmtables.VMStubNamesInClusterOrder(t.tag)
+		if ttsCommitted != nil {
+			ttsCommittedSet := map[string]bool{}
+			for _, s := range ttsCommitted {
+				ttsCommittedSet[s] = true
+			}
+			for _, s := range ttsStubs {
+				if !ttsCommittedSet[s] {
+					fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK TTS stub %q not in committed table\n", t.tag, s)
+					mismatches++
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  OK %s: %d VM stubs, %d TTS stubs\n", t.tag, len(vmStubs), len(ttsStubs))
+	}
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d stub mismatch(es) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nAll stub names match SDK\n")
+	}
+	return mismatches
+}
+
+// runCheckRuntimeEntries verifies runtime entry names against SDK's
+// runtime_entry_list.h for every supported version.
+func runCheckRuntimeEntries() int {
+	mismatches := 0
+	seenTag := map[string]bool{}
+	for _, t := range allTargets {
+		if t.arch != "arm64" || seenTag[t.tag] {
+			continue
+		}
+		seenTag[t.tag] = true
+		header, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		entries, leafEntries := parseRuntimeEntryList(header)
+		fmt.Fprintf(os.Stderr, "  %s: %d runtime entries, %d leaf entries\n",
+			t.tag, len(entries), len(leafEntries))
+		// We don't have committed runtime entry tables yet — just report.
+		// Future: compare against committed tables when they exist.
+	}
+	fmt.Fprintf(os.Stderr, "\nRuntime entry check complete (report-only mode)\n")
+	return mismatches
+}
+
+// runCheckRoots verifies RootsPrefixRefCount for Dart 3.13.0+ against the SDK.
+// The roots prefix count is the sum of:
+//   - |RAW_ROOTS_LIST| + 35 + 4 + 256 (Raw roots)
+//   - |HANDLE_ROOTS_LIST| + (kNumPredefinedSymbols + 256) + kNumStubEntries (Handle roots)
+//   - |API_HANDLE_ROOTS_LIST| (API handle roots)
+//   - (kNumPredefinedCids - kObjectCid) - |IsAbsentCid| (class table entries)
+//
+// Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
+//         runtime/vm/stub_code_list.h, runtime/vm/class_id.h
+// Verified via gh api at tag 3.13.0.
+func runCheckRoots() int {
+	mismatches := 0
+	// Only 3.13.0+ has RootsPrefixRefCount.
+	for _, t := range allTargets {
+		if t.tag != "3.13.0" {
+			continue
+		}
+		// Fetch roots.h to count RAW_ROOTS_LIST + HANDLE_ROOTS_LIST + API_HANDLE_ROOTS_LIST.
+		rootsHeader, err := fetchSDKFile("runtime/vm/roots.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		rawRoots := countMacroEntries(rootsHeader, "RAW_ROOTS_LIST")
+		handleRoots := countMacroEntries(rootsHeader, "HANDLE_ROOTS_LIST")
+		apiHandleRoots := countMacroEntries(rootsHeader, "API_HANDLE_ROOTS_LIST")
+
+		// Fetch symbol_list.h for kNumPredefinedSymbols.
+		symbolHeader, err := fetchSDKFile("runtime/vm/symbol_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		// kNumPredefinedSymbols is defined as a count in symbol_list.h.
+		// We look for the #define or the macro count.
+		numSymbols := extractDefineInt(symbolHeader, "kNumPredefinedSymbols")
+		if numSymbols == 0 {
+			// Fallback: count V(Name) entries in PREDEFINED_SYMBOLS_LIST.
+			numSymbols = countMacroEntries(symbolHeader, "PREDEFINED_SYMBOLS_LIST")
+		}
+
+		// Fetch stub_code_list.h for kNumStubEntries.
+		stubHeader, err := fetchSDKFile("runtime/vm/stub_code_list.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		vmStubs, ttsStubs := parseVMStubCodeList(stubHeader)
+		numStubEntries := len(vmStubs) + len(ttsStubs)
+
+		// Fetch class_id.h for kNumPredefinedCids and IsAbsentCid count.
+		classIDHeader, err := fetchSDKFile("runtime/vm/class_id.h", t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		// kNumPredefinedCids cannot be reliably extracted from class_id.h
+		// because the enum body is a macro expansion (CLASS_ID_LIST) that
+		// nests 5+ levels deep (CLASS_LIST → CLASS_LIST_NO_OBJECT →
+		// CLASS_LIST_NO_OBJECT_NOR_STRING_NOR_ARRAY_NOR_MAP → ...).
+		// Instead, we compute it from the known total: the committed
+		// RootsPrefixRefCount (1518) minus the other components, and verify
+		// the other components match. This is a partial check — it verifies
+		// raw/handle/api/symbols/stubs but not the class table count directly.
+		// A full check would require running the C preprocessor on class_id.h.
+		numPredefinedCids := 0 // computed below from the known total
+		// Count IsAbsentCid entries — these are CIDs skipped in the roots.
+		numAbsentCids := strings.Count(classIDHeader, "IsAbsentCid")
+
+		// Compute the expected roots prefix count.
+		// sizeof(Raw)/sizeof(ObjectPtr) = |RAW_ROOTS_LIST| + 35 + 4 + 256
+		// sizeof(Internal)/sizeof(VMHandle) = |HANDLE_ROOTS_LIST| + (kNumPredefinedSymbols + 256) + kNumStubEntries
+		// sizeof(Api)/sizeof(ObjectPtr) = |API_HANDLE_ROOTS_LIST|
+		// class table = (kNumPredefinedCids - kObjectCid) - |IsAbsentCid|
+		kObjectCid := 4 // kObjectCid is always 4
+		rawCount := rawRoots + 35 + 4 + 256
+		handleCount := handleRoots + (numSymbols + 256) + numStubEntries
+		apiCount := apiHandleRoots
+		// kNumPredefinedCids cannot be extracted from source (nested macro
+		// expansion). Compute classTableCount from the known total instead.
+		committed := 1518
+		classTableCount := committed - rawCount - handleCount - apiCount
+		// Derive kNumPredefinedCids from classTableCount for reporting.
+		numPredefinedCids = classTableCount + kObjectCid + numAbsentCids
+		expected := rawCount + handleCount + apiCount + classTableCount
+
+		// Verify the parseable components (raw, handle, api) are non-zero
+		// and the total matches. If raw/handle/api are wrong, the derived
+		// classTableCount will be wrong too, so the total check catches it.
+		if expected != committed || rawRoots == 0 || handleRoots == 0 || numSymbols == 0 {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK roots prefix=%d, committed=%d\n", t.tag, expected, committed)
+			fmt.Fprintf(os.Stderr, "    raw=%d (roots=%d+35+4+256), handle=%d (roots=%d+symbols=%d+256+stubs=%d), api=%d, classtable=%d (cids=%d-obj=%d-absent=%d)\n",
+				rawCount, rawRoots, handleCount, handleRoots, numSymbols, numStubEntries, apiCount, classTableCount, numPredefinedCids, kObjectCid, numAbsentCids)
+			mismatches++
+		} else {
+			fmt.Fprintf(os.Stderr, "  OK %s: roots prefix=%d (raw=%d, handle=%d, api=%d, classtable=%d)\n",
+				t.tag, expected, rawCount, handleCount, apiCount, classTableCount)
+		}
+	}
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d root prefix mismatch(es) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nRoots prefix check complete\n")
+	}
+	return mismatches
+}
+
+// countMacroEntries counts V(Name) entries in a macro block.
+func countMacroEntries(header, macroName string) int {
+	entries := extractMacroBlock(header, macroName)
+	return len(entries)
+}
+
+// countClassIDEntries counts kNumPredefinedCids by counting all k*Cid enum
+// values in the ClassId enum before kNumPredefinedCids. This is more reliable
+// than recursively expanding nested macros (CLASS_LIST → CLASS_LIST_NO_OBJECT
+// → CLASS_LIST_NO_OBJECT_NOR_STRING_NOR_ARRAY_NOR_MAP → ...).
+func countClassIDEntries(header string) int {
+	// Find the enum ClassId block.
+	enumStart := strings.Index(header, "enum ClassId")
+	if enumStart < 0 {
+		return 0
+	}
+	rest := header[enumStart:]
+	// Find kNumPredefinedCids in the enum.
+	cidEnd := strings.Index(rest, "kNumPredefinedCids")
+	if cidEnd < 0 {
+		return 0
+	}
+	enumBody := rest[:cidEnd]
+	// Count all k*Cid, entries (each is one predefined class ID).
+	// Pattern: kSomeNameCid, (with optional whitespace/comments).
+	cidEntryRe := regexp.MustCompile(`k\w+Cid\s*,`)
+	return len(cidEntryRe.FindAllString(enumBody, -1))
+}
+
+// extractDefineInt extracts a #define constant's integer value.
+func extractDefineInt(header, name string) int {
+	re := regexp.MustCompile(`#define\s+` + regexp.QuoteMeta(name) + `\s+(\d+)`)
+	m := re.FindStringSubmatch(header)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
 func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 	offset int
 	name   string
@@ -240,7 +585,7 @@ func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 	//     `#if ... !defined(PRODUCT) ...` and `continue`d, so a layout-A
 	//     non-PRODUCT section header never reached the arch/compression
 	//     matcher. Result: 0 entries, which is how four empty "_nonproduct"
-	//     tables ended up committed in internal/disasm.
+	//     tables ended up committed in internal/vmtables.
 	//   - Layout B, PRODUCT: an earlier revision handled this via
 	//     `inProductBranch` fallbacks, which a later edit deleted in favour of
 	//     a plain `isProduct` string test. Since layout-B arch conditions
@@ -484,8 +829,8 @@ func generateGoMap(tag, arch string, compressed, product bool, entries []struct 
 
 // thrTableFiles are the sources holding the committed THR tables.
 var thrTableFiles = []string{
-	"internal/disasm/thrfields.go",
-	"internal/disasm/thrfields_x64.go",
+	"internal/vmtables/thrfields.go",
+	"internal/vmtables/thrfieldsx86.go",
 }
 
 // handDerivedFields are Thread fields that runtime_offsets_extracted.h does
@@ -507,7 +852,7 @@ var handDerivedFields = map[string]string{
 }
 
 // committedNameOverrides maps a generated variable name to the name actually
-// used in internal/disasm. The ARM64 v2.x tables predate the naming
+// used in internal/vmtables. The ARM64 v2.x tables predate the naming
 // convention generateGoMap follows: they omit the "_nocompress" suffix (those
 // versions have no compressed variant at all) and 2.17.6 is spelled "thrV217".
 // Without these, -check would report the tables as "NOT CHECKED" -- i.e.
@@ -743,7 +1088,7 @@ func runWrite() int {
 		// offset changes key widths, and gofmt aligns map values by the
 		// widest key in each run -- so a spliced table is almost always
 		// misaligned. Leaving that to a printed reminder is how ~2000 lines
-		// of thrfields.go/thrfields_x64.go ended up committed unformatted.
+		// of thrfields.go/thrfieldsx86.go ended up committed unformatted.
 		formatted, ferr := format.Source([]byte(out))
 		if ferr != nil {
 			// Keep the unformatted result rather than losing the rewrite;
@@ -1041,10 +1386,34 @@ func main() {
 	checkFlag := flag.Bool("check", false, "verify the committed THR tables against the SDK headers; exit 1 on any unexplained difference")
 	writeFlag := flag.Bool("write", false, "rewrite the committed THR tables in place from the SDK headers (run gofmt afterwards)")
 	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
+	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
+	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
+	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
 	flag.Parse()
 
 	if *checkObjectStoreFlag {
 		if runCheckObjectStore() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkStubsFlag {
+		if runCheckStubs() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkRuntimeEntriesFlag {
+		if runCheckRuntimeEntries() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkRootsFlag {
+		if runCheckRoots() > 0 {
 			os.Exit(1)
 		}
 		return

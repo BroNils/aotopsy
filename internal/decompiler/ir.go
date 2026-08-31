@@ -11,6 +11,7 @@ package decompiler
 
 import (
 	"sort"
+	"aotopsy/internal/cluster"
 	"strings"
 )
 
@@ -67,7 +68,7 @@ type Block struct {
 	StartVA uint64
 	Instrs  []Instr
 	Succs   []Succ
-	IsTerm  bool // ends in RET or a branch out of the function
+	IsTerm  bool  // ends in RET or a branch out of the function
 	Preds   []int // predecessor block IDs (computed by ComputePreds)
 }
 
@@ -95,6 +96,29 @@ type FuncIR struct {
 	// ARM64 only; x86_64 adds Thread.heap_base instead. See
 	// isPointerDecompression.
 	HeapBitsReg string
+
+	// CodeReg holds the current Code object pointer at function entry
+	// (CODE_REG: x24 on ARM64, r12 on x86_64). The prologue derives PP from it
+	// and the register allocator then freely REUSES it as a general register --
+	// which on x86_64 made it the single largest raw-register leak (2428
+	// occurrences in one 500-function sample) because its entry value was never
+	// seeded. Seeding it as the honest name "CODE" resolves every read that
+	// precedes a reassignment; a later `mov CODE_REG, x` overwrites it normally.
+	CodeReg string
+	// ArgsDescReg holds the arguments descriptor at entry (ARGS_DESC_REG: x4 on
+	// ARM64 -- which overlaps the x0..x7 arg display and so was already seeded --
+	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
+	ArgsDescReg string
+
+	// FpuArgRegs holds the FPU argument register names (ARM64: v0-v5;
+	// x86_64: xmm1-xmm6) in calling-convention order. Used by the lifter
+	// to recognize FPU argument patterns and by the emitter to display
+	// double/float parameters. Empty when the architecture has no FPU
+	// calling convention (not currently the case for either supported arch).
+	FpuArgRegs []string
+	// FpuReturnReg holds the FPU return register name (ARM64: v0; x86_64:
+	// xmm0). Used to recognize double return values.
+	FpuReturnReg string
 
 	// PoolIndexOf turns a byte displacement off PoolReg into an object-pool
 	// index. The arithmetic differs per architecture -- the ARM64 pool
@@ -140,7 +164,7 @@ type FuncIR struct {
 	// (dart-lang/sdk's CACHED_VM_STUBS_ADDRESSES_LIST in thread.h, e.g.
 	// write_barrier_entry_point_ or stack_overflow_shared_..._entry_point_).
 	// Set by the caller (decompile_native_cmd.go) from a per-Dart-version,
-	// per-arch table (internal/disasm.ThreadStubOffsets) BEFORE
+	// per-arch table (internal/vmtables.ThreadStubOffsets) BEFORE
 	// EmitPseudocode runs -- nil/empty means "not verified for this
 	// version/arch", in which case THR-relative loads render as a plain
 	// field access (THR.fNN) same as before this feature existed.
@@ -148,7 +172,7 @@ type FuncIR struct {
 
 	// ThreadFieldNames maps a THR-relative byte displacement to the Thread
 	// field it names, from the same SDK-derived tables as ThreadStubOffsets
-	// (internal/disasm.THRFields) but covering every field rather than only
+	// (internal/vmtables.THRFields) but covering every field rather than only
 	// the cached stub entry points.
 	//
 	// Three of those fields cache VM OBJECTS rather than addresses --
@@ -210,6 +234,13 @@ type FuncIR struct {
 	// reader that a run of instructions is really a callee the compiler inlined,
 	// which is otherwise invisible in the pseudocode.
 	InlineFrames map[uint64][]string `json:"-"`
+
+	// StackMaps holds decoded CompressedStackMaps entries for this function,
+	// giving per-PC register/spill liveness at GC safepoints. Populated by
+	// the caller from Code.CompressedStackMapsRef before EmitPseudocode runs.
+	// Used by the emitter to kill dead temps at safepoints and improve
+	// register reuse tracking. Empty/absent means no CSM data available.
+	StackMaps []cluster.StackMapEntry `json:"-"`
 
 	// TryRegions holds recovered try blocks with their PC extents, populated by
 	// the caller from PcDescriptors before EmitPseudocode runs. Unlike
@@ -329,8 +360,8 @@ func (f *FuncIR) AllocatedClassID(calleeName string) int {
 
 // SwitchCase is one case in a recovered switch dispatch.
 type SwitchCase struct {
-	Index   int    // case value (0-based)
-	BlockID int    // target block ID in FuncIR.Blocks
+	Index   int // case value (0-based)
+	BlockID int // target block ID in FuncIR.Blocks
 }
 
 // TryRegionEntry is one recovered try block: a PC range plus the handler it
@@ -485,6 +516,6 @@ type SymbolLookup func(va uint64) (name string, ok bool)
 // PoolLookup resolves an object-pool slot index to a display string
 // (e.g. a literal value, a selector name, or a class/library hint),
 // reusing aotopsy's own already-more-accurate pool resolution
-// (internal/pipeline.ResolvePoolDisplay) instead of flutterdec's raw
+// (internal/analysis.ResolvePoolDisplay) instead of flutterdec's raw
 // "pool[N]" placeholder.
 type PoolLookup func(idx int) (display string, ok bool)

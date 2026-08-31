@@ -64,10 +64,11 @@ GEMINI.md
 /findpool305
 /aotopsy
 aotopsy_*
+*.exe
 docs/roadmap/
 docs/SESSION-HANDOFF*.md
 docs/SESSION_HANDOFF*.md
-# NOTE: internal/pipeline/regression_test.go was listed here and deleted in the
+# NOTE: internal/analysis/regression_test.go was listed here and deleted in the
 # same change. That combination removed the only end-to-end regression suite AND
 # made re-adding it impossible without editing this file first. Restored; do not
 # re-ignore source or test files here -- this list is for build outputs.
@@ -77,7 +78,7 @@ docs/SESSION_HANDOFF*.md
 # one developer's local setup and is meaningless (and wrong) on another machine.
 AGENTS-local.md
 
-# Golden test records under internal/pipeline/testdata/golden/ are COMMITTED,
+# Golden test records under internal/analysis/testdata/golden/ are COMMITTED,
 # deliberately. They used to be ignored on the grounds of being per-machine,
 # but they are not: each record carries the input binary's SHA-256, and the
 # test skips when the local sample does not match it. Ignoring them made the

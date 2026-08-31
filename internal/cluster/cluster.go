@@ -158,6 +158,15 @@ type Result struct {
 	// generic parameter declarations. Consumed via FuncTypeInfo.TypeParamsRefID
 	// to reconstruct `<T>` in decompiler signatures (gap §2.3).
 	TypeParameters []TypeParametersInfo
+
+	// Closures holds Closure objects' function refs, enabling closure
+	// dispatch BLR resolution. Each Closure's function ref (index 3 in
+	// ReadFromTo) points to the Function the closure wraps.
+	Closures []ClosureInfo
+
+	// FfiTrampolines holds decoded FfiTrampolineData metadata: C function
+	// signatures, Dart signature types, callback targets, and callback IDs.
+	FfiTrampolines []FfiTrampolineInfo
 }
 
 // ScanClusters reads the clustered snapshot header and cluster tags from
@@ -382,4 +391,3 @@ func FindClusterDataStart(data []byte) (int, error) {
 	}
 	return 0, fmt.Errorf("cluster: unterminated features string")
 }
-

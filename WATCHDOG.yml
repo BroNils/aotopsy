@@ -1,0 +1,3 @@
+advisors:
+  - name: default
+    model: devin/glm-5-2:high

@@ -4,30 +4,28 @@ import (
 	"fmt"
 
 	"aotopsy/internal/disasm"
-
-	"aotopsy/internal/lattice"
 )
 
-// BuildFuncCFG builds a single-function lattice.FuncCFG from instructions and call edges.
+// BuildFuncCFG builds a single-function FuncCFG from instructions and call edges.
 // Returns the FuncCFG and the number of basic blocks (for filtering trivial functions).
-func BuildFuncCFG(name string, insts []disasm.Inst, edges []disasm.CallEdge) (*lattice.FuncCFG, int) {
+func BuildFuncCFG(name string, insts []disasm.Inst, edges []disasm.CallEdge) (*FuncCFG, int) {
 	dcfg := disasm.BuildCFG(name, insts)
 	lcfg := convertFuncCFG(&dcfg, edges)
 	return lcfg, len(dcfg.Blocks)
 }
 
-// convertFuncCFG maps a disasm.FuncCFG to a lattice.FuncCFG.
+// convertFuncCFG maps a disasm.FuncCFG to a FuncCFG.
 // Call edges are mapped into blocks by matching instruction PCs.
-func convertFuncCFG(dcfg *disasm.FuncCFG, edges []disasm.CallEdge) *lattice.FuncCFG {
+func convertFuncCFG(dcfg *disasm.FuncCFG, edges []disasm.CallEdge) *FuncCFG {
 	// Build PC → CallEdge map for O(1) lookup.
 	edgeByPC := make(map[uint64]disasm.CallEdge, len(edges))
 	for _, e := range edges {
 		edgeByPC[e.FromPC] = e
 	}
 
-	lcfg := &lattice.FuncCFG{Name: dcfg.Name}
+	lcfg := &FuncCFG{Name: dcfg.Name}
 	for _, db := range dcfg.Blocks {
-		lb := &lattice.BasicBlock{
+		lb := &BasicBlock{
 			ID:    db.ID,
 			Start: db.Start,
 			End:   db.End,
@@ -36,7 +34,7 @@ func convertFuncCFG(dcfg *disasm.FuncCFG, edges []disasm.CallEdge) *lattice.Func
 
 		// Convert successors.
 		for _, ds := range db.Succs {
-			lb.Succs = append(lb.Succs, lattice.Successor{
+			lb.Succs = append(lb.Succs, Successor{
 				BlockID: ds.BlockID,
 				Cond:    ds.Cond,
 			})
@@ -52,7 +50,7 @@ func convertFuncCFG(dcfg *disasm.FuncCFG, edges []disasm.CallEdge) *lattice.Func
 				if callee == "" {
 					callee = fmt.Sprintf("0x%x", e.TargetPC)
 				}
-				lb.Calls = append(lb.Calls, lattice.CallSite{
+				lb.Calls = append(lb.Calls, CallSite{
 					Offset: idx,
 					Callee: callee,
 				})

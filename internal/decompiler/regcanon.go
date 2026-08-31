@@ -83,7 +83,7 @@ var x86RegCanon = map[string]string{
 func stackComputedSlot(expr string) (string, bool) {
 	expr = strings.TrimSpace(expr)
 	if expr == "SP" {
-		return "[SP]", true
+		return "stack_sp", true
 	}
 	if !strings.HasPrefix(expr, "(SP ") || !strings.HasSuffix(expr, ")") {
 		return "", false
@@ -97,7 +97,13 @@ func stackComputedSlot(expr string) (string, bool) {
 	if !isAllDigits(num) {
 		return "", false
 	}
-	return "[SP" + string(inner[0]) + num + "]", true
+	// Valid Dart identifier (a stack slot), not `[SP±k]` which does not parse as
+	// an lvalue/expression. "m" = minus, "p" = plus, mirroring localName.
+	sign := "p"
+	if inner[0] == '-' {
+		sign = "m"
+	}
+	return "stack_" + sign + num, true
 }
 
 // setReg writes val as the symbolic value of register dst, keyed by the

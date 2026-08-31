@@ -5,6 +5,10 @@ import (
 	"regexp"
 	"strings"
 
+	"aotopsy/internal/cluster"
+	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/decompiler/stmt"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/strutil"
 )
 
@@ -21,6 +25,7 @@ type Stats struct {
 	NonLastBranch         int `json:"non_last_branch"`
 	TryBlocks             int `json:"try_blocks"`
 	CatchHandlers         int `json:"catch_handlers"`
+	CSMDeadRegsKilled     int `json:"csm_dead_regs_killed,omitempty"`
 }
 
 // Artifact is one function's emitted pseudocode plus its stats.
@@ -32,7 +37,7 @@ type Artifact struct {
 }
 
 const (
-	maxDepth      = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
+	maxDepth = 20 // Fase 7: increased from 12 to reach loop headers in deep CFGs
 	// Re-emission cap. Lowered from 24: coverage is set by each block's FIRST
 	// emission (unaffected here), so anything above this only DUPLICATES already-
 	// emitted code. On dense 100+ block state machines (chunked-JSON parser) the
@@ -87,19 +92,30 @@ type emitter struct {
 	// omittedStates stores register state snapshots at extraction points,
 	// so helper sub-emitters can receive live register aliases as parameters.
 	omittedStates map[int]*LiftState
-	// blockOut records each block's OUT register state (with real emission-time
-	// temp names) the first time its own instructions finish emitting. It is the
-	// per-block dataflow lattice point used by seedFromEmittedPreds to fill a
-	// successor's unknown live-in registers with values every already-emitted
-	// predecessor agrees on -- a forward join, purely additive and §2-safe (only
-	// agreed concrete values are propagated; any disagreement leaves the register
-	// unknown, i.e. honestly raw).
-	blockOut map[int]*LiftState
-	callIdx       int
-	steps         int
-	budgetHit     bool
-	stats         Stats
-	loopHeaders   map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	// blockEntryState is the per-block register state computed by the pre-emission
+	// reaching-definition fixpoint (computeEntryStates). seedFromFixpoint fills a
+	// block's unknown live-ins from it. Supersedes the already-emitted-predecessor
+	// forward join.
+	blockEntryState []*LiftState
+	// loopPhis maps a loop-header block id to its loop-carried registers and each
+	// one's clean entry-initial value (computeLoopPhis). At the loop's entry the
+	// emitter declares an induction local `phi_bH_<reg>` initialized to that value
+	// and pins the register to it; the register's in-loop redefinitions are then
+	// emitted as explicit `phi_bH_<reg> = <update>;` statements instead of leaking
+	// the raw register token at the header read.
+	loopPhis map[int]map[string]string
+	// pinnedPhi maps a currently-pinned canonical register to its phi induction
+	// local name. While pinned, a redefinition of the register emits an update to
+	// the local and re-pins, rather than forwarding the raw value expression.
+	pinnedPhi map[string]string
+	// phiDeclared guards against re-declaring a header's induction locals if the
+	// loop-entry path is reached more than once.
+	phiDeclared map[int]bool
+	callIdx     int
+	steps       int
+	budgetHit   bool
+	stats       Stats
+	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -112,6 +128,13 @@ type emitter struct {
 	// curTryRegion is the try region currently open, stored as index+1 so the
 	// zero value means "none". Prevents a region re-opening inside itself.
 	curTryRegion int
+
+	// csmByPC maps a PC offset (relative to function entry) to the
+	// CompressedStackMaps entry at that offset. Built from fir.StackMaps
+	// in EmitPseudocode. Used by emitBlockBody to kill dead registers at
+	// GC safepoints, improving pseudocode quality by removing stores to
+	// registers that are dead at the safepoint.
+	csmByPC map[uint32]cluster.StackMapEntry
 	// tryOpened records regions already structured with real try/catch, so the
 	// many recursion paths into a region do not each emit their own.
 	tryOpened map[int]bool
@@ -218,13 +241,15 @@ func (e *emitter) annotateBlockTry(id, indent int) {
 func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact {
 	fir.ComputePreds() // A3: compute predecessors for if/else inlining
 	e := &emitter{
-		fir:        fir,
-		symbols:    symbols,
-		pool:       pool,
-		state:      newLiftState(fir.NullReg),
-		active:     make(map[int]bool),
-		visits:     make(map[int]int),
-		omittedSet: make(map[int]bool),
+		fir:         fir,
+		symbols:     symbols,
+		pool:        pool,
+		state:       newLiftState(fir.NullReg),
+		active:      make(map[int]bool),
+		visits:      make(map[int]int),
+		omittedSet:  make(map[int]bool),
+		pinnedPhi:   make(map[string]string),
+		phiDeclared: make(map[int]bool),
 	}
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
@@ -241,6 +266,12 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
 	e.loopHeaders = identifyLoopHeaders(fir)
+	// Pre-emission reaching-definition fixpoint: correct value state at each
+	// block entry regardless of the recursive walk's path (ssa.go). The same
+	// fixpoint's exit states drive loop-carried phi detection.
+	entryStates, exitStates := runFixpoint(fir, pool)
+	e.blockEntryState = entryStates
+	e.loopPhis = computeLoopPhis(fir, exitStates)
 	// Map blocks to the try region covering them, for per-block annotation.
 	e.buildBlockTryIndex()
 	// Allocate up front so sub-emitters for helper functions share the same
@@ -254,6 +285,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if len(fir.TryRegions) > 0 {
 		e.tryOpened = make(map[int]bool, len(fir.TryRegions))
 		e.handlerBlocks = make(map[int]bool)
+	}
+	// Build CSM lookup map for dead-register elimination at safepoints.
+	if len(fir.StackMaps) > 0 {
+		e.csmByPC = make(map[uint32]cluster.StackMapEntry, len(fir.StackMaps))
+		for _, sm := range fir.StackMaps {
+			e.csmByPC[sm.PCOffset] = sm
+		}
 	}
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
@@ -331,7 +369,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 						// left untouched when that one was changed -- so the
 						// "fix" hardened the path that never fires and left
 						// the one that does. Both now share asyncStubRole.
-						if isAsyncStubName(name) {
+						if sdk.IsAsyncStubName(name) {
 							fir.IsAsync = true
 							break
 						}
@@ -419,18 +457,18 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		returnType = inferReturnTypeFromName(fir.Name)
 	}
 	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
-	e.state.setReg(fir.ThreadReg, "THR")
-	e.state.setReg(fir.PoolReg, "PP")
+	e.state.setReg(fir.ThreadReg, sdk.SymTHR)
+	e.state.setReg(fir.PoolReg, sdk.SymPP)
 	// SPREG (ARM64 x15 / x86 rsp) and HEAP_BITS (ARM64 x28) are reserved
 	// registers with fixed meanings, verified against constants_arm64.h
 	// (SPREG=R15, HEAP_BITS=R28). Seeding them by name keeps computed
 	// stack addresses and write-barrier-mask math from leaking raw register
 	// tokens into the pseudocode.
 	if fir.StackReg != "" {
-		e.state.setReg(fir.StackReg, "SP")
+		e.state.setReg(fir.StackReg, sdk.SymSP)
 	}
 	if fir.HeapBitsReg != "" {
-		e.state.setReg(fir.HeapBitsReg, "HEAP_BITS")
+		e.state.setReg(fir.HeapBitsReg, sdk.SymHeapBits)
 	}
 
 	// P7: Async state machine annotation. Dart compiles async functions
@@ -565,6 +603,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// over the text here (constant folding, negated comparisons, wrapped
 	// member access, outer parens).
 	source = compactLines(source)
+	// Hoist long, repeated string literals to function-local consts. The
+	// control-flow walk re-emits blocks, so a compiler-generated character table
+	// can appear dozens of times in one function; naming it once is a large, safe
+	// size reduction (constants have no CSE-invariance hazard).
+	source = hoistStringLiterals(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
 	// Null-safety annotation (detect null-check patterns)
@@ -584,7 +627,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Item 17: IdentStats-based re-classification pass from flutterdec.
 	// Renames generic temps (t0, t1) to semantic names (result, flag,
 	// counter, accumulator) based on usage patterns.
-	source = applyIdentReclassification(source)
+	source = compare.ApplyIdentReclassification(source)
 
 	visited := make(map[int]bool, len(e.visits))
 	for id, count := range e.visits {
@@ -601,11 +644,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	}
 }
 
-// labelDeclRe matches an emitted block label line, gotoRe a reference to one.
-var (
-	labelDeclRe = regexp.MustCompile(`^\s*block_(\d+):;$`)
-	gotoRefRe   = regexp.MustCompile(`goto block_(\d+);`)
-)
+// gotoRefRe matches a `goto block_N;` reference.
+var gotoRefRe = regexp.MustCompile(`goto block_(\d+);`)
 
 // dropUnusedLabels reconciles block labels and gotos so the emitted text is
 // internally consistent:
@@ -624,13 +664,13 @@ func dropUnusedLabels(source string) string {
 		for _, m := range gotoRefRe.FindAllStringSubmatch(line, -1) {
 			used[m[1]] = true
 		}
-		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
 			declared[m[1]] = true
 		}
 	}
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if m := labelDeclRe.FindStringSubmatch(line); m != nil {
+		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
 			if !used[m[1]] {
 				continue
 			}

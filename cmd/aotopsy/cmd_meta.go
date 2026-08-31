@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 // cmdMeta handles "aotopsy meta <libapp.so>" — full pipeline producing flutter_meta.json.
@@ -32,7 +32,7 @@ func cmdMeta(args []string) error {
 		if *outDir == "" {
 			*outDir = *from
 		}
-		metaPath, err := pipeline.RunMetaStage(*from, "", *all, quiet, os.Stderr)
+		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -53,7 +53,7 @@ func cmdMeta(args []string) error {
 		*outDir = defaultOutDir(libPath)
 	}
 
-	result, err := pipeline.Run(pipeline.Opts{
+	result, err := analysis.Run(analysis.Opts{
 		LibPath:   libPath,
 		OutDir:    *outDir,
 		MaxSteps:  *maxSteps,

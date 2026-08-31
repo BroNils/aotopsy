@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // stubPool stands in for the deserialized object pool. Index 6 is `sentinel`
@@ -34,7 +35,7 @@ func stubPool(idx int) (string, bool) {
 // comparing against the sentinel is how Dart checks a lazily-initialized
 // static or a `late` field.
 func TestPoolOperandResolvesWithoutALoad(t *testing.T) {
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: x86PoolReg, ThreadReg: "r14",
+	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr,
 		PoolIndexOf: disasm.X64PoolIndex}
 	s := newLiftState("")
 	s.Pool = stubPool
@@ -76,7 +77,7 @@ func TestPoolOperandTaggingDiffersPerArch(t *testing.T) {
 // that cannot name an element must stay a placeholder rather than round to
 // a neighbour.
 func TestPoolOperandRefusesToGuess(t *testing.T) {
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: x86PoolReg, PoolIndexOf: disasm.X64PoolIndex}
+	x64 := &FuncIR{FrameReg: "rbp", PoolReg: sdk.X86PoolRegStr, PoolIndexOf: disasm.X64PoolIndex}
 	cases := []struct{ name, src string }{
 		{"not element-aligned", "cmp eax, [r15+0x3e]"},
 		{"below the first element", "cmp eax, [r15+0x4]"},
@@ -99,7 +100,7 @@ func TestPoolOperandRefusesToGuess(t *testing.T) {
 // instruction, and `pool[708]` can be looked up by hand where `pool[?]`
 // cannot.
 func TestPoolOperandKeepsIndexWhenContentsAreUnknown(t *testing.T) {
-	x64 := &FuncIR{FrameReg: "rbp", PoolReg: x86PoolReg, PoolIndexOf: disasm.X64PoolIndex}
+	x64 := &FuncIR{FrameReg: "rbp", PoolReg: sdk.X86PoolRegStr, PoolIndexOf: disasm.X64PoolIndex}
 	// 0x1637 -> index 709, which stubPool does not know.
 	s := newLiftState("")
 	s.Pool = stubPool
@@ -123,8 +124,8 @@ func TestPoolOperandKeepsIndexWhenContentsAreUnknown(t *testing.T) {
 // ARM64 samples were byte-identical across this change; this pins the
 // reason rather than the observation.
 func TestARM64PoolOperandUnaffected(t *testing.T) {
-	arm := &FuncIR{FrameReg: arm64FrameReg, PoolReg: arm64PoolReg, ThreadReg: arm64ThreadReg,
-		NullReg: arm64NullReg,
+	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+		NullReg: sdk.ARM64NullRegStr,
 		PoolIndexOf: func(disp int64) (int, bool) {
 			return disasm.ARM64PoolIndex(int(disp))
 		}}

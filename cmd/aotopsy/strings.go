@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
 	"aotopsy/internal/strxref"
 )
 
@@ -38,7 +38,7 @@ func cmdStrings(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	ef, info, err := pipeline.LoadSnapshotRaw(*libapp, opts)
+	ef, info, err := analysis.LoadSnapshotRaw(*libapp, opts)
 	if err != nil {
 		return err
 	}
@@ -231,13 +231,13 @@ func cmdStrings(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
 
-		// Separate parse pass via pipeline.LoadContext -- this command
+		// Separate parse pass via analysis.LoadContext -- this command
 		// builds its own VM+Isolate string tables above (needed for the
 		// "which snapshot" dump format), not the Ranges/FuncIR machinery
 		// --xref needs, so this reuses Komponen A's shared context loader
 		// instead of duplicating decompile_native_cmd.go's setup a third
 		// time in this file.
-		ctx, err := pipeline.LoadContext(*libapp)
+		ctx, err := analysis.LoadContext(*libapp)
 		if err != nil {
 			return fmt.Errorf("--xref: load context: %w", err)
 		}

@@ -97,24 +97,21 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 
 	for _, e := range edges {
 		prov := ClassifyEdgeProv(e)
-		var target string
-		if e.Kind == "bl" || e.Kind == "call" {
-			target = e.Target
-		} else {
-			// For BLR, target is unresolvable — group by "from → via" label.
-			target = e.Via
-			if target == "" {
-				target = "unresolved_blr"
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
+			if e.Kind == "blr" || e.Kind == "call_indirect" {
+				targets = []string{"unresolved_blr"}
+			} else {
+				continue
 			}
 		}
-		if target == "" {
-			continue
-		}
-		k := edgeKey{e.FromFunc, target, prov}
-		if v, ok := dedupEdges[k]; ok {
-			v.count++
-		} else {
-			dedupEdges[k] = &edgeVal{count: 1}
+		for _, target := range targets {
+			k := edgeKey{e.FromFunc, target, prov}
+			if v, ok := dedupEdges[k]; ok {
+				v.count++
+			} else {
+				dedupEdges[k] = &edgeVal{count: 1}
+			}
 		}
 	}
 
@@ -317,12 +314,12 @@ func ComputeStats(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) Call
 		callerCount[e.FromFunc]++
 		if e.Kind == "bl" || e.Kind == "call" {
 			stats.BLEdges++
-			if e.Target != "" {
-				calleeCount[e.Target]++
+			for _, t := range e.ResolvedTargets() {
+				calleeCount[t]++
 			}
 		} else {
 			stats.BLREdges++
-			if e.Via != "" {
+			if len(e.ResolvedTargets()) > 0 {
 				stats.BLRAnnotated++
 			}
 		}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 func cmdSignal(args []string) error {
@@ -21,6 +21,6 @@ func cmdSignal(args []string) error {
 		return fmt.Errorf("--in is required")
 	}
 
-	_, err := pipeline.RunSignalStage(*inDir, *k, *noAsm, false, os.Stderr)
+	_, err := analysis.RunSignalStage(*inDir, *k, *noAsm, false, os.Stderr)
 	return err
 }

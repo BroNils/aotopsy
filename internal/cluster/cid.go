@@ -2,7 +2,10 @@
 
 package cluster
 
-import "aotopsy/internal/snapshot"
+import (
+	"aotopsy/internal/sdk"
+	"aotopsy/internal/snapshot"
+)
 
 // CID constants for Dart VM v3.9.2 (kept for backward compatibility and CidName).
 const (
@@ -107,10 +110,10 @@ const (
 
 // Tag bit positions for v3.4.3+ object header tag encoding.
 const (
-	tagCanonicalBit = 1  // bit 1
-	tagImmutableBit = 6  // bit 6
-	tagClassIdShift = 12 // bits 12-31
-	tagClassIdMask  = (1 << 20) - 1
+	tagCanonicalBit = 1
+	tagImmutableBit = 6
+	tagClassIdShift = sdk.ClassIdTagPosV3
+	tagClassIdMask  = (1 << sdk.ClassIdTagSizeV3) - 1
 )
 
 // DecodeTags extracts CID, canonical, and immutable flags from v3.4.3+

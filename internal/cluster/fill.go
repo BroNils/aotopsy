@@ -333,6 +333,16 @@ type ClosureDataInfo struct {
 	PackedFields      uint32
 }
 
+// ClosureInfo holds a Closure object's function ref, enabling closure
+// dispatch BLR resolution. UntaggedClosure ReadFromTo (raw_object.h):
+// instantiator_type_arguments(0), function_type_arguments(1),
+// delayed_type_arguments(2), function(3), context(4), hash(5).
+// The function ref (index 3) points to the Function the closure wraps.
+type ClosureInfo struct {
+	RefID      int
+	FunctionRef int // ref ID of the wrapped Function (-1 if not captured)
+}
+
 // CompressedStackMapsInfo holds a raw CompressedStackMaps payload.
 // Not decoded yet — the payload is a compressed bitmap of which registers
 // are live at each safepoint. No consumer exists currently, but the data
@@ -608,7 +618,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
+			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
@@ -622,6 +632,8 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.KernelProgramInfo = append(result.KernelProgramInfo, kpiRefs...)
 			result.ClosureData = append(result.ClosureData, closureDataInfos...)
 			result.TypeParameters = append(result.TypeParameters, typeParamInfos...)
+			result.Closures = append(result.Closures, closureInfos...)
+			result.FfiTrampolines = append(result.FfiTrampolines, ffiInfos...)
 
 		case FillDouble:
 			if err := skipFillDouble(s, cm, profile.PreCanonicalSplit); err != nil {
@@ -782,12 +794,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
-		// Pass the real profile through. Passing nil here used to panic:
-		// readFillRefs dereferences profile.CIDs to decide which CID-specific
-		// capture applies, so every FillRefs cluster reached from
-		// DebugFillPositions (aotopsy _debug clusters / _debug objects) hit a
-		// nil-pointer dereference.
-		_, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
+		_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)

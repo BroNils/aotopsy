@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/analysis"
 )
 
 func cmdFindLibappBatch(args []string) error {
@@ -29,7 +31,7 @@ func cmdFindLibappBatch(args []string) error {
 
 	type summary struct {
 		Name   string
-		Result *FindResult
+		Result *analysis.FindResult
 		Error  string
 	}
 
@@ -41,8 +43,7 @@ func cmdFindLibappBatch(args []string) error {
 		}
 		path := filepath.Join(*dir, e.Name())
 		s := summary{Name: e.Name()}
-
-		result, err := findLibappInZip(path)
+		result, err := analysis.FindLibappInZip(path)
 		if err != nil {
 			s.Error = err.Error()
 		} else {

@@ -2,12 +2,14 @@ package typetrack
 
 import (
 	"strings"
+
+	"aotopsy/internal/arch/arm64"
 )
 
 // handleUBFX handles case 5b-ubfx: UBFX/UBFM bitfield extract for class ID.
 func handleUBFX(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, rn, ok := isUBFX(raw); ok {
+	if rd, rn, _, _, ok := arm64.UBFX(raw); ok {
 		if rd >= 31 {
 			return true
 		}
@@ -41,7 +43,7 @@ func handleUBFX(tc *transferCtx) bool {
 // handleMOV handles case 6: MOV (ORR Xd, XZR, Xm) → copy type.
 func handleMOV(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, ok := isMOVOrr(raw); ok {
+	if rd, ok := arm64.MOVOrr(raw); ok {
 		rm := int((raw >> 16) & 0x1F)
 		if rd >= 31 {
 			return true
@@ -59,7 +61,7 @@ func handleMOV(tc *transferCtx) bool {
 // handleBLR handles case 7: BLR — dispatch resolution + allocation detection.
 func handleBLR(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rn, ok := isBLR(raw); ok {
+	if rn, ok := arm64.BLR(raw); ok {
 		if rn < 31 {
 			resolveBLR(tc.state, rn, tc.inst, tc.ctx, tc.result)
 		}
@@ -67,22 +69,52 @@ func handleBLR(tc *transferCtx) bool {
 			sn := tc.state[rn].StubName
 			if strings.HasPrefix(sn, "UnlinkedCall:") {
 				methodName := sn[len("UnlinkedCall:"):]
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: methodName, Resolved: true,
-				})
+				if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
+					res := BlrResolution{
+						PC: tc.inst.Addr, Reg: rn, SlotIndex: -1,
+						Confidence: "static_inferred",
+					}
+					var allTargets []string
+					for _, selOff := range selectorOffsets {
+						allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
+					}
+					applySelectorCandidates(&res, allTargets)
+					if res.Polymorphic {
+						res.Confidence = "polymorphic"
+					}
+					tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
+				} else {
+					tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
+						PC: tc.inst.Addr, Reg: rn, TargetName: methodName, Resolved: true,
+						Confidence: "stub",
+					})
+				}
 			} else if strings.HasPrefix(sn, "PPCode:") {
 				funcName := sn[len("PPCode:"):]
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
+					Confidence: "stub",
 				})
 			} else if strings.HasPrefix(sn, "TTS:") {
 				stubName := sn[len("TTS:"):]
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
+					Confidence: "stub",
 				})
+			} else if strings.HasPrefix(sn, "Closure:") {
+				poolIdx := tc.state[rn].StubOff
+				if tc.ctx.PoolClosureFunctionNames != nil {
+					if funcName, ok := tc.ctx.PoolClosureFunctionNames[poolIdx]; ok && funcName != "" {
+						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
+							PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
+							Confidence: "stub",
+						})
+					}
+				}
 			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
 				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
 					PC: tc.inst.Addr, Reg: rn, TargetName: sn, Resolved: true,
+					Confidence: "stub",
 				})
 			}
 		}
@@ -124,14 +156,14 @@ func handleBLR(tc *transferCtx) bool {
 // handleBL handles case 8: BL — direct call with callee exit type propagation.
 func handleBL(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if target, ok := isBL(raw, tc.inst.Addr); ok {
+	if target, ok := arm64.BL(raw, tc.inst.Addr); ok {
 		tc.ctx.BLTotal++
 		if tc.result.BLCallSiteTypes == nil {
 			tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 		}
 		var callSiteState [31]TypeLattice
 		copy(callSiteState[:], tc.state[:])
-		tc.result.BLCallSiteTypes[target] = callSiteState
+		tc.result.BLCallSiteTypes[tc.inst.Addr] = callSiteState
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {

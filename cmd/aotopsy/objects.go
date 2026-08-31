@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/pipeline"
 )
 
 type poolRecord struct {
@@ -38,7 +38,7 @@ func cmdObjects(args []string) error {
 		MaxSteps: *maxSteps,
 	}
 
-	sc, err := pipeline.LoadSnapshot(*libapp, opts)
+	sc, err := analysis.LoadSnapshot(*libapp, opts)
 	if err != nil {
 		return err
 	}

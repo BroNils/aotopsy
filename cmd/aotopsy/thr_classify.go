@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"aotopsy/internal/disasm"
+	"aotopsy/internal/thraudit"
 )
 
 func cmdTHRClassify(args []string) error {
@@ -30,16 +30,16 @@ func cmdTHRClassify(args []string) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	records, err := disasm.ReadAuditRecords(f)
+	records, err := thraudit.ReadAuditRecords(f)
 	if err != nil {
 		return fmt.Errorf("read records: %w", err)
 	}
 
 	// Cluster into bands.
-	bands := disasm.ClusterBands(records, *maxGap)
+	bands := thraudit.ClusterBands(records, *maxGap)
 
 	// Classify.
-	classified := disasm.ClassifyRecords(records, bands)
+	classified := thraudit.ClassifyRecords(records, bands)
 
 	// Create output directory.
 	if err := os.MkdirAll(*outDir, 0755); err != nil {
@@ -62,16 +62,16 @@ func cmdTHRClassify(args []string) error {
 	}
 
 	// Build and print summary.
-	summary := disasm.Summarize(classified)
+	summary := thraudit.Summarize(classified)
 
 	fmt.Fprintf(os.Stderr, "%s (Dart %s): %d unresolved\n",
 		summary.Sample, summary.DartVersion, summary.Total)
 
-	classes := []disasm.THRClass{
-		disasm.ClassRuntimeEntrypoint,
-		disasm.ClassObjectStoreCache,
-		disasm.ClassIsolateGroupPtr,
-		disasm.ClassUnknown,
+	classes := []thraudit.THRClass{
+		thraudit.ClassRuntimeEntrypoint,
+		thraudit.ClassObjectStoreCache,
+		thraudit.ClassIsolateGroupPtr,
+		thraudit.ClassUnknown,
 	}
 	for _, cls := range classes {
 		count := summary.Counts[cls]

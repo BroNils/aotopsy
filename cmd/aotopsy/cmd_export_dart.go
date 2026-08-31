@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/naming"
+	"aotopsy/internal/strutil"
 )
 
 // cmdExportDart implements "aotopsy export-dart --lib <libapp.so> --out <dir>":
@@ -47,168 +48,48 @@ func cmdExportDart(args []string) error {
 		return fmt.Errorf("creating output directory: %w", err)
 	}
 
-	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
-	sc, err := pipeline.LoadSnapshot(*libapp, opts)
+	ctx, err := analysis.LoadContext(*libapp)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = sc.Close() }()
+	defer func() { _ = ctx.Close() }()
 
-	info := sc.Info
-	result := sc.Result
-	ranges := sc.Ranges
-	code := sc.Code
-	codeOff := sc.CodeOff
-	codeVA := sc.CodeVA
-	isARM64 := sc.IsARM64
-	pl := sc.Pool
+	result := ctx.Result
+	pl := ctx.Pool
+	info := ctx.Info
+	ranges := ctx.Ranges
+	codeOff := ctx.CodeOff
+	codeVA := ctx.CodeVA
+	symbolNames := ctx.SymbolNames
 
-	fmt.Printf("[export-dart] Loaded %s (Dart %s, %s)\n", *libapp, info.Version.DartVersion, map[bool]string{true: "ARM64", false: "x86_64"}[isARM64])
+	fmt.Printf("[export-dart] Loaded %s (Dart %s, %s)\n", *libapp, info.Version.DartVersion, map[bool]string{true: "ARM64", false: "x86_64"}[ctx.IsARM64])
 	fmt.Printf("[export-dart] Total code entries: %d\n", len(ranges))
 
-	// Build symbols map for name resolution
-	symbolNames := make(map[uint64]string, len(ranges))
+	// Library-URL mapping (export-specific): map each Code to its owning library
+	// URI for file placement. The FuncIR itself now comes from the shared,
+	// fully-enriched Context.FuncIRFor -- export-dart no longer builds its own
+	// (previously partial) FuncIR builder, so its output matches decompile-native.
 	ctEarly := info.Version.CIDs
-	paramTypeByCodeIndex := pipeline.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
-	for _, r := range ranges {
-		if r.Size == 0 {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
-		if r.RefID >= 0 {
-			symbolNames[funcVA] = qualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-
-	classLayouts := pipeline.BuildClassLayouts(result, pl, info.Version.CompressedPointers)
-	perClassFieldNames := map[int32]map[int32]string{}
-	offsetNames := map[int32]map[string]bool{}
-	for _, cl := range classLayouts {
-		if perClassFieldNames[cl.ClassID] == nil {
-			perClassFieldNames[cl.ClassID] = map[int32]string{}
-		}
-		for _, f := range cl.Fields {
-			if strings.HasPrefix(f.Name, "f_0x") || strings.HasPrefix(f.Name, "field_0x") {
-				continue
-			}
-			perClassFieldNames[cl.ClassID][f.ByteOffset] = f.Name
-			if offsetNames[f.ByteOffset] == nil {
-				offsetNames[f.ByteOffset] = map[string]bool{}
-			}
-			offsetNames[f.ByteOffset][f.Name] = true
-		}
-	}
-
-	globalFieldNames := map[int32]string{}
-	for off, names := range offsetNames {
-		if len(names) == 1 {
-			for name := range names {
-				globalFieldNames[off] = name
-			}
-		}
-	}
-
-	fieldNameResolver := func(classID int, byteOffset int64) string {
-		if classID > 0 {
-			if classFields, ok := perClassFieldNames[int32(classID)]; ok {
-				if name, ok2 := classFields[int32(byteOffset)]; ok2 {
-					return name
-				}
-			}
-		}
-		if name, ok := globalFieldNames[int32(byteOffset)]; ok {
-			return name
-		}
-		return ""
-	}
-
-	closureParents := pipeline.BuildClosureParents(result, pl)
-	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
-	for i := range result.Classes {
-		classByRef[result.Classes[i].RefID] = &result.Classes[i]
-	}
-
+	paramTypeByCodeIndex := naming.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
 	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
 		effectiveClass := funcObj.OwnerRefID
-		if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
-			effectiveClass = owner.OwnerRefID
+		if ctEarly != nil && ctEarly.PatchClass != 0 {
+			if owner, ok := pl.RefToNamed[effectiveClass]; ok && owner.CID == ctEarly.PatchClass {
+				effectiveClass = owner.OwnerRefID
+			}
 		}
 		return effectiveClass
 	}
-	// Resolve each function's OWNING LIBRARY URL from its owner class (audit E2).
-	// Previously every function was dumped into one hardcoded
-	// "package:app/app.dart" file; now files are mapped by the real library URI
-	// so the export is genuinely modular. Uses the shared LibraryResolver so the
-	// mapping matches the rest of the pipeline.
-	libResolver := pipeline.NewLibraryResolver(result, pl)
-	codeRefToReceiverClassID := make(map[int]int, len(result.Codes))
+	libResolver := analysis.NewLibraryResolver(result, pl)
 	codeRefToLibURL := make(map[int]string, len(result.Codes))
 	for _, ce := range result.Codes {
-		if owner, ok := pipeline.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex); ok && owner != nil {
-			classRef := effectiveOwnerClassRef(owner)
-			if classRef > 0 {
-				if ci, ok2 := classByRef[classRef]; ok2 {
-					codeRefToReceiverClassID[ce.RefID] = int(ci.ClassID)
-				}
-				if url := libResolver.LibraryURLForClassRef(classRef); url != "" {
-					codeRefToLibURL[ce.RefID] = url
-				}
-			}
-			// Top-level functions have no class owner but their owner ref may be
-			// the library (or a PatchClass onto it); try that too.
-			if _, seen := codeRefToLibURL[ce.RefID]; !seen {
-				if url := libResolver.LibraryURLForClassRef(effectiveOwnerClassRef(owner)); url != "" {
-					codeRefToLibURL[ce.RefID] = url
-				}
-			}
+		owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
+		if !ok || owner == nil {
+			continue
 		}
-	}
-
-	// Ground-truth try/catch: map each Code to its ExceptionHandlers entries and
-	// decoded PcDescriptors, so the builder recovers exact try-region extents
-	// (via cluster.BuildTryRegions + ExpandOuterTryRegions) instead of guessing
-	// from branches. This mirrors decompile-native; export-dart previously lacked
-	// it entirely, so reconstructed source had no try/catch (audit E1).
-	excHandlersByRef := make(map[int][]cluster.ExceptionHandlerEntry, len(result.ExceptionHandlers))
-	for i := range result.ExceptionHandlers {
-		excHandlersByRef[result.ExceptionHandlers[i].RefID] = result.ExceptionHandlers[i].Handlers
-	}
-	codeRefToExcHandlers := make(map[int][]cluster.ExceptionHandlerEntry)
-	pcDescByRef := make(map[int][]cluster.PcDescriptorEntry, len(result.PcDescriptors))
-	for i := range result.PcDescriptors {
-		pcDescByRef[result.PcDescriptors[i].RefID] = result.PcDescriptors[i].Entries
-	}
-	codeRefToPcDesc := make(map[int][]cluster.PcDescriptorEntry)
-	for _, ce := range result.Codes {
-		if ce.ExceptionHandlersRef >= 0 {
-			if handlers, ok := excHandlersByRef[ce.ExceptionHandlersRef]; ok {
-				codeRefToExcHandlers[ce.RefID] = handlers
-			}
+		if url := libResolver.LibraryURLForClassRef(effectiveOwnerClassRef(owner)); url != "" {
+			codeRefToLibURL[ce.RefID] = url
 		}
-		if ce.PcDescriptorsRef >= 0 {
-			if entries, ok := pcDescByRef[ce.PcDescriptorsRef]; ok {
-				codeRefToPcDesc[ce.RefID] = entries
-			}
-		}
-	}
-
-	funcIRBld := &funcIRBuilder{
-		code:                   code,
-		codeOff:                codeOff,
-		codeVA:                 codeVA,
-		symbolNames:            symbolNames,
-		isARM64:                isARM64,
-		info:                   info,
-		fieldNameResolver:      fieldNameResolver,
-		closureParents:         closureParents,
-		pl:                     pl,
-		paramTypeByCodeIndex:   paramTypeByCodeIndex,
-		codeRefToReceiverClass: codeRefToReceiverClassID,
-		codeRefToExcHandlers:   codeRefToExcHandlers,
-		codeRefToPcDesc:        codeRefToPcDesc,
 	}
 
 	symbolLookup := func(va uint64) (string, bool) {
@@ -217,10 +98,9 @@ func cmdExportDart(args []string) error {
 		}
 		return "", false
 	}
-
 	poolLookup := func(offset int) (string, bool) {
-		if sc.PoolDisplay != nil {
-			if str, ok := sc.PoolDisplay[offset]; ok {
+		if ctx.PoolDisplay != nil {
+			if str, ok := ctx.PoolDisplay[offset]; ok {
 				return str, true
 			}
 		}
@@ -276,20 +156,30 @@ func cmdExportDart(args []string) error {
 		// library URL (dart:* / package:flutter*), not by a name-prefix heuristic.
 		// The old code also dropped every `_`-prefixed owner, which threw away the
 		// app's own private classes (audit E2).
-		if *appOnly && pipeline.IsFrameworkLibraryURL(libURL) {
+		if *appOnly && analysis.IsFrameworkLibraryURL(libURL) {
 			continue
 		}
 
-		fir, err := funcIRBld.Build(r)
+		fir, err := ctx.FuncIRFor(r)
 		if err != nil || fir == nil {
 			continue
 		}
 
 		art := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
-		body := art.Source
+		body := strutil.SanitizeDartBody(art.Source)
 
 		if idx := strings.Index(body, "{"); idx >= 0 {
 			body = body[idx:]
+		}
+
+		// Declaration names must be valid Dart identifiers, or the emitted file
+		// does not even parse. Recovered names carry keyword prefixes (a discarded
+		// constructor is "new X"), mixin `&`, dots, `@hash`, etc. Sanitize before
+		// emitting the class/method declaration. Verified against the real Dart
+		// analyzer: `dynamic new Size_25c()` -> `dynamic Size_25c()`.
+		methodName = strutil.SanitizeDartIdent(methodName)
+		if ownerClass != "" {
+			ownerClass = strutil.SanitizeDartIdent(ownerClass)
 		}
 
 		lib := getOrCreateLib(libURL)
@@ -323,7 +213,7 @@ func cmdExportDart(args []string) error {
 			continue
 		}
 
-		relPath := sanitizeLibraryPath(url)
+		relPath := strutil.SanitizeLibraryPath(url)
 		fullPath := filepath.Join(*outDir, relPath)
 
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
@@ -340,16 +230,4 @@ func cmdExportDart(args []string) error {
 	fmt.Printf("[export-dart] Successfully exported %d methods across %d classes into %d .dart files under %s/\n",
 		exportedMethods, len(exportedClasses), totalFiles, *outDir)
 	return nil
-}
-
-func sanitizeLibraryPath(url string) string {
-	url = strings.TrimPrefix(url, "package:")
-	url = strings.TrimPrefix(url, "dart:")
-	url = strings.TrimPrefix(url, "file:///")
-	url = strings.ReplaceAll(url, ":", "/")
-
-	if !strings.HasSuffix(url, ".dart") {
-		url += ".dart"
-	}
-	return filepath.Clean(url)
 }

@@ -1,30 +1,21 @@
 package disasm
 
 import (
+	"aotopsy/internal/arch/x86"
 	"fmt"
 
 	"golang.org/x/arch/x86/x86asm"
 
-	"aotopsy/internal/arch"
+	"aotopsy/internal/sdk"
+	"aotopsy/internal/thraudit"
 )
 
-// x86_64 Dart AOT reserved-register roles, confirmed directly against
-// dart-lang/sdk's runtime/vm/constants_x64.h: `const Register PP = R15;`,
-// `const Register THR = R14;`. Unlike ARM64 (a fixed 4-byte instruction
-// width, handled by Inst/Disassemble/ExtractCallEdges above), x86_64's
-// variable-length instructions make materializing a full []Inst slice and
-// re-walking it for call-edge extraction awkward, so this file scans each
-// function in a single pass instead -- the same design internal/decompiler
-// and cmd/aotopsy/gdtcall.go already use for x86_64.
-const (
-	x86RegPP  = 15 // R15
-	x86RegTHR = 14 // R14
-)
+// x86_64 Dart AOT reserved-register roles are now shared from internal/sdk.
 
 // x86RegProvenance records a register's last known origin. Note: no
 // time-based expiry field -- that was the old fixed-window design
 // (see MODIFICATIONS.md / ARCHITECTURE.md's "x86_64 port status");
-// ScanX86FunctionCFG (dataflow_x86.go) tracks provenance via a real
+// ScanX86FunctionCFG (dataflowx86.go) tracks provenance via a real
 // CFG-wide dataflow instead, and only uses x86RegTracker as a small
 // read-only adapter so classifyX86Call below doesn't need two lookup
 // call shapes.
@@ -84,12 +75,19 @@ type X86ScanResult struct {
 	StringRefs []StringRefRecord
 }
 
-// x86ArgRegCanon lists the SysV AMD64 ABI's integer argument registers, in
-// calling-convention order, as canonX86Reg's canonical indices (RDI=7,
-// RSI=6, RDX=2, RCX=1, R8=8, R9=9 -- NOT contiguous, unlike ARM64's X0-X7).
-// Mirrors x86ArgRegs in internal/decompiler/x86.go; position i here is
-// ArgRegs[i] there.
-var x86ArgRegCanon = [6]int{7, 6, 2, 1, 8, 9}
+// x86ArgRegCanon lists Dart's calling-convention argument registers, in
+// parameter order, as canonical indices (RDI=7, RSI=6, RDX=2, RBX=3,
+// R8=8, R9=9). This is Dart's OWN convention
+// (DartCallingConvention::kCpuRegistersForArgs in constants_x64.h), NOT
+// the SysV C ABI — the C ABI's 4th arg is RCX, but Dart uses RBX.
+// RCX is kClassIdReg, not an argument register.
+// Shared via sdk.DartArgRegisters(sdk.ArchX86).
+var x86ArgRegCanon = func() [6]int {
+	r := sdk.DartArgRegisters(sdk.ArchX86)
+	var arr [6]int
+	copy(arr[:], r)
+	return arr
+}()
 
 // x86ArgRegBitPos returns which bit of an inferCallArgRegMaskLocal-style
 // mask a canonical register index corresponds to (its position in
@@ -122,7 +120,7 @@ const maxX86ArgSetupBack = 16
 // bitwise-AND intersection, not trust one site alone (see
 // cmd/aotopsy/decompile_native_cmd.go's resolveArgRegIndices and its
 // doc comment for why intersection, not exact-equality or majority).
-func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
+func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx int) uint8 {
 	var mask uint8
 	for i, steps := callIdx-1, 0; i >= 0 && steps < maxX86ArgSetupBack; i, steps = i-1, steps+1 {
 		d := insts[i]
@@ -139,7 +137,7 @@ func inferX86CallArgRegMaskLocal(insts []x86DecodedInst, callIdx int) uint8 {
 		if !ok {
 			continue
 		}
-		pos := x86ArgRegBitPos(arch.X86CanonReg(dstReg))
+		pos := x86ArgRegBitPos(x86.CanonReg(dstReg))
 		if pos < 0 {
 			continue
 		}
@@ -165,7 +163,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 		if reg, ok := arg.(x86asm.Reg); ok {
 			e.Kind = "call_indirect"
 			e.Reg = reg.String()
-			e.Via = rt.lookup(arch.X86CanonReg(reg))
+			e.Via = rt.lookup(x86.CanonReg(reg))
 			return e
 		}
 		if mem, ok := arg.(x86asm.Mem); ok {
@@ -183,8 +181,8 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			// themselves are never "defined" that way, so check the base
 			// register's fixed role before falling back to the tracker.
 			var baseNote string
-			switch arch.X86CanonReg(mem.Base) {
-			case x86RegTHR:
+			switch x86.CanonReg(mem.Base) {
+			case sdk.X86THR:
 				// A THR-relative call with NO index register is a call
 				// through a Thread slot -- a stub entry point -- not a
 				// dispatch-table call. This used to claim `dispatch_table`
@@ -206,7 +204,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				// sits in almost every function prologue.
 				//
 				// Naming them off the Thread field table is the same thing
-				// the MOV path next door already does (dataflow_x86.go), and
+				// the MOV path next door already does (dataflowx86.go), and
 				// it makes them resolve as stubs, which is what ARM64's
 				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
 				if mem.Index == 0 {
@@ -220,7 +218,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				} else {
 					baseNote = "dispatch_table"
 				}
-			case x86RegPP:
+			case sdk.X86PP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
@@ -228,9 +226,9 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
 				}
 			default:
-				baseNote = rt.lookup(arch.X86CanonReg(mem.Base))
+				baseNote = rt.lookup(x86.CanonReg(mem.Base))
 			}
-			if arch.X86CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if x86.CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote
@@ -245,7 +243,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 // for thr-audit's context window, sitting alongside ScanX86Function's
 // CallEdge/StringRefRecord-oriented output above.
 type X86Inst struct {
-	Addr uint64
+	VA   uint64
 	Text string
 }
 
@@ -253,18 +251,14 @@ type X86Inst struct {
 // pairs only -- everything ExtractX86THRAccesses/BuildAuditRecords need,
 // without the register-provenance bookkeeping ScanX86Function carries.
 func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
-	var out []X86Inst
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			out = append(out, X86Inst{Addr: addr, Text: "<bad>"})
-			off++
+	decoded := x86.Decode(funcCode, funcVA)
+	out := make([]X86Inst, 0, len(decoded))
+	for _, d := range decoded {
+		if d.Bad {
+			out = append(out, X86Inst{VA: d.VA, Text: "<bad>"})
 			continue
 		}
-		out = append(out, X86Inst{Addr: addr, Text: inst.String()})
-		off += length
+		out = append(out, X86Inst{VA: d.VA, Text: d.Inst.String()})
 	}
 	return out
 }
@@ -276,14 +270,12 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 // optional (marks Resolved when the offset has a known name).
 func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
 	var out []THRAccess
-	for off := 0; off < len(funcCode); {
-		addr := funcVA + uint64(off)
-		inst, err := x86asm.Decode(funcCode[off:], 64)
-		length := inst.Len
-		if err != nil || length <= 0 {
-			off++
-			continue
+	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
+		if d.Bad {
+			return true
 		}
+		addr := d.VA
+		inst := d.Inst
 		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
 			// DataSize is the operand size in bits but is 0 for many MOV
 			// encodings, yielding width=0. Prefer MemBytes (the memory
@@ -301,38 +293,38 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8 // last-resort fallback
 			}
 			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						DstReg: arch.X86CanonReg(dstReg), Width: width, Resolved: resolved,
+						DstReg: x86.CanonReg(dstReg), Width: width, Resolved: resolved,
 					})
 				}
-			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && arch.X86CanonReg(mem.Base) == x86RegTHR && mem.Index == 0 {
+			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
 					_, resolved := fields[int(mem.Disp)]
 					out = append(out, THRAccess{
 						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						IsStore: true, SrcReg: arch.X86CanonReg(srcReg), Width: width, Resolved: resolved,
+						IsStore: true, SrcReg: x86.CanonReg(srcReg), Width: width, Resolved: resolved,
 					})
 				}
 			}
 		}
-		off += length
-	}
+		return true
+	})
 	return out
 }
 
 // BuildX86AuditRecords is ExtractX86THRAccesses's counterpart to
 // BuildAuditRecords, operating on []X86Inst instead of []Inst for
 // context-window lookup.
-func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []THRAuditRecord {
+func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
-		pcIdx[inst.Addr] = i
+		pcIdx[inst.VA] = i
 	}
 
-	records := make([]THRAuditRecord, 0, len(accesses))
+	records := make([]thraudit.THRAuditRecord, 0, len(accesses))
 	for _, a := range accesses {
 		var ctx []string
 		if idx, ok := pcIdx[a.PC]; ok {
@@ -343,12 +335,12 @@ func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dart
 					if d == 0 {
 						prefix = "> "
 					}
-					ctx = append(ctx, fmt.Sprintf("%s0x%x: %s", prefix, allInsts[j].Addr, allInsts[j].Text))
+					ctx = append(ctx, fmt.Sprintf("%s0x%x: %s", prefix, allInsts[j].VA, allInsts[j].Text))
 				}
 			}
 		}
 
-		rec := THRAuditRecord{
+		rec := thraudit.THRAuditRecord{
 			Sample: sample, DartVersion: dartVersion, PC: fmt.Sprintf("0x%x", a.PC),
 			Insn: a.InsnText, THROffset: fmt.Sprintf("0x%x", a.THROffset), IsStore: a.IsStore,
 			Width: a.Width, FuncName: funcName, Resolved: a.Resolved, Context: ctx,

@@ -3,6 +3,8 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // --- countArgs tests ---
@@ -169,14 +171,14 @@ func TestExtractIterVarFromCond(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got := extractIterVarFromCond(tt.cond)
+		got := stmt.ExtractIterVarFromCond(tt.cond)
 		if got != tt.want {
-			t.Errorf("extractIterVarFromCond(%q) = %q, want %q", tt.cond, got, tt.want)
+			t.Errorf("ExtractIterVarFromCond(%q) = %q, want %q", tt.cond, got, tt.want)
 		}
 	}
 }
 
-// --- A1: applyLocalTypeHints tests ---
+// --- A1: localTypeInference tests ---
 
 func TestApplyLocalTypeHints(t *testing.T) {
 	hints := map[string]string{
@@ -188,12 +190,12 @@ func TestApplyLocalTypeHints(t *testing.T) {
   local_m8 = arg1;
   return local_8;
 }`
-	result := applyLocalTypeHints(source, hints)
+	result := localTypeInference(source, nil, hints)
 	if !strings.Contains(result, "local_8: int") {
-		t.Error("applyLocalTypeHints should annotate local_8 as int")
+		t.Error("localTypeInference should annotate local_8 as int")
 	}
 	if !strings.Contains(result, "local_m8: String") {
-		t.Error("applyLocalTypeHints should annotate local_m8 as String")
+		t.Error("localTypeInference should annotate local_m8 as String")
 	}
 }
 

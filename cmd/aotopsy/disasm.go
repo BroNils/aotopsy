@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 
-	"aotopsy/internal/pipeline"
+	"aotopsy/internal/analysis"
 )
 
 func cmdDisasm(args []string) error {
@@ -22,7 +22,7 @@ func cmdDisasm(args []string) error {
 		return fmt.Errorf("--lib and --out are required")
 	}
 
-	_, err := pipeline.Run(pipeline.Opts{
+	_, err := analysis.Run(analysis.Opts{
 		LibPath:  *libapp,
 		OutDir:   *outDir,
 		MaxSteps: *maxSteps,

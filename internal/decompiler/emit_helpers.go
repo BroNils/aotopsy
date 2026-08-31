@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 func sanitizeTailCallName(target string) string {
@@ -72,7 +74,15 @@ func (e *emitter) appendHelperFunctions() {
 			tryMarked:      e.tryMarked,
 			inlineMarked:   e.inlineMarked,
 			tryOpened:      e.tryOpened,
-			handlerBlocks:  e.handlerBlocks}
+			handlerBlocks:  e.handlerBlocks,
+			// Per-FuncIR analyses are valid to share with helper sub-emitters so
+			// extracted loops keep both fixpoint live-in seeding and phi
+			// materialization; the phi bookkeeping maps are per-emitter, fresh.
+			loopHeaders:     e.loopHeaders,
+			blockEntryState: e.blockEntryState,
+			loopPhis:        e.loopPhis,
+			pinnedPhi:       make(map[string]string),
+			phiDeclared:     make(map[int]bool)}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,
@@ -201,10 +211,7 @@ func (e *emitter) extractLoopCondition(id int) string {
 		return ""
 	}
 	// Skip stack overflow checks — they are not real loop conditions.
-	// Pattern: "x15 <= THR.f56" or similar comparisons involving THR
-	// and the stack pointer register.
-	if strings.Contains(cond, "THR.") && (strings.Contains(cond, "x15") ||
-		strings.Contains(cond, "SP") || strings.Contains(cond, "stack_limit")) {
+	if sdk.IsStackOverflowCond(cond) {
 		return ""
 	}
 
@@ -288,22 +295,6 @@ func invertCondition(cond string) string {
 	}
 	// Can't flip — wrap with !()
 	return "!(" + cond + ")"
-}
-
-// extractIterVarFromCond extracts the iterator variable name from a condition
-// like "local_8 < 10" or "local_m8 != arg0".
-func extractIterVarFromCond(cond string) string {
-	// Look for local_NN or local_mNN at the start of the condition
-	for _, op := range []string{" < ", " <= ", " != ", " > ", " >= ", " == "} {
-		idx := strings.Index(cond, op)
-		if idx > 0 {
-			left := strings.TrimSpace(cond[:idx])
-			if strings.HasPrefix(left, "local_") {
-				return left
-			}
-		}
-	}
-	return ""
 }
 
 // inferReturnTypeFromName infers a Dart function's return type from its name

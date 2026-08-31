@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
-	"aotopsy/internal/pipeline"
 )
 
 // cmdDispatchTable implements "aotopsy _debug dispatch-table --lib
@@ -32,14 +32,14 @@ func cmdDispatchTable(args []string) error {
 		return fmt.Errorf("--lib is required")
 	}
 
-	ctx, err := pipeline.LoadContext(*libapp)
+	ctx, err := analysis.LoadContext(*libapp)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
-	entries, err := pipeline.ResolveDispatchTable(ctx)
+	entries, err := analysis.ResolveDispatchTable(ctx)
 	if err != nil {
 		return err
 	}

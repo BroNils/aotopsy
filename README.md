@@ -20,7 +20,7 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 | Pseudocode | Architecture-neutral decompiled output from ARM64 or x86_64 machine code |
 | Dart Source Export | Whole-project modular `.dart` files reconstructed with classes, fields, and methods |
 
-Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier).
+Supports **ARM64** and **x86_64**. Covers **Dart 2.10 through 3.13** (3.13.2 is the current stable frontier) — every modeled version parses cleanly on both architectures, see [COVERAGE.md](COVERAGE.md) (93 sample builds, 0 failures).
 
 ## Accuracy & Honesty
 
@@ -35,7 +35,7 @@ the test suite on every change:
 
 The ground-truth twins are real production builds we cannot redistribute, so those
 differential gates run **locally**; public CI validates build + unit tests across the
-platform matrix (sample-dependent tests skip cleanly when the binary is absent). See
+platform matrix (sample-dependent tests skip cleanly when the binary is absent). How every number here is measured (ground truth, metric definitions, reproduction): [METHODOLOGY.md](METHODOLOGY.md). See
 [SECURITY.md](SECURITY.md) for release-binary verification and the honest scope below.
 
 ## Quick Start
@@ -48,7 +48,7 @@ make build
 ./aotopsy _debug decompile-native --lib libapp.so --find MyClass  # find and decompile a function
 ```
 
-See `WORKFLOW.md` for the step-by-step methodology when you have a raw APK and don't know where to start.
+See [DEMO.md](DEMO.md) for a five-minute walkthrough on a real snapshot, or `WORKFLOW.md` for the step-by-step methodology when you have a raw APK and don't know where to start.
 
 ## How It Works
 
@@ -214,8 +214,12 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 | `call_edges.jsonl` | BL/BLR edges with resolved targets and provenance |
 | `classes.jsonl` | Field names, offsets, instance sizes per class |
 | `string_refs.jsonl` | String references from object pool loads |
+| `dispatch_table.jsonl`| Inferred dispatch table receiver types and target mapping |
 | `signal.html` | Behavioral signal report with context graph |
+| `dart_meta.json` | Snapshot metadata, compressed pointers flag, THR layout |
 | `flutter_meta.json` | Unified metadata for Ghidra/IDA (ARM64 only) |
+| `aotopsy.sarif` | SARIF 2.1.0 security finding report (for GitHub Code Scanning) |
+| `evidence.jsonl` | Unified evidence model with confidence and provenance per call site |
 | `asm/*.txt` | Annotated disassembly per function |
 | `cfg/*.dot` | Per-function CFGs (with `--graph`) |
 
@@ -224,25 +228,35 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 ```
 cmd/aotopsy/          CLI entry point and command handlers
 internal/
+  analysis/           Pipeline orchestration, snapshot loader, and analysis engines
+  sdk/                Dart VM ground-truth facts, register mappings, and predicates
+  vmtables/           Versioned THR field offsets, stub names, and stub orders
+  thraudit/           Thread-relative memory access audit and classification
+  arch/arm64/         Centralized ARM64 bitmask instruction decoders
+  arch/x86/           Centralized x86_64 decode primitives and register helpers
+  naming/             Central pool lookups, name resolution, and stub builders
   elfx/               ELF validation and symbol extraction
   snapshot/           Snapshot region extraction, version profiles
   dartfmt/            Dart VM variable-length integer encoding
   cluster/            Two-phase snapshot deserialization (alloc + fill)
   disasm/             ARM64 + x86_64 decode, CFG, call-edge provenance
-  callgraph/          Lattice graph builders for DOT rendering
-  signal/             Behavioral string classification
+  callgraph/          Call graph construction and DOT rendering
+  signal/             Behavioral string and malware signal classification
   render/             HTML/DOT/SVG visualization
-  output/             JSONL serialization
+  output/             JSONL and SARIF 2.1.0 serialization
   decompiler/         Dart-AOT pseudocode decompiler (both architectures)
-  typetrack/          Whole-program type inference for BLR resolution
+  typetrack/          Whole-program type inference and receiver recovery
   fingerprint/        Build-id and version marker identification
   funcdiff/           Function-set diffing between builds
   symbolmap/          Stripped-vs-unstripped symbol resolution
   ffitrace/           Static dart:ffi call-site tracing
   strxref/            String-to-function cross-referencing
-  strutil/            Shared string utilities
-  pipeline/           Pipeline orchestration and name resolution
-tools/                Standalone utilities (THR table extractor)
+  strutil/            Dart syntax sanitization and metadata serialization
+  jsonutil/           Generic JSONL stream readers and writers
+  evidence/           Unified evidence model with confidence and provenance
+  frida/              Frida runtime hook and probe generation
+  cli/                ANSI color helpers for CLI output
+tools/                Standalone utilities (THR table extractor and validator)
 ghidra_scripts/       Ghidra integration (Python)
 ida_scripts/          IDA integration (Python)
 ```
@@ -257,9 +271,12 @@ Requires Go 1.25+.
 make build      # build ./aotopsy
 make install    # install to ~/.aotopsy/bin
 make test       # run tests
+make bench      # regenerate BENCHMARK.md (needs local ground-truth twins)
+make coverage   # regenerate COVERAGE.md (needs local corpus samples)
+make analyze    # cross-check export-dart output against `dart analyze`
 ```
 
-Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set.
+Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set. Public CI runs build + unit tests + vet across linux/amd64, darwin/arm64, and windows/amd64, plus a race+coverage job.
 
 ## Releases & Branches
 

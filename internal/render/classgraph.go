@@ -55,22 +55,24 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 		}
 
 		// For BL/call edges, resolve target owner directly.
-		// For BLR/call_indirect edges, try to resolve via the Via annotation.
+		// For BLR/call_indirect edges, try to resolve via ResolvedTargets.
 		// x86_64 uses "call"/"call_indirect" edge kinds, ARM64 uses "bl"/"blr".
 		var dstOwner string
-		if (e.Kind == "bl" || e.Kind == "call") && e.Target != "" {
-			dstOwner = funcOwner[e.Target]
-			if dstOwner == "" {
-				dstOwner = unowned
+		resolved := false
+		for _, t := range e.ResolvedTargets() {
+			owner := funcOwner[t]
+			if owner != "" {
+				dstOwner = owner
+				resolved = true
+				break
 			}
-		} else if (e.Kind == "blr" || e.Kind == "call_indirect") && e.Via != "" {
-			// Try to resolve Via as a function name.
-			dstOwner = funcOwner[e.Via]
-			if dstOwner == "" {
+		}
+		if !resolved {
+			if e.Kind == "bl" || e.Kind == "call" {
+				dstOwner = unowned
+			} else {
 				continue // Can't resolve target class — skip this indirect edge
 			}
-		} else {
-			continue
 		}
 
 		if srcOwner == dstOwner {

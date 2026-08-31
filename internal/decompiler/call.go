@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/sdk"
 )
 
 // namedIndirectTarget maps well-known ABI registers to a readable alias,
@@ -166,32 +168,32 @@ func parseHexVA(target string) (uint64, bool) {
 //   - List.reset doesn't exist, but many custom reset methods return values
 // Keeping these as void would silently drop return values in decompiled output.
 var knownVoidSelectors = map[string]bool{
-	"setState":           true,
-	"print":              true,
-	"notifyListeners":    true,
-	"addListener":        true,
-	"removeListener":     true,
-	"clear":              true,
-	"dispose":            true,
-	"markNeedsBuild":     true,
-	"requestLayout":      true,
-	"markNeedsLayout":    true,
-	"scheduleMicrotask":  true,
-	"complete":           true,
-	"completeError":      true,
-	"insert":             true,
-	"forEach":            true,
-	"sort":               true,
-	"shuffle":            true,
-	"clearCache":         true,
-	"notifyClients":      true,
-	"performRebuild":     true,
-	"performLayout":      true,
-	"assemble":           true,
-	"reassemble":         true,
-	"visitChildren":      true,
-	"visitAncestors":     true,
-	"visitDescendants":   true,
+	"setState":          true,
+	"print":             true,
+	"notifyListeners":   true,
+	"addListener":       true,
+	"removeListener":    true,
+	"clear":             true,
+	"dispose":           true,
+	"markNeedsBuild":    true,
+	"requestLayout":     true,
+	"markNeedsLayout":   true,
+	"scheduleMicrotask": true,
+	"complete":          true,
+	"completeError":     true,
+	"insert":            true,
+	"forEach":           true,
+	"sort":              true,
+	"shuffle":           true,
+	"clearCache":        true,
+	"notifyClients":     true,
+	"performRebuild":    true,
+	"performLayout":     true,
+	"assemble":          true,
+	"reassemble":        true,
+	"visitChildren":     true,
+	"visitAncestors":    true,
+	"visitDescendants":  true,
 }
 
 // isVoidCall returns true if the call target is a known void function/method.
@@ -229,12 +231,12 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	//
 	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
 	// pre-pass in emit.go so the two cannot drift apart.
-	switch asyncStubRole(name) {
-	case asyncRoleInit:
+	switch sdk.ClassifyStubRole(name) {
+	case sdk.StubRoleAsyncInit:
 		e.fir.IsAsync = true
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return false
-	case asyncRoleAwait:
+	case sdk.StubRoleAsyncAwait:
 		e.fir.IsAsync = true
 		if argsText != "" {
 			e.emit(indent, "final %s = await %s;", tmpName, argsText)
@@ -242,7 +244,7 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 			e.emit(indent, "final %s = await;", tmpName)
 		}
 		return true
-	case asyncRoleReturn:
+	case sdk.StubRoleAsyncReturn:
 		e.fir.IsAsync = true
 		if argsText != "" {
 			e.emit(indent, "return %s;", argsText)
@@ -312,12 +314,12 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
 		// snake_case Thread-table spellings.
-		switch asyncStubRole(stubName) {
-		case asyncRoleInit:
+		switch sdk.ClassifyStubRole(stubName) {
+		case sdk.StubRoleAsyncInit:
 			e.fir.IsAsync = true
 			e.emit(indent, "// async function entry (InitAsync stub)")
 			return false
-		case asyncRoleAwait:
+		case sdk.StubRoleAsyncAwait:
 			e.fir.IsAsync = true
 			if argsText != "" {
 				e.emit(indent, "final %s = await %s;", tmpName, argsText)
@@ -325,7 +327,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 				e.emit(indent, "final %s = await;", tmpName)
 			}
 			return true
-		case asyncRoleReturn:
+		case sdk.StubRoleAsyncReturn:
 			e.fir.IsAsync = true
 			if argsText != "" {
 				e.emit(indent, "return %s;", argsText)
@@ -422,4 +424,23 @@ func sanitizeCallName(s string) string {
 		return "call"
 	}
 	return safeFuncName(s)
+}
+
+// CallTargetsOf extracts every resolved direct-call target VA from a
+// FuncIR's blocks -- used by --from-main's reachability walk to
+// discover callees without re-running EmitPseudocode's full
+// text-emission pipeline just to find call sites.
+func CallTargetsOf(fir *FuncIR) []uint64 {
+	var out []uint64
+	for _, blk := range fir.Blocks {
+		for _, ins := range blk.Instrs {
+			if ins.Op != OpCall || ins.Target == "" {
+				continue
+			}
+			if va, err := strconv.ParseUint(strings.TrimPrefix(ins.Target, "0x"), 16, 64); err == nil {
+				out = append(out, va)
+			}
+		}
+	}
+	return out
 }

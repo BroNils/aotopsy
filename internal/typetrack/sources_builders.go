@@ -261,6 +261,78 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 			}
 		}
 	}
+
+	// Build MethodNameToSelectorOffsets: for each dispatch table entry
+	// that resolves to a named function, record the selector offset at
+	// which that function's name appears. The selector offset for a slot
+	// key = entry.Index - kOriginElement is derived from the class ID:
+	// slot = cid + selector_offset - kOriginElement, so
+	// selector_offset = slot - cid + kOriginElement. But we don't know
+	// the CID from the entry alone. Instead, we scan all entries and for
+	// each named entry, compute the set of selector offsets that would
+	// reach it from any class. A simpler approach: for each named entry
+	// at slot key, the selector offsets that reach it are
+	// {key - cid + kOriginElement : cid in InstantiatedClasses}. But
+	// that's O(entries * classes). Instead, we use the fact that all
+	// entries for the same selector share the same selector_offset
+	// relative to their class: selector = key - (cid - kOriginElement).
+	// So for a named entry at slot key belonging to class cid,
+	// selector_offset = key - (cid - kOriginElement). We can get cid
+	// from the Code's owner class.
+	ctx.MethodNameToSelectorOffsets = make(map[string][]int)
+	// Build ClusterIndex → owner class CID map from the Code entries.
+	codeClusterToCID := make(map[int]int, len(clResult.Codes))
+	for i := range clResult.Codes {
+		c := &clResult.Codes[i]
+		if c.ClusterIndex >= 0 && c.OwnerRef >= 0 {
+			if ownerNo, ok := pl.RefToNamed[c.OwnerRef]; ok && ownerNo != nil {
+				// Resolve through PatchClass hop.
+				effectiveRef := c.OwnerRef
+				if pl.CT != nil && pl.CT.PatchClass != 0 && ownerNo.CID == pl.CT.PatchClass {
+					effectiveRef = ownerNo.OwnerRefID
+				}
+				if classNo, ok2 := pl.RefToNamed[effectiveRef]; ok2 && classNo != nil {
+					// Look up the class's ClassID from the Classes list.
+					for _, ci := range clResult.Classes {
+						if ci.RefID == effectiveRef {
+							codeClusterToCID[c.ClusterIndex] = int(ci.ClassID)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	for key, entry := range ctx.DispatchBySlot {
+		if entry.Kind != cluster.DispatchCode {
+			continue
+		}
+		name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]
+		if !ok || name == "" {
+			continue
+		}
+		cid, hasCID := codeClusterToCID[entry.ClusterIndex]
+		if !hasCID {
+			continue
+		}
+		// selector_offset = slot - (cid - kOriginElement) = key - cid + kOriginElement
+		selectorOffset := key - cid + kOriginElement
+		ctx.MethodNameToSelectorOffsets[name] = append(ctx.MethodNameToSelectorOffsets[name], selectorOffset)
+	}
+	// Deduplicate selector offsets per name (a method may appear at the
+	// same selector from multiple classes).
+	for name, offsets := range ctx.MethodNameToSelectorOffsets {
+		seen := map[int]bool{}
+		var dedup []int
+		for _, off := range offsets {
+			if !seen[off] {
+				seen[off] = true
+				dedup = append(dedup, off)
+			}
+		}
+		sort.Ints(dedup)
+		ctx.MethodNameToSelectorOffsets[name] = dedup
+	}
 }
 
 // buildPoolUnlinkedCallNames builds PP index → UnlinkedCall target_name.
@@ -283,6 +355,66 @@ func buildPoolUnlinkedCallNames(clResult *cluster.Result, pl *PoolLookupData) ma
 		}
 	}
 	return poolUnlinkedCallNames
+}
+
+// buildPoolClosureFunctionNames builds PP index → function name for Closure
+// objects in the pool. Uses clResult.Closures (captured via ClosureInfo in
+// readFillRefs) to find each Closure's function ref, then resolves the
+// function's name via the pool lookups.
+func buildPoolClosureFunctionNames(clResult *cluster.Result, pl *PoolLookupData) map[int]string {
+	poolClosureFuncNames := make(map[int]string)
+	if pl.CT == nil || pl.RefToNamed == nil || pl.RefToStr == nil {
+		return poolClosureFuncNames
+	}
+	// Build ref → ClosureInfo lookup.
+	closureByRef := make(map[int]cluster.ClosureInfo, len(clResult.Closures))
+	for i := range clResult.Closures {
+		closureByRef[clResult.Closures[i].RefID] = clResult.Closures[i]
+	}
+	for _, pe := range clResult.Pool {
+		if pe.Kind != cluster.PoolTagged {
+			continue
+		}
+		if pl.RefCID != nil {
+			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Closure {
+				if ci, ok2 := closureByRef[pe.RefID]; ok2 && ci.FunctionRef >= 0 {
+					if fnNo, ok3 := pl.RefToNamed[ci.FunctionRef]; ok3 && fnNo != nil {
+						name := ""
+						if fnNo.NameRefID >= 0 {
+							if s, ok4 := pl.RefToStr[fnNo.NameRefID]; ok4 {
+								name = s
+							}
+							if name == "" {
+								if s, ok4 := pl.VmRefToStr[fnNo.NameRefID]; ok4 {
+									name = s
+								}
+							}
+						}
+						if name != "" {
+							owner := ""
+							if fnNo.OwnerRefID >= 0 {
+								if ownerNo, ok5 := pl.RefToNamed[fnNo.OwnerRefID]; ok5 && ownerNo != nil {
+									if ownerNo.NameRefID >= 0 {
+										if s, ok6 := pl.RefToStr[ownerNo.NameRefID]; ok6 {
+											owner = s
+										}
+									}
+								}
+							}
+							if owner != "" {
+								name = owner + "." + name
+							}
+							if fnNo.IsConstructor() {
+								name = "new " + name
+							}
+							poolClosureFuncNames[pe.Index] = name
+						}
+					}
+				}
+			}
+		}
+	}
+	return poolClosureFuncNames
 }
 
 // buildFuncParamTypes builds FuncParamTypes, FuncParamCount, FuncIsInstance.

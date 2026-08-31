@@ -3,9 +3,11 @@ package decompiler
 import (
 	"strings"
 	"testing"
+
+	"aotopsy/internal/sdk"
 )
 
-// The tests here are what internal/pipeline's TestDecompilerFeatures claimed
+// The tests here are what internal/analysis's TestDecompilerFeatures claimed
 // to be. That test's doc comment promised it "checks that decompiler output
 // contains expected features (ffi_call, field names, etc.)", and its body
 // counted the lines in functions.jsonl -- a file the decompiler does not
@@ -19,12 +21,12 @@ import (
 func featureFuncIR(name string, instrs []Instr) *FuncIR {
 	fir := newFuncIR(name, 0x1000)
 	fir.ArgRegs = arm64ArgRegs
-	fir.FrameReg = arm64FrameReg
-	fir.ReturnReg = arm64ReturnReg
-	fir.LinkReg = arm64LinkReg
-	fir.PoolReg = arm64PoolReg
-	fir.ThreadReg = arm64ThreadReg
-	fir.NullReg = arm64NullReg
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.LinkReg = sdk.ARM64LinkRegStr
+	fir.PoolReg = sdk.ARM64PoolRegStr
+	fir.ThreadReg = sdk.ARM64ThreadRegStr
+	fir.NullReg = sdk.ARM64NullRegStr
 	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: instrs})
 	return fir
 }
@@ -133,7 +135,7 @@ func TestFeatureFieldNamesSkipThreadPoolAndStack(t *testing.T) {
 				{Addr: 0x1004, Op: OpOther, Src: "mov x0, x2"},
 				{Addr: 0x1008, Op: OpReturn, Src: "ret"},
 			})
-			fir.StackReg = arm64StackReg
+			fir.StackReg = sdk.ARM64StackRegStr
 			fir.ReceiverClassID = 77
 			fir.FieldNameResolver = func(int, int64) string { return "radius" }
 

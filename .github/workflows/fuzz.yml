@@ -1,0 +1,46 @@
+name: fuzz
+
+# Continuous fuzzing of the untrusted-binary parsers. Weekly + on demand; each
+# target explores well beyond its committed seed corpus. A crash fails the job
+# and uploads the reproducing input.
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'Per-target fuzz duration (Go duration, e.g. 5m)'
+        default: '3m'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: internal/cluster, target: FuzzDecodeCodeSourceMap }
+          - { pkg: internal/cluster, target: FuzzDecodePcDescriptors }
+          - { pkg: internal/snapshot, target: FuzzParseImageHeader }
+          - { pkg: internal/snapshot, target: FuzzParseInstructionsSection }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          go test ./${{ matrix.pkg }}/ -run '^$' \
+            -fuzz='^${{ matrix.target }}$' \
+            -fuzztime='${{ github.event.inputs.fuzztime || '3m' }}'
+      - name: Upload reproducers on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/
+          if-no-files-found: ignore

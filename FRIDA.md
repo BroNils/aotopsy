@@ -39,6 +39,10 @@ aotopsy _debug decompile-native --lib libapp.so --all --filter MyClass \
 
 aotopsy _debug decompile-native --lib libapp.so --from-main \
   --gen-frida --out out/
+
+# Pipeline export / import commands:
+aotopsy frida-export --lib libapp.so --out frida_hooks.js
+aotopsy frida-import --lib libapp.so --in frida_log.txt --out ./imported
 ```
 
 The script hooks by module-relative offset (`Process.getModuleByName(...).base.add(offset)`), so it works regardless of ASLR slide. The offset numbering matches `decompile-native`'s VA numbering — no manual math needed.

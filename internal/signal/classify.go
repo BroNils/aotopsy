@@ -6,6 +6,8 @@ package signal
 import (
 	"regexp"
 	"strings"
+
+	"aotopsy/internal/disasm"
 )
 
 // Categories for string signal classification.
@@ -429,38 +431,26 @@ func ClassifyString(value string) []string {
 	return cats
 }
 
-// IsMundaneTHR returns true for THR field names that represent allocations,
-// write barriers, or type checks — noise in the signal graph.
-func IsMundaneTHR(name string) bool {
-	lower := strings.ToLower(name)
-	mundanePatterns := []string{
-		"allocate",
-		"write_barrier",
-		"store_buffer",
-		"type_test",
-		"subtype_check",
-		"call_to_runtime", // matches both the SDK name and the old _ep spelling
-		"stack_overflow",
-		"null_error",
-		"range_error",
-		"error_", // covers null_error, range_error, write_error, etc.
-		"deoptimize",
-		"megamorphic_call",
-		"switchable_call",
-		"monomorphic_",
-		"lazy_deopt",
-		"safepoint",
+// IsInterestingCallee returns true if the callee name represents a real named
+// function rather than VM internals, stubs, or dispatch noise.
+func IsInterestingCallee(name string) bool {
+	if name == "" {
+		return false
 	}
-	for _, p := range mundanePatterns {
-		if strings.Contains(lower, p) {
-			// Exception: call_native_through_safepoint_ep is interesting (FFI/JNI).
-			if strings.Contains(lower, "native") {
-				return false
-			}
-			return true
-		}
+	switch {
+	case len(name) > 4 && name[:4] == "sub_":
+		return false
+	case len(name) > 2 && name[0] == '0' && name[1] == 'x':
+		return false
+	// object_field carries a field offset suffix, so match by prefix.
+	case name == "dispatch_table" || strings.HasPrefix(name, disasm.ObjectFieldVia):
+		return false
+	case len(name) > 4 && name[:4] == "THR.":
+		return false
+	case len(name) > 3 && name[:3] == "PP[":
+		return false
 	}
-	return false
+	return true
 }
 
 // Severity levels for signal categories.

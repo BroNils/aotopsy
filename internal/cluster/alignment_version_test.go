@@ -6,7 +6,7 @@ import (
 	"aotopsy/internal/snapshot"
 )
 
-// --- dartVersionAtLeast tests ---
+// --- snapshot.VersionAtLeast tests ---
 
 func TestDartVersionAtLeast(t *testing.T) {
 	tests := []struct {
@@ -28,31 +28,9 @@ func TestDartVersionAtLeast(t *testing.T) {
 		{"1.0.0", "0.0.1", true},
 	}
 	for _, tt := range tests {
-		got := dartVersionAtLeast(tt.version, tt.minimum)
+		got := snapshot.VersionAtLeast(tt.version, tt.minimum)
 		if got != tt.want {
-			t.Errorf("dartVersionAtLeast(%q, %q) = %v, want %v", tt.version, tt.minimum, got, tt.want)
-		}
-	}
-}
-
-func TestParseDartVersion(t *testing.T) {
-	tests := []struct {
-		input string
-		want  [3]int
-	}{
-		{"3.9.2", [3]int{3, 9, 2}},
-		{"2.12.0", [3]int{2, 12, 0}},
-		{"2.19.0", [3]int{2, 19, 0}},
-		{"10.20.30", [3]int{10, 20, 30}},
-		{"1.0", [3]int{1, 0, 0}},
-		{"", [3]int{0, 0, 0}},
-		{"garbage", [3]int{0, 0, 0}},
-		{"3.9.2-edge", [3]int{3, 9, 2}},
-	}
-	for _, tt := range tests {
-		got := parseDartVersion(tt.input)
-		if got != tt.want {
-			t.Errorf("parseDartVersion(%q) = %v, want %v", tt.input, got, tt.want)
+			t.Errorf("snapshot.VersionAtLeast(%q, %q) = %v, want %v", tt.version, tt.minimum, got, tt.want)
 		}
 	}
 }
