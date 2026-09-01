@@ -76,6 +76,9 @@ func resolveEffectiveOwnerName(no *cluster.NamedObject, pl *naming.PoolLookups, 
 		}
 	}
 	classObj, ok := pl.RefToNamed[effectiveClass]
+	if !ok && pl.VmRefToNamed != nil {
+		classObj, ok = pl.VmRefToNamed[effectiveClass]
+	}
 	if !ok {
 		return ""
 	}
@@ -123,9 +126,7 @@ type Report struct {
 }
 
 // Diff loads both builds and computes the added/removed/common/changed
-// function descriptor sets. A function is "changed" when it exists in both
-// builds but has a different code size (PayloadInfo), indicating the
-// compiler emitted different instructions for the same named function.
+// function descriptor sets.
 func Diff(oldPath, newPath string, topN int) (*Report, error) {
 	oldDescs, oldVer, err := Load(oldPath)
 	if err != nil {
@@ -136,6 +137,16 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 		return nil, err
 	}
 
+	rep := DiffDescriptors(oldDescs, newDescs, topN)
+	rep.OldPath = oldPath
+	rep.NewPath = newPath
+	rep.OldVersion = oldVer
+	rep.NewVersion = newVer
+	return rep, nil
+}
+
+// DiffDescriptors computes differences between two in-memory function descriptor sets.
+func DiffDescriptors(oldDescs, newDescs map[FuncDescriptor]FuncInfo, topN int) *Report {
 	var added, removed, changed []string
 	common := 0
 	for d, newInfo := range newDescs {
@@ -158,10 +169,6 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 	sort.Strings(changed)
 
 	rep := &Report{
-		OldPath:      oldPath,
-		NewPath:      newPath,
-		OldVersion:   oldVer,
-		NewVersion:   newVer,
 		OldCount:     len(oldDescs),
 		NewCount:     len(newDescs),
 		CommonCount:  common,
@@ -187,5 +194,5 @@ func Diff(oldPath, newPath string, topN int) (*Report, error) {
 	} else {
 		rep.Changed = changed
 	}
-	return rep, nil
+	return rep
 }

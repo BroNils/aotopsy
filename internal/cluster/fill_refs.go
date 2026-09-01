@@ -251,15 +251,23 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				EntriesRef:    allRefs[2],
 			})
 		}
-		if isClosure && len(allRefs) >= 4 {
-			// UntaggedClosure ReadFromTo: instantiator_type_arguments(0),
-			// function_type_arguments(1), delayed_type_arguments(2),
-			// function(3), context(4), hash(5).
-			// FP-9: capture function ref (index 3) for closure dispatch.
-			closures = append(closures, ClosureInfo{
-				RefID:       ref,
-				FunctionRef: int(allRefs[3]),
-			})
+		if isClosure {
+			// UntaggedClosure ReadFromTo:
+			// Pre-3.13.0: instantiator_type_arguments(0), function_type_arguments(1),
+			//             delayed_type_arguments(2), function(3), context(4), hash(5).
+			// Dart 3.13.0+: length_and_flags(0), hash(1), function(2), variable captured refs...
+			fnIdx := 3
+			minRefs := 4
+			if profile != nil && snapshot.VersionAtLeast(profile.DartVersion, "3.13.0") {
+				fnIdx = 2
+				minRefs = 3
+			}
+			if len(allRefs) >= minRefs {
+				closures = append(closures, ClosureInfo{
+					RefID:       ref,
+					FunctionRef: int(allRefs[fnIdx]),
+				})
+			}
 		}
 		if isScript && len(allRefs) >= 1 {
 			si := ScriptInfo{

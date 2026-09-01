@@ -352,7 +352,7 @@ func Run(opts Opts) (*Result, error) {
 	if len(edges) > 0 {
 		evCollector.FromCallEdges(edges)
 	}
-	if err := evCollector.WriteJSONL(opts.OutDir); err != nil {
+	if err := evCollector.WriteJSONL(filepath.Join(opts.OutDir, "evidence.jsonl")); err != nil {
 		opts.logf("  evidence: %v\n", err)
 	}
 

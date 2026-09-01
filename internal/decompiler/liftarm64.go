@@ -378,6 +378,45 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			return line1, handled, true
 		}
 		return "", false, true
+	case "csel", "csinc", "csinv", "csneg":
+		if len(ops) >= 4 {
+			dst := strings.ToLower(ops[0])
+			src1 := operandExpr(fir, s, ops[1])
+			src2 := operandExpr(fir, s, ops[2])
+			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[3])))
+			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[3]))
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			var elseExpr string
+			switch mnemonic {
+			case "csel":
+				elseExpr = src2
+			case "csinc":
+				elseExpr = fmt.Sprintf("(%s + 1)", src2)
+			case "csinv":
+				elseExpr = fmt.Sprintf("(~%s)", src2)
+			case "csneg":
+				elseExpr = fmt.Sprintf("(-%s)", src2)
+			}
+			s.setReg(dst, fmt.Sprintf("(%s ? %s : %s)", condStr, src1, elseExpr))
+		}
+		return "", false, true
+	case "cset", "csetm":
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[1])))
+			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[1]))
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			if mnemonic == "cset" {
+				s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))
+			} else {
+				s.setReg(dst, fmt.Sprintf("(%s ? -1 : 0)", condStr))
+			}
+		}
+		return "", false, true
 	case "fadd", "fsub", "fmul", "fdiv", "fmov", "fneg", "fsqrt", "fabs":
 		// ARM64 FPU arithmetic. These operate on Dn/Sn/Qn registers.
 		// fmov is a register-to-register copy (like mov for GPR).

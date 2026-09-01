@@ -89,12 +89,12 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
 		if _, ok := arm64.BLR(in.Raw); ok {
 			break
 		}
-		rd := arm64.DstRegOfInst(in.Raw)
-		pos := arm64ArgRegBitPos(rd)
-		if pos < 0 {
-			continue
+		for _, rd := range arm64.DstRegsOfInst(in.Raw) {
+			pos := arm64ArgRegBitPos(rd)
+			if pos >= 0 {
+				mask |= 1 << uint(pos)
+			}
 		}
-		mask |= 1 << uint(pos)
 	}
 	return mask
 }

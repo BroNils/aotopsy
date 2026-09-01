@@ -2348,8 +2348,10 @@ func thrFieldsX64(dartVersion string) map[int]string {
 		return thrV325_x64
 	case "3.4.3", "3.5.0":
 		return thrV343_x64
-	case "3.6.2", "3.7.0":
+	case "3.6.2":
 		return thrV362_x64
+	case "3.7.0":
+		return thrV370_x64
 	case "3.8.1":
 		return thrV381_x64
 	case "3.9.2":

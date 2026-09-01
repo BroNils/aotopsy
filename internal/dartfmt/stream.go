@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 var (
@@ -220,6 +221,15 @@ func (s *Stream) ReadTagged64() (int64, error) {
 			return 0, ErrStreamOverrun
 		}
 	}
+}
+
+// ReadDouble reads a float64 by reading a Tagged64 and bit-casting to float64 (runtime/vm/datastream.h Read<double>).
+func (s *Stream) ReadDouble() (float64, error) {
+	v, err := s.ReadTagged64()
+	if err != nil {
+		return 0, err
+	}
+	return math.Float64frombits(uint64(v)), nil
 }
 
 // ReadRefId reads a Dart reference ID using the optimized big-endian encoding.

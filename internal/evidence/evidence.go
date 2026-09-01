@@ -11,27 +11,30 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/output"
 	"aotopsy/internal/typetrack"
 )
 
 // Evidence is one analysis finding with full provenance.
 type Evidence struct {
-	PC         string         `json:"pc"`
-	Function   string         `json:"function"`
-	Kind       string         `json:"kind"`       // "call", "dispatch", "field_access", "signal"
-	Instruction string        `json:"instruction,omitempty"`
-	Inputs     map[string]any `json:"inputs,omitempty"`
-	Result     map[string]any `json:"result,omitempty"`
-	Confidence string         `json:"confidence"` // exact, static_inferred, polymorphic, stub, unknown
-	Rule       string         `json:"rule,omitempty"`
-	SDKRef     *SDKReference  `json:"sdk_ref,omitempty"`
+	PC          string         `json:"pc"`
+	Function    string         `json:"function"`
+	Kind        string         `json:"kind"` // "call", "dispatch", "field_access", "signal"
+	Instruction string         `json:"instruction,omitempty"`
+	Inputs      map[string]any `json:"inputs,omitempty"`
+	Result      map[string]any `json:"result,omitempty"`
+	Confidence  string         `json:"confidence"` // exact, static_inferred, polymorphic, stub, unknown, runtime_confirmed
+	Rule        string         `json:"rule,omitempty"`
+	SDKRef      *SDKReference  `json:"sdk_ref,omitempty"`
 }
 
 // SDKReference points to the SDK source that justifies a rule or constant.
 type SDKReference struct {
-	Tag    string `json:"tag"`
+	Tag    string `json:"tag,omitempty"`
 	File   string `json:"file"`
 	Symbol string `json:"symbol,omitempty"`
 }
@@ -51,18 +54,34 @@ func NewCollector() *Collector {
 func (c *Collector) FromCallEdges(edges []disasm.CallEdgeRecord) {
 	for _, e := range edges {
 		ev := Evidence{
-			PC:       e.FromPC,
-			Function: e.FromFunc,
-			Kind:     "call",
+			PC:         e.FromPC,
+			Function:   e.FromFunc,
+			Kind:       "call",
 			Confidence: classifyEdgeConfidence(e),
-			Rule:     edgeRule(e),
+			Rule:       edgeRule(e),
 		}
 		if e.Target != "" {
 			ev.Result = map[string]any{"target": e.Target}
+			if e.Kind == "bl" || e.Kind == "call" {
+				ev.SDKRef = &SDKReference{
+					File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
+					Symbol: "EmitDirectCall",
+				}
+			}
 		} else if len(e.Targets) > 0 {
 			ev.Result = map[string]any{"targets": e.Targets, "candidate_count": e.Candidates}
+			ev.SDKRef = &SDKReference{
+				File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
+				Symbol: "EmitDispatchTableCall",
+			}
 		} else if e.Via != "" {
 			ev.Result = map[string]any{"via": e.Via}
+			if strings.HasPrefix(e.Via, "THR.") {
+				ev.SDKRef = &SDKReference{
+					File:   "runtime/vm/compiler/runtime_offsets_extracted.h",
+					Symbol: "Thread::" + strings.TrimPrefix(e.Via, "THR."),
+				}
+			}
 		} else {
 			ev.Result = map[string]any{"resolved": false}
 			ev.Confidence = "unknown"
@@ -86,6 +105,10 @@ func (c *Collector) FromBLRResolutions(funcName string, resols []typetrack.BlrRe
 			Kind:       "dispatch",
 			Confidence: r.Confidence,
 			Rule:       "typetrack.BLRResolution",
+			SDKRef: &SDKReference{
+				File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
+				Symbol: "EmitDispatchTableCall",
+			},
 		}
 		if r.Confidence == "" {
 			ev.Confidence = "unknown"
@@ -105,12 +128,59 @@ func (c *Collector) FromBLRResolutions(funcName string, resols []typetrack.BlrRe
 	}
 }
 
-// Records returns all collected evidence, sorted by PC.
+// FromSignalFindings collects evidence from security signal findings.
+func (c *Collector) FromSignalFindings(findings []output.SignalFinding) {
+	for _, f := range findings {
+		c.records = append(c.records, Evidence{
+			PC:         f.PC,
+			Function:   f.Function,
+			Kind:       "signal",
+			Confidence: "static_inferred",
+			Rule:       "signal." + f.Category,
+			Result:     map[string]any{"signal": f.StringValue, "category": f.Category},
+		})
+	}
+}
+
+// FromFieldAccesses collects evidence from typetrack field access records.
+func (c *Collector) FromFieldAccesses(funcName string, accesses []typetrack.FieldAccess, className func(int) string) {
+	for _, a := range accesses {
+		res := map[string]any{}
+		if className != nil {
+			if name := className(a.ClassID); name != "" {
+				res["class_name"] = name
+			}
+		}
+		c.records = append(c.records, Evidence{
+			PC:         fmt.Sprintf("0x%x", a.PC),
+			Function:   funcName,
+			Kind:       "field_access",
+			Confidence: "static_inferred",
+			Rule:       "typetrack.FieldAccess",
+			Inputs:     map[string]any{"class_id": a.ClassID, "byte_offset": a.ByteOffset, "is_store": a.IsStore},
+			Result:     res,
+		})
+	}
+}
+
+// parsePCUint parses a hex address string for numeric sorting.
+func parsePCUint(pc string) uint64 {
+	pc = strings.TrimPrefix(pc, "0x")
+	v, _ := strconv.ParseUint(pc, 16, 64)
+	return v
+}
+
+// Records returns all collected evidence, sorted numerically by PC.
 func (c *Collector) Records() []Evidence {
 	out := make([]Evidence, len(c.records))
 	copy(out, c.records)
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].PC < out[j].PC
+		pi := parsePCUint(out[i].PC)
+		pj := parsePCUint(out[j].PC)
+		if pi == pj {
+			return out[i].Kind < out[j].Kind
+		}
+		return pi < pj
 	})
 	return out
 }

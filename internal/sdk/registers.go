@@ -38,7 +38,7 @@ const (
 	ARM64PP        = 27 // PP   = R27 — object pool pointer
 	ARM64THR       = 26 // THR  = R26 — thread pointer
 	ARM64DT        = 21 // dispatch table register (X21, used by typetrack)
-	ARM64HeapBits  = 28 // HEAP_BITS = R28 — write_barrier_mask<<32 | heap_base>>32
+	ARM64HeapBits  = 28 // HEAP_BITS = R28 (Dart 2.14+: write_barrier_mask<<32 | heap_base>>32; Dart 2.10–2.13: BARRIER_MASK = R28)
 	ARM64CodeReg   = 24 // CODE_REG  = R24 — current Code object
 	ARM64ArgsDesc  = 4  // ARGS_DESC_REG = R4 — arguments descriptor
 	ARM64SPReg     = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
@@ -47,6 +47,9 @@ const (
 	ARM64LinkReg   = 30 // LR    = R30 — link register
 	ARM64ReturnReg = 0  // R0 — return value
 )
+
+// ARM64BarrierMask is the alias for R28 in Dart 2.10.0–2.13.0 before HEAP_BITS.
+const ARM64BarrierMask = ARM64HeapBits
 
 // ARM64RegName maps a register number to the lowercase string name the
 // decompiler uses in pseudocode (e.g. 27 → "x27").

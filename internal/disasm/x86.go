@@ -127,21 +127,12 @@ func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx int) uint8 {
 		if d.Inst.Op == x86asm.CALL {
 			break
 		}
-		if d.Inst.Op != x86asm.MOV && d.Inst.Op != x86asm.LEA {
-			continue
+		for _, reg := range x86.DstRegsOfInst(d.Inst) {
+			pos := x86ArgRegBitPos(reg)
+			if pos >= 0 {
+				mask |= 1 << uint(pos)
+			}
 		}
-		if len(d.Inst.Args) == 0 {
-			continue
-		}
-		dstReg, ok := d.Inst.Args[0].(x86asm.Reg)
-		if !ok {
-			continue
-		}
-		pos := x86ArgRegBitPos(x86.CanonReg(dstReg))
-		if pos < 0 {
-			continue
-		}
-		mask |= 1 << uint(pos)
 	}
 	return mask
 }
@@ -276,39 +267,60 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 		}
 		addr := d.VA
 		inst := d.Inst
-		if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
-			// DataSize is the operand size in bits but is 0 for many MOV
-			// encodings, yielding width=0. Prefer MemBytes (the memory
-			// operand size in bytes, already 1/2/4/8/16) when present;
-			// otherwise infer the width from the register operand's size
-			// class (RAX=8, EAX=4, AX=2, AL=1).
+
+		for argIdx, arg := range inst.Args {
+			if arg == nil {
+				continue
+			}
+			mem, ok := arg.(x86asm.Mem)
+			if !ok || x86.CanonReg(mem.Base) != sdk.X86THR {
+				continue
+			}
+
 			width := inst.MemBytes
 			if width <= 0 {
-				width = x86RegWidthBytes(inst.Args[0])
-				if width <= 0 {
-					width = x86RegWidthBytes(inst.Args[1])
+				for _, a := range inst.Args {
+					if a != nil {
+						if r, isReg := a.(x86asm.Reg); isReg {
+							width = x86RegWidthBytes(r)
+							if width > 0 {
+								break
+							}
+						}
+					}
 				}
 			}
 			if width <= 0 {
-				width = inst.DataSize / 8 // last-resort fallback
+				width = inst.DataSize / 8
 			}
-			if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
-					_, resolved := fields[int(mem.Disp)]
-					out = append(out, THRAccess{
-						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						DstReg: x86.CanonReg(dstReg), Width: width, Resolved: resolved,
-					})
+
+			disp := int(mem.Disp)
+			_, resolved := fields[disp]
+			acc := THRAccess{
+				PC:        addr,
+				InsnText:  inst.String(),
+				THROffset: disp,
+				Width:     width,
+				Resolved:  resolved,
+			}
+
+			if argIdx == 0 && (inst.Op == x86asm.MOV || inst.Op == x86asm.MOVZX || inst.Op == x86asm.MOVSX || inst.Op == x86asm.MOVSXD) {
+				acc.IsStore = true
+				if len(inst.Args) > 1 {
+					if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
+						acc.SrcReg = x86.CanonReg(srcReg)
+					}
 				}
-			} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && x86.CanonReg(mem.Base) == sdk.X86THR && mem.Index == 0 {
-				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
-					_, resolved := fields[int(mem.Disp)]
-					out = append(out, THRAccess{
-						PC: addr, InsnText: inst.String(), THROffset: int(mem.Disp),
-						IsStore: true, SrcReg: x86.CanonReg(srcReg), Width: width, Resolved: resolved,
-					})
+			} else {
+				if len(inst.Args) > 0 {
+					if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
+						acc.DstReg = x86.CanonReg(dstReg)
+					}
 				}
 			}
+
+			out = append(out, acc)
+			break
 		}
 		return true
 	})

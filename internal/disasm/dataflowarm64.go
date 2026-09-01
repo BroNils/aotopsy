@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
 )
 
 // ExtractCallEdgesCFG is ExtractCallEdges's CFG-wide replacement: instead
@@ -243,9 +244,11 @@ func meetLvalue(a, b lvalue) lvalue {
 // them inline before falling through to this function).
 func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, touched *[31]bool) {
 	if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
+		killReg(regs, touched, sdk.ARM64LinkReg)
 		return
 	}
 	if _, ok := arm64.BLR(inst.Raw); ok {
+		killReg(regs, touched, sdk.ARM64LinkReg)
 		return
 	}
 	if base, _, dstR, ok := arm64.LDRRegExtended(inst.Raw); ok && base == regDT {
@@ -276,13 +279,14 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 			break
 		}
 	}
-	if annotation != "" {
-		if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 {
+	dsts := arm64.DstRegsOfInst(inst.Raw)
+	if annotation != "" && len(dsts) > 0 {
+		for _, rd := range dsts {
 			defineReg(regs, touched, rd, annotation)
-			return
 		}
+		return
 	}
-	if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 {
+	for _, rd := range dsts {
 		killReg(regs, touched, rd)
 	}
 }

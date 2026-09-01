@@ -34,17 +34,49 @@ func ReadJSONL[T any](path string) ([]T, error) {
 // WriteJSONLFile writes a slice of records as JSONL to path. Each record
 // is encoded on its own line. Returns the number of records written.
 func WriteJSONLFile[T any](path string, records []T) (int, error) {
-	f, err := os.Create(path)
+	w, err := NewJSONLWriter[T](path)
 	if err != nil {
-		return 0, fmt.Errorf("create %s: %w", path, err)
+		return 0, err
 	}
-	defer func() { _ = f.Close() }()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
+	defer func() { _ = w.Close() }()
+
 	for i := range records {
-		if err := enc.Encode(&records[i]); err != nil {
+		if err := w.Write(records[i]); err != nil {
 			return i, fmt.Errorf("encode %s record %d: %w", path, i, err)
 		}
 	}
 	return len(records), nil
+}
+
+// JSONLWriter provides buffered streaming serialization of records into JSONL format.
+type JSONLWriter[T any] struct {
+	file *os.File
+	enc  *json.Encoder
+}
+
+// NewJSONLWriter creates a new streaming JSONL writer for the specified file path.
+func NewJSONLWriter[T any](path string) (*JSONLWriter[T], error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create %s: %w", path, err)
+	}
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	return &JSONLWriter[T]{
+		file: f,
+		enc:  enc,
+	}, nil
+}
+
+// Write encodes and appends one record as a single JSON line.
+func (w *JSONLWriter[T]) Write(rec T) error {
+	return w.enc.Encode(rec)
+}
+
+// Close closes the underlying file handle.
+func (w *JSONLWriter[T]) Close() error {
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
 }

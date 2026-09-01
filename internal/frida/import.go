@@ -167,7 +167,7 @@ func CmdFridaImport(args []string) error {
 
 func CopyStaticFiles(srcDir, dstDir string) {
 	files := []string{"functions.jsonl", "classes.jsonl", "string_refs.jsonl",
-		"dart_meta.json", "dispatch_table.jsonl", "signal_graph.json"}
+		"dart_meta.json", "dispatch_table.jsonl", "signal_graph.json", "evidence.jsonl"}
 	for _, f := range files {
 		src := filepath.Join(srcDir, f)
 		dst := filepath.Join(dstDir, f)

@@ -53,10 +53,16 @@ type Region struct {
 type SnapshotKind int64
 
 const (
+	// Pre-3.13.0 Snapshot::Kind (runtime/vm/snapshot.h)
 	KindFull    SnapshotKind = 0
 	KindCore    SnapshotKind = 1
 	KindFullJIT SnapshotKind = 2
 	KindFullAOT SnapshotKind = 3
+
+	// Dart 3.13.0+ Snapshot::Kind (kFullCore and kNone removed)
+	// 0=kFull, 1=kFullJIT, 2=kFullAOT, 3=kModule
+	KindFullAOTV313 SnapshotKind = 2
+	KindModuleV313  SnapshotKind = 3
 )
 
 func (k SnapshotKind) String() string {
@@ -65,10 +71,10 @@ func (k SnapshotKind) String() string {
 		return "Full"
 	case KindCore:
 		return "FullCore"
-	case KindFullJIT:
-		return "FullJIT"
-	case KindFullAOT:
-		return "FullAOT"
+	case KindFullJIT: // Also FullAOT on 3.13.0+
+		return "FullJIT/FullAOT(v3.13+)"
+	case KindFullAOT: // Also Module on 3.13.0+
+		return "FullAOT/Module(v3.13+)"
 	default:
 		return fmt.Sprintf("Unknown(%d)", k)
 	}

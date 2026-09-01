@@ -103,13 +103,13 @@ func RunDisasmStageX86(
 	edgesEnc := json.NewEncoder(edgesFile)
 	edgesEnc.SetEscapeHTML(false)
 
-	// unresolved_thr.jsonl: always created (downstream tooling/tests may
-	// expect the file to exist) but left empty -- see doc comment above.
 	unresTHRFile, err := os.Create(filepath.Join(opts.OutDir, "unresolved_thr.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("create unresolved_thr.jsonl: %w", err)
 	}
-	_ = unresTHRFile.Close()
+	defer func() { _ = unresTHRFile.Close() }()
+	unresTHREnc := json.NewEncoder(unresTHRFile)
+	unresTHREnc.SetEscapeHTML(false)
 
 	stringRefsFile, err := os.Create(filepath.Join(opts.OutDir, "string_refs.jsonl"))
 	if err != nil {
@@ -212,6 +212,23 @@ func RunDisasmStageX86(
 				return nil, fmt.Errorf("write string_refs.jsonl: %w", err)
 			}
 			dr.TotalStringRefs++
+		}
+
+		thrAccs := disasm.ExtractX86THRAccesses(funcCode, funcVA, thrFields)
+		for _, acc := range thrAccs {
+			if !acc.Resolved {
+				rec := disasm.UnresolvedTHRRecord{
+					FuncName:  name,
+					PC:        fmt.Sprintf("0x%x", acc.PC),
+					THROffset: fmt.Sprintf("0x%x", acc.THROffset),
+					Width:     acc.Width,
+					IsStore:   acc.IsStore,
+					Class:     "UNKNOWN",
+				}
+				if err := unresTHREnc.Encode(rec); err != nil {
+					return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
+				}
+			}
 		}
 
 		if opts.Graph {

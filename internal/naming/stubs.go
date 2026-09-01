@@ -192,6 +192,9 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		}
 		name := pl.ResolveName(no)
 		if name == "" {
+			name = pl.ResolveVMName(no)
+		}
+		if name == "" {
 			continue
 		}
 		if owner := pl.ResolveOwnerName(no); owner != "" {
