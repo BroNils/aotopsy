@@ -529,6 +529,175 @@ var stubOffsetTargets = []extractTarget{
 	{"3.13.0", "x64", true, true},
 }
 
+// runEmitRuntimeEntries prints Go source for the runtime-entry name
+// tables of the given tags, plus the mergeRuntimeEntries calls that
+// install them.
+//
+// Both block bases come from the SDK rather than from arithmetic on a
+// neighbouring version: Thread_AllocateArray_entry_point_offset is the
+// first RUNTIME_ENTRY_LIST slot and Thread_DeoptimizeCopyFrame_entry_point_offset
+// the first LEAF one. Whether the two blocks are contiguous changed
+// between versions, so it is derived per tag rather than assumed -- 3.12.2
+// has a 49-slot gap between them that a "leaf follows runtime" assumption
+// would silently write over.
+func runEmitRuntimeEntries(tags []string) int {
+	for _, tag := range tags {
+		target, ok := arm64ProductTarget(tag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			continue
+		}
+		relSrc, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		macros := cmacro.ParseMacros(relSrc)
+		runtime, err := cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		// LEAF entries put the return type first: V(intptr_t, Name, ...).
+		leaf, err := cmacro.Column(macros, "LEAF_RUNTIME_ENTRY_LIST", 1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+
+		header, err := fetchHeader(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		fields, err := extractTHRFields(header, target.arch, target.compressed, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		offsetOf := func(name string) (int, bool) {
+			for _, f := range fields {
+				if f.name == name {
+					return f.offset, true
+				}
+			}
+			return 0, false
+		}
+		// extractTHRFields stores the inner name only: the Thread_ prefix
+		// and the _offset suffix are both stripped by reSingle.
+		rtBase, ok1 := offsetOf("AllocateArray_entry_point")
+		leafBase, ok2 := offsetOf("DeoptimizeCopyFrame_entry_point")
+		if !ok1 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: AllocateArray entry point not in the extracted header\n", tag)
+			continue
+		}
+
+		id := strings.ReplaceAll(tag, ".", "")
+
+		// Whether the LEAF block follows the runtime block is a property of
+		// the Thread struct, not of the offsets header. Up to 2.19 the two
+		// DECLARE_MEMBERS expansions are adjacent; by 3.12.2 the LEAF one
+		// has moved down past exit_through_ffi_, leaving a gap that a
+		// "leaf follows runtime" assumption writes straight over.
+		//
+		// The offsets header only exports DeoptimizeCopyFrame for the newer
+		// tags, so adjacency is read from thread.h and the exported offset,
+		// where present, is used as a cross-check.
+		contiguous, err := leafFollowsRuntime(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		switch {
+		case contiguous && ok2 && leafBase != rtBase+len(runtime)*8:
+			fmt.Fprintf(os.Stderr, "  SKIP %s: thread.h says the blocks are adjacent but the header puts\n"+
+				"    DeoptimizeCopyFrame at %#x, not %#x -- resolve before emitting\n",
+				tag, leafBase, rtBase+len(runtime)*8)
+			continue
+		case !contiguous && !ok2:
+			fmt.Fprintf(os.Stderr, "  SKIP %s: LEAF block is not adjacent to the runtime block and the\n"+
+				"    header does not export DeoptimizeCopyFrame_entry_point_offset.\n"+
+				"    The leaf base cannot be derived; guessing it would misname the whole block.\n", tag)
+			continue
+		}
+		fmt.Printf("\n// Dart %s. Derived from runtime_entry_list.h@%s;\n", tag, tag)
+		fmt.Printf("// base offsets from runtime_offsets_extracted.h@%s\n", tag)
+		fmt.Printf("// (AllocateArray = %#x", rtBase)
+		if ok2 {
+			fmt.Printf(", DeoptimizeCopyFrame = %#x", leafBase)
+		}
+		fmt.Printf(").\n")
+		if contiguous {
+			fmt.Printf("// The LEAF block follows the runtime block with no gap, so the two\n")
+			fmt.Printf("// are stored flattened, matching the pre-3.10.7 convention.\n")
+			fmt.Printf("var runtimeEntriesV%s = []string{\n", id)
+			printGoStrings(append(append([]string{}, runtime...), leaf...))
+			fmt.Printf("}\n")
+			fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, runtimeEntriesV%s)\n", id, rtBase, id)
+			continue
+		}
+		fmt.Printf("var runtimeEntriesV%s = []string{\n", id)
+		printGoStrings(runtime)
+		fmt.Printf("}\n\n")
+		fmt.Printf("var leafEntriesV%s = []string{\n", id)
+		printGoStrings(leaf)
+		fmt.Printf("}\n")
+		fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, runtimeEntriesV%s)\n", id, rtBase, id)
+		if ok2 {
+			fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, leafEntriesV%s)\n", id, leafBase, id)
+		}
+	}
+	return 0
+}
+
+func printGoStrings(names []string) {
+	const perLine = 3
+	for i := 0; i < len(names); i += perLine {
+		fmt.Printf("\t")
+		for j := i; j < i+perLine && j < len(names); j++ {
+			fmt.Printf("%q, ", names[j])
+		}
+		fmt.Printf("\n")
+	}
+}
+
+var (
+	reRuntimeMembers = regexp.MustCompile(`(?m)^\s*RUNTIME_ENTRY_LIST\(DECLARE_MEMBERS\)`)
+	reLeafMembers    = regexp.MustCompile(`(?m)^\s*LEAF_RUNTIME_ENTRY_LIST\(DECLARE_MEMBERS\)`)
+	rePreproc        = regexp.MustCompile(`(?m)^\s*#(define|undef)[^\n]*$`)
+)
+
+// leafFollowsRuntime reports whether Thread declares the LEAF runtime
+// entry points immediately after the ordinary ones, with nothing in
+// between -- which is what makes the two blocks one contiguous run of
+// offsets.
+func leafFollowsRuntime(tag string) (bool, error) {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return false, err
+	}
+	rt := reRuntimeMembers.FindStringIndex(src)
+	lf := reLeafMembers.FindStringIndex(src)
+	if rt == nil || lf == nil {
+		return false, fmt.Errorf("thread.h@%s: DECLARE_MEMBERS expansions not found", tag)
+	}
+	if lf[0] < rt[1] {
+		return false, fmt.Errorf("thread.h@%s: LEAF block precedes the runtime block", tag)
+	}
+	between := src[rt[1]:lf[0]]
+	between = rePreproc.ReplaceAllString(between, "")
+	return strings.TrimSpace(between) == "", nil
+}
+
+func arm64ProductTarget(tag string) (extractTarget, bool) {
+	for _, t := range allTargets {
+		if t.tag == tag && t.arch == "arm64" && t.product {
+			return t, true
+		}
+	}
+	return extractTarget{}, false
+}
+
 // runCheckRoots verifies RootsPrefixRefCount for Dart 3.13.0+ against the SDK.
 // The roots prefix count is the sum of:
 //   - |RAW_ROOTS_LIST| + 35 + 4 + 256 (Raw roots)
@@ -1540,8 +1709,13 @@ func main() {
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	emitRuntimeEntriesFlag := flag.String("emit-runtime-entries", "", "comma-separated tags: print Go source for their runtime-entry tables and the mergeRuntimeEntries calls")
 	checkStubOffsetsFlag := flag.Bool("check-stub-offsets", false, "verify threadstubs.go's ThreadStubOffsets tables against SDK's thread.h + runtime_offsets_extracted.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *emitRuntimeEntriesFlag != "" {
+		os.Exit(runEmitRuntimeEntries(strings.Split(*emitRuntimeEntriesFlag, ",")))
+	}
 
 	if *checkStubOffsetsFlag {
 		if runCheckStubOffsets() > 0 {
