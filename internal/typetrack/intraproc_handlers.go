@@ -1,7 +1,6 @@
 package typetrack
 
 import (
-	"strconv"
 	"strings"
 
 	"aotopsy/internal/arch/arm64"
@@ -307,63 +306,20 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	if !poolIdxOK {
 		return true
 	}
-	if tc.ctx.PoolUnlinkedCallNames != nil {
-		if name, ok3 := tc.ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
-			tc.state[rt] = KnownStub("UnlinkedCall:"+name, byteOff)
-			tc.ctx.PPHits++
-			return true
-		}
-	}
-	// Check PoolCodeNames BEFORE PoolClassByIndex: a Code object in
-	// the pool should be named (PPCode:funcName), not typed as
-	// KnownClass(kCodeCid). KnownClass(CodeCID) is useless for BLR
-	// resolution — the function name is what resolveBLR needs.
-	if tc.ctx.PoolCodeNames != nil {
-		if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
-			tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
-			tc.ctx.PPHits++
-			return true
-		}
-	}
-	if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
-		// If this pool entry is a Type with a known type testing stub
-		// name, set KnownStub("TTS:name") instead of KnownClass(TypeCID).
-		// The type_test_stub_entry_point_ is at offset 7 from the Type's
-		// tagged pointer (uword field, not a pointer — verified via gh
-		// api to raw_object.h @2.12.0: type_test_stub_entry_point_ is
-		// the first field in UntaggedAbstractType, at offset 8 from
-		// untagged = 7 from tagged). handleFieldLoad's existing PPCode
-		// handler at imm9==7 will preserve the KnownStub through the
-		// LDUR, and handleBLR will resolve "TTS:name" to the stub name.
-		if tc.ctx.TypeTestingStubNames != nil {
-			if ttsName, ok3 := tc.ctx.TypeTestingStubNames[poolIdx]; ok3 && ttsName != "" {
-				tc.state[rt] = KnownStub("TTS:"+ttsName, byteOff)
-				tc.ctx.PPHits++
-				return true
-			}
-		}
-		tc.state[rt] = KnownClass(classID)
+	// The lookup order lives in ResolvePoolEntry, shared with x86_64.
+	// Notes that used to sit inline here and still apply:
+	//
+	//   - PoolCodeNames is checked before PoolClassByIndex, because a
+	//     Code object in the pool is useful as a name, not as kCodeCid.
+	//   - type_test_stub_entry_point_ is at offset 7 from a Type's tagged
+	//     pointer (raw_object.h@2.12.0: first field of
+	//     UntaggedAbstractType, 8 untagged). handleFieldLoad's imm9 == 7
+	//     case preserves the KnownStub through the LDUR, and handleBLR
+	//     resolves "TTS:name".
+	lat, hit := ResolvePoolEntry(tc.ctx, poolIdx, byteOff)
+	tc.state[rt] = lat
+	if hit {
 		tc.ctx.PPHits++
-		if tc.ctx.InstantiatedClasses != nil {
-			tc.ctx.InstantiatedClasses[classID] = true
-		}
-		return true // Don't fall through to PoolClosureClass — its
-		// else-branch would set Top(), clobbering this KnownClass.
-	}
-	if tc.ctx.PoolClosureClass != nil {
-		if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-			// Set KnownStub("Closure", poolIdx) instead of KnownClass:
-			// this lets handleFieldLoad detect Closure.function loads
-			// and resolve them to KnownClass(ownerClassID) via
-			// PoolClosureClass. KnownClass alone would lose the pool
-			// index, making it impossible to trace back to the closure.
-			tc.state[rt] = KnownStub("Closure:"+strconv.Itoa(classID), poolIdx)
-			tc.ctx.PPHits++
-			return true
-		}
-		tc.state[rt] = Top()
-	} else {
-		tc.state[rt] = Top()
 	}
 	return true
 }
