@@ -9,7 +9,7 @@ import (
 
 // TestBLRResolutionRate checks that BLR resolution doesn't regress below
 // a minimum threshold. This prevents silent BLR drops from code changes.
-// Requires AOTOPSY_TEST_SAMPLE_ARM64 env var.
+// Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestBLRResolutionRate(t *testing.T) {
 	tmpDir := sharedPipelineOutDir(t)
 

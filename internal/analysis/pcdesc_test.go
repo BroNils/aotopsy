@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -17,10 +16,7 @@ import (
 //   - kinds are all valid single-bit values
 //   - some descriptors carry a real try_index, since the app contains try/catch
 func TestPcDescriptorsDecodedFromBinary(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	if len(res.PcDescriptors) == 0 {
@@ -94,10 +90,7 @@ func TestPcDescriptorsDecodedFromBinary(t *testing.T) {
 // Each must yield at least one try region, and each region must reference a
 // handler that actually exists in the function's ExceptionHandlers.
 func TestTryRegionsForKnownTryCatchFunctions(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 	if len(res.PcDescriptors) == 0 {
 		t.Skip("no PcDescriptors decoded")
@@ -196,10 +189,7 @@ func TestTryRegionsForKnownTryCatchFunctions(t *testing.T) {
 // raw region scan sees 1 region. The outer one is definitional: a pc inside try
 // N is inside handler[N].outer_try_index too.
 func TestExpandOuterTryRegions_NestedTryCatch(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	strByRef := map[int]string{}
@@ -302,10 +292,7 @@ func TestExpandOuterTryRegions_NestedTryCatch(t *testing.T) {
 // the feature is not carried on faith. It also enforces the two invariants that
 // must hold whenever it does fire.
 func TestExpandOuterTryRegionsCorpusEffect(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	pdByRef := map[int]*cluster.PcDescriptorsInfo{}
