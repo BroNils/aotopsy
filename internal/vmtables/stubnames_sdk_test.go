@@ -1,8 +1,6 @@
 package vmtables
 
 import (
-	"regexp"
-	"strings"
 	"testing"
 
 	"aotopsy/internal/sdktest"
@@ -29,12 +27,7 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/vmtables/ -run VMStubNamesMatchSDK
 func TestVMStubNamesMatchSDK(t *testing.T) {
-	if sdktest.SkipIfNoSDK() {
-		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
-	}
-	if !sdktest.HasGH() {
-		t.Skip("gh not on PATH, skipping SDK drift check")
-	}
+	sdktest.SkipIfNoSDKTools(t)
 
 	// Every version VMStubNames claims to know. Keep in sync with the
 	// switch there; a version with a table but no probe here is untested.
@@ -54,12 +47,12 @@ func TestVMStubNamesMatchSDK(t *testing.T) {
 			if err != nil {
 				t.Skipf("cannot fetch stub_code_list.h@%s: %v", tag, err)
 			}
-			macros := parseStubMacros(src)
-			full, err := expandStubMacro(macros, "VM_STUB_CODE_LIST")
+			macros := sdktest.ParseMacros(src)
+			full, err := sdktest.ExpandMacro(macros, "VM_STUB_CODE_LIST")
 			if err != nil {
 				t.Fatalf("expand VM_STUB_CODE_LIST@%s: %v", tag, err)
 			}
-			tts, err := expandStubMacro(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
+			tts, err := sdktest.ExpandMacro(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
 			if err != nil {
 				t.Fatalf("expand VM_TYPE_TESTING_STUB_CODE_LIST@%s: %v", tag, err)
 			}
@@ -144,65 +137,5 @@ func TestVMStubTablesHaveNoDuplicates(t *testing.T) {
 	}
 }
 
-// --- stub_code_list.h macro expansion ---
-//
-// The lists are C preprocessor macros that nest: VM_STUB_CODE_LIST
-// expands PROBE_POINT_STUBS_LIST and VM_TYPE_TESTING_STUB_CODE_LIST
-// inline. A naive `V\((\w+)\)` scan silently drops the nested ones, which
-// is a good way to "verify" a table against a list that is missing
-// entries — so expansion is done properly here.
-
-var (
-	stubMacroDefRe = regexp.MustCompile(`(?m)^#define\s+(\w+)\(V\)(.*)$`)
-	stubTokenRe    = regexp.MustCompile(`(\w+)\(V\)|V\((\w+)\)`)
-)
-
-// parseStubMacros returns every `#define NAME(V) ...` body in the file,
-// with line continuations joined and comments stripped.
-func parseStubMacros(src string) map[string]string {
-	src = strings.ReplaceAll(src, "\\\n", "")
-	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
-	src = regexp.MustCompile(`//[^\n]*`).ReplaceAllString(src, "")
-	out := map[string]string{}
-	for _, m := range stubMacroDefRe.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = m[2]
-	}
-	return out
-}
-
-type stubMacroError string
-
-func (e stubMacroError) Error() string { return string(e) }
-
-// expandStubMacro expands one macro, recursing into nested list macros.
-func expandStubMacro(macros map[string]string, name string) ([]string, error) {
-	body, ok := macros[name]
-	if !ok {
-		return nil, stubMacroError("macro " + name + " not found")
-	}
-	return expandStubBody(macros, body, map[string]bool{name: true})
-}
-
-func expandStubBody(macros map[string]string, body string, seen map[string]bool) ([]string, error) {
-	var out []string
-	for _, m := range stubTokenRe.FindAllStringSubmatch(body, -1) {
-		nested, leaf := m[1], m[2]
-		switch {
-		case leaf != "":
-			out = append(out, leaf)
-		case nested != "" && !seen[nested]:
-			sub, ok := macros[nested]
-			if !ok {
-				return nil, stubMacroError("nested macro " + nested + " not found")
-			}
-			seen[nested] = true
-			vals, err := expandStubBody(macros, sub, seen)
-			delete(seen, nested)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, vals...)
-		}
-	}
-	return out, nil
-}
+// The stub_code_list.h macro expansion this gate needs now lives in
+// internal/sdktest, shared with the other SDK drift gates.
