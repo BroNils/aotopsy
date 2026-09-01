@@ -1,7 +1,6 @@
 package naming
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -21,10 +20,7 @@ import (
 //	Function.signature -> FunctionType.type_parameters
 //	                   -> TypeParameters.names (Array) -> Strings
 func TestFuncTypeParamNames_Chain(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := corpusSample(t, sampleARM64Name)
 	res := clusterOnly(t, libPath)
 
 	if len(res.TypeParameters) == 0 {

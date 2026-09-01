@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -36,10 +35,7 @@ import (
 //
 // So the expectation is exactly two captured refs, at offsets 8 and 20.
 func TestInstanceFieldOffsets_ConfigData(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	// Find ConfigData's class ID via its ClassInfo name.
@@ -137,13 +133,9 @@ func TestInstanceFieldOffsets_ConfigData(t *testing.T) {
 // stream misalignment in readFillInstance, which would otherwise show up only
 // as subtly wrong types much later.
 func TestInstanceFieldRefsNeverExceedSlots(t *testing.T) {
-	for _, env := range []string{"AOTOPSY_TEST_SAMPLE_ARM64", "AOTOPSY_TEST_SAMPLE_312_X64",
-		"AOTOPSY_TEST_SAMPLE_DART212", "AOTOPSY_TEST_SAMPLE_LARGE"} {
-		libPath := os.Getenv(env)
-		if libPath == "" {
-			continue
-		}
-		t.Run(env, func(t *testing.T) {
+	for _, name := range []string{sampleARM64Name, sample312X64Name, sampleDart212Name, sampleLargeName} {
+		libPath := corpusSample(t, name)
+		t.Run(name, func(t *testing.T) {
 			res := clusterOnly(t, libPath)
 			if len(res.Instances) == 0 {
 				t.Skip("no instances captured")

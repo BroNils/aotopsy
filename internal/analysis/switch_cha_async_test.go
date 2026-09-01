@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -16,10 +15,7 @@ import (
 // switches with >=16 cases (kJumpTableMinExpressions = 16, verified against
 // dart-lang/sdk kernel_to_il.cc @ 3.9.2).
 func TestSwitchDispatchDetected(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	// Find bigSwitch function by name.
@@ -80,10 +76,7 @@ func TestSwitchDispatchDetected(t *testing.T) {
 //
 // So Shape should have 3 subclasses: Circle, Square, Triangle.
 func TestCHASubclassesBuilt(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	// Build class name → classID map.
@@ -162,10 +155,7 @@ func TestCHASubclassesBuilt(t *testing.T) {
 // to a resume function, without recognizable stub calls. Full async detection
 // requires CFG pattern analysis (switch on state index + tail call) — future work.
 func TestAsyncFunctionExists(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	strByRef := map[int]string{}

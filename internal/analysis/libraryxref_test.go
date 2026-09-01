@@ -1,18 +1,16 @@
 package analysis
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-// libPathForTest returns the ARM64 sample path for error messages.
-func libPathForTest() string {
-	return os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-}
+// libPathForTest names the ARM64 sample, for error messages.
+func libPathForTest() string { return sampleARM64Name }
 
 // TestLibraryFunctionsXref verifies the library -> functions xref against the
-// actual Dart source of compare_sample, which declares:
+// actual Dart source of the test app (package sampleARM64Package), which
+// declares:
 //
 //	main.dart:         CompareApp, MathTools, StringTools, AntiInlineTools,
 //	                   Processor, AddProcessor, MulProcessor, CompareHomePage,
@@ -23,9 +21,9 @@ func libPathForTest() string {
 // libapp.so files with five different hashes, and the two under
 // build/app/outputs/flutter-apk/extracted_*/ are built from an OLDER revision
 // of lib/*.dart: they contain no AntiInlineTools, no safeDivide and no
-// ground_truth.dart at all. Point AOTOPSY_TEST_SAMPLE_ARM64 at
-// build/app/intermediates/merged_native_libs/... (or jniLibs/...) instead, or
-// this test will fail for a reason that has nothing to do with the code.
+// ground_truth.dart at all. The corpus entry is the merged_native_libs
+// build; swapping it for an extracted_* one fails this test for a reason
+// that has nothing to do with the code.
 func TestLibraryFunctionsXref(t *testing.T) {
 	outDir := sharedPipelineOutDir(t)
 	recs := readJSONL(t, filepath.Join(outDir, "library_functions.jsonl"))
@@ -52,11 +50,11 @@ func TestLibraryFunctionsXref(t *testing.T) {
 		t.Error("every library flagged as framework; app/third-party code must not be")
 	}
 
-	main, ok := byURL["package:compare_sample/main.dart"]
+	main, ok := byURL["package:"+sampleARM64Package+"/main.dart"]
 	if !ok {
-		t.Fatalf("package:compare_sample/main.dart missing. If this sample's "+
-			"libapp.so is the stale extracted_* one, see this test's doc comment. "+
-			"Sample: %s", libPathForTest())
+		t.Fatalf("package:%s/main.dart missing. If this sample's libapp.so is the "+
+			"stale extracted_* one, see this test's doc comment. Sample: %s",
+			sampleARM64Package, libPathForTest())
 	}
 	// Class count must match the source exactly: the AOT compiler drops unused
 	// classes, but every class here is reachable from _runAll.
@@ -105,12 +103,12 @@ func TestLibraryFunctionsXref(t *testing.T) {
 	// them and no Function object survives. Asserting their presence would
 	// encode a compiler decision we do not control.
 
-	if gt, ok := byURL["package:compare_sample/ground_truth.dart"]; ok {
+	if gt, ok := byURL["package:"+sampleARM64Package+"/ground_truth.dart"]; ok {
 		if cc, _ := gt["class_count"].(float64); int(cc) != 5 {
 			t.Errorf("ground_truth.dart class_count = %v, want 5", cc)
 		}
 	} else {
-		t.Error("package:compare_sample/ground_truth.dart missing (stale binary?)")
+		t.Errorf("package:%s/ground_truth.dart missing (stale binary?)", sampleARM64Package)
 	}
 }
 
