@@ -115,15 +115,26 @@ func BuildSignalGraph(
 		if sdk.IsMundaneStub(thrName) {
 			continue
 		}
+		// IsMundaneStub keeps exactly two things: the async stubs, and
+		// names it does not recognise. Those are not the same finding --
+		// "this function suspends" is structural evidence that survives
+		// obfuscation, while "this calls a stub we cannot name" is a gap
+		// in our own tables. Filing both under "thr" made the largest
+		// category in the graph the least informative one.
+		cat := CatTHR
+		switch sdk.ClassifyStubRole(thrName) {
+		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
+			cat = CatAsync
+		}
 		// Mark the calling function as signal.
 		fs, ok := funcSignals[e.FromFunc]
 		if !ok {
 			fs = &funcSignal{categories: make(map[string]bool)}
 			funcSignals[e.FromFunc] = fs
 		}
-		if !fs.categories["thr"] {
-			fs.categories["thr"] = true
-			catCounts["thr"]++
+		if !fs.categories[cat] {
+			fs.categories[cat] = true
+			catCounts[cat]++
 		}
 	}
 
