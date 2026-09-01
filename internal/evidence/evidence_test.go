@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/output"
+	"aotopsy/internal/typetrack"
 )
 
 func TestFromCallEdges(t *testing.T) {
@@ -82,13 +84,38 @@ func TestRecordsSortedByPC(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{
 		{FromFunc: "F", FromPC: "0x3000", Kind: "bl", Target: "C"},
 		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A"},
-		{FromFunc: "F", FromPC: "0x2000", Kind: "bl", Target: "B"},
+		{FromFunc: "F", FromPC: "0x20", Kind: "bl", Target: "B"},
 	}
 	c := NewCollector()
 	c.FromCallEdges(edges)
 	records := c.Records()
-	if records[0].PC != "0x1000" || records[1].PC != "0x2000" || records[2].PC != "0x3000" {
-		t.Errorf("records not sorted by PC: %s, %s, %s", records[0].PC, records[1].PC, records[2].PC)
+	if records[0].PC != "0x20" || records[1].PC != "0x1000" || records[2].PC != "0x3000" {
+		t.Errorf("records not sorted numerically by PC: %s, %s, %s", records[0].PC, records[1].PC, records[2].PC)
+	}
+}
+
+func TestFromSignalFindingsAndFieldAccesses(t *testing.T) {
+	c := NewCollector()
+	c.FromSignalFindings([]output.SignalFinding{
+		{Category: "rooting", StringValue: "su", Function: "SecurityCheck", PC: "0x50"},
+	})
+	c.FromFieldAccesses("User.getName", []typetrack.FieldAccess{
+		{ClassID: 42, ByteOffset: 16, IsStore: false, PC: 0x60},
+	}, func(cid int) string {
+		if cid == 42 {
+			return "User"
+		}
+		return ""
+	})
+	records := c.Records()
+	if len(records) != 2 {
+		t.Fatalf("want 2 records, got %d", len(records))
+	}
+	if records[0].Kind != "signal" || records[0].Confidence != "static_inferred" {
+		t.Errorf("record 0 = %+v", records[0])
+	}
+	if records[1].Kind != "field_access" || records[1].Result["class_name"] != "User" {
+		t.Errorf("record 1 = %+v", records[1])
 	}
 }
 

@@ -126,3 +126,27 @@ func EqualitySuccessor(op x86asm.Op, numSuccs int) int {
 	}
 	return -1 // sdk.SuccUnknown
 }
+
+// DstRegsOfInst returns the canonical register indices (0..15) modified by inst.
+// Returns nil for instructions that do not modify GP registers (e.g. CMP, TEST, PUSH, jumps).
+func DstRegsOfInst(inst x86asm.Inst) []int {
+	switch inst.Op {
+	case x86asm.CMP, x86asm.TEST, x86asm.PUSH, x86asm.JMP:
+		return nil
+	case x86asm.DIV, x86asm.IDIV:
+		// DIV/IDIV implicitly modifies RAX (0) and RDX (2)
+		return []int{0, 2}
+	}
+	if IsCondJump(inst.Op) {
+		return nil
+	}
+	if len(inst.Args) >= 1 {
+		if r, ok := inst.Args[0].(x86asm.Reg); ok {
+			canon := CanonReg(r)
+			if canon >= 0 {
+				return []int{canon}
+			}
+		}
+	}
+	return nil
+}

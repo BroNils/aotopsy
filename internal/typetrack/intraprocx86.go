@@ -892,38 +892,12 @@ func transferInstructionX86(
 		}
 	}
 
-	// Default: if this instruction defines a register, kill its type.
-	//
-	// Args[0] is the destination for most x86 instructions, but NOT for the
-	// flag-only ones. CMP and TEST read both operands and write only the
-	// flags, and PUSH reads its operand -- killing Args[0] for those
-	// destroys a type the instruction never touched.
-	//
-	// CMP is the damaging case: `CMP cid, #N` is exactly how a class check
-	// is written, so this wiped the type of the very register the check was
-	// about, every time. Traced on the sequence at 0x213d6d in the x86_64
-	// sample -- header load sets Bottom, the SHR extract keeps it, and then
-	// the CMP resets it to Top one instruction before the branch that would
-	// have narrowed it. That is why narrowing found an untyped register at
-	// all 61428 opportunities.
-	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
-		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			dstIdx := x86.CanonReg(dstReg)
-			if dstIdx >= 0 && dstIdx < 31 {
-				state[dstIdx] = Top()
-			}
+	// Default: if this instruction defines registers, kill their types.
+	for _, dstIdx := range x86.DstRegsOfInst(ins) {
+		if dstIdx >= 0 && dstIdx < 31 {
+			state[dstIdx] = Top()
 		}
 	}
-}
-
-// x86ReadsOnlyFirstOperand reports whether an instruction reads its first
-// operand without writing it, so the default kill above must not apply.
-func x86ReadsOnlyFirstOperand(op x86asm.Op) bool {
-	switch op {
-	case x86asm.CMP, x86asm.TEST, x86asm.PUSH:
-		return true
-	}
-	return false
 }
 
 // resolveX86Dispatch resolves a dispatch table call to a target function.
@@ -935,8 +909,8 @@ func resolveX86Dispatch(
 	result *IntraResult,
 ) {
 	res := BlrResolution{
-		PC:        inst.VA,
-		SlotIndex: slot,
+		PC:         inst.VA,
+		SlotIndex:  slot,
 		Confidence: "unknown",
 	}
 	if name, ok := ctx.ResolveDispatchTarget(slot); ok {
@@ -945,16 +919,28 @@ func resolveX86Dispatch(
 		res.Confidence = "exact"
 		ctx.DispatchHits++
 	} else {
-		// P4 reverse dispatch scan: if the slot doesn't directly resolve,
-		// scan nearby slots for monomorphic targets (same as ARM64).
-		// This handles cases where the dispatch table entry is null/stub
-		// but a nearby slot has a valid Code target.
-		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
-		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
-		if res.Polymorphic {
-			res.Confidence = "polymorphic"
-		} else if res.Resolved {
-			res.Confidence = "static_inferred"
+		// When selector offset is known, check CHA first for receiver class
+		if selectorImm, ok := ctx.SelectorOffsets[inst.VA]; ok && state[x86RegRCX].Kind == LatticeKnownClass {
+			chaTargets := ctx.ResolveDispatchCHA(state[x86RegRCX].ClassID, selectorImm)
+			if len(chaTargets) > 0 {
+				applySelectorCandidates(&res, chaTargets)
+				if res.Polymorphic {
+					res.Confidence = "polymorphic"
+				} else if res.Resolved {
+					res.Confidence = "static_inferred"
+				}
+			}
+		}
+		if !res.Resolved && !res.Polymorphic {
+			// P4 reverse dispatch scan: if the slot doesn't directly resolve,
+			// scan nearby slots for monomorphic targets (same as ARM64).
+			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
+			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
+			if res.Polymorphic {
+				res.Confidence = "polymorphic"
+			} else if res.Resolved {
+				res.Confidence = "static_inferred"
+			}
 		}
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)

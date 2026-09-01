@@ -215,3 +215,15 @@ func TestStreamPosition(t *testing.T) {
 		t.Errorf("ReadUnsigned = %d, want 0", v)
 	}
 }
+
+func TestReadDouble(t *testing.T) {
+	// Encode a known double (e.g. 0.0 -> int64 0 -> tagged64: [192])
+	s := NewStream([]byte{192})
+	f, err := s.ReadDouble()
+	if err != nil {
+		t.Fatalf("ReadDouble: %v", err)
+	}
+	if f != 0.0 {
+		t.Errorf("ReadDouble = %f, want 0.0", f)
+	}
+}

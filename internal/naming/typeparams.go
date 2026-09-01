@@ -216,6 +216,9 @@ func BuildClosureParents(result *cluster.Result, pl *PoolLookups) map[int]string
 			continue
 		}
 		parent, ok := pl.RefToNamed[parentRef]
+		if !ok && pl.VmRefToNamed != nil {
+			parent, ok = pl.VmRefToNamed[parentRef]
+		}
 		if !ok {
 			continue
 		}

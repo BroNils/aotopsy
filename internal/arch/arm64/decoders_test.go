@@ -94,4 +94,28 @@ func TestDstRegOfInst(t *testing.T) {
 	if rd := DstRegOfInst(rawMOV); rd != 1 {
 		t.Fatalf("DstRegOfInst(MOV) = %d, want 1", rd)
 	}
+
+	// LDP X0, X1, [X26, #80] -> 0xA9450740
+	rawLDP := uint32(0xA9400000 | (10 << 15) | (1 << 10) | (26 << 5) | 0)
+	regs := DstRegsOfInst(rawLDP)
+	if len(regs) != 2 || regs[0] != 0 || regs[1] != 1 {
+		t.Fatalf("DstRegsOfInst(LDP) = %v, want [0, 1]", regs)
+	}
+
+	base, r1, r2, off, ok := LDP64UnsignedOffset(rawLDP)
+	if !ok || base != 26 || r1 != 0 || r2 != 1 || off != 80 {
+		t.Fatalf("LDP64UnsignedOffset = (%d, %d, %d, %d, %v), want (26, 0, 1, 80, true)", base, r1, r2, off, ok)
+	}
+
+	// CMP X0, #0 (SUBS XZR, X0, #0) -> no destination register (discards to XZR)
+	rawCMP := uint32(0xF100001F)
+	if cmpRegs := DstRegsOfInst(rawCMP); len(cmpRegs) != 0 {
+		t.Fatalf("DstRegsOfInst(CMP) = %v, want empty", cmpRegs)
+	}
+
+	// CSEL X0, X1, X2, EQ -> 0x9A820020
+	rawCSEL := uint32(0x9A820020)
+	if cselRegs := DstRegsOfInst(rawCSEL); len(cselRegs) != 1 || cselRegs[0] != 0 {
+		t.Fatalf("DstRegsOfInst(CSEL) = %v, want [0]", cselRegs)
+	}
 }

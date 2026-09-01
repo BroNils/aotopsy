@@ -628,5 +628,57 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 		}
 		return "", false, true
 	}
+
+	if strings.HasPrefix(mnemonic, "cmov") {
+		if len(ops) >= 2 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			suf := strings.TrimPrefix(mnemonic, "cmov")
+			condOp := x86CondOpFromSuffix(suf)
+			condStr := fmt.Sprintf("/* %s */", suf)
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			old := s.lookupReg(dst)
+			if old == "" {
+				old = dst
+			}
+			s.setReg(dst, fmt.Sprintf("(%s ? %s : %s)", condStr, src, old))
+		}
+		return "", false, true
+	}
+
+	if strings.HasPrefix(mnemonic, "set") && len(mnemonic) > 3 {
+		if len(ops) >= 1 {
+			dst := strings.ToLower(ops[0])
+			suf := strings.TrimPrefix(mnemonic, "set")
+			condOp := x86CondOpFromSuffix(suf)
+			condStr := fmt.Sprintf("/* %s */", suf)
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))
+		}
+		return "", false, true
+	}
+
 	return "", false, false
+}
+
+func x86CondOpFromSuffix(suf string) string {
+	switch suf {
+	case "e", "z":
+		return "=="
+	case "ne", "nz":
+		return "!="
+	case "l", "b", "c", "nae", "nge":
+		return "<"
+	case "le", "be", "na", "ng":
+		return "<="
+	case "g", "a", "nbe", "nle":
+		return ">"
+	case "ge", "ae", "nb", "nc", "nl":
+		return ">="
+	}
+	return "?"
 }
