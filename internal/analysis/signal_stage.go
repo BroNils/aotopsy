@@ -38,7 +38,12 @@ type SignalResult struct {
 // pipeline passes false and writes a richer one at step 9; the standalone
 // `aotopsy signal` and --from-dir paths pass true, because nothing else
 // will.
-func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, writeEvidence bool) (*SignalResult, error) {
+// libPath is the analysed binary, used to name and hash the SARIF
+// artifact. The standalone entry points pass "" -- they are handed an
+// output directory and genuinely do not know which binary produced it,
+// and no artifact records it. WriteSARIF degrades to a placeholder name
+// rather than inventing one.
+func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, writeEvidence bool, libPath string) (*SignalResult, error) {
 	if log == nil {
 		log = os.Stderr
 	}
@@ -225,7 +230,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 	}
 
 	if len(findings) > 0 {
-		if err := output.WriteSARIF(inDir, findings, "1.0.0"); err != nil {
+		if err := output.WriteSARIF(inDir, findings, "1.0.0", libPath); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
 			sarifPath := filepath.Join(inDir, "aotopsy.sarif")
