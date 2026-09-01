@@ -356,6 +356,19 @@ func SUBS32Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 	return rd, rn, immValue, true
 }
 
+// A 64-bit SUBS/CMP decoder is deliberately absent.
+//
+// It was written and wired into typetrack's class-id narrowing, then
+// removed on the measurement: narrow_hits went 5872 -> 68313 on
+// dart-3.9.2-arm64 while resolved_blr moved by 0, and dart-2.12.0-arm64
+// lost a monomorphic call. Class ids are extracted into W registers, so a
+// CMP on an X register is comparing a tagged value or a Smi, and treating
+// the immediate as a class id is wrong 62000 times over.
+//
+// If a caller ever needs 64-bit comparisons for something other than
+// class-id narrowing -- a range lattice, say -- add the decoder together
+// with that caller and its own measurement.
+
 // ── Data processing instructions ──────────────────────────────────────
 
 // MOVZ64 detects MOVZ Xd, #imm16 (64-bit, shift=0).
