@@ -128,21 +128,14 @@ function offsetToName(offset) {
   return FUNC_MAP[key] || ('sub_' + offset.toString(16));
 }
 
-function extractClassId(objPtr) {
-  try {
-    var header;
-    if (META.compressed) {
-      header = Memory.readU32(objPtr);
-    } else {
-      header = Memory.readU64(objPtr).toNumber();
-    }
-    var mask = (1 << META.headerBitWidth) - 1;
-    var cid = (header >>> META.headerBitOffset) & mask;
-    return cid;
-  } catch (e) {
-    return -1;
-  }
-}
+// extractClassId used to live here, reading a heap header out of what the
+// dispatch probe called the "receiver register". Its only caller now takes
+// the class id straight from DispatchTableNullErrorABI::kClassIdReg, which
+// already holds it as an integer, so the header read is gone rather than
+// left behind unused. META.headerBitOffset / headerBitWidth stay in the
+// emitted metadata block -- they describe the object header layout and are
+// part of the exported JSON that external scripts read -- but nothing in
+// this generated script uses them any more.
 
 function safeReadPtr(p) {
   try { return p.readPointer(); } catch(e) { return null; }
@@ -257,11 +250,20 @@ function installHooks() {
             if (!targetPtr) return;
 
             var offset = targetPtr.sub(base);
-            var receiverReg = (META.arch === 'arm64') ? 'x1' : 'rcx';
-            var receiverPtr = this.context[receiverReg];
+            // DispatchTableNullErrorABI::kClassIdReg holds the receiver's
+            // class id as a plain integer -- x0 on ARM64, rcx on x86_64 --
+            // because EmitDispatchTableCall uses it as the table index:
+            //   arm64   add LR, cid_reg, #off ; call [DT_REG + LR*8]
+            //   x86_64  call [table_reg + cid_reg*8 + off]
+            // This used to read x1 / rcx as a receiver POINTER and pull a
+            // heap header out of it, which on x86_64 meant dereferencing
+            // the class id itself: an address equal to a small integer,
+            // so every probe faulted and reported -1.
+            var cidReg = (META.arch === 'arm64') ? 'x0' : 'rcx';
             var classId = -1;
-            if (receiverPtr && !receiverPtr.isNull()) {
-              classId = extractClassId(receiverPtr);
+            var cidVal = this.context[cidReg];
+            if (cidVal) {
+              classId = cidVal.toInt32();
             }
 
             var targetName = offsetToName(offset);
