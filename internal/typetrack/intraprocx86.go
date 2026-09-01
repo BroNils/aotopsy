@@ -483,20 +483,16 @@ func transferInstructionX86(
 				if !poolIdxOK {
 					return
 				}
-				if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
-					state[dstIdx] = KnownClass(classID)
+				// Same resolver as ARM64. This used to check
+				// PoolClassByIndex and PoolClosureClass only -- missing
+				// every source that produces a NAME (unlinked calls, Code
+				// objects, type-testing stubs), and storing closures as
+				// KnownClass, which loses the pool index a later
+				// Closure.function load needs.
+				lat, hit := ResolvePoolEntry(ctx, poolIdx, int(mem.Disp))
+				state[dstIdx] = lat
+				if hit {
 					ctx.PPHits++
-				} else if ctx.PoolClosureClass != nil {
-					// Closure consumer: same as ARM64, resolve Closure →
-					// ClosureData.parent_function → owner class.
-					if classID, ok3 := ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-						state[dstIdx] = KnownClass(classID)
-						ctx.PPHits++
-						return
-					}
-					state[dstIdx] = Top()
-				} else {
-					state[dstIdx] = Top()
 				}
 				return
 			}
