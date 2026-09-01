@@ -265,13 +265,13 @@ func (c *Collector) MergeRuntime(resolutions []RuntimeResolution) {
 // CoverageReport summarizes how many static predictions were confirmed,
 // contradicted, or left unobserved by runtime evidence.
 type CoverageReport struct {
-	StaticOnly        int `json:"static_only"`
-	RuntimeOnly       int `json:"runtime_only"`
-	BothMatch         int `json:"both_match"`
-	BothConflict      int `json:"both_conflict"`
-	RuntimeConfirmed  int `json:"runtime_confirmed"`
-	TotalStatic       int `json:"total_static"`
-	TotalRuntime      int `json:"total_runtime"`
+	StaticOnly       int `json:"static_only"`
+	RuntimeOnly      int `json:"runtime_only"`
+	BothMatch        int `json:"both_match"`
+	BothConflict     int `json:"both_conflict"`
+	RuntimeConfirmed int `json:"runtime_confirmed"`
+	TotalStatic      int `json:"total_static"`
+	TotalRuntime     int `json:"total_runtime"`
 }
 
 // Coverage computes a summary of static vs runtime evidence overlap.

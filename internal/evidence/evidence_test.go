@@ -165,10 +165,10 @@ func TestCoverage(t *testing.T) {
 	c.FromCallEdges(edges)
 
 	rt := []RuntimeResolution{
-		{PC: "0x1000", TargetName: "A.foo"},   // match
-		{PC: "0x2000", TargetName: "C.baz"},   // conflict
-		{PC: "0x3000", TargetName: "D.qux"},   // runtime confirmed (was unknown)
-		{PC: "0x9999", TargetName: "E.only"},  // runtime only
+		{PC: "0x1000", TargetName: "A.foo"},  // match
+		{PC: "0x2000", TargetName: "C.baz"},  // conflict
+		{PC: "0x3000", TargetName: "D.qux"},  // runtime confirmed (was unknown)
+		{PC: "0x9999", TargetName: "E.only"}, // runtime only
 	}
 	rep := c.Coverage(rt)
 
