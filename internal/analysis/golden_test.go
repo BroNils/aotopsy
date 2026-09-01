@@ -69,6 +69,7 @@ var goldenFiles = []string{
 	"string_value_xref.jsonl",
 	"pool_immediates.jsonl",
 	"typetrack_report.json",
+	"native_capabilities.jsonl",
 }
 
 type goldenRecord struct {
