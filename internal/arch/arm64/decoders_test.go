@@ -120,6 +120,26 @@ func TestDstRegOfInst(t *testing.T) {
 	}
 }
 
+// TestSUBS32ImmediateIgnores64Bit pins the deliberate asymmetry: the
+// class-id narrowing that consumes this decoder must not see 64-bit
+// comparisons, because a CMP on an X register is comparing a tagged value
+// and narrowing it to KnownClass(imm) is wrong. See the comment above
+// MOVZ64 for the measurement that settled it.
+func TestSUBS32ImmediateIgnores64Bit(t *testing.T) {
+	// CMP W3, #1  ->  SUBS WZR, W3, #1
+	if rd, rn, imm, ok := SUBS32Immediate(0x7100047F); !ok || rd != 31 || rn != 3 || imm != 1 {
+		t.Errorf("SUBS32Immediate(CMP W3,#1) = (%d,%d,%d,%v), want (31,3,1,true)", rd, rn, imm, ok)
+	}
+	// CMP X2, #7  ->  SUBS XZR, X2, #7 must NOT match.
+	if _, _, _, ok := SUBS32Immediate(0xF1001C5F); ok {
+		t.Error("SUBS32Immediate matched a 64-bit CMP; class-id narrowing would fire on tagged values")
+	}
+	// Plain SUB (no flags) must not match either.
+	if _, _, _, ok := SUBS32Immediate(0x51001C41); ok {
+		t.Error("SUBS32Immediate matched SUB, which does not set flags")
+	}
+}
+
 // TestDstRegsOfInstStoresDefineNothing pins the load/store split.
 //
 // transferInstruction uses DstRegsOfInst to invalidate a register's

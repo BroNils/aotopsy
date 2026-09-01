@@ -496,7 +496,18 @@ func AnalyzeFunction(
 		var cmpImm int  // immediate being compared against
 		var hasCmp bool // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
-			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm)
+			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm).
+			//
+			// Deliberately 32-bit only. Extending this to the 64-bit form
+			// was tried and measured: narrow_hits went 5872 -> 68313 on
+			// dart-3.9.2-arm64, an 11x increase, with resolved_blr moving
+			// by exactly 0 -- and dart-2.12.0-arm64 lost one monomorphic
+			// call to polymorphic. A class id is extracted into a W
+			// register, so a CMP on an X register is almost always
+			// comparing a tagged value or a Smi, and narrowing the
+			// register to KnownClass(imm) on that edge is simply wrong.
+			// 62000 extra narrowings that buy no resolution are 62000
+			// chances to be confidently wrong.
 			if _, rn, imm, ok := arm64.SUBS32Immediate(inst.Raw); ok {
 				cmpReg = rn
 				cmpImm = imm
