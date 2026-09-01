@@ -22,14 +22,26 @@ import (
 )
 
 var (
-	macroDefRe   = regexp.MustCompile(`(?m)^#define\s+(\w+)\(V[^)]*\)(.*)$`)
+	// Both function-like (`#define NAME(args) body`) and object-like
+	// (`#define NAME body`) macros. Dart 3.13.0 moved the ClassId enum from
+	// a set of parameterised CLASS_LIST_* invocations to a single object-like
+	// CLASS_ID_LIST, so a parser that only knows the parameterised form reads
+	// that header as having no list at all.
+	macroDefRe   = regexp.MustCompile(`(?m)^#define\s+(\w+)(\([^)]*\))?(.*)$`)
 	blockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	lineComment  = regexp.MustCompile(`//[^\n]*`)
 	identRe      = regexp.MustCompile(`\w+`)
 )
 
-// ParseMacros returns every `#define NAME(V) ...` body in a C header,
-// with line continuations joined and comments stripped.
+// ParseMacros returns every `#define NAME ...` body in a C header, with
+// line continuations joined and comments stripped. Both function-like and
+// object-like macros are included, keyed by name.
+//
+// A name defined more than once keeps the LAST definition, which is what
+// the preprocessor would see at the end of the file but not necessarily
+// at a given point in it. Callers that walk a region containing its own
+// `#define` (the pre-3.13 ClassId enum redefines DEFINE_OBJECT_KIND three
+// times) must track those positionally instead.
 func ParseMacros(src string) map[string]string {
 	src = strings.ReplaceAll(src, "\\\r\n", "")
 	src = strings.ReplaceAll(src, "\\\n", "")
@@ -37,7 +49,7 @@ func ParseMacros(src string) map[string]string {
 	src = lineComment.ReplaceAllString(src, "")
 	out := map[string]string{}
 	for _, m := range macroDefRe.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = m[2]
+		out[m[1]] = m[3]
 	}
 	return out
 }
