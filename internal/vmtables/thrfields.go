@@ -2704,7 +2704,10 @@ var runtimeEntriesV3107 = []string{
 	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
 	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
 	"FfiAsyncCallbackSend", "AllocateSubtypeTestCache", "GetFieldForDispatch",
-	"AdjustArgumentsDescriptorForImplicitClosure", "ConvertToInstanceTypeArguments",
+	// Spelled "Desciptor" upstream at every tag from 3.10.7 to 3.13.0.
+	// The typo is the symbol name; correcting it here made this one entry
+	// stop matching anything greppable in the SDK.
+	"AdjustArgumentsDesciptorForImplicitClosure", "ConvertToInstanceTypeArguments",
 	"ClosureArgumentsValid", "ResolveCallFunction", "ResolveExternalCall",
 	"FfiCall", "CheckFunctionArgumentTypes",
 	"InterpretedInstanceCallMissHandler",
