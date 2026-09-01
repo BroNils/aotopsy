@@ -365,6 +365,15 @@ func Run(opts Opts) (*Result, error) {
 		}
 	}
 
+	// VM natives the snapshot can reach. Read from the pool rather than
+	// from string_refs: nothing in generated code loads these names, so
+	// the reference path never sees them.
+	if caps := BuildNativeCapabilities(clResult, sc.VMResult); len(caps) > 0 {
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "native_capabilities.jsonl"), caps); err != nil {
+			opts.logf("  native capabilities: %v\n", err)
+		}
+	}
+
 	// Step 11: Semantic topology de-obfuscation map.
 	// Infers class roles for obfuscated binaries based on superclass hierarchy and string accesses.
 	deobfMap := BuildDeobfuscationMap(clResult, pl, stringRefs)

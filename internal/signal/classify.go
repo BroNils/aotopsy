@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 )
 
 // Categories for string signal classification.
@@ -242,6 +243,18 @@ var (
 func ClassifyString(value string) []string {
 	if len(value) < 2 {
 		return nil
+	}
+
+	// VM native names are classified from the SDK's own tables, and the
+	// answer is authoritative: return it alone rather than letting the
+	// substring heuristics below add to it. Those heuristics read
+	// SecurityContext_UsePrivateKeyBytes -- a TLS native -- as
+	// "blockchain", because it contains "PrivateKey".
+	//
+	// This is also where most native names get classified at all: of 20
+	// representative ones the heuristics matched 4.
+	if cat, ok := sdk.DartNativeCategory(value); ok {
+		return []string{cat}
 	}
 
 	var cats []string
