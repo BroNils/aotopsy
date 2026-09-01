@@ -119,3 +119,59 @@ func TestDstRegOfInst(t *testing.T) {
 		t.Fatalf("DstRegsOfInst(CSEL) = %v, want [0]", cselRegs)
 	}
 }
+
+// TestDstRegsOfInstStoresDefineNothing pins the load/store split.
+//
+// transferInstruction uses DstRegsOfInst to invalidate a register's
+// tracked type, so a store misread as a define erases type information
+// that is still live. The unscaled and unsigned-immediate masks used to
+// omit bits 23:22 -- the opc field that says load or store -- so STUR Wt,
+// STURB, STURH and STR Wt all reported Rt as a destination. On ARM64 that
+// collapsed intra-procedural inference: dart-2.12.0 lost 36632
+// add_class_hits and gained 4967 blr_at_top.
+func TestDstRegsOfInstStoresDefineNothing(t *testing.T) {
+	stores := []struct {
+		name string
+		raw  uint32
+	}{
+		{"STR Wt, [Xn,#imm]", 0xB9000001},
+		{"STR Xt, [Xn,#imm]", 0xF9000001},
+		{"STRB Wt, [Xn,#imm]", 0x39000001},
+		{"STRH Wt, [Xn,#imm]", 0x79000001},
+		{"STUR Xt, [Xn,#imm]", 0xF8000001},
+		{"STUR Wt, [Xn,#imm]", 0xB8000001},
+		{"STURB Wt, [Xn,#imm]", 0x38000001},
+		{"STURH Wt, [Xn,#imm]", 0x78000001},
+	}
+	for _, s := range stores {
+		if regs := DstRegsOfInst(s.raw); len(regs) != 0 {
+			t.Errorf("DstRegsOfInst(%s = %#08x) = %v, want none: a store does not define its source register",
+				s.name, s.raw, regs)
+		}
+	}
+}
+
+// TestDstRegsOfInstLoadModes covers every addressing mode of the
+// unscaled group. All four write Rt; only LDUR used to be recognised, so
+// the `ldr x19,[sp],#8` that restores a callee-saved register in an
+// epilogue looked like it defined nothing.
+func TestDstRegsOfInstLoadModes(t *testing.T) {
+	loads := []struct {
+		name string
+		raw  uint32
+	}{
+		{"LDUR X1, [X0,#8]", 0xF8408001},
+		{"LDR X1, [X0],#8 (post-index)", 0xF8408401},
+		{"LDR X1, [X0,#8]! (pre-index)", 0xF8408C01},
+		{"LDTR X1, [X0,#8] (unprivileged)", 0xF8408801},
+		{"LDURB W1, [X0,#8]", 0x38408001},
+		{"LDURH W1, [X0,#8]", 0x78408001},
+		{"LDURSW X1, [X0,#8]", 0xB8808001},
+	}
+	for _, l := range loads {
+		regs := DstRegsOfInst(l.raw)
+		if len(regs) != 1 || regs[0] != 1 {
+			t.Errorf("DstRegsOfInst(%s = %#08x) = %v, want [1]", l.name, l.raw, regs)
+		}
+	}
+}
