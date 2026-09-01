@@ -3,6 +3,7 @@ package vmtables
 import (
 	"testing"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
 )
 
@@ -47,12 +48,12 @@ func TestVMStubNamesMatchSDK(t *testing.T) {
 			if err != nil {
 				t.Skipf("cannot fetch stub_code_list.h@%s: %v", tag, err)
 			}
-			macros := sdktest.ParseMacros(src)
-			full, err := sdktest.ExpandMacro(macros, "VM_STUB_CODE_LIST")
+			macros := cmacro.ParseMacros(src)
+			full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 			if err != nil {
 				t.Fatalf("expand VM_STUB_CODE_LIST@%s: %v", tag, err)
 			}
-			tts, err := sdktest.ExpandMacro(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
+			tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
 			if err != nil {
 				t.Fatalf("expand VM_TYPE_TESTING_STUB_CODE_LIST@%s: %v", tag, err)
 			}

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"testing"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
 	"aotopsy/internal/snapshot"
 )
@@ -160,5 +161,5 @@ func sdkFunctionKinds(tag string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sdktest.ExpandMacro(sdktest.ParseMacros(src), "FOR_EACH_RAW_FUNCTION_KIND")
+	return cmacro.Expand(cmacro.ParseMacros(src), "FOR_EACH_RAW_FUNCTION_KIND")
 }

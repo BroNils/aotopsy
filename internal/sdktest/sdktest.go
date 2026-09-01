@@ -9,7 +9,8 @@
 //
 // These helpers fetch files from dart-lang/sdk via the GitHub API
 // (gh CLI), so tests using them are network-dependent and opt-in via
-// the AOTOPSY_TEST_SDK environment variable.
+// the AOTOPSY_TEST_SDK environment variable. The macro expansion the
+// gates need lives in internal/cmacro, which tools/extract_thr.go shares.
 //
 // Environment:
 //
@@ -25,8 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -131,180 +130,3 @@ func GHFileAtTag(path, tag string) (string, error) {
 	memMu.Unlock()
 	return s, nil
 }
-
-// --- C preprocessor list-macro expansion ---
-//
-// The SDK expresses most of the tables this project mirrors as X-macro
-// lists: `#define SOME_LIST(V) V(A) V(B) ...`. They nest -- VM_STUB_CODE_LIST
-// expands PROBE_POINT_STUBS_LIST and VM_TYPE_TESTING_STUB_CODE_LIST inline --
-// and several take multiple arguments per entry.
-//
-// A naive `V\((\w+)\)` scan silently drops the nested lists and every
-// multi-argument entry, which is an excellent way to "verify" a table
-// against a list that is missing rows. One expander, used by every gate.
-
-var (
-	macroDefRe   = regexp.MustCompile(`(?m)^#define\s+(\w+)\(V[^)]*\)(.*)$`)
-	blockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	lineComment  = regexp.MustCompile(`//[^\n]*`)
-	identRe = regexp.MustCompile(`\w+`)
-)
-
-// ParseMacros returns every `#define NAME(V) ...` body in a C header,
-// with line continuations joined and comments stripped.
-func ParseMacros(src string) map[string]string {
-	src = strings.ReplaceAll(src, "\\\r\n", "")
-	src = strings.ReplaceAll(src, "\\\n", "")
-	src = blockComment.ReplaceAllString(src, "")
-	src = lineComment.ReplaceAllString(src, "")
-	out := map[string]string{}
-	for _, m := range macroDefRe.FindAllStringSubmatch(src, -1) {
-		out[m[1]] = m[2]
-	}
-	return out
-}
-
-// ExpandMacroRaw expands one list macro, recursing into nested list
-// macros, and returns each entry's arguments split and trimmed.
-//
-// `V(Name)` yields ["Name"]; `V(Type, name, expr, default)` yields all
-// four. Use this when the position of an argument matters.
-func ExpandMacroRaw(macros map[string]string, name string) ([][]string, error) {
-	body, ok := macros[name]
-	if !ok {
-		return nil, macroError("macro " + name + " not found")
-	}
-	return expandBody(macros, body, map[string]bool{name: true})
-}
-
-// ExpandMacro expands one list macro and returns the first argument of
-// each entry, which for the single-argument lists is the whole entry.
-func ExpandMacro(macros map[string]string, name string) ([]string, error) {
-	rows, err := ExpandMacroRaw(macros, name)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if len(r) == 0 {
-			continue
-		}
-		out = append(out, r[0])
-	}
-	return out, nil
-}
-
-// ExpandMacroColumn expands a list macro and returns argument i of each
-// entry. Entries with fewer arguments are skipped.
-func ExpandMacroColumn(macros map[string]string, name string, i int) ([]string, error) {
-	rows, err := ExpandMacroRaw(macros, name)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, r := range rows {
-		if i < len(r) {
-			out = append(out, r[i])
-		}
-	}
-	return out, nil
-}
-
-// expandBody walks `IDENT( ... )` calls with a paren-depth scan rather
-// than a regex. Entries carry initialiser expressions -- CACHED_VM_OBJECTS_LIST
-// has V(ObjectPtr, object_null_, Object::null()) -- so a regex that stops
-// at the first ')' truncates the row and one that forbids nested parens
-// drops it entirely. Both read downstream as a short list.
-func expandBody(macros map[string]string, body string, seen map[string]bool) ([][]string, error) {
-	var out [][]string
-	for i := 0; i < len(body); {
-		loc := identRe.FindStringIndex(body[i:])
-		if loc == nil {
-			break
-		}
-		name := body[i+loc[0] : i+loc[1]]
-		j := i + loc[1]
-		if j >= len(body) || body[j] != '(' {
-			i = i + loc[1]
-			continue
-		}
-		inner, end, ok := balanced(body, j)
-		if !ok {
-			break
-		}
-		i = end
-
-		if name != "V" {
-			// A nested list is invoked as NAME(V); anything else with
-			// arguments is an ordinary call, not part of the list.
-			if strings.TrimSpace(inner) != "V" || seen[name] {
-				continue
-			}
-			sub, ok := macros[name]
-			if !ok {
-				return nil, macroError("nested macro " + name + " not found")
-			}
-			seen[name] = true
-			vals, err := expandBody(macros, sub, seen)
-			delete(seen, name)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, vals...)
-			continue
-		}
-
-		args := splitTopLevel(inner)
-		// V() with an empty body is a list terminator in some headers,
-		// not an entry.
-		if len(args) == 1 && args[0] == "" {
-			continue
-		}
-		out = append(out, args)
-	}
-	return out, nil
-}
-
-// balanced returns the contents between body[open] == '(' and its
-// matching ')', plus the index just past that ')'.
-func balanced(body string, open int) (string, int, bool) {
-	depth := 0
-	for k := open; k < len(body); k++ {
-		switch body[k] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return body[open+1 : k], k + 1, true
-			}
-		}
-	}
-	return "", 0, false
-}
-
-// splitTopLevel splits on commas that are not inside parentheses or
-// angle brackets, so `Array<int, int>` and `f(a, b)` stay one argument.
-func splitTopLevel(s string) []string {
-	var out []string
-	depth, start := 0, 0
-	for k := 0; k < len(s); k++ {
-		switch s[k] {
-		case '(', '<':
-			depth++
-		case ')', '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				out = append(out, strings.TrimSpace(s[start:k]))
-				start = k + 1
-			}
-		}
-	}
-	out = append(out, strings.TrimSpace(s[start:]))
-	return out
-}
-
-type macroError string
-
-func (e macroError) Error() string { return string(e) }

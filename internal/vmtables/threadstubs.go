@@ -128,15 +128,20 @@ var (
 	// Dart 2.17.6 -- PRODUCT + TARGET_ARCH_ARM64 +
 	// !DART_COMPRESSED_POINTERS block (compressed pointers were NOT yet
 	// the default for 64-bit Dart AOT at 2.x; they became default in the
-	// Dart 3.0 cycle). This table is a SUBSET of the 3.7.0 cluster: the
-	// four stubs added later (MegamorphicCall, SwitchableCallMiss,
-	// OptimizeFunction, Deoptimize at 0x248-0x260 in 3.7.0) and
-	// ResumeInterpreter / InterpretCall did not yet exist as
-	// Thread-cached stubs in 2.17.6, so the native-call wrappers sit
-	// 0x10 lower than in 3.7.0 (Bootstrap at 0x280, not 0x288). X64
-	// non-compressed PRODUCT offsets are identical -- verified against
-	// the same generated header's TARGET_ARCH_X64 PRODUCT+
-	// !DART_COMPRESSED_POINTERS block.
+	// Dart 3.0 cycle). Relative to 3.7.0 it lacks only ResumeInterpreter
+	// and InterpretCall, so the native-call wrappers sit 0x8 lower
+	// (Bootstrap at 0x280, not 0x288). X64 non-compressed PRODUCT offsets
+	// are identical -- verified against the same generated header's
+	// TARGET_ARCH_X64 PRODUCT+!DART_COMPRESSED_POINTERS block.
+	//
+	// The four entries at 0x248-0x260 were missing here until the
+	// -check-stub-offsets gate was written. The comment that used to sit
+	// in their place claimed they "did not yet exist as Thread-cached
+	// stubs in 2.17.6"; thread.h@2.17.6 has all four in
+	// CACHED_VM_STUBS_ADDRESSES_LIST, and the generated header exports
+	// them as Thread_megamorphic_call_checked_entry_offset et al. They
+	// are named _entry_, not _entry_point_, which is how a search for the
+	// wrong suffix concludes the SDK does not export them.
 	threadStubOffsets2176 = map[int64]string{
 		0x1f8: "WriteBarrier",
 		0x200: "ArrayWriteBarrier",
@@ -148,6 +153,10 @@ var (
 		0x230: "AllocateObjectSlow",
 		0x238: "StackOverflowSharedWithoutFPURegs",
 		0x240: "StackOverflowSharedWithFPURegs",
+		0x248: "MegamorphicCall",
+		0x250: "SwitchableCallMiss",
+		0x258: "OptimizeFunction",
+		0x260: "Deoptimize",
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
@@ -162,10 +171,9 @@ var (
 	// IDENTICAL Thread-cached stub offsets -- verified against the
 	// generated header at both tags. The whole cluster is shifted -0x10
 	// relative to 2.17.6 (compressed-pointer Thread layout is smaller)
-	// and, like 2.17.6, lacks the four later stubs (MegamorphicCall et
-	// al.) plus ResumeInterpreter / InterpretCall. X64 compressed
-	// PRODUCT offsets are identical -- verified against the
-	// TARGET_ARCH_X64 PRODUCT+compressed block at both tags.
+	// and lacks ResumeInterpreter / InterpretCall. X64 compressed PRODUCT
+	// offsets are identical -- verified against the TARGET_ARCH_X64
+	// PRODUCT+compressed block at both tags.
 	threadStubOffsets305 = map[int64]string{
 		0x1e8: "WriteBarrier",
 		0x1f0: "ArrayWriteBarrier",
@@ -177,6 +185,10 @@ var (
 		0x220: "AllocateObjectSlow",
 		0x228: "StackOverflowSharedWithoutFPURegs",
 		0x230: "StackOverflowSharedWithFPURegs",
+		0x238: "MegamorphicCall",
+		0x240: "SwitchableCallMiss",
+		0x248: "OptimizeFunction",
+		0x250: "Deoptimize",
 		0x258: "CallNativeThroughSafepoint",
 		0x260: "JumpToFrame",
 		0x268: "SlowTypeTest",
@@ -189,9 +201,9 @@ var (
 	// Dart 3.4.3 -- PRODUCT + TARGET_ARCH_ARM64 +
 	// DART_COMPRESSED_POINTERS. The cluster shifts +0x8 relative to
 	// 3.0.5/3.2.5 (one 8-byte field added to Thread ahead of these
-	// stubs), but still lacks the four later stubs (MegamorphicCall et
-	// al.) and ResumeInterpreter / InterpretCall. X64 compressed PRODUCT
-	// offsets are identical -- verified against the generated header.
+	// stubs), and still lacks ResumeInterpreter / InterpretCall. X64
+	// compressed PRODUCT offsets are identical -- verified against the
+	// generated header.
 	threadStubOffsets343 = map[int64]string{
 		0x1f0: "WriteBarrier",
 		0x1f8: "ArrayWriteBarrier",
@@ -203,6 +215,10 @@ var (
 		0x228: "AllocateObjectSlow",
 		0x230: "StackOverflowSharedWithoutFPURegs",
 		0x238: "StackOverflowSharedWithFPURegs",
+		0x240: "MegamorphicCall",
+		0x248: "SwitchableCallMiss",
+		0x250: "OptimizeFunction",
+		0x258: "Deoptimize",
 		0x260: "CallNativeThroughSafepoint",
 		0x268: "JumpToFrame",
 		0x270: "SlowTypeTest",
@@ -218,9 +234,9 @@ var (
 	// (CallNativeThroughSafepoint ... InterpretCall at 0x2a0) this table
 	// is byte-for-byte identical to 3.7.0's, and the 0x1f8-0x240 head
 	// (WriteBarrier ... StackOverflowSharedWithFPURegs) also matches
-	// 3.7.0 exactly. The ONLY difference from 3.7.0 is the absence of
-	// the four stubs at 0x248-0x260 (MegamorphicCall, SwitchableCallMiss,
-	// OptimizeFunction, Deoptimize), which were added in 3.7.0. X64
+	// 3.7.0 exactly. It is in fact identical to 3.7.0's table throughout:
+	// the earlier claim that the four stubs at 0x248-0x260 "were added in
+	// 3.7.0" was wrong -- thread.h@3.6.2 already caches all four. X64
 	// compressed PRODUCT offsets are identical -- verified against the
 	// generated header.
 	threadStubOffsets362 = map[int64]string{
@@ -234,6 +250,10 @@ var (
 		0x230: "AllocateObjectSlow",
 		0x238: "StackOverflowSharedWithoutFPURegs",
 		0x240: "StackOverflowSharedWithFPURegs",
+		0x248: "MegamorphicCall",
+		0x250: "SwitchableCallMiss",
+		0x258: "OptimizeFunction",
+		0x260: "Deoptimize",
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
