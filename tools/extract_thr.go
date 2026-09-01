@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/vmtables"
 )
 
@@ -376,6 +377,156 @@ func runCheckRuntimeEntries() int {
 	}
 	fmt.Fprintf(os.Stderr, "\nRuntime entry check complete (report-only mode)\n")
 	return mismatches
+}
+
+// sdkStubStructor matches the class that produces a cached stub entry
+// point. CACHED_ADDRESSES_LIST holds three flavours and a tail of
+// non-stub constants (predefined_symbols, double_nan, the float masks);
+// only the three below are Thread-cached stub entry points.
+var reStubCtor = regexp.MustCompile(`\b(?:StubCode|NativeEntry|RuntimeEntry)::(\w+?)(?:Entry)?\(\)`)
+
+// sdkThreadStubNames derives the offset-field -> stub-name mapping from
+// thread.h's own macro list at a tag.
+//
+// Both halves come from the SDK: the field name is argument 1 of the
+// CACHED_ADDRESSES_LIST entry, and the stub name is the StubCode:: /
+// NativeEntry:: / RuntimeEntry:: constructor in its initialiser. Nothing
+// is hand-mapped, so a stub renamed or added upstream shows up here
+// instead of being quietly absent from the committed table -- which is
+// exactly how MegamorphicCall, SwitchableCallMiss, OptimizeFunction and
+// Deoptimize went missing from five tables at once.
+func sdkThreadStubNames(tag string) (map[string]string, error) {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(cmacro.ParseMacros(src), "CACHED_ADDRESSES_LIST")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, r := range rows {
+		if len(r) < 3 {
+			continue
+		}
+		m := reStubCtor.FindStringSubmatch(r[2])
+		if m == nil {
+			continue // predefined_symbols_, double_nan_, float masks: not stubs
+		}
+		out[strings.TrimSuffix(r[1], "_")] = m[1]
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no cached stub entries found in thread.h@%s", tag)
+	}
+	return out, nil
+}
+
+// runCheckStubOffsets verifies internal/vmtables' ThreadStubOffsets
+// tables against the SDK, for every (version, arch) pair those tables
+// claim to support.
+//
+// This gate did not exist, and its absence is why five tables shipped
+// missing four entries each: a missing offset is not a wrong annotation,
+// it is a silently absent one. The call still resolves, it just prints
+// "THR.f248" instead of "THR.MegamorphicCall", so nothing downstream can
+// tell the table is short.
+func runCheckStubOffsets() int {
+	mismatches := 0
+	for _, t := range stubOffsetTargets {
+		committed := vmtables.ThreadStubOffsets(t.tag, t.arch == "arm64")
+		if committed == nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no committed table\n", t.tag, t.arch)
+			continue
+		}
+		fieldToStub, err := sdkThreadStubNames(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+		header, err := fetchHeader(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+		fields, err := extractTHRFields(header, t.arch, t.compressed, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+
+		want := map[int64]string{}
+		for _, f := range fields {
+			name := strings.TrimSuffix(f.name, "_offset")
+			if stub, ok := fieldToStub[name]; ok {
+				want[int64(f.offset)] = stub
+			}
+		}
+		if len(want) == 0 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no stub offsets in the %s/compressed=%v PRODUCT block\n",
+				t.tag, t.arch, t.arch, t.compressed)
+			continue
+		}
+
+		local := 0
+		for off, stub := range want {
+			got, present := committed[off]
+			switch {
+			case !present:
+				fmt.Fprintf(os.Stderr, "  MISSING %s/%s: 0x%x %s is in the SDK but not in the committed table\n",
+					t.tag, t.arch, off, stub)
+				local++
+			case got != stub:
+				fmt.Fprintf(os.Stderr, "  MISMATCH %s/%s: 0x%x committed=%q sdk=%q\n",
+					t.tag, t.arch, off, got, stub)
+				local++
+			}
+		}
+		for off, stub := range committed {
+			if _, present := want[off]; !present {
+				fmt.Fprintf(os.Stderr, "  EXTRA %s/%s: 0x%x %s is in the committed table but not in the SDK\n",
+					t.tag, t.arch, off, stub)
+				local++
+			}
+		}
+		if local == 0 {
+			fmt.Fprintf(os.Stderr, "  OK %s/%s: %d stub offsets\n", t.tag, t.arch, len(want))
+		}
+		mismatches += local
+	}
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d thread-stub offset mismatch(es) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nAll thread-stub offsets match SDK\n")
+	}
+	return mismatches
+}
+
+// stubOffsetTargets is every (version, arch) pair ThreadStubOffsets
+// claims to support, with the pointer-compression mode that version's
+// release builds use. Keep it in sync with the switch in threadstubs.go:
+// a version with a table but no target here is untested, which is the
+// state the whole file was in.
+var stubOffsetTargets = []extractTarget{
+	{"2.17.6", "arm64", false, true},
+	{"2.17.6", "x64", false, true},
+	{"3.0.5", "arm64", true, true},
+	{"3.0.5", "x64", true, true},
+	{"3.2.5", "arm64", true, true},
+	{"3.2.5", "x64", true, true},
+	{"3.4.3", "arm64", true, true},
+	{"3.4.3", "x64", true, true},
+	{"3.6.2", "arm64", true, true},
+	{"3.6.2", "x64", true, true},
+	{"3.7.0", "arm64", true, true},
+	{"3.7.0", "x64", true, true},
+	{"3.9.2", "arm64", true, true},
+	{"3.9.2", "x64", true, true},
+	{"3.10.7", "arm64", true, true},
+	{"3.11.0", "arm64", true, true},
+	{"3.12.2", "arm64", true, true},
+	{"3.12.2", "x64", true, true},
+	{"3.13.0", "arm64", true, true},
+	{"3.13.0", "x64", true, true},
 }
 
 // runCheckRoots verifies RootsPrefixRefCount for Dart 3.13.0+ against the SDK.
@@ -1389,7 +1540,15 @@ func main() {
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	checkStubOffsetsFlag := flag.Bool("check-stub-offsets", false, "verify threadstubs.go's ThreadStubOffsets tables against SDK's thread.h + runtime_offsets_extracted.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *checkStubOffsetsFlag {
+		if runCheckStubOffsets() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *checkObjectStoreFlag {
 		if runCheckObjectStore() > 0 {
