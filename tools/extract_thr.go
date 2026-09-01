@@ -507,8 +507,29 @@ func runCheckStubOffsets() int {
 // a version with a table but no target here is untested, which is the
 // state the whole file was in.
 var stubOffsetTargets = []extractTarget{
+	{"2.10.0", "arm64", false, true},
+	{"2.10.0", "x64", false, true},
+	{"2.12.0", "arm64", false, true},
+	{"2.12.0", "x64", false, true},
+	{"2.13.0", "arm64", false, true},
+	{"2.13.0", "x64", false, true},
+	{"2.14.0", "arm64", false, true},
+	{"2.14.0", "x64", false, true},
+	{"2.15.0", "arm64", false, true},
+	{"2.15.0", "x64", false, true},
+	{"2.16.0", "arm64", false, true},
+	{"2.16.0", "x64", false, true},
 	{"2.17.6", "arm64", false, true},
 	{"2.17.6", "x64", false, true},
+	{"2.18.0", "arm64", true, true},
+	{"2.18.0", "x64", true, true},
+	{"2.19.0", "arm64", true, true},
+	{"2.19.0", "x64", true, true},
+	{"3.1.0", "arm64", true, true},
+	{"3.3.0", "arm64", true, true},
+	{"3.5.0", "arm64", true, true},
+	{"3.8.1", "arm64", true, true},
+	{"3.8.1", "x64", true, true},
 	{"3.0.5", "arm64", true, true},
 	{"3.0.5", "x64", true, true},
 	{"3.2.5", "arm64", true, true},
@@ -527,6 +548,84 @@ var stubOffsetTargets = []extractTarget{
 	{"3.12.2", "x64", true, true},
 	{"3.13.0", "arm64", true, true},
 	{"3.13.0", "x64", true, true},
+}
+
+// runEmitStubOffsets prints Go source for the Thread-cached stub offset
+// tables of the given tags.
+//
+// Both halves are SDK-derived: the field name and the stub name come from
+// thread.h's CACHED_ADDRESSES_LIST entries, the offset from
+// runtime_offsets_extracted.h. Emitting one table per (tag, arch) and
+// comparing the two lets the caller see whether the arches agree, which
+// is the usual case but not one to assume.
+func runEmitStubOffsets(tags []string) int {
+	for _, tag := range tags {
+		fieldToStub, err := sdkThreadStubNames(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		header, err := fetchHeader(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		target, ok := arm64ProductTarget(tag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			continue
+		}
+
+		perArch := map[string]map[int]string{}
+		for _, arch := range []string{"arm64", "x64"} {
+			fields, err := extractTHRFields(header, arch, target.compressed, true)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", tag, arch, err)
+				continue
+			}
+			m := map[int]string{}
+			for _, f := range fields {
+				if stub, ok := fieldToStub[strings.TrimSuffix(f.name, "_offset")]; ok {
+					m[f.offset] = stub
+				}
+			}
+			perArch[arch] = m
+		}
+		arm, x64 := perArch["arm64"], perArch["x64"]
+		if len(arm) == 0 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no stub offsets in the arm64 PRODUCT block\n", tag)
+			continue
+		}
+		same := len(arm) == len(x64)
+		for off, name := range arm {
+			if x64[off] != name {
+				same = false
+				break
+			}
+		}
+
+		id := strings.ReplaceAll(tag, ".", "")
+		fmt.Printf("\n// Dart %s -- PRODUCT + %s pointers. Names and offsets both from\n",
+			tag, map[bool]string{true: "compressed", false: "non-compressed"}[target.compressed])
+		fmt.Printf("// thread.h@%s + runtime_offsets_extracted.h@%s.\n", tag, tag)
+		if same {
+			fmt.Printf("// x86_64 offsets are identical.\n")
+		} else {
+			fmt.Printf("// NOTE: x86_64 offsets DIFFER; emit and keep a separate table.\n")
+		}
+		fmt.Printf("threadStubOffsets%s = map[int64]string{\n", id)
+		offs := make([]int, 0, len(arm))
+		for off := range arm {
+			offs = append(offs, off)
+		}
+		sort.Ints(offs)
+		for _, off := range offs {
+			fmt.Printf("\t%#x: %q,\n", off, arm[off])
+		}
+		fmt.Printf("}\n")
+		fmt.Printf("// switch: case %q: return threadStubOffsets%s\n", tag, id)
+	}
+	return 0
 }
 
 // runEmitRuntimeEntries prints Go source for the runtime-entry name
@@ -1709,9 +1808,14 @@ func main() {
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
 	emitRuntimeEntriesFlag := flag.String("emit-runtime-entries", "", "comma-separated tags: print Go source for their runtime-entry tables and the mergeRuntimeEntries calls")
 	checkStubOffsetsFlag := flag.Bool("check-stub-offsets", false, "verify threadstubs.go's ThreadStubOffsets tables against SDK's thread.h + runtime_offsets_extracted.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *emitStubOffsetsFlag != "" {
+		os.Exit(runEmitStubOffsets(strings.Split(*emitStubOffsetsFlag, ",")))
+	}
 
 	if *emitRuntimeEntriesFlag != "" {
 		os.Exit(runEmitRuntimeEntries(strings.Split(*emitRuntimeEntriesFlag, ",")))

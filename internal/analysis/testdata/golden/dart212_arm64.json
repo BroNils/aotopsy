@@ -5,7 +5,7 @@
   "func_count": 7714,
   "class_count": 1575,
   "lines": {
-    "address_callers_xref.jsonl": 4121,
+    "address_callers_xref.jsonl": 4120,
     "call_edges.jsonl": 40502,
     "classes.jsonl": 1575,
     "dispatch_table.jsonl": 18929,
@@ -19,8 +19,8 @@
     "unresolved_thr.jsonl": 0
   },
   "sha256": {
-    "address_callers_xref.jsonl": "c90d96ed8a36e2a086212983422282e9c353884d1f4c8272f0813b8dcac7bdbb",
-    "call_edges.jsonl": "42852c988c6e7bb692e37d287b75cd28d9ab83187fb0598f099cfba6171424fd",
+    "address_callers_xref.jsonl": "4d45f7e1bbd9c8da9998e7f46f224bfb466b2927cc3818a4afb5153c429fbb2c",
+    "call_edges.jsonl": "31af6767234b5460697e100379ee0c9955b576606de43c055ea0bec2881eccbe",
     "classes.jsonl": "31929d6ef87f14c1fbd0ae0f02026d90d9b75f223451933525889f5600ae3851",
     "dispatch_table.jsonl": "06e8a1d5213fa7ec3cae99a359cf5d66fca796f0dc86c35de5e7d6a075ef1690",
     "field_accessor_xref.jsonl": "ca1b31b9092e77aa78a7e4c3704514cf67ec8bb5a6eafbb6fc9093c434e9044e",
