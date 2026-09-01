@@ -156,18 +156,14 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 	title := "aotopsy"
 	digest := filepath.Base(filepath.Dir(inDir))
 	filename := inDir
-	if metaBytes, err := os.ReadFile(filepath.Join(filepath.Dir(inDir), "meta.json")); err == nil {
-		var meta struct {
-			Hash   string `json:"hash"`
-			Source string `json:"source"`
-		}
-		if json.Unmarshal(metaBytes, &meta) == nil {
-			if meta.Hash != "" {
-				digest = meta.Hash
-			}
-			if meta.Source != "" {
-				filename = filepath.Base(meta.Source)
-			}
+	// This read a "meta.json" from the PARENT of the output directory.
+	// Nothing ever wrote that file -- one reader, zero writers -- so the
+	// lookup always failed and the report named itself after its own
+	// output directory. The pipeline writes snapshot.json now.
+	if p, ok := ReadProvenance(inDir); ok {
+		filename = p.SourceName
+		if p.SHA256 != "" {
+			digest = p.SHA256
 		}
 	}
 	render.WriteSignalHTML(htmlFile, g, title, filename, digest, asmSnippets)
@@ -230,7 +226,17 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 	}
 
 	if len(findings) > 0 {
-		if err := output.WriteSARIF(inDir, findings, "1.0.0", libPath); err != nil {
+		// The standalone entry points hand us no binary path; recover it
+		// from the provenance record the pipeline left behind, so a
+		// `aotopsy signal --in <dir>` report still names the file it is
+		// about.
+		sarifLib := libPath
+		if sarifLib == "" {
+			if p, ok := ReadProvenance(inDir); ok {
+				sarifLib = p.Source
+			}
+		}
+		if err := output.WriteSARIF(inDir, findings, "1.0.0", sarifLib); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
 			sarifPath := filepath.Join(inDir, "aotopsy.sarif")
