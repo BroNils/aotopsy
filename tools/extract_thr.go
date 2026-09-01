@@ -550,6 +550,53 @@ var stubOffsetTargets = []extractTarget{
 	{"3.13.0", "x64", true, true},
 }
 
+// runEmitStubNames prints Go source for the VM stub NAME tables of the
+// given tags -- VM_STUB_CODE_LIST minus the type-testing stubs, which
+// composeVMStubEmissionOrder splices back in at the Subtype7TestCache
+// anchor.
+//
+// This list is zipped by index against the VM snapshot's Code objects,
+// so one missing or extra name shifts every later stub. It is generated
+// rather than transcribed for that reason.
+func runEmitStubNames(tags []string) int {
+	for _, tag := range tags {
+		src, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		macros := cmacro.ParseMacros(src)
+		full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		ttsSet := map[string]bool{}
+		for _, n := range tts {
+			ttsSet[n] = true
+		}
+		var want []string
+		for _, n := range full {
+			if !ttsSet[n] {
+				want = append(want, n)
+			}
+		}
+		id := strings.ReplaceAll(tag, ".", "")
+		fmt.Printf("\n// Dart %s -- VM_STUB_CODE_LIST@%s minus the %d type-testing\n", tag, tag, len(tts))
+		fmt.Printf("// stubs, %d entries.\n", len(want))
+		fmt.Printf("var stubNames%s = []string{\n", id)
+		printGoStrings(want)
+		fmt.Printf("}\n")
+		fmt.Printf("// switch: case %q: return stubNames%s\n", tag, id)
+	}
+	return 0
+}
+
 // runEmitStubOffsets prints Go source for the Thread-cached stub offset
 // tables of the given tags.
 //
@@ -1808,10 +1855,15 @@ func main() {
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	emitStubNamesFlag := flag.String("emit-stub-names", "", "comma-separated tags: print Go source for their VM stub name tables")
 	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
 	emitRuntimeEntriesFlag := flag.String("emit-runtime-entries", "", "comma-separated tags: print Go source for their runtime-entry tables and the mergeRuntimeEntries calls")
 	checkStubOffsetsFlag := flag.Bool("check-stub-offsets", false, "verify threadstubs.go's ThreadStubOffsets tables against SDK's thread.h + runtime_offsets_extracted.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *emitStubNamesFlag != "" {
+		os.Exit(runEmitStubNames(strings.Split(*emitStubNamesFlag, ",")))
+	}
 
 	if *emitStubOffsetsFlag != "" {
 		os.Exit(runEmitStubOffsets(strings.Split(*emitStubOffsetsFlag, ",")))
