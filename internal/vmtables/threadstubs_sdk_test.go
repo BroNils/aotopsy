@@ -43,16 +43,24 @@ func TestThreadStubOffsetsMatchSDK(t *testing.T) {
 	}
 }
 
+// supportedStubOffsetVersions is every version ThreadStubOffsets answers
+// for. Keep in sync with the switch in threadstubs.go; a version there
+// but not here is unverified, which is the state the whole file was in.
+var supportedStubOffsetVersions = []string{
+	"2.10.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0", "2.16.0",
+	"2.17.6", "2.18.0", "2.19.0",
+	"3.0.5", "3.1.0", "3.2.5", "3.3.0", "3.4.3", "3.5.0",
+	"3.6.2", "3.7.0", "3.8.1", "3.9.2",
+	"3.10.7", "3.11.0", "3.12.2", "3.13.0",
+}
+
 // TestThreadStubTargetsCoverSupportedVersions keeps the gate honest: a
 // version that ThreadStubOffsets answers for but stubOffsetTargets never
 // probes is unverified, and unverified is the state the whole file was
 // in. The list lives in the tool, so this checks the other direction --
 // every version the switch handles must be a version the tool knows.
 func TestThreadStubTargetsCoverSupportedVersions(t *testing.T) {
-	supported := []string{
-		"2.17.6", "3.0.5", "3.2.5", "3.4.3", "3.6.2",
-		"3.7.0", "3.9.2", "3.10.7", "3.11.0", "3.12.2", "3.13.0",
-	}
+	supported := supportedStubOffsetVersions
 	for _, v := range supported {
 		for _, arm := range []bool{true, false} {
 			if ThreadStubOffsets(v, arm) == nil {
@@ -73,10 +81,7 @@ func TestThreadStubTargetsCoverSupportedVersions(t *testing.T) {
 // network: two offsets naming the same stub means an entry was pasted at
 // the wrong displacement, which silently steals the real one's name.
 func TestThreadStubTablesAreInjective(t *testing.T) {
-	for _, v := range []string{
-		"2.17.6", "3.0.5", "3.2.5", "3.4.3", "3.6.2",
-		"3.7.0", "3.9.2", "3.10.7", "3.11.0", "3.12.2", "3.13.0",
-	} {
+	for _, v := range supportedStubOffsetVersions {
 		tbl := ThreadStubOffsets(v, true)
 		seen := map[string]int64{}
 		for off, name := range tbl {
