@@ -47,6 +47,15 @@ const (
 	CatDRMBypass     = "drm_bypass"     // Widevine, FairPlay, PlayReady
 	CatObfuscation   = "obfuscation"    // Short meaningless names, identifier entropy
 	CatCryptoConst   = "crypto_const"   // AES S-box, SHA-256 K, crypto magic numbers
+	// CatTHR marks a call to a Thread-cached stub we cannot name. It is a
+	// gap in our own tables, not a property of the binary, and it is kept
+	// separate from CatAsync for exactly that reason.
+	CatTHR = "thr"
+	// CatAsync marks a function that enters, suspends at, or completes an
+	// async body -- structural evidence that survives obfuscation, since
+	// the async stubs are reached through the Thread table by address.
+	CatAsync = "async"
+
 	CatMethodChannel = "method_channel" // Flutter MethodChannel("name")
 	CatPlugin        = "plugin"         // Flutter plugin package names
 )
@@ -480,8 +489,13 @@ func CategorySeverity(cat string) string {
 		return SeverityHigh
 	case CatURL, CatHost, CatBase64Key, CatLocation, CatDeviceInfo, CatCamera, CatAttribution:
 		return SeverityMedium
-	case CatNet, CatFileExt, "thr":
+	case CatNet, CatFileExt, CatTHR, CatAsync:
 		return SeverityLow
+	// The native-capability categories (tls, process, isolate, vm_service,
+	// compression, ffi) fall through to Low deliberately. Assigning them a
+	// severity is a judgement about what a capability means, and none of
+	// them has been measured against real findings yet; guessing here
+	// would put an opinion into every report.
 	default:
 		return SeverityLow
 	}

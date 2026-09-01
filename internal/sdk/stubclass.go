@@ -93,6 +93,17 @@ func ClassifyStubRole(name string) StubRole {
 		return StubRoleAsyncInit
 	case HasSegmentPair(name, "return", "async"):
 		return StubRoleAsyncReturn
+	// Generators suspend through the same machinery. Keying only on
+	// "async" left suspend_state_init_sync_star_entry_point and
+	// suspend_state_suspend_sync_star_at_start_entry_point classified as
+	// unrecognised stubs, which reported them as a gap in our tables when
+	// they are in fact the strongest evidence a function is a generator.
+	case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
+		return StubRoleAsyncInit
+	case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "state", "suspend"):
+		return StubRoleAsyncAwait
+	case HasSegmentPair(name, "return", "sync"), HasSegmentPair(name, "yield", "async"):
+		return StubRoleAsyncReturn
 	}
 
 	// Other VM stub roles.
@@ -103,10 +114,34 @@ func ClassifyStubRole(name string) StubRole {
 // IsMundaneTHR used, but returns a structured role instead of a boolean.
 func classifyMundanePattern(name string) StubRole {
 	lower := strings.ToLower(name)
+	// Thread fields that are DATA, not stubs. A call whose target came
+	// out of one of these is not a stub call at all, and treating it as
+	// an unrecognised stub made every virtual call look like a signal:
+	// 3371 dispatch_table_array edges on a single x86_64 sample, which is
+	// simply "this function makes a virtual call".
+	switch lower {
+	case "dispatch_table_array", "isolate", "isolate_group",
+		"object_null", "bool_true", "bool_false",
+		"predefined_symbols_address", "field_table_values":
+		return StubRoleRuntime
+	}
+
 	patterns := []struct {
 		pattern string
 		role    StubRole
 	}{
+		// Leaf runtime entries: libc math, memory-move, sanitizer hooks.
+		// They are runtime calls the compiler emits, not app behaviour.
+		{"libc", StubRoleRuntime},
+		{"dartmodulo", StubRoleRuntime},
+		{"memorymove", StubRoleRuntime},
+		{"ensureremembered", StubRoleWriteBarrier},
+		{"wb_wrapper", StubRoleWriteBarrier},
+		// GC bookkeeping. The underscore-separated patterns below miss
+		// these because the SDK spells them in CamelCase:
+		// StoreBufferBlockProcess, OldMarkingStackBlockProcess.
+		{"storebuffer", StubRoleWriteBarrier},
+		{"markingstack", StubRoleWriteBarrier},
 		{"allocate", StubRoleAllocate},
 		{"write_barrier", StubRoleWriteBarrier},
 		{"store_buffer", StubRoleWriteBarrier},

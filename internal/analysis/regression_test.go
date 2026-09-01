@@ -174,9 +174,33 @@ func TestPipelineRegression_Sample312_X64(t *testing.T) {
 	if result.ClassCount < 1500 || result.ClassCount > 2500 {
 		t.Errorf("Class count: got %d, expected 1500-2500", result.ClassCount)
 	}
-	// x86_64 signal should be >0 after H-3 fix (THR tables added)
-	if result.SignalCount < 100 {
-		t.Errorf("Signal count: got %d, expected >100 (x86_64 THR tables should produce signal)", result.SignalCount)
+	// What this is guarding is that the x86_64 THR tables resolve at all:
+	// before they existed, no call through Thread was annotated and the
+	// signal graph was empty.
+	//
+	// It used to assert SignalCount > 100, and that proxy went stale.
+	// 1374 of the 1388 signal functions were flagged because they called
+	// THR.dispatch_table_array -- a Thread DATA field, so every virtual
+	// call looked like a call to a stub we could not name. With that
+	// counted as what it is, the honest number is 36, and a threshold of
+	// 100 was asserting that 97% noise stayed present.
+	//
+	// So assert the thing directly instead of through the signal graph:
+	// count THR-annotated call edges. That is what "the x86_64 THR tables
+	// produce annotations" means, and it cannot be inflated by
+	// misclassification downstream.
+	thrEdges := 0
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "call_edges.jsonl")) {
+		if via, _ := rec["via"].(string); strings.HasPrefix(via, "THR.") {
+			thrEdges++
+		}
+	}
+	if thrEdges < 1000 {
+		t.Errorf("THR-annotated call edges: got %d, expected >=1000 -- the x86_64 THR tables "+
+			"are not resolving", thrEdges)
+	}
+	if result.SignalCount == 0 {
+		t.Error("Signal count is 0; the x86_64 signal graph is empty")
 	}
 }
 
