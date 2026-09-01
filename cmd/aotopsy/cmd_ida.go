@@ -54,7 +54,7 @@ func cmdIDA(args []string) error {
 	// Step 1: Run pipeline (disasm + signal + meta).
 	var pipeResult *analysis.Result
 	if *from != "" {
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true)
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}

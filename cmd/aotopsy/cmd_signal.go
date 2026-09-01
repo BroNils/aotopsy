@@ -24,7 +24,7 @@ func cmdSignal(args []string) error {
 		return fmt.Errorf("--in is required")
 	}
 
-	_, err := analysis.RunSignalStage(*inDir, *k, *noAsm, false, os.Stderr)
+	_, err := analysis.RunSignalStage(*inDir, *k, *noAsm, false, os.Stderr, true)
 	return err
 }
 
@@ -52,7 +52,7 @@ func cmdSignalPipeline(args []string) error {
 		if *outDir == "" {
 			*outDir = *from
 		}
-		sigResult, err := analysis.RunSignalStage(*from, *k, false, quiet, os.Stderr)
+		sigResult, err := analysis.RunSignalStage(*from, *k, false, quiet, os.Stderr, true)
 		if err != nil {
 			return err
 		}
