@@ -101,7 +101,10 @@ func handleBLR(tc *transferCtx) bool {
 					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
 					Confidence: "stub",
 				})
-			} else if strings.HasPrefix(sn, "Closure:") {
+			} else if strings.HasPrefix(sn, "Closure:") || strings.HasPrefix(sn, "ClosureEntry:") {
+				// ClosureEntry is the cached entry_point_ of the same
+				// closure, and it is what the call actually branches to.
+				// Both resolve through the same pool index.
 				poolIdx := tc.state[rn].StubOff
 				if tc.ctx.PoolClosureFunctionNames != nil {
 					if funcName, ok := tc.ctx.PoolClosureFunctionNames[poolIdx]; ok && funcName != "" {
