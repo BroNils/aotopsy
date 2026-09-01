@@ -24,12 +24,7 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/disasm/ -run THRTablesMatchSDK
 func TestTHRTablesMatchSDK(t *testing.T) {
-	if sdktest.SkipIfNoSDK() {
-		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
-	}
-	if !sdktest.HasGH() {
-		t.Skip("gh not on PATH, skipping SDK drift check")
-	}
+	sdktest.SkipIfNoSDKTools(t)
 	out, err := runSDKCheck("-check")
 	t.Logf("extract_thr -check output:\n%s", out)
 	if err != nil {
@@ -48,12 +43,7 @@ func TestTHRTablesMatchSDK(t *testing.T) {
 // exactly at the dispatch table: it parses as garbage and BLR resolution
 // drops to zero with no other symptom.
 func TestObjectStoreFieldCountsMatchSDK(t *testing.T) {
-	if sdktest.SkipIfNoSDK() {
-		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
-	}
-	if !sdktest.HasGH() {
-		t.Skip("gh not on PATH, skipping SDK drift check")
-	}
+	sdktest.SkipIfNoSDKTools(t)
 	out, err := runSDKCheck("-check-objectstore")
 	t.Logf("extract_thr -check-objectstore output:\n%s", out)
 	if err != nil {
