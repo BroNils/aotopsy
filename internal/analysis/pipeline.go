@@ -148,6 +148,20 @@ func Run(opts Opts) (*Result, error) {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
 
+	// Record which binary this directory came from, first thing, so it is
+	// there even if a later stage fails. Every stage that wants to name
+	// the analysed file reads this; without it they fall back to guessing
+	// from the output directory's own name.
+	{
+		dv, compressed := "", false
+		if info.Version != nil {
+			dv, compressed = info.Version.DartVersion, info.Version.CompressedPointers
+		}
+		if err := WriteProvenance(opts.OutDir, opts.LibPath, dv, isARM64, compressed); err != nil {
+			opts.logf("  provenance: %v\n", err)
+		}
+	}
+
 	// Build and write class layouts.
 	classLayouts := BuildClassLayouts(clResult, pl, info.Version.CompressedPointers)
 	if len(classLayouts) > 0 {
