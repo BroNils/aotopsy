@@ -467,24 +467,51 @@ func DstRegsOfInst(raw uint32) []int {
 		}
 		return nil
 	}
-	// LDR unsigned immediate 64-bit (0xF9400000), 32-bit/LDRSW (0xB9400000/0xB9800000),
-	// 16-bit/LDRSH (0x79400000..0x79C00000), 8-bit/LDRSB (0x39400000..0x39C00000)
-	if (raw&0xFFC00000 == 0xF9400000) ||
-		(raw&0xFF800000 == 0xB9400000) || (raw&0xFF800000 == 0xB9800000) ||
-		(raw&0xFF400000 == 0x79400000) || (raw&0xFF400000 == 0x79800000) || (raw&0xFF400000 == 0x79C00000) ||
-		(raw&0xFF400000 == 0x39400000) || (raw&0xFF400000 == 0x39800000) || (raw&0xFF400000 == 0x39C00000) {
+	// Load register, unsigned immediate offset. Encoding:
+	//   [31:30]=size [29:27]=111 [26]=V [25:24]=01 [23:22]=opc [21:10]=imm12
+	// opc selects load vs store and the extension, so the mask MUST cover
+	// bits 23:22 (0xFFC00000). Masks that left bit 22 out matched the STORE
+	// with the same size and reported its source register as a destination --
+	// see the comment on the unscaled group below.
+	if (raw&0xFFC00000 == 0xF9400000) || // LDR   Xt
+		(raw&0xFFC00000 == 0xB9400000) || // LDR   Wt
+		(raw&0xFFC00000 == 0xB9800000) || // LDRSW Xt
+		(raw&0xFFC00000 == 0x79400000) || // LDRH  Wt
+		(raw&0xFFC00000 == 0x79800000) || // LDRSH Xt
+		(raw&0xFFC00000 == 0x79C00000) || // LDRSH Wt
+		(raw&0xFFC00000 == 0x39400000) || // LDRB  Wt
+		(raw&0xFFC00000 == 0x39800000) || // LDRSB Xt
+		(raw&0xFFC00000 == 0x39C00000) { // LDRSB Wt
 		rd := int(raw & 0x1F)
 		if rd < 31 {
 			return []int{rd}
 		}
 		return nil
 	}
-	// Unscaled LDUR: 64-bit (0xF8400000), 32-bit (0xB8400000/0xB8800000),
-	// 16-bit (0x78400000..0x78C00000), 8-bit (0x38400000..0x38C00000)
-	if (raw&0xFFE00C00 == 0xF8400000) ||
-		(raw&0xFFA00C00 == 0xB8400000) ||
-		(raw&0xFF200C00 == 0x78400000) ||
-		(raw&0xFF200C00 == 0x38400000) {
+	// Load register, unscaled/post-index/pre-index/unprivileged. Encoding:
+	//   [31:30]=size [29:27]=111 [26]=V [25:24]=00 [23:22]=opc [21]=0
+	//   [20:12]=imm9 [11:10]=mode
+	// Mask bits 31:21 (0xFFE00000): that pins opc, so only loads match, and
+	// bit 21 = 0 excludes the register-offset form handled below.
+	//
+	// Two bugs lived here. The masks omitted bits 23:22, so STUR Wt, STURB
+	// and STURH all reported Rt as a destination -- every 8/16/32-bit store
+	// killed a live register's tracked type, which is why intra-procedural
+	// type inference collapsed on ARM64 (blr_at_top +4967, add_class_hits
+	// -36632 on dart-2.12.0) once transferInstruction started using this
+	// function to invalidate registers. And bits 11:10 were pinned to 00, so
+	// only LDUR matched: post-index (01) and pre-index (11) were missed
+	// entirely, which hid every `ldr x19,[sp],#8` epilogue restore. All four
+	// modes write Rt.
+	if (raw&0xFFE00000 == 0xF8400000) || // LDUR/LDR (post/pre) Xt
+		(raw&0xFFE00000 == 0xB8400000) || // ... Wt
+		(raw&0xFFE00000 == 0xB8800000) || // LDURSW Xt
+		(raw&0xFFE00000 == 0x78400000) || // LDURH  Wt
+		(raw&0xFFE00000 == 0x78800000) || // LDURSH Xt
+		(raw&0xFFE00000 == 0x78C00000) || // LDURSH Wt
+		(raw&0xFFE00000 == 0x38400000) || // LDURB  Wt
+		(raw&0xFFE00000 == 0x38800000) || // LDURSB Xt
+		(raw&0xFFE00000 == 0x38C00000) { // LDURSB Wt
 		rd := int(raw & 0x1F)
 		if rd < 31 {
 			return []int{rd}
