@@ -20,10 +20,17 @@ func TestBuildAndDiff(t *testing.T) {
 			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1},
 			{RefID: 3, CID: 10, NameRefID: 102, OwnerRefID: 1},
 		},
-		Codes: []cluster.CodeEntry{
-			{OwnerRef: 2, PayloadInfo: 64},
-			{OwnerRef: 3, PayloadInfo: 128},
-		},
+	}
+	// Two functions at distinct offsets in a synthetic instructions image.
+	// PayloadInfo is deliberately NOT used here any more: it is the
+	// unchecked-entry offset with a flag in the low bit, not a size.
+	rangesA := []cluster.CodeRange{
+		{OwnerRef: 2, PCOffset: 0, Size: 8},
+		{OwnerRef: 3, PCOffset: 8, Size: 8},
+	}
+	codeA := []byte{
+		1, 1, 1, 1, 1, 1, 1, 1,
+		2, 2, 2, 2, 2, 2, 2, 2,
 	}
 	plA := &naming.PoolLookups{
 		RefToStr: map[int]string{
@@ -38,7 +45,7 @@ func TestBuildAndDiff(t *testing.T) {
 		},
 	}
 
-	funcsA := Build(resA, plA, ct)
+	funcsA := Build(resA, plA, ct, rangesA, codeA, 0)
 	if len(funcsA) != 2 {
 		t.Fatalf("Build A got %d funcs, want 2", len(funcsA))
 	}
@@ -49,10 +56,16 @@ func TestBuildAndDiff(t *testing.T) {
 			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1},
 			{RefID: 4, CID: 10, NameRefID: 103, OwnerRefID: 1},
 		},
-		Codes: []cluster.CodeEntry{
-			{OwnerRef: 2, PayloadInfo: 96}, // size changed
-			{OwnerRef: 4, PayloadInfo: 32},
-		},
+	}
+	// funcOne's body is rewritten to the SAME length. Diffing on size
+	// alone would call it unchanged; the instruction hash catches it.
+	rangesB := []cluster.CodeRange{
+		{OwnerRef: 2, PCOffset: 0, Size: 8},
+		{OwnerRef: 4, PCOffset: 8, Size: 8},
+	}
+	codeB := []byte{
+		9, 9, 9, 9, 9, 9, 9, 9,
+		3, 3, 3, 3, 3, 3, 3, 3,
 	}
 	plB := &naming.PoolLookups{
 		RefToStr: map[int]string{
@@ -67,7 +80,7 @@ func TestBuildAndDiff(t *testing.T) {
 		},
 	}
 
-	funcsB := Build(resB, plB, ct)
+	funcsB := Build(resB, plB, ct, rangesB, codeB, 0)
 	diff := DiffDescriptors(funcsA, funcsB, 0)
 
 	if len(diff.Added) != 1 || diff.Added[0] != "MyClass::funcThree" {
