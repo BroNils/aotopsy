@@ -281,7 +281,7 @@ func Run(opts Opts) (*Result, error) {
 	if opts.Signal {
 		// false: step 9 below writes evidence.jsonl with these findings
 		// plus the type-inference resolutions folded in.
-		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log(), false)
+		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log(), false, opts.LibPath)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
@@ -546,7 +546,7 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 	if opts.Signal {
 		// true: --from-dir has no type-inference stage to fold in, so the
 		// signal stage's own evidence.jsonl is the only one there will be.
-		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log(), true)
+		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log(), true, opts.LibPath)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}

@@ -57,7 +57,7 @@ func cmdGhidra(args []string) error {
 	var pipeResult *analysis.Result
 	if *from != "" {
 		// Reuse existing output: just regenerate signal + meta.
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true, "")
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}
