@@ -27,10 +27,18 @@ type SignalResult struct {
 	SignalCount  int
 	ContextCount int
 	EdgeCount    int
+	// Findings are returned so the pipeline can fold them into the single
+	// evidence collector. The stage writes its own evidence.jsonl only on
+	// the standalone path, where nothing downstream will.
+	Findings []output.SignalFinding
 }
 
 // RunSignalStage runs the signal analysis on existing disasm output.
-func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) (*SignalResult, error) {
+// writeEvidence tells the stage to emit evidence.jsonl itself. The full
+// pipeline passes false and writes a richer one at step 9; the standalone
+// `aotopsy signal` and --from-dir paths pass true, because nothing else
+// will.
+func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, writeEvidence bool) (*SignalResult, error) {
 	if log == nil {
 		log = os.Stderr
 	}
@@ -225,14 +233,23 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		}
 	}
 
-	// Write evidence.jsonl — unified evidence model from call edges.
-	evidencePath := filepath.Join(inDir, "evidence.jsonl")
-	evCollector := evidence.NewCollector()
-	evCollector.FromCallEdges(edges)
-	if err := evCollector.WriteJSONL(evidencePath); err != nil {
-		logf("  %swarning: evidence: %v%s\n", cli.Gold, err, cli.Reset)
-	} else {
-		logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, evidencePath, cli.Reset, strutil.FileSize(evidencePath))
+	// Write evidence.jsonl only when nothing downstream will.
+	//
+	// The full pipeline writes it again at step 9 with the type-inference
+	// resolutions and these findings folded in, so writing here too meant
+	// producing a strictly poorer file and then overwriting it. That was
+	// invisible while both wrote the same call-edge-only content; it stops
+	// being invisible the moment either side gains a source.
+	if writeEvidence {
+		evidencePath := filepath.Join(inDir, "evidence.jsonl")
+		evCollector := evidence.NewCollector()
+		evCollector.FromCallEdges(edges)
+		evCollector.FromSignalFindings(findings)
+		if err := evCollector.WriteJSONL(evidencePath); err != nil {
+			logf("  %swarning: evidence: %v%s\n", cli.Gold, err, cli.Reset)
+		} else {
+			logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, evidencePath, cli.Reset, strutil.FileSize(evidencePath))
+		}
 	}
 
 	// Build connected signal CFG.
@@ -299,6 +316,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		SignalCount:  g.Stats.SignalFuncs,
 		ContextCount: g.Stats.ContextFuncs,
 		EdgeCount:    g.Stats.TotalEdges,
+		Findings:     findings,
 	}, nil
 }
 

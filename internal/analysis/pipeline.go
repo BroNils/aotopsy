@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
@@ -20,6 +21,7 @@ import (
 	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/signal"
 	"aotopsy/internal/strutil"
 	"aotopsy/internal/vmtables"
@@ -256,7 +258,8 @@ func Run(opts Opts) (*Result, error) {
 	// Non-fatal: if it fails, BLR edges remain unresolved (as before).
 	// Runs BEFORE xref so that dispatch_table.jsonl is available for
 	// selector_dispatch_xref.jsonl generation.
-	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields, sc.VMResult); err != nil {
+	tiOut, err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields, sc.VMResult)
+	if err != nil {
 		opts.logf("  type inference: %v\n", err)
 	}
 
@@ -274,12 +277,16 @@ func Run(opts Opts) (*Result, error) {
 	// Step 5: Signal analysis (if enabled) -- reads functions.jsonl/
 	// call_edges.jsonl/string_refs.jsonl, which both disasm stages now
 	// produce in the same schema, so this works unmodified for x86_64.
+	var signalFindings []output.SignalFinding
 	if opts.Signal {
-		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log())
+		// false: step 9 below writes evidence.jsonl with these findings
+		// plus the type-inference resolutions folded in.
+		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log(), false)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
 		result.SignalCount = sigResult.SignalCount
+		signalFindings = sigResult.Findings
 
 		// Step 5.1: Entropy analysis (packed/encrypted section detection).
 		if err := signal.WriteEntropyFindings(opts.OutDir, opts.LibPath); err != nil {
@@ -346,11 +353,36 @@ func Run(opts Opts) (*Result, error) {
 	}
 
 	// Step 9: Unified Evidence collection & export.
-	// Aggregates call edges, typetrack resolutions, and behavioral signals
-	// into evidence.jsonl with provenance and confidence classification.
+	//
+	// Three of the collector's four sources were never called. Only
+	// FromCallEdges ran, so evidence.jsonl held nothing but Kind "call" --
+	// and the BLR resolutions it did carry had been through a round trip
+	// via call_edges.jsonl, losing the confidence and slot index the type
+	// analysis produced.
 	evCollector := evidence.NewCollector()
 	if len(edges) > 0 {
 		evCollector.FromCallEdges(edges)
+	}
+	if tiOut != nil && tiOut.Inter != nil {
+		// Sorted, because ranging a map here would reorder records that
+		// tie on (PC, Kind) between runs of the same binary.
+		names := make([]string, 0, len(tiOut.Inter.Functions))
+		for name := range tiOut.Inter.Functions {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		className := func(id int) string { return tiOut.ClassIDToName[id] }
+		for _, name := range names {
+			fa := tiOut.Inter.Functions[name]
+			if fa == nil {
+				continue
+			}
+			evCollector.FromBLRResolutions(name, fa.Intra.BLRResolutions)
+			evCollector.FromFieldAccesses(name, fa.Intra.FieldAccesses, className)
+		}
+	}
+	if len(signalFindings) > 0 {
+		evCollector.FromSignalFindings(signalFindings)
 	}
 	if err := evCollector.WriteJSONL(filepath.Join(opts.OutDir, "evidence.jsonl")); err != nil {
 		opts.logf("  evidence: %v\n", err)
@@ -512,7 +544,9 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 	result.FuncCount = len(funcs)
 
 	if opts.Signal {
-		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log())
+		// true: --from-dir has no type-inference stage to fold in, so the
+		// signal stage's own evidence.jsonl is the only one there will be.
+		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log(), true)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}

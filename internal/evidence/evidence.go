@@ -63,9 +63,14 @@ func (c *Collector) FromCallEdges(edges []disasm.CallEdgeRecord) {
 		if e.Target != "" {
 			ev.Result = map[string]any{"target": e.Target}
 			if e.Kind == "bl" || e.Kind == "call" {
+				// GenerateStaticDartCall, not EmitDirectCall: there is no
+				// EmitDirectCall anywhere in runtime/vm/compiler/backend
+				// (the name exists only in pkg/dart2wasm and
+				// pkg/dart2bytecode), so the reference pointed at nothing
+				// a reader could look up.
 				ev.SDKRef = &SDKReference{
 					File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
-					Symbol: "EmitDirectCall",
+					Symbol: "GenerateStaticDartCall",
 				}
 			}
 		} else if len(e.Targets) > 0 {
@@ -174,13 +179,22 @@ func parsePCUint(pc string) uint64 {
 func (c *Collector) Records() []Evidence {
 	out := make([]Evidence, len(c.records))
 	copy(out, c.records)
+	// Fully ordered, not just by PC. Records now arrive from several
+	// collectors, and two of them iterate a map of function names, so
+	// ties broken by insertion order would make the file differ between
+	// runs of the same binary.
 	sort.Slice(out, func(i, j int) bool {
-		pi := parsePCUint(out[i].PC)
-		pj := parsePCUint(out[j].PC)
-		if pi == pj {
+		pi, pj := parsePCUint(out[i].PC), parsePCUint(out[j].PC)
+		if pi != pj {
+			return pi < pj
+		}
+		if out[i].Kind != out[j].Kind {
 			return out[i].Kind < out[j].Kind
 		}
-		return pi < pj
+		if out[i].Function != out[j].Function {
+			return out[i].Function < out[j].Function
+		}
+		return out[i].Rule < out[j].Rule
 	})
 	return out
 }
