@@ -64,6 +64,7 @@ func BuildX86IR(name string, insts []x86.Decoded) *FuncIR {
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
 	fir.FpuArgRegs = sdk.X86FpuArgRegNames()
 	fir.FpuReturnReg = sdk.X86FpuReturnRegName
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(false)
 
 	funcStart := insts[0].VA
 	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative

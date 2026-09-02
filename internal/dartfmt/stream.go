@@ -133,12 +133,25 @@ const (
 // If byte > 127: it's the last byte; value contribution = byte - 128.
 // If byte <= 127: it's a data byte; 7 bits contribute to the value.
 func (s *Stream) ReadUnsigned() (int64, error) {
+	return s.readVarint(endUnsignedByteMarker)
+}
+
+// readVarint decodes the SDK's variable-length integer encoding: data
+// bytes carry dataBitsPerByte bits each, and the final byte is marked by
+// exceeding maxUnsignedDataPerByte, with endMarker subtracted from it.
+//
+// ReadUnsigned and ReadTagged64 were two full copies of this loop that
+// differed in exactly one thing -- which end marker to subtract -- so
+// establishing that required diffing two 25-line functions byte by byte.
+// This is snapshot deserialisation: a divergence between the two copies
+// would not fail loudly, it would silently misread a length or an offset.
+func (s *Stream) readVarint(endMarker int64) (int64, error) {
 	b, err := s.ReadByte()
 	if err != nil {
 		return 0, err
 	}
 	if b > maxUnsignedDataPerByte {
-		return int64(b) - endUnsignedByteMarker, nil
+		return int64(b) - endMarker, nil
 	}
 
 	var r int64
@@ -151,7 +164,7 @@ func (s *Stream) ReadUnsigned() (int64, error) {
 			return 0, err
 		}
 		if b > maxUnsignedDataPerByte {
-			r |= int64(b-endUnsignedByteMarker) << shift
+			r |= (int64(b) - endMarker) << shift
 			return r, nil
 		}
 		if shift >= 63 {
@@ -196,31 +209,7 @@ func (s *Stream) ReadTagged32() (uint32, error) {
 // ReadTagged64 reads a Dart-encoded int64 using the signed variable-length
 // encoding (kEndByteMarker = 192). Used for Read<int64_t> (e.g. Mint values).
 func (s *Stream) ReadTagged64() (int64, error) {
-	b, err := s.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-	if b > maxUnsignedDataPerByte {
-		return int64(b) - int64(endByteMarker), nil
-	}
-
-	var r int64
-	var shift uint
-	for {
-		r |= int64(b) << shift
-		shift += dataBitsPerByte
-		b, err = s.ReadByte()
-		if err != nil {
-			return 0, err
-		}
-		if b > maxUnsignedDataPerByte {
-			r |= (int64(b) - int64(endByteMarker)) << shift
-			return r, nil
-		}
-		if shift >= 63 {
-			return 0, ErrStreamOverrun
-		}
-	}
+	return s.readVarint(int64(endByteMarker))
 }
 
 // ReadDouble reads a float64 by reading a Tagged64 and bit-casting to float64 (runtime/vm/datastream.h Read<double>).

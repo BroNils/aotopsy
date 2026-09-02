@@ -60,6 +60,27 @@ func ARM64RegName(n int) string {
 	return xName[n]
 }
 
+// X86RegName maps a canonical x86_64 register number to the lowercase
+// 64-bit name the decompiler uses in pseudocode (e.g. 0 → "rax").
+//
+// The numbering is the instruction-encoding order, which is what
+// arch/x86.CanonReg produces and what the ABI tables in abi.go are
+// written in: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
+// R8..R15=8..15. This is the counterpart of ARM64RegName; without it the
+// x86 half of an ABI table could not be turned back into a name, so the
+// tables were only usable on ARM64.
+func X86RegName(n int) string {
+	if n < 0 || n >= len(x86Name) {
+		return ""
+	}
+	return x86Name[n]
+}
+
+var x86Name = [...]string{
+	"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+	"r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+}
+
 // xName is pre-computed to avoid fmt.Sprintf in hot paths.
 var xName = [...]string{
 	"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",

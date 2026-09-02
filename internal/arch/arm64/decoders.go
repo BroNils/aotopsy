@@ -281,19 +281,31 @@ func LDURH(raw uint32) (base, rt int, imm9 int, ok bool) {
 // Encoding: sf=1 | op=0 | S=0 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0x91000000
 func ADD64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0x91000000 {
+	return addSubImmediate(raw, 0x91000000)
+}
+
+// addSubImmediate decodes the shared add/subtract-immediate encoding.
+//
+// ADD64/SUB64/SUBS32 differ ONLY in the sf|op|S bits of the opcode, i.e.
+// in the value the top byte is compared against; the register and imm12
+// extraction and the shift handling are identical. They were written out
+// three times, so seeing that was a matter of diffing three 16-line
+// functions -- and a correction to the shift decoding would have had to
+// land in all three.
+func addSubImmediate(raw, opcode uint32) (rd, rn int, immValue int, ok bool) {
+	if raw&0xFF000000 != opcode {
 		return 0, 0, 0, false
 	}
 	rd = int(raw & 0x1F)
 	rn = int((raw >> 5) & 0x1F)
 	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
+	switch (raw >> 22) & 0x3 {
+	case 0:
 		immValue = imm12
-	} else {
-		immValue = 0 // reserved
+	case 1:
+		immValue = imm12 << 12
+	default:
+		immValue = 0 // reserved shift encoding
 	}
 	return rd, rn, immValue, true
 }
@@ -303,21 +315,7 @@ func ADD64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 // Encoding: sf=1 | op=1 | S=0 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0xD1000000
 func SUB64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0xD1000000 {
-		return 0, 0, 0, false
-	}
-	rd = int(raw & 0x1F)
-	rn = int((raw >> 5) & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
-		immValue = imm12
-	} else {
-		immValue = 0 // reserved
-	}
-	return rd, rn, immValue, true
+	return addSubImmediate(raw, 0xD1000000)
 }
 
 // ADD64Register detects ADD Xd, Xn, Xm (register-register, 64-bit).
@@ -339,21 +337,7 @@ func ADD64Register(raw uint32) (rd, rn, rm int, ok bool) {
 // Encoding: sf=0 | 1 | 1 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0x71000000
 func SUBS32Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0x71000000 {
-		return 0, 0, 0, false
-	}
-	rd = int(raw & 0x1F)
-	rn = int((raw >> 5) & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
-		immValue = imm12
-	} else {
-		immValue = 0 // reserved
-	}
-	return rd, rn, immValue, true
+	return addSubImmediate(raw, 0x71000000)
 }
 
 // A 64-bit SUBS/CMP decoder is deliberately absent.

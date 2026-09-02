@@ -367,6 +367,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	for i, reg := range fir.FpuArgRegs {
 		e.state.setReg(reg, fmt.Sprintf("fparg%d", i))
 	}
+	// Type-testing stubs are entered with the TypeTestABI registers already
+	// holding their operands; see seedTypeTestABI.
+	seedTypeTestABI(fir, e.state)
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
 	// is emitted. The signature needs `async` prefix, but IsAsync is set
 	// during block walking which happens after the signature. A pre-scan
