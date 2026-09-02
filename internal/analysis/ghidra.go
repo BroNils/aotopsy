@@ -74,7 +74,7 @@ func FindGhidra(explicitHome string) (launcher GhidraLauncher, ghidraHome string
 		}
 	}
 
-	return GhidraLauncher{}, "", fmt.Errorf(`Ghidra not found
+	return GhidraLauncher{}, "", fmt.Errorf(`ghidra not found
 
 Install Ghidra:
   brew install ghidra

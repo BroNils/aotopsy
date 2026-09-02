@@ -111,10 +111,6 @@ type FridaOptions struct {
 	StalkerMinCalls int
 }
 
-func generateFridaScript(libPath string, isARM64 bool, hooks []FridaHook, probes []FridaProbe) string {
-	return GenerateFridaScriptWithOptions(libPath, isARM64, hooks, probes, FridaOptions{})
-}
-
 func GenerateFridaScriptWithOptions(libPath string, isARM64 bool, hooks []FridaHook, probes []FridaProbe, opts FridaOptions) string {
 	moduleName := filepath.Base(libPath)
 	defaultRegs := sdk.DartArgRegNames(isARM64)

@@ -267,29 +267,6 @@ func parseRuntimeEntryList(header string) (entries, leafEntries []string) {
 	return entries, leafEntries
 }
 
-// extractThreadStubOffsets filters runtime_offsets_extracted.h for
-// *_entry_point_offset fields that are in CACHED_VM_STUBS_ADDRESSES_LIST,
-// returning offset→name pairs for the given arch/compressed/product combo.
-func extractThreadStubOffsets(header, arch string, compressed, product bool) (map[int]string, error) {
-	// The CACHED_VM_STUBS_ADDRESSES_LIST entries appear as
-	// Thread::<name>_entry_point_offset in the extracted header.
-	// We filter for fields ending in _entry_point_offset that are NOT
-	// runtime entries (those are handled by the THR fields table already).
-	entries, err := extractTHRFields(header, arch, compressed, product)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int]string)
-	for _, e := range entries {
-		if strings.HasSuffix(e.name, "_entry_point_offset") {
-			// Strip the _entry_point_offset suffix to get the stub name
-			stubName := strings.TrimSuffix(e.name, "_entry_point_offset")
-			out[e.offset] = stubName
-		}
-	}
-	return out, nil
-}
-
 // runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
 // for every supported version. Returns count of mismatches.
 func runCheckStubs() int {
@@ -852,7 +829,7 @@ func arm64ProductTarget(tag string) (extractTarget, bool) {
 //   - (kNumPredefinedCids - kObjectCid) - |IsAbsentCid| (class table entries)
 //
 // Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
-//         runtime/vm/stub_code_list.h, runtime/vm/class_id.h
+// runtime/vm/stub_code_list.h, runtime/vm/class_id.h.
 // Verified via gh api at tag 3.13.0.
 func runCheckRoots() int {
 	mismatches := 0
@@ -955,29 +932,6 @@ func runCheckRoots() int {
 func countMacroEntries(header, macroName string) int {
 	entries := extractMacroBlock(header, macroName)
 	return len(entries)
-}
-
-// countClassIDEntries counts kNumPredefinedCids by counting all k*Cid enum
-// values in the ClassId enum before kNumPredefinedCids. This is more reliable
-// than recursively expanding nested macros (CLASS_LIST → CLASS_LIST_NO_OBJECT
-// → CLASS_LIST_NO_OBJECT_NOR_STRING_NOR_ARRAY_NOR_MAP → ...).
-func countClassIDEntries(header string) int {
-	// Find the enum ClassId block.
-	enumStart := strings.Index(header, "enum ClassId")
-	if enumStart < 0 {
-		return 0
-	}
-	rest := header[enumStart:]
-	// Find kNumPredefinedCids in the enum.
-	cidEnd := strings.Index(rest, "kNumPredefinedCids")
-	if cidEnd < 0 {
-		return 0
-	}
-	enumBody := rest[:cidEnd]
-	// Count all k*Cid, entries (each is one predefined class ID).
-	// Pattern: kSomeNameCid, (with optional whitespace/comments).
-	cidEntryRe := regexp.MustCompile(`k\w+Cid\s*,`)
-	return len(cidEntryRe.FindAllString(enumBody, -1))
 }
 
 // extractDefineInt extracts a #define constant's integer value.

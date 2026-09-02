@@ -80,9 +80,7 @@ func TypedDeclarationsStmt(stmts []Stmt) ([]Stmt, bool) {
 			}
 
 			// Clean `new ClassName(...)` to `ClassName(...)` if type is injected
-			if strings.HasPrefix(rhs, "new ") {
-				rhs = strings.TrimPrefix(rhs, "new ")
-			}
+			rhs = strings.TrimPrefix(rhs, "new ")
 
 			newLineText := fmt.Sprintf("final %s %s = %s;", inferredType, varName, rhs)
 			if newLineText != line.Text {

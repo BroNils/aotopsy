@@ -174,8 +174,8 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 		[]byte(strings.Join(mergedFuncs, "\n")+"\n"), 0644)
 
 	// Write report
-	report := fmt.Sprintf("reFlutter Import Report\n")
-	report += fmt.Sprintf("=======================\n\n")
+	report := "reFlutter Import Report\n"
+	report += "=======================\n\n"
 	report += fmt.Sprintf("Static output: %s\n", opts.StaticDir)
 	report += fmt.Sprintf("reFlutter dump: %s\n", opts.DumpPath)
 	report += fmt.Sprintf("Merged output: %s\n\n", outDir)

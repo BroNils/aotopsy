@@ -360,32 +360,6 @@ func isX86CmpRegImm(inst x86.Decoded) (reg, imm int, ok bool) {
 	return idx, int(v), true
 }
 
-// isX86HeaderLoad reports whether prev was a header load writing dstIdx:
-// `MOV dstReg, [base-1]` where -1 is kHeapObjectTag. This is the x86_64
-// equivalent of ARM64's `LDUR Xt, [Xn, #-1]`, used to detect the header-load →
-// class-ID-extract pattern so a subsequent SHR/AND preserves Bottom.
-func isX86HeaderLoad(prev *x86.Decoded, dstIdx int) bool {
-	if prev == nil {
-		return false
-	}
-	p := prev.Inst
-	if p.Op != x86asm.MOV || len(p.Args) < 2 {
-		return false
-	}
-	dstReg, ok := p.Args[0].(x86asm.Reg)
-	if !ok {
-		return false
-	}
-	if x86.CanonReg(dstReg) != dstIdx {
-		return false
-	}
-	mem, ok := p.Args[1].(x86asm.Mem)
-	if !ok {
-		return false
-	}
-	return mem.Disp == -1
-}
-
 // transferInstructionX86 updates the register type state for one x86_64 instruction.
 // H-4 fix: added stack type tracking, field type lookup, LEA dispatch slot
 // computation, and fixed allocation stub detection.
@@ -830,39 +804,39 @@ func transferInstructionX86(
 			regIdx := x86.CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && state[regIdx].Kind == LatticeKnownStub {
 				sn := state[regIdx].StubName
-			if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
-				if state[x86RegRDI].Kind == LatticeKnownClass {
-					state[x86RegRAX] = state[x86RegRDI]
-					killX86ArgRegs(state)
-					return
+				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
+					if state[x86RegRDI].Kind == LatticeKnownClass {
+						state[x86RegRAX] = state[x86RegRDI]
+						killX86ArgRegs(state)
+						return
+					}
 				}
-			}
-			// FP-8: UnlinkedCall BLR resolution on x86_64.
-			// When the call register holds a KnownStub with "UnlinkedCall:"
-			// prefix, use MethodNameToSelectorOffsets to resolve via the
-			// dispatch table, same as ARM64's handleBLR.
-			if strings.HasPrefix(sn, "UnlinkedCall:") {
-				methodName := sn[len("UnlinkedCall:"):]
-				if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-					res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
-					var allTargets []string
-					for _, selOff := range selectorOffsets {
-						allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
+				// FP-8: UnlinkedCall BLR resolution on x86_64.
+				// When the call register holds a KnownStub with "UnlinkedCall:"
+				// prefix, use MethodNameToSelectorOffsets to resolve via the
+				// dispatch table, same as ARM64's handleBLR.
+				if strings.HasPrefix(sn, "UnlinkedCall:") {
+					methodName := sn[len("UnlinkedCall:"):]
+					if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
+						res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
+						var allTargets []string
+						for _, selOff := range selectorOffsets {
+							allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
+						}
+						applySelectorCandidates(&res, allTargets)
+						if res.Polymorphic {
+							res.Confidence = "polymorphic"
+						}
+						result.BLRResolutions = append(result.BLRResolutions, res)
+					} else {
+						result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
+							PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
+							Confidence: "stub",
+						})
 					}
-					applySelectorCandidates(&res, allTargets)
-					if res.Polymorphic {
-						res.Confidence = "polymorphic"
-					}
-					result.BLRResolutions = append(result.BLRResolutions, res)
-				} else {
-					result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
-						PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
-						Confidence: "stub",
-					})
 				}
 			}
 		}
-	}
 		state[x86RegRAX] = Top()
 		killX86ArgRegs(state)
 		return
@@ -971,8 +945,8 @@ func resolveX86DispatchSelectorOffset(
 	// used to be a second copy with its own (wrong) implied-CID formula and
 	// an unbounded " | "-join of every match.
 	res := BlrResolution{
-		PC:        inst.VA,
-		SlotIndex: -1,
+		PC:         inst.VA,
+		SlotIndex:  -1,
 		Confidence: "static_inferred",
 	}
 	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
