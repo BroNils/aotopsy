@@ -110,6 +110,23 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	for ri := 0; ri < len(fir.ArgRegs); ri++ {
 		s.setReg(fir.ArgRegs[ri], fmt.Sprintf("arg%d", ri))
 	}
+	// Floating-point arguments, on the same footing as the integer ones.
+	//
+	// FpuArgRegs and FpuReturnReg were populated by both lifters and read
+	// by nothing at all -- ABI facts written down and never used. The
+	// consequence was visible in the output: a function reading a double
+	// parameter it never wrote printed the raw register, which is where
+	// the remaining v0/v1 (ARM64) and xmm0/xmm1 (x86_64) leaks came from.
+	//
+	// The index is the position in Dart's FP argument sequence, not the
+	// source parameter position: `foo(double a, int b)` passes a in V0 and
+	// b in R1, so a is fparg0 AND arg0. Naming it fparg0 states exactly
+	// what is known -- which FP argument slot this is -- without claiming
+	// a source-level position that would need the parameter types to
+	// establish.
+	for ri := 0; ri < len(fir.FpuArgRegs); ri++ {
+		s.setReg(fir.FpuArgRegs[ri], fmt.Sprintf("fparg%d", ri))
+	}
 	return s
 }
 

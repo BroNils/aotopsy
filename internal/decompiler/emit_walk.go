@@ -231,7 +231,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			// P3-feasible-3: Emit bare "return;" if the return register
 			// holds a void-call result or is empty/uninitialized.
 			retVal := e.state.lookupReg(e.fir.ReturnReg)
-			if retVal == "" || retVal == "/* void */" || retVal == "/* pop */" {
+			if retVal = e.returnValue(retVal); retVal == "" {
 				e.emit(indent, "return;")
 			} else {
 				e.emit(indent, "return %s;", retVal)
