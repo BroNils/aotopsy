@@ -193,7 +193,7 @@ func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.Symb
 			n++
 			return true
 		}
-		line := d.Inst.String()
+		line := x86.InstText(d.Inst)
 		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := lookup(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)

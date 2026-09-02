@@ -249,7 +249,7 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 			out = append(out, X86Inst{VA: d.VA, Text: "<bad>"})
 			continue
 		}
-		out = append(out, X86Inst{VA: d.VA, Text: d.Inst.String()})
+		out = append(out, X86Inst{VA: d.VA, Text: x86.InstText(d.Inst)})
 	}
 	return out
 }

@@ -225,7 +225,7 @@ func x86CondOp(op x86asm.Op) string {
 }
 
 func liftX86Instr(in x86.Decoded, k branchKind, tgt uint64, hasTgt bool, prev *x86.Decoded) Instr {
-	src := strings.ToLower(in.Inst.String())
+	src := strings.ToLower(x86.InstText(in.Inst))
 	ir := Instr{Addr: in.VA, Src: src, PoolIndex: -1}
 
 	switch {
@@ -526,107 +526,12 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 			s.setReg(dst, "/* pop */")
 		}
 		return "", false, true
-	case "addsd", "subsd", "mulsd", "divsd", "minsd", "maxsd":
-		// x86_64 scalar double arithmetic (SSE2).
-		// addsd xmm, xmm/mem → xmm = xmm + src
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			src := operandExpr(fir, s, ops[1])
-			var op string
-			switch mnemonic {
-			case "addsd":
-				op = "+"
-			case "subsd":
-				op = "-"
-			case "mulsd":
-				op = "*"
-			case "divsd":
-				op = "/"
-			case "minsd":
-				s.setReg(dst, fmt.Sprintf("min(%s, %s)", s.lookupReg(dst), src))
-				return "", false, true
-			case "maxsd":
-				s.setReg(dst, fmt.Sprintf("max(%s, %s)", s.lookupReg(dst), src))
-				return "", false, true
-			}
-			old := s.lookupReg(dst)
-			if old == "" {
-				old = "0.0"
-			}
-			s.setReg(dst, fmt.Sprintf("(%s %s %s)", old, op, src))
-		}
-		return "", false, true
-	case "addss", "subss", "mulss", "divss":
-		// x86_64 scalar single (float32) arithmetic.
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			src := operandExpr(fir, s, ops[1])
-			var op string
-			switch mnemonic {
-			case "addss":
-				op = "+"
-			case "subss":
-				op = "-"
-			case "mulss":
-				op = "*"
-			case "divss":
-				op = "/"
-			}
-			old := s.lookupReg(dst)
-			if old == "" {
-				old = "0.0"
-			}
-			s.setReg(dst, fmt.Sprintf("(%s %s %s)", old, op, src))
-		}
-		return "", false, true
-	case "sqrtsd":
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, fmt.Sprintf("sqrt(%s)", operandExpr(fir, s, ops[1])))
-		}
-		return "", false, true
-	case "ucomisd", "comisd":
-		// Double compare — sets flags like cmp.
-		if len(ops) >= 2 {
-			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
-			s.HasCmp = true
-		}
-		return "", false, true
-	case "cvtsi2sd", "cvtsi2ss":
-		// Integer to double/float conversion.
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, fmt.Sprintf("(%s).toDouble()", operandExpr(fir, s, ops[1])))
-		}
-		return "", false, true
-	case "cvttsd2si", "cvttss2si":
-		// Double/float to integer (truncate toward zero).
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, fmt.Sprintf("(%s).toInt()", operandExpr(fir, s, ops[1])))
-		}
-		return "", false, true
-	case "cvtsd2ss":
-		// Double to float (precision narrowing).
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, operandExpr(fir, s, ops[1]))
-		}
-		return "", false, true
-	case "cvtss2sd":
-		// Float to double (precision widening).
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, operandExpr(fir, s, ops[1]))
-		}
-		return "", false, true
-	case "movsd", "movss":
-		// SSE move: movsd xmm, xmm/mem — register-to-register copy.
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, operandExpr(fir, s, ops[1]))
-		}
-		return "", false, true
+		// SIMD&FP mnemonics are handled by applyFloat, shared with ARM64.
+		//
+		// The `movsd`/`movss` case that used to live here never fired:
+		// x86asm spells the SSE form MOVSD_XMM (bare MOVSD is the string
+		// instruction), so 11,875 of them on the 3.12.2 x64 sample fell
+		// through to raw text with a handler sitting right there.
 	}
 
 	if strings.HasPrefix(mnemonic, "cmov") {
