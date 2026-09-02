@@ -50,6 +50,11 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 	logf := cli.MakeLogf(quiet, log)
 	stagef := cli.MakeStagef(quiet, log)
 
+	// snapshot.json is what the pipeline leaves behind describing the
+	// binary this directory came from: its name, hash, and architecture.
+	// Read once here; three separate call sites used to re-read it.
+	prov, hasProv := ReadProvenance(inDir)
+
 	// Read functions.jsonl.
 	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
 	if err != nil {
@@ -160,10 +165,10 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 	// Nothing ever wrote that file -- one reader, zero writers -- so the
 	// lookup always failed and the report named itself after its own
 	// output directory. The pipeline writes snapshot.json now.
-	if p, ok := ReadProvenance(inDir); ok {
-		filename = p.SourceName
-		if p.SHA256 != "" {
-			digest = p.SHA256
+	if hasProv {
+		filename = prov.SourceName
+		if prov.SHA256 != "" {
+			digest = prov.SHA256
 		}
 	}
 	render.WriteSignalHTML(htmlFile, g, title, filename, digest, asmSnippets)
@@ -231,10 +236,8 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 		// `aotopsy signal --in <dir>` report still names the file it is
 		// about.
 		sarifLib := libPath
-		if sarifLib == "" {
-			if p, ok := ReadProvenance(inDir); ok {
-				sarifLib = p.Source
-			}
+		if sarifLib == "" && hasProv {
+			sarifLib = prov.Source
 		}
 		if err := output.WriteSARIF(inDir, findings, "1.0.0", sarifLib); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
@@ -265,7 +268,7 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 
 	// Build connected signal CFG.
 	if !noAsm {
-		content := BuildSignalContent(g, inDir, funcs, edges)
+		content := BuildSignalContent(g, inDir, funcs, edges, prov.Arch)
 		if len(content) > 0 {
 			cfgTitle := "signal CFG"
 			if title != "" {
@@ -333,11 +336,19 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, 
 
 // BuildSignalContent re-disassembles signal functions from bin files and extracts
 // interesting calls and string refs for each function.
+// arch is the provenance architecture ("arm64" or "x64"); it selects the
+// decoder outright. This used to be guessed: decode every function as
+// ARM64, and if not one instruction address lined up with a known call
+// edge, assume x86_64 and redo it. That guess silently misfires on any
+// function with no call edges at all, and it cost a full wasted ARM64
+// decode of every x86_64 function. The pipeline knows the architecture,
+// so it passes it.
 func BuildSignalContent(
 	g *signal.SignalGraph,
 	inDir string,
 	funcs []disasm.FuncRecord,
 	edgeRecords []disasm.CallEdgeRecord,
+	arch string,
 ) map[string]*render.SignalFuncContent {
 	edgesByFunc := make(map[string][]disasm.CallEdge)
 	for _, er := range edgeRecords {
@@ -385,37 +396,24 @@ func BuildSignalContent(
 			continue
 		}
 
-		insts := disasm.Disassemble(data, disasm.Options{BaseAddr: baseAddr})
-		if len(insts) == 0 {
-			continue
-		}
-
 		funcEdges := edgesByFunc[sf.Name]
 		edgeByPC := make(map[uint64]disasm.CallEdge, len(funcEdges))
 		for _, e := range funcEdges {
 			edgeByPC[e.FromPC] = e
 		}
 
-		// Determine architecture: ARM64 decode of x86_64 bytes produces
-		// wrong instruction addresses (4-byte aligned vs variable-length),
-		// so no call edge addresses will match. If that happens, fall back
-		// to x86_64 decode. This makes BuildSignalContent work for both
-		// architectures without needing an explicit arch flag.
-		instAddrs := make([]uint64, 0, len(insts))
-		anyMatch := false
-		for _, inst := range insts {
-			instAddrs = append(instAddrs, inst.Addr)
-			if _, ok := edgeByPC[inst.Addr]; ok {
-				anyMatch = true
-			}
-		}
-		if !anyMatch && len(edgeByPC) > 0 {
-			// ARM64 addresses didn't match any call edge — try x86_64.
-			x86Insts := disasm.DecodeX86Simple(data, baseAddr)
-			instAddrs = instAddrs[:0]
-			for _, inst := range x86Insts {
+		var instAddrs []uint64
+		if arch == "x64" {
+			for _, inst := range disasm.DecodeX86Simple(data, baseAddr) {
 				instAddrs = append(instAddrs, inst.VA)
 			}
+		} else {
+			for _, inst := range disasm.Disassemble(data, disasm.Options{BaseAddr: baseAddr}) {
+				instAddrs = append(instAddrs, inst.Addr)
+			}
+		}
+		if len(instAddrs) == 0 {
+			continue
 		}
 
 		seenCalls := make(map[string]bool)

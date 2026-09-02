@@ -15,6 +15,9 @@ import "strconv"
 //	PoolClassByIndex          yes     yes
 //	PoolClosureClass          yes     yes, but as KnownClass
 //
+// Both then checked PoolClassByIndex before PoolClosureClass, which made
+// the closure branch unreachable on either architecture -- see below.
+//
 // The missing three are all the ones that produce a NAME. Without them an
 // x86_64 pool load of a Code object, an unlinked call or a type-testing
 // stub typed the register as kCodeCid -- true and useless, because
@@ -40,6 +43,21 @@ func ResolvePoolEntry(ctx *TypeContext, poolIdx, byteOff int) (TypeLattice, bool
 	if name, ok := ctx.PoolCodeNames[poolIdx]; ok && name != "" {
 		return KnownStub("PPCode:"+name, byteOff), true
 	}
+	// Before PoolClassByIndex, not after.
+	//
+	// A Closure pool entry also has a class -- kClosureCid -- so
+	// PoolClassByIndex has an entry for it and, checked first, returned
+	// KnownClass(kClosureCid) every single time. The branch below was
+	// therefore unreachable, and with it the whole Closure.function /
+	// entry_point_ field-load path in both architectures' load handlers:
+	// dead code guarded by a stub name nothing ever produced.
+	//
+	// "It is a _Closure" is also the least useful true thing to say about
+	// the slot. "Closure:<ownerCID>" carries the owner class AND keeps the
+	// pool index, which is what the field load needs to name the tear-off.
+	if classID, ok := ctx.PoolClosureClass[poolIdx]; ok && classID >= 0 {
+		return KnownStub("Closure:"+strconv.Itoa(classID), poolIdx), true
+	}
 	if classID, ok := ctx.PoolClassByIndex[poolIdx]; ok && classID >= 0 {
 		// A Type with a known type-testing stub is more useful as that
 		// stub's name than as kTypeCid.
@@ -50,9 +68,6 @@ func ResolvePoolEntry(ctx *TypeContext, poolIdx, byteOff int) (TypeLattice, bool
 			ctx.InstantiatedClasses[classID] = true
 		}
 		return KnownClass(classID), true
-	}
-	if classID, ok := ctx.PoolClosureClass[poolIdx]; ok && classID >= 0 {
-		return KnownStub("Closure:"+strconv.Itoa(classID), poolIdx), true
 	}
 	return Top(), false
 }

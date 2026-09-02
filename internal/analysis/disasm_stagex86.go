@@ -14,6 +14,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -153,8 +154,16 @@ func RunDisasmStageX86(
 			name = funcName
 		}
 
-		if err := writeX86ASM(asmDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset), funcCode, funcVA, lookup); err != nil {
+		relName := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
+		if err := writeX86ASM(asmDir, relName, funcCode, funcVA, lookup); err != nil {
 			return nil, fmt.Errorf("write asm %s: %w", name, err)
+		}
+		// The raw bytes are what BuildSignalContent re-decodes for its
+		// per-function snippets, and what `_debug graph` rebuilds CFGs
+		// from. Only the ARM64 stage used to write them, so on x86_64
+		// every consumer silently found nothing and skipped.
+		if err := output.WriteBin(opts.OutDir, relName, funcCode); err != nil {
+			return nil, fmt.Errorf("write bin %s: %w", name, err)
 		}
 
 		entry := strutil.DisasmIndexEntry{
@@ -164,7 +173,7 @@ func RunDisasmStageX86(
 			OwnerRef:  r.OwnerRef,
 			PCOffset:  r.PCOffset,
 			Size:      r.Size,
-			File:      filepath.ToSlash(filepath.Join("asm", naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".txt")),
+			File:      filepath.ToSlash(filepath.Join("asm", relName+".txt")),
 		}
 		if err := enc.Encode(entry); err != nil {
 			return nil, fmt.Errorf("write index: %w", err)
@@ -236,7 +245,7 @@ func RunDisasmStageX86(
 			if nblocks > 1 {
 				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
 				dot := render.DOTCFG(g, name)
-				dotPath := filepath.Join(cfgDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".dot")
+				dotPath := filepath.Join(cfgDir, relName+".dot")
 				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
 					return nil, fmt.Errorf("mkdir cfg: %w", err)
 				}
@@ -268,9 +277,8 @@ func RunDisasmStageX86(
 
 // writeX86ASM writes a simple annotated disassembly listing -- a lighter
 // equivalent of output.WriteASM (which is built around the ARM64 Inst
-// type). Kept minimal: this is read opportunistically by the signal
-// stage for code-snippet context and gracefully skipped if absent, not a
-// hard dependency.
+// type). Kept minimal: it is the human-readable listing only. Consumers
+// that need to re-decode instructions read the .bin written alongside it.
 func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols disasm.SymbolLookup) error {
 	path := filepath.Join(asmDir, relName+".txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

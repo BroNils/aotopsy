@@ -8,41 +8,8 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-// closureFunctionOffset is the byte offset of UntaggedClosure.function
-// from a TAGGED Closure pointer.
-//
-// Layout (raw_object.h, verified at 3.9.2): an 8-byte header, then
-// instantiator_type_arguments, function_type_arguments,
-// delayed_type_arguments, function, context, hash -- all pointer-sized --
-// and finally ONLY_IN_PRECOMPILED(uword entry_point_).
-//
-//	compressed (4-byte fields)   function @ 8+12 = 20 untagged, 19 tagged
-//	                             entry_point_ @ 8+24 = 32,      31 tagged
-//	uncompressed (8-byte)        function @ 8+24 = 32,          31 tagged
-//	                             entry_point_ @ 8+48 = 56,      55 tagged
-//
-// So 31 means `function` in one build and `entry_point_` in the other.
-// Accepting both 19 and 31 unconditionally -- which is what these
-// handlers did -- reads the entry point as a Function in every compressed
-// build and types the destination as the closure's owner class. That is a
-// confident wrong answer, not a missing one.
-func closureFunctionOffset(ctx *TypeContext) int {
-	word := 8
-	if ctx != nil && ctx.WordSize > 0 {
-		word = int(ctx.WordSize)
-	}
-	return 8 + 3*word - 1
-}
-
-// closureEntryPointOffset is the byte offset of
-// ONLY_IN_PRECOMPILED(entry_point_) from a tagged Closure pointer.
-func closureEntryPointOffset(ctx *TypeContext) int {
-	word := 8
-	if ctx != nil && ctx.WordSize > 0 {
-		word = int(ctx.WordSize)
-	}
-	return 8 + 6*word - 1
-}
+// The closure field offsets and the shared load resolver live in
+// closurefield.go, so the x86_64 transfer function can use them too.
 
 // This file holds the per-instruction-type handlers that transferInstruction
 // (intraproc.go) dispatches to. Each handler returns true if it consumed the
@@ -510,37 +477,9 @@ func handleFieldLoad(tc *transferCtx) bool {
 				return true
 			}
 		}
-		// Closure.function: UntaggedClosure.function is field 3
-		// (after instantiator_type_arguments, function_type_arguments,
-		// delayed_type_arguments). SDK-verified against raw_object.h@3.9.2.
-		// StubOff holds the PP index; PoolClosureClass maps it to
-		// owner class ID. The function field contains a Function
-		// whose owner class IS the closure's owner class.
-		//
-		// The offset is derived from the word size, not accepted from a
-		// set. This used to match 19 OR 31 without asking which build it
-		// was looking at -- and in a compressed build 31 is not `function`
-		// at all, it is `entry_point_`, a uword. Reading it as a Function
-		// and typing the destination as the closure's owner class was a
-		// confident wrong answer at every tear-off call site.
-		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
-			sn := tc.state[base].StubName
-			if strings.HasPrefix(sn, "Closure:") && imm9 == closureFunctionOffset(tc.ctx) {
-				poolIdx := tc.state[base].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok := tc.ctx.PoolClosureClass[poolIdx]; ok && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
-			}
-			// entry_point_ is the cached code address, not a Function.
-			// It is what a closure call actually branches to, so carry it
-			// as a stub whose name handleBLR can resolve -- rather than
-			// mistyping the register as the closure's owner class, which
-			// is what matching offset 31 unconditionally used to do.
-			if strings.HasPrefix(sn, "Closure:") && imm9 == closureEntryPointOffset(tc.ctx) {
-				tc.state[rt] = KnownStub("ClosureEntry:"+sn[len("Closure:"):], tc.state[base].StubOff)
+		if base < 31 {
+			if lat, ok := ResolveClosureField(tc.ctx, tc.state[base], imm9); ok {
+				tc.state[rt] = lat
 				return true
 			}
 		}
@@ -628,18 +567,11 @@ func handleFieldLoad(tc *transferCtx) bool {
 			tc.ctx.HeaderHits++
 			return true
 		}
-		// Closure.function via compressed LDUR32. A 32-bit load of this
-		// field only occurs in a compressed build, where the offset is 19.
-		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
-			sn := tc.state[base].StubName
-			if strings.HasPrefix(sn, "Closure:") && imm9 == closureFunctionOffset(tc.ctx) {
-				poolIdx := tc.state[base].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
+		// Closure field via compressed LDUR32.
+		if base < 31 {
+			if lat, ok2 := ResolveClosureField(tc.ctx, tc.state[base], imm9); ok2 {
+				tc.state[rt] = lat
+				return true
 			}
 		}
 		tc.state[rt] = Top()
@@ -657,16 +589,10 @@ func handleFieldLoad(tc *transferCtx) bool {
 				tc.state[rt] = tc.state[baseReg]
 				return true
 			}
-			// Closure.function via LDR64 unsigned offset. The offset
-			// depends on the word size; see closureFunctionOffset.
-			if strings.HasPrefix(sn, "Closure:") && byteOff == closureFunctionOffset(tc.ctx) {
-				poolIdx := tc.state[baseReg].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
+			// Closure field via LDR64 unsigned offset.
+			if lat, ok2 := ResolveClosureField(tc.ctx, tc.state[baseReg], byteOff); ok2 {
+				tc.state[rt] = lat
+				return true
 			}
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {

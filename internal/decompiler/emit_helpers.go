@@ -139,6 +139,7 @@ func (e *emitter) appendHelperFunctions() {
 		e.stats.TotalCalls += sub.stats.TotalCalls
 		e.stats.IndirectCalls += sub.stats.IndirectCalls
 		e.stats.NonLastBranch += sub.stats.NonLastBranch
+		e.stats.OrphanBlocks += sub.stats.OrphanBlocks
 	}
 
 	// Replace `return _block_N();` calls with the inlined body where the

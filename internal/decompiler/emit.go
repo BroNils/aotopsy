@@ -26,6 +26,9 @@ type Stats struct {
 	TryBlocks             int `json:"try_blocks"`
 	CatchHandlers         int `json:"catch_handlers"`
 	CSMDeadRegsKilled     int `json:"csm_dead_regs_killed,omitempty"`
+	// OrphanBlocks counts blocks emitted only because the entry walk
+	// never reached them -- see emitOrphanBlocks.
+	OrphanBlocks int `json:"orphan_blocks,omitempty"`
 }
 
 // Artifact is one function's emitted pseudocode plus its stats.
@@ -562,6 +565,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if entryID, ok := fir.BlockByVA(fir.EntryVA); ok {
 		e.emitBlock(entryID, 1, 0)
 	}
+	// Anything the walk above could not reach is still code in the
+	// binary, so it is shown rather than dropped.
+	e.emitOrphanBlocks(1)
 
 	// P7: Post-walk modifier patch. IsAsync/IsSyncStar/IsAsyncStar can be set
 	// during block walking (emitIndirectCall detecting a THR stub such as
