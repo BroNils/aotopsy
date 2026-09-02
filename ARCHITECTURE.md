@@ -69,9 +69,27 @@ The central source of truth for ground-truth Dart VM architecture facts, registe
 - **`internal/vmtables`**: Generated, versioned tables for Thread-relative offsets (`thrfields.go`, `thrfieldsx86.go`), stub names (`stubnames.go`), stub orderings (`stuborder.go`), and thread stubs (`threadstubs.go`) covering Dart 2.10 through 3.13+.
 - **`internal/thraudit`**: Audit and security classification (`thrclassify.go`) of thread field accesses.
 
+**Every table has an SDK drift gate, and each one exists because its absence
+cost something.** They re-derive the table from `dart-lang/sdk` at the pinned tag
+via `gh api` and diff it against what is committed:
+`TestThreadStubOffsetsMatchSDK`, `TestStubNamesMatchSDK`,
+`TestRuntimeEntriesMatchSDK`, `TestThreadFieldNamesMatchSDK`.
+
+The failure these guard against is not a missing name — that renders as an
+unnamed `THR.fNN` and says so. It is a *wrong* one. A version aliased to a
+neighbour's table after the SDK inserted a field gets every subsequent offset
+named after its neighbour, reported with exactly the confidence of a correct
+name. Four tables were in that state (3.5.0 on both architectures, 3.0.5/3.1.0/
+3.7.0 on ARM64) and the field gate did not exist until they were found.
+
+When adding a table, check `mergeRuntimeEntries`' base offset too: it shifts with
+the same insertions, and its own conflict warning is the only thing that makes a
+wrong base loud rather than silent.
+
 ### `internal/arch/arm64`
 
-Centralized bitmask instruction decoders (`decoders.go`): `LDR64UnsignedOffset`, `STR64UnsignedOffset`, `LDUR64`, `LDUR32`, `LDURH`, `DstRegOfInst`, `ADD64Immediate`, `SUB64Immediate`, `BL`, `BLR`, `B`, `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`. Shared across `disasm`, `decompiler`, `typetrack`, and `symbolmap`.
+Centralized bitmask instruction decoders (`decoders.go`): `LDR64UnsignedOffset`, `STR64UnsignedOffset`, `LDUR64`, `LDUR32`, `LDURH`, `DstRegOfInst`, `ADD64Immediate`, `SUB64Immediate`, `SUBS32Immediate` (one shared
+`addSubImmediate`; they differ only in the opcode byte), `BL`, `BLR`, `B`, `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`. Shared across `disasm`, `decompiler`, `typetrack`, and `symbolmap`.
 
 ### `internal/arch/x86`
 
@@ -123,7 +141,7 @@ Whole-program type inference and receiver recovery:
 ### `internal/decompiler`
 
 Dart-AOT-aware native pseudocode decompiler (ARM64 + x86_64):
-1. **IR Lift** (`lift.go`, `liftarm64.go`, `liftx86.go`): Machine code converted to SSA instructions with canonical register value-graphs.
+1. **IR Lift** (`lift.go`, `liftarm64.go`, `liftx86.go`): Machine code converted to SSA instructions with canonical register value-graphs. SIMD&FP is lifted once for both architectures (`lift_float.go`) — the semantics are identical and only the mnemonic and operand count differ (ARM64 is three-operand non-destructive, x86_64 two-operand destructive).
 2. **Exception Handling**: PC bounds bound mathematically via `ExceptionHandlerTable` and `PcDescriptors`.
 3. **Multi-Pass AST Compaction**:
    - Control-flow restructuring: `for-in`, `while`, `for`, `try-catch-finally` (`stmt_for_in.go`, `stmt_loops.go`).
@@ -131,6 +149,25 @@ Dart-AOT-aware native pseudocode decompiler (ARM64 + x86_64):
    - Closure synthesis: Inlines `AllocateClosure` callbacks as arrow functions at call sites (`stmt_closure.go`).
    - Idiom recognition: Cascades (`..`), null-aware navigation (`?.`, `??`), Set/List/Map literals, string interpolation (`stmt_idioms.go`).
 4. **Whole-Project Synthesizer** (`project_synthesizer.go`): Reconstructs full modular `.dart` projects mapped by library URIs.
+
+**Emission model (`emit.go`, `emit_walk.go`).** The walk inlines a successor
+when it is a tree edge — one predecessor — because that is what makes the output
+read like source rather than a basic-block dump. A *join* (two or more
+predecessors) that has already been emitted is referenced with `goto block_N;`
+instead. Re-inlining joins is combinatorial: it once made ten functions in a
+thousand produce 45% of all output, at 45x–83x lines per machine instruction.
+Helper sub-emitters share the "already emitted" set with their parent, but not
+`visits`, which is a per-emitter recursion budget answering a different question.
+
+Every recursion site goes through `emitBlock`, which holds all five guards
+(depth, cycle, visit cap, bounds, step budget). Calling `emitBlockBody` directly
+bypasses all of them at once — the switch-case path did, and killed six corpus
+samples with OOM at recursion depth ~5,400.
+
+Blocks the structured walk cannot reach are emitted after the body rather than
+dropped (`emitOrphanBlocks`). Unreachable code is frequently the thing an analyst
+is looking for, and silently omitting instructions that are present in the binary
+is the worst failure mode available to a tool whose job is to show what is there.
 
 ### `internal/output`
 
