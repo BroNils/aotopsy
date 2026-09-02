@@ -67,7 +67,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// This path should not be reached.
 		return 0, fmt.Errorf("AllocMint should be handled before skipAllocV")
 	case AllocArray:
-		return skipArrayAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "array")
 	case AllocWeakArray:
 		return skipCountedLengthAlloc(s, cm, maxSteps, "weak_array")
 	case AllocTypeArguments:
@@ -273,25 +273,10 @@ func readMintAlloc(s *dartfmt.Stream, preCanonicalSplit bool, maxSteps int) (int
 	return count, values, nil
 }
 
-// skipArrayAlloc skips Array/ImmutableArray alloc: count + per-element length.
-func skipArrayAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("array count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("array %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
+// skipArrayAlloc was an eighth copy of skipCountedLengthAlloc, missed on
+// the first consolidation pass and caught by re-running the similarity
+// scan afterwards -- which is the argument for re-running it rather than
+// assuming one pass finished the job.
 
 // skipTypeArgumentsAlloc skips TypeArguments alloc:
 //

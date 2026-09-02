@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strxref"
 )
 
@@ -87,7 +88,7 @@ func cmdStrings(args []string) error {
 			continue
 		}
 
-		clusterStart, err := cluster.FindClusterDataStart(t.data)
+		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", t.name, err)
 			continue

@@ -370,24 +370,6 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	return result, nil
 }
 
-// FindClusterDataStart returns the byte offset where clustered data begins
-// within a snapshot data region. This is after: magic(4) + length(8) + kind(8) +
-// hash(32) + features(null-terminated).
-func FindClusterDataStart(data []byte) (int, error) {
-	const minHeader = 0x35 // magic + length + kind + hash
-	if len(data) < minHeader {
-		return 0, fmt.Errorf("cluster: data too short (%d < %d)", len(data), minHeader)
-	}
-
-	// Features string starts at offset 0x34, null-terminated.
-	featStart := 0x34
-	for i := featStart; i < len(data); i++ {
-		if data[i] == 0 {
-			return i + 1, nil // byte after null terminator
-		}
-		if i-featStart > 1024 {
-			return 0, fmt.Errorf("cluster: features string too long (no null terminator within 1024 bytes)")
-		}
-	}
-	return 0, fmt.Errorf("cluster: unterminated features string")
-}
+// FindClusterDataStart moved to snapshot.FindClusterDataStart: it parses
+// the snapshot header, and keeping a second copy here meant a correction
+// to the header layout had to land in two packages.

@@ -30,7 +30,7 @@ func clusterOnly(t *testing.T, libPath string) *cluster.Result {
 		t.Skipf("unsupported snapshot version in %s", libPath)
 	}
 	data := info.IsolateData.Data
-	start, err := cluster.FindClusterDataStart(data)
+	start, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		t.Fatalf("find cluster start: %v", err)
 	}

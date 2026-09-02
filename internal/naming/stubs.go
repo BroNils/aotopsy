@@ -42,7 +42,7 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 		return out
 	}
 
-	clusterStart, err := cluster.FindClusterDataStart(info.VmData.Data)
+	clusterStart, err := snapshot.FindClusterDataStart(info.VmData.Data)
 	if err != nil {
 		if debug {
 			fmt.Fprintf(os.Stderr, "vmstubs: FindClusterDataStart: %v\n", err)
