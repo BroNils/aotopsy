@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
@@ -289,20 +290,88 @@ func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snaps
 			classNames[ci.ClassID] = name
 		}
 	}
+	// className resolves a Type ref to its class name, for the recursion
+	// below. Built once.
+	typeByRef := make(map[int]*cluster.TypeInfo, len(result.Types))
+	for i := range result.Types {
+		typeByRef[result.Types[i].RefID] = &result.Types[i]
+	}
+	taByRef := make(map[int]*cluster.TypeArgumentsInfo, len(result.TypeArguments))
+	for i := range result.TypeArguments {
+		taByRef[result.TypeArguments[i].RefID] = &result.TypeArguments[i]
+	}
+	nameOfClass := func(cid int32) string {
+		if n, ok := classNames[cid]; ok {
+			return n
+		}
+		if ct != nil {
+			return cluster.CidNameV(int(cid), ct)
+		}
+		return ""
+	}
+
 	out := make(map[int]string, len(result.Types))
 	for _, t := range result.Types {
-		name, ok := classNames[t.ClassID]
-		if !ok && ct != nil {
-			// Predefined/builtin classes have no snapshot-side Class record
-			// name; the SDK's own table covers them.
-			name = cluster.CidNameV(int(t.ClassID), ct)
-		}
+		name := nameOfClass(t.ClassID)
 		if name == "" {
 			continue
+		}
+		if args, ok := typeArgsString(&t, typeByRef, taByRef, nameOfClass, 0); ok {
+			name += args
 		}
 		out[t.RefID] = fmt.Sprintf("TypeTestingStub_%s", name)
 	}
 	return out
+}
+
+// typeArgsString renders a Type's type arguments as "<A, B>", or reports
+// ok=false when they cannot be rendered.
+//
+// The stub for List<double> and the one for List<String> both used to
+// call themselves TypeTestingStub_List, and that is the single largest
+// category of symbol-table disagreement: the unstripped ELF says
+// "assert type is List<double>".
+//
+// It is deliberately all-or-nothing. An argument is rendered only when it
+// resolves to a captured Type whose class is named; anything else -- a
+// TypeParameter (the ELF writes those as X0, X1, and nothing in the
+// snapshot capture gives us the index), a FunctionType, an unresolved ref
+// -- makes the whole list unavailable and the caller keeps the bare class
+// name. A partially-rendered argument list would be a name that looks
+// precise and is not, which is the failure mode TTS naming is already
+// switched off for on 2.10-2.15.
+func typeArgsString(
+	t *cluster.TypeInfo,
+	typeByRef map[int]*cluster.TypeInfo,
+	taByRef map[int]*cluster.TypeArgumentsInfo,
+	nameOfClass func(int32) string,
+	depth int,
+) (string, bool) {
+	// Generic types nest (List<Map<String, int>>), but a cycle in the
+	// captured refs would not terminate.
+	if depth > 4 || t == nil || t.ArgumentsRef <= 0 {
+		return "", false
+	}
+	ta, ok := taByRef[t.ArgumentsRef]
+	if !ok || ta.Length == 0 || len(ta.TypeRefs) == 0 {
+		return "", false
+	}
+	parts := make([]string, 0, len(ta.TypeRefs))
+	for _, ref := range ta.TypeRefs {
+		at, ok := typeByRef[ref]
+		if !ok {
+			return "", false
+		}
+		an := nameOfClass(at.ClassID)
+		if an == "" {
+			return "", false
+		}
+		if nested, ok := typeArgsString(at, typeByRef, taByRef, nameOfClass, depth+1); ok {
+			an += nested
+		}
+		parts = append(parts, an)
+	}
+	return "<" + strings.Join(parts, ", ") + ">", true
 }
 
 // Indirect calls that invoke a type-testing stub.
