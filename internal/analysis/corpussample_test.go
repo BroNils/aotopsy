@@ -53,12 +53,23 @@ const (
 	sampleLargeName = "dart-3.12.2-realapp-arm64.so"
 )
 
-// corpusSample resolves a sample by file name, failing if it is absent.
+// corpusSample resolves a sample by file name.
+//
+// Missing samples are treated two different ways on purpose. samples/ is
+// gitignored, so a fresh clone and every CI runner has no corpus at all
+// and these tests have nothing to assert against -- they skip. But when a
+// corpus IS present and this one sample is not in it, the corpus has
+// drifted from the registry, and that fails: silently skipping is exactly
+// how roughly 25 test functions spent months reporting ok while running
+// nothing.
 func corpusSample(t *testing.T, name string) string {
 	t.Helper()
 	p := samplecorpus.Path(name)
 	if p == "" {
-		t.Fatalf("corpus sample %s is missing.\n"+
+		if !samplecorpus.Available() {
+			t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
+		}
+		t.Fatalf("corpus sample %s is missing from samples/.\n"+
 			"  Restore it rather than skipping: a regression test that cannot find its\n"+
 			"  input is not a passing test, and this suite spent months in that state.", name)
 	}

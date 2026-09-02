@@ -390,6 +390,38 @@ func Path(fileName string) string {
 	}
 }
 
+// Available reports whether a samples/ directory exists at all, which is
+// a different question from whether one particular sample is in it.
+//
+// The distinction is the whole point. samples/ is gitignored -- the
+// binaries are large and some come from real apps -- so a fresh clone and
+// every CI runner legitimately has no corpus, and a sample-driven test
+// there has nothing to assert against and must skip. But on a machine
+// that HAS a corpus, a missing sample means the corpus has drifted from
+// the registry, and skipping is how roughly 25 test functions spent
+// months reporting ok while running nothing.
+//
+// So: no corpus at all -> skip; corpus present but this sample absent ->
+// fail. Collapsing those two into one silent skip is the bug that
+// binding the suite to the registry was meant to fix; collapsing them
+// into one hard failure is what broke CI when it was.
+func Available() bool {
+	dir, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "samples")); err == nil && fi.IsDir() {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
 // MissingMessage is what a test prints when it skips for a missing sample.
 func MissingMessage(s Sample) string {
 	return fmt.Sprintf("sample %s not present (Dart %s %s: %s) -- "+
