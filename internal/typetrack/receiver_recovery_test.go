@@ -80,7 +80,7 @@ func TestRecoverReceiverStackSlotARM64_LDUR64(t *testing.T) {
 	rawLDUR64_X1_X0_7 := uint32(0xF8407001)
 	ctx := newCtxWithOwnerField(200, 7)
 	insts := []disasm.Inst{
-		{Raw: rawLDR_X0_X29_16}, // FP+16, receiver
+		{Raw: rawLDR_X0_X29_16},  // FP+16, receiver
 		{Raw: rawLDUR64_X1_X0_7}, // LDUR64 field access off X0 at offset 7 -> validates
 	}
 	slot, ok := RecoverReceiverStackSlotARM64(insts, 200, ctx)

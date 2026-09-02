@@ -928,8 +928,8 @@ func resolveBLR(
 	result *IntraResult,
 ) {
 	res := BlrResolution{
-		PC:  inst.Addr,
-		Reg: rn,
+		PC:         inst.Addr,
+		Reg:        rn,
 		Confidence: "unknown",
 	}
 

@@ -14,9 +14,9 @@ func TestResolvedTargets(t *testing.T) {
 
 	// Polymorphic indirect: Targets list is set, Target is empty.
 	poly := CallEdgeRecord{
-		Kind:     "blr",
-		Via:      "dispatch_table",
-		Targets:  []string{"Foo.paint", "Bar.paint"},
+		Kind:       "blr",
+		Via:        "dispatch_table",
+		Targets:    []string{"Foo.paint", "Bar.paint"},
 		Candidates: 2,
 	}
 	got = poly.ResolvedTargets()

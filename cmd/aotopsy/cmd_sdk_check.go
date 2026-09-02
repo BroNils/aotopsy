@@ -12,11 +12,12 @@ import (
 // into a user-friendly CLI command.
 //
 // Usage:
-//   aotopsy sdk-check              # run all checks
-//   aotopsy sdk-check --thr        # THR field tables only
-//   aotopsy sdk-check --objectstore # ObjectStore field count only
-//   aotopsy sdk-check --stubs      # VM stub names only
-//   aotopsy sdk-check --roots      # Roots prefix count only
+//
+//	aotopsy sdk-check              # run all checks
+//	aotopsy sdk-check --thr        # THR field tables only
+//	aotopsy sdk-check --objectstore # ObjectStore field count only
+//	aotopsy sdk-check --stubs      # VM stub names only
+//	aotopsy sdk-check --roots      # Roots prefix count only
 func cmdSDKCheck(args []string) error {
 	fs := flag.NewFlagSet("sdk-check", flag.ExitOnError)
 	thrOnly := fs.Bool("thr", false, "check THR field tables only")

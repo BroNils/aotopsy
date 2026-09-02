@@ -58,7 +58,7 @@ type Result struct {
 	// DecompiledCount is the number of .dart files written; 0 unless
 	// Opts.Decompile was set.
 	DecompiledCount int
-	Diags       []string
+	Diags           []string
 }
 
 func (o *Opts) log() io.Writer {
@@ -453,11 +453,6 @@ func Run(opts Opts) (*Result, error) {
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Errors are logged but non-fatal (captured data is supplementary).
 func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, log io.Writer) {
-	type writeJob struct {
-		filename string
-		label    string
-	}
-
 	// Build all records first, then write each non-empty slice.
 	scripts := BuildScripts(clResult, pl)
 	loadingUnits := BuildLoadingUnits(clResult)

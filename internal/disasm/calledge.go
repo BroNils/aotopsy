@@ -137,8 +137,9 @@ const ObjectFieldVia = "object_field"
 // becoming anonymous.
 //
 // Displacements covered:
-//   Compressed (Dart 2.18+): 0x3 (normal), 0xb (monomorphic), 0x7 (unchecked), 0xf (mono unchecked)
-//   Uncompressed (Dart 2.10–2.17): 0x7 (normal), 0x17 (monomorphic), 0xf (unchecked), 0x1f (mono unchecked)
+//
+//	Compressed (Dart 2.18+): 0x3 (normal), 0xb (monomorphic), 0x7 (unchecked), 0xf (mono unchecked)
+//	Uncompressed (Dart 2.10–2.17): 0x7 (normal), 0x17 (monomorphic), 0xf (unchecked), 0x1f (mono unchecked)
 func IsCodeEntryPointDisp(off int) bool {
 	switch off {
 	case 0x3, 0x7, 0xb, 0xf, 0x17, 0x1f:

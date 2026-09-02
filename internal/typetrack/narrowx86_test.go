@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"golang.org/x/arch/x86/x86asm"
-
 )
 
 // The class-check sequence the x86_64 backend emits, taken verbatim from
