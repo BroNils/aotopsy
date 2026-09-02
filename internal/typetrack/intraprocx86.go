@@ -521,6 +521,18 @@ func transferInstructionX86(
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
 			}
+			// Closure field load: MOV reg, [closure + function/entry_point].
+			// The pool resolver above already carries closures as a
+			// KnownStub whose StubOff is the pool index, which is exactly
+			// what ResolveClosureField needs -- x86_64 preserved that
+			// index and then never consumed it, so every tear-off
+			// receiver went Top here while ARM64 resolved it.
+			if baseIdx >= 0 && baseIdx < 31 {
+				if lat, ok := ResolveClosureField(ctx, state[baseIdx], int(mem.Disp)); ok {
+					state[dstIdx] = lat
+					return
+				}
+			}
 			// Class-id load, Dart <= 2.18 form: MOVZX reg, word [obj + 1].
 			//
 			// Assembler::LoadClassId emits a 16-bit zero-extending load there,

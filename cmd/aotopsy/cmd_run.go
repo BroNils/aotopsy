@@ -32,6 +32,7 @@ func cmdRun(args []string) error {
 	fs.BoolVar(&_verbose, "v", false, "")
 	signalK := fs.Int("k", 2, "signal context hops")
 	from := fs.String("from", "", "reuse existing disasm output directory")
+	decompile := fs.Bool("decompile", false, "write per-function Dart pseudocode to <out>/dart/ (large)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -82,6 +83,7 @@ func cmdRun(args []string) error {
 		SignalK:   *signalK,
 		Meta:      true,
 		DecompAll: *all,
+		Decompile: *decompile,
 		Quiet:     quiet,
 	})
 	if err != nil {
@@ -104,6 +106,9 @@ func printSummary(result *analysis.Result) {
 	fmt.Fprintf(os.Stderr, "  %ssignal:%s    %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.SignalCount, cli.Reset)
 	if result.MetaPath != "" {
 		fmt.Fprintf(os.Stderr, "  %smeta:%s      %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.MetaPath, cli.Reset)
+	}
+	if result.DecompiledCount > 0 {
+		fmt.Fprintf(os.Stderr, "  %spseudocode:%s %s%d%s functions\n", cli.Muted, cli.Reset, cli.Gold, result.DecompiledCount, cli.Reset)
 	}
 
 	// Follow-up commands.

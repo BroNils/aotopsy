@@ -40,6 +40,7 @@ type Opts struct {
 	SignalK   int       // signal context hops (default 2)
 	Meta      bool      // produce flutter_meta.json
 	DecompAll bool      // all functions vs signal-only in focus list
+	Decompile bool      // emit per-function Dart pseudocode into <out>/dart/
 	Quiet     bool      // suppress verbose output (verbose is default)
 	Log       io.Writer // stderr by default
 }
@@ -54,6 +55,9 @@ type Result struct {
 	ClassCount  int
 	SignalCount int
 	MetaPath    string // empty if Meta=false
+	// DecompiledCount is the number of .dart files written; 0 unless
+	// Opts.Decompile was set.
+	DecompiledCount int
 	Diags       []string
 }
 
@@ -427,6 +431,19 @@ func Run(opts Opts) (*Result, error) {
 		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "deobfuscate_map.jsonl"), deobfMap); err != nil {
 			opts.logf("  deobfuscate: %v\n", err)
 		}
+	}
+
+	// Step 12: Dart pseudocode. Off by default because it roughly triples
+	// the output directory; announced when off so it is discoverable.
+	if opts.Decompile {
+		count, err := RunDecompileStage(&opts)
+		if err != nil {
+			return nil, fmt.Errorf("decompile: %w", err)
+		}
+		result.DecompiledCount = count
+	} else {
+		opts.logf("  %sdecompile:%s skipped -- pass --decompile to write per-function Dart pseudocode to %s/dart/\n",
+			cli.Muted, cli.Reset, opts.OutDir)
 	}
 
 	return result, nil
