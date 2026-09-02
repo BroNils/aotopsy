@@ -127,7 +127,30 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	for ri := 0; ri < len(fir.FpuArgRegs); ri++ {
 		s.setReg(fir.FpuArgRegs[ri], fmt.Sprintf("fparg%d", ri))
 	}
+	seedTypeTestABI(fir, s)
 	return s
+}
+
+// seedTypeTestABI names the operands a type-testing stub is entered with.
+//
+// These stubs receive their operands in TypeTestABI registers, which are
+// NOT the Dart argument registers: kInstanceReg is R0 on ARM64 and RAX on
+// x86_64, and neither appears in DartCallingConvention::kCpuRegistersForArgs.
+// Nothing seeded them, and since a stub never writes them either, every
+// read printed the bare register name. That single omission accounted for
+// 511 of 794 leaked tokens on ARM64 -- all x0, all inside
+// TypeTestingStub_* -- and 287 of 444 on x86_64, all rax.
+//
+// Applied only to functions that ARE such stubs. In any other function
+// these are ordinary registers, and naming R0 "instance" there would be a
+// confident wrong answer rather than a missing one.
+func seedTypeTestABI(fir *FuncIR, s *LiftState) {
+	if !fir.IsTypeTestStub() {
+		return
+	}
+	for reg, role := range fir.TypeTestABIRegs {
+		s.setReg(reg, role)
+	}
 }
 
 // joinStates conservatively merges predecessor exit states: a register survives
@@ -161,6 +184,23 @@ func joinStates(states []*LiftState) *LiftState {
 		}
 		if agree {
 			out.RegClass[reg] = cid
+		}
+	}
+	// The pending comparison, under the same all-predecessors-agree rule.
+	//
+	// It was simply not carried: joinStates built a fresh state with only
+	// Regs, Locals and RegClass, so a branch whose CMP sits in a
+	// predecessor block lost its operands and the emitter printed
+	// `if (/* cond */)`. LiftState.Clone and MergeJoin both already carry
+	// LastCmp/HasCmp, so this was an omission in one of three places that
+	// handle the same field, not a decision.
+	out.HasCmp = base.HasCmp
+	out.LastCmp = base.LastCmp
+	for _, s := range states[1:] {
+		if !s.HasCmp || s.LastCmp != out.LastCmp {
+			out.HasCmp = false
+			out.LastCmp = [2]string{}
+			break
 		}
 	}
 	return out
@@ -458,5 +498,11 @@ func (e *emitter) seedFromFixpoint(id int) {
 		if _, known := e.state.RegClass[reg]; !known {
 			e.state.RegClass[reg] = cid
 		}
+	}
+	// Additive here too: only supply a comparison the walk does not
+	// already have, so the emission's own path value always wins.
+	if !e.state.HasCmp && st.HasCmp {
+		e.state.HasCmp = true
+		e.state.LastCmp = st.LastCmp
 	}
 }

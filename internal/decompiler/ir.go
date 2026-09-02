@@ -11,8 +11,9 @@ package decompiler
 
 import (
 	"sort"
-	"aotopsy/internal/cluster"
 	"strings"
+
+	"aotopsy/internal/cluster"
 )
 
 // Op classifies one instruction's role in control flow / value flow, this
@@ -119,6 +120,11 @@ type FuncIR struct {
 	// FpuReturnReg holds the FPU return register name (ARM64: v0; x86_64:
 	// xmm0). Used to recognize double return values.
 	FpuReturnReg string
+	// TypeTestABIRegs maps a register name to the operand a type-testing
+	// stub receives in it (instance, dstType, ...). Set by each lifter
+	// from internal/sdk; consulted only for functions that ARE such stubs,
+	// since in any other function these are ordinary registers.
+	TypeTestABIRegs map[string]string
 
 	// PoolIndexOf turns a byte displacement off PoolReg into an object-pool
 	// index. The arithmetic differs per architecture -- the ARM64 pool
@@ -497,6 +503,18 @@ func (f *FuncIR) addBlock(b Block) {
 
 // ComputePreds populates Preds for each block from Succs.
 // Must be called after all blocks and successors are finalized.
+// IsTypeTestStub reports whether this function is a type-testing stub,
+// i.e. one entered with the TypeTestABI registers already populated
+// rather than with the ordinary Dart calling convention.
+//
+// The name is the signal because it is the only one available here: these
+// stubs are named by naming.buildTypeTestingStubNames after the SDK's own
+// TypeTestingStubNamer::WriteStubNameForTypeTo, so the prefix is not a
+// guess about shape, it is the same label the SDK writes.
+func (f *FuncIR) IsTypeTestStub() bool {
+	return strings.HasPrefix(f.Name, "TypeTestingStub")
+}
+
 func (f *FuncIR) ComputePreds() {
 	for i := range f.Blocks {
 		f.Blocks[i].Preds = nil

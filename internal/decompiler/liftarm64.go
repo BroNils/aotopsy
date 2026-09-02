@@ -46,6 +46,7 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
 	fir.FpuArgRegs = sdk.ARM64FpuArgRegNames()
 	fir.FpuReturnReg = sdk.ARM64FpuReturnRegName
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(true)
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
