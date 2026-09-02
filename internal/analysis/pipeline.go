@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
@@ -20,6 +21,7 @@ import (
 	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/signal"
 	"aotopsy/internal/strutil"
 	"aotopsy/internal/vmtables"
@@ -38,6 +40,7 @@ type Opts struct {
 	SignalK   int       // signal context hops (default 2)
 	Meta      bool      // produce flutter_meta.json
 	DecompAll bool      // all functions vs signal-only in focus list
+	Decompile bool      // emit per-function Dart pseudocode into <out>/dart/
 	Quiet     bool      // suppress verbose output (verbose is default)
 	Log       io.Writer // stderr by default
 }
@@ -52,7 +55,10 @@ type Result struct {
 	ClassCount  int
 	SignalCount int
 	MetaPath    string // empty if Meta=false
-	Diags       []string
+	// DecompiledCount is the number of .dart files written; 0 unless
+	// Opts.Decompile was set.
+	DecompiledCount int
+	Diags           []string
 }
 
 func (o *Opts) log() io.Writer {
@@ -144,6 +150,20 @@ func Run(opts Opts) (*Result, error) {
 	// Create output directory.
 	if err := os.MkdirAll(opts.OutDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
+	}
+
+	// Record which binary this directory came from, first thing, so it is
+	// there even if a later stage fails. Every stage that wants to name
+	// the analysed file reads this; without it they fall back to guessing
+	// from the output directory's own name.
+	{
+		dv, compressed := "", false
+		if info.Version != nil {
+			dv, compressed = info.Version.DartVersion, info.Version.CompressedPointers
+		}
+		if err := WriteProvenance(opts.OutDir, opts.LibPath, dv, isARM64, compressed); err != nil {
+			opts.logf("  provenance: %v\n", err)
+		}
 	}
 
 	// Build and write class layouts.
@@ -256,7 +276,8 @@ func Run(opts Opts) (*Result, error) {
 	// Non-fatal: if it fails, BLR edges remain unresolved (as before).
 	// Runs BEFORE xref so that dispatch_table.jsonl is available for
 	// selector_dispatch_xref.jsonl generation.
-	if err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields, sc.VMResult); err != nil {
+	tiOut, err := RunTypeInferenceStage(&opts, isARM64, pl, clResult, ranges, code, codeOff, codeVA, info, table, thrFields, sc.VMResult)
+	if err != nil {
 		opts.logf("  type inference: %v\n", err)
 	}
 
@@ -274,12 +295,16 @@ func Run(opts Opts) (*Result, error) {
 	// Step 5: Signal analysis (if enabled) -- reads functions.jsonl/
 	// call_edges.jsonl/string_refs.jsonl, which both disasm stages now
 	// produce in the same schema, so this works unmodified for x86_64.
+	var signalFindings []output.SignalFinding
 	if opts.Signal {
-		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log())
+		// false: step 9 below writes evidence.jsonl with these findings
+		// plus the type-inference resolutions folded in.
+		sigResult, err := RunSignalStage(opts.OutDir, opts.SignalK, false, opts.Quiet, opts.log(), false, opts.LibPath)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
 		result.SignalCount = sigResult.SignalCount
+		signalFindings = sigResult.Findings
 
 		// Step 5.1: Entropy analysis (packed/encrypted section detection).
 		if err := signal.WriteEntropyFindings(opts.OutDir, opts.LibPath); err != nil {
@@ -346,13 +371,38 @@ func Run(opts Opts) (*Result, error) {
 	}
 
 	// Step 9: Unified Evidence collection & export.
-	// Aggregates call edges, typetrack resolutions, and behavioral signals
-	// into evidence.jsonl with provenance and confidence classification.
+	//
+	// Three of the collector's four sources were never called. Only
+	// FromCallEdges ran, so evidence.jsonl held nothing but Kind "call" --
+	// and the BLR resolutions it did carry had been through a round trip
+	// via call_edges.jsonl, losing the confidence and slot index the type
+	// analysis produced.
 	evCollector := evidence.NewCollector()
 	if len(edges) > 0 {
 		evCollector.FromCallEdges(edges)
 	}
-	if err := evCollector.WriteJSONL(opts.OutDir); err != nil {
+	if tiOut != nil && tiOut.Inter != nil {
+		// Sorted, because ranging a map here would reorder records that
+		// tie on (PC, Kind) between runs of the same binary.
+		names := make([]string, 0, len(tiOut.Inter.Functions))
+		for name := range tiOut.Inter.Functions {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		className := func(id int) string { return tiOut.ClassIDToName[id] }
+		for _, name := range names {
+			fa := tiOut.Inter.Functions[name]
+			if fa == nil {
+				continue
+			}
+			evCollector.FromBLRResolutions(name, fa.Intra.BLRResolutions)
+			evCollector.FromFieldAccesses(name, fa.Intra.FieldAccesses, className)
+		}
+	}
+	if len(signalFindings) > 0 {
+		evCollector.FromSignalFindings(signalFindings)
+	}
+	if err := evCollector.WriteJSONL(filepath.Join(opts.OutDir, "evidence.jsonl")); err != nil {
 		opts.logf("  evidence: %v\n", err)
 	}
 
@@ -365,6 +415,15 @@ func Run(opts Opts) (*Result, error) {
 		}
 	}
 
+	// VM natives the snapshot can reach. Read from the pool rather than
+	// from string_refs: nothing in generated code loads these names, so
+	// the reference path never sees them.
+	if caps := BuildNativeCapabilities(clResult, sc.VMResult); len(caps) > 0 {
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "native_capabilities.jsonl"), caps); err != nil {
+			opts.logf("  native capabilities: %v\n", err)
+		}
+	}
+
 	// Step 11: Semantic topology de-obfuscation map.
 	// Infers class roles for obfuscated binaries based on superclass hierarchy and string accesses.
 	deobfMap := BuildDeobfuscationMap(clResult, pl, stringRefs)
@@ -374,6 +433,19 @@ func Run(opts Opts) (*Result, error) {
 		}
 	}
 
+	// Step 12: Dart pseudocode. Off by default because it roughly triples
+	// the output directory; announced when off so it is discoverable.
+	if opts.Decompile {
+		count, err := RunDecompileStage(&opts)
+		if err != nil {
+			return nil, fmt.Errorf("decompile: %w", err)
+		}
+		result.DecompiledCount = count
+	} else {
+		opts.logf("  %sdecompile:%s skipped -- pass --decompile to write per-function Dart pseudocode to %s/dart/\n",
+			cli.Muted, cli.Reset, opts.OutDir)
+	}
+
 	return result, nil
 }
 
@@ -381,11 +453,6 @@ func Run(opts Opts) (*Result, error) {
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Errors are logged but non-fatal (captured data is supplementary).
 func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, log io.Writer) {
-	type writeJob struct {
-		filename string
-		label    string
-	}
-
 	// Build all records first, then write each non-empty slice.
 	scripts := BuildScripts(clResult, pl)
 	loadingUnits := BuildLoadingUnits(clResult)
@@ -503,7 +570,9 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 	result.FuncCount = len(funcs)
 
 	if opts.Signal {
-		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log())
+		// true: --from-dir has no type-inference stage to fold in, so the
+		// signal stage's own evidence.jsonl is the only one there will be.
+		sigResult, err := RunSignalStage(opts.FromDir, opts.SignalK, false, opts.Quiet, opts.log(), true, opts.LibPath)
 		if err != nil {
 			return nil, fmt.Errorf("signal: %w", err)
 		}

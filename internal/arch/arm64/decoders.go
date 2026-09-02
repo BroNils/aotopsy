@@ -281,19 +281,31 @@ func LDURH(raw uint32) (base, rt int, imm9 int, ok bool) {
 // Encoding: sf=1 | op=0 | S=0 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0x91000000
 func ADD64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0x91000000 {
+	return addSubImmediate(raw, 0x91000000)
+}
+
+// addSubImmediate decodes the shared add/subtract-immediate encoding.
+//
+// ADD64/SUB64/SUBS32 differ ONLY in the sf|op|S bits of the opcode, i.e.
+// in the value the top byte is compared against; the register and imm12
+// extraction and the shift handling are identical. They were written out
+// three times, so seeing that was a matter of diffing three 16-line
+// functions -- and a correction to the shift decoding would have had to
+// land in all three.
+func addSubImmediate(raw, opcode uint32) (rd, rn int, immValue int, ok bool) {
+	if raw&0xFF000000 != opcode {
 		return 0, 0, 0, false
 	}
 	rd = int(raw & 0x1F)
 	rn = int((raw >> 5) & 0x1F)
 	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
+	switch (raw >> 22) & 0x3 {
+	case 0:
 		immValue = imm12
-	} else {
-		immValue = 0 // reserved
+	case 1:
+		immValue = imm12 << 12
+	default:
+		immValue = 0 // reserved shift encoding
 	}
 	return rd, rn, immValue, true
 }
@@ -303,21 +315,7 @@ func ADD64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 // Encoding: sf=1 | op=1 | S=0 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0xD1000000
 func SUB64Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0xD1000000 {
-		return 0, 0, 0, false
-	}
-	rd = int(raw & 0x1F)
-	rn = int((raw >> 5) & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
-		immValue = imm12
-	} else {
-		immValue = 0 // reserved
-	}
-	return rd, rn, immValue, true
+	return addSubImmediate(raw, 0xD1000000)
 }
 
 // ADD64Register detects ADD Xd, Xn, Xm (register-register, 64-bit).
@@ -339,22 +337,21 @@ func ADD64Register(raw uint32) (rd, rn, rm int, ok bool) {
 // Encoding: sf=0 | 1 | 1 | 100010 | sh | imm12 | Rn | Rd
 // Mask: 0xFF000000, Value: 0x71000000
 func SUBS32Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
-	if raw&0xFF000000 != 0x71000000 {
-		return 0, 0, 0, false
-	}
-	rd = int(raw & 0x1F)
-	rn = int((raw >> 5) & 0x1F)
-	imm12 := int((raw >> 10) & 0xFFF)
-	shift := int((raw >> 22) & 0x3)
-	if shift == 1 {
-		immValue = imm12 << 12
-	} else if shift == 0 {
-		immValue = imm12
-	} else {
-		immValue = 0 // reserved
-	}
-	return rd, rn, immValue, true
+	return addSubImmediate(raw, 0x71000000)
 }
+
+// A 64-bit SUBS/CMP decoder is deliberately absent.
+//
+// It was written and wired into typetrack's class-id narrowing, then
+// removed on the measurement: narrow_hits went 5872 -> 68313 on
+// dart-3.9.2-arm64 while resolved_blr moved by 0, and dart-2.12.0-arm64
+// lost a monomorphic call. Class ids are extracted into W registers, so a
+// CMP on an X register is comparing a tagged value or a Smi, and treating
+// the immediate as a class id is wrong 62000 times over.
+//
+// If a caller ever needs 64-bit comparisons for something other than
+// class-id narrowing -- a range lattice, say -- add the decoder together
+// with that caller and its own measurement.
 
 // ── Data processing instructions ──────────────────────────────────────
 
@@ -402,62 +399,276 @@ func MOVOrr(raw uint32) (rd int, ok bool) {
 	return 0, false
 }
 
-// DstRegOfInst returns the destination register of common instructions,
-// or -1 if not detected. Used to know which register an instruction defines.
-func DstRegOfInst(raw uint32) int {
-	// LDR X64 unsigned offset
-	if raw&0xFFC00000 == 0xF9400000 {
-		return int(raw & 0x1F)
+// LDP64UnsignedOffset detects LDP Xt1, Xt2, [Xn, #imm] (64-bit pair load).
+// Returns base register, destination registers, and byte offset.
+// Encoding: opc=10 | 101 | V=0 | 010 | L=1 | imm7 | Rt2 | Rn | Rt1
+// Mask: 0xFFC00000, Value: 0xA9400000
+func LDP64UnsignedOffset(raw uint32) (baseReg, rt1, rt2 int, byteOffset int, ok bool) {
+	if raw&0xFFC00000 != 0xA9400000 {
+		return 0, 0, 0, 0, false
 	}
-	// LDR W32 unsigned offset
-	if raw&0xFFC00000 == 0xB9400000 {
-		return int(raw & 0x1F)
+	rt1 = int(raw & 0x1F)
+	baseReg = int((raw >> 5) & 0x1F)
+	rt2 = int((raw >> 10) & 0x1F)
+	imm7 := int((raw >> 15) & 0x7F)
+	if imm7&(1<<6) != 0 {
+		imm7 |= ^0x7F
 	}
-	// LDR X register extended (scaled or unscaled)
-	if raw&0xFFE0FC00 == 0xF8607800 || raw&0xFFE0FC00 == 0xF8606800 || raw&0xFFE00C00 == 0xF8600800 {
-		return int(raw & 0x1F)
+	return baseReg, rt1, rt2, imm7 << 3, true
+}
+
+// STP64UnsignedOffset detects STP Xt1, Xt2, [Xn, #imm] (64-bit pair store).
+// Returns base register, source registers, and byte offset.
+// Encoding: opc=10 | 101 | V=0 | 010 | L=0 | imm7 | Rt2 | Rn | Rt1
+// Mask: 0xFFC00000, Value: 0xA9000000
+func STP64UnsignedOffset(raw uint32) (baseReg, rt1, rt2 int, byteOffset int, ok bool) {
+	if raw&0xFFC00000 != 0xA9000000 {
+		return 0, 0, 0, 0, false
 	}
-	// LDR W register extended
-	if raw&0xFFE0FC00 == 0xB8607800 || raw&0xFFE0FC00 == 0xB8606800 || raw&0xFFE00C00 == 0xB8600800 {
-		return int(raw & 0x1F)
+	rt1 = int(raw & 0x1F)
+	baseReg = int((raw >> 5) & 0x1F)
+	rt2 = int((raw >> 10) & 0x1F)
+	imm7 := int((raw >> 15) & 0x7F)
+	if imm7&(1<<6) != 0 {
+		imm7 |= ^0x7F
 	}
-	// LDUR X64
-	if raw&0xFFE00C00 == 0xF8400000 {
-		return int(raw & 0x1F)
-	}
-	// LDUR W32
-	if raw&0xFFE00C00 == 0xB8400000 {
-		return int(raw & 0x1F)
-	}
-	// LDURH W16
-	if raw&0xFFE00C00 == 0x78400000 {
-		return int(raw & 0x1F)
-	}
-	// ADD Xd, Xn, #imm
-	if raw&0xFF000000 == 0x91000000 {
-		return int(raw & 0x1F)
-	}
-	// SUB Xd, Xn, #imm
-	if raw&0xFF000000 == 0xD1000000 {
-		return int(raw & 0x1F)
-	}
-	// MOVZ / MOVK / MOVN Xd, #imm (mask 0xFF800000 covers bits 31-23)
-	if raw&0xFF800000 == 0xD2800000 || raw&0xFF800000 == 0xF2800000 || raw&0xFF800000 == 0x92800000 {
-		return int(raw & 0x1F)
-	}
-	// UBFX
-	if raw&0xFF800000 == 0xD3000000 {
-		return int(raw & 0x1F)
-	}
-	// ADD Xd, Xn, Xm
-	if raw&0xFF200000 == 0x8B000000 {
-		return int(raw & 0x1F)
-	}
-	// ORR (MOV alias)
-	if raw&0xFF200000 == 0xAA000000 {
-		if (raw>>5)&0x1F == 31 {
-			return int(raw & 0x1F)
+	return baseReg, rt1, rt2, imm7 << 3, true
+}
+
+// DstRegsOfInst returns all general-purpose destination registers defined by
+// the instruction (0-30), or an empty slice if no GPR is written (or if CMP/TST).
+// For pair loads (LDP), returns both registers []int{rt1, rt2}.
+func DstRegsOfInst(raw uint32) []int {
+	// ── 1. Load Pair (LDP) ──
+	// Bits: [31:30]=opc, [29:27]=101, [26]=V(0 for GPR), [22]=L(1 for Load)
+	// Mask 0x3E400000 == 0x28400000 covers 32-bit, 64-bit, and LDPSW.
+	if raw&0x3E400000 == 0x28400000 {
+		rt1 := int(raw & 0x1F)
+		rt2 := int((raw >> 10) & 0x1F)
+		var res []int
+		if rt1 < 31 {
+			res = append(res, rt1)
 		}
+		if rt2 < 31 && rt2 != rt1 {
+			res = append(res, rt2)
+		}
+		return res
 	}
-	return -1
+
+	// ── 2. Single-register loads ──
+	// LDR literal (32/64 bit): mask 0x3B000000 == 0x18000000
+	if raw&0x3B000000 == 0x18000000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Load register, unsigned immediate offset. Encoding:
+	//   [31:30]=size [29:27]=111 [26]=V [25:24]=01 [23:22]=opc [21:10]=imm12
+	// opc selects load vs store and the extension, so the mask MUST cover
+	// bits 23:22 (0xFFC00000). Masks that left bit 22 out matched the STORE
+	// with the same size and reported its source register as a destination --
+	// see the comment on the unscaled group below.
+	if (raw&0xFFC00000 == 0xF9400000) || // LDR   Xt
+		(raw&0xFFC00000 == 0xB9400000) || // LDR   Wt
+		(raw&0xFFC00000 == 0xB9800000) || // LDRSW Xt
+		(raw&0xFFC00000 == 0x79400000) || // LDRH  Wt
+		(raw&0xFFC00000 == 0x79800000) || // LDRSH Xt
+		(raw&0xFFC00000 == 0x79C00000) || // LDRSH Wt
+		(raw&0xFFC00000 == 0x39400000) || // LDRB  Wt
+		(raw&0xFFC00000 == 0x39800000) || // LDRSB Xt
+		(raw&0xFFC00000 == 0x39C00000) { // LDRSB Wt
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Load register, unscaled/post-index/pre-index/unprivileged. Encoding:
+	//   [31:30]=size [29:27]=111 [26]=V [25:24]=00 [23:22]=opc [21]=0
+	//   [20:12]=imm9 [11:10]=mode
+	// Mask bits 31:21 (0xFFE00000): that pins opc, so only loads match, and
+	// bit 21 = 0 excludes the register-offset form handled below.
+	//
+	// Two bugs lived here. The masks omitted bits 23:22, so STUR Wt, STURB
+	// and STURH all reported Rt as a destination -- every 8/16/32-bit store
+	// killed a live register's tracked type, which is why intra-procedural
+	// type inference collapsed on ARM64 (blr_at_top +4967, add_class_hits
+	// -36632 on dart-2.12.0) once transferInstruction started using this
+	// function to invalidate registers. And bits 11:10 were pinned to 00, so
+	// only LDUR matched: post-index (01) and pre-index (11) were missed
+	// entirely, which hid every `ldr x19,[sp],#8` epilogue restore. All four
+	// modes write Rt.
+	if (raw&0xFFE00000 == 0xF8400000) || // LDUR/LDR (post/pre) Xt
+		(raw&0xFFE00000 == 0xB8400000) || // ... Wt
+		(raw&0xFFE00000 == 0xB8800000) || // LDURSW Xt
+		(raw&0xFFE00000 == 0x78400000) || // LDURH  Wt
+		(raw&0xFFE00000 == 0x78800000) || // LDURSH Xt
+		(raw&0xFFE00000 == 0x78C00000) || // LDURSH Wt
+		(raw&0xFFE00000 == 0x38400000) || // LDURB  Wt
+		(raw&0xFFE00000 == 0x38800000) || // LDURSB Xt
+		(raw&0xFFE00000 == 0x38C00000) { // LDURSB Wt
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// LDR register extended (scaled / unscaled): mask 0x3FE00800 == 0x38600800
+	if raw&0x3FE00800 == 0x38600800 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+
+	// ── 3. Data Processing - Immediate ──
+	// ADD/SUB immediate: mask 0x1F000000 == 0x11000000
+	if raw&0x1F000000 == 0x11000000 {
+		// ADDS/SUBS (S=1, bits 30:29 == 11 -> 0x71000000 / 0xF1000000)
+		if raw&0x7F000000 == 0x71000000 {
+			rd := int(raw & 0x1F)
+			if rd == 31 { // CMP / CMN: discards result into XZR
+				return nil
+			}
+			return []int{rd}
+		}
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return []int{31} // SP write (ADD/SUB SP, SP, #imm)
+	}
+	// MOVZ / MOVK / MOVN: mask 0x1F800000 == 0x12800000
+	if raw&0x1F800000 == 0x12800000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Bitfield: UBFM/UBFX, SBFM/SBFX, BFM/BFI: mask 0x1F800000 == 0x13000000
+	if raw&0x1F800000 == 0x13000000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Logical immediate: AND, ORR, EOR, ANDS: mask 0x1F800000 == 0x12000000
+	if raw&0x1F800000 == 0x12000000 {
+		if raw&0x7F800000 == 0x72000000 { // ANDS (TST immediate)
+			rd := int(raw & 0x1F)
+			if rd == 31 {
+				return nil
+			}
+			return []int{rd}
+		}
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// ADR / ADRP: mask 0x1F000000 == 0x10000000
+	if raw&0x1F000000 == 0x10000000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+
+	// ── 4. Data Processing - Register ──
+	// Logical shifted register: AND, BIC, ORR, ORN, EOR, EON, ANDS, BICS (mask 0x1F000000 == 0x0A000000)
+	if raw&0x1F000000 == 0x0A000000 {
+		if raw&0x7F000000 == 0x6A000000 { // ANDS / BICS (TST reg)
+			rd := int(raw & 0x1F)
+			if rd == 31 {
+				return nil
+			}
+			return []int{rd}
+		}
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Add/Sub shifted register: ADD, SUB, ADDS, SUBS (mask 0x1F200000 == 0x0B000000)
+	if raw&0x1F200000 == 0x0B000000 {
+		if raw&0x7F200000 == 0x6B000000 { // ADDS / SUBS (CMP reg)
+			rd := int(raw & 0x1F)
+			if rd == 31 {
+				return nil
+			}
+			return []int{rd}
+		}
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return []int{31}
+	}
+	// Add/Sub extended register: ADD, SUB, ADDS, SUBS extended (mask 0x1FE00000 == 0x0B200000)
+	if raw&0x1FE00000 == 0x0B200000 {
+		if raw&0x7FE00000 == 0x6B200000 { // ADDS / SUBS extended
+			rd := int(raw & 0x1F)
+			if rd == 31 {
+				return nil
+			}
+			return []int{rd}
+		}
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return []int{31}
+	}
+	// Conditional Select: CSEL, CSINC, CSINV, CSNEG, CSET (mask 0x1FE00000 == 0x1A800000)
+	if raw&0x1FE00000 == 0x1A800000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Data-processing 2-source: SDIV, UDIV, LSLV, LSRV, ASRV, RORV (mask 0x5FE00000 == 0x1AC00000)
+	if raw&0x5FE00000 == 0x1AC00000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Data-processing 1-source: RBIT, REV16, REV, REV32, CLZ, CLS (mask 0x5FE00000 == 0x5AC00000)
+	if raw&0x5FE00000 == 0x5AC00000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+	// Data-processing 3-source: MADD, MSUB, SMADDL, SMSUBL, SMULH, UMADDL, UMSUBL, UMULH (mask 0x1F000000 == 0x1B000000)
+	if raw&0x1F000000 == 0x1B000000 {
+		rd := int(raw & 0x1F)
+		if rd < 31 {
+			return []int{rd}
+		}
+		return nil
+	}
+
+	return nil
+}
+
+// DstRegOfInst returns the first destination register of an instruction,
+// or -1 if no register is defined.
+func DstRegOfInst(raw uint32) int {
+	regs := DstRegsOfInst(raw)
+	if len(regs) == 0 {
+		return -1
+	}
+	return regs[0]
 }

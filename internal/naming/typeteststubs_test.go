@@ -1,7 +1,6 @@
 package naming
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -33,7 +32,7 @@ func loadForNaming(t *testing.T, libPath string) (*cluster.Result, *cluster.Resu
 		t.Skipf("unsupported snapshot in %s", libPath)
 	}
 	data := info.IsolateData.Data
-	start, err := cluster.FindClusterDataStart(data)
+	start, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		t.Fatalf("cluster start: %v", err)
 	}
@@ -50,7 +49,7 @@ func loadForNaming(t *testing.T, libPath string) (*cluster.Result, *cluster.Resu
 	}
 	var vmRes *cluster.Result
 	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
+		if vmStart, err := snapshot.FindClusterDataStart(vmData); err == nil {
 			if r, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
 				_ = cluster.ReadFill(vmData, r, info.Version, true, info.VmHeader.TotalSize)
 				vmRes = r
@@ -69,12 +68,9 @@ func loadForNaming(t *testing.T, libPath string) (*cluster.Result, *cluster.Resu
 // used to render as `sub_<pcOffset>`. On the 3.9.2 ARM64 sample that was 324
 // of the 409 remaining unnamed Codes.
 func TestTypeTestingStubsAreNamed(t *testing.T) {
-	for _, env := range []string{"AOTOPSY_TEST_SAMPLE_ARM64", "AOTOPSY_TEST_SAMPLE_312_X64"} {
-		libPath := os.Getenv(env)
-		if libPath == "" {
-			t.Skipf("%s not set", env)
-		}
-		t.Run(env, func(t *testing.T) {
+	for _, name := range []string{sampleARM64Name, sample312X64Name} {
+		libPath := corpusSample(t, name)
+		t.Run(name, func(t *testing.T) {
 			res, vmRes, profile := loadForNaming(t, libPath)
 			pl := BuildPoolLookups(res, profile.CIDs, vmRes, profile.CodeIndexOneBased,
 				profile.DartVersion, profile.TypeClassIdIsRef)
@@ -111,10 +107,7 @@ func TestTypeTestingStubsAreNamed(t *testing.T) {
 // This pins the gate. If Type->ClassID is ever implemented for 2.x, this test
 // fails and the gate can be removed on purpose rather than by accident.
 func TestTypeTestingStubNamingIsOffWhereTypesCannotResolve(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_DART212")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_DART212 not set")
-	}
+	libPath := corpusSample(t, sampleDart212Name)
 	res, vmRes, profile := loadForNaming(t, libPath)
 	if !profile.TypeClassIdIsRef {
 		t.Fatalf("sample no longer has TypeClassIdIsRef; this test guards the wrong thing now")

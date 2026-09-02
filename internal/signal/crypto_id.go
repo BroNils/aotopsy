@@ -210,6 +210,7 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 	}
 
 	// Scan binary for each pattern
+	familyHits := map[string]int{}
 	for _, pat := range patterns {
 		offset := 0
 		for {
@@ -221,6 +222,7 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 			key := pat.algo + ":" + pat.hex
 			if !seen[key] {
 				seen[key] = true
+				familyHits[algorithmFamily(pat.algo)]++
 				findings = append(findings, CryptoFinding{
 					Algorithm: pat.algo,
 					Constant:  pat.hex,
@@ -232,7 +234,64 @@ func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 		}
 	}
 
-	return findings, nil
+	// Drop lone ASCII-looking constants.
+	//
+	// ChaCha20's constants ARE text: "expand 32-byte k" split into four
+	// 32-bit words, so 0x61707865 is literally the bytes "expa". A raw
+	// scan therefore matched it inside `expando_patch.dart` -- a Dart core
+	// library filename -- and reported "ChaCha20 detected" on a binary
+	// containing no ChaCha20 at all. The other three words had zero hits,
+	// which is exactly the corroboration this now requires.
+	//
+	// isDistinctiveConstant cannot catch this: "expa" has four distinct
+	// non-zero bytes and is not a power of two, so it passes every test
+	// there. The property that matters is not entropy, it is that the
+	// bytes are printable text, which collides with identifiers in any
+	// real binary.
+	//
+	// Only ASCII constants need a second witness. A lone SHA-256 K[0]
+	// (0x428a2f98 -> 98 2f 8a 42) is not text and is still reported on its
+	// own, so no existing detection is weakened. For an RE tool a
+	// confident wrong "ChaCha20 found" is worse than silence: it sends the
+	// analyst hunting a cipher that is not there.
+	kept := findings[:0]
+	for _, f := range findings {
+		if isPrintableASCIIConstant(f.Constant) && familyHits[algorithmFamily(f.Algorithm)] < 2 {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, nil
+}
+
+// algorithmFamily is the cipher name in an entry like "ChaCha20 'expa'"
+// or "SHA-256 K[0]" -- everything before the first space.
+func algorithmFamily(algo string) string {
+	if i := strings.IndexByte(algo, ' '); i >= 0 {
+		return algo[:i]
+	}
+	return algo
+}
+
+// isPrintableASCIIConstant reports whether every byte of the constant is
+// printable ASCII, i.e. whether finding it in a binary is as likely to be
+// text as it is to be a cipher constant.
+func isPrintableASCIIConstant(hex string) bool {
+	var val uint64
+	if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
+		return false
+	}
+	width := 4
+	if len(strings.TrimPrefix(hex, "0x")) > 8 {
+		width = 8
+	}
+	for i := 0; i < width; i++ {
+		b := byte(val >> (8 * uint(i)))
+		if b < 0x20 || b > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // MethodChannelFinding is a Flutter MethodChannel enumeration finding.

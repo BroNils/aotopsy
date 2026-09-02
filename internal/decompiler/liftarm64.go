@@ -46,14 +46,20 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
 	fir.FpuArgRegs = sdk.ARM64FpuArgRegNames()
 	fir.FpuReturnReg = sdk.ARM64FpuReturnRegName
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(true)
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
 		if bb.Start < len(insts) {
 			blk.StartVA = insts[bb.Start].Addr
 		}
+		// Pool bases established by `add xT, PP, #hi` earlier in this
+		// block, keyed by destination register. Block-local on purpose:
+		// carrying them across a control-flow join would pair an ADD on
+		// one path with an LDR on another.
+		poolBase := map[int]int64{}
 		for i := bb.Start; i < bb.End && i < len(insts); i++ {
-			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i]))
+			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i], poolBase))
 		}
 		for _, s := range bb.Succs {
 			blk.Succs = append(blk.Succs, Succ{BlockID: s.BlockID, Cond: s.Cond})
@@ -63,10 +69,26 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	return fir
 }
 
-func liftARM64Instr(inst disasm.Inst) Instr {
+// liftARM64Instr lifts one instruction. poolBase carries the two-instruction
+// object-pool form across the block (see trackARM64PoolBase); it is mutated
+// as instructions define and redefine registers.
+func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 	mnemonic := strings.ToLower(inst.Mnemonic)
 	src := strings.ToLower(inst.Text)
 	ir := Instr{Addr: inst.Addr, Src: src, PoolIndex: -1}
+
+	// Resolve against the base BEFORE this instruction updates the map:
+	// `add x2, x27, #0x4000; ldr x2, [x2, #8]` reuses the same register,
+	// and the load reads the base the add produced.
+	baseIdx := arm64PoolIndexViaBase(inst, poolBase)
+	defer trackARM64PoolBase(inst, poolBase)
+
+	if baseIdx >= 0 && (mnemonic == "ldr" || mnemonic == "ldur") {
+		ir.Op = OpLoadPool
+		ir.PoolIndex = baseIdx
+		ir.Target = firstOperandReg(inst.Operands)
+		return ir
+	}
 
 	switch {
 	case mnemonic == "ret":
@@ -208,6 +230,54 @@ func firstOperandToken(operands string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[0])
+}
+
+// trackARM64PoolBase maintains the register -> pool-base map for the
+// two-instruction object-pool form.
+//
+// Dart's LoadWordFromPoolIndex emits a single `ldr xD, [PP, #imm]` only
+// while the displacement fits the 12-bit unsigned-offset field. Past that
+// it emits `add xT, PP, #hi` then `ldr xD, [xT, #lo]`, and the lifter
+// recognised only the first form -- so on a real production binary 38716
+// of 64601 pool loads (60%) produced no OpLoadPool at all, and every
+// string, class and stub reference behind them was invisible to the
+// pseudocode, to strxref, and to anything else reading PoolIndex.
+func trackARM64PoolBase(inst disasm.Inst, poolBase map[int]int64) {
+	if rd, rn, imm, ok := arm64.ADD64Immediate(inst.Raw); ok && rn == sdk.ARM64PP && rd < 31 {
+		poolBase[rd] = int64(imm)
+		return
+	}
+	// Anything else that writes a tracked register invalidates it. A base
+	// that survived its register being overwritten would resolve a later
+	// load against an address that no longer exists.
+	for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
+		delete(poolBase, rd)
+	}
+}
+
+// arm64PoolIndexViaBase resolves `ldr xD, [xT, #lo]` where xT was set by
+// an earlier `add xT, PP, #hi`, returning the pool slot index or -1.
+func arm64PoolIndexViaBase(inst disasm.Inst, poolBase map[int]int64) int {
+	if len(poolBase) == 0 {
+		return -1
+	}
+	base, off, ok := arm64.LDR64UnsignedOffset(inst.Raw)
+	if !ok {
+		b, _, o, uok := arm64.LDUR64(inst.Raw)
+		if !uok {
+			return -1
+		}
+		base, off = b, o
+	}
+	hi, tracked := poolBase[base]
+	if !tracked {
+		return -1
+	}
+	idx, ok := disasm.ARM64PoolIndex(int(hi + int64(off)))
+	if !ok {
+		return -1
+	}
+	return idx
 }
 
 // isARM64PoolLoad recognizes "ldr/ldur xD, [x27, #imm]" (or w-register
@@ -378,69 +448,46 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			return line1, handled, true
 		}
 		return "", false, true
-	case "fadd", "fsub", "fmul", "fdiv", "fmov", "fneg", "fsqrt", "fabs":
-		// ARM64 FPU arithmetic. These operate on Dn/Sn/Qn registers.
-		// fmov is a register-to-register copy (like mov for GPR).
-		// The others are binary ops: fadd Dd, Dn, Dm → Dd = Dn + Dm.
+	case "csel", "csinc", "csinv", "csneg":
+		if len(ops) >= 4 {
+			dst := strings.ToLower(ops[0])
+			src1 := operandExpr(fir, s, ops[1])
+			src2 := operandExpr(fir, s, ops[2])
+			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[3])))
+			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[3]))
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			var elseExpr string
+			switch mnemonic {
+			case "csel":
+				elseExpr = src2
+			case "csinc":
+				elseExpr = fmt.Sprintf("(%s + 1)", src2)
+			case "csinv":
+				elseExpr = fmt.Sprintf("(~%s)", src2)
+			case "csneg":
+				elseExpr = fmt.Sprintf("(-%s)", src2)
+			}
+			s.setReg(dst, fmt.Sprintf("(%s ? %s : %s)", condStr, src1, elseExpr))
+		}
+		return "", false, true
+	case "cset", "csetm":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			if mnemonic == "fmov" && len(ops) >= 2 {
-				s.setReg(dst, operandExpr(fir, s, ops[1]))
-			} else if len(ops) >= 3 {
-				src1 := operandExpr(fir, s, ops[1])
-				src2 := operandExpr(fir, s, ops[2])
-				var op string
-				switch mnemonic {
-				case "fadd":
-					op = "+"
-				case "fsub":
-					op = "-"
-				case "fmul":
-					op = "*"
-				case "fdiv":
-					op = "/"
-				case "fneg":
-					s.setReg(dst, fmt.Sprintf("-(%s)", src1))
-					return "", false, true
-				case "fsqrt":
-					s.setReg(dst, fmt.Sprintf("sqrt(%s)", src1))
-					return "", false, true
-				case "fabs":
-					s.setReg(dst, fmt.Sprintf("abs(%s)", src1))
-					return "", false, true
-				}
-				s.setReg(dst, fmt.Sprintf("(%s %s %s)", src1, op, src2))
+			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[1])))
+			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[1]))
+			if s.HasCmp && condOp != "?" {
+				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			}
+			if mnemonic == "cset" {
+				s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))
+			} else {
+				s.setReg(dst, fmt.Sprintf("(%s ? -1 : 0)", condStr))
 			}
 		}
 		return "", false, true
-	case "fcmp":
-		// FPU compare: fcmp Dn, Dm — sets flags like cmp but for doubles.
-		if len(ops) >= 2 {
-			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
-			s.HasCmp = true
-		}
-		return "", false, true
-	case "fcvt":
-		// FCVT converts between FP precisions: fcvt Dd, Sn (single→double).
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, operandExpr(fir, s, ops[1]))
-		}
-		return "", false, true
-	case "scvtf", "ucvtf":
-		// SCVTF/UCVTF: integer to FP conversion.
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, fmt.Sprintf("(%s).toDouble()", operandExpr(fir, s, ops[1])))
-		}
-		return "", false, true
-	case "fcvtzs", "fcvtzu":
-		// FCVTZS/FCVTZU: FP to integer conversion (truncate toward zero).
-		if len(ops) >= 2 {
-			dst := strings.ToLower(ops[0])
-			s.setReg(dst, fmt.Sprintf("(%s).toInt()", operandExpr(fir, s, ops[1])))
-		}
-		return "", false, true
+		// SIMD&FP mnemonics are handled by applyFloat, shared with x86_64.
 	}
 	return "", false, false
 }

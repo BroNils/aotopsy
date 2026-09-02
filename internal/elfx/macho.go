@@ -307,10 +307,16 @@ func openMachO(path string) (*MachOFile, error) {
 			}
 
 			// Read string table.
+			//
+			// This used to `break` on failure, as the last statement of the
+			// block -- so it exited to exactly where control was already
+			// going and the error was simply dropped. The symbol table is
+			// parsed by this point; without its string table the names
+			// cannot be resolved, so the buffer is dropped rather than left
+			// zero-filled and read as a run of empty names.
 			mo.strtab = make([]byte, strSize)
-			_, err = f.ReadAt(mo.strtab, int64(strOff))
-			if err != nil {
-				break
+			if _, err = f.ReadAt(mo.strtab, int64(strOff)); err != nil {
+				mo.strtab = nil
 			}
 		}
 

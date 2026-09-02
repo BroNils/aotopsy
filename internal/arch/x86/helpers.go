@@ -17,7 +17,11 @@
 // leaves the others wrong.
 package x86
 
-import "golang.org/x/arch/x86/x86asm"
+import (
+	"aotopsy/internal/sdk"
+
+	"golang.org/x/arch/x86/x86asm"
+)
 
 // CanonReg maps any width of an x86_64 general-purpose register to its
 // canonical number 0..15 (RAX=0 .. R15=15), or -1 for anything else.
@@ -114,15 +118,43 @@ func IsCondJump(op x86asm.Op) bool {
 // Successor convention constants (SuccEqual, SuccNotEqual, SuccUnknown)
 // live in internal/sdk because they are shared with ARM64's
 // equalitySuccessor in typetrack/intraproc.go.
+// The constants used to be written out as bare 0/1/-1 with the sdk name
+// in a trailing comment. A comment does not track a rename, and the two
+// architectures disagreeing about which edge means "equal" is a bug that
+// fails silently -- it produces confidently wrong types, not an error.
 func EqualitySuccessor(op x86asm.Op, numSuccs int) int {
 	if numSuccs != 2 {
-		return -1 // sdk.SuccUnknown
+		return sdk.SuccUnknown
 	}
 	switch op {
 	case x86asm.JE:
-		return 0 // sdk.SuccEqual
+		return sdk.SuccEqual
 	case x86asm.JNE:
-		return 1 // sdk.SuccNotEqual
+		return sdk.SuccNotEqual
 	}
-	return -1 // sdk.SuccUnknown
+	return sdk.SuccUnknown
+}
+
+// DstRegsOfInst returns the canonical register indices (0..15) modified by inst.
+// Returns nil for instructions that do not modify GP registers (e.g. CMP, TEST, PUSH, jumps).
+func DstRegsOfInst(inst x86asm.Inst) []int {
+	switch inst.Op {
+	case x86asm.CMP, x86asm.TEST, x86asm.PUSH, x86asm.JMP:
+		return nil
+	case x86asm.DIV, x86asm.IDIV:
+		// DIV/IDIV implicitly modifies RAX (0) and RDX (2)
+		return []int{0, 2}
+	}
+	if IsCondJump(inst.Op) {
+		return nil
+	}
+	if len(inst.Args) >= 1 {
+		if r, ok := inst.Args[0].(x86asm.Reg); ok {
+			canon := CanonReg(r)
+			if canon >= 0 {
+				return []int{canon}
+			}
+		}
+	}
+	return nil
 }

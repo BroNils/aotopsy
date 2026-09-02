@@ -14,6 +14,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -103,13 +104,13 @@ func RunDisasmStageX86(
 	edgesEnc := json.NewEncoder(edgesFile)
 	edgesEnc.SetEscapeHTML(false)
 
-	// unresolved_thr.jsonl: always created (downstream tooling/tests may
-	// expect the file to exist) but left empty -- see doc comment above.
 	unresTHRFile, err := os.Create(filepath.Join(opts.OutDir, "unresolved_thr.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("create unresolved_thr.jsonl: %w", err)
 	}
-	_ = unresTHRFile.Close()
+	defer func() { _ = unresTHRFile.Close() }()
+	unresTHREnc := json.NewEncoder(unresTHRFile)
+	unresTHREnc.SetEscapeHTML(false)
 
 	stringRefsFile, err := os.Create(filepath.Join(opts.OutDir, "string_refs.jsonl"))
 	if err != nil {
@@ -153,8 +154,16 @@ func RunDisasmStageX86(
 			name = funcName
 		}
 
-		if err := writeX86ASM(asmDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset), funcCode, funcVA, lookup); err != nil {
+		relName := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
+		if err := writeX86ASM(asmDir, relName, funcCode, funcVA, lookup); err != nil {
 			return nil, fmt.Errorf("write asm %s: %w", name, err)
+		}
+		// The raw bytes are what BuildSignalContent re-decodes for its
+		// per-function snippets, and what `_debug graph` rebuilds CFGs
+		// from. Only the ARM64 stage used to write them, so on x86_64
+		// every consumer silently found nothing and skipped.
+		if err := output.WriteBin(opts.OutDir, relName, funcCode); err != nil {
+			return nil, fmt.Errorf("write bin %s: %w", name, err)
 		}
 
 		entry := strutil.DisasmIndexEntry{
@@ -164,7 +173,7 @@ func RunDisasmStageX86(
 			OwnerRef:  r.OwnerRef,
 			PCOffset:  r.PCOffset,
 			Size:      r.Size,
-			File:      filepath.ToSlash(filepath.Join("asm", naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".txt")),
+			File:      filepath.ToSlash(filepath.Join("asm", relName+".txt")),
 		}
 		if err := enc.Encode(entry); err != nil {
 			return nil, fmt.Errorf("write index: %w", err)
@@ -214,12 +223,29 @@ func RunDisasmStageX86(
 			dr.TotalStringRefs++
 		}
 
+		thrAccs := disasm.ExtractX86THRAccesses(funcCode, funcVA, thrFields)
+		for _, acc := range thrAccs {
+			if !acc.Resolved {
+				rec := disasm.UnresolvedTHRRecord{
+					FuncName:  name,
+					PC:        fmt.Sprintf("0x%x", acc.PC),
+					THROffset: fmt.Sprintf("0x%x", acc.THROffset),
+					Width:     acc.Width,
+					IsStore:   acc.IsStore,
+					Class:     "UNKNOWN",
+				}
+				if err := unresTHREnc.Encode(rec); err != nil {
+					return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
+				}
+			}
+		}
+
 		if opts.Graph {
 			lcfg, nblocks := callgraph.BuildX86FuncCFG(name, funcCode, funcVA, scan.Edges)
 			if nblocks > 1 {
 				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
 				dot := render.DOTCFG(g, name)
-				dotPath := filepath.Join(cfgDir, naming.FuncRelPath(ownerName, funcName, r.PCOffset)+".dot")
+				dotPath := filepath.Join(cfgDir, relName+".dot")
 				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
 					return nil, fmt.Errorf("mkdir cfg: %w", err)
 				}
@@ -251,9 +277,8 @@ func RunDisasmStageX86(
 
 // writeX86ASM writes a simple annotated disassembly listing -- a lighter
 // equivalent of output.WriteASM (which is built around the ARM64 Inst
-// type). Kept minimal: this is read opportunistically by the signal
-// stage for code-snippet context and gracefully skipped if absent, not a
-// hard dependency.
+// type). Kept minimal: it is the human-readable listing only. Consumers
+// that need to re-decode instructions read the .bin written alongside it.
 func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols disasm.SymbolLookup) error {
 	path := filepath.Join(asmDir, relName+".txt")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -270,7 +295,7 @@ func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols
 			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
 			return true
 		}
-		line := d.Inst.String()
+		line := x86.InstText(d.Inst)
 		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := symbols(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)

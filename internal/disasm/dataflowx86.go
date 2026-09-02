@@ -357,10 +357,8 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 		x86Kill(regs, touched, x86.CanonReg(dstReg))
 		return
 	}
-	if len(inst.Args) >= 1 {
-		if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-			x86Kill(regs, touched, x86.CanonReg(dstReg))
-		}
+	for _, reg := range x86.DstRegsOfInst(inst) {
+		x86Kill(regs, touched, reg)
 	}
 }
 

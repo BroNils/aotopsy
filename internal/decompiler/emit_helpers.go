@@ -82,7 +82,9 @@ func (e *emitter) appendHelperFunctions() {
 			blockEntryState: e.blockEntryState,
 			loopPhis:        e.loopPhis,
 			pinnedPhi:       make(map[string]string),
-			phiDeclared:     make(map[int]bool)}
+			phiDeclared:     make(map[int]bool),
+			// Shared, unlike visits: see emitter.emittedAnywhere.
+			emittedAnywhere: e.emittedAnywhere}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,
@@ -139,6 +141,7 @@ func (e *emitter) appendHelperFunctions() {
 		e.stats.TotalCalls += sub.stats.TotalCalls
 		e.stats.IndirectCalls += sub.stats.IndirectCalls
 		e.stats.NonLastBranch += sub.stats.NonLastBranch
+		e.stats.OrphanBlocks += sub.stats.OrphanBlocks
 	}
 
 	// Replace `return _block_N();` calls with the inlined body where the

@@ -681,6 +681,11 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 	mnemonic, ops := splitOperands(ins.Src)
 	mnemonic = normalizeMnemonic(mnemonic)
 
+	// SIMD&FP first: shared across both architectures, and its mnemonics
+	// do not overlap the integer ones below.
+	if line, hasLine, handled := applyFloat(fir, s, mnemonic, ops); handled {
+		return line, hasLine
+	}
 	// Try arch-specific handlers first (mnemonics are arch-disjoint).
 	if line, hasLine, handled := applyOtherARM64(fir, s, mnemonic, ops); handled {
 		return line, hasLine

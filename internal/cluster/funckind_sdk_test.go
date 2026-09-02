@@ -2,11 +2,10 @@ package cluster
 
 import (
 	"math/bits"
-	"regexp"
 	"sort"
-	"strings"
 	"testing"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
 	"aotopsy/internal/snapshot"
 )
@@ -33,12 +32,7 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/cluster/ -run FunctionKindLayoutsMatchSDK
 func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
-	if sdktest.SkipIfNoSDK() {
-		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
-	}
-	if !sdktest.HasGH() {
-		t.Skip("gh not on PATH, skipping SDK drift check")
-	}
+	sdktest.SkipIfNoSDKTools(t)
 
 	// Every version the table claims, not a sample of them: a row nobody
 	// checked is exactly how 2.10 and 2.18 went wrong.
@@ -155,42 +149,17 @@ func sdkKindName(k FunctionKind) string {
 	return "<unmapped>"
 }
 
-var kindEntryRe = regexp.MustCompile(`^\s*V\((\w+)\)`)
-
 // sdkFunctionKinds returns FOR_EACH_RAW_FUNCTION_KIND's entries in order.
+//
+// The line-oriented scan this used to do stopped at the first line that
+// was not a V(...) entry, so a list with a blank line or a wrapped
+// comment inside it was silently truncated -- and a short list reads as
+// "narrower mask", which is one of the two silent failure modes this
+// gate exists to catch. It goes through the shared macro expander now.
 func sdkFunctionKinds(tag string) ([]string, error) {
 	src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", tag)
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(src, "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.Contains(l, "#define FOR_EACH_RAW_FUNCTION_KIND") {
-			start = i + 1
-			break
-		}
-	}
-	if start < 0 {
-		return nil, errNoKindList
-	}
-	var out []string
-	for _, l := range lines[start:] {
-		if m := kindEntryRe.FindStringSubmatch(l); m != nil {
-			out = append(out, m[1])
-			continue
-		}
-		// The list ends at the first line that is neither a V(...) entry nor
-		// a continued comment.
-		if strings.TrimSpace(l) == "" || strings.Contains(l, "#define") {
-			break
-		}
-	}
-	return out, nil
+	return cmacro.Expand(cmacro.ParseMacros(src), "FOR_EACH_RAW_FUNCTION_KIND")
 }
-
-type kindListError string
-
-func (e kindListError) Error() string { return string(e) }
-
-const errNoKindList kindListError = "FOR_EACH_RAW_FUNCTION_KIND not found"

@@ -360,32 +360,6 @@ func isX86CmpRegImm(inst x86.Decoded) (reg, imm int, ok bool) {
 	return idx, int(v), true
 }
 
-// isX86HeaderLoad reports whether prev was a header load writing dstIdx:
-// `MOV dstReg, [base-1]` where -1 is kHeapObjectTag. This is the x86_64
-// equivalent of ARM64's `LDUR Xt, [Xn, #-1]`, used to detect the header-load →
-// class-ID-extract pattern so a subsequent SHR/AND preserves Bottom.
-func isX86HeaderLoad(prev *x86.Decoded, dstIdx int) bool {
-	if prev == nil {
-		return false
-	}
-	p := prev.Inst
-	if p.Op != x86asm.MOV || len(p.Args) < 2 {
-		return false
-	}
-	dstReg, ok := p.Args[0].(x86asm.Reg)
-	if !ok {
-		return false
-	}
-	if x86.CanonReg(dstReg) != dstIdx {
-		return false
-	}
-	mem, ok := p.Args[1].(x86asm.Mem)
-	if !ok {
-		return false
-	}
-	return mem.Disp == -1
-}
-
 // transferInstructionX86 updates the register type state for one x86_64 instruction.
 // H-4 fix: added stack type tracking, field type lookup, LEA dispatch slot
 // computation, and fixed allocation stub detection.
@@ -483,20 +457,16 @@ func transferInstructionX86(
 				if !poolIdxOK {
 					return
 				}
-				if classID, ok2 := ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
-					state[dstIdx] = KnownClass(classID)
+				// Same resolver as ARM64. This used to check
+				// PoolClassByIndex and PoolClosureClass only -- missing
+				// every source that produces a NAME (unlinked calls, Code
+				// objects, type-testing stubs), and storing closures as
+				// KnownClass, which loses the pool index a later
+				// Closure.function load needs.
+				lat, hit := ResolvePoolEntry(ctx, poolIdx, int(mem.Disp))
+				state[dstIdx] = lat
+				if hit {
 					ctx.PPHits++
-				} else if ctx.PoolClosureClass != nil {
-					// Closure consumer: same as ARM64, resolve Closure →
-					// ClosureData.parent_function → owner class.
-					if classID, ok3 := ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-						state[dstIdx] = KnownClass(classID)
-						ctx.PPHits++
-						return
-					}
-					state[dstIdx] = Top()
-				} else {
-					state[dstIdx] = Top()
 				}
 				return
 			}
@@ -524,6 +494,18 @@ func transferInstructionX86(
 				}
 				state[dstIdx] = KnownStub(stubName, byteOff)
 				return
+			}
+			// Closure field load: MOV reg, [closure + function/entry_point].
+			// The pool resolver above already carries closures as a
+			// KnownStub whose StubOff is the pool index, which is exactly
+			// what ResolveClosureField needs -- x86_64 preserved that
+			// index and then never consumed it, so every tear-off
+			// receiver went Top here while ARM64 resolved it.
+			if baseIdx >= 0 && baseIdx < 31 {
+				if lat, ok := ResolveClosureField(ctx, state[baseIdx], int(mem.Disp)); ok {
+					state[dstIdx] = lat
+					return
+				}
 			}
 			// Class-id load, Dart <= 2.18 form: MOVZX reg, word [obj + 1].
 			//
@@ -822,39 +804,39 @@ func transferInstructionX86(
 			regIdx := x86.CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && state[regIdx].Kind == LatticeKnownStub {
 				sn := state[regIdx].StubName
-			if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
-				if state[x86RegRDI].Kind == LatticeKnownClass {
-					state[x86RegRAX] = state[x86RegRDI]
-					killX86ArgRegs(state)
-					return
+				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
+					if state[x86RegRDI].Kind == LatticeKnownClass {
+						state[x86RegRAX] = state[x86RegRDI]
+						killX86ArgRegs(state)
+						return
+					}
 				}
-			}
-			// FP-8: UnlinkedCall BLR resolution on x86_64.
-			// When the call register holds a KnownStub with "UnlinkedCall:"
-			// prefix, use MethodNameToSelectorOffsets to resolve via the
-			// dispatch table, same as ARM64's handleBLR.
-			if strings.HasPrefix(sn, "UnlinkedCall:") {
-				methodName := sn[len("UnlinkedCall:"):]
-				if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-					res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
-					var allTargets []string
-					for _, selOff := range selectorOffsets {
-						allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
+				// FP-8: UnlinkedCall BLR resolution on x86_64.
+				// When the call register holds a KnownStub with "UnlinkedCall:"
+				// prefix, use MethodNameToSelectorOffsets to resolve via the
+				// dispatch table, same as ARM64's handleBLR.
+				if strings.HasPrefix(sn, "UnlinkedCall:") {
+					methodName := sn[len("UnlinkedCall:"):]
+					if selectorOffsets, hasOffsets := ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
+						res := BlrResolution{PC: inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
+						var allTargets []string
+						for _, selOff := range selectorOffsets {
+							allTargets = append(allTargets, ctx.selectorCandidates(selOff)...)
+						}
+						applySelectorCandidates(&res, allTargets)
+						if res.Polymorphic {
+							res.Confidence = "polymorphic"
+						}
+						result.BLRResolutions = append(result.BLRResolutions, res)
+					} else {
+						result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
+							PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
+							Confidence: "stub",
+						})
 					}
-					applySelectorCandidates(&res, allTargets)
-					if res.Polymorphic {
-						res.Confidence = "polymorphic"
-					}
-					result.BLRResolutions = append(result.BLRResolutions, res)
-				} else {
-					result.BLRResolutions = append(result.BLRResolutions, BlrResolution{
-						PC: inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
-						Confidence: "stub",
-					})
 				}
 			}
 		}
-	}
 		state[x86RegRAX] = Top()
 		killX86ArgRegs(state)
 		return
@@ -892,38 +874,12 @@ func transferInstructionX86(
 		}
 	}
 
-	// Default: if this instruction defines a register, kill its type.
-	//
-	// Args[0] is the destination for most x86 instructions, but NOT for the
-	// flag-only ones. CMP and TEST read both operands and write only the
-	// flags, and PUSH reads its operand -- killing Args[0] for those
-	// destroys a type the instruction never touched.
-	//
-	// CMP is the damaging case: `CMP cid, #N` is exactly how a class check
-	// is written, so this wiped the type of the very register the check was
-	// about, every time. Traced on the sequence at 0x213d6d in the x86_64
-	// sample -- header load sets Bottom, the SHR extract keeps it, and then
-	// the CMP resets it to Top one instruction before the branch that would
-	// have narrowed it. That is why narrowing found an untyped register at
-	// all 61428 opportunities.
-	if len(ins.Args) >= 1 && !x86ReadsOnlyFirstOperand(ins.Op) {
-		if dstReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			dstIdx := x86.CanonReg(dstReg)
-			if dstIdx >= 0 && dstIdx < 31 {
-				state[dstIdx] = Top()
-			}
+	// Default: if this instruction defines registers, kill their types.
+	for _, dstIdx := range x86.DstRegsOfInst(ins) {
+		if dstIdx >= 0 && dstIdx < 31 {
+			state[dstIdx] = Top()
 		}
 	}
-}
-
-// x86ReadsOnlyFirstOperand reports whether an instruction reads its first
-// operand without writing it, so the default kill above must not apply.
-func x86ReadsOnlyFirstOperand(op x86asm.Op) bool {
-	switch op {
-	case x86asm.CMP, x86asm.TEST, x86asm.PUSH:
-		return true
-	}
-	return false
 }
 
 // resolveX86Dispatch resolves a dispatch table call to a target function.
@@ -935,8 +891,8 @@ func resolveX86Dispatch(
 	result *IntraResult,
 ) {
 	res := BlrResolution{
-		PC:        inst.VA,
-		SlotIndex: slot,
+		PC:         inst.VA,
+		SlotIndex:  slot,
 		Confidence: "unknown",
 	}
 	if name, ok := ctx.ResolveDispatchTarget(slot); ok {
@@ -945,16 +901,28 @@ func resolveX86Dispatch(
 		res.Confidence = "exact"
 		ctx.DispatchHits++
 	} else {
-		// P4 reverse dispatch scan: if the slot doesn't directly resolve,
-		// scan nearby slots for monomorphic targets (same as ARM64).
-		// This handles cases where the dispatch table entry is null/stub
-		// but a nearby slot has a valid Code target.
-		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
-		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
-		if res.Polymorphic {
-			res.Confidence = "polymorphic"
-		} else if res.Resolved {
-			res.Confidence = "static_inferred"
+		// When selector offset is known, check CHA first for receiver class
+		if selectorImm, ok := ctx.SelectorOffsets[inst.VA]; ok && state[x86RegRCX].Kind == LatticeKnownClass {
+			chaTargets := ctx.ResolveDispatchCHA(state[x86RegRCX].ClassID, selectorImm)
+			if len(chaTargets) > 0 {
+				applySelectorCandidates(&res, chaTargets)
+				if res.Polymorphic {
+					res.Confidence = "polymorphic"
+				} else if res.Resolved {
+					res.Confidence = "static_inferred"
+				}
+			}
+		}
+		if !res.Resolved && !res.Polymorphic {
+			// P4 reverse dispatch scan: if the slot doesn't directly resolve,
+			// scan nearby slots for monomorphic targets (same as ARM64).
+			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
+			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
+			if res.Polymorphic {
+				res.Confidence = "polymorphic"
+			} else if res.Resolved {
+				res.Confidence = "static_inferred"
+			}
 		}
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
@@ -977,8 +945,8 @@ func resolveX86DispatchSelectorOffset(
 	// used to be a second copy with its own (wrong) implied-CID formula and
 	// an unbounded " | "-join of every match.
 	res := BlrResolution{
-		PC:        inst.VA,
-		SlotIndex: -1,
+		PC:         inst.VA,
+		SlotIndex:  -1,
 		Confidence: "static_inferred",
 	}
 	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))

@@ -22,12 +22,7 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/snapshot/ -run BaseObjectNamesMatchSDK
 func TestBaseObjectNamesMatchSDK(t *testing.T) {
-	if sdktest.SkipIfNoSDK() {
-		t.Skip("AOTOPSY_TEST_SDK not set (needs network + gh auth), skipping SDK drift check")
-	}
-	if !sdktest.HasGH() {
-		t.Skip("gh not on PATH, skipping SDK drift check")
-	}
+	sdktest.SkipIfNoSDKTools(t)
 	// One tag per layout is enough to catch drift in that layout's row, and
 	// the boundary tags catch a range that has silently moved.
 	probes := []struct {

@@ -128,15 +128,20 @@ var (
 	// Dart 2.17.6 -- PRODUCT + TARGET_ARCH_ARM64 +
 	// !DART_COMPRESSED_POINTERS block (compressed pointers were NOT yet
 	// the default for 64-bit Dart AOT at 2.x; they became default in the
-	// Dart 3.0 cycle). This table is a SUBSET of the 3.7.0 cluster: the
-	// four stubs added later (MegamorphicCall, SwitchableCallMiss,
-	// OptimizeFunction, Deoptimize at 0x248-0x260 in 3.7.0) and
-	// ResumeInterpreter / InterpretCall did not yet exist as
-	// Thread-cached stubs in 2.17.6, so the native-call wrappers sit
-	// 0x10 lower than in 3.7.0 (Bootstrap at 0x280, not 0x288). X64
-	// non-compressed PRODUCT offsets are identical -- verified against
-	// the same generated header's TARGET_ARCH_X64 PRODUCT+
-	// !DART_COMPRESSED_POINTERS block.
+	// Dart 3.0 cycle). Relative to 3.7.0 it lacks only ResumeInterpreter
+	// and InterpretCall, so the native-call wrappers sit 0x8 lower
+	// (Bootstrap at 0x280, not 0x288). X64 non-compressed PRODUCT offsets
+	// are identical -- verified against the same generated header's
+	// TARGET_ARCH_X64 PRODUCT+!DART_COMPRESSED_POINTERS block.
+	//
+	// The four entries at 0x248-0x260 were missing here until the
+	// -check-stub-offsets gate was written. The comment that used to sit
+	// in their place claimed they "did not yet exist as Thread-cached
+	// stubs in 2.17.6"; thread.h@2.17.6 has all four in
+	// CACHED_VM_STUBS_ADDRESSES_LIST, and the generated header exports
+	// them as Thread_megamorphic_call_checked_entry_offset et al. They
+	// are named _entry_, not _entry_point_, which is how a search for the
+	// wrong suffix concludes the SDK does not export them.
 	threadStubOffsets2176 = map[int64]string{
 		0x1f8: "WriteBarrier",
 		0x200: "ArrayWriteBarrier",
@@ -148,6 +153,10 @@ var (
 		0x230: "AllocateObjectSlow",
 		0x238: "StackOverflowSharedWithoutFPURegs",
 		0x240: "StackOverflowSharedWithFPURegs",
+		0x248: "MegamorphicCall",
+		0x250: "SwitchableCallMiss",
+		0x258: "OptimizeFunction",
+		0x260: "Deoptimize",
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
@@ -162,10 +171,9 @@ var (
 	// IDENTICAL Thread-cached stub offsets -- verified against the
 	// generated header at both tags. The whole cluster is shifted -0x10
 	// relative to 2.17.6 (compressed-pointer Thread layout is smaller)
-	// and, like 2.17.6, lacks the four later stubs (MegamorphicCall et
-	// al.) plus ResumeInterpreter / InterpretCall. X64 compressed
-	// PRODUCT offsets are identical -- verified against the
-	// TARGET_ARCH_X64 PRODUCT+compressed block at both tags.
+	// and lacks ResumeInterpreter / InterpretCall. X64 compressed PRODUCT
+	// offsets are identical -- verified against the TARGET_ARCH_X64
+	// PRODUCT+compressed block at both tags.
 	threadStubOffsets305 = map[int64]string{
 		0x1e8: "WriteBarrier",
 		0x1f0: "ArrayWriteBarrier",
@@ -177,6 +185,10 @@ var (
 		0x220: "AllocateObjectSlow",
 		0x228: "StackOverflowSharedWithoutFPURegs",
 		0x230: "StackOverflowSharedWithFPURegs",
+		0x238: "MegamorphicCall",
+		0x240: "SwitchableCallMiss",
+		0x248: "OptimizeFunction",
+		0x250: "Deoptimize",
 		0x258: "CallNativeThroughSafepoint",
 		0x260: "JumpToFrame",
 		0x268: "SlowTypeTest",
@@ -189,9 +201,9 @@ var (
 	// Dart 3.4.3 -- PRODUCT + TARGET_ARCH_ARM64 +
 	// DART_COMPRESSED_POINTERS. The cluster shifts +0x8 relative to
 	// 3.0.5/3.2.5 (one 8-byte field added to Thread ahead of these
-	// stubs), but still lacks the four later stubs (MegamorphicCall et
-	// al.) and ResumeInterpreter / InterpretCall. X64 compressed PRODUCT
-	// offsets are identical -- verified against the generated header.
+	// stubs), and still lacks ResumeInterpreter / InterpretCall. X64
+	// compressed PRODUCT offsets are identical -- verified against the
+	// generated header.
 	threadStubOffsets343 = map[int64]string{
 		0x1f0: "WriteBarrier",
 		0x1f8: "ArrayWriteBarrier",
@@ -203,6 +215,10 @@ var (
 		0x228: "AllocateObjectSlow",
 		0x230: "StackOverflowSharedWithoutFPURegs",
 		0x238: "StackOverflowSharedWithFPURegs",
+		0x240: "MegamorphicCall",
+		0x248: "SwitchableCallMiss",
+		0x250: "OptimizeFunction",
+		0x258: "Deoptimize",
 		0x260: "CallNativeThroughSafepoint",
 		0x268: "JumpToFrame",
 		0x270: "SlowTypeTest",
@@ -218,11 +234,197 @@ var (
 	// (CallNativeThroughSafepoint ... InterpretCall at 0x2a0) this table
 	// is byte-for-byte identical to 3.7.0's, and the 0x1f8-0x240 head
 	// (WriteBarrier ... StackOverflowSharedWithFPURegs) also matches
-	// 3.7.0 exactly. The ONLY difference from 3.7.0 is the absence of
-	// the four stubs at 0x248-0x260 (MegamorphicCall, SwitchableCallMiss,
-	// OptimizeFunction, Deoptimize), which were added in 3.7.0. X64
+	// 3.7.0 exactly. It is in fact identical to 3.7.0's table throughout:
+	// the earlier claim that the four stubs at 0x248-0x260 "were added in
+	// 3.7.0" was wrong -- thread.h@3.6.2 already caches all four. X64
 	// compressed PRODUCT offsets are identical -- verified against the
 	// generated header.
+	// The tables below were generated by
+	// `go run tools/extract_thr.go -emit-stub-offsets <tags>`, which reads
+	// the stub name from thread.h's CACHED_ADDRESSES_LIST entry and the
+	// offset from runtime_offsets_extracted.h at the same tag. Nothing is
+	// hand-mapped and nothing is extrapolated from a neighbouring version.
+	// x86_64 offsets are identical to ARM64 for every one of them, checked
+	// per tag rather than assumed.
+	//
+	// These twelve versions returned nil until 2026-09, which the
+	// decompiler treats as "feature inactive": every Thread-cached stub
+	// call in them rendered unnamed.
+
+	// Dart 2.10.0 -- PRODUCT + non-compressed. Has InterpretCall but no
+	// JumpToFrame or ResumeInterpreter.
+	threadStubOffsets2100 = map[int64]string{
+		0x200: "WriteBarrier",
+		0x208: "ArrayWriteBarrier",
+		0x210: "CallToRuntime",
+		0x218: "AllocateMintSharedWithFPURegs",
+		0x220: "AllocateMintSharedWithoutFPURegs",
+		0x228: "AllocateObject",
+		0x230: "AllocateObjectParameterized",
+		0x238: "AllocateObjectSlow",
+		0x240: "StackOverflowSharedWithoutFPURegs",
+		0x248: "StackOverflowSharedWithFPURegs",
+		0x250: "MegamorphicCall",
+		0x258: "SwitchableCallMiss",
+		0x260: "OptimizeFunction",
+		0x268: "Deoptimize",
+		0x270: "CallNativeThroughSafepoint",
+		0x278: "SlowTypeTest",
+		0x280: "BootstrapNativeCallWrapper",
+		0x288: "NoScopeNativeCallWrapper",
+		0x290: "AutoScopeNativeCallWrapper",
+		0x298: "InterpretCall",
+	}
+
+	// Dart 2.12.0 -- PRODUCT + non-compressed. InterpretCall is gone, so
+	// this is the shortest table in the file at 19 entries.
+	threadStubOffsets2120 = map[int64]string{
+		0x1f8: "WriteBarrier",
+		0x200: "ArrayWriteBarrier",
+		0x208: "CallToRuntime",
+		0x210: "AllocateMintSharedWithFPURegs",
+		0x218: "AllocateMintSharedWithoutFPURegs",
+		0x220: "AllocateObject",
+		0x228: "AllocateObjectParameterized",
+		0x230: "AllocateObjectSlow",
+		0x238: "StackOverflowSharedWithoutFPURegs",
+		0x240: "StackOverflowSharedWithFPURegs",
+		0x248: "MegamorphicCall",
+		0x250: "SwitchableCallMiss",
+		0x258: "OptimizeFunction",
+		0x260: "Deoptimize",
+		0x268: "CallNativeThroughSafepoint",
+		0x270: "SlowTypeTest",
+		0x278: "BootstrapNativeCallWrapper",
+		0x280: "NoScopeNativeCallWrapper",
+		0x288: "AutoScopeNativeCallWrapper",
+	}
+
+	// Dart 2.13.0 -- PRODUCT + non-compressed. 2.14.0 and 2.15.0 are
+	// byte-identical to it, verified per tag rather than borrowed.
+	threadStubOffsets2130 = map[int64]string{
+		0x200: "WriteBarrier",
+		0x208: "ArrayWriteBarrier",
+		0x210: "CallToRuntime",
+		0x218: "AllocateMintSharedWithFPURegs",
+		0x220: "AllocateMintSharedWithoutFPURegs",
+		0x228: "AllocateObject",
+		0x230: "AllocateObjectParameterized",
+		0x238: "AllocateObjectSlow",
+		0x240: "StackOverflowSharedWithoutFPURegs",
+		0x248: "StackOverflowSharedWithFPURegs",
+		0x250: "MegamorphicCall",
+		0x258: "SwitchableCallMiss",
+		0x260: "OptimizeFunction",
+		0x268: "Deoptimize",
+		0x270: "CallNativeThroughSafepoint",
+		0x278: "SlowTypeTest",
+		0x280: "BootstrapNativeCallWrapper",
+		0x288: "NoScopeNativeCallWrapper",
+		0x290: "AutoScopeNativeCallWrapper",
+	}
+
+	// Dart 2.16.0 -- PRODUCT + non-compressed. JumpToFrame appears here.
+	threadStubOffsets2160 = map[int64]string{
+		0x200: "WriteBarrier",
+		0x208: "ArrayWriteBarrier",
+		0x210: "CallToRuntime",
+		0x218: "AllocateMintSharedWithFPURegs",
+		0x220: "AllocateMintSharedWithoutFPURegs",
+		0x228: "AllocateObject",
+		0x230: "AllocateObjectParameterized",
+		0x238: "AllocateObjectSlow",
+		0x240: "StackOverflowSharedWithoutFPURegs",
+		0x248: "StackOverflowSharedWithFPURegs",
+		0x250: "MegamorphicCall",
+		0x258: "SwitchableCallMiss",
+		0x260: "OptimizeFunction",
+		0x268: "Deoptimize",
+		0x270: "CallNativeThroughSafepoint",
+		0x278: "JumpToFrame",
+		0x280: "SlowTypeTest",
+		0x288: "BootstrapNativeCallWrapper",
+		0x290: "NoScopeNativeCallWrapper",
+		0x298: "AutoScopeNativeCallWrapper",
+	}
+
+	// Dart 2.18.0 -- PRODUCT + compressed. The whole cluster sits 0x30
+	// higher than 2.16.0's despite compression, so this is not derivable
+	// from any neighbour.
+	threadStubOffsets2180 = map[int64]string{
+		0x230: "WriteBarrier",
+		0x238: "ArrayWriteBarrier",
+		0x240: "CallToRuntime",
+		0x248: "AllocateMintSharedWithFPURegs",
+		0x250: "AllocateMintSharedWithoutFPURegs",
+		0x258: "AllocateObject",
+		0x260: "AllocateObjectParameterized",
+		0x268: "AllocateObjectSlow",
+		0x270: "StackOverflowSharedWithoutFPURegs",
+		0x278: "StackOverflowSharedWithFPURegs",
+		0x280: "MegamorphicCall",
+		0x288: "SwitchableCallMiss",
+		0x290: "OptimizeFunction",
+		0x298: "Deoptimize",
+		0x2a0: "CallNativeThroughSafepoint",
+		0x2a8: "JumpToFrame",
+		0x2b0: "SlowTypeTest",
+		0x2b8: "BootstrapNativeCallWrapper",
+		0x2c0: "NoScopeNativeCallWrapper",
+		0x2c8: "AutoScopeNativeCallWrapper",
+	}
+
+	// Dart 2.19.0 -- PRODUCT + compressed. Another +0x18 over 2.18.0.
+	threadStubOffsets2190 = map[int64]string{
+		0x248: "WriteBarrier",
+		0x250: "ArrayWriteBarrier",
+		0x258: "CallToRuntime",
+		0x260: "AllocateMintSharedWithFPURegs",
+		0x268: "AllocateMintSharedWithoutFPURegs",
+		0x270: "AllocateObject",
+		0x278: "AllocateObjectParameterized",
+		0x280: "AllocateObjectSlow",
+		0x288: "StackOverflowSharedWithoutFPURegs",
+		0x290: "StackOverflowSharedWithFPURegs",
+		0x298: "MegamorphicCall",
+		0x2a0: "SwitchableCallMiss",
+		0x2a8: "OptimizeFunction",
+		0x2b0: "Deoptimize",
+		0x2b8: "CallNativeThroughSafepoint",
+		0x2c0: "JumpToFrame",
+		0x2c8: "SlowTypeTest",
+		0x2d0: "BootstrapNativeCallWrapper",
+		0x2d8: "NoScopeNativeCallWrapper",
+		0x2e0: "AutoScopeNativeCallWrapper",
+	}
+
+	// Dart 3.8.1 -- PRODUCT + compressed. 22 entries like 3.7.0 and
+	// 3.9.2, but at its own offsets: -0x8 from 3.7.0 throughout.
+	threadStubOffsets381 = map[int64]string{
+		0x1f0: "WriteBarrier",
+		0x1f8: "ArrayWriteBarrier",
+		0x200: "CallToRuntime",
+		0x208: "AllocateMintSharedWithFPURegs",
+		0x210: "AllocateMintSharedWithoutFPURegs",
+		0x218: "AllocateObject",
+		0x220: "AllocateObjectParameterized",
+		0x228: "AllocateObjectSlow",
+		0x230: "StackOverflowSharedWithoutFPURegs",
+		0x238: "StackOverflowSharedWithFPURegs",
+		0x240: "MegamorphicCall",
+		0x248: "SwitchableCallMiss",
+		0x250: "OptimizeFunction",
+		0x258: "Deoptimize",
+		0x260: "CallNativeThroughSafepoint",
+		0x268: "JumpToFrame",
+		0x270: "SlowTypeTest",
+		0x278: "ResumeInterpreter",
+		0x280: "BootstrapNativeCallWrapper",
+		0x288: "NoScopeNativeCallWrapper",
+		0x290: "AutoScopeNativeCallWrapper",
+		0x298: "InterpretCall",
+	}
+
 	threadStubOffsets362 = map[int64]string{
 		0x1f8: "WriteBarrier",
 		0x200: "ArrayWriteBarrier",
@@ -234,6 +436,10 @@ var (
 		0x230: "AllocateObjectSlow",
 		0x238: "StackOverflowSharedWithoutFPURegs",
 		0x240: "StackOverflowSharedWithFPURegs",
+		0x248: "MegamorphicCall",
+		0x250: "SwitchableCallMiss",
+		0x258: "OptimizeFunction",
+		0x260: "Deoptimize",
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
@@ -271,16 +477,41 @@ func ThreadStubOffsets(dartVersion string, isARM64 bool) map[int64]string {
 		return threadStubOffsets3122
 	case "3.13.0": // verified via gh api runtime_offsets_extracted.h @3.13.0 — offsets identical to 3.12.2
 		return threadStubOffsets3122
+	case "2.10.0":
+		return threadStubOffsets2100
+	case "2.12.0":
+		return threadStubOffsets2120
+	// 2.14.0 and 2.15.0 are byte-identical to 2.13.0, confirmed against
+	// the SDK at each tag by -check-stub-offsets rather than borrowed on
+	// the assumption that adjacent versions match.
+	case "2.13.0", "2.14.0", "2.15.0":
+		return threadStubOffsets2130
+	case "2.16.0":
+		return threadStubOffsets2160
 	case "2.17.6":
 		return threadStubOffsets2176
-	case "3.0.5":
+	case "2.18.0":
+		return threadStubOffsets2180
+	case "2.19.0":
+		return threadStubOffsets2190
+	// 3.1.0 and 3.3.0 match 3.0.5 exactly.
+	case "3.0.5", "3.1.0", "3.3.0":
 		return threadStubOffsets305
 	case "3.2.5":
 		return threadStubOffsets325
 	case "3.4.3":
 		return threadStubOffsets343
+	// 3.5.0's offsets coincide with 2.17.6's, not with its 3.4.3
+	// neighbour's -- a layout coincidence, not a shared derivation, and
+	// the opposite of what adjacency would suggest. Both are re-derived
+	// from their own tag by the SDK gate, so the alias cannot drift
+	// unnoticed.
+	case "3.5.0":
+		return threadStubOffsets2176
 	case "3.6.2":
 		return threadStubOffsets362
+	case "3.8.1":
+		return threadStubOffsets381
 	}
 	return nil
 }

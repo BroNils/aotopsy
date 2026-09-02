@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,12 +10,9 @@ import (
 // TestPipelineRegression_CompareSample_ARM64 runs the full pipeline on the
 // compare_sample ARM64 binary and verifies key output counts.
 // This is an integration test that requires the sample binary to exist.
-// Set AOTOPSY_TEST_SAMPLE_ARM64 to the path of a Dart 3.9.2 ARM64 libapp.so to enable.
+// Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set, skipping regression test")
-	}
+	libPath := sampleARM64(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
 	}
@@ -95,12 +91,9 @@ func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
 
 // TestPipelineRegression_Sample312_ARM64 runs the full pipeline on the
 // Dart 3.12 sample ARM64 binary and verifies key output counts.
-// Set AOTOPSY_TEST_SAMPLE_312_ARM64 to the path of a Dart 3.12 ARM64 libapp.so to enable.
+// Runs on the Dart 3.12.2 ARM64 sample from the corpus.
 func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_312_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_312_ARM64 not set, skipping regression test")
-	}
+	libPath := sample312ARM64(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
 	}
@@ -143,12 +136,9 @@ func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 
 // TestPipelineRegression_Sample312_X64 runs the full pipeline on the
 // Dart 3.12 sample x86_64 binary and verifies key output counts.
-// Set AOTOPSY_TEST_SAMPLE_312_X64 to the path of a Dart 3.12 x86_64 libapp.so to enable.
+// Runs on the Dart 3.12.2 x86_64 sample from the corpus.
 func TestPipelineRegression_Sample312_X64(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_312_X64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_312_X64 not set, skipping regression test")
-	}
+	libPath := sample312X64(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
 	}
@@ -183,20 +173,41 @@ func TestPipelineRegression_Sample312_X64(t *testing.T) {
 	if result.ClassCount < 1500 || result.ClassCount > 2500 {
 		t.Errorf("Class count: got %d, expected 1500-2500", result.ClassCount)
 	}
-	// x86_64 signal should be >0 after H-3 fix (THR tables added)
-	if result.SignalCount < 100 {
-		t.Errorf("Signal count: got %d, expected >100 (x86_64 THR tables should produce signal)", result.SignalCount)
+	// What this is guarding is that the x86_64 THR tables resolve at all:
+	// before they existed, no call through Thread was annotated and the
+	// signal graph was empty.
+	//
+	// It used to assert SignalCount > 100, and that proxy went stale.
+	// 1374 of the 1388 signal functions were flagged because they called
+	// THR.dispatch_table_array -- a Thread DATA field, so every virtual
+	// call looked like a call to a stub we could not name. With that
+	// counted as what it is, the honest number is 36, and a threshold of
+	// 100 was asserting that 97% noise stayed present.
+	//
+	// So assert the thing directly instead of through the signal graph:
+	// count THR-annotated call edges. That is what "the x86_64 THR tables
+	// produce annotations" means, and it cannot be inflated by
+	// misclassification downstream.
+	thrEdges := 0
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "call_edges.jsonl")) {
+		if via, _ := rec["via"].(string); strings.HasPrefix(via, "THR.") {
+			thrEdges++
+		}
+	}
+	if thrEdges < 1000 {
+		t.Errorf("THR-annotated call edges: got %d, expected >=1000 -- the x86_64 THR tables "+
+			"are not resolving", thrEdges)
+	}
+	if result.SignalCount == 0 {
+		t.Error("Signal count is 0; the x86_64 signal graph is empty")
 	}
 }
 
 // TestDecompilerAccuracy_Factorial verifies that decompile-native produces
 // correct output for MathTools.factorial on the compare_sample.
-// Set AOTOPSY_TEST_SAMPLE_ARM64 to the path of a Dart 3.9.2 ARM64 libapp.so to enable.
+// Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestDecompilerAccuracy_Factorial(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set, skipping decompiler test")
-	}
+	libPath := sampleARM64(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping decompiler test", libPath)
 	}
@@ -247,12 +258,9 @@ func TestDecompilerAccuracy_Factorial(t *testing.T) {
 
 // TestDart212StringExtraction verifies that Dart 2.12.0 string extraction
 // works (C-3 fix verification).
-// Set AOTOPSY_TEST_SAMPLE_DART212 to the path of a Dart 2.12.0 ARM64 libapp.so to enable.
+// Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtraction(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_DART212")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_DART212 not set, skipping string extraction test")
-	}
+	libPath := sampleDart212(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping string extraction test", libPath)
 	}
@@ -296,12 +304,9 @@ func TestDart212StringExtraction(t *testing.T) {
 // resolution) using only cluster.Result.Strings and cluster.Result.Classes,
 // which are populated by ReadFill without any disassembly.
 //
-// Set AOTOPSY_TEST_SAMPLE_DART212 to the path of a Dart 2.12.0 ARM64 libapp.so.
+// Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtractionClusterOnly(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_DART212")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_DART212 not set, skipping cluster-only string extraction test")
-	}
+	libPath := sampleDart212(t)
 	if _, err := os.Stat(libPath); os.IsNotExist(err) {
 		t.Skipf("sample binary not found at %s, skipping cluster-only string extraction test", libPath)
 	}
@@ -320,22 +325,4 @@ func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	if len(res.Classes) < 100 {
 		t.Errorf("Classes: got %d, expected >100 (Class cluster fill should yield >100 classes)", len(res.Classes))
 	}
-}
-
-// Helper to parse first JSON object from JSONL.
-func parseFirstJSON(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 {
-		t.Fatal("empty JSONL file")
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
-		t.Fatal(err)
-	}
-	return result
 }

@@ -38,8 +38,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/elfx"
@@ -371,16 +369,6 @@ func SourceSets() map[string][]Sample {
 	return bySet
 }
 
-// Get returns the registry entry for a version/arch pair.
-func Get(dartVersion, arch string) (Sample, bool) {
-	for _, s := range Registry {
-		if s.DartVersion == dartVersion && s.Arch == arch {
-			return s, true
-		}
-	}
-	return Sample{}, false
-}
-
 // Path locates a sample by walking up from the working directory to a
 // samples/ directory. It returns "" when the sample is not present, which
 // callers turn into a skip.
@@ -397,6 +385,38 @@ func Path(fileName string) string {
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			return ""
+		}
+		dir = parent
+	}
+}
+
+// Available reports whether a samples/ directory exists at all, which is
+// a different question from whether one particular sample is in it.
+//
+// The distinction is the whole point. samples/ is gitignored -- the
+// binaries are large and some come from real apps -- so a fresh clone and
+// every CI runner legitimately has no corpus, and a sample-driven test
+// there has nothing to assert against and must skip. But on a machine
+// that HAS a corpus, a missing sample means the corpus has drifted from
+// the registry, and skipping is how roughly 25 test functions spent
+// months reporting ok while running nothing.
+//
+// So: no corpus at all -> skip; corpus present but this sample absent ->
+// fail. Collapsing those two into one silent skip is the bug that
+// binding the suite to the registry was meant to fix; collapsing them
+// into one hard failure is what broke CI when it was.
+func Available() bool {
+	dir, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "samples")); err == nil && fi.IsDir() {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
 		}
 		dir = parent
 	}
@@ -423,47 +443,11 @@ func VersionMismatch(s Sample, got string) string {
 		s.FileName(), got, s.DartVersion, s.DartVersion, s.Arch, s.Note)
 }
 
-// Versions returns the registry's Dart versions, deduplicated and sorted.
-func Versions() []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range Registry {
-		if !seen[s.DartVersion] {
-			seen[s.DartVersion] = true
-			out = append(out, s.DartVersion)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return compare(out[i], out[j]) < 0 })
-	return out
-}
-
-func compare(a, b string) int {
-	pa, pb := triple(a), triple(b)
-	for i := 0; i < 3; i++ {
-		if pa[i] != pb[i] {
-			if pa[i] < pb[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-func triple(s string) [3]int {
-	var v [3]int
-	for i, part := range strings.SplitN(s, ".", 3) {
-		if i >= 3 {
-			break
-		}
-		n := 0
-		for _, c := range part {
-			if c < '0' || c > '9' {
-				break
-			}
-			n = n*10 + int(c-'0')
-		}
-		v[i] = n
-	}
-	return v
-}
+// Versions(), Get(), compare() and triple() lived here and were called by
+// nothing -- zero references in the whole repo, verified before removal.
+// compare/triple were also a verbatim copy of snapshot's
+// compareDartVersions/parseVersionTriple, minus the comment explaining why
+// the comparison must be numeric ("2.9.0" sorts after "2.10.0" as a
+// string). A second copy of a rule, with the reason for the rule dropped,
+// is how the rule gets broken. Use snapshot.SupportedVersions or range
+// Registry directly.

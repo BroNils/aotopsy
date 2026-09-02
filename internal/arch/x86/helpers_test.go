@@ -131,3 +131,23 @@ func TestEqualitySuccessor(t *testing.T) {
 		}
 	}
 }
+
+func TestDstRegsOfInstX86(t *testing.T) {
+	// MOV RAX, RBX -> [0]
+	movInst := x86asm.Inst{Op: x86asm.MOV, Args: [4]x86asm.Arg{x86asm.RAX, x86asm.RBX, nil, nil}}
+	if dsts := DstRegsOfInst(movInst); len(dsts) != 1 || dsts[0] != 0 {
+		t.Errorf("MOV RAX, RBX dsts = %v, want [0]", dsts)
+	}
+
+	// CMP RAX, 10 -> nil
+	cmpInst := x86asm.Inst{Op: x86asm.CMP, Args: [4]x86asm.Arg{x86asm.RAX, x86asm.Imm(10), nil, nil}}
+	if dsts := DstRegsOfInst(cmpInst); len(dsts) != 0 {
+		t.Errorf("CMP RAX, 10 dsts = %v, want nil", dsts)
+	}
+
+	// IDIV RCX -> [0, 2] (RAX, RDX)
+	idivInst := x86asm.Inst{Op: x86asm.IDIV, Args: [4]x86asm.Arg{x86asm.RCX, nil, nil, nil}}
+	if dsts := DstRegsOfInst(idivInst); len(dsts) != 2 || dsts[0] != 0 || dsts[1] != 2 {
+		t.Errorf("IDIV RCX dsts = %v, want [0, 2]", dsts)
+	}
+}

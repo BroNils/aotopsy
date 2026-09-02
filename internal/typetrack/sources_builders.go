@@ -225,8 +225,9 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 		ctx.CodeRefToName[ref] = name
 	}
 
-	// 7b. Build DispatchCodeIndexToName.
-	if byCodeIndex != nil {
+	// 7b. Build DispatchCodeIndexToName. Ranging a nil map is a no-op, so
+	// the guard the loop used to carry said nothing.
+	{
 		for clusterIdx, no := range byCodeIndex {
 			if no == nil || no.NameRefID < 0 {
 				continue

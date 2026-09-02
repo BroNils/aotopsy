@@ -67,9 +67,9 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// This path should not be reached.
 		return 0, fmt.Errorf("AllocMint should be handled before skipAllocV")
 	case AllocArray:
-		return skipArrayAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "array")
 	case AllocWeakArray:
-		return skipWeakArrayAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "weak_array")
 	case AllocTypeArguments:
 		// TypeArguments uses kAllCanonicalObjectsAreIncludedIntoSet=true.
 		// In 2.13 (SplitCanonical), first_element is NOT in stream.
@@ -83,7 +83,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		stateBitsInAlloc := profile.Tags != snapshot.TagStyleCidInt32
 		return skipCodeAlloc(s, cm, stateBitsInAlloc, maxSteps)
 	case AllocObjectPool:
-		return skipObjectPoolAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "object_pool")
 	case AllocROData:
 		// ROData for PcDescriptors/CodeSourceMap/CompressedStackMaps is never
 		// canonical, so the readFirstElement value doesn't matter.
@@ -96,15 +96,15 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// much of the stream is consumed.
 		return skipRODataAlloc(s, cm, canonicalSetInStream, !profile.SplitCanonical, maxSteps)
 	case AllocExceptionHandlers:
-		return skipExceptionHandlersAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "exception_handlers")
 	case AllocContext:
-		return skipContextAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "context")
 	case AllocContextScope:
-		return skipContextScopeAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "context_scope")
 	case AllocRecord:
-		return skipRecordAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "record")
 	case AllocTypedData:
-		return skipTypedDataAlloc(s, cm, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "typed_data")
 	case AllocInstance:
 		return skipInstanceAllocV(s, cm, maxSteps)
 	case AllocEmpty:
@@ -273,25 +273,10 @@ func readMintAlloc(s *dartfmt.Stream, preCanonicalSplit bool, maxSteps int) (int
 	return count, values, nil
 }
 
-// skipArrayAlloc skips Array/ImmutableArray alloc: count + per-element length.
-func skipArrayAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("array count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("array %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
+// skipArrayAlloc was an eighth copy of skipCountedLengthAlloc, missed on
+// the first consolidation pass and caught by re-running the similarity
+// scan afterwards -- which is the argument for re-running it rather than
+// assuming one pass finished the job.
 
 // skipTypeArgumentsAlloc skips TypeArguments alloc:
 //
@@ -447,20 +432,29 @@ func skipCodeAlloc(s *dartfmt.Stream, cm *ClusterMeta, stateBitsInAlloc bool, ma
 	return count + deferred, nil
 }
 
-// skipObjectPoolAlloc skips ObjectPool cluster alloc: count + per-pool length.
-func skipObjectPoolAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
+// skipCountedLengthAlloc reads the alloc section shared by every cluster
+// whose format is "count, then one length per object": ObjectPool,
+// ExceptionHandlers, Context, ContextScope, WeakArray, Record and
+// TypedData. label names the cluster in error messages.
+//
+// These were seven separate functions, byte-identical apart from that
+// label -- ~112 lines encoding one rule seven times. The hazard is not
+// the line count: a correction to the count bound or the error wrapping
+// had to be made in seven places, and missing one would leave a cluster
+// silently parsing differently from its siblings.
+func skipCountedLengthAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int, label string) (int64, error) {
 	count, err := s.ReadUnsigned()
 	if err != nil {
 		return 0, err
 	}
 	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("object_pool count %d out of range", count)
+		return 0, fmt.Errorf("%s count %d out of range", label, count)
 	}
 	cm.Lengths = make([]int64, count)
 	for i := int64(0); i < count; i++ {
 		length, err := s.ReadUnsigned()
 		if err != nil {
-			return count, fmt.Errorf("object_pool %d/%d alloc: %w", i, count, err)
+			return count, fmt.Errorf("%s %d/%d alloc: %w", label, i, count, err)
 		}
 		cm.Lengths[i] = length
 	}
@@ -501,126 +495,6 @@ func skipRODataAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, readF
 		if err := skipCanonicalSet(s, int(count), readFirstElement, maxSteps); err != nil {
 			return count, fmt.Errorf("rodata canonical set: %w", err)
 		}
-	}
-	return count, nil
-}
-
-// skipExceptionHandlersAlloc skips ExceptionHandlers alloc: count + per-handler length.
-func skipExceptionHandlersAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("exception_handlers count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("exception_handlers %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
-
-// skipContextAlloc skips Context cluster alloc: count + per-context num_variables.
-func skipContextAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("context count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("context %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
-
-// skipContextScopeAlloc skips ContextScope cluster alloc: count + per-scope length.
-func skipContextScopeAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("context_scope count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("context_scope %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
-
-// skipWeakArrayAlloc skips WeakArray cluster alloc: count + per-array length.
-func skipWeakArrayAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("weak_array count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("weak_array %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
-
-// skipRecordAlloc skips Record cluster alloc: count + per-record num_fields.
-func skipRecordAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("record count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("record %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
-	}
-	return count, nil
-}
-
-// skipTypedDataAlloc skips TypedData cluster alloc: count + per-item length.
-func skipTypedDataAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
-	count, err := s.ReadUnsigned()
-	if err != nil {
-		return 0, err
-	}
-	if count < 0 || int(count) > maxSteps {
-		return 0, fmt.Errorf("typed_data count %d out of range", count)
-	}
-	cm.Lengths = make([]int64, count)
-	for i := int64(0); i < count; i++ {
-		length, err := s.ReadUnsigned()
-		if err != nil {
-			return count, fmt.Errorf("typed_data %d/%d alloc: %w", i, count, err)
-		}
-		cm.Lengths[i] = length
 	}
 	return count, nil
 }

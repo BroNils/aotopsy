@@ -2,6 +2,7 @@ package decompiler
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"aotopsy/internal/cluster"
@@ -24,6 +25,74 @@ func identifyLoopHeaders(fir *FuncIR) map[int]bool {
 		}
 	}
 	return headers
+}
+
+// emitOrphanBlocks emits every block the structured walk left out, in
+// address order, after the main body.
+//
+// Two different things end up here, and they are not the same size:
+//
+//   - Blocks genuinely unreachable from the entry in the lifted CFG.
+//     Measured over 1200 functions per sample: 2.0% of ARM64 blocks (5%
+//     of functions) against 7.4% of x86_64 blocks (68% of functions),
+//     most of them following an unconditional jump nothing else targets.
+//   - Blocks that ARE reachable but that the walk declined to emit
+//     because a path hit maxDepth or maxVisitCount. These are the larger
+//     group. The walk left a `goto block_N;` behind, and dropUnusedLabels
+//     then rewrote it to a comment because block_N was never emitted.
+//
+// Either way the instructions were in the binary and absent from the
+// decompilation, with no output saying so -- the only trace was a CFG
+// coverage number nothing printed. For a tool whose job is to show what a
+// stripped binary contains, silently dropping code is the worst failure
+// mode available, and unreachable code is frequently the exact thing an
+// analyst is hunting for.
+//
+// Each orphan is walked with the ordinary emitBlock, so its own reachable
+// successors come with it and the shared step budget still applies.
+func (e *emitter) emitOrphanBlocks(indent int) {
+	orphans := make([]int, 0)
+	for i := range e.fir.Blocks {
+		if e.visits[i] != 0 || len(e.fir.Blocks[i].Instrs) == 0 {
+			continue
+		}
+		// Handler blocks never increment visits -- emitBlock returns
+		// early for them because they were already emitted inside their
+		// catch clause. They are in the output; re-emitting them here
+		// would duplicate every catch body.
+		if e.handlerBlocks != nil && e.handlerBlocks[i] {
+			continue
+		}
+		// Blocks extracted to a `_block_N()` helper also never increment
+		// visits in this emitter, but appendHelperFunctions emits their
+		// body. Emitting them here too would print each one twice.
+		if e.omittedSet != nil && e.omittedSet[i] {
+			continue
+		}
+		orphans = append(orphans, i)
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	sort.Slice(orphans, func(a, b int) bool {
+		return e.fir.Blocks[orphans[a]].StartVA < e.fir.Blocks[orphans[b]].StartVA
+	})
+	emitted := 0
+	for _, id := range orphans {
+		// An earlier orphan's walk may already have covered this one.
+		if e.visits[id] != 0 {
+			continue
+		}
+		if emitted == 0 {
+			e.emit(indent, "// --- code omitted by the structured walk, shown verbatim ---")
+		}
+		emitted++
+		e.emit(indent, "// orphan block %d @ 0x%x", id, e.fir.Blocks[id].StartVA)
+		e.emitBlock(id, indent, 0)
+	}
+	if emitted > 0 {
+		e.stats.OrphanBlocks += emitted
+	}
 }
 
 // emitBlock is the recursive CFG walker: flutterdec's emit_block, ported
@@ -130,6 +199,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// already visited, and the label it needed was never emitted -- a
 	// dangling goto.
 	e.emit(indent, "block_%d:;", id)
+	if e.emittedAnywhere != nil {
+		e.emittedAnywhere[id] = true
+	}
 	e.annotateInlineFrames(blk.StartVA, indent)
 	// Reaching-definition fixpoint: fill live-in registers the recursive walk
 	// left unknown but a value-flow fixpoint proves consistent (see ssa.go).
@@ -159,7 +231,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			// P3-feasible-3: Emit bare "return;" if the return register
 			// holds a void-call result or is empty/uninitialized.
 			retVal := e.state.lookupReg(e.fir.ReturnReg)
-			if retVal == "" || retVal == "/* void */" || retVal == "/* pop */" {
+			if retVal = e.returnValue(retVal); retVal == "" {
 				e.emit(indent, "return;")
 			} else {
 				e.emit(indent, "return %s;", retVal)
@@ -321,6 +393,31 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		}
 		e.emitOmittedPath(id, indent+1)
 		e.emit(indent, "}")
+		return
+	}
+	// A join point that has already been emitted is referenced, not
+	// emitted again.
+	//
+	// Without this the walk re-INLINES it, and with it the whole subtree
+	// below it, once per reaching path up to maxVisitCount. That is
+	// combinatorial, and it dominated the output: ten functions out of a
+	// thousand produced 45% of all emitted lines, at 45x-83x LINES PER
+	// MACHINE INSTRUCTION (_StringBase._createStringFromIterable: 331
+	// instructions -> 27,563 lines). Nothing was wrong with any single
+	// line; there were simply tens of thousands of them, which for a tool
+	// whose job is to make a stripped binary readable is its own kind of
+	// failure. The `analysis budget exceeded` backstop never fired
+	// (measured budgetHit=0), so none of this was even caught as runaway.
+	//
+	// Blocks with ONE predecessor are still inlined: that is a tree edge,
+	// inlining it is what makes the output read like source rather than
+	// like a basic-block dump, and it cannot multiply. Only a real join --
+	// two or more predecessors, already emitted once -- becomes a goto.
+	// The label is emitted for every block in emitBlockBody and pruned
+	// later by dropUnusedLabels, so referencing one is always safe here:
+	// visits>0 means the block, and therefore its label, is in the output.
+	if e.emittedAnywhere[id] && len(e.fir.Blocks[id].Preds) > 1 {
+		e.emit(indent, "goto block_%d;", id)
 		return
 	}
 	if e.canInline(id, depth) {
@@ -571,15 +668,30 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 	// targets. Otherwise emit a dispatch comment.
 	if ins.Target != "" && !strings.HasPrefix(ins.Target, "0x") {
 		if len(e.fir.SwitchCases) > 0 {
-			// Real switch/case recovery: emit switch with ALL case blocks.
-			// Use emitBlockBody (not emitSuccessor) for each case so the
-			// emitter does NOT follow fallthrough into the next case —
-			// each case is emitted independently with its own break.
+			// Case bodies go through emitBlock, like every other
+			// recursion site.
+			//
+			// This called emitBlockBody directly, which bypasses ALL of
+			// emitBlock's guards at once: the depth limit, the active-set
+			// cycle detection, the visit cap, the id bounds check and the
+			// step budget. A jump table whose cases lead back into the
+			// dispatch then recursed without any bound. It cost six of the
+			// project's 93 corpus samples -- Dart 2.14.0, 2.15.0 and
+			// 2.16.0 on ARM64, every variant of each -- which died with
+			// `fatal error: out of memory` at depth ~5,400 and an indent
+			// of ~10,800 columns. The same three versions on x86_64, and
+			// 2.13.0/2.17.6 on ARM64, were unaffected, which is what makes
+			// it look like a version quirk rather than what it is.
+			//
+			// The stated reason for the bypass -- "so the emitter does NOT
+			// follow fallthrough into the next case" -- did not hold
+			// either: emitBlockBody follows the fallthrough successor at
+			// its end just as emitBlock does.
 			e.emit(indent, "switch (%s) {", ins.Target)
 			for _, sc := range e.fir.SwitchCases {
 				e.emit(indent+1, "case %d:", sc.Index)
 				if sc.BlockID >= 0 && sc.BlockID < len(e.fir.Blocks) {
-					e.emitBlockBody(sc.BlockID, indent+2, depth+1)
+					e.emitBlock(sc.BlockID, indent+2, depth+1)
 				} else {
 					e.emit(indent+2, "// case target block %d not recovered", sc.BlockID)
 				}

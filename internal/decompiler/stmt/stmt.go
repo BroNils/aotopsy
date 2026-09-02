@@ -333,21 +333,6 @@ func lastCode(body []Stmt) Stmt {
 	return nil
 }
 
-// walkConstructs calls fn for every Construct in the tree, innermost first,
-// so a pass may rewrite a body without invalidating an outer traversal.
-func walkConstructs(stmts []Stmt, fn func(*Construct)) {
-	for _, s := range stmts {
-		c := asConstruct(s)
-		if c == nil {
-			continue
-		}
-		for i := range c.Clauses {
-			walkConstructs(c.Clauses[i].Body, fn)
-		}
-		fn(c)
-	}
-}
-
 // mapBodies rewrites every statement list in the tree, innermost first, using
 // fn. It reports whether any body changed. This is the driver for passes that
 // work on a flat sequence of sibling statements.

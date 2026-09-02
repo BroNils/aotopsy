@@ -1,10 +1,15 @@
 package output
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // SARIF 2.1.0 types — subset sufficient for AOTopsy security findings.
@@ -17,8 +22,34 @@ type sarifLog struct {
 }
 
 type sarifRun struct {
-	Tool    sarifTool     `json:"tool"`
-	Results []sarifResult `json:"results"`
+	Tool      sarifTool       `json:"tool"`
+	Artifacts []sarifArtifact `json:"artifacts,omitempty"`
+	Results   []sarifResult   `json:"results"`
+}
+
+// sarifArtifact describes the analysed binary (SARIF 2.1.0 §3.24).
+//
+// Without it a consumer has a report about "libapp.so" with no way to
+// tell which one: every Flutter app ships a file by that name.
+type sarifArtifact struct {
+	Location sarifArtifactLocation `json:"location"`
+	Length   int64                 `json:"length,omitempty"`
+	Roles    []string              `json:"roles,omitempty"`
+	MIMEType string                `json:"mimeType,omitempty"`
+	Hashes   map[string]string     `json:"hashes,omitempty"`
+}
+
+// sarifAddress locates a finding in a binary (SARIF 2.1.0 §3.32).
+//
+// This is where an address belongs. It used to live in a text snippet
+// with region.startLine pinned to 1, which §3.30.21 forbids for a binary
+// artifact -- and which meant every finding in the report pointed at
+// "line 1" of a file that has no lines.
+type sarifAddress struct {
+	AbsoluteAddress int64  `json:"absoluteAddress"`
+	Kind            string `json:"kind,omitempty"`
+	Name            string `json:"name,omitempty"`
+	FullyQualified  string `json:"fullyQualifiedName,omitempty"`
 }
 
 type sarifTool struct {
@@ -64,21 +95,12 @@ type sarifLocation struct {
 
 type sarifPhysicalLocation struct {
 	ArtifactLocation sarifArtifactLocation `json:"artifactLocation"`
-	Region           sarifRegion           `json:"region"`
+	Address          *sarifAddress         `json:"address,omitempty"`
 }
 
 type sarifArtifactLocation struct {
-	URI string `json:"uri"`
-}
-
-type sarifRegion struct {
-	StartLine   int           `json:"startLine"`
-	StartColumn int           `json:"startColumn,omitempty"`
-	Snippet     *sarifSnippet `json:"snippet,omitempty"`
-}
-
-type sarifSnippet struct {
-	Text string `json:"text"`
+	URI   string `json:"uri"`
+	Index *int   `json:"index,omitempty"`
 }
 
 // ruleLevel maps signal categories to SARIF severity levels.
@@ -155,8 +177,59 @@ type SignalFinding struct {
 	PC          string `json:"pc"`
 }
 
+// describeArtifact builds the run.artifacts entry for the analysed
+// binary, hashing it so a report can be tied to the exact file.
+func describeArtifact(libPath string) sarifArtifact {
+	a := sarifArtifact{
+		Location: sarifArtifactLocation{URI: "libapp.so"},
+		Roles:    []string{"analysisTarget"},
+		MIMEType: "application/x-sharedlib",
+	}
+	if libPath == "" {
+		return a
+	}
+	a.Location.URI = filepath.Base(libPath)
+	fi, err := os.Stat(libPath)
+	if err != nil {
+		return a
+	}
+	a.Length = fi.Size()
+	f, err := os.Open(libPath)
+	if err != nil {
+		return a
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return a
+	}
+	a.Hashes = map[string]string{"sha-256": hex.EncodeToString(h.Sum(nil))}
+	return a
+}
+
+// parseAddress reads a "0x..." PC. Findings that carry no address at all
+// (binary-level ones like entropy or obfuscation) get no address object
+// rather than a fabricated zero.
+func parseAddress(pc string) (int64, bool) {
+	s := strings.TrimSpace(pc)
+	if s == "" {
+		return 0, false
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	v, err := strconv.ParseInt(s, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
 // WriteSARIF writes a SARIF 2.1.0 report from signal findings.
-func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error {
+//
+// libPath is the analysed binary; it names the artifact and supplies its
+// size and SHA-256 so a report can be tied to the exact file it came
+// from. Passing "" still writes a valid report, with the artifact
+// described only by the placeholder name.
+func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath string) error {
 	// Build unique rules from findings
 	ruleSet := map[string]bool{}
 	var rules []sarifRule
@@ -183,6 +256,9 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 		})
 	}
 
+	artifact := describeArtifact(libPath)
+	artifactIndex := 0
+
 	// Build results
 	var results []sarifResult
 	for _, f := range findings {
@@ -190,29 +266,34 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 		if level == "" {
 			level = "note"
 		}
+		loc := sarifLocation{
+			PhysicalLocation: sarifPhysicalLocation{
+				ArtifactLocation: sarifArtifactLocation{
+					URI:   artifact.Location.URI,
+					Index: &artifactIndex,
+				},
+			},
+		}
+		if addr, ok := parseAddress(f.PC); ok {
+			loc.PhysicalLocation.Address = &sarifAddress{
+				AbsoluteAddress: addr,
+				Kind:            "function",
+				Name:            f.Function,
+			}
+		}
 		results = append(results, sarifResult{
 			RuleID: "AOTOPSY_" + f.Category,
 			Level:  level,
 			Message: sarifDescription{
-				Text: fmt.Sprintf("%s: \"%s\" in %s", f.Category, f.StringValue, f.Function),
+				Text: fmt.Sprintf("%s: %q in %s at %s", f.Category, f.StringValue, f.Function, f.PC),
 			},
-			Locations: []sarifLocation{
-				{
-					PhysicalLocation: sarifPhysicalLocation{
-						ArtifactLocation: sarifArtifactLocation{
-							URI: "libapp.so",
-						},
-						Region: sarifRegion{
-							StartLine: 1,
-							Snippet: &sarifSnippet{
-								Text: fmt.Sprintf("Function: %s at %s — String: %q", f.Function, f.PC, f.StringValue),
-							},
-						},
-					},
-				},
-			},
+			Locations: []sarifLocation{loc},
 			PartialFingerprints: map[string]string{
-				"primaryLocationLineHash": fmt.Sprintf("%s:%s", f.Function, f.PC),
+				// Function and PC alone collide for binary-level findings,
+				// which carry neither: every obfuscation finding hashed to
+				// ":". The category and the matched string disambiguate.
+				"aotopsyFindingV1": fmt.Sprintf("%s:%s:%s:%s",
+					f.Category, f.Function, f.PC, f.StringValue),
 			},
 		})
 	}
@@ -229,7 +310,8 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string) error 
 					Rules:          rules,
 				},
 			},
-			Results: results,
+			Artifacts: []sarifArtifact{artifact},
+			Results:   results,
 		}},
 	}
 
