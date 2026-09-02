@@ -2346,8 +2346,25 @@ func thrFieldsX64(dartVersion string) map[int]string {
 		return thrV310_x64
 	case "3.2.5", "3.3.0":
 		return thrV325_x64
-	case "3.4.3", "3.5.0":
+	// 3.5.0 has its OWN table, and used to be aliased to 3.4.3's.
+	//
+	// thread.h @3.5.0 adds shared_field_table_values (absent at 3.4.3,
+	// verified via gh api), which lands at 0x70 and shifts every field
+	// after it by one slot. The two tables differ in 108 of ~124 entries,
+	// so a 3.5.0 x64 binary was getting 3.4.3's names: object_null
+	// reported where the field is shared_field_table_values, bool_true
+	// where object_null is, and so on down the whole struct. Not a
+	// missing annotation -- a confidently wrong one at every Thread
+	// access on that version.
+	//
+	// thrV350_x64 was written and then never wired in. Nothing caught it
+	// because there is no SDK drift gate for thread FIELD offsets (only
+	// for stubs, stub names and runtime entries); staticcheck found it as
+	// an unused variable.
+	case "3.4.3":
 		return thrV343_x64
+	case "3.5.0":
+		return thrV350_x64
 	case "3.6.2":
 		return thrV362_x64
 	case "3.7.0":
