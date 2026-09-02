@@ -32,7 +32,7 @@ func loadForNaming(t *testing.T, libPath string) (*cluster.Result, *cluster.Resu
 		t.Skipf("unsupported snapshot in %s", libPath)
 	}
 	data := info.IsolateData.Data
-	start, err := cluster.FindClusterDataStart(data)
+	start, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		t.Fatalf("cluster start: %v", err)
 	}
@@ -49,7 +49,7 @@ func loadForNaming(t *testing.T, libPath string) (*cluster.Result, *cluster.Resu
 	}
 	var vmRes *cluster.Result
 	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
+		if vmStart, err := snapshot.FindClusterDataStart(vmData); err == nil {
 			if r, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
 				_ = cluster.ReadFill(vmData, r, info.Version, true, info.VmHeader.TotalSize)
 				vmRes = r

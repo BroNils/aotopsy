@@ -274,7 +274,7 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 
 		// For unknown hashes, probe the data to determine tag style.
 		if info.Version != nil && info.Version.DartVersion == "" && hashRegion.Data != nil {
-			if cs, err := findClusterDataStart(hashRegion.Data); err == nil {
+			if cs, err := FindClusterDataStart(hashRegion.Data); err == nil {
 				info.Version = ProbeTagStyle(hashRegion.Data, cs)
 			}
 		}
@@ -322,24 +322,37 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	return info, nil
 }
 
-// findClusterDataStart returns the byte offset where clustered data begins
-// within a snapshot data region. Duplicated from cluster package to avoid
-// circular imports.
-func findClusterDataStart(data []byte) (int, error) {
-	const minHeader = 0x35
+// FindClusterDataStart returns the byte offset where clustered data
+// begins within a snapshot data region: past the header and past the
+// null-terminated features string that starts at 0x34.
+//
+// This existed twice, here and as cluster.FindClusterDataStart, with a
+// comment here saying it was "duplicated from cluster package to avoid
+// circular imports". There was no cycle to avoid: cluster imports
+// snapshot and snapshot does not import cluster, so the shared copy can
+// only live here, which is also where it belongs -- this parses the
+// snapshot header, not a cluster.
+//
+// Two copies of a header layout is the shape of bug this project has
+// already paid for elsewhere: a correction to the 0x34 offset or the
+// 1024-byte bound would have had to land in both, and nothing would have
+// reported it if only one were updated.
+func FindClusterDataStart(data []byte) (int, error) {
+	const minHeader = 0x35 // magic + length + kind + hash
 	if len(data) < minHeader {
-		return 0, fmt.Errorf("data too short (%d < %d)", len(data), minHeader)
+		return 0, fmt.Errorf("snapshot: data too short (%d < %d)", len(data), minHeader)
 	}
-	featStart := 0x34
+	// Features string starts at offset 0x34, null-terminated.
+	const featStart = 0x34
 	for i := featStart; i < len(data); i++ {
 		if data[i] == 0 {
-			return i + 1, nil
+			return i + 1, nil // byte after null terminator
 		}
 		if i-featStart > 1024 {
-			return 0, fmt.Errorf("features string too long")
+			return 0, fmt.Errorf("snapshot: features string too long (no null terminator within 1024 bytes)")
 		}
 	}
-	return 0, fmt.Errorf("unterminated features string")
+	return 0, fmt.Errorf("snapshot: unterminated features string")
 }
 
 // capRegionSize computes a bounded read size for a region whose symbol has size 0.

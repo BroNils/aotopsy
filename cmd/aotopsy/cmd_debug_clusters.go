@@ -68,7 +68,7 @@ func cmdClusters(args []string) error {
 			continue
 		}
 
-		clusterStart, err := cluster.FindClusterDataStart(t.data)
+		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", t.name, err)
 			continue

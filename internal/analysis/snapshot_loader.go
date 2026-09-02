@@ -86,7 +86,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		return nil, fmt.Errorf("isolate data too short (%d bytes)", len(data))
 	}
 
-	clusterStart, err := cluster.FindClusterDataStart(data)
+	clusterStart, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		_ = ef.Close()
 		return nil, fmt.Errorf("cluster start: %w", err)
@@ -141,7 +141,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 	// VM snapshot: cluster scan + fill (best-effort, nil if absent).
 	var vmResult *cluster.Result
 	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := cluster.FindClusterDataStart(vmData); err == nil {
+		if vmStart, err := snapshot.FindClusterDataStart(vmData); err == nil {
 			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
 				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
 				vmResult = vmRes
@@ -215,7 +215,7 @@ func LoadSnapshotIsolate(libPath string, opts dartfmt.Options) (*elfx.File, *sna
 		_ = ef.Close()
 		return nil, nil, nil, fmt.Errorf("isolate data too short (%d bytes)", len(data))
 	}
-	clusterStart, err := cluster.FindClusterDataStart(data)
+	clusterStart, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		_ = ef.Close()
 		return nil, nil, nil, fmt.Errorf("cluster start: %w", err)
