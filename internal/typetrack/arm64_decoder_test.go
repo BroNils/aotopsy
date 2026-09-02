@@ -19,7 +19,7 @@ func TestIsLDURH(t *testing.T) {
 	}{
 		{
 			name:     "LDURH W0, [X2, #1] (class ID load)",
-			raw:      0x78401040, // 0x78400000 | (1<<12) | (2<<5) | 0
+			raw:      0x78401040, // 0x78400000 | (1<<12) | (2<<5)
 			wantOK:   true,
 			wantBase: 2,
 			wantRT:   0,
@@ -72,7 +72,7 @@ func TestIsLDURH(t *testing.T) {
 
 func TestIsADD64ImmediateReservedShift(t *testing.T) {
 	// ADD X0, X0, #0x123, shift=0 (no shift) — normal case
-	raw := uint32(0x91000000) | (0x123 << 10) | (0 << 5) | 0
+	raw := uint32(0x91000000) | (0x123 << 10) | (0 << 5)
 	rd, rn, imm, ok := arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=0 should be valid")
@@ -84,7 +84,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 	_ = rn
 
 	// ADD X0, X0, #0x123, shift=1 (LSL #12) — normal case
-	raw = uint32(0x91400000) | (0x123 << 10) | (0 << 5) | 0
+	raw = uint32(0x91400000) | (0x123 << 10) | (0 << 5)
 	_, _, imm, ok = arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=1 should be valid")
@@ -94,7 +94,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 	}
 
 	// ADD X0, X0, #0x123, shift=2 (RESERVED) — should return imm=0
-	raw = uint32(0x91800000) | (0x123 << 10) | (0 << 5) | 0
+	raw = uint32(0x91800000) | (0x123 << 10) | (0 << 5)
 	_, _, imm, ok = arm64.ADD64Immediate(raw)
 	if !ok {
 		t.Error("ADD with shift=2 should still return ok=true")
@@ -108,7 +108,7 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 
 func TestIsSUB64ImmediateReservedShift(t *testing.T) {
 	// SUB X0, X0, #0x123, shift=2 (RESERVED)
-	raw := uint32(0xD1800000) | (0x123 << 10) | (0 << 5) | 0
+	raw := uint32(0xD1800000) | (0x123 << 10) | (0 << 5)
 	_, _, imm, ok := arm64.SUB64Immediate(raw)
 	if !ok {
 		t.Error("SUB with shift=2 should still return ok=true")

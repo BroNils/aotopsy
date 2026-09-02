@@ -211,15 +211,15 @@ const (
 	//   kUnchecked:            field offset  8 -> displacement 0x7 (7)
 	//   kMonomorphicUnchecked: field offset 16 -> displacement 0xf (15)
 
-	CodeEntryPointDispUncompressed               = 0x7
-	CodeMonomorphicEntryPointDispUncompressed    = 0x17
-	CodeUncheckedEntryPointDispUncompressed      = 0xf
-	CodeMonomorphicUncheckedDispUncompressed     = 0x1f
+	CodeEntryPointDispUncompressed            = 0x7
+	CodeMonomorphicEntryPointDispUncompressed = 0x17
+	CodeUncheckedEntryPointDispUncompressed   = 0xf
+	CodeMonomorphicUncheckedDispUncompressed  = 0x1f
 
-	CodeEntryPointDispCompressed                 = 0x3
-	CodeMonomorphicEntryPointDispCompressed      = 0xb
-	CodeUncheckedEntryPointDispCompressed        = 0x7
-	CodeMonomorphicUncheckedDispCompressed       = 0xf
+	CodeEntryPointDispCompressed            = 0x3
+	CodeMonomorphicEntryPointDispCompressed = 0xb
+	CodeUncheckedEntryPointDispCompressed   = 0x7
+	CodeMonomorphicUncheckedDispCompressed  = 0xf
 )
 
 // ── Pool index layout constants ───────────────────────────────────────
@@ -233,7 +233,6 @@ const (
 	// PoolElementSize is the size of one pool element in bytes (one word).
 	PoolElementSize = 8
 )
-
 
 // ── Class ID bitfield constants ───────────────────────────────────────
 //

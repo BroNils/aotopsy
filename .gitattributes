@@ -1,0 +1,29 @@
+# Go source is LF, everywhere, on every platform.
+#
+# 34 of the repo's .go files were checked in with CRLF line terminators.
+# gofmt always writes LF, so every one of them was permanently "unformatted"
+# as far as `gofmt -l` is concerned -- which is why CI had no gofmt gate:
+# adding one would have reported 34 files that nobody had actually
+# misformatted. That in turn meant real formatting drift in 8 other files
+# went unreported for as long as it had been there.
+#
+# Normalising the endings and pinning them here is what makes a gofmt gate
+# possible. Without the pin, a checkout on Windows with core.autocrlf=true
+# reintroduces CRLF and the gate goes red for everyone on that platform.
+*.go text eol=lf
+
+# The Go toolchain's own files, and the formats where a stray CRLF is
+# equally load-bearing.
+go.mod  text eol=lf
+go.sum  text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+
+# Sample binaries and anything else binary must never be touched.
+*.so    binary
+*.bin   binary
+*.png   binary

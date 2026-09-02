@@ -166,6 +166,7 @@ func parseHexVA(target string) (uint64, bool) {
 //   - StreamSubscription.resume/pause return void, but Isolate.resume/pause
 //     return Future/void depending on overload
 //   - List.reset doesn't exist, but many custom reset methods return values
+//
 // Keeping these as void would silently drop return values in decompiled output.
 var knownVoidSelectors = map[string]bool{
 	"setState":          true,

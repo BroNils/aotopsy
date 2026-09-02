@@ -53,7 +53,7 @@ func TestIsBR(t *testing.T) {
 }
 
 func TestCondBranch(t *testing.T) {
-	rawBEQ := uint32(0x54000000 | (8 << 5) | 0)
+	rawBEQ := uint32(0x54000000 | (8 << 5))
 	if target, ok := CondBranch(rawBEQ, 0x1000); !ok || target != 0x1020 {
 		t.Fatalf("CondBranch(B.EQ) = (0x%x, %v), want (0x1020, true)", target, ok)
 	}
@@ -63,7 +63,7 @@ func TestCondBranch(t *testing.T) {
 		t.Fatalf("CondBranch(B.AL) = true, want false")
 	}
 
-	rawCBZ := uint32(0x34000000 | (16 << 5) | 0)
+	rawCBZ := uint32(0x34000000 | (16 << 5))
 	if target, ok := CondBranch(rawCBZ, 0x1000); !ok || target != 0x1040 {
 		t.Fatalf("CondBranch(CBZ) = (0x%x, %v), want (0x1040, true)", target, ok)
 	}
@@ -73,19 +73,19 @@ func TestCondBranch(t *testing.T) {
 		t.Fatalf("CondBranch(CBNZ) = (0x%x, %v), want (0x1040, true)", target, ok)
 	}
 
-	rawTBZ := uint32(0x36000000 | (8 << 5) | 0)
+	rawTBZ := uint32(0x36000000 | (8 << 5))
 	if target, ok := CondBranch(rawTBZ, 0x1000); !ok || target != 0x1020 {
 		t.Fatalf("CondBranch(TBZ) = (0x%x, %v), want (0x1020, true)", target, ok)
 	}
 
-	rawTBNZ := uint32(0x37000000 | (8 << 5) | 0)
+	rawTBNZ := uint32(0x37000000 | (8 << 5))
 	if target, ok := CondBranch(rawTBNZ, 0x1000); !ok || target != 0x1020 {
 		t.Fatalf("CondBranch(TBNZ) = (0x%x, %v), want (0x1020, true)", target, ok)
 	}
 }
 
 func TestDstRegOfInst(t *testing.T) {
-	rawLDR := uint32(0xF9400000 | (1 << 10) | (27 << 5) | 0)
+	rawLDR := uint32(0xF9400000 | (1 << 10) | (27 << 5))
 	if rd := DstRegOfInst(rawLDR); rd != 0 {
 		t.Fatalf("DstRegOfInst(LDR) = %d, want 0", rd)
 	}
@@ -96,7 +96,7 @@ func TestDstRegOfInst(t *testing.T) {
 	}
 
 	// LDP X0, X1, [X26, #80] -> 0xA9450740
-	rawLDP := uint32(0xA9400000 | (10 << 15) | (1 << 10) | (26 << 5) | 0)
+	rawLDP := uint32(0xA9400000 | (10 << 15) | (1 << 10) | (26 << 5))
 	regs := DstRegsOfInst(rawLDP)
 	if len(regs) != 2 || regs[0] != 0 || regs[1] != 1 {
 		t.Fatalf("DstRegsOfInst(LDP) = %v, want [0, 1]", regs)

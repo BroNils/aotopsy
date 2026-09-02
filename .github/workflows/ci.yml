@@ -14,6 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Formatting and static analysis, on Linux only: both are
+  # platform-independent, and running them three times says nothing extra.
+  #
+  # There was no gofmt gate here for a concrete reason: 34 .go files were
+  # committed with CRLF line terminators, and gofmt always writes LF, so
+  # every one of them was permanently "unformatted" and the gate would have
+  # been red from the day it was added. The endings are normalised and
+  # pinned in .gitattributes now, which is what makes this possible -- and
+  # in the process it turned up genuine formatting drift in 8 other files
+  # that had gone unreported for as long as it existed.
+  lint:
+    name: gofmt + staticcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal ./tools)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            echo
+            echo "Run: gofmt -w \$(gofmt -l ./cmd ./internal ./tools)"
+            exit 1
+          fi
+      # go vet catches a deliberately narrow set. staticcheck covers the
+      # much larger class around it -- unused results, impossible
+      # conditions, misuses of the standard library.
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
   test:
     name: build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -35,8 +72,11 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+      # -shuffle=on because nothing here ever randomised test order, so an
+      # ordering dependency between tests would pass forever and then fail
+      # for whoever next added a test in the middle.
       - name: Test
-        run: go test ./... -count=1
+        run: go test ./... -count=1 -shuffle=on -timeout 20m
 
   race-coverage:
     name: race + coverage (linux/amd64)
@@ -48,9 +88,31 @@ jobs:
           go-version: stable
           cache: true
       - name: Test (race + coverage)
-        run: go test ./... -count=1 -race -covermode=atomic -coverprofile=coverage.out
+        run: go test ./... -count=1 -shuffle=on -timeout 30m -race -covermode=atomic -coverprofile=coverage.out
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
+      # A floor, not a target. Coverage was measured and uploaded before,
+      # and nothing ever failed when it dropped -- an artifact nobody
+      # downloads is not a gate.
+      #
+      # The number is deliberately below where the project sits rather than
+      # at it: this runs WITHOUT the sample corpus (samples/ is gitignored
+      # and not redistributable), so the covered set here is the pure-unit
+      # portion, well under what a run with the corpus reports. Raise it
+      # when it is comfortably clear, and never lower it to make a red
+      # build green -- that is the one move it exists to prevent.
+      - name: Coverage floor
+        env:
+          COVERAGE_FLOOR: '15.0'
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+          echo "total coverage: ${total}% (floor ${COVERAGE_FLOOR}%)"
+          awk -v t="$total" -v f="$COVERAGE_FLOOR" 'BEGIN {
+            if (t+0 < f+0) {
+              printf "coverage %.1f%% is below the %.1f%% floor\n", t, f
+              exit 1
+            }
+          }'
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
