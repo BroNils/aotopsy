@@ -360,6 +360,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
+	// FP argument registers, matching the fixpoint's entry seed (ssa.go).
+	// Arity recovery is integer-register based, so there is no per-slot
+	// parameter name to use here; fpargN names the ABI slot, which is what
+	// is actually known.
+	for i, reg := range fir.FpuArgRegs {
+		e.state.setReg(reg, fmt.Sprintf("fparg%d", i))
+	}
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
 	// is emitted. The signature needs `async` prefix, but IsAsync is set
 	// during block walking which happens after the signature. A pre-scan
@@ -716,6 +723,37 @@ func safeFuncName(name string) string {
 }
 
 func indentStr(n int) string { return strings.Repeat("  ", n) }
+
+// returnValue picks the value a `return` statement should show, or ""
+// when there is genuinely nothing to return.
+//
+// A function returning a double leaves it in V0 (ARM64) / XMM0 (x86_64),
+// not in the integer return register. Reading only the integer one
+// printed a bare `return;` for every such function and silently dropped
+// the value it returned. FpuReturnReg is what says where to look, and it
+// was populated by both lifters and read by nothing.
+//
+// The FP register is consulted only as a fallback, so an integer return
+// is never overridden by a value left in V0 by earlier arithmetic. And
+// lookupReg echoes the register name back when it has no tracked value,
+// so that case is rejected explicitly -- otherwise this would trade a
+// missing return for `return v0;`, which is a leak, not a fix.
+func (e *emitter) returnValue(intVal string) string {
+	if usableReturnValue(intVal) {
+		return intVal
+	}
+	if e.fir.FpuReturnReg != "" {
+		fp := e.state.lookupReg(e.fir.FpuReturnReg)
+		if usableReturnValue(fp) && fp != e.fir.FpuReturnReg {
+			return fp
+		}
+	}
+	return ""
+}
+
+func usableReturnValue(v string) bool {
+	return v != "" && v != "/* void */" && v != "/* pop */"
+}
 
 // emit appends one indented output line -- or several, when the formatted
 // text contains newlines.

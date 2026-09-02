@@ -52,48 +52,70 @@ func abs(x float64) float64 {
 // --- Crypto algorithm identification tests ---
 
 func TestIdentifyCryptoFromBinary(t *testing.T) {
-	// Create a small binary with known crypto constants embedded
-	// AES Rcon[0] = 0x01000000 (LE: 00 00 00 01)
-	// ChaCha20 'expa' = 0x61707865 (LE: 65 78 70 61)
-	data := []byte{
-		0x00, 0x00, 0x00, 0x01, // AES Rcon[0]
-		0x00, 0x00, 0x00, 0x00, // padding
-		0x65, 0x78, 0x70, 0x61, // ChaCha20 'expa'
-	}
-	// Write to temp file and scan
-	tmpFile := filepath.Join(t.TempDir(), "test_crypto_binary.bin")
-	if err := writeFile(tmpFile, data); err != nil {
-		t.Fatalf("write temp file: %v", err)
-	}
-	findings, err := IdentifyCryptoFromBinary(tmpFile)
-	if err != nil {
-		t.Fatalf("IdentifyCryptoFromBinary: %v", err)
-	}
-	if len(findings) < 1 {
-		t.Errorf("expected at least 1 crypto finding, got %d", len(findings))
-	}
-	// ChaCha20's constant is distinctive and must be found.
-	// AES Rcon[0] must NOT be: its little-endian bytes are 00 00 00 01,
-	// which occur in every binary (any `MOV #1`, any length-1 array, any
-	// zero-padded word). Reporting "AES detected" from that byte run is a
-	// guaranteed false positive, so the raw-byte scan skips non-distinctive
-	// constants -- see isDistinctiveConstant.
-	foundAES := false
-	foundChaCha := false
-	for _, f := range findings {
-		if contains(f.Algorithm, "AES Rcon[0]") {
-			foundAES = true
+	scan := func(t *testing.T, name string, data []byte) []CryptoFinding {
+		t.Helper()
+		tmpFile := filepath.Join(t.TempDir(), name)
+		if err := writeFile(tmpFile, data); err != nil {
+			t.Fatalf("write temp file: %v", err)
 		}
-		if contains(f.Algorithm, "ChaCha20") {
-			foundChaCha = true
+		findings, err := IdentifyCryptoFromBinary(tmpFile)
+		if err != nil {
+			t.Fatalf("IdentifyCryptoFromBinary: %v", err)
 		}
+		return findings
 	}
-	if foundAES {
-		t.Error("AES Rcon[0] must not be reported from a raw byte scan (00 00 00 01 is not evidence)")
+	has := func(findings []CryptoFinding, algo string) bool {
+		for _, f := range findings {
+			if contains(f.Algorithm, algo) {
+				return true
+			}
+		}
+		return false
 	}
-	if !foundChaCha {
-		t.Error("ChaCha20 'expa' not found in binary scan")
-	}
+
+	// AES Rcon[0]'s little-endian bytes are 00 00 00 01, which occur in
+	// every binary ever built (any `MOV #1`, any length-1 array, any
+	// zero-padded word). See isDistinctiveConstant.
+	t.Run("non-distinctive constant is not evidence", func(t *testing.T) {
+		f := scan(t, "rcon.bin", []byte{0x00, 0x00, 0x00, 0x01})
+		if has(f, "AES Rcon[0]") {
+			t.Error("AES Rcon[0] must not be reported from a raw byte scan")
+		}
+	})
+
+	// ChaCha20's constants ARE text: "expand 32-byte k" cut into four
+	// 32-bit words, so 0x61707865 is literally the bytes "expa". This test
+	// used to embed that one word and REQUIRE it to be reported, which is
+	// what let a real false positive through: on dart-3.9.2-arm64 the only
+	// crypto finding in the whole binary was this constant matched inside
+	// `expando_patch.dart`, a Dart core library filename.
+	t.Run("lone ASCII constant is not evidence", func(t *testing.T) {
+		f := scan(t, "expa.bin", []byte("some/path/expando_patch.dart"))
+		if has(f, "ChaCha20") {
+			t.Error("a lone ASCII constant must not be reported: " +
+				`"expa" occurs in ordinary identifiers`)
+		}
+	})
+
+	// Corroboration is what makes it evidence: the real cipher constant is
+	// the whole 16-byte string, and finding two or more of its words is
+	// not something ordinary text does.
+	t.Run("corroborated ASCII constants are evidence", func(t *testing.T) {
+		f := scan(t, "chacha.bin", []byte("expand 32-byte k"))
+		if !has(f, "ChaCha20") {
+			t.Error("the full ChaCha20 constant block must be reported")
+		}
+	})
+
+	// A constant that is not text needs no second witness, so tightening
+	// the ASCII case must not weaken any other detection.
+	t.Run("lone non-ASCII constant is still evidence", func(t *testing.T) {
+		// SHA-256 K[0] = 0x428a2f98, little-endian 98 2f 8a 42.
+		f := scan(t, "sha.bin", []byte{0x98, 0x2f, 0x8a, 0x42})
+		if !has(f, "SHA-256") {
+			t.Error("SHA-256 K[0] must still be reported on its own")
+		}
+	})
 }
 
 func TestIsDistinctiveConstant(t *testing.T) {
