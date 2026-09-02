@@ -47,25 +47,25 @@ func RunTypeInferenceStage(
 	table *cluster.InstructionsTable,
 	thrFields map[int]string,
 	vmResult *cluster.Result,
-) error {
+) (*TypeInferenceOutput, error) {
 	if info == nil || info.Version == nil {
-		return nil
+		return nil, nil
 	}
 	if info.Version.ObjectStoreAOTFieldCount <= 0 {
-		return nil
+		return nil, nil
 	}
 	// TARGET 3: For Dart 2.x (no InstructionsTable), still run typetrack
 	// using dispatch table entries from TextOffset fallback.
 	if table == nil && !info.Version.CodeTextOffsetDelta {
-		return nil
+		return nil, nil
 	}
 
 	opts.logf("  type inference: starting...\n")
 
-	bd, tctx, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields, vmResult)
+	bd, tctx, interResult, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields, vmResult)
 	if err != nil {
 		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
-		return nil // non-fatal
+		return nil, nil // non-fatal
 	}
 
 	// Report the three claims separately. "resolved N/M" alone hid the
@@ -84,11 +84,29 @@ func RunTypeInferenceStage(
 			len(tctx.InstanceFieldTypes), tctx.InstanceFieldHits)
 	}
 
-	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, bd, tctx); err != nil {
-		return fmt.Errorf("write typetrack report: %w", err)
+	out := &TypeInferenceOutput{Inter: interResult}
+	if tctx != nil {
+		out.ClassIDToName = tctx.ClassIDToName
 	}
 
-	return nil
+	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, bd, tctx); err != nil {
+		return out, fmt.Errorf("write typetrack report: %w", err)
+	}
+
+	return out, nil
+}
+
+// TypeInferenceOutput is what the type-inference stage hands back for
+// reuse downstream.
+//
+// Inter carries the per-function analyses with the confidence and slot
+// index the analysis produced; those are lossy once they have been through
+// call_edges.jsonl, which is where the evidence collector used to read
+// them from. ClassIDToName is the same resolver field_accessor_xref uses,
+// so a field access reports the same class name in both artifacts.
+type TypeInferenceOutput struct {
+	Inter         *typetrack.InterResult
+	ClassIDToName map[int]string
 }
 
 // runTypeInference is the core logic, separated from RunTypeInferenceStage
@@ -106,17 +124,17 @@ func runTypeInference(
 	isARM64 bool,
 	thrFields map[int]string,
 	vmResult *cluster.Result,
-) (BLRBreakdown, *typetrack.TypeContext, error) {
+) (BLRBreakdown, *typetrack.TypeContext, *typetrack.InterResult, error) {
 	// 1. Parse dispatch table.
 	// ParseDispatchTable reads from the roots section, which is in the
 	// snapshot DATA region (info.IsolateData.Data), not the instructions
 	// region. result.FillEnd is the byte offset within this data.
 	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
 	if err != nil {
-		return BLRBreakdown{}, nil, fmt.Errorf("parse dispatch table: %w", err)
+		return BLRBreakdown{}, nil, nil, fmt.Errorf("parse dispatch table: %w", err)
 	}
 	if len(dispatchEntries) == 0 {
-		return BLRBreakdown{}, nil, nil
+		return BLRBreakdown{}, nil, nil, nil
 	}
 
 	// 2. Build TypeContext.
@@ -496,18 +514,22 @@ func runTypeInference(
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
 	bd, err := rewriteCallEdges(outDir, interResult, naming.BuildTTSCallTargets(clResult.Pool, pl))
 	if err != nil {
-		return bd, ctx, fmt.Errorf("rewrite call_edges: %w", err)
+		return bd, ctx, interResult, fmt.Errorf("rewrite call_edges: %w", err)
 	}
 
 	// 6. field_accessor_xref.jsonl — (class, field) → the functions that read
 	// and write it, from the per-function field accesses the type analysis
 	// recorded.
 	if err := writeFieldAccessorXref(outDir, ctx, interResult, clResult, pl, info.Version.CompressedPointers); err != nil {
-		return bd, ctx, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
+		return bd, ctx, interResult, fmt.Errorf("write field_accessor_xref.jsonl: %w", err)
 	}
 
-	// ctx is returned so the caller can report per-source hit counters.
-	return bd, ctx, nil
+	// ctx is returned so the caller can report per-source hit counters;
+	// interResult so the evidence collector can record the BLR
+	// resolutions and field accesses with the confidence and slot index
+	// the analysis actually produced, rather than the lossy versions that
+	// survive a round trip through call_edges.jsonl.
+	return bd, ctx, interResult, nil
 }
 
 // writeFieldAccessorXref writes field_accessor_xref.jsonl: for every instance

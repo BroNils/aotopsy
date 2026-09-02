@@ -27,15 +27,33 @@ type SignalResult struct {
 	SignalCount  int
 	ContextCount int
 	EdgeCount    int
+	// Findings are returned so the pipeline can fold them into the single
+	// evidence collector. The stage writes its own evidence.jsonl only on
+	// the standalone path, where nothing downstream will.
+	Findings []output.SignalFinding
 }
 
 // RunSignalStage runs the signal analysis on existing disasm output.
-func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) (*SignalResult, error) {
+// writeEvidence tells the stage to emit evidence.jsonl itself. The full
+// pipeline passes false and writes a richer one at step 9; the standalone
+// `aotopsy signal` and --from-dir paths pass true, because nothing else
+// will.
+// libPath is the analysed binary, used to name and hash the SARIF
+// artifact. The standalone entry points pass "" -- they are handed an
+// output directory and genuinely do not know which binary produced it,
+// and no artifact records it. WriteSARIF degrades to a placeholder name
+// rather than inventing one.
+func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer, writeEvidence bool, libPath string) (*SignalResult, error) {
 	if log == nil {
 		log = os.Stderr
 	}
 	logf := cli.MakeLogf(quiet, log)
 	stagef := cli.MakeStagef(quiet, log)
+
+	// snapshot.json is what the pipeline leaves behind describing the
+	// binary this directory came from: its name, hash, and architecture.
+	// Read once here; three separate call sites used to re-read it.
+	prov, hasProv := ReadProvenance(inDir)
 
 	// Read functions.jsonl.
 	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(inDir, "functions.jsonl"))
@@ -143,18 +161,14 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	title := "aotopsy"
 	digest := filepath.Base(filepath.Dir(inDir))
 	filename := inDir
-	if metaBytes, err := os.ReadFile(filepath.Join(filepath.Dir(inDir), "meta.json")); err == nil {
-		var meta struct {
-			Hash   string `json:"hash"`
-			Source string `json:"source"`
-		}
-		if json.Unmarshal(metaBytes, &meta) == nil {
-			if meta.Hash != "" {
-				digest = meta.Hash
-			}
-			if meta.Source != "" {
-				filename = filepath.Base(meta.Source)
-			}
+	// This read a "meta.json" from the PARENT of the output directory.
+	// Nothing ever wrote that file -- one reader, zero writers -- so the
+	// lookup always failed and the report named itself after its own
+	// output directory. The pipeline writes snapshot.json now.
+	if hasProv {
+		filename = prov.SourceName
+		if prov.SHA256 != "" {
+			digest = prov.SHA256
 		}
 	}
 	render.WriteSignalHTML(htmlFile, g, title, filename, digest, asmSnippets)
@@ -217,7 +231,15 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 	}
 
 	if len(findings) > 0 {
-		if err := output.WriteSARIF(inDir, findings, "1.0.0"); err != nil {
+		// The standalone entry points hand us no binary path; recover it
+		// from the provenance record the pipeline left behind, so a
+		// `aotopsy signal --in <dir>` report still names the file it is
+		// about.
+		sarifLib := libPath
+		if sarifLib == "" && hasProv {
+			sarifLib = prov.Source
+		}
+		if err := output.WriteSARIF(inDir, findings, "1.0.0", sarifLib); err != nil {
 			logf("  %swarning: sarif: %v%s\n", cli.Gold, err, cli.Reset)
 		} else {
 			sarifPath := filepath.Join(inDir, "aotopsy.sarif")
@@ -225,19 +247,28 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		}
 	}
 
-	// Write evidence.jsonl — unified evidence model from call edges.
-	evidencePath := filepath.Join(inDir, "evidence.jsonl")
-	evCollector := evidence.NewCollector()
-	evCollector.FromCallEdges(edges)
-	if err := evCollector.WriteJSONL(evidencePath); err != nil {
-		logf("  %swarning: evidence: %v%s\n", cli.Gold, err, cli.Reset)
-	} else {
-		logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, evidencePath, cli.Reset, strutil.FileSize(evidencePath))
+	// Write evidence.jsonl only when nothing downstream will.
+	//
+	// The full pipeline writes it again at step 9 with the type-inference
+	// resolutions and these findings folded in, so writing here too meant
+	// producing a strictly poorer file and then overwriting it. That was
+	// invisible while both wrote the same call-edge-only content; it stops
+	// being invisible the moment either side gains a source.
+	if writeEvidence {
+		evidencePath := filepath.Join(inDir, "evidence.jsonl")
+		evCollector := evidence.NewCollector()
+		evCollector.FromCallEdges(edges)
+		evCollector.FromSignalFindings(findings)
+		if err := evCollector.WriteJSONL(evidencePath); err != nil {
+			logf("  %swarning: evidence: %v%s\n", cli.Gold, err, cli.Reset)
+		} else {
+			logf("  %s->%s %s%s%s (%d bytes)\n", cli.Muted, cli.Reset, cli.Blue, evidencePath, cli.Reset, strutil.FileSize(evidencePath))
+		}
 	}
 
 	// Build connected signal CFG.
 	if !noAsm {
-		content := BuildSignalContent(g, inDir, funcs, edges)
+		content := BuildSignalContent(g, inDir, funcs, edges, prov.Arch)
 		if len(content) > 0 {
 			cfgTitle := "signal CFG"
 			if title != "" {
@@ -299,16 +330,25 @@ func RunSignalStage(inDir string, k int, noAsm bool, quiet bool, log io.Writer) 
 		SignalCount:  g.Stats.SignalFuncs,
 		ContextCount: g.Stats.ContextFuncs,
 		EdgeCount:    g.Stats.TotalEdges,
+		Findings:     findings,
 	}, nil
 }
 
 // BuildSignalContent re-disassembles signal functions from bin files and extracts
 // interesting calls and string refs for each function.
+// arch is the provenance architecture ("arm64" or "x64"); it selects the
+// decoder outright. This used to be guessed: decode every function as
+// ARM64, and if not one instruction address lined up with a known call
+// edge, assume x86_64 and redo it. That guess silently misfires on any
+// function with no call edges at all, and it cost a full wasted ARM64
+// decode of every x86_64 function. The pipeline knows the architecture,
+// so it passes it.
 func BuildSignalContent(
 	g *signal.SignalGraph,
 	inDir string,
 	funcs []disasm.FuncRecord,
 	edgeRecords []disasm.CallEdgeRecord,
+	arch string,
 ) map[string]*render.SignalFuncContent {
 	edgesByFunc := make(map[string][]disasm.CallEdge)
 	for _, er := range edgeRecords {
@@ -356,37 +396,24 @@ func BuildSignalContent(
 			continue
 		}
 
-		insts := disasm.Disassemble(data, disasm.Options{BaseAddr: baseAddr})
-		if len(insts) == 0 {
-			continue
-		}
-
 		funcEdges := edgesByFunc[sf.Name]
 		edgeByPC := make(map[uint64]disasm.CallEdge, len(funcEdges))
 		for _, e := range funcEdges {
 			edgeByPC[e.FromPC] = e
 		}
 
-		// Determine architecture: ARM64 decode of x86_64 bytes produces
-		// wrong instruction addresses (4-byte aligned vs variable-length),
-		// so no call edge addresses will match. If that happens, fall back
-		// to x86_64 decode. This makes BuildSignalContent work for both
-		// architectures without needing an explicit arch flag.
-		instAddrs := make([]uint64, 0, len(insts))
-		anyMatch := false
-		for _, inst := range insts {
-			instAddrs = append(instAddrs, inst.Addr)
-			if _, ok := edgeByPC[inst.Addr]; ok {
-				anyMatch = true
-			}
-		}
-		if !anyMatch && len(edgeByPC) > 0 {
-			// ARM64 addresses didn't match any call edge — try x86_64.
-			x86Insts := disasm.DecodeX86Simple(data, baseAddr)
-			instAddrs = instAddrs[:0]
-			for _, inst := range x86Insts {
+		var instAddrs []uint64
+		if arch == "x64" {
+			for _, inst := range disasm.DecodeX86Simple(data, baseAddr) {
 				instAddrs = append(instAddrs, inst.VA)
 			}
+		} else {
+			for _, inst := range disasm.Disassemble(data, disasm.Options{BaseAddr: baseAddr}) {
+				instAddrs = append(instAddrs, inst.Addr)
+			}
+		}
+		if len(instAddrs) == 0 {
+			continue
 		}
 
 		seenCalls := make(map[string]bool)

@@ -319,6 +319,8 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 		{"movzx", "movzx x0, x1", "x0", "x1"},
 		{"movsxd", "movsxd x0, x1", "x0", "(int64)(x1)"},
 		{"movsx", "movsx x0, x1", "x0", "(int)(x1)"},
+		{"cmove", "cmove rax, rbx", "rax", "(/* e */ ? rbx : rax)"},
+		{"sete", "sete al", "al", "(/* e */ ? 1 : 0)"},
 	}
 
 	for _, tt := range tests {

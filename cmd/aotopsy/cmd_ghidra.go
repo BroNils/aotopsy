@@ -57,7 +57,7 @@ func cmdGhidra(args []string) error {
 	var pipeResult *analysis.Result
 	if *from != "" {
 		// Reuse existing output: just regenerate signal + meta.
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr)
+		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true, "")
 		if err != nil {
 			return fmt.Errorf("signal: %w", err)
 		}
@@ -97,7 +97,7 @@ func cmdGhidra(args []string) error {
 		var findErr error
 		scriptPath, findErr = analysis.FindScriptPath()
 		if findErr != nil {
-			return fmt.Errorf("Ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
+			return fmt.Errorf("ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
 		}
 	}
 

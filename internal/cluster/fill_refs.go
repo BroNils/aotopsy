@@ -128,7 +128,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if err != nil {
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
 			}
-			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType || isClosure || isFfiTrampoline {
+			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType || isClosure || isFfiTrampoline || spec.IsType {
 				allRefs = append(allRefs, int(r))
 			}
 			if j == spec.NameIdx {
@@ -210,6 +210,12 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if ti != nil {
+					// arguments is the last ref of UntaggedType's visited
+					// range; see TypeInfo.ArgumentsRef.
+					ti.ArgumentsRef = -1
+					if n := len(allRefs); n > 0 {
+						ti.ArgumentsRef = allRefs[n-1]
+					}
 					types = append(types, *ti)
 				}
 			case isScript:
@@ -251,15 +257,23 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				EntriesRef:    allRefs[2],
 			})
 		}
-		if isClosure && len(allRefs) >= 4 {
-			// UntaggedClosure ReadFromTo: instantiator_type_arguments(0),
-			// function_type_arguments(1), delayed_type_arguments(2),
-			// function(3), context(4), hash(5).
-			// FP-9: capture function ref (index 3) for closure dispatch.
-			closures = append(closures, ClosureInfo{
-				RefID:       ref,
-				FunctionRef: int(allRefs[3]),
-			})
+		if isClosure {
+			// UntaggedClosure ReadFromTo:
+			// Pre-3.13.0: instantiator_type_arguments(0), function_type_arguments(1),
+			//             delayed_type_arguments(2), function(3), context(4), hash(5).
+			// Dart 3.13.0+: length_and_flags(0), hash(1), function(2), variable captured refs...
+			fnIdx := 3
+			minRefs := 4
+			if profile != nil && snapshot.VersionAtLeast(profile.DartVersion, "3.13.0") {
+				fnIdx = 2
+				minRefs = 3
+			}
+			if len(allRefs) >= minRefs {
+				closures = append(closures, ClosureInfo{
+					RefID:       ref,
+					FunctionRef: int(allRefs[fnIdx]),
+				})
+			}
 		}
 		if isScript && len(allRefs) >= 1 {
 			si := ScriptInfo{
@@ -332,6 +346,11 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					RefID:          ref,
 					ClassID:        0, // resolved later via MintValues
 					TypeClassIdRef: allRefs[typeClassIdIdx],
+					// Not captured for the 2.10-2.15 layouts: TTS naming
+					// is deliberately off there (see
+					// buildTypeTestingStubNames), so there is no consumer
+					// to justify guessing the index.
+					ArgumentsRef: -1,
 				})
 			}
 		}

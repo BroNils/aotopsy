@@ -369,6 +369,11 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 	}
 	owner, ok := l.RefToNamed[no.OwnerRefID]
 	if !ok {
+		if l.VmRefToNamed != nil {
+			if vmOwner, vmOK := l.VmRefToNamed[no.OwnerRefID]; vmOK {
+				return l.resolveClassName(vmOwner, 0)
+			}
+		}
 		return ""
 	}
 	return l.resolveClassName(owner, 0)

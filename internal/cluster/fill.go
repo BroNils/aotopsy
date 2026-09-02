@@ -191,6 +191,19 @@ type TypeInfo struct {
 	RefID          int
 	ClassID        int32
 	TypeClassIdRef int // ref ID of type_class_id Smi (v2.x TypeClassIdIsRef only); -1 otherwise
+
+	// ArgumentsRef is the TypeArguments this type was instantiated with,
+	// or -1. UntaggedType's visited range is type_test_stub, hash,
+	// arguments (raw_object.h: VISIT_FROM(type_test_stub) in
+	// UntaggedAbstractType, VISIT_TO(arguments) in UntaggedType), so it is
+	// the LAST ref of the fill.
+	//
+	// Without it a type is only ever as specific as its class. The type
+	// testing stub for List<double> and the one for List<String> both
+	// named themselves TypeTestingStub_List, which is why they are the
+	// single largest category of symbol-table disagreement: the ELF says
+	// "assert type is List<double>".
+	ArgumentsRef int
 }
 
 // --- New capture types (previously skipped) ---
@@ -339,7 +352,7 @@ type ClosureDataInfo struct {
 // delayed_type_arguments(2), function(3), context(4), hash(5).
 // The function ref (index 3) points to the Function the closure wraps.
 type ClosureInfo struct {
-	RefID      int
+	RefID       int
 	FunctionRef int // ref ID of the wrapped Function (-1 if not captured)
 }
 
@@ -767,7 +780,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			for _, cm := range rodataCSM2Clusters {
 				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile) {
 					result.CompressedStackMaps = append(result.CompressedStackMaps,
-						CompressedStackMapsInfo{RefID: p.RefID, Payload: p.Payload})
+						CompressedStackMapsInfo(p))
 				}
 			}
 		}

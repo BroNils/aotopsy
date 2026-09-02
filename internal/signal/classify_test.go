@@ -282,3 +282,58 @@ func TestIsMundaneStub(t *testing.T) {
 		}
 	}
 }
+
+// TestThreadDataFieldsAreNotStubs pins the largest false-positive source
+// the signal graph had.
+//
+// A call whose target came out of THR.dispatch_table_array is a virtual
+// call, not a stub call. Counting it as an unrecognised stub marked every
+// function that makes a virtual call as signal: 3371 such edges on one
+// x86_64 sample, which took its "interesting THR call" count from 13 to
+// 1374 -- 97% noise.
+func TestThreadDataFieldsAreNotStubs(t *testing.T) {
+	notStubs := []string{
+		"dispatch_table_array",
+		"isolate",
+		"isolate_group",
+		"object_null",
+		"bool_true",
+		"field_table_values",
+		// Leaf runtime entries the compiler emits, not app behaviour.
+		"LibcPow_entry_point",
+		"LibcRound_entry_point",
+		"DartModulo_entry_point",
+		"MemoryMove_entry_point",
+		// GC bookkeeping, spelled CamelCase upstream so the
+		// underscore-separated patterns missed it.
+		"StoreBufferBlockProcess_entry_point",
+		"OldMarkingStackBlockProcess_entry_point",
+		"NewMarkingStackBlockProcess_entry_point",
+		"EnsureRememberedAndMarkingDeferred_entry_point",
+		"wb_wrapper_R3",
+	}
+	for _, name := range notStubs {
+		if !sdk.IsMundaneStub(name) {
+			t.Errorf("%q should carry no signal: it is VM bookkeeping or a Thread data field, "+
+				"not a call into app behaviour", name)
+		}
+	}
+}
+
+// TestGeneratorSuspendStubsAreAsync: generators suspend through the same
+// machinery as async functions. Keying only on "async" left the sync_star
+// stubs classified as unrecognised, reporting them as a gap in our tables
+// when they are the strongest evidence a function is a generator.
+func TestGeneratorSuspendStubsAreAsync(t *testing.T) {
+	for _, name := range []string{
+		"suspend_state_init_sync_star_entry_point",
+		"suspend_state_suspend_sync_star_at_start_entry_point",
+		"suspend_state_return_sync_star_entry_point",
+		"suspend_state_init_async_entry_point",
+		"suspend_state_await_entry_point",
+	} {
+		if !sdk.IsAsyncStubName(name) {
+			t.Errorf("IsAsyncStubName(%q) = false; suspension is what these stubs are for", name)
+		}
+	}
+}

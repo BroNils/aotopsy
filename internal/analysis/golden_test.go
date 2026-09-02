@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"aotopsy/internal/samplecorpus"
 )
 
 // Golden output tests.
@@ -25,9 +27,17 @@ import (
 // says what moved rather than just "hash differs".
 //
 // The sample binaries are not in the repo, so each golden record is keyed by
-// the SHA-256 of the input binary. Pointing the env var at a different
-// libapp.so skips (never fails) with a clear message -- a different input is
-// not a regression.
+// the SHA-256 of the input binary AND names the corpus sample it was recorded
+// from. The sample is resolved through internal/samplecorpus, the same way
+// every other sample-driven test finds its input.
+//
+// It used to be resolved from a per-record environment variable instead, and
+// an unset variable skipped. Nobody sets four environment variables, so
+// `go test ./internal/...` reported ok while running none of this: on
+// 2026-09-01 two records turned out to be failing and two to be keyed to
+// binaries that exist nowhere, and the suite had been green throughout. A
+// gate that silently does nothing is worse than no gate, so a missing corpus
+// sample now fails.
 //
 // The records themselves ARE in the repo, under testdata/golden/. That is
 // what gives this gate teeth: it compares against a baseline someone reviewed
@@ -35,7 +45,12 @@ import (
 // Recording is therefore explicit -- a missing record fails rather than
 // filling itself in.
 //
-//	AOTOPSY_TEST_SAMPLE_ARM64=... go test ./internal/analysis/ -run Golden
+// Four full pipeline runs cost about 80s, so this package no longer fits
+// go test's 10-minute default. Pass -timeout 40m when running the whole
+// package; -run Golden alone is fine without it.
+//
+//	go test ./internal/analysis/ -run Golden
+//	go test ./internal/analysis/ -count=1 -timeout 40m         # whole package
 //	AOTOPSY_UPDATE_GOLDEN=1 ...                                # rewrite records
 
 // goldenFiles are the pipeline outputs covered. Anything derived from the
@@ -54,6 +69,7 @@ var goldenFiles = []string{
 	"string_value_xref.jsonl",
 	"pool_immediates.jsonl",
 	"typetrack_report.json",
+	"native_capabilities.jsonl",
 }
 
 type goldenRecord struct {
@@ -66,33 +82,43 @@ type goldenRecord struct {
 	SHA256      map[string]string `json:"sha256"`
 }
 
+// goldenSamples maps each record to the corpus sample it covers.
+var goldenSamples = []struct{ sample, name string }{
+	{"dart-3.9.2-arm64.so", "compare_sample_arm64"},
+	{"dart-3.12.2-x64.so", "sample312_x64"},
+	// Dart 2.12 exercises a different instructions path entirely
+	// (text-offset deltas, no InstructionsTable), which is where the
+	// "395 of 7714 functions" bug lived.
+	{"dart-2.12.0-arm64.so", "dart212_arm64"},
+	// Dart 3.13.0, the unified-snapshot format: one _kDartSnapshotData /
+	// _kDartSnapshotText pair instead of the four legacy symbols, and a
+	// single snapshot rather than a VM/isolate pair. Worth a golden of its
+	// own precisely because nothing else in the corpus exercises that path.
+	{"dart-3.13.0-arm64.so", "sample313_arm64"},
+}
+
 func TestGoldenPipelineOutput(t *testing.T) {
-	samples := []struct{ env, name string }{
-		{"AOTOPSY_TEST_SAMPLE_ARM64", "compare_sample_arm64"},
-		{"AOTOPSY_TEST_SAMPLE_312_X64", "sample312_x64"},
-		// Dart 2.12 exercises a different instructions path entirely
-		// (text-offset deltas, no InstructionsTable), which is where the
-		// "395 of 7714 functions" bug lived.
-		{"AOTOPSY_TEST_SAMPLE_DART212", "dart212_arm64"},
-		// Dart 3.13.0, the unified-snapshot format: one _kDartSnapshotData /
-		// _kDartSnapshotText pair instead of the four legacy symbols, and a
-		// single snapshot rather than a VM/isolate pair. Worth a golden of its
-		// own precisely because nothing else in the corpus exercises that path.
-		{"AOTOPSY_TEST_SAMPLE_313_ARM64", "sample313_arm64"},
-	}
-	for _, s := range samples {
-		t.Run(s.name, func(t *testing.T) { runGolden(t, s.env, s.name) })
+	for _, s := range goldenSamples {
+		t.Run(s.name, func(t *testing.T) { runGolden(t, s.sample, s.name) })
 	}
 }
 
-func runGolden(t *testing.T, env, name string) {
-	libPath := os.Getenv(env)
+func runGolden(t *testing.T, sample, name string) {
+	libPath := samplecorpus.Path(sample)
 	if libPath == "" {
-		t.Skipf("%s not set", env)
+		// No corpus at all (fresh clone, CI): nothing to check against.
+		// Corpus present but this sample absent: the record and the corpus
+		// disagree, and that must fail. See samplecorpus.Available.
+		if !samplecorpus.Available() {
+			t.Skipf("no samples/ directory in this checkout; golden record for %s cannot be checked", name)
+		}
+		t.Fatalf("corpus sample %s is missing from samples/; the golden record for %s cannot be checked.\n"+
+			"  Restore the sample rather than deleting the record: an unrunnable golden is\n"+
+			"  how this gate spent months reporting ok while checking nothing.", sample, name)
 	}
 	inputHash, err := fileSHA256(libPath)
 	if err != nil {
-		t.Skipf("cannot read %s: %v", libPath, err)
+		t.Fatalf("cannot read %s: %v", libPath, err)
 	}
 
 	goldenPath := filepath.Join("testdata", "golden", name+".json")
@@ -119,11 +145,17 @@ func runGolden(t *testing.T, env, name string) {
 			"  To record it deliberately: AOTOPSY_UPDATE_GOLDEN=1 go test ./internal/analysis/ -run Golden\n"+
 			"  then review the new file before committing it.", goldenPath)
 	}
+	// A record whose input hash no longer matches the corpus sample it names
+	// is unrunnable, and unrunnable used to mean skip. Two of the four
+	// records had drifted that way and the gate reported nothing for both.
+	// Fail: either the sample was replaced (re-record deliberately) or the
+	// record names the wrong sample (fix the mapping).
 	if haveGolden && !update && want.InputSHA256 != inputHash {
-		t.Skipf("%s points at a different binary than the golden record\n"+
+		t.Fatalf("corpus sample %s does not match the golden record for %s\n"+
 			"  golden input: %s\n  actual input: %s\n"+
-			"  (not a regression -- rerun with AOTOPSY_UPDATE_GOLDEN=1 to re-record)",
-			env, want.InputSHA256, inputHash)
+			"  Re-record deliberately with AOTOPSY_UPDATE_GOLDEN=1 and review the diff,\n"+
+			"  or point goldenSamples at the sample the record was made from.",
+			sample, name, want.InputSHA256, inputHash)
 	}
 
 	outDir := t.TempDir()
@@ -219,9 +251,12 @@ func runGolden(t *testing.T, env, name string) {
 // reproducible: map iteration order leaking into a JSONL file would make them
 // fail at random and train everyone to re-record instead of investigating.
 func TestGoldenOutputIsDeterministic(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
+	libPath := samplecorpus.Path("dart-3.9.2-arm64.so")
 	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
+		if !samplecorpus.Available() {
+			t.Skip("no samples/ directory in this checkout; determinism is unchecked")
+		}
+		t.Fatal("corpus sample dart-3.9.2-arm64.so is missing from samples/; determinism is unchecked without it")
 	}
 	sums := make([]map[string]string, 2)
 	for run := 0; run < 2; run++ {

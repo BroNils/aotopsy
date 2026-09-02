@@ -1,13 +1,15 @@
 package typetrack
 
 import (
-	"strconv"
 	"strings"
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
 )
+
+// The closure field offsets and the shared load resolver live in
+// closurefield.go, so the x86_64 transfer function can use them too.
 
 // This file holds the per-instruction-type handlers that transferInstruction
 // (intraproc.go) dispatches to. Each handler returns true if it consumed the
@@ -271,63 +273,20 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	if !poolIdxOK {
 		return true
 	}
-	if tc.ctx.PoolUnlinkedCallNames != nil {
-		if name, ok3 := tc.ctx.PoolUnlinkedCallNames[poolIdx]; ok3 && name != "" {
-			tc.state[rt] = KnownStub("UnlinkedCall:"+name, byteOff)
-			tc.ctx.PPHits++
-			return true
-		}
-	}
-	// Check PoolCodeNames BEFORE PoolClassByIndex: a Code object in
-	// the pool should be named (PPCode:funcName), not typed as
-	// KnownClass(kCodeCid). KnownClass(CodeCID) is useless for BLR
-	// resolution — the function name is what resolveBLR needs.
-	if tc.ctx.PoolCodeNames != nil {
-		if name, ok3 := tc.ctx.PoolCodeNames[poolIdx]; ok3 && name != "" {
-			tc.state[rt] = KnownStub("PPCode:"+name, byteOff)
-			tc.ctx.PPHits++
-			return true
-		}
-	}
-	if classID, ok2 := tc.ctx.PoolClassByIndex[poolIdx]; ok2 && classID >= 0 {
-		// If this pool entry is a Type with a known type testing stub
-		// name, set KnownStub("TTS:name") instead of KnownClass(TypeCID).
-		// The type_test_stub_entry_point_ is at offset 7 from the Type's
-		// tagged pointer (uword field, not a pointer — verified via gh
-		// api to raw_object.h @2.12.0: type_test_stub_entry_point_ is
-		// the first field in UntaggedAbstractType, at offset 8 from
-		// untagged = 7 from tagged). handleFieldLoad's existing PPCode
-		// handler at imm9==7 will preserve the KnownStub through the
-		// LDUR, and handleBLR will resolve "TTS:name" to the stub name.
-		if tc.ctx.TypeTestingStubNames != nil {
-			if ttsName, ok3 := tc.ctx.TypeTestingStubNames[poolIdx]; ok3 && ttsName != "" {
-				tc.state[rt] = KnownStub("TTS:"+ttsName, byteOff)
-				tc.ctx.PPHits++
-				return true
-			}
-		}
-		tc.state[rt] = KnownClass(classID)
+	// The lookup order lives in ResolvePoolEntry, shared with x86_64.
+	// Notes that used to sit inline here and still apply:
+	//
+	//   - PoolCodeNames is checked before PoolClassByIndex, because a
+	//     Code object in the pool is useful as a name, not as kCodeCid.
+	//   - type_test_stub_entry_point_ is at offset 7 from a Type's tagged
+	//     pointer (raw_object.h@2.12.0: first field of
+	//     UntaggedAbstractType, 8 untagged). handleFieldLoad's imm9 == 7
+	//     case preserves the KnownStub through the LDUR, and handleBLR
+	//     resolves "TTS:name".
+	lat, hit := ResolvePoolEntry(tc.ctx, poolIdx, byteOff)
+	tc.state[rt] = lat
+	if hit {
 		tc.ctx.PPHits++
-		if tc.ctx.InstantiatedClasses != nil {
-			tc.ctx.InstantiatedClasses[classID] = true
-		}
-		return true // Don't fall through to PoolClosureClass — its
-		// else-branch would set Top(), clobbering this KnownClass.
-	}
-	if tc.ctx.PoolClosureClass != nil {
-		if classID, ok3 := tc.ctx.PoolClosureClass[poolIdx]; ok3 && classID >= 0 {
-			// Set KnownStub("Closure", poolIdx) instead of KnownClass:
-			// this lets handleFieldLoad detect Closure.function loads
-			// and resolve them to KnownClass(ownerClassID) via
-			// PoolClosureClass. KnownClass alone would lose the pool
-			// index, making it impossible to trace back to the closure.
-			tc.state[rt] = KnownStub("Closure:"+strconv.Itoa(classID), poolIdx)
-			tc.ctx.PPHits++
-			return true
-		}
-		tc.state[rt] = Top()
-	} else {
-		tc.state[rt] = Top()
 	}
 	return true
 }
@@ -518,24 +477,10 @@ func handleFieldLoad(tc *transferCtx) bool {
 				return true
 			}
 		}
-		// Closure.function: UntaggedClosure.function is field 3
-		// (after instantiator_type_arguments, function_type_arguments,
-		// delayed_type_arguments). Compressed: 20 from untagged = 19 tagged.
-		// Non-compressed: 32 from untagged = 31 tagged.
-		// SDK-verified via gh api to raw_object.h @3.9.2.
-		// StubOff holds the PP index; PoolClosureClass maps it to
-		// owner class ID. The function field contains a Function
-		// whose owner class IS the closure's owner class.
-		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
-			sn := tc.state[base].StubName
-			if strings.HasPrefix(sn, "Closure:") && (imm9 == 19 || imm9 == 31) {
-				poolIdx := tc.state[base].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok := tc.ctx.PoolClosureClass[poolIdx]; ok && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
+		if base < 31 {
+			if lat, ok := ResolveClosureField(tc.ctx, tc.state[base], imm9); ok {
+				tc.state[rt] = lat
+				return true
 			}
 		}
 		if imm9 == -1 && base < 31 {
@@ -622,17 +567,11 @@ func handleFieldLoad(tc *transferCtx) bool {
 			tc.ctx.HeaderHits++
 			return true
 		}
-		// Closure.function via compressed LDUR32 (offset 19).
-		if base < 31 && tc.state[base].Kind == LatticeKnownStub {
-			sn := tc.state[base].StubName
-			if strings.HasPrefix(sn, "Closure:") && imm9 == 19 {
-				poolIdx := tc.state[base].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
+		// Closure field via compressed LDUR32.
+		if base < 31 {
+			if lat, ok2 := ResolveClosureField(tc.ctx, tc.state[base], imm9); ok2 {
+				tc.state[rt] = lat
+				return true
 			}
 		}
 		tc.state[rt] = Top()
@@ -650,16 +589,10 @@ func handleFieldLoad(tc *transferCtx) bool {
 				tc.state[rt] = tc.state[baseReg]
 				return true
 			}
-			// Closure.function via LDR64 unsigned offset.
-			// Compressed: offset 19, non-compressed: offset 31.
-			if strings.HasPrefix(sn, "Closure:") && (byteOff == 19 || byteOff == 31) {
-				poolIdx := tc.state[baseReg].StubOff
-				if tc.ctx.PoolClosureClass != nil {
-					if ownerCID, ok2 := tc.ctx.PoolClosureClass[poolIdx]; ok2 && ownerCID >= 0 {
-						tc.state[rt] = KnownClass(ownerCID)
-						return true
-					}
-				}
+			// Closure field via LDR64 unsigned offset.
+			if lat, ok2 := ResolveClosureField(tc.ctx, tc.state[baseReg], byteOff); ok2 {
+				tc.state[rt] = lat
+				return true
 			}
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {

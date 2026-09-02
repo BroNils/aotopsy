@@ -410,9 +410,9 @@ func declaredClusters(r *Result) int64 {
 // can decide whether an absent VM blob is expected.
 func scanData(t *testing.T, info *snapshot.Info, data []byte, isVM bool) *Result {
 	t.Helper()
-	cs, err := FindClusterDataStart(data)
+	cs, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
-		t.Fatalf("FindClusterDataStart: %v", err)
+		t.Fatalf("snapshot.FindClusterDataStart: %v", err)
 	}
 	result, err := ScanClusters(data, cs, info.Version, isVM, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {

@@ -141,8 +141,8 @@ func CmdFridaImport(args []string) error {
 	}
 
 	// Write resolution report
-	report := fmt.Sprintf("Frida Import Report\n")
-	report += fmt.Sprintf("===================\n\n")
+	report := "Frida Import Report\n"
+	report += "===================\n\n"
 	report += fmt.Sprintf("Static output: %s\n", *staticDir)
 	report += fmt.Sprintf("Frida results: %s\n", *fromPath)
 	report += fmt.Sprintf("Merged output: %s\n\n", *outDir)
@@ -167,7 +167,7 @@ func CmdFridaImport(args []string) error {
 
 func CopyStaticFiles(srcDir, dstDir string) {
 	files := []string{"functions.jsonl", "classes.jsonl", "string_refs.jsonl",
-		"dart_meta.json", "dispatch_table.jsonl", "signal_graph.json"}
+		"dart_meta.json", "dispatch_table.jsonl", "signal_graph.json", "evidence.jsonl"}
 	for _, f := range files {
 		src := filepath.Join(srcDir, f)
 		dst := filepath.Join(dstDir, f)

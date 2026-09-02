@@ -26,6 +26,9 @@ type Stats struct {
 	TryBlocks             int `json:"try_blocks"`
 	CatchHandlers         int `json:"catch_handlers"`
 	CSMDeadRegsKilled     int `json:"csm_dead_regs_killed,omitempty"`
+	// OrphanBlocks counts blocks emitted only because the entry walk
+	// never reached them -- see emitOrphanBlocks.
+	OrphanBlocks int `json:"orphan_blocks,omitempty"`
 }
 
 // Artifact is one function's emitted pseudocode plus its stats.
@@ -141,6 +144,18 @@ type emitter struct {
 	// handlerBlocks records block IDs that were already emitted inside a
 	// catch clause, so they are not repeated at their natural CFG position.
 	handlerBlocks map[int]bool
+
+	// emittedAnywhere records every block already written out by this
+	// emitter OR by any helper sub-emitter, and is SHARED with them.
+	//
+	// visits is deliberately not shared: it drives canInline's recursion
+	// budget, which is per-emitter. This map answers a different question
+	// -- "is this block's text already somewhere in the output?" -- and
+	// that question is global, because a `goto block_N;` refers to a label
+	// wherever it was emitted. Without it every helper re-walked its whole
+	// subtree from a fresh visit map and re-emitted join blocks the main
+	// body had already shown.
+	emittedAnywhere map[int]bool
 }
 
 // buildBlockTryIndex assigns each block to the try region covering its start.
@@ -207,28 +222,6 @@ func (e *emitter) annotateInlineFrames(va uint64, indent int) {
 // case. Marking each protected block is correct regardless of traversal order
 // and repetition, and still tells the reader exactly which code the handler
 // covers. Real syntax needs the emitter restructured to emit regions as units.
-func (e *emitter) annotateBlockTry(id, indent int) {
-	ri, ok := e.blockTryRegion[id]
-	if !ok {
-		return
-	}
-	// Once per block, not once per visit. The CFG walk re-emits blocks (up to
-	// maxVisitCount) and loop bodies especially: without this, one big
-	// loop-heavy function (_Timer._runTimers) produced 9010 identical marker
-	// lines, 91% of all markers in a 900-function sweep. The fact being
-	// reported -- "this block is inside try N" -- is a property of the block,
-	// so stating it once is both sufficient and readable.
-	if e.tryMarked == nil {
-		e.tryMarked = make(map[int]bool)
-	}
-	if e.tryMarked[id] {
-		return
-	}
-	e.tryMarked[id] = true
-	r := e.fir.TryRegions[ri]
-	e.emit(indent, "// [in try #%d -> %s at 0x%x]", r.TryIndex, r.CatchClause(), r.HandlerVA)
-}
-
 // EmitPseudocode is the top-level entry point: lifts+walks fir's CFG into
 // readable pseudocode text, matching flutterdec's emit_pseudocode /
 // FuncEmitter::emit pipeline (signature -> recursive block walk ->
@@ -250,6 +243,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		omittedSet:  make(map[int]bool),
 		pinnedPhi:   make(map[string]string),
 		phiDeclared: make(map[int]bool),
+
+		emittedAnywhere: make(map[int]bool),
 	}
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
@@ -343,6 +338,16 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
+	// FP argument registers, matching the fixpoint's entry seed (ssa.go).
+	// Arity recovery is integer-register based, so there is no per-slot
+	// parameter name to use here; fpargN names the ABI slot, which is what
+	// is actually known.
+	for i, reg := range fir.FpuArgRegs {
+		e.state.setReg(reg, fmt.Sprintf("fparg%d", i))
+	}
+	// Type-testing stubs are entered with the TypeTestABI registers already
+	// holding their operands; see seedTypeTestABI.
+	seedTypeTestABI(fir, e.state)
 	// P7: Pre-scan for async stub calls to set IsAsync before the signature
 	// is emitted. The signature needs `async` prefix, but IsAsync is set
 	// during block walking which happens after the signature. A pre-scan
@@ -562,6 +567,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if entryID, ok := fir.BlockByVA(fir.EntryVA); ok {
 		e.emitBlock(entryID, 1, 0)
 	}
+	// Anything the walk above could not reach is still code in the
+	// binary, so it is shown rather than dropped.
+	e.emitOrphanBlocks(1)
 
 	// P7: Post-walk modifier patch. IsAsync/IsSyncStar/IsAsyncStar can be set
 	// during block walking (emitIndirectCall detecting a THR stub such as
@@ -697,8 +705,57 @@ func safeFuncName(name string) string {
 
 func indentStr(n int) string { return strings.Repeat("  ", n) }
 
+// returnValue picks the value a `return` statement should show, or ""
+// when there is genuinely nothing to return.
+//
+// A function returning a double leaves it in V0 (ARM64) / XMM0 (x86_64),
+// not in the integer return register. Reading only the integer one
+// printed a bare `return;` for every such function and silently dropped
+// the value it returned. FpuReturnReg is what says where to look, and it
+// was populated by both lifters and read by nothing.
+//
+// The FP register is consulted only as a fallback, so an integer return
+// is never overridden by a value left in V0 by earlier arithmetic. And
+// lookupReg echoes the register name back when it has no tracked value,
+// so that case is rejected explicitly -- otherwise this would trade a
+// missing return for `return v0;`, which is a leak, not a fix.
+func (e *emitter) returnValue(intVal string) string {
+	if usableReturnValue(intVal) {
+		return intVal
+	}
+	if e.fir.FpuReturnReg != "" {
+		fp := e.state.lookupReg(e.fir.FpuReturnReg)
+		if usableReturnValue(fp) && fp != e.fir.FpuReturnReg {
+			return fp
+		}
+	}
+	return ""
+}
+
+func usableReturnValue(v string) bool {
+	return v != "" && v != "/* void */" && v != "/* pop */"
+}
+
+// emit appends one indented output line -- or several, when the formatted
+// text contains newlines.
+//
+// A lifter is allowed to return more than one statement for a single
+// instruction: ARM64 `stp` is two stores, and returns them joined by a
+// newline. Prefixing the indent once left every continuation line hard
+// against column 0, in the middle of otherwise correctly nested output.
+// Indenting per line fixes it here, at the one place indentation is
+// applied, rather than requiring every current and future multi-statement
+// lifter to remember.
 func (e *emitter) emit(indent int, format string, args ...interface{}) {
-	e.lines = append(e.lines, indentStr(indent)+fmt.Sprintf(format, args...))
+	text := fmt.Sprintf(format, args...)
+	pad := indentStr(indent)
+	if !strings.Contains(text, "\n") {
+		e.lines = append(e.lines, pad+text)
+		return
+	}
+	for _, l := range strings.Split(text, "\n") {
+		e.lines = append(e.lines, pad+l)
+	}
 }
 
 // identifyLoopHeaders finds blocks that are targets of back-edges (loops).

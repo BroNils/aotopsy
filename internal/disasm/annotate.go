@@ -207,6 +207,15 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 	// register (addDestReg) before writing the destination register.
 	if p.addValid && p.addDestReg >= 0 {
 		baseReg, ldrOff, ldrOK := arm64.LDR64UnsignedOffset(inst.Raw)
+		if !ldrOK {
+			baseReg, ldrOff, _, ldrOK = arm64.LDR32UnsignedOffset(inst.Raw)
+		}
+		if !ldrOK {
+			base, _, off, ok := arm64.LDUR64(inst.Raw)
+			if ok {
+				baseReg, ldrOff, ldrOK = base, off, true
+			}
+		}
 		if ldrOK && baseReg == p.addDestReg {
 			combined := p.addImm + ldrOff
 			if idx, idxOK := ARM64PoolIndex(combined); idxOK {
@@ -222,8 +231,11 @@ func (p *PeepholeState) Annotate(inst Inst) string {
 
 	// If not consumed by LDR, check if current instruction kills the ADD dest.
 	if p.addValid && p.addDestReg >= 0 {
-		if arm64.DstRegOfInst(inst.Raw) == p.addDestReg {
-			p.addValid = false
+		for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
+			if rd == p.addDestReg {
+				p.addValid = false
+				break
+			}
 		}
 	}
 

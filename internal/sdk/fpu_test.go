@@ -6,11 +6,14 @@ import "testing"
 // names against the Dart SDK's DartCallingConvention.
 //
 // Source: constants_arm64.h @3.12.2:
-//   kFpuRegistersForArgs[] = {V0, V1, V2, V3, V4, V5}
-//   kReturnFpuReg = V0
+//
+//	kFpuRegistersForArgs[] = {V0, V1, V2, V3, V4, V5}
+//	kReturnFpuReg = V0
+//
 // Source: constants_x64.h @3.12.2:
-//   kFpuRegistersForArgs[] = {XMM1, XMM2, XMM3, XMM4, XMM5, XMM6}
-//   kReturnFpuReg = XMM0
+//
+//	kFpuRegistersForArgs[] = {XMM1, XMM2, XMM3, XMM4, XMM5, XMM6}
+//	kReturnFpuReg = XMM0
 func TestFpuCallingConvention(t *testing.T) {
 	// ARM64 FPU args.
 	armFpu := ARM64FpuArgRegNames()

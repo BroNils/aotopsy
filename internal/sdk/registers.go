@@ -38,7 +38,7 @@ const (
 	ARM64PP        = 27 // PP   = R27 — object pool pointer
 	ARM64THR       = 26 // THR  = R26 — thread pointer
 	ARM64DT        = 21 // dispatch table register (X21, used by typetrack)
-	ARM64HeapBits  = 28 // HEAP_BITS = R28 — write_barrier_mask<<32 | heap_base>>32
+	ARM64HeapBits  = 28 // HEAP_BITS = R28 (Dart 2.14+: write_barrier_mask<<32 | heap_base>>32; Dart 2.10–2.13: BARRIER_MASK = R28)
 	ARM64CodeReg   = 24 // CODE_REG  = R24 — current Code object
 	ARM64ArgsDesc  = 4  // ARGS_DESC_REG = R4 — arguments descriptor
 	ARM64SPReg     = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
@@ -48,6 +48,9 @@ const (
 	ARM64ReturnReg = 0  // R0 — return value
 )
 
+// ARM64BarrierMask is the alias for R28 in Dart 2.10.0–2.13.0 before HEAP_BITS.
+const ARM64BarrierMask = ARM64HeapBits
+
 // ARM64RegName maps a register number to the lowercase string name the
 // decompiler uses in pseudocode (e.g. 27 → "x27").
 func ARM64RegName(n int) string {
@@ -55,6 +58,27 @@ func ARM64RegName(n int) string {
 		return ""
 	}
 	return xName[n]
+}
+
+// X86RegName maps a canonical x86_64 register number to the lowercase
+// 64-bit name the decompiler uses in pseudocode (e.g. 0 → "rax").
+//
+// The numbering is the instruction-encoding order, which is what
+// arch/x86.CanonReg produces and what the ABI tables in abi.go are
+// written in: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
+// R8..R15=8..15. This is the counterpart of ARM64RegName; without it the
+// x86 half of an ABI table could not be turned back into a name, so the
+// tables were only usable on ARM64.
+func X86RegName(n int) string {
+	if n < 0 || n >= len(x86Name) {
+		return ""
+	}
+	return x86Name[n]
+}
+
+var x86Name = [...]string{
+	"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+	"r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
 }
 
 // xName is pre-computed to avoid fmt.Sprintf in hot paths.
@@ -187,15 +211,15 @@ const (
 	//   kUnchecked:            field offset  8 -> displacement 0x7 (7)
 	//   kMonomorphicUnchecked: field offset 16 -> displacement 0xf (15)
 
-	CodeEntryPointDispUncompressed               = 0x7
-	CodeMonomorphicEntryPointDispUncompressed    = 0x17
-	CodeUncheckedEntryPointDispUncompressed      = 0xf
-	CodeMonomorphicUncheckedDispUncompressed     = 0x1f
+	CodeEntryPointDispUncompressed            = 0x7
+	CodeMonomorphicEntryPointDispUncompressed = 0x17
+	CodeUncheckedEntryPointDispUncompressed   = 0xf
+	CodeMonomorphicUncheckedDispUncompressed  = 0x1f
 
-	CodeEntryPointDispCompressed                 = 0x3
-	CodeMonomorphicEntryPointDispCompressed      = 0xb
-	CodeUncheckedEntryPointDispCompressed        = 0x7
-	CodeMonomorphicUncheckedDispCompressed       = 0xf
+	CodeEntryPointDispCompressed            = 0x3
+	CodeMonomorphicEntryPointDispCompressed = 0xb
+	CodeUncheckedEntryPointDispCompressed   = 0x7
+	CodeMonomorphicUncheckedDispCompressed  = 0xf
 )
 
 // ── Pool index layout constants ───────────────────────────────────────
@@ -209,7 +233,6 @@ const (
 	// PoolElementSize is the size of one pool element in bytes (one word).
 	PoolElementSize = 8
 )
-
 
 // ── Class ID bitfield constants ───────────────────────────────────────
 //

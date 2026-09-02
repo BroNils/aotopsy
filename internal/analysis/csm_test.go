@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -16,10 +15,7 @@ import (
 // normally drops. So this asserts the inlining information -- which is real and
 // not obtainable any other way -- and treats token positions as opaque.
 func TestCodeSourceMapDecoded(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	if len(res.CodeSourceMaps) == 0 {

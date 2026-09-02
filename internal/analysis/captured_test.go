@@ -13,15 +13,8 @@ import (
 // TypeArguments, ExceptionHandlers, ICData, Script, LoadingUnit,
 // KernelProgramInfo, ClosureData) and for the JSONL artifacts built from it.
 //
-// Gated on AOTOPSY_TEST_SAMPLE_ARM64 (a Dart 3.9.2 ARM64 libapp.so), same as
-// the other integration tests; skips when unset.
-
-// sharedCaptureOutDir caches the pipeline output from a single Run() call
-// so that multiple TestCaptured_* tests don't each re-run the full pipeline
-// (each Run() takes ~90s on the 3.9.2 ARM64 sample, and running 5 of them
-// serially exceeds the test timeout).
-var sharedCaptureOutDir string
-var sharedCaptureErr error
+// Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus, same
+// as the other integration tests.
 
 func runCaptureFixture(t *testing.T) string {
 	t.Helper()
@@ -90,7 +83,7 @@ func TestCaptured_Scripts(t *testing.T) {
 		if !strings.Contains(url, ":") {
 			t.Errorf("script url %q has no scheme -- ref 0 may not be url_", url)
 		}
-		if strings.HasPrefix(url, "package:compare_sample/") {
+		if strings.HasPrefix(url, "package:"+sampleARM64Package+"/") {
 			appOwn++
 		}
 	}
@@ -101,7 +94,7 @@ func TestCaptured_Scripts(t *testing.T) {
 			ratio*100, withURL, len(recs))
 	}
 	if appOwn == 0 {
-		t.Error("no package:compare_sample/ script found; expected the app's own library")
+		t.Errorf("no package:%s/ script found; expected the app's own library", sampleARM64Package)
 	}
 }
 

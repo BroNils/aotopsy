@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -31,7 +30,7 @@ func clusterOnly(t *testing.T, libPath string) *cluster.Result {
 		t.Skipf("unsupported snapshot version in %s", libPath)
 	}
 	data := info.IsolateData.Data
-	start, err := cluster.FindClusterDataStart(data)
+	start, err := snapshot.FindClusterDataStart(data)
 	if err != nil {
 		t.Fatalf("find cluster start: %v", err)
 	}
@@ -59,10 +58,7 @@ func clusterOnly(t *testing.T, libPath string) *cluster.Result {
 // one root unit, every Code in the main bucket, nothing deferred, and
 // Degenerate set so callers do not present a one-bucket split as a finding.
 func TestPartitionCodesByLoadingUnit_Degenerate(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 
 	part := PartitionCodesByLoadingUnit(res)
@@ -98,18 +94,14 @@ func TestPartitionCodesByLoadingUnit_Degenerate(t *testing.T) {
 }
 
 // TestPartitionCodesByLoadingUnit_LargeApp exercises the partition on a real,
-// much larger production app than the synthetic samples. Set
-// AOTOPSY_TEST_SAMPLE_LARGE to any libapp.so.
+// much larger production app than the synthetic samples.
 //
 // It asserts self-consistency rather than fixed counts, and reports whether the
 // app actually uses deferred imports -- the non-degenerate path stays unproven
 // until a split-AOT sample (app.so + app-N.part.so) is available, and this test
 // is where that would be checked.
 func TestPartitionCodesByLoadingUnit_LargeApp(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_LARGE")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_LARGE not set")
-	}
+	libPath := sampleLarge(t)
 	res := clusterOnly(t, libPath)
 
 	part := PartitionCodesByLoadingUnit(res)

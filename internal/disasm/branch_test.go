@@ -49,7 +49,7 @@ func TestDecodeBranch_B_Negative(t *testing.T) {
 func TestDecodeBranch_Bcond(t *testing.T) {
 	// B.EQ #0x20 at PC=0x2000 → target=0x2020
 	// imm19 = 0x20/4 = 8, cond = 0 (EQ)
-	raw := uint32(0x54000000 | (8 << 5) | 0) // B.EQ
+	raw := uint32(0x54000000 | (8 << 5)) // B.EQ
 	bi := DecodeBranch(raw, 0x2000)
 	if bi == nil {
 		t.Fatal("expected B.cond")
@@ -65,7 +65,7 @@ func TestDecodeBranch_Bcond(t *testing.T) {
 func TestDecodeBranch_CBZ(t *testing.T) {
 	// CBZ X0, #0x40 at PC=0x3000 → target=0x3040
 	// imm19 = 0x40/4 = 0x10, sf=1 (64-bit), Rt=0
-	raw := uint32(0xB4000000 | (0x10 << 5) | 0) // CBZ X0
+	raw := uint32(0xB4000000 | (0x10 << 5)) // CBZ X0
 	bi := DecodeBranch(raw, 0x3000)
 	if bi == nil {
 		t.Fatal("expected CBZ")
@@ -81,7 +81,7 @@ func TestDecodeBranch_CBZ(t *testing.T) {
 func TestDecodeBranch_TBZ(t *testing.T) {
 	// TBZ W0, #0, #0x10 at PC=0x4000 → target=0x4010
 	// imm14 = 0x10/4 = 4
-	raw := uint32(0x36000000 | (4 << 5) | 0) // TBZ
+	raw := uint32(0x36000000 | (4 << 5)) // TBZ
 	bi := DecodeBranch(raw, 0x4000)
 	if bi == nil {
 		t.Fatal("expected TBZ")

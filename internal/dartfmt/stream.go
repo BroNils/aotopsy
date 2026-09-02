@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 var (
@@ -132,12 +133,32 @@ const (
 // If byte > 127: it's the last byte; value contribution = byte - 128.
 // If byte <= 127: it's a data byte; 7 bits contribute to the value.
 func (s *Stream) ReadUnsigned() (int64, error) {
+	return s.readVarint(endUnsignedByteMarker, 63)
+}
+
+// readVarint decodes the SDK's variable-length integer encoding: data
+// bytes carry dataBitsPerByte bits each, and the final byte is marked by
+// exceeding maxUnsignedDataPerByte, with endMarker subtracted from it.
+//
+// ReadUnsigned, ReadTagged32 and ReadTagged64 were three full copies of
+// this loop, differing only in which end marker to subtract and how wide
+// the result is -- so establishing that took a byte-by-byte diff of three
+// 25-line functions. This is snapshot deserialisation: a divergence
+// between the copies would not fail loudly, it would silently misread a
+// length or an offset.
+//
+// maxShift is the shift at which the value no longer fits the target
+// width, and the stream is treated as overrun. It is NOT a detail that
+// can be dropped by widening everything to int64 and truncating at the
+// end: a 32-bit read of an oversized value must fail, not silently keep
+// its low bits.
+func (s *Stream) readVarint(endMarker int64, maxShift uint) (int64, error) {
 	b, err := s.ReadByte()
 	if err != nil {
 		return 0, err
 	}
 	if b > maxUnsignedDataPerByte {
-		return int64(b) - endUnsignedByteMarker, nil
+		return int64(b) - endMarker, nil
 	}
 
 	var r int64
@@ -150,10 +171,10 @@ func (s *Stream) ReadUnsigned() (int64, error) {
 			return 0, err
 		}
 		if b > maxUnsignedDataPerByte {
-			r |= int64(b-endUnsignedByteMarker) << shift
+			r |= (int64(b) - endMarker) << shift
 			return r, nil
 		}
-		if shift >= 63 {
+		if shift >= maxShift {
 			return 0, ErrStreamOverrun
 		}
 	}
@@ -165,61 +186,26 @@ func (s *Stream) ReadUnsigned() (int64, error) {
 // Same structure as ReadUnsigned but the terminator byte subtracts 192 instead
 // of 128, giving a 7-bit signed range (-64..63) for the final contribution.
 func (s *Stream) ReadTagged32() (uint32, error) {
-	b, err := s.ReadByte()
+	v, err := s.readVarint(int64(endByteMarker), 28)
 	if err != nil {
 		return 0, err
 	}
-	if b > maxUnsignedDataPerByte {
-		return uint32(b) - uint32(endByteMarker), nil
-	}
-
-	var r uint32
-	var shift uint
-	for {
-		r |= uint32(b) << shift
-		shift += dataBitsPerByte
-		b, err = s.ReadByte()
-		if err != nil {
-			return 0, err
-		}
-		if b > maxUnsignedDataPerByte {
-			r |= (uint32(b) - uint32(endByteMarker)) << shift
-			return r, nil
-		}
-		if shift >= 28 {
-			return 0, ErrStreamOverrun
-		}
-	}
+	return uint32(v), nil
 }
 
 // ReadTagged64 reads a Dart-encoded int64 using the signed variable-length
 // encoding (kEndByteMarker = 192). Used for Read<int64_t> (e.g. Mint values).
 func (s *Stream) ReadTagged64() (int64, error) {
-	b, err := s.ReadByte()
+	return s.readVarint(int64(endByteMarker), 63)
+}
+
+// ReadDouble reads a float64 by reading a Tagged64 and bit-casting to float64 (runtime/vm/datastream.h Read<double>).
+func (s *Stream) ReadDouble() (float64, error) {
+	v, err := s.ReadTagged64()
 	if err != nil {
 		return 0, err
 	}
-	if b > maxUnsignedDataPerByte {
-		return int64(b) - int64(endByteMarker), nil
-	}
-
-	var r int64
-	var shift uint
-	for {
-		r |= int64(b) << shift
-		shift += dataBitsPerByte
-		b, err = s.ReadByte()
-		if err != nil {
-			return 0, err
-		}
-		if b > maxUnsignedDataPerByte {
-			r |= (int64(b) - int64(endByteMarker)) << shift
-			return r, nil
-		}
-		if shift >= 63 {
-			return 0, ErrStreamOverrun
-		}
-	}
+	return math.Float64frombits(uint64(v)), nil
 }
 
 // ReadRefId reads a Dart reference ID using the optimized big-endian encoding.

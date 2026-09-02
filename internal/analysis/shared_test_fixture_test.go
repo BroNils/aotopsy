@@ -20,20 +20,14 @@ var (
 )
 
 // sharedPipelineOutDir returns the output directory of a single shared
-// pipeline Run() on AOTOPSY_TEST_SAMPLE_ARM64. The first caller pays the
-// ~90s cost; subsequent callers get the cached directory instantly.
+// pipeline Run() on the 3.9.2 ground-truth sample. The first caller pays
+// the ~90s cost; subsequent callers get the cached directory instantly.
 //
-// If the env var is not set, the test is skipped. If Run() fails, the
-// error is cached and all subsequent callers get the same fatal error.
+// If Run() fails, the error is cached and all subsequent callers get the
+// same fatal error.
 func sharedPipelineOutDir(t *testing.T) string {
 	t.Helper()
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s", libPath)
-	}
+	libPath := sampleARM64(t)
 	sharedPipelineOnce.Do(func() {
 		outDir, err := os.MkdirTemp("", "aotopsy-shared-pipeline-*")
 		if err != nil {

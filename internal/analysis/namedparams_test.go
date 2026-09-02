@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"testing"
 
 	"aotopsy/internal/naming"
@@ -36,10 +35,7 @@ import (
 // A Flutter app is a good witness because the framework is saturated with
 // named parameters -- every widget constructor has them.
 func TestNamedParamNames_Chain(t *testing.T) {
-	libPath := os.Getenv("AOTOPSY_TEST_SAMPLE_ARM64")
-	if libPath == "" {
-		t.Skip("AOTOPSY_TEST_SAMPLE_ARM64 not set")
-	}
+	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 	if len(res.FuncTypes) == 0 {
 		t.Fatal("no FunctionType objects captured")

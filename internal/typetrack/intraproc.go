@@ -496,7 +496,18 @@ func AnalyzeFunction(
 		var cmpImm int  // immediate being compared against
 		var hasCmp bool // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
-			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm)
+			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm).
+			//
+			// Deliberately 32-bit only. Extending this to the 64-bit form
+			// was tried and measured: narrow_hits went 5872 -> 68313 on
+			// dart-3.9.2-arm64, an 11x increase, with resolved_blr moving
+			// by exactly 0 -- and dart-2.12.0-arm64 lost one monomorphic
+			// call to polymorphic. A class id is extracted into a W
+			// register, so a CMP on an X register is almost always
+			// comparing a tagged value or a Smi, and narrowing the
+			// register to KnownClass(imm) on that edge is simply wrong.
+			// 62000 extra narrowings that buy no resolution are 62000
+			// chances to be confidently wrong.
 			if _, rn, imm, ok := arm64.SUBS32Immediate(inst.Raw); ok {
 				cmpReg = rn
 				cmpImm = imm
@@ -892,8 +903,10 @@ func transferInstruction(
 	}
 
 	// 9. Default: if this instruction defines a register, kill its type.
-	if rd := arm64.DstRegOfInst(inst.Raw); rd >= 0 && rd < 31 {
-		state[rd] = Top()
+	for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
+		if rd >= 0 && rd < 31 {
+			state[rd] = Top()
+		}
 	}
 }
 
@@ -915,8 +928,8 @@ func resolveBLR(
 	result *IntraResult,
 ) {
 	res := BlrResolution{
-		PC:  inst.Addr,
-		Reg: rn,
+		PC:         inst.Addr,
+		Reg:        rn,
 		Confidence: "unknown",
 	}
 
@@ -1008,28 +1021,31 @@ func resolveBLR(
 			}
 		}
 	case LatticeKnownClass:
-		// We know the receiver class but not the selector offset.
-		// P4: Reverse dispatch scan — scan this class's dispatch slots for
-		// non-null targets. If exactly one slot has a non-null Code entry,
-		// that is the call target (monomorphic call). If multiple, we cannot
-		// pick one, so leave unresolved.
-		//
-		// P5 CHA: the Subclasses map and ResolveDispatchCHA are available
-		// for future use — when a selector offset IS known (via a preceding
-		// ADD/SUB that we can recover), CHA can enumerate all subclass
-		// dispatch targets for polymorphic call resolution. Currently the
-		// reverse scan above handles the monomorphic case; CHA would
-		// extend this to polymorphic calls.
-		baseSlot := t.ClassID - ctx.KOriginElement
-		candidates, candidateName, allCandidates := scanDispatchSlots(ctx, baseSlot)
-		if candidates == 1 {
-			res.SlotIndex = -1
+		// When a selector offset is known (from preceding ADD/SUB), CHA enumerates
+		// all subclass dispatch targets.
+		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+			chaTargets := ctx.ResolveDispatchCHA(t.ClassID, selectorImm)
+			if len(chaTargets) > 0 {
+				applySelectorCandidates(&res, chaTargets)
+				if res.Polymorphic {
+					res.Confidence = "polymorphic"
+				} else if res.Resolved {
+					res.Confidence = "static_inferred"
+				}
+			}
 		}
-		applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
-		if res.Polymorphic {
-			res.Confidence = "polymorphic"
-		} else if res.Resolved {
-			res.Confidence = "static_inferred"
+		if !res.Resolved && !res.Polymorphic {
+			baseSlot := t.ClassID - ctx.KOriginElement
+			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, baseSlot)
+			if candidates == 1 {
+				res.SlotIndex = -1
+			}
+			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
+			if res.Polymorphic {
+				res.Confidence = "polymorphic"
+			} else if res.Resolved {
+				res.Confidence = "static_inferred"
+			}
 		}
 	case LatticeTop, LatticeBottom:
 		// No usable type for the call register -- fall back to the selector

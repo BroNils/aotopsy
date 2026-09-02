@@ -12,9 +12,13 @@ import "strings"
 // versa); routing every read and write through canonReg makes that class of bug
 // structurally impossible instead of patched per-mnemonic.
 //
-// Canonicalization is architecture-disjoint: an ARM64 token (w/x + digits)
-// never appears in an x86 binary and vice versa, so a single function can
-// serve both without an explicit arch flag. Unknown tokens (THR, PP, sp, named
+// Canonicalization is architecture-disjoint ONLY because the x86 lifter now
+// normalizes SSE register names before they get here. It was not disjoint
+// before: x86asm.Inst.String() spells XMM registers "X0".."X15", which
+// lowercases to exactly the ARM64 tokens x0..x15, so this function's ARM64
+// branch claimed every x86 floating-point register as a general-purpose one.
+// See x86.InstText, which renames them to xmm<n> at the single point where
+// instruction text is produced. Unknown tokens (THR, PP, sp, named
 // pseudo-regs) pass through lowercased unchanged.
 //
 // Width semantics: a 32-bit write zero-extends the upper bits on both
@@ -31,6 +35,19 @@ func canonReg(tok string) string {
 	// ARM64: w<n> and x<n> are the low-32 and full-64 views of GPR n.
 	if (tok[0] == 'w' || tok[0] == 'x') && len(tok) > 1 && isAllDigits(tok[1:]) {
 		return "x" + tok[1:]
+	}
+	// ARM64: b<n>/h<n>/s<n>/d<n>/q<n>/v<n> are the 8/16/32/64/128-bit and
+	// vector views of SIMD&FP register n -- the same physical register, for
+	// exactly the reason w<n> and x<n> are. Without collapsing them a
+	// 64-bit write through d0 left a stale q0 alias (and vice versa), the
+	// same corruption the w/x merge above was written to make impossible.
+	// The corpus reaches this: 5,245 FP instructions on the 3.9.2 ARM64
+	// sample, and FCMP/FMOV/FMUL freely mix d<n> and q<n> views.
+	if len(tok) > 1 && isAllDigits(tok[1:]) {
+		switch tok[0] {
+		case 'b', 'h', 's', 'd', 'q', 'v':
+			return "v" + tok[1:]
+		}
 	}
 	// x86-64 extended registers r8..r15 with optional width suffix d/w/b.
 	if tok[0] == 'r' && len(tok) > 1 {

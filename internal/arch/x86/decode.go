@@ -1,6 +1,35 @@
 package x86
 
-import "golang.org/x/arch/x86/x86asm"
+import (
+	"regexp"
+
+	"golang.org/x/arch/x86/x86asm"
+)
+
+// xmmTokenRe matches x86asm's own name for an SSE register.
+//
+// x86asm.Inst.String() renders XMM registers as "X0".."X15" (see its
+// regNames table; only IntelSyntax/GNUSyntax spell them "xmm0"/"%xmm0").
+// Lowercased, that produces exactly the ARM64 general-purpose register
+// tokens x0..x15 -- so x86_64 disassembly listings and pseudocode showed
+// `x3 == x4` for a COMISD of XMM3 and XMM4, and regcanon.go's stated
+// invariant that "an ARM64 token (w/x + digits) never appears in an x86
+// binary" was false for every one of the 19,949 FP/SIMD instructions on
+// the 3.12.2 x64 sample.
+//
+// No other operand x86asm prints matches this shape: GPRs are spelled
+// RAX/R13, memory operands are bracketed, immediates are hex.
+var xmmTokenRe = regexp.MustCompile(`\bX(\d{1,2})\b`)
+
+// InstText renders one decoded instruction the way every layer of this
+// project should read it: x86asm's default syntax, but with SSE
+// registers named xmm<n> instead of X<n>.
+//
+// Used by BOTH the disassembly listing writer and the pseudocode lifter,
+// so the two never disagree about what a register is called.
+func InstText(inst x86asm.Inst) string {
+	return xmmTokenRe.ReplaceAllString(inst.String(), "xmm$1")
+}
 
 // Decoded is one step of a linear x86-64 decode sweep: the decoded
 // instruction, its virtual address, and its encoded length. Bad marks a byte

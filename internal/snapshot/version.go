@@ -1117,8 +1117,10 @@ func ProbeTagStyle(data []byte, clusterStart int) *VersionProfile {
 			return &p
 		}
 	}
-	// Fallback to latest known (ObjectHeader, 5 fields).
+	// Fallback to latest known (ObjectHeader, 5 fields) marked unsupported.
 	p := *versionProfiles["3.9.2"]
+	p.DartVersion = ""
+	p.Supported = false
 	return &p
 }
 

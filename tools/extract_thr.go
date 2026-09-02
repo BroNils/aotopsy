@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/vmtables"
 )
 
@@ -266,29 +267,6 @@ func parseRuntimeEntryList(header string) (entries, leafEntries []string) {
 	return entries, leafEntries
 }
 
-// extractThreadStubOffsets filters runtime_offsets_extracted.h for
-// *_entry_point_offset fields that are in CACHED_VM_STUBS_ADDRESSES_LIST,
-// returning offset→name pairs for the given arch/compressed/product combo.
-func extractThreadStubOffsets(header, arch string, compressed, product bool) (map[int]string, error) {
-	// The CACHED_VM_STUBS_ADDRESSES_LIST entries appear as
-	// Thread::<name>_entry_point_offset in the extracted header.
-	// We filter for fields ending in _entry_point_offset that are NOT
-	// runtime entries (those are handled by the THR fields table already).
-	entries, err := extractTHRFields(header, arch, compressed, product)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int]string)
-	for _, e := range entries {
-		if strings.HasSuffix(e.name, "_entry_point_offset") {
-			// Strip the _entry_point_offset suffix to get the stub name
-			stubName := strings.TrimSuffix(e.name, "_entry_point_offset")
-			out[e.offset] = stubName
-		}
-	}
-	return out, nil
-}
-
 // runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
 // for every supported version. Returns count of mismatches.
 func runCheckStubs() int {
@@ -378,6 +356,471 @@ func runCheckRuntimeEntries() int {
 	return mismatches
 }
 
+// sdkStubStructor matches the class that produces a cached stub entry
+// point. CACHED_ADDRESSES_LIST holds three flavours and a tail of
+// non-stub constants (predefined_symbols, double_nan, the float masks);
+// only the three below are Thread-cached stub entry points.
+var reStubCtor = regexp.MustCompile(`\b(?:StubCode|NativeEntry|RuntimeEntry)::(\w+?)(?:Entry)?\(\)`)
+
+// sdkThreadStubNames derives the offset-field -> stub-name mapping from
+// thread.h's own macro list at a tag.
+//
+// Both halves come from the SDK: the field name is argument 1 of the
+// CACHED_ADDRESSES_LIST entry, and the stub name is the StubCode:: /
+// NativeEntry:: / RuntimeEntry:: constructor in its initialiser. Nothing
+// is hand-mapped, so a stub renamed or added upstream shows up here
+// instead of being quietly absent from the committed table -- which is
+// exactly how MegamorphicCall, SwitchableCallMiss, OptimizeFunction and
+// Deoptimize went missing from five tables at once.
+func sdkThreadStubNames(tag string) (map[string]string, error) {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(cmacro.ParseMacros(src), "CACHED_ADDRESSES_LIST")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, r := range rows {
+		if len(r) < 3 {
+			continue
+		}
+		m := reStubCtor.FindStringSubmatch(r[2])
+		if m == nil {
+			continue // predefined_symbols_, double_nan_, float masks: not stubs
+		}
+		out[strings.TrimSuffix(r[1], "_")] = m[1]
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no cached stub entries found in thread.h@%s", tag)
+	}
+	return out, nil
+}
+
+// runCheckStubOffsets verifies internal/vmtables' ThreadStubOffsets
+// tables against the SDK, for every (version, arch) pair those tables
+// claim to support.
+//
+// This gate did not exist, and its absence is why five tables shipped
+// missing four entries each: a missing offset is not a wrong annotation,
+// it is a silently absent one. The call still resolves, it just prints
+// "THR.f248" instead of "THR.MegamorphicCall", so nothing downstream can
+// tell the table is short.
+func runCheckStubOffsets() int {
+	mismatches := 0
+	for _, t := range stubOffsetTargets {
+		committed := vmtables.ThreadStubOffsets(t.tag, t.arch == "arm64")
+		if committed == nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no committed table\n", t.tag, t.arch)
+			continue
+		}
+		fieldToStub, err := sdkThreadStubNames(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+		header, err := fetchHeader(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+		fields, err := extractTHRFields(header, t.arch, t.compressed, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			continue
+		}
+
+		want := map[int64]string{}
+		for _, f := range fields {
+			name := strings.TrimSuffix(f.name, "_offset")
+			if stub, ok := fieldToStub[name]; ok {
+				want[int64(f.offset)] = stub
+			}
+		}
+		if len(want) == 0 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no stub offsets in the %s/compressed=%v PRODUCT block\n",
+				t.tag, t.arch, t.arch, t.compressed)
+			continue
+		}
+
+		local := 0
+		for off, stub := range want {
+			got, present := committed[off]
+			switch {
+			case !present:
+				fmt.Fprintf(os.Stderr, "  MISSING %s/%s: 0x%x %s is in the SDK but not in the committed table\n",
+					t.tag, t.arch, off, stub)
+				local++
+			case got != stub:
+				fmt.Fprintf(os.Stderr, "  MISMATCH %s/%s: 0x%x committed=%q sdk=%q\n",
+					t.tag, t.arch, off, got, stub)
+				local++
+			}
+		}
+		for off, stub := range committed {
+			if _, present := want[off]; !present {
+				fmt.Fprintf(os.Stderr, "  EXTRA %s/%s: 0x%x %s is in the committed table but not in the SDK\n",
+					t.tag, t.arch, off, stub)
+				local++
+			}
+		}
+		if local == 0 {
+			fmt.Fprintf(os.Stderr, "  OK %s/%s: %d stub offsets\n", t.tag, t.arch, len(want))
+		}
+		mismatches += local
+	}
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d thread-stub offset mismatch(es) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nAll thread-stub offsets match SDK\n")
+	}
+	return mismatches
+}
+
+// stubOffsetTargets is every (version, arch) pair ThreadStubOffsets
+// claims to support, with the pointer-compression mode that version's
+// release builds use. Keep it in sync with the switch in threadstubs.go:
+// a version with a table but no target here is untested, which is the
+// state the whole file was in.
+var stubOffsetTargets = []extractTarget{
+	{"2.10.0", "arm64", false, true},
+	{"2.10.0", "x64", false, true},
+	{"2.12.0", "arm64", false, true},
+	{"2.12.0", "x64", false, true},
+	{"2.13.0", "arm64", false, true},
+	{"2.13.0", "x64", false, true},
+	{"2.14.0", "arm64", false, true},
+	{"2.14.0", "x64", false, true},
+	{"2.15.0", "arm64", false, true},
+	{"2.15.0", "x64", false, true},
+	{"2.16.0", "arm64", false, true},
+	{"2.16.0", "x64", false, true},
+	{"2.17.6", "arm64", false, true},
+	{"2.17.6", "x64", false, true},
+	{"2.18.0", "arm64", true, true},
+	{"2.18.0", "x64", true, true},
+	{"2.19.0", "arm64", true, true},
+	{"2.19.0", "x64", true, true},
+	{"3.1.0", "arm64", true, true},
+	{"3.3.0", "arm64", true, true},
+	{"3.5.0", "arm64", true, true},
+	{"3.8.1", "arm64", true, true},
+	{"3.8.1", "x64", true, true},
+	{"3.0.5", "arm64", true, true},
+	{"3.0.5", "x64", true, true},
+	{"3.2.5", "arm64", true, true},
+	{"3.2.5", "x64", true, true},
+	{"3.4.3", "arm64", true, true},
+	{"3.4.3", "x64", true, true},
+	{"3.6.2", "arm64", true, true},
+	{"3.6.2", "x64", true, true},
+	{"3.7.0", "arm64", true, true},
+	{"3.7.0", "x64", true, true},
+	{"3.9.2", "arm64", true, true},
+	{"3.9.2", "x64", true, true},
+	{"3.10.7", "arm64", true, true},
+	{"3.11.0", "arm64", true, true},
+	{"3.12.2", "arm64", true, true},
+	{"3.12.2", "x64", true, true},
+	{"3.13.0", "arm64", true, true},
+	{"3.13.0", "x64", true, true},
+}
+
+// runEmitStubNames prints Go source for the VM stub NAME tables of the
+// given tags -- VM_STUB_CODE_LIST minus the type-testing stubs, which
+// composeVMStubEmissionOrder splices back in at the Subtype7TestCache
+// anchor.
+//
+// This list is zipped by index against the VM snapshot's Code objects,
+// so one missing or extra name shifts every later stub. It is generated
+// rather than transcribed for that reason.
+func runEmitStubNames(tags []string) int {
+	for _, tag := range tags {
+		src, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		macros := cmacro.ParseMacros(src)
+		full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		ttsSet := map[string]bool{}
+		for _, n := range tts {
+			ttsSet[n] = true
+		}
+		var want []string
+		for _, n := range full {
+			if !ttsSet[n] {
+				want = append(want, n)
+			}
+		}
+		id := strings.ReplaceAll(tag, ".", "")
+		fmt.Printf("\n// Dart %s -- VM_STUB_CODE_LIST@%s minus the %d type-testing\n", tag, tag, len(tts))
+		fmt.Printf("// stubs, %d entries.\n", len(want))
+		fmt.Printf("var stubNames%s = []string{\n", id)
+		printGoStrings(want)
+		fmt.Printf("}\n")
+		fmt.Printf("// switch: case %q: return stubNames%s\n", tag, id)
+	}
+	return 0
+}
+
+// runEmitStubOffsets prints Go source for the Thread-cached stub offset
+// tables of the given tags.
+//
+// Both halves are SDK-derived: the field name and the stub name come from
+// thread.h's CACHED_ADDRESSES_LIST entries, the offset from
+// runtime_offsets_extracted.h. Emitting one table per (tag, arch) and
+// comparing the two lets the caller see whether the arches agree, which
+// is the usual case but not one to assume.
+func runEmitStubOffsets(tags []string) int {
+	for _, tag := range tags {
+		fieldToStub, err := sdkThreadStubNames(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		header, err := fetchHeader(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		target, ok := arm64ProductTarget(tag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			continue
+		}
+
+		perArch := map[string]map[int]string{}
+		for _, arch := range []string{"arm64", "x64"} {
+			fields, err := extractTHRFields(header, arch, target.compressed, true)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", tag, arch, err)
+				continue
+			}
+			m := map[int]string{}
+			for _, f := range fields {
+				if stub, ok := fieldToStub[strings.TrimSuffix(f.name, "_offset")]; ok {
+					m[f.offset] = stub
+				}
+			}
+			perArch[arch] = m
+		}
+		arm, x64 := perArch["arm64"], perArch["x64"]
+		if len(arm) == 0 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no stub offsets in the arm64 PRODUCT block\n", tag)
+			continue
+		}
+		same := len(arm) == len(x64)
+		for off, name := range arm {
+			if x64[off] != name {
+				same = false
+				break
+			}
+		}
+
+		id := strings.ReplaceAll(tag, ".", "")
+		fmt.Printf("\n// Dart %s -- PRODUCT + %s pointers. Names and offsets both from\n",
+			tag, map[bool]string{true: "compressed", false: "non-compressed"}[target.compressed])
+		fmt.Printf("// thread.h@%s + runtime_offsets_extracted.h@%s.\n", tag, tag)
+		if same {
+			fmt.Printf("// x86_64 offsets are identical.\n")
+		} else {
+			fmt.Printf("// NOTE: x86_64 offsets DIFFER; emit and keep a separate table.\n")
+		}
+		fmt.Printf("threadStubOffsets%s = map[int64]string{\n", id)
+		offs := make([]int, 0, len(arm))
+		for off := range arm {
+			offs = append(offs, off)
+		}
+		sort.Ints(offs)
+		for _, off := range offs {
+			fmt.Printf("\t%#x: %q,\n", off, arm[off])
+		}
+		fmt.Printf("}\n")
+		fmt.Printf("// switch: case %q: return threadStubOffsets%s\n", tag, id)
+	}
+	return 0
+}
+
+// runEmitRuntimeEntries prints Go source for the runtime-entry name
+// tables of the given tags, plus the mergeRuntimeEntries calls that
+// install them.
+//
+// Both block bases come from the SDK rather than from arithmetic on a
+// neighbouring version: Thread_AllocateArray_entry_point_offset is the
+// first RUNTIME_ENTRY_LIST slot and Thread_DeoptimizeCopyFrame_entry_point_offset
+// the first LEAF one. Whether the two blocks are contiguous changed
+// between versions, so it is derived per tag rather than assumed -- 3.12.2
+// has a 49-slot gap between them that a "leaf follows runtime" assumption
+// would silently write over.
+func runEmitRuntimeEntries(tags []string) int {
+	for _, tag := range tags {
+		target, ok := arm64ProductTarget(tag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			continue
+		}
+		relSrc, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		macros := cmacro.ParseMacros(relSrc)
+		runtime, err := cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		// LEAF entries put the return type first: V(intptr_t, Name, ...).
+		leaf, err := cmacro.Column(macros, "LEAF_RUNTIME_ENTRY_LIST", 1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+
+		header, err := fetchHeader(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		fields, err := extractTHRFields(header, target.arch, target.compressed, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		offsetOf := func(name string) (int, bool) {
+			for _, f := range fields {
+				if f.name == name {
+					return f.offset, true
+				}
+			}
+			return 0, false
+		}
+		// extractTHRFields stores the inner name only: the Thread_ prefix
+		// and the _offset suffix are both stripped by reSingle.
+		rtBase, ok1 := offsetOf("AllocateArray_entry_point")
+		leafBase, ok2 := offsetOf("DeoptimizeCopyFrame_entry_point")
+		if !ok1 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: AllocateArray entry point not in the extracted header\n", tag)
+			continue
+		}
+
+		id := strings.ReplaceAll(tag, ".", "")
+
+		// Whether the LEAF block follows the runtime block is a property of
+		// the Thread struct, not of the offsets header. Up to 2.19 the two
+		// DECLARE_MEMBERS expansions are adjacent; by 3.12.2 the LEAF one
+		// has moved down past exit_through_ffi_, leaving a gap that a
+		// "leaf follows runtime" assumption writes straight over.
+		//
+		// The offsets header only exports DeoptimizeCopyFrame for the newer
+		// tags, so adjacency is read from thread.h and the exported offset,
+		// where present, is used as a cross-check.
+		contiguous, err := leafFollowsRuntime(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
+		switch {
+		case contiguous && ok2 && leafBase != rtBase+len(runtime)*8:
+			fmt.Fprintf(os.Stderr, "  SKIP %s: thread.h says the blocks are adjacent but the header puts\n"+
+				"    DeoptimizeCopyFrame at %#x, not %#x -- resolve before emitting\n",
+				tag, leafBase, rtBase+len(runtime)*8)
+			continue
+		case !contiguous && !ok2:
+			fmt.Fprintf(os.Stderr, "  SKIP %s: LEAF block is not adjacent to the runtime block and the\n"+
+				"    header does not export DeoptimizeCopyFrame_entry_point_offset.\n"+
+				"    The leaf base cannot be derived; guessing it would misname the whole block.\n", tag)
+			continue
+		}
+		fmt.Printf("\n// Dart %s. Derived from runtime_entry_list.h@%s;\n", tag, tag)
+		fmt.Printf("// base offsets from runtime_offsets_extracted.h@%s\n", tag)
+		fmt.Printf("// (AllocateArray = %#x", rtBase)
+		if ok2 {
+			fmt.Printf(", DeoptimizeCopyFrame = %#x", leafBase)
+		}
+		fmt.Printf(").\n")
+		if contiguous {
+			fmt.Printf("// The LEAF block follows the runtime block with no gap, so the two\n")
+			fmt.Printf("// are stored flattened, matching the pre-3.10.7 convention.\n")
+			fmt.Printf("var runtimeEntriesV%s = []string{\n", id)
+			printGoStrings(append(append([]string{}, runtime...), leaf...))
+			fmt.Printf("}\n")
+			fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, runtimeEntriesV%s)\n", id, rtBase, id)
+			continue
+		}
+		fmt.Printf("var runtimeEntriesV%s = []string{\n", id)
+		printGoStrings(runtime)
+		fmt.Printf("}\n\n")
+		fmt.Printf("var leafEntriesV%s = []string{\n", id)
+		printGoStrings(leaf)
+		fmt.Printf("}\n")
+		fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, runtimeEntriesV%s)\n", id, rtBase, id)
+		if ok2 {
+			fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, leafEntriesV%s)\n", id, leafBase, id)
+		}
+	}
+	return 0
+}
+
+func printGoStrings(names []string) {
+	const perLine = 3
+	for i := 0; i < len(names); i += perLine {
+		fmt.Printf("\t")
+		for j := i; j < i+perLine && j < len(names); j++ {
+			fmt.Printf("%q, ", names[j])
+		}
+		fmt.Printf("\n")
+	}
+}
+
+var (
+	reRuntimeMembers = regexp.MustCompile(`(?m)^\s*RUNTIME_ENTRY_LIST\(DECLARE_MEMBERS\)`)
+	reLeafMembers    = regexp.MustCompile(`(?m)^\s*LEAF_RUNTIME_ENTRY_LIST\(DECLARE_MEMBERS\)`)
+	rePreproc        = regexp.MustCompile(`(?m)^\s*#(define|undef)[^\n]*$`)
+)
+
+// leafFollowsRuntime reports whether Thread declares the LEAF runtime
+// entry points immediately after the ordinary ones, with nothing in
+// between -- which is what makes the two blocks one contiguous run of
+// offsets.
+func leafFollowsRuntime(tag string) (bool, error) {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return false, err
+	}
+	rt := reRuntimeMembers.FindStringIndex(src)
+	lf := reLeafMembers.FindStringIndex(src)
+	if rt == nil || lf == nil {
+		return false, fmt.Errorf("thread.h@%s: DECLARE_MEMBERS expansions not found", tag)
+	}
+	if lf[0] < rt[1] {
+		return false, fmt.Errorf("thread.h@%s: LEAF block precedes the runtime block", tag)
+	}
+	between := src[rt[1]:lf[0]]
+	between = rePreproc.ReplaceAllString(between, "")
+	return strings.TrimSpace(between) == "", nil
+}
+
+func arm64ProductTarget(tag string) (extractTarget, bool) {
+	for _, t := range allTargets {
+		if t.tag == tag && t.arch == "arm64" && t.product {
+			return t, true
+		}
+	}
+	return extractTarget{}, false
+}
+
 // runCheckRoots verifies RootsPrefixRefCount for Dart 3.13.0+ against the SDK.
 // The roots prefix count is the sum of:
 //   - |RAW_ROOTS_LIST| + 35 + 4 + 256 (Raw roots)
@@ -386,7 +829,7 @@ func runCheckRuntimeEntries() int {
 //   - (kNumPredefinedCids - kObjectCid) - |IsAbsentCid| (class table entries)
 //
 // Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
-//         runtime/vm/stub_code_list.h, runtime/vm/class_id.h
+// runtime/vm/stub_code_list.h, runtime/vm/class_id.h.
 // Verified via gh api at tag 3.13.0.
 func runCheckRoots() int {
 	mismatches := 0
@@ -489,29 +932,6 @@ func runCheckRoots() int {
 func countMacroEntries(header, macroName string) int {
 	entries := extractMacroBlock(header, macroName)
 	return len(entries)
-}
-
-// countClassIDEntries counts kNumPredefinedCids by counting all k*Cid enum
-// values in the ClassId enum before kNumPredefinedCids. This is more reliable
-// than recursively expanding nested macros (CLASS_LIST → CLASS_LIST_NO_OBJECT
-// → CLASS_LIST_NO_OBJECT_NOR_STRING_NOR_ARRAY_NOR_MAP → ...).
-func countClassIDEntries(header string) int {
-	// Find the enum ClassId block.
-	enumStart := strings.Index(header, "enum ClassId")
-	if enumStart < 0 {
-		return 0
-	}
-	rest := header[enumStart:]
-	// Find kNumPredefinedCids in the enum.
-	cidEnd := strings.Index(rest, "kNumPredefinedCids")
-	if cidEnd < 0 {
-		return 0
-	}
-	enumBody := rest[:cidEnd]
-	// Count all k*Cid, entries (each is one predefined class ID).
-	// Pattern: kSomeNameCid, (with optional whitespace/comments).
-	cidEntryRe := regexp.MustCompile(`k\w+Cid\s*,`)
-	return len(cidEntryRe.FindAllString(enumBody, -1))
 }
 
 // extractDefineInt extracts a #define constant's integer value.
@@ -1389,7 +1809,30 @@ func main() {
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	emitStubNamesFlag := flag.String("emit-stub-names", "", "comma-separated tags: print Go source for their VM stub name tables")
+	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
+	emitRuntimeEntriesFlag := flag.String("emit-runtime-entries", "", "comma-separated tags: print Go source for their runtime-entry tables and the mergeRuntimeEntries calls")
+	checkStubOffsetsFlag := flag.Bool("check-stub-offsets", false, "verify threadstubs.go's ThreadStubOffsets tables against SDK's thread.h + runtime_offsets_extracted.h; exit 1 on mismatch")
 	flag.Parse()
+
+	if *emitStubNamesFlag != "" {
+		os.Exit(runEmitStubNames(strings.Split(*emitStubNamesFlag, ",")))
+	}
+
+	if *emitStubOffsetsFlag != "" {
+		os.Exit(runEmitStubOffsets(strings.Split(*emitStubOffsetsFlag, ",")))
+	}
+
+	if *emitRuntimeEntriesFlag != "" {
+		os.Exit(runEmitRuntimeEntries(strings.Split(*emitRuntimeEntriesFlag, ",")))
+	}
+
+	if *checkStubOffsetsFlag {
+		if runCheckStubOffsets() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *checkObjectStoreFlag {
 		if runCheckObjectStore() > 0 {
