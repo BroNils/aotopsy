@@ -97,7 +97,7 @@ func cmdGhidra(args []string) error {
 		var findErr error
 		scriptPath, findErr = analysis.FindScriptPath()
 		if findErr != nil {
-			return fmt.Errorf("Ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
+			return fmt.Errorf("ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
 		}
 	}
 

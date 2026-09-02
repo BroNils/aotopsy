@@ -220,19 +220,6 @@ func enumBody(src string) (string, error) {
 	return body, nil
 }
 
-// applyKindTemplate substitutes the macro parameter into a
-// DEFINE_OBJECT_KIND body and returns the ids it emits, in order.
-func applyKindTemplate(template, class string) []string {
-	t := strings.ReplaceAll(template, "##", "\x00")
-	t = strings.ReplaceAll(t, "clazz", class)
-	t = strings.ReplaceAll(t, "\x00", "")
-	var out []string
-	for _, m := range reEnumEntry.FindAllStringSubmatch(t, -1) {
-		out = append(out, m[1])
-	}
-	return out
-}
-
 type cidError string
 
 func (e cidError) Error() string { return string(e) }

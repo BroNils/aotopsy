@@ -222,28 +222,6 @@ func (e *emitter) annotateInlineFrames(va uint64, indent int) {
 // case. Marking each protected block is correct regardless of traversal order
 // and repetition, and still tells the reader exactly which code the handler
 // covers. Real syntax needs the emitter restructured to emit regions as units.
-func (e *emitter) annotateBlockTry(id, indent int) {
-	ri, ok := e.blockTryRegion[id]
-	if !ok {
-		return
-	}
-	// Once per block, not once per visit. The CFG walk re-emits blocks (up to
-	// maxVisitCount) and loop bodies especially: without this, one big
-	// loop-heavy function (_Timer._runTimers) produced 9010 identical marker
-	// lines, 91% of all markers in a 900-function sweep. The fact being
-	// reported -- "this block is inside try N" -- is a property of the block,
-	// so stating it once is both sufficient and readable.
-	if e.tryMarked == nil {
-		e.tryMarked = make(map[int]bool)
-	}
-	if e.tryMarked[id] {
-		return
-	}
-	e.tryMarked[id] = true
-	r := e.fir.TryRegions[ri]
-	e.emit(indent, "// [in try #%d -> %s at 0x%x]", r.TryIndex, r.CatchClause(), r.HandlerVA)
-}
-
 // EmitPseudocode is the top-level entry point: lifts+walks fir's CFG into
 // readable pseudocode text, matching flutterdec's emit_pseudocode /
 // FuncEmitter::emit pipeline (signature -> recursive block walk ->

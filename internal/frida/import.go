@@ -141,8 +141,8 @@ func CmdFridaImport(args []string) error {
 	}
 
 	// Write resolution report
-	report := fmt.Sprintf("Frida Import Report\n")
-	report += fmt.Sprintf("===================\n\n")
+	report := "Frida Import Report\n"
+	report += "===================\n\n"
 	report += fmt.Sprintf("Static output: %s\n", *staticDir)
 	report += fmt.Sprintf("Frida results: %s\n", *fromPath)
 	report += fmt.Sprintf("Merged output: %s\n\n", *outDir)

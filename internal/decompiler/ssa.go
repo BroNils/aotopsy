@@ -15,7 +15,7 @@ import (
 // recursion took, so a register whose value is consistent at a join (or carried
 // around a loop back-edge) but was not on the taken path leaked as a raw token.
 //
-// computeEntryStates runs the transfer function (applyBlockToState) over every
+// runFixpoint runs the transfer function (applyBlockToState) over every
 // block to a fixpoint, joining predecessor exit states conservatively at each
 // block entry. The emitter then FILLS its live-in registers from the fixpoint
 // result (seedFromFixpoint) — additive: it only supplies values the walk left
@@ -251,12 +251,6 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 		}
 	}
 	return entry, exit
-}
-
-// computeEntryStates returns just the per-block entry states (see runFixpoint).
-func computeEntryStates(fir *FuncIR, pool PoolLookup) []*LiftState {
-	entry, _ := runFixpoint(fir, pool)
-	return entry
 }
 
 // rawRegTokenRe matches a bare physical-register token (ARM64 w/x, x86 named +

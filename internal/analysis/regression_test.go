@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -326,22 +325,4 @@ func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	if len(res.Classes) < 100 {
 		t.Errorf("Classes: got %d, expected >100 (Class cluster fill should yield >100 classes)", len(res.Classes))
 	}
-}
-
-// Helper to parse first JSON object from JSONL.
-func parseFirstJSON(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 {
-		t.Fatal("empty JSONL file")
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
-		t.Fatal(err)
-	}
-	return result
 }

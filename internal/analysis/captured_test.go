@@ -16,13 +16,6 @@ import (
 // Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus, same
 // as the other integration tests.
 
-// sharedCaptureOutDir caches the pipeline output from a single Run() call
-// so that multiple TestCaptured_* tests don't each re-run the full pipeline
-// (each Run() takes ~90s on the 3.9.2 ARM64 sample, and running 5 of them
-// serially exceeds the test timeout).
-var sharedCaptureOutDir string
-var sharedCaptureErr error
-
 func runCaptureFixture(t *testing.T) string {
 	t.Helper()
 	// Delegate to the package-wide shared pipeline fixture.

@@ -352,7 +352,7 @@ type ClosureDataInfo struct {
 // delayed_type_arguments(2), function(3), context(4), hash(5).
 // The function ref (index 3) points to the Function the closure wraps.
 type ClosureInfo struct {
-	RefID      int
+	RefID       int
 	FunctionRef int // ref ID of the wrapped Function (-1 if not captured)
 }
 
@@ -780,7 +780,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			for _, cm := range rodataCSM2Clusters {
 				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile) {
 					result.CompressedStackMaps = append(result.CompressedStackMaps,
-						CompressedStackMapsInfo{RefID: p.RefID, Payload: p.Payload})
+						CompressedStackMapsInfo(p))
 				}
 			}
 		}
