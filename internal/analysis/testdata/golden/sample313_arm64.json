@@ -5,7 +5,7 @@
   "func_count": 8520,
   "class_count": 2387,
   "lines": {
-    "address_callers_xref.jsonl": 5147,
+    "address_callers_xref.jsonl": 5148,
     "call_edges.jsonl": 41872,
     "classes.jsonl": 2387,
     "dispatch_table.jsonl": 29636,
@@ -20,13 +20,13 @@
     "unresolved_thr.jsonl": 1293
   },
   "sha256": {
-    "address_callers_xref.jsonl": "380b51d7a9d7cee836eb3b679477cd1fed7d9b4e7814dbe039c53375037423b2",
-    "call_edges.jsonl": "d73ad3bf0275d81aa53ddabc085c7a5b38cd52f92a7e19663b483a265b6a4db6",
+    "address_callers_xref.jsonl": "8e97136cd2b841e1db17d4753ef0fe53711cddd99cb8201915dda5683db81668",
+    "call_edges.jsonl": "0b09abb94abb4a1326d856098d08028e103678c9a6f4aebce8d2b17031dffcea",
     "classes.jsonl": "465e2d8f02e679588566240aa0943362a9a710cd1fb94ff14bd73c655121e1ea",
     "dispatch_table.jsonl": "cf8ca0aee2f62151fa45ec3852fad68e65823a8fc6d5149acd1eb697737d04a3",
     "field_accessor_xref.jsonl": "8128db4ae8c6d30768bdf36b7a4e0eb8f09190f72ce17c013bb80eb7f2420849",
-    "functions.jsonl": "c6fe3c5079f47089dc0ed71b59d0f66ae5e011da658ef6ca5fd9834db5e406d1",
-    "index.jsonl": "c20da33dee7736ea350e6a683249bf992b65273f8bd5ded804fa270140b46e49",
+    "functions.jsonl": "7408f417157a0b19989af6e9b29eff028a84f846da1a839cbff3849827e83c13",
+    "index.jsonl": "0ee1d6bd444df65a289b5e2d35b5728780a1b0ac8f35ee7dffe4319fba97d2a6",
     "native_capabilities.jsonl": "93fc863f9e31230c7e09b20cc1de367afbc574c40733080117847e1104e39542",
     "pool_immediates.jsonl": "3a4d29f53b17a24ce6195fd16e7ea52fc78b7018a1cd2f0171c32efd271604ba",
     "string_refs.jsonl": "9f8e25f24f45c0cb447c4de08bce010d0aaee782aa0355ed348b199a963492e2",

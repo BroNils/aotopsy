@@ -191,6 +191,19 @@ type TypeInfo struct {
 	RefID          int
 	ClassID        int32
 	TypeClassIdRef int // ref ID of type_class_id Smi (v2.x TypeClassIdIsRef only); -1 otherwise
+
+	// ArgumentsRef is the TypeArguments this type was instantiated with,
+	// or -1. UntaggedType's visited range is type_test_stub, hash,
+	// arguments (raw_object.h: VISIT_FROM(type_test_stub) in
+	// UntaggedAbstractType, VISIT_TO(arguments) in UntaggedType), so it is
+	// the LAST ref of the fill.
+	//
+	// Without it a type is only ever as specific as its class. The type
+	// testing stub for List<double> and the one for List<String> both
+	// named themselves TypeTestingStub_List, which is why they are the
+	// single largest category of symbol-table disagreement: the ELF says
+	// "assert type is List<double>".
+	ArgumentsRef int
 }
 
 // --- New capture types (previously skipped) ---

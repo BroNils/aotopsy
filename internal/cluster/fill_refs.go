@@ -128,7 +128,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if err != nil {
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d ref %d: %w", i, count, j, err)
 			}
-			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType || isClosure || isFfiTrampoline {
+			if isICData || isScript || isLoadingUnit || isKPI || isClosureData || isTypeParameters || isOldType || isClosure || isFfiTrampoline || spec.IsType {
 				allRefs = append(allRefs, int(r))
 			}
 			if j == spec.NameIdx {
@@ -210,6 +210,12 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if ti != nil {
+					// arguments is the last ref of UntaggedType's visited
+					// range; see TypeInfo.ArgumentsRef.
+					ti.ArgumentsRef = -1
+					if n := len(allRefs); n > 0 {
+						ti.ArgumentsRef = allRefs[n-1]
+					}
 					types = append(types, *ti)
 				}
 			case isScript:
@@ -340,6 +346,11 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					RefID:          ref,
 					ClassID:        0, // resolved later via MintValues
 					TypeClassIdRef: allRefs[typeClassIdIdx],
+					// Not captured for the 2.10-2.15 layouts: TTS naming
+					// is deliberately off there (see
+					// buildTypeTestingStubNames), so there is no consumer
+					// to justify guessing the index.
+					ArgumentsRef: -1,
 				})
 			}
 		}
