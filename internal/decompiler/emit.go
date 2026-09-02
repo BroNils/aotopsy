@@ -144,6 +144,18 @@ type emitter struct {
 	// handlerBlocks records block IDs that were already emitted inside a
 	// catch clause, so they are not repeated at their natural CFG position.
 	handlerBlocks map[int]bool
+
+	// emittedAnywhere records every block already written out by this
+	// emitter OR by any helper sub-emitter, and is SHARED with them.
+	//
+	// visits is deliberately not shared: it drives canInline's recursion
+	// budget, which is per-emitter. This map answers a different question
+	// -- "is this block's text already somewhere in the output?" -- and
+	// that question is global, because a `goto block_N;` refers to a label
+	// wherever it was emitted. Without it every helper re-walked its whole
+	// subtree from a fresh visit map and re-emitted join blocks the main
+	// body had already shown.
+	emittedAnywhere map[int]bool
 }
 
 // buildBlockTryIndex assigns each block to the try region covering its start.
@@ -253,6 +265,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		omittedSet:  make(map[int]bool),
 		pinnedPhi:   make(map[string]string),
 		phiDeclared: make(map[int]bool),
+
+		emittedAnywhere: make(map[int]bool),
 	}
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
@@ -703,8 +717,26 @@ func safeFuncName(name string) string {
 
 func indentStr(n int) string { return strings.Repeat("  ", n) }
 
+// emit appends one indented output line -- or several, when the formatted
+// text contains newlines.
+//
+// A lifter is allowed to return more than one statement for a single
+// instruction: ARM64 `stp` is two stores, and returns them joined by a
+// newline. Prefixing the indent once left every continuation line hard
+// against column 0, in the middle of otherwise correctly nested output.
+// Indenting per line fixes it here, at the one place indentation is
+// applied, rather than requiring every current and future multi-statement
+// lifter to remember.
 func (e *emitter) emit(indent int, format string, args ...interface{}) {
-	e.lines = append(e.lines, indentStr(indent)+fmt.Sprintf(format, args...))
+	text := fmt.Sprintf(format, args...)
+	pad := indentStr(indent)
+	if !strings.Contains(text, "\n") {
+		e.lines = append(e.lines, pad+text)
+		return
+	}
+	for _, l := range strings.Split(text, "\n") {
+		e.lines = append(e.lines, pad+l)
+	}
 }
 
 // identifyLoopHeaders finds blocks that are targets of back-edges (loops).

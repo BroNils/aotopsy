@@ -82,7 +82,9 @@ func (e *emitter) appendHelperFunctions() {
 			blockEntryState: e.blockEntryState,
 			loopPhis:        e.loopPhis,
 			pinnedPhi:       make(map[string]string),
-			phiDeclared:     make(map[int]bool)}
+			phiDeclared:     make(map[int]bool),
+			// Shared, unlike visits: see emitter.emittedAnywhere.
+			emittedAnywhere: e.emittedAnywhere}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,
