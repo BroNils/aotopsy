@@ -199,6 +199,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// already visited, and the label it needed was never emitted -- a
 	// dangling goto.
 	e.emit(indent, "block_%d:;", id)
+	if e.emittedAnywhere != nil {
+		e.emittedAnywhere[id] = true
+	}
 	e.annotateInlineFrames(blk.StartVA, indent)
 	// Reaching-definition fixpoint: fill live-in registers the recursive walk
 	// left unknown but a value-flow fixpoint proves consistent (see ssa.go).
@@ -390,6 +393,31 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		}
 		e.emitOmittedPath(id, indent+1)
 		e.emit(indent, "}")
+		return
+	}
+	// A join point that has already been emitted is referenced, not
+	// emitted again.
+	//
+	// Without this the walk re-INLINES it, and with it the whole subtree
+	// below it, once per reaching path up to maxVisitCount. That is
+	// combinatorial, and it dominated the output: ten functions out of a
+	// thousand produced 45% of all emitted lines, at 45x-83x LINES PER
+	// MACHINE INSTRUCTION (_StringBase._createStringFromIterable: 331
+	// instructions -> 27,563 lines). Nothing was wrong with any single
+	// line; there were simply tens of thousands of them, which for a tool
+	// whose job is to make a stripped binary readable is its own kind of
+	// failure. The `analysis budget exceeded` backstop never fired
+	// (measured budgetHit=0), so none of this was even caught as runaway.
+	//
+	// Blocks with ONE predecessor are still inlined: that is a tree edge,
+	// inlining it is what makes the output read like source rather than
+	// like a basic-block dump, and it cannot multiply. Only a real join --
+	// two or more predecessors, already emitted once -- becomes a goto.
+	// The label is emitted for every block in emitBlockBody and pruned
+	// later by dropUnusedLabels, so referencing one is always safe here:
+	// visits>0 means the block, and therefore its label, is in the output.
+	if e.emittedAnywhere[id] && len(e.fir.Blocks[id].Preds) > 1 {
+		e.emit(indent, "goto block_%d;", id)
 		return
 	}
 	if e.canInline(id, depth) {
