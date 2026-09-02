@@ -668,15 +668,30 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 	// targets. Otherwise emit a dispatch comment.
 	if ins.Target != "" && !strings.HasPrefix(ins.Target, "0x") {
 		if len(e.fir.SwitchCases) > 0 {
-			// Real switch/case recovery: emit switch with ALL case blocks.
-			// Use emitBlockBody (not emitSuccessor) for each case so the
-			// emitter does NOT follow fallthrough into the next case —
-			// each case is emitted independently with its own break.
+			// Case bodies go through emitBlock, like every other
+			// recursion site.
+			//
+			// This called emitBlockBody directly, which bypasses ALL of
+			// emitBlock's guards at once: the depth limit, the active-set
+			// cycle detection, the visit cap, the id bounds check and the
+			// step budget. A jump table whose cases lead back into the
+			// dispatch then recursed without any bound. It cost six of the
+			// project's 93 corpus samples -- Dart 2.14.0, 2.15.0 and
+			// 2.16.0 on ARM64, every variant of each -- which died with
+			// `fatal error: out of memory` at depth ~5,400 and an indent
+			// of ~10,800 columns. The same three versions on x86_64, and
+			// 2.13.0/2.17.6 on ARM64, were unaffected, which is what makes
+			// it look like a version quirk rather than what it is.
+			//
+			// The stated reason for the bypass -- "so the emitter does NOT
+			// follow fallthrough into the next case" -- did not hold
+			// either: emitBlockBody follows the fallthrough successor at
+			// its end just as emitBlock does.
 			e.emit(indent, "switch (%s) {", ins.Target)
 			for _, sc := range e.fir.SwitchCases {
 				e.emit(indent+1, "case %d:", sc.Index)
 				if sc.BlockID >= 0 && sc.BlockID < len(e.fir.Blocks) {
-					e.emitBlockBody(sc.BlockID, indent+2, depth+1)
+					e.emitBlock(sc.BlockID, indent+2, depth+1)
 				} else {
 					e.emit(indent+2, "// case target block %d not recovered", sc.BlockID)
 				}
