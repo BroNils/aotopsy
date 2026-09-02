@@ -42,7 +42,7 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 			fmt.Printf("0x%x: <decode error>\n", d.VA)
 			return true
 		}
-		text := d.Inst.String()
+		text := x86.InstText(d.Inst)
 		annotation := ""
 		for _, arg := range d.Inst.Args {
 			if mem, ok := arg.(x86asm.Mem); ok {

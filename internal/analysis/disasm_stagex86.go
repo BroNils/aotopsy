@@ -295,7 +295,7 @@ func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols
 			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
 			return true
 		}
-		line := d.Inst.String()
+		line := x86.InstText(d.Inst)
 		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 			if name, ok := symbols(target); ok {
 				line += fmt.Sprintf("  ; -> %s", name)
