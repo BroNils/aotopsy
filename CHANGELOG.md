@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-02
+
+Correctness release. Most of it is one story: the checks meant to catch
+regressions were not running, and once they ran they found real defects.
+
+### Added
+- **Corpus-wide decompiler gate (`TestDecompileCorpus`)** — runs every registered
+  sample through the emitter. The golden gate covers pipeline *artifacts*, and
+  pseudocode is not one of them (it is written only under `--decompile`), so the
+  emitter had no corpus-wide coverage at all: six samples could crash the
+  decompiler with the whole suite green.
+- **Thread field SDK drift gate (`TestThreadFieldNamesMatchSDK`)** — checks every
+  committed Thread field table against `runtime_offsets_extracted.h`. Only stub
+  offsets, stub names and runtime entries had gates before.
+- **`--decompile`** — writes per-function Dart pseudocode to `<out>/dart/`.
+  `EmitPseudocode` was previously reachable only from `export-dart` and
+  `_debug decompile-native`, so the pipeline emitted 8049 disassembly listings
+  and zero decompiled Dart. Off by default: it roughly triples the output
+  directory, and every run that does not use it now says so.
+- **CI gates** — `gofmt`, `staticcheck`, `-shuffle=on`, and a coverage floor.
+- **`samplecorpus.Available`** — distinguishes "no corpus at all" (skip) from
+  "corpus present but this sample missing" (fail).
+- **FP/SIMD lifting** — one `applyFloat` shared by both architectures, replacing
+  two near-identical copies and covering the FP *moves* neither of them did.
+- **`sdk.X86RegName`** — the counterpart to `ARM64RegName`, without which the
+  x86 half of every ABI table could not be turned back into a register name.
+
+### Fixed
+- **Unbounded recursion in the decompiler.** `emitJump`'s switch-case path called
+  `emitBlockBody` directly, bypassing every one of `emitBlock`'s guards: depth
+  limit, cycle detection, visit cap, bounds check, step budget. Six of 93 corpus
+  samples died with `fatal error: out of memory` at recursion depth ~5,400 —
+  Dart 2.14.0/2.15.0/2.16.0 on ARM64, every variant. The comment justifying the
+  bypass was also untrue.
+- **Four Thread field tables named every access after its neighbour.** 3.5.0 on
+  both architectures, plus 3.0.5/3.1.0/3.7.0 on ARM64. A version aliased to a
+  neighbour's table after the SDK inserted a field, shifting everything by one
+  slot: `thrV350_x64` agreed with the SDK on 5 of 89 offsets. Not a missing
+  annotation — those render as `THR.fNN` — but a wrong one carrying the
+  confidence of a correct name. Found because staticcheck reported the correct
+  table as an unused variable.
+- **Combinatorial re-emission.** Each successor was inlined up to
+  `maxVisitCount` times per reaching path, bringing its whole subtree along; ten
+  functions in a thousand produced 45% of all output at 45x–83x lines per
+  machine instruction, and the `analysis budget exceeded` backstop never fired.
+  Join blocks already emitted are now referenced with a `goto`, and helper
+  sub-emitters share the "already emitted" set with their parent.
+  ARM64 661,085 → 37,070 lines; x86_64 702,475 → 38,205; CFG coverage unchanged
+  at 99.9%.
+- **Blocks the structured walk could not reach were dropped without a trace.**
+  Average CFG coverage was 86% (ARM64) and 74% (x86_64); both are now 99.9%.
+- **x86_64 wrote no `asm/*.bin`,** so the signal stage skipped every function and
+  `_debug graph` could not rebuild a CFG — both failing silently. `signal_cfg.*`
+  is produced for x86_64 binaries for the first time.
+- **SSE registers were named as ARM64 GPRs.** `x86asm` spells them `X0`..`X15`,
+  which lowercases to exactly `x0`..`x15`; the invariant stated in `regcanon.go`
+  was false for all 19,949 FP/SIMD instructions on the x64 sample. A `movsd`
+  handler existed but never fired, because the mnemonic is `MOVSD_XMM`.
+- **`FpuArgRegs`/`FpuReturnReg` were written by both lifters and read by
+  nothing.** A function returning a `double` leaves it in V0/XMM0, so every one
+  printed a bare `return;` and dropped the value. FP register leaks ~495 → 8
+  (ARM64) and ~590 → 34 (x86_64).
+- **Type-testing stub operands were unnamed.** These stubs are entered with
+  their operands in `TypeTestABI` registers, which are not the Dart argument
+  registers (`kInstanceReg` is R0/RAX). Raw-register leaks 904 → 447 (ARM64) and
+  444 → 245 (x86_64).
+- **A crypto finding that was text.** ChaCha20's constants *are* ASCII —
+  `0x61707865` is the bytes `expa` — and the only crypto finding on the 3.9.2
+  sample was that constant matched inside `expando_patch.dart`. The existing
+  test asserted the false positive.
+- **`macho.go` swallowed a failed string-table read**; the `break` was the last
+  statement of its block, so it exited to where control was already going.
+- **`ResolvePoolEntry` checked `PoolClassByIndex` before `PoolClosureClass`,**
+  making the closure branch unreachable on both architectures. Correct now, but
+  stated plainly: it changed no artifact on any corpus sample.
+- **Multi-statement lifts lost their indentation** — ARM64 `stp` is two stores,
+  and only the first was indented.
+- **Sample-driven tests failed instead of skipping without a corpus,** taking 34
+  tests red on every CI runner. `samples/` is gitignored, so no corpus is a
+  legitimate state.
+
+### Changed
+- **All Go sources are LF**, pinned by `.gitattributes`. 34 files were committed
+  with CRLF, and gofmt always writes LF, so they were permanently
+  "unformatted" — which is why CI had no gofmt gate, and why genuine formatting
+  drift in 8 other files went unreported.
+- **Deduplication.** A structural similarity scan over all 686 functions found 40
+  near-duplicate pairs; 35 are gone. Notably: eight identical cluster-alloc
+  readers differing only in an error label; three copies of the varint loop
+  differing in an end marker and a shift bound; the snapshot-header parser in two
+  packages, with a comment claiming a circular import that does not exist.
+- **`COVERAGE.md`'s build count was under-reported.** The generator deduped rows
+  that carried no file name, so two builds of the same version/arch with equal
+  function counts collapsed into one.
+- **47 staticcheck findings cleared**, none suppressed.
+
+
 ### Added
 - **Unified Snapshot Loader (`LoadSnapshot`)** — centralized 10-step snapshot initialization pipeline in `internal/analysis/snapshot_loader.go` replacing 8 previously copy-pasted setup blocks.
 - **Dedicated Dart VM SDK Ground-Truth Package (`internal/sdk`)** — centralized register roles, DartCallingConvention argument sets (`DartArgRegisters`), write barrier / stack overflow predicates, cached VM object values, stack-slot naming, pointer-decompression detection, and stub classification directly verified against `dart-lang/sdk`.
@@ -41,6 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Inline Frame Wiring** — `wireInlineFrames` now called in `FuncIRFor`, restoring inline frame annotations that were lost when `funcir_builder.go` was deleted.
 - **Switch/Case Recovery** — `wireSwitchCases` ported from deleted `funcir_builder.go`, restoring IndirectGoto pattern detection for ≥16-case switch tables.
 - **ClosureData/TypeParameters Capture** — restored `isClosureData` and `isTypeParameters` assignments in `fill_refs.go` that were accidentally deleted, fixing symtab differential for 8 Dart 2.13–2.16 samples.
+
+## [1.2.0] - 2026-08-31
+
+Architecture refactor, SSA fixpoint, FPU/SIMD, evidence engine & QA hardening.
+This section was left under `[Unreleased]` when v1.2.0 was tagged.
 
 ## [1.1.0] - 2026-08-26
 
@@ -173,6 +275,8 @@ mindmap
       Parity reporting
 ```
 
-[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/BroNils/aotopsy/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/BroNils/aotopsy/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BroNils/aotopsy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BroNils/aotopsy/releases/tag/v1.0.0

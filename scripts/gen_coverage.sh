@@ -10,6 +10,12 @@ if [ -z "$ROWS" ]; then
   echo "Parsing every corpus sample present locally (this is heavy)..." >&2
   AOTOPSY_COVERAGE=1 go test ./internal/analysis/ -run TestCoverageCensus -count=1 -timeout 30m -v 2>&1 \
     | grep -oE "COVROW	.*" | sed 's/^COVROW	//' | sort -u > "$ROWS" || true
+  # The row carries the sample's file name so `sort -u` dedupes repeated log
+  # lines without collapsing distinct builds. It used to end at the function
+  # counts, so two builds of the same version/arch that recovered the same
+  # number of functions -- which the -gt- twins do, being the same binary
+  # content -- became one row, and the headline under-reported the corpus by
+  # however many such pairs existed.
 fi
 trap '[ -n "$TMP" ] && rm -f "$TMP"' EXIT
 

@@ -29,13 +29,17 @@ the test suite on every change:
 
 | Metric | Value | What it means |
 |--------|-------|---------------|
-| **Name-recovery agreement** | **89.8%** overall (81.3% worst band, ≥ 0.81 gate floor) across 44 ground-truth builds | Recovered function names compared against each build's own ELF `.symtab`, the external ground truth — `TestSymtabDifferential`. Full per-build scoreboard: [BENCHMARK.md](BENCHMARK.md) (`make bench`). |
+| **Name-recovery agreement** | **90.2%** overall (81.3% worst band, ≥ 0.81 gate floor) across 44 ground-truth builds | Recovered function names compared against each build's own ELF `.symtab`, the external ground truth — `TestSymtabDifferential`. Full per-build scoreboard: [BENCHMARK.md](BENCHMARK.md) (`make bench`). |
 | **Decompiler syntax validity** | **100%** valid Dart | Every emitted pseudocode function parses as Dart — `TestDecompileQualityCorpus`. |
 | **Fabrication rate** | **0%** | The §2 rule: never emit a guessed name, type, or call target as fact. Unknowns render honestly (`indirectCall`, `<unknown>`, `dynamic`). |
 
 The ground-truth twins are real production builds we cannot redistribute, so those
-differential gates run **locally**; public CI validates build + unit tests across the
-platform matrix (sample-dependent tests skip cleanly when the binary is absent). How every number here is measured (ground truth, metric definitions, reproduction): [METHODOLOGY.md](METHODOLOGY.md). See
+differential gates run **locally**; public CI validates build, vet, `gofmt`,
+`staticcheck`, unit tests (shuffled) and a coverage floor across the platform
+matrix. `samples/` is not redistributable and is gitignored, so sample-dependent
+tests skip there — but only when the corpus is absent entirely; a corpus that is
+present and missing a registered sample fails, because those mean opposite
+things. How every number here is measured (ground truth, metric definitions, reproduction): [METHODOLOGY.md](METHODOLOGY.md). See
 [SECURITY.md](SECURITY.md) for release-binary verification and the honest scope below.
 
 ## Quick Start
@@ -132,7 +136,11 @@ aotopsy signal libapp.so       # same, skip metadata
 aotopsy libapp.so --graph      # also build call graph DOT files
 ```
 
-Flags: `--out <dir>` (default: `<basename>.aotopsy/`), `--quiet`, `--strict`, `--max-steps <n>`, `--k <n>` (signal context depth, default 2).
+Flags: `--out <dir>` (default: `<basename>.aotopsy/`), `--quiet`, `--strict`, `--max-steps <n>`, `--k <n>` (signal context depth, default 2), `--decompile`.
+
+`--decompile` writes per-function Dart pseudocode to `<out>/dart/`. It is off by
+default because it roughly triples the output directory; every run without it
+says so, so the capability is discoverable rather than merely present.
 
 ### Diagnostic
 
@@ -221,6 +229,8 @@ aotopsy _debug thr-audit -lib libapp.so -out thr.jsonl  # THR access scan
 | `aotopsy.sarif` | SARIF 2.1.0 security finding report (for GitHub Code Scanning) |
 | `evidence.jsonl` | Unified evidence model with confidence and provenance per call site |
 | `asm/*.txt` | Annotated disassembly per function |
+| `asm/*.bin` | Raw instruction bytes per function (both architectures) |
+| `dart/*.dart` | Per-function decompiled pseudocode (with `--decompile`) |
 | `cfg/*.dot` | Per-function CFGs (with `--graph`) |
 
 ## Package Layout
@@ -276,7 +286,9 @@ make coverage   # regenerate COVERAGE.md (needs local corpus samples)
 make analyze    # cross-check export-dart output against `dart analyze`
 ```
 
-Integration tests use environment variables (`AOTOPSY_TEST_SAMPLE_*`) to locate sample binaries — they skip automatically if not set. Public CI runs build + unit tests + vet across linux/amd64, darwin/arm64, and windows/amd64, plus a race+coverage job.
+Integration tests resolve their input from `internal/samplecorpus`, which looks for a `samples/` directory; there is nothing to set. `samples/` is gitignored, so a checkout without one skips those tests — but a checkout that *has* a corpus and is missing a registered sample fails, because a drifted corpus and an absent one mean different things.
+
+Public CI runs `gofmt`, `staticcheck`, build, vet and shuffled unit tests across linux/amd64, darwin/arm64 and windows/amd64, plus a race+coverage job with a coverage floor.
 
 ## Releases & Branches
 
@@ -307,7 +319,7 @@ fabricating over them.
 - **Local and captured variable names are gone.** Rendered as `local_*` / `tN`.
 - **Truly polymorphic dispatch targets are not statically resolvable.** BLR through a
   dispatch table / dynamic `Closure` object is an AOT limit, not an analysis gap; these
-  render honestly as `indirectCall` / `dynamicCall`. See `docs/roadmap/20-invariants-and-non-defects.md`.
+  render honestly as `indirectCall` / `dynamicCall`. See [METHODOLOGY.md](METHODOLOGY.md#limits-of-this-method-honestly).
 
 **Engineering scope:**
 - **AOT only.** No JIT support.
