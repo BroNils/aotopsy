@@ -120,24 +120,41 @@ flowchart TD
 
 ## Integration Tests
 
-Set environment variables to enable regression tests:
+Sample-driven tests resolve their input from `internal/samplecorpus`, which walks
+up from the working directory to a `samples/` directory. Put the binaries there
+(symlinks are fine) and they run; there is nothing to set.
 
-- `AOTOPSY_TEST_SAMPLE_ARM64` — Dart 3.9.2 ARM64 libapp.so
-- `AOTOPSY_TEST_SAMPLE_312_ARM64` — Dart 3.12 ARM64 libapp.so
-- `AOTOPSY_TEST_SAMPLE_312_X64` — Dart 3.12 x86_64 libapp.so
-- `AOTOPSY_TEST_SAMPLE_DART212` — Dart 2.12.0 ARM64 libapp.so
-- `AOTOPSY_TEST_SAMPLE_LARGE` — any large production libapp.so (cluster-only tests)
+This replaced five `AOTOPSY_TEST_SAMPLE_*` environment variables. Nobody sets
+five environment variables, so roughly 25 test functions across a dozen files —
+including the golden gate — had been skipping silently while `go test
+./internal/...` reported ok.
 
-Tests skip automatically if not set.
+Missing samples are treated two different ways, and the difference matters:
+
+- **No `samples/` directory at all** → skip. `samples/` is gitignored, so a fresh
+  clone and every CI runner legitimately has no corpus and nothing to assert
+  against.
+- **`samples/` present but a registered sample absent** → fail. The corpus has
+  drifted from the registry, and that is the state the suite spent months in.
+
+`samplecorpus.Available()` is what separates the two. Collapsing them into one
+silent skip is the bug the registry was meant to fix; collapsing them into one
+hard failure took 34 tests red on every CI runner.
 
 ### ⚠️ A Flutter build tree holds SEVERAL libapp.so — most are stale
 
 A Flutter build tree contains multiple `libapp.so` files with different hashes,
 and the `extracted_*` APK outputs are often stale (predate the current source).
 **Which paths are stale vs valid on your machine is documented in
-`AGENTS-local.md`** — always point env vars at `merged_native_libs`, not
+`AGENTS-local.md`** — always link `samples/` at `merged_native_libs`, not
 `extracted_*`. Before trusting a negative result (`--find X` returning 0
 matches), confirm the symbol is in the file: `strings -n 6 libapp.so | grep -x X`.
+
+`internal/samplecorpus` exists because this went wrong once already: fixtures
+were named after the app they came from, `samples/` is gitignored, and the names
+drifted onto other binaries. A sample now declares its Dart version and
+architecture in its file name, and `TestCorpusVersionsMatch` fails if the binary
+disagrees with what the name claims.
 
 ## Key Conventions
 
@@ -156,6 +173,27 @@ matches), confirm the symbol is in the file: `strings -n 6 libapp.so | grep -x X
 - **NEVER use `python3 << 'PYEOF'` heredoc scripts to edit files** — this caused syntax errors (brace mismatch, CRLF issues, non-unique matches). The edit tool validates uniqueness and preserves exact whitespace. Heredoc python scripts bypass all safety checks.
 - Shell commands (`exec`) are for running builds, tests, git, and one-off diagnostics — NOT for file content modification.
 - If `edit` fails with "String not found", read the file again to get the exact current content (tabs, spaces, line endings) before retrying. Do NOT fall back to `sed` or python scripts.
+
+**Line endings are LF everywhere**, pinned by `.gitattributes` (`*.go text
+eol=lf`). 34 files were previously committed with CRLF, which is why this section
+warns about CRLF/LF mismatches — that hazard is now removed at the source, and
+`gofmt -w` is safe on any file. Do not reintroduce CRLF: it puts the CI `gofmt`
+gate permanently red, which is exactly why that gate could not exist before.
+
+## CI
+
+`.github/workflows/ci.yml` runs, on every push and PR:
+
+- `gofmt -l` over `cmd/ internal/ tools/` — must be empty.
+- `staticcheck ./...` — must be clean. Fix findings; do not suppress them. A gate
+  whose baseline is a list of exceptions is not a gate.
+- `go build`, `go vet`, `go test -shuffle=on` on ubuntu, macos and windows.
+- race + coverage, with a floor (currently 18%, measured 20.0% without the
+  corpus). Raise it when it is comfortably clear; never lower it to make a red
+  build green.
+
+CI has no `samples/`, so sample-driven tests skip there — see Integration Tests
+for why "no corpus" and "incomplete corpus" behave differently.
 
 **Why this rule exists (do not work around it):** every harness (Claude Code,
 Devin, Codex, etc.) has its own edit/write tool that works like git — it

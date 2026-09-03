@@ -259,14 +259,6 @@ func parseMacroEntries(body string) []string {
 	return names
 }
 
-// parseRuntimeEntryList parses RUNTIME_ENTRY_LIST(V) and
-// LEAF_RUNTIME_ENTRY_LIST(V) from runtime_entry_list.h.
-func parseRuntimeEntryList(header string) (entries, leafEntries []string) {
-	entries = extractMacroBlock(header, "RUNTIME_ENTRY_LIST")
-	leafEntries = extractMacroBlock(header, "LEAF_RUNTIME_ENTRY_LIST")
-	return entries, leafEntries
-}
-
 // runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
 // for every supported version. Returns count of mismatches.
 func runCheckStubs() int {
@@ -331,28 +323,80 @@ func runCheckStubs() int {
 	return mismatches
 }
 
-// runCheckRuntimeEntries verifies runtime entry names against SDK's
-// runtime_entry_list.h for every supported version.
+// runCheckRuntimeEntries verifies that every runtime entry the SDK
+// declares at a tag is actually reachable as a THR field annotation for
+// that tag, on both architectures.
+//
+// This used to print counts and return 0 unconditionally, carrying the
+// comment "we don't have committed runtime entry tables yet". That
+// stopped being true once extract_thr started generating them, but the
+// check kept passing either way -- which is the worse failure mode: a
+// gate that cannot go red reads exactly like a gate that is green. Its
+// counts were still correct, so nothing looked wrong.
+//
+// The comparison is one-directional by construction. mergeRuntimeEntries
+// fills gaps only, so an SDK entry with no committed name is a real hole
+// (the call renders as an unnamed THR.fNN), whereas a committed name with
+// no SDK entry cannot arise here -- the tables are generated from these
+// same headers, and any disagreement about *which* name sits at an offset
+// is caught by runtimeEntryConflicts instead.
 func runCheckRuntimeEntries() int {
 	mismatches := 0
 	seenTag := map[string]bool{}
 	for _, t := range allTargets {
-		if t.arch != "arm64" || seenTag[t.tag] {
+		if seenTag[t.tag+t.arch] {
 			continue
 		}
-		seenTag[t.tag] = true
-		header, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", t.tag)
+		seenTag[t.tag+t.arch] = true
+		// Deliberately the same derivation -write uses. The gate's
+		// first draft called a second, older parser that took the LAST
+		// macro argument -- right for roots.h, wrong for
+		// LEAF_RUNTIME_ENTRY_LIST, whose shape is V(ret, Name, args...).
+		// It reported the SDK as declaring leaf entries named "uword"
+		// and "thread". The committed tables were fine; the checker was
+		// the broken half. That parser is now gone.
+		entries, leafEntries, _, err := sdkRuntimeEntriesFor(t.tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
 			continue
 		}
-		entries, leafEntries := parseRuntimeEntryList(header)
-		fmt.Fprintf(os.Stderr, "  %s: %d runtime entries, %d leaf entries\n",
-			t.tag, len(entries), len(leafEntries))
-		// We don't have committed runtime entry tables yet — just report.
-		// Future: compare against committed tables when they exist.
+		fields := vmtables.THRFields(t.tag, t.arch == "arm64")
+		if len(fields) == 0 {
+			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no committed THR table\n", t.tag, t.arch)
+			continue
+		}
+		named := map[string]bool{}
+		for _, n := range fields {
+			named[n] = true
+		}
+
+		local := 0
+		for _, kind := range []struct {
+			label string
+			names []string
+		}{{"runtime", entries}, {"leaf", leafEntries}} {
+			for _, n := range kind.names {
+				// mergeRuntimeEntries stores the SDK name with an
+				// _entry_point suffix: the THR slot holds the entry
+				// point, not the RuntimeEntry object.
+				if !named[n+"_entry_point"] {
+					fmt.Fprintf(os.Stderr, "  MISSING %s/%s: %s entry %q is in the SDK but is not named in the committed THR table\n",
+						t.tag, t.arch, kind.label, n)
+					local++
+				}
+			}
+		}
+		if local == 0 {
+			fmt.Fprintf(os.Stderr, "  OK %s/%s: %d runtime + %d leaf entries all named\n",
+				t.tag, t.arch, len(entries), len(leafEntries))
+		}
+		mismatches += local
 	}
-	fmt.Fprintf(os.Stderr, "\nRuntime entry check complete (report-only mode)\n")
+	if mismatches > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d runtime-entry naming gap(s) found\n", mismatches)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nAll SDK runtime entries are named in the committed tables\n")
+	}
 	return mismatches
 }
 
@@ -1394,6 +1438,7 @@ func extractAll() (map[string]map[int]string, []string) {
 		for _, e := range entries {
 			m[e.offset] = e.name
 		}
+		fillRuntimeEntries(m, t.tag, t.arch)
 		out[mapName(t.tag, t.arch, t.compressed, t.product)] = m
 	}
 	return out, failed
@@ -1521,8 +1566,10 @@ func runWrite() int {
 			return 1
 		}
 	}
-	fmt.Fprintf(os.Stderr, "write: %d table(s) rewritten, %d left untouched (no SDK target)\n", rewritten, skipped)
-	return 0
+	fmt.Fprintf(os.Stderr, "write: %d Thread field table(s) rewritten, %d left untouched (no SDK target)\n", rewritten, skipped)
+	// The other three per-version families, so one command regenerates
+	// everything derived from the SDK rather than three plus a paste.
+	return writeStubTables()
 }
 
 // --- ObjectStoreAOTFieldCount verification ---
@@ -1753,6 +1800,12 @@ func runCheck() int {
 		for _, e := range entries {
 			got[e.offset] = e.name
 		}
+		// Same derivation -write applies, for the same tables. Without
+		// it the two halves disagree by construction: the committed
+		// tables carry the ~70 runtime entries the header declares only
+		// in RUNTIME_ENTRY_LIST order, and comparing them against the
+		// raw header alone reports every one of them as "extra".
+		fillRuntimeEntries(got, t.tag, t.arch)
 
 		var problems []string
 		for off, sdkName := range got {
@@ -1808,7 +1861,7 @@ func main() {
 	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
-	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "report runtime entry names from SDK's runtime_entry_list.h (report-only mode)")
+	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "verify every runtime entry in SDK's runtime_entry_list.h is named in the committed THR tables; exit 1 on any gap")
 	emitStubNamesFlag := flag.String("emit-stub-names", "", "comma-separated tags: print Go source for their VM stub name tables")
 	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
 	emitRuntimeEntriesFlag := flag.String("emit-runtime-entries", "", "comma-separated tags: print Go source for their runtime-entry tables and the mergeRuntimeEntries calls")
@@ -1928,4 +1981,451 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Found %d Thread field entries for %s %s compressed=%v product=%v\n",
 		len(entries), *tagFlag, *archFlag, compressed, product)
 	fmt.Print(generateGoMap(*tagFlag, *archFlag, compressed, product, entries))
+}
+
+// ---------------------------------------------------------------------
+// Generated-table writers.
+//
+// Three of the four per-version table families could only be -emit'ed:
+// the tool printed Go source and a human pasted it in. That hand-off is
+// where a table drifts, and it is exactly how four Thread field tables
+// came to carry their neighbour's offsets for every field the SDK header
+// does not export -- the shipped bug that prompted this. -write now
+// regenerates all four families in place, so "regenerate" is a command
+// rather than a procedure.
+// ---------------------------------------------------------------------
+
+// tagID is the identifier form of a tag: 3.10.7 -> "3107".
+func tagID(tag string) string { return strings.ReplaceAll(tag, ".", "") }
+
+// sdkStubOffsetsFor returns the Thread-cached stub offsets for a tag, per
+// architecture. Same derivation runEmitStubOffsets prints.
+func sdkStubOffsetsFor(tag string) (arm, x64 map[int]string, err error) {
+	fieldToStub, err := sdkThreadStubNames(tag)
+	if err != nil {
+		return nil, nil, err
+	}
+	header, err := fetchHeader(tag)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, ok := arm64ProductTarget(tag)
+	if !ok {
+		return nil, nil, fmt.Errorf("no arm64 PRODUCT target")
+	}
+	out := map[string]map[int]string{}
+	for _, arch := range []string{"arm64", "x64"} {
+		fields, ferr := extractTHRFields(header, arch, target.compressed, true)
+		if ferr != nil {
+			continue
+		}
+		m := map[int]string{}
+		for _, f := range fields {
+			if stub, ok := fieldToStub[strings.TrimSuffix(f.name, "_offset")]; ok {
+				m[f.offset] = stub
+			}
+		}
+		out[arch] = m
+	}
+	if len(out["arm64"]) == 0 {
+		return nil, nil, fmt.Errorf("no stub offsets in the arm64 PRODUCT block")
+	}
+	return out["arm64"], out["x64"], nil
+}
+
+// sdkStubNamesFor returns VM_STUB_CODE_LIST minus the type-testing stubs,
+// in declaration order -- the same list runEmitStubNames prints.
+func sdkStubNamesFor(tag string) ([]string, error) {
+	src, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
+	if err != nil {
+		return nil, err
+	}
+	macros := cmacro.ParseMacros(src)
+	full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
+	if err != nil {
+		return nil, err
+	}
+	tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
+	if err != nil {
+		return nil, err
+	}
+	ttsSet := map[string]bool{}
+	for _, n := range tts {
+		ttsSet[n] = true
+	}
+	var want []string
+	for _, n := range full {
+		if !ttsSet[n] {
+			want = append(want, n)
+		}
+	}
+	return want, nil
+}
+
+// sdkRuntimeEntriesFor returns the runtime-entry names for a tag, split
+// the way the committed tables store them.
+//
+// Whether the LEAF block follows the runtime block is a property of the
+// Thread struct, not of the offsets header: up to 2.19 the two
+// DECLARE_MEMBERS expansions are adjacent and the tables store them
+// flattened, but by 3.12.2 the LEAF one has moved down past
+// exit_through_ffi_, leaving a gap. Flattening unconditionally writes
+// straight over that gap and misnames the whole write-barrier wrapper
+// block -- 192 offsets on the first attempt at this.
+//
+// leafFollowsRuntime reads that from thread.h, which is why this defers
+// to it rather than deciding from the tag.
+func sdkRuntimeEntriesFor(tag string) (runtime, leaf []string, contiguous bool, err error) {
+	src, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", tag)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	macros := cmacro.ParseMacros(src)
+	runtime, err = cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
+	if err != nil {
+		return nil, nil, false, err
+	}
+	// LEAF entries put the return type first: V(intptr_t, Name, ...).
+	leaf, err = cmacro.Column(macros, "LEAF_RUNTIME_ENTRY_LIST", 1)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	contiguous, err = leafFollowsRuntime(tag)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return runtime, leaf, contiguous, nil
+}
+
+var runtimeEntryCache = map[string]struct {
+	runtime, leaf []string
+	contiguous    bool
+}{}
+
+// fillRuntimeEntries names the runtime-entry and leaf-runtime-entry blocks
+// of a single extracted Thread table.
+//
+// runtime_offsets_extracted.h exports only ~31 of the ~100 entry points as
+// their own constants -- the ones the compiler references by name. The rest
+// exist in the struct but are anonymous in the header, so they can only be
+// recovered from RUNTIME_ENTRY_LIST's declaration order. Both blocks are
+// laid out contiguously in declaration order, and the SDK does export the
+// first name of each block, which gives an exact anchor: no hand-typed base
+// offset is involved on either side.
+//
+// This used to be done by ten hand-written mergeRuntimeEntries calls in
+// runtimeentries.go, covering ten of the twenty-three ARM64 tables and none
+// of the twenty-seven x64 ones. Every runtime-entry call site on x86_64
+// therefore disassembled as an unnamed THR.fNN. Deriving it here instead
+// covers both architectures and every variant by construction, because
+// extractAll already visits each of them.
+//
+// Anything already carrying an SDK-exported name is left alone and reported:
+// the predicted slot disagreeing with the header means the contiguity
+// assumption has broken for that version, which must not be papered over by
+// overwriting the header's own answer.
+func fillRuntimeEntries(m map[int]string, tag, arch string) {
+	lists, ok := runtimeEntryCache[tag]
+	if !ok {
+		runtime, leaf, contiguous, err := sdkRuntimeEntriesFor(tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  runtime-entries SKIP %s: %v\n", tag, err)
+			runtimeEntryCache[tag] = lists
+			return
+		}
+		lists.runtime, lists.leaf, lists.contiguous = runtime, leaf, contiguous
+		runtimeEntryCache[tag] = lists
+	}
+
+	// Both target architectures are 64-bit, so entry points are 8 bytes
+	// apart. The anchor lookups below are what actually keep this honest:
+	// a wrong stride would collide with an SDK-named slot and be reported.
+	const stride = 8
+
+	byName := map[string]int{}
+	for off, n := range m {
+		byName[n] = off
+	}
+	runtimeAnchor := -1
+	for _, block := range []struct {
+		label string
+		names []string
+	}{{"runtime", lists.runtime}, {"leaf", lists.leaf}} {
+		if len(block.names) == 0 {
+			continue
+		}
+		anchor, ok := byName[block.names[0]+"_entry_point"]
+		ffi, hasFFI := byName["exit_through_ffi"]
+		switch {
+		case ok:
+		case block.label == "leaf" && hasFFI && !lists.contiguous:
+			// When the leaf block is not adjacent to the runtime block it
+			// starts immediately after exit_through_ffi, the last field
+			// thread.h declares before it. On the three versions that do
+			// export a leaf anchor, exit_through_ffi+stride reproduces it
+			// exactly, so this is a checked rule rather than a guess.
+			anchor = ffi + stride
+		case block.label == "leaf" && runtimeAnchor >= 0 && lists.contiguous:
+			// Most headers export no anchor for the leaf block at all,
+			// which left every leaf entry unnamed on x64 even after the
+			// runtime block was recovered. thread.h declares the two
+			// blocks back to back on these versions -- which is a fact
+			// leafFollowsRuntime reads from the SDK, not an assumption
+			// about layout -- so the runtime block's own anchor plus its
+			// length locates the leaf block exactly.
+			anchor = runtimeAnchor + len(lists.runtime)*stride
+		default:
+			fmt.Fprintf(os.Stderr, "  runtime-entries SKIP %s/%s: %s block anchor %q absent from the header\n",
+				tag, arch, block.label, block.names[0]+"_entry_point")
+			continue
+		}
+		if block.label == "runtime" {
+			runtimeAnchor = anchor
+		}
+		for i, n := range block.names {
+			off := anchor + i*stride
+			want := n + "_entry_point"
+			existing, taken := m[off]
+			switch {
+			case !taken:
+				m[off] = want
+			case existing != want:
+				fmt.Fprintf(os.Stderr, "  runtime-entries CONFLICT %s/%s: 0x%x holds %q, %s block predicts %q\n",
+					tag, arch, off, existing, block.label, want)
+			}
+		}
+	}
+}
+
+// goStringSlice renders names as the body of a []string composite literal.
+func goStringSlice(names []string) string {
+	var b strings.Builder
+	b.WriteString("[]string{\n")
+	for i, n := range names {
+		if i%3 == 0 {
+			b.WriteString("\t")
+		}
+		fmt.Fprintf(&b, "%q, ", n)
+		if i%3 == 2 {
+			b.WriteString("\n")
+		}
+	}
+	if len(names)%3 != 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// goInt64Map renders offsets as the body of a map[int64]string literal.
+func goInt64Map(m map[int]string) string {
+	offs := make([]int, 0, len(m))
+	for off := range m {
+		offs = append(offs, off)
+	}
+	sort.Ints(offs)
+	var b strings.Builder
+	b.WriteString("map[int64]string{\n")
+	for _, off := range offs {
+		fmt.Fprintf(&b, "\t%#x: %q,\n", off, m[off])
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// rewriteVarLiterals replaces the composite literal of every `var NAME =
+// <literal>` in path for which gen has an entry.
+//
+// Only variables that already exist are touched. A generated table with
+// no committed variable is reported rather than invented: adding one also
+// means wiring it into a version switch, which is a decision, not a
+// mechanical step.
+func rewriteVarLiterals(path string, gen map[string]string) (rewritten int, missing []string, err error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	seen := map[string]bool{}
+	type edit struct {
+		start, end int
+		text       string
+	}
+	var edits []edit
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			name := vs.Names[0].Name
+			text, want := gen[name]
+			if !want {
+				continue
+			}
+			lit, ok := vs.Values[0].(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			seen[name] = true
+			edits = append(edits, edit{
+				start: fset.Position(lit.Pos()).Offset,
+				end:   fset.Position(lit.End()).Offset,
+				text:  text,
+			})
+		}
+	}
+	for name := range gen {
+		if !seen[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+	out := string(src)
+	for _, e := range edits {
+		out = out[:e.start] + e.text + out[e.end:]
+	}
+	if len(edits) > 0 {
+		// Format before writing, for the same reason runWrite does:
+		// splicing literals back in by byte offset changes key widths, and
+		// gofmt aligns each run to its widest key. This path was the one
+		// that still left the reformatting to the caller, so regenerating
+		// put stubnames.go, threadstubs.go and thrfields.go into the tree
+		// unformatted -- straight into the CI gofmt gate.
+		if formatted, ferr := format.Source([]byte(out)); ferr == nil {
+			out = string(formatted)
+		} else {
+			fmt.Fprintf(os.Stderr, "write: %s: gofmt failed (%v), writing unformatted\n", path, ferr)
+		}
+		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+			return 0, nil, err
+		}
+	}
+	sort.Strings(missing)
+	return len(edits), missing, nil
+}
+
+// writeStubTables regenerates threadstubs.go, stubnames.go and the
+// runtime-entry lists in thrfields.go.
+// varExists reports whether names contains name.
+func varExists(names map[string]bool, name string) bool { return names[name] }
+
+// committedVarNames returns every `var NAME = <composite literal>` in path.
+//
+// The writer only rewrites variables that already exist. A generated table
+// with no committed variable is reported instead of invented: adding one
+// also means wiring it into a version switch, which is a decision rather
+// than a mechanical step.
+func committedVarNames(path string) map[string]bool {
+	out := map[string]bool{}
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return out
+	}
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			if _, ok := vs.Values[0].(*ast.CompositeLit); ok {
+				out[vs.Names[0].Name] = true
+			}
+		}
+	}
+	return out
+}
+
+func writeStubTables() int {
+	stubOffsetVars := committedVarNames("internal/vmtables/threadstubs.go")
+	stubOffTags := map[string]bool{}
+	for _, t := range stubOffsetTargets {
+		stubOffTags[t.tag] = true
+	}
+	tags := make([]string, 0, len(stubOffTags))
+	for t := range stubOffTags {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+
+	genStubOff := map[string]string{}
+	genStubNames := map[string]string{}
+	genRuntime := map[string]string{}
+	var failed []string
+
+	for _, tag := range tags {
+		id := tagID(tag)
+		if arm, x64, err := sdkStubOffsetsFor(tag); err != nil {
+			failed = append(failed, fmt.Sprintf("stub-offsets %s: %v", tag, err))
+		} else {
+			// A version stores either one table (offsets identical on
+			// both architectures) or an ARM64/X64 pair. Emitting all
+			// three names would report two phantom "missing" tables per
+			// version, which buries the real ones.
+			switch {
+			case varExists(stubOffsetVars, "threadStubOffsets"+id+"ARM64"):
+				genStubOff["threadStubOffsets"+id+"ARM64"] = goInt64Map(arm)
+				if len(x64) > 0 {
+					genStubOff["threadStubOffsets"+id+"X64"] = goInt64Map(x64)
+				}
+			default:
+				genStubOff["threadStubOffsets"+id] = goInt64Map(arm)
+			}
+		}
+		if names, err := sdkStubNamesFor(tag); err != nil {
+			failed = append(failed, fmt.Sprintf("stub-names %s: %v", tag, err))
+		} else {
+			genStubNames["stubNames"+id] = goStringSlice(names)
+		}
+		// Runtime-entry names are no longer emitted as standalone
+		// []string tables to be merged in at init() time. fillRuntimeEntries
+		// writes them straight into each Thread table, anchored on the
+		// offsets the SDK exports, so there is no base offset left to get
+		// wrong and no per-version variable to forget to wire up.
+	}
+
+	total := 0
+	for _, job := range []struct {
+		path string
+		gen  map[string]string
+		what string
+	}{
+		{"internal/vmtables/threadstubs.go", genStubOff, "thread-stub offset"},
+		{"internal/vmtables/stubnames.go", genStubNames, "VM stub name"},
+		{"internal/vmtables/thrfields.go", genRuntime, "runtime-entry"},
+	} {
+		n, missing, err := rewriteVarLiterals(job.path, job.gen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write: %v\n", err)
+			return 1
+		}
+		total += n
+		fmt.Printf("write: %d %s table(s) rewritten in %s\n", n, job.what, job.path)
+		if len(missing) > 0 {
+			fmt.Printf("       %d SDK table(s) have no committed variable (add + wire the switch by hand): %s\n",
+				len(missing), strings.Join(missing, " "))
+		}
+	}
+	for _, f := range failed {
+		fmt.Fprintf(os.Stderr, "write: SKIP %s\n", f)
+	}
+	fmt.Printf("write: %d stub/runtime table(s) rewritten\n", total)
+	return 0
 }

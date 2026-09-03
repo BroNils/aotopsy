@@ -97,15 +97,17 @@ jobs:
       #
       # Set below where the project sits, not at it. This job runs WITHOUT
       # the sample corpus (samples/ is gitignored and not redistributable),
-      # so it covers only the pure-unit portion: 20.0% measured, against
-      # 41.2% for a local run with the corpus. The floor leaves two points
-      # of margin for toolchain drift.
+      # so it covers only the pure-unit portion: 20.0% measured across six
+      # consecutive runs, against 41.2% for a local run with the corpus.
+      # One point of margin, because six identical readings say the number
+      # is stable rather than noisy -- a wider gap would just be a floor
+      # that never fires.
       #
       # Raise it when it is comfortably clear. Never lower it to make a red
       # build green -- that is the one move it exists to prevent.
       - name: Coverage floor
         env:
-          COVERAGE_FLOOR: '18.0'
+          COVERAGE_FLOOR: '19.0'
         run: |
           total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
           echo "total coverage: ${total}% (floor ${COVERAGE_FLOOR}%)"

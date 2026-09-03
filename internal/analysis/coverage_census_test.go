@@ -36,7 +36,7 @@ func TestCoverageCensus(t *testing.T) {
 			ctx, err := LoadContext(path)
 			if err != nil {
 				// A parse failure is the exact thing coverage must expose.
-				t.Errorf("COVROW\t%s\t%s\tFAIL\t0\t0\t%v", s.DartVersion, s.Arch, err)
+				t.Errorf("COVROW\t%s\t%s\tFAIL\t0\t0\t%s\t%v", s.DartVersion, s.Arch, name, err)
 				return
 			}
 			defer func() { _ = ctx.Close() }()
@@ -45,7 +45,7 @@ func TestCoverageCensus(t *testing.T) {
 			if ctx.EF != nil {
 				symtab = len(ctx.EF.FuncSymbols())
 			}
-			t.Logf("COVROW\t%s\t%s\tOK\t%d\t%d", s.DartVersion, s.Arch, fns, symtab)
+			t.Logf("COVROW\t%s\t%s\tOK\t%d\t%d\t%s", s.DartVersion, s.Arch, fns, symtab, name)
 		}()
 	}
 }

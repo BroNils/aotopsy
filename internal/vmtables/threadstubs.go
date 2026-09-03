@@ -61,7 +61,7 @@ var (
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
-		0x280: "ResumeInterpreter", // + SuspendStubABI::kResumePcDistance at runtime, entry point value itself still identifies the stub
+		0x280: "ResumeInterpreter",
 		0x288: "BootstrapNativeCallWrapper",
 		0x290: "NoScopeNativeCallWrapper",
 		0x298: "AutoScopeNativeCallWrapper",
@@ -443,7 +443,7 @@ var (
 		0x268: "CallNativeThroughSafepoint",
 		0x270: "JumpToFrame",
 		0x278: "SlowTypeTest",
-		0x280: "ResumeInterpreter", // resume_interpreter_adjusted in the header; entry point value still identifies the stub
+		0x280: "ResumeInterpreter",
 		0x288: "BootstrapNativeCallWrapper",
 		0x290: "NoScopeNativeCallWrapper",
 		0x298: "AutoScopeNativeCallWrapper",

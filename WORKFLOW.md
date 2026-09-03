@@ -119,6 +119,19 @@ aotopsy _debug decompile-native --lib libapp.so --func 0x1b7e54
 
 Warning: `--all` without a small `--max` can need ~64GB RAM and crash the host. Use targeted modes whenever possible.
 
+### Decompiling everything in one pass
+
+For a whole-binary sweep, the pipeline itself can now write the pseudocode:
+
+```bash
+aotopsy libapp.so --decompile      # adds <out>/dart/<owner>/<func>.dart
+```
+
+This is off by default because it roughly triples the output directory. It is
+the right tool when you want to grep across every function rather than inspect a
+few; `decompile-native` remains the way to look at one function closely, and
+`export-dart` the way to get a modular project rather than one file per function.
+
 ## Step 3.5: Cross-referencing
 
 **"Which function loads this string?"**

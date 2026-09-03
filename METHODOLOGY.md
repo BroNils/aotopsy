@@ -32,8 +32,8 @@ numbers come only from builds where an independent ground truth exists.
   know"* markers, not name claims, and are **excluded** from the comparison.
   Counting them as disagreements would punish honesty; counting them as agreements
   would reward guessing. Both are wrong, so they are removed.
-- **Gate floor:** 0.81 (`minAgreementRate`). Current: 89.8% overall across 44
-  ground-truth builds, 81.3% worst band, up to Dart 3.13.0 (92.2%).
+- **Gate floor:** 0.81 (`minAgreementRate`). Current: 90.2% overall across 44
+  ground-truth builds, 81.3% worst band, up to Dart 3.13.0 (92.8%).
 - **Reproduce:** `make bench`.
 
 ### 2. Decompiler syntactic validity
@@ -68,6 +68,19 @@ numbers come only from builds where an independent ground truth exists.
   `runtime/vm/app_snapshot.cc@3.13.2`.
 - **Reproduce:** `make coverage`.
 
+### 6. Emitter reachability — `TestDecompileCorpus`
+- **Computed by:** every registered sample is run through the emitter and its
+  average CFG coverage measured (`VerifyCFG`: blocks emitted / blocks in the
+  lifted CFG). Below 95% fails.
+- Current: 93/93 samples, Dart 2.10.0–3.13.0 on both architectures, all at
+  99.9%–100%.
+- **Why it exists:** the golden gate covers pipeline *artifacts*, and pseudocode
+  is not one of them — it is written only under `--decompile`. The emitter
+  therefore had no corpus-wide coverage at all, and six samples could crash the
+  decompiler outright with the whole suite green. Coverage is the right measure
+  here because the failure it catches is silent omission: a block that is in the
+  binary and not in the output.
+
 ## Gates vs measurement harnesses
 
 **Permanent gates** (must stay green; run in the normal suite / CI):
@@ -75,6 +88,15 @@ numbers come only from builds where an independent ground truth exists.
 - `TestDecompileQualityCorpus` — Dart validity + fabrication (F1).
 - `TestGoldenPipelineOutput`, `TestCrossVersionDifferential`, `funckind_sdk_test.go`,
   `blr_signal_regression_test.go`.
+- `TestDecompileCorpus` — emitter reachability over the whole corpus.
+- SDK drift gates re-derive each committed VM table from `dart-lang/sdk` at its
+  pinned tag: `TestThreadStubOffsetsMatchSDK`, `TestStubNamesMatchSDK`,
+  `TestRuntimeEntriesMatchSDK`, `TestThreadFieldNamesMatchSDK`,
+  `TestRegisterABIMatchSDK`, and the CID-table gate. What they guard against is
+  not a missing name — that renders as an unnamed `THR.fNN` and says so — but a
+  *wrong* one: a version aliased to a neighbour's table after the SDK inserted a
+  field gets every later offset named after its neighbour, with the confidence of
+  a correct answer. Four tables were in that state before the field gate existed.
 - `Fuzz*` targets run their seed corpus under normal `go test`.
 
 **Measurement harnesses** (env-gated, not gates; drive the published scoreboards):
@@ -89,8 +111,11 @@ to read the exact version — never from memory.
 
 ## Limits of this method (honestly)
 - Ground-truth twins are real builds we **cannot redistribute**, so the accuracy
-  gates run locally, not in public CI (CI validates build + unit tests + the fuzz
-  seed corpus across the platform matrix).
+  gates run locally, not in public CI (CI validates build, vet, `gofmt`,
+  `staticcheck`, shuffled unit tests, a coverage floor, and the fuzz seed corpus
+  across the platform matrix). `samples/` is gitignored, so sample-driven tests
+  skip there — but only when the corpus is absent entirely; a corpus that is
+  present and missing a registered sample fails.
 - We do **not** yet measure re-executability (recompile the recovered Dart to AOT
   and diff): recovered output is often abstracted and will not recompile verbatim.
   A twin-scoped recompile-and-diff spike is future work.
