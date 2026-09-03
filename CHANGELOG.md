@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-03
+
+The per-version VM tables are now generated from dart-lang/sdk, and every
+hand-maintained layer that used to fill the generator's gaps has been deleted
+rather than corrected. Each of those layers was wrong in a way that could not
+go red — the defects here were in the things meant to be checking the tables,
+not in the tables.
+
+### Fixed
+- **Runtime-entry names were missing on x86_64.** `mergeRuntimeEntries` listed
+  only 14 of the 27 x64 Thread tables, so the rest rendered every runtime-entry
+  call site as an unnamed `THR.fNN` — 1015 unnamed entries in total, all x64.
+  Both architectures are now covered by construction: `thrV3130_x64` goes from
+  31 named entries to 162, and the 3.9.2 x64 table from ~110 to 205.
+- **Leaf runtime entries were named as their neighbours.** The hand-typed leaf
+  base offsets were one slot high. `runtime_offsets_extracted.h` exports the
+  leaf anchor on three versions, and on all three it sits at
+  `exit_through_ffi+8` — one slot below where these calls placed it (3.12.2
+  used `0x710` against the SDK's `0x708`). Every leaf entry the layer did name
+  was therefore shifted by one position.
+- **`extract_thr -check-runtime-entries` could not fail.** It printed counts and
+  returned 0 unconditionally, under a comment stating the committed tables did
+  not exist yet — untrue since v1.3.0's generator work. A gate that cannot go
+  red reads exactly like a gate that passes. It now compares every entry in
+  `RUNTIME_ENTRY_LIST` and `LEAF_RUNTIME_ENTRY_LIST` against the committed
+  tables across all 46 version/arch pairs, and exits 1 on any gap.
+- **A second macro parser misread `LEAF_RUNTIME_ENTRY_LIST`.** It took the last
+  macro argument — correct for `roots.h`, wrong for the leaf list, whose shape
+  is `V(ret, Name, args...)`. It reported the SDK as declaring leaf entries
+  named `"uword"` and `"thread"`. The committed tables were fine; the checker
+  was the broken half. The parser had no other caller and is gone.
+- **`rewriteVarLiterals` wrote without formatting**, unlike `runWrite`. Splicing
+  map literals in by byte offset changes key widths, so regenerating put
+  `thrfields.go`, `threadstubs.go` and `stubnames.go` into the tree unformatted
+  — straight into the CI `gofmt` gate.
+- **`xor reg, reg` leaked a register instead of yielding `0`.** The decompiler
+  now folds self-operand bitwise ops: `^` on a register with itself is the x86
+  zeroing idiom, `&` and `|` are identities. x86_64 register leaks drop from
+  247 to 169 (−32%), `rcx` from 61 to 9. ARM64 is unchanged, as expected — it
+  zeroes via `xzr`.
+- **The Thread field drift gate covered 13 of 23 versions**, silently. It
+  re-implemented the SDK header parser and understood only the post-3.0.5
+  section-guard shape; a version simply absent from its list looks like a
+  passing test. It now delegates to `extract_thr -check`, which handles all 23.
+
+### Changed
+- Runtime-entry names are derived inside `extractAll` from anchors the SDK
+  exports by name, with three anchor sources tried in order: the exported
+  anchor, adjacency to the runtime block (a fact `leafFollowsRuntime` reads
+  from `thread.h`, not an assumption about layout), then `exit_through_ffi+8`.
+  Because `extractAll` already visits every target, both architectures and all
+  variants are covered without anyone remembering to add a call. An offset
+  already holding an SDK-exported name is left alone and the disagreement
+  reported, so a broken contiguity assumption cannot be papered over.
+
+### Removed
+- **The hand-written runtime-entry merge layer** — `internal/vmtables/runtimeentries.go`,
+  two `init()` blocks, 16 name tables, `mergeRuntimeEntries`, `runtimeEntryConflicts`
+  and their two tests (552 lines). It was a second source of truth for data the
+  SDK already answers, and it was the wrong one. `TestNoRuntimeEntryConflicts`,
+  added in v1.3.0 as "the only signal" for a wrong base offset, did its job
+  immediately: it fired, and what it proved was that the layer it guarded
+  should not exist.
+
 ## [1.3.0] - 2026-09-02
 
 Correctness release. Most of it is one story: the checks meant to catch
@@ -275,7 +339,8 @@ mindmap
       Parity reporting
 ```
 
-[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/BroNils/aotopsy/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/BroNils/aotopsy/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/BroNils/aotopsy/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BroNils/aotopsy/compare/v1.0.0...v1.1.0
