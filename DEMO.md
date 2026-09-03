@@ -53,8 +53,8 @@ against the actual `dart analyze` frontend, not just an internal check
 
 Measured against ground truth, not asserted:
 
-- **Name recovery: 89.8% agreement** vs each build's own `.symtab` across 44
-  ground-truth builds, up to Dart 3.13.0 (92.2%) — see [BENCHMARK.md](BENCHMARK.md).
+- **Name recovery: 90.2% agreement** vs each build's own `.symtab` across 44
+  ground-truth builds, up to Dart 3.13.0 (92.8%) — see [BENCHMARK.md](BENCHMARK.md).
 - **Format coverage: 93 builds across 23 Dart versions**, both architectures, parse
   cleanly — see [COVERAGE.md](COVERAGE.md).
 - **Decompiler: 100% valid Dart, 0% fabrication** over the full function sweep.

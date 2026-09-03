@@ -778,6 +778,27 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 		}
 	case "mul", "imul", "and", "orr", "or", "eor", "xor":
 		op := binOpSymbol(mnemonic)
+		// A bitwise op on one register with itself is a constant or an
+		// identity, and both are worth folding at lift time rather than
+		// printing the operation.
+		//
+		// `xor reg, reg` is THE x86 zeroing idiom -- it is how a compiler
+		// writes `0` -- so rendering it as `(rcx ^ rcx)` hides a constant
+		// behind an expression AND leaks the register name into the
+		// output. It was the third most common raw-register leak on the
+		// 3.12.2 x64 sample. ARM64's `eor xd, xn, xn` is the same thing.
+		//
+		// AND/OR with self are identities; folding them costs nothing and
+		// keeps the three cases answered the same way.
+		if self, ok := selfOperand(mnemonic, ops); ok {
+			dst := strings.ToLower(ops[0])
+			if op == "^" {
+				s.setReg(dst, "0")
+			} else { // & and | with self are identities
+				s.setReg(dst, s.lookupReg(self))
+			}
+			break
+		}
 		if len(ops) >= 3 {
 			dst := strings.ToLower(ops[0])
 			s.setReg(dst, fmt.Sprintf("(%s %s %s)", operandExpr(fir, s, ops[1]), op, operandExpr(fir, s, ops[2])))
@@ -1001,6 +1022,36 @@ func isSimpleLvalueExpr(expr string) bool {
 
 func normalizeMnemonic(m string) string {
 	return strings.ToLower(strings.TrimSpace(m))
+}
+
+// selfOperand reports whether a bitwise instruction applies an operation
+// to one register with itself, returning that register's canonical name.
+//
+// Both operand shapes occur: ARM64 is three-operand and non-destructive
+// (`eor xd, xn, xn`), x86_64 two-operand and destructive
+// (`xor rcx, rcx`). Comparison is on the canonical physical register, so
+// a width alias -- `xor ecx, ecx`, which is how a 64-bit zero is usually
+// written -- still matches.
+func selfOperand(mnemonic string, ops []string) (string, bool) {
+	switch mnemonic {
+	case "and", "orr", "or", "eor", "xor":
+	default:
+		return "", false
+	}
+	var a, b string
+	switch {
+	case len(ops) >= 3:
+		a, b = ops[1], ops[2]
+	case len(ops) == 2:
+		a, b = ops[0], ops[1]
+	default:
+		return "", false
+	}
+	ca, cb := canonReg(a), canonReg(b)
+	if ca == "" || ca != cb {
+		return "", false
+	}
+	return ca, true
 }
 
 func binOpSymbol(mnemonic string) string {
