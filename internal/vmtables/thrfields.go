@@ -2,7 +2,6 @@ package vmtables
 
 import (
 	"fmt"
-	"os"
 
 	"aotopsy/internal/snapshot"
 )
@@ -816,6 +815,17 @@ var thrV343 = map[int]string{
 // table named each access after its neighbour -- a wrong name carrying
 // exactly as much confidence as a right one. Found by
 // TestThreadFieldNamesMatchSDK, which did not exist until this table did.
+//
+// Carries ONLY what the SDK's generated header states. The first version
+// of this table was seeded from its neighbour and then corrected at the
+// SDK-covered offsets -- which left every offset the header does NOT
+// cover (the wb_wrapper block, the cached-object fields) sitting at the
+// NEIGHBOUR's offsets, unshifted. That is the same bug this table exists
+// to fix, reintroduced in the part the drift gate cannot see.
+// mergeRuntimeEntries' conflict warning is what caught it.
+//
+// An offset absent here renders as an unnamed THR.fNN -- a gap that says
+// so, which is strictly better than a confident wrong name.
 var thrV305 = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
@@ -828,8 +838,6 @@ var thrV305 = map[int]string{
 	0x70:  "object_null",
 	0x78:  "bool_true",
 	0x80:  "bool_false",
-	0x88:  "empty_array",
-	0x90:  "dynamic_type",
 	0x98:  "fix_callers_target_code",
 	0xa0:  "fix_allocation_stub_code",
 	0xa8:  "invoke_dart_code_stub",
@@ -897,24 +905,26 @@ var thrV305 = map[int]string{
 	0x2b8: "float_absolute_address",
 	0x2c0: "float_zerow_address",
 	0x2c8: "AllocateArray_entry_point",
-	0x5e8: "wb_wrapper_R0",
-	0x5f0: "wb_wrapper_R1",
-	0x5f8: "wb_wrapper_R2",
-	0x600: "wb_wrapper_R3",
-	0x608: "wb_wrapper_R4",
-	0x610: "wb_wrapper_R5",
-	0x618: "wb_wrapper_R6",
-	0x620: "wb_wrapper_R7",
-	0x628: "wb_wrapper_R8",
-	0x630: "wb_wrapper_R9",
-	0x638: "wb_wrapper_R10",
-	0x640: "wb_wrapper_R11",
-	0x648: "wb_wrapper_R12",
-	0x650: "wb_wrapper_R13",
-	0x658: "wb_wrapper_R14",
-	0x660: "wb_wrapper_R19",
-	0x668: "wb_wrapper_R20",
-	0x670: "wb_wrapper_R23",
+	0x5d8: "wb_wrapper_R0",
+	0x5e0: "wb_wrapper_R1",
+	0x5e8: "wb_wrapper_R2",
+	0x5f0: "wb_wrapper_R3",
+	0x5f8: "wb_wrapper_R4",
+	0x600: "wb_wrapper_R5",
+	0x608: "wb_wrapper_R6",
+	0x610: "wb_wrapper_R7",
+	0x618: "wb_wrapper_R8",
+	0x620: "wb_wrapper_R9",
+	0x628: "wb_wrapper_R10",
+	0x630: "wb_wrapper_R11",
+	0x638: "wb_wrapper_R12",
+	0x640: "wb_wrapper_R13",
+	0x648: "wb_wrapper_R14",
+	0x650: "wb_wrapper_R19",
+	0x658: "wb_wrapper_R20",
+	0x660: "wb_wrapper_R23",
+	0x668: "wb_wrapper_R24",
+	0x670: "wb_wrapper_R25",
 	0x678: "suspend_state_init_async_entry_point",
 	0x680: "suspend_state_await_entry_point",
 	0x688: "suspend_state_await_with_type_check_entry_point",
@@ -936,6 +946,7 @@ var thrV305 = map[int]string{
 	0x710: "vm_tag",
 	0x718: "unboxed_runtime_arg",
 	0x728: "active_exception",
+	0x730: "active_stacktrace",
 	0x738: "global_object_pool",
 	0x740: "resume_pc",
 	0x748: "saved_shadow_call_stack",
@@ -950,6 +961,7 @@ var thrV305 = map[int]string{
 	0x790: "random",
 	0x798: "tsan_utils",
 	0x7b8: "dart_stream",
+	0x7c0: "service_extension_stream",
 }
 
 // v3.1.0: PRODUCT AOT + ARM64 + DART_COMPRESSED_POINTERS
@@ -962,6 +974,17 @@ var thrV305 = map[int]string{
 // table named each access after its neighbour -- a wrong name carrying
 // exactly as much confidence as a right one. Found by
 // TestThreadFieldNamesMatchSDK, which did not exist until this table did.
+//
+// Carries ONLY what the SDK's generated header states. The first version
+// of this table was seeded from its neighbour and then corrected at the
+// SDK-covered offsets -- which left every offset the header does NOT
+// cover (the wb_wrapper block, the cached-object fields) sitting at the
+// NEIGHBOUR's offsets, unshifted. That is the same bug this table exists
+// to fix, reintroduced in the part the drift gate cannot see.
+// mergeRuntimeEntries' conflict warning is what caught it.
+//
+// An offset absent here renders as an unnamed THR.fNN -- a gap that says
+// so, which is strictly better than a confident wrong name.
 var thrV310 = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
@@ -974,8 +997,6 @@ var thrV310 = map[int]string{
 	0x70:  "object_null",
 	0x78:  "bool_true",
 	0x80:  "bool_false",
-	0x88:  "empty_array",
-	0x90:  "dynamic_type",
 	0x98:  "fix_callers_target_code",
 	0xa0:  "fix_allocation_stub_code",
 	0xa8:  "invoke_dart_code_stub",
@@ -1043,25 +1064,26 @@ var thrV310 = map[int]string{
 	0x2b8: "float_absolute_address",
 	0x2c0: "float_zerow_address",
 	0x2c8: "AllocateArray_entry_point",
-	0x5e8: "wb_wrapper_R0",
-	0x5f0: "wb_wrapper_R1",
-	0x5f8: "wb_wrapper_R2",
-	0x600: "wb_wrapper_R3",
-	0x608: "wb_wrapper_R4",
-	0x610: "wb_wrapper_R5",
-	0x618: "wb_wrapper_R6",
-	0x620: "wb_wrapper_R7",
-	0x628: "wb_wrapper_R8",
-	0x630: "wb_wrapper_R9",
-	0x638: "wb_wrapper_R10",
-	0x640: "wb_wrapper_R11",
-	0x648: "wb_wrapper_R12",
-	0x650: "wb_wrapper_R13",
-	0x658: "wb_wrapper_R14",
-	0x660: "wb_wrapper_R19",
-	0x668: "wb_wrapper_R20",
-	0x670: "wb_wrapper_R23",
-	0x678: "wb_wrapper_R24",
+	0x5e0: "wb_wrapper_R0",
+	0x5e8: "wb_wrapper_R1",
+	0x5f0: "wb_wrapper_R2",
+	0x5f8: "wb_wrapper_R3",
+	0x600: "wb_wrapper_R4",
+	0x608: "wb_wrapper_R5",
+	0x610: "wb_wrapper_R6",
+	0x618: "wb_wrapper_R7",
+	0x620: "wb_wrapper_R8",
+	0x628: "wb_wrapper_R9",
+	0x630: "wb_wrapper_R10",
+	0x638: "wb_wrapper_R11",
+	0x640: "wb_wrapper_R12",
+	0x648: "wb_wrapper_R13",
+	0x650: "wb_wrapper_R14",
+	0x658: "wb_wrapper_R19",
+	0x660: "wb_wrapper_R20",
+	0x668: "wb_wrapper_R23",
+	0x670: "wb_wrapper_R24",
+	0x678: "wb_wrapper_R25",
 	0x680: "suspend_state_init_async_entry_point",
 	0x688: "suspend_state_await_entry_point",
 	0x690: "suspend_state_await_with_type_check_entry_point",
@@ -1082,6 +1104,7 @@ var thrV310 = map[int]string{
 	0x708: "marking_stack_block",
 	0x718: "vm_tag",
 	0x720: "unboxed_runtime_arg",
+	0x730: "active_exception",
 	0x738: "active_stacktrace",
 	0x740: "global_object_pool",
 	0x748: "resume_pc",
@@ -1094,6 +1117,7 @@ var thrV310 = map[int]string{
 	0x780: "next_task_id",
 	0x788: "random",
 	0x790: "tsan_utils",
+	0x7a8: "dart_stream",
 	0x7b0: "service_extension_stream",
 }
 
@@ -1107,6 +1131,17 @@ var thrV310 = map[int]string{
 // table named each access after its neighbour -- a wrong name carrying
 // exactly as much confidence as a right one. Found by
 // TestThreadFieldNamesMatchSDK, which did not exist until this table did.
+//
+// Carries ONLY what the SDK's generated header states. The first version
+// of this table was seeded from its neighbour and then corrected at the
+// SDK-covered offsets -- which left every offset the header does NOT
+// cover (the wb_wrapper block, the cached-object fields) sitting at the
+// NEIGHBOUR's offsets, unshifted. That is the same bug this table exists
+// to fix, reintroduced in the part the drift gate cannot see.
+// mergeRuntimeEntries' conflict warning is what caught it.
+//
+// An offset absent here renders as an unnamed THR.fNN -- a gap that says
+// so, which is strictly better than a confident wrong name.
 var thrV350 = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
@@ -1120,8 +1155,6 @@ var thrV350 = map[int]string{
 	0x78:  "object_null",
 	0x80:  "bool_true",
 	0x88:  "bool_false",
-	0x90:  "empty_type_arguments",
-	0x98:  "dynamic_type",
 	0xa8:  "fix_callers_target_code",
 	0xb0:  "fix_allocation_stub_code",
 	0xb8:  "invoke_dart_code_stub",
@@ -1150,6 +1183,7 @@ var thrV350 = map[int]string{
 	0x170: "return_async_star_stub",
 	0x178: "stack_overflow_shared_without_fpu_regs_stub",
 	0x180: "stack_overflow_shared_with_fpu_regs_stub",
+	0x188: "switchable_call_miss_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -1180,32 +1214,34 @@ var thrV350 = map[int]string{
 	0x280: "bootstrap_native_wrapper_entry_point",
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
+	0x298: "predefined_symbols_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
 	0x2c0: "float_negate_address",
 	0x2c8: "float_absolute_address",
 	0x2d0: "float_zerow_address",
-	0x5f8: "wb_wrapper_R0",
-	0x600: "wb_wrapper_R1",
-	0x608: "wb_wrapper_R2",
-	0x610: "wb_wrapper_R3",
-	0x618: "wb_wrapper_R4",
-	0x620: "wb_wrapper_R5",
-	0x628: "wb_wrapper_R6",
-	0x630: "wb_wrapper_R7",
-	0x638: "wb_wrapper_R8",
-	0x640: "wb_wrapper_R9",
-	0x648: "wb_wrapper_R10",
-	0x650: "wb_wrapper_R11",
-	0x658: "wb_wrapper_R12",
-	0x660: "wb_wrapper_R13",
-	0x668: "wb_wrapper_R14",
-	0x670: "wb_wrapper_R19",
-	0x678: "wb_wrapper_R20",
-	0x680: "wb_wrapper_R23",
-	0x688: "wb_wrapper_R24",
-	0x690: "wb_wrapper_R25",
+	0x2d8: "AllocateArray_entry_point",
+	0x610: "wb_wrapper_R0",
+	0x618: "wb_wrapper_R1",
+	0x620: "wb_wrapper_R2",
+	0x628: "wb_wrapper_R3",
+	0x630: "wb_wrapper_R4",
+	0x638: "wb_wrapper_R5",
+	0x640: "wb_wrapper_R6",
+	0x648: "wb_wrapper_R7",
+	0x650: "wb_wrapper_R8",
+	0x658: "wb_wrapper_R9",
+	0x660: "wb_wrapper_R10",
+	0x668: "wb_wrapper_R11",
+	0x670: "wb_wrapper_R12",
+	0x678: "wb_wrapper_R13",
+	0x680: "wb_wrapper_R14",
+	0x688: "wb_wrapper_R19",
+	0x690: "wb_wrapper_R20",
+	0x698: "wb_wrapper_R23",
+	0x6a0: "wb_wrapper_R24",
+	0x6a8: "wb_wrapper_R25",
 	0x6b0: "suspend_state_init_async_entry_point",
 	0x6b8: "suspend_state_await_entry_point",
 	0x6c0: "suspend_state_await_with_type_check_entry_point",
@@ -1221,8 +1257,10 @@ var thrV350 = map[int]string{
 	0x710: "isolate_group",
 	0x718: "saved_stack_limit",
 	0x720: "stack_overflow_flags",
+	0x728: "top_exit_frame_info",
 	0x730: "store_buffer_block",
 	0x738: "old_marking_stack_block",
+	0x740: "new_marking_stack_block",
 	0x750: "vm_tag",
 	0x758: "unboxed_runtime_arg",
 	0x768: "active_exception",
@@ -1234,8 +1272,12 @@ var thrV350 = map[int]string{
 	0x798: "safepoint_state",
 	0x7a0: "exit_through_ffi",
 	0x7a8: "api_top_scope",
+	0x7b0: "double_truncate_round_supported",
+	0x7b8: "next_task_id",
 	0x7c0: "random",
 	0x7c8: "tsan_utils",
+	0x7e0: "dart_stream",
+	0x7e8: "service_extension_stream",
 }
 
 // v3.7.0: PRODUCT AOT + ARM64 + DART_COMPRESSED_POINTERS
@@ -1248,6 +1290,17 @@ var thrV350 = map[int]string{
 // table named each access after its neighbour -- a wrong name carrying
 // exactly as much confidence as a right one. Found by
 // TestThreadFieldNamesMatchSDK, which did not exist until this table did.
+//
+// Carries ONLY what the SDK's generated header states. The first version
+// of this table was seeded from its neighbour and then corrected at the
+// SDK-covered offsets -- which left every offset the header does NOT
+// cover (the wb_wrapper block, the cached-object fields) sitting at the
+// NEIGHBOUR's offsets, unshifted. That is the same bug this table exists
+// to fix, reintroduced in the part the drift gate cannot see.
+// mergeRuntimeEntries' conflict warning is what caught it.
+//
+// An offset absent here renders as an unnamed THR.fNN -- a gap that says
+// so, which is strictly better than a confident wrong name.
 var thrV370 = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
@@ -1261,9 +1314,6 @@ var thrV370 = map[int]string{
 	0x78:  "object_null",
 	0x80:  "bool_true",
 	0x88:  "bool_false",
-	0x90:  "empty_array",
-	0x98:  "empty_type_arguments",
-	0xa0:  "dynamic_type",
 	0xa8:  "fix_callers_target_code",
 	0xb0:  "fix_allocation_stub_code",
 	0xb8:  "invoke_dart_code_stub",
@@ -1334,25 +1384,26 @@ var thrV370 = map[int]string{
 	0x2d8: "float_absolute_address",
 	0x2e0: "float_zerow_address",
 	0x2e8: "AllocateArray_entry_point",
-	0x660: "wb_wrapper_R0",
-	0x668: "wb_wrapper_R1",
-	0x670: "wb_wrapper_R2",
-	0x678: "wb_wrapper_R3",
-	0x680: "wb_wrapper_R4",
-	0x688: "wb_wrapper_R5",
-	0x690: "wb_wrapper_R6",
-	0x698: "wb_wrapper_R7",
-	0x6a0: "wb_wrapper_R8",
-	0x6a8: "wb_wrapper_R9",
-	0x6b0: "wb_wrapper_R10",
-	0x6b8: "wb_wrapper_R11",
-	0x6c0: "wb_wrapper_R12",
-	0x6c8: "wb_wrapper_R13",
-	0x6d0: "wb_wrapper_R14",
-	0x6d8: "wb_wrapper_R19",
-	0x6e0: "wb_wrapper_R20",
-	0x6e8: "wb_wrapper_R23",
-	0x6f0: "wb_wrapper_R24",
+	0x658: "wb_wrapper_R0",
+	0x660: "wb_wrapper_R1",
+	0x668: "wb_wrapper_R2",
+	0x670: "wb_wrapper_R3",
+	0x678: "wb_wrapper_R4",
+	0x680: "wb_wrapper_R5",
+	0x688: "wb_wrapper_R6",
+	0x690: "wb_wrapper_R7",
+	0x698: "wb_wrapper_R8",
+	0x6a0: "wb_wrapper_R9",
+	0x6a8: "wb_wrapper_R10",
+	0x6b0: "wb_wrapper_R11",
+	0x6b8: "wb_wrapper_R12",
+	0x6c0: "wb_wrapper_R13",
+	0x6c8: "wb_wrapper_R14",
+	0x6d0: "wb_wrapper_R19",
+	0x6d8: "wb_wrapper_R20",
+	0x6e0: "wb_wrapper_R23",
+	0x6e8: "wb_wrapper_R24",
+	0x6f0: "wb_wrapper_R25",
 	0x6f8: "suspend_state_init_async_entry_point",
 	0x700: "suspend_state_await_entry_point",
 	0x708: "suspend_state_await_with_type_check_entry_point",
@@ -1372,7 +1423,9 @@ var thrV370 = map[int]string{
 	0x778: "store_buffer_block",
 	0x780: "old_marking_stack_block",
 	0x788: "new_marking_stack_block",
+	0x798: "vm_tag",
 	0x7a0: "unboxed_runtime_arg",
+	0x7b0: "active_exception",
 	0x7b8: "active_stacktrace",
 	0x7c0: "global_object_pool",
 	0x7c8: "resume_pc",
@@ -1385,6 +1438,7 @@ var thrV370 = map[int]string{
 	0x800: "next_task_id",
 	0x808: "random",
 	0x810: "tsan_utils",
+	0x828: "dart_stream",
 	0x830: "service_extension_stream",
 }
 
@@ -3019,43 +3073,40 @@ var runtimeEntriesV217 = []string{
 
 // v3.2.5: 64 RUNTIME + 36 LEAF = 100 entries from 0x2c8 to 0x5e8 (exclusive).
 var runtimeEntriesV325 = []string{
-	// RUNTIME_ENTRY_LIST (64)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler",
-	"CloneContext", "CloneSuspendState",
-	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
-	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck", "NonBoolTypeError",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "NonBoolTypeError", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
 	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
-	"RangeError", "WriteError",
-	"NullError", "NullErrorWithSelector", "NullCastError",
-	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend",
-	// LEAF_RUNTIME_ENTRY_LIST (36)
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
+	"RangeError", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError", "CompileFunction",
+	"ResumeFrame", "SwitchableCallMiss", "NotLoaded",
+	"FfiAsyncCallbackSend", "DeoptimizeCopyFrame", "DeoptimizeFillFrame",
 	"StoreBufferBlockProcess", "MarkingStackBlockProcess", "RememberCard",
-	"EnsureRememberedAndMarkingDeferred",
-	"LibcPow", "DartModulo", "LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
-	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
+	"EnsureRememberedAndMarkingDeferred", "LibcPow", "DartModulo",
+	"LibcFloor", "LibcCeil", "LibcTrunc",
+	"LibcRound", "LibcCos", "LibcSin",
+	"LibcTan", "LibcAcos", "LibcAsin",
+	"LibcAtan", "LibcAtan2", "LibcExp",
+	"LibcLog", "CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
 	"EnterSafepoint", "ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress",
 	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
 	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanLoadAcquire", "TsanStoreRelease",
-	"TryDoubleAsInteger", "MemoryMove",
+	"TsanLoadAcquire", "TsanStoreRelease", "TryDoubleAsInteger",
+	"MemoryMove",
 }
 
 // v3.1.0: 64 RUNTIME + 35 LEAF = 99 entries. Identical to the v3.2.5 list
@@ -3067,48 +3118,218 @@ var runtimeEntriesV325 = []string{
 // but claimed one slot too many. On x86_64 that slot, Thread+0x5e0, is where
 // the write-barrier wrappers begin, so it was annotated
 // "MemoryMove_entry_point" instead of "wb_wrapper_R0".
-var runtimeEntriesV310 = runtimeEntriesV325[:len(runtimeEntriesV325)-1]
+// Superseded by the generated runtimeEntriesV310 below, emitted per tag by
+// `extract_thr -emit-runtime-entries=3.1.0`. Slicing a neighbour's list
+// happened to be right here -- the two are byte-identical, verified -- but
+// "right by luck" is what this whole file keeps being caught by.
 
 // v3.4.3: 65 RUNTIME + 36 LEAF = 101 entries from 0x2d0 to 0x5f8 (exclusive).
 // Also used for v3.5.0.
 // Delta from v3.2.5: +RangeErrorUnboxedInt64, +WriteError replaces old position.
-var runtimeEntriesV343 = []string{
-	// RUNTIME_ENTRY_LIST (65)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler",
-	"CloneContext", "CloneSuspendState",
-	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
-	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck", "NonBoolTypeError",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+// Dart 3.0.5. Derived from runtime_entry_list.h@3.0.5;
+// base offsets from runtime_offsets_extracted.h@3.0.5
+// (AllocateArray = 0x2c8).
+// The LEAF block follows the runtime block with no gap, so the two
+// are stored flattened, matching the pre-3.10.7 convention.
+var runtimeEntriesV305 = []string{
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "NonBoolTypeError", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
+	"RangeError", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError", "CompileFunction",
+	"ResumeFrame", "SwitchableCallMiss", "NotLoaded",
+	"DeoptimizeCopyFrame", "DeoptimizeFillFrame", "StoreBufferBlockProcess",
+	"MarkingStackBlockProcess", "RememberCard", "EnsureRememberedAndMarkingDeferred",
+	"LibcPow", "DartModulo", "LibcFloor",
+	"LibcCeil", "LibcTrunc", "LibcRound",
+	"LibcCos", "LibcSin", "LibcTan",
+	"LibcAcos", "LibcAsin", "LibcAtan",
+	"LibcAtan2", "LibcExp", "LibcLog",
+	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16", "EnterSafepoint",
+	"ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress", "EnterHandleScope",
+	"ExitHandleScope", "AllocateHandle", "PropagateError",
+	"MsanUnpoison", "MsanUnpoisonParam", "TsanLoadAcquire",
+	"TsanStoreRelease", "TryDoubleAsInteger",
+}
+
+// Dart 3.1.0. Derived from runtime_entry_list.h@3.1.0;
+// base offsets from runtime_offsets_extracted.h@3.1.0
+// (AllocateArray = 0x2c8).
+// The LEAF block follows the runtime block with no gap, so the two
+// are stored flattened, matching the pre-3.10.7 convention.
+var runtimeEntriesV310 = []string{
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "NonBoolTypeError", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
+	"RangeError", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError", "CompileFunction",
+	"ResumeFrame", "SwitchableCallMiss", "NotLoaded",
+	"FfiAsyncCallbackSend", "DeoptimizeCopyFrame", "DeoptimizeFillFrame",
+	"StoreBufferBlockProcess", "MarkingStackBlockProcess", "RememberCard",
+	"EnsureRememberedAndMarkingDeferred", "LibcPow", "DartModulo",
+	"LibcFloor", "LibcCeil", "LibcTrunc",
+	"LibcRound", "LibcCos", "LibcSin",
+	"LibcTan", "LibcAcos", "LibcAsin",
+	"LibcAtan", "LibcAtan2", "LibcExp",
+	"LibcLog", "CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
+	"EnterSafepoint", "ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress",
+	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
+	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
+	"TsanLoadAcquire", "TsanStoreRelease", "TryDoubleAsInteger",
+}
+
+// Dart 3.5.0. Derived from runtime_entry_list.h@3.5.0;
+// base offsets from runtime_offsets_extracted.h@3.5.0
+// (AllocateArray = 0x2d8).
+// The LEAF block follows the runtime block with no gap, so the two
+// are stored flattened, matching the pre-3.10.7 convention.
+var runtimeEntriesV350 = []string{
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "NonBoolTypeError", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
 	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
 	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
 	"NullError", "NullErrorWithSelector", "NullCastError",
 	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend",
-	// LEAF_RUNTIME_ENTRY_LIST (36)
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
-	"StoreBufferBlockProcess", "MarkingStackBlockProcess", "RememberCard",
-	"EnsureRememberedAndMarkingDeferred",
-	"LibcPow", "DartModulo", "LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
-	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
+	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException", "ReThrow",
+	"InterruptOrStackOverflow", "Throw", "DeoptimizeMaterialize",
+	"RewindPostDeopt", "UpdateFieldCid", "InitInstanceField",
+	"InitStaticField", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "DeoptimizeCopyFrame",
+	"DeoptimizeFillFrame", "StoreBufferBlockProcess", "OldMarkingStackBlockProcess",
+	"NewMarkingStackBlockProcess", "RememberCard", "EnsureRememberedAndMarkingDeferred",
+	"LibcPow", "DartModulo", "LibcFmod",
+	"LibcFloor", "LibcCeil", "LibcTrunc",
+	"LibcRound", "LibcCos", "LibcSin",
+	"LibcTan", "LibcAcos", "LibcAsin",
+	"LibcAtan", "LibcAtan2", "LibcExp",
+	"LibcLog", "CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
 	"EnterSafepoint", "ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress",
 	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
 	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanLoadAcquire", "TsanStoreRelease",
+	"TsanLoadAcquire", "TsanStoreRelease", "TryDoubleAsInteger",
+	"MemoryMove",
+}
+
+// Dart 3.7.0. Derived from runtime_entry_list.h@3.7.0;
+// base offsets from runtime_offsets_extracted.h@3.7.0
+// (AllocateArray = 0x2e8).
+// The LEAF block follows the runtime block with no gap, so the two
+// are stored flattened, matching the pre-3.10.7 convention.
+var runtimeEntriesV370 = []string{
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "InstantiateType", "InstantiateTypeArguments",
+	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "OptimizeInvokedFunction",
+	"TraceICCall", "PatchStaticCall", "RangeError",
+	"RangeErrorUnboxedInt64", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "AllocateSubtypeTestCache",
+	"GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure", "ClosureArgumentsValid",
+	"ResolveCallFunction", "InterpretedInstanceCallMissHandler", "InvokeNoSuchMethod",
+	"ResumeInterpreter", "DeoptimizeCopyFrame", "DeoptimizeFillFrame",
+	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
+	"EnsureRememberedAndMarkingDeferred", "LibcPow", "DartModulo",
+	"LibcFmod", "LibcFloor", "LibcCeil",
+	"LibcTrunc", "LibcRound", "LibcCos",
+	"LibcSin", "LibcTan", "LibcAcos",
+	"LibcAsin", "LibcAtan", "LibcAtan2",
+	"LibcExp", "LibcLog", "CaseInsensitiveCompareUCS2",
+	"CaseInsensitiveCompareUTF16", "EnterSafepoint", "ExitSafepoint",
+	"ExitSafepointIgnoreUnwindInProgress", "EnterHandleScope", "ExitHandleScope",
+	"AllocateHandle", "PropagateError", "MsanUnpoison",
+	"MsanUnpoisonParam", "TsanLoadAcquire", "TsanStoreRelease",
+	"TryDoubleAsInteger", "MemoryMove",
+}
+
+var runtimeEntriesV343 = []string{
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "NonBoolTypeError", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
+	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
+	"NullError", "NullErrorWithSelector", "NullCastError",
+	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
+	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException", "ReThrow",
+	"InterruptOrStackOverflow", "Throw", "DeoptimizeMaterialize",
+	"RewindPostDeopt", "UpdateFieldCid", "InitInstanceField",
+	"InitStaticField", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "DeoptimizeCopyFrame",
+	"DeoptimizeFillFrame", "StoreBufferBlockProcess", "MarkingStackBlockProcess",
+	"RememberCard", "EnsureRememberedAndMarkingDeferred", "LibcPow",
+	"DartModulo", "LibcFloor", "LibcCeil",
+	"LibcTrunc", "LibcRound", "LibcCos",
+	"LibcSin", "LibcTan", "LibcAcos",
+	"LibcAsin", "LibcAtan", "LibcAtan2",
+	"LibcExp", "LibcLog", "CaseInsensitiveCompareUCS2",
+	"CaseInsensitiveCompareUTF16", "EnterSafepoint", "ExitSafepoint",
+	"ExitSafepointIgnoreUnwindInProgress", "EnterHandleScope", "ExitHandleScope",
+	"AllocateHandle", "PropagateError", "MsanUnpoison",
+	"MsanUnpoisonParam", "TsanLoadAcquire", "TsanStoreRelease",
 	"TryDoubleAsInteger", "MemoryMove",
 }
 
@@ -3117,100 +3338,86 @@ var runtimeEntriesV343 = []string{
 // Delta from v3.4.3: -NonBoolTypeError, +LateFieldAlreadyInitializedError,
 // +8 new entries at end. LEAF: MarkingStackBlockProcess split into Old+New, +LibcFmod.
 var runtimeEntriesV362 = []string{
-	// RUNTIME_ENTRY_LIST (73)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler",
-	"CloneContext", "CloneSuspendState",
-	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
-	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
-	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
-	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
-	"NullError", "NullErrorWithSelector", "NullCastError",
-	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"LateFieldAlreadyInitializedError",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend",
-	"AllocateSubtypeTestCache", "GetFieldForDispatch",
-	"AdjustArgumentsDesciptorForImplicitClosure",
-	"ClosureArgumentsValid", "ResolveCallFunction",
-	"InterpretedInstanceCallMissHandler",
-	"InvokeNoSuchMethod", "ResumeInterpreter",
-	// LEAF_RUNTIME_ENTRY_LIST (38)
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "InstantiateType", "InstantiateTypeArguments",
+	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "OptimizeInvokedFunction",
+	"TraceICCall", "PatchStaticCall", "RangeError",
+	"RangeErrorUnboxedInt64", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "AllocateSubtypeTestCache",
+	"GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure", "ClosureArgumentsValid",
+	"ResolveCallFunction", "InterpretedInstanceCallMissHandler", "InvokeNoSuchMethod",
+	"ResumeInterpreter", "DeoptimizeCopyFrame", "DeoptimizeFillFrame",
 	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
-	"RememberCard", "EnsureRememberedAndMarkingDeferred",
-	"LibcPow", "DartModulo", "LibcFmod",
-	"LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
+	"RememberCard", "EnsureRememberedAndMarkingDeferred", "LibcPow",
+	"DartModulo", "LibcFmod", "LibcFloor",
+	"LibcCeil", "LibcTrunc", "LibcRound",
+	"LibcCos", "LibcSin", "LibcTan",
+	"LibcAcos", "LibcAsin", "LibcAtan",
 	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
-	"EnterSafepoint", "ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress",
-	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
-	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanLoadAcquire", "TsanStoreRelease",
-	"TryDoubleAsInteger", "MemoryMove",
+	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16", "EnterSafepoint",
+	"ExitSafepoint", "ExitSafepointIgnoreUnwindInProgress", "EnterHandleScope",
+	"ExitHandleScope", "AllocateHandle", "PropagateError",
+	"MsanUnpoison", "MsanUnpoisonParam", "TsanLoadAcquire",
+	"TsanStoreRelease", "TryDoubleAsInteger", "MemoryMove",
 }
 
 // v3.8.1: 73 RUNTIME + 36 LEAF = 109 entries from 0x2e0 to 0x648 (exclusive).
 // Delta from v3.6.2: -RememberCard, -ExitSafepointIgnoreUnwindInProgress from LEAF.
 // exit_safepoint_ignore_unwind_stub removed → all ep offsets shift -8.
 var runtimeEntriesV381 = []string{
-	// RUNTIME_ENTRY_LIST (73) — identical to v3.6.2
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler",
-	"CloneContext", "CloneSuspendState",
-	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
-	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
-	"OptimizeInvokedFunction", "TraceICCall", "PatchStaticCall",
-	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
-	"NullError", "NullErrorWithSelector", "NullCastError",
-	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"LateFieldAlreadyInitializedError",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend",
-	"AllocateSubtypeTestCache", "GetFieldForDispatch",
-	"AdjustArgumentsDesciptorForImplicitClosure",
-	"ClosureArgumentsValid", "ResolveCallFunction",
-	"InterpretedInstanceCallMissHandler",
-	"InvokeNoSuchMethod", "ResumeInterpreter",
-	// LEAF_RUNTIME_ENTRY_LIST (36) — RememberCard and ExitSafepointIgnoreUnwindInProgress removed
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "InstantiateType", "InstantiateTypeArguments",
+	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "OptimizeInvokedFunction",
+	"TraceICCall", "PatchStaticCall", "RangeError",
+	"RangeErrorUnboxedInt64", "WriteError", "NullError",
+	"NullErrorWithSelector", "NullCastError", "ArgumentNullError",
+	"DispatchTableNullError", "ArgumentError", "ArgumentErrorUnboxedInt64",
+	"IntegerDivisionByZeroException", "ReThrow", "InterruptOrStackOverflow",
+	"Throw", "DeoptimizeMaterialize", "RewindPostDeopt",
+	"UpdateFieldCid", "InitInstanceField", "InitStaticField",
+	"LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "AllocateSubtypeTestCache",
+	"GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure", "ClosureArgumentsValid",
+	"ResolveCallFunction", "InterpretedInstanceCallMissHandler", "InvokeNoSuchMethod",
+	"ResumeInterpreter", "DeoptimizeCopyFrame", "DeoptimizeFillFrame",
 	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
-	"EnsureRememberedAndMarkingDeferred",
-	"LibcPow", "DartModulo", "LibcFmod",
-	"LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
-	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
-	"EnterSafepoint", "ExitSafepoint",
+	"EnsureRememberedAndMarkingDeferred", "LibcPow", "DartModulo",
+	"LibcFmod", "LibcFloor", "LibcCeil",
+	"LibcTrunc", "LibcRound", "LibcCos",
+	"LibcSin", "LibcTan", "LibcAcos",
+	"LibcAsin", "LibcAtan", "LibcAtan2",
+	"LibcExp", "LibcLog", "CaseInsensitiveCompareUCS2",
+	"CaseInsensitiveCompareUTF16", "EnterSafepoint", "ExitSafepoint",
 	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
 	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanLoadAcquire", "TsanStoreRelease",
-	"TryDoubleAsInteger", "MemoryMove",
+	"TsanLoadAcquire", "TsanStoreRelease", "TryDoubleAsInteger",
+	"MemoryMove",
 }
 
 // v3.9.2: 77 RUNTIME + 36 LEAF = 113 entries from 0x2f0 to 0x678 (exclusive).
@@ -3218,89 +3425,74 @@ var runtimeEntriesV381 = []string{
 // +ThrowIfValueCantBeShared, +ConvertToInstanceTypeArguments, +ResolveExternalCall,
 // +InitializeSharedField. LEAF identical to v3.8.1.
 var runtimeEntriesV392 = []string{
-	// RUNTIME_ENTRY_LIST (77)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler",
-	"CloneContext", "CloneSuspendState",
-	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
-	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
-	"OptimizeInvokedFunction", "PatchStaticCall",
-	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
-	"NullError", "NullErrorWithSelector", "NullCastError",
-	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"CloneContext", "CloneSuspendState", "DoubleToInteger",
+	"FixCallersTarget", "FixCallersTargetMonomorphic", "FixAllocationStubTarget",
+	"InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs", "StaticCallMissHandlerOneArg",
+	"StaticCallMissHandlerTwoArgs", "Instanceof", "SubtypeCheck",
+	"TypeCheck", "InstantiateType", "InstantiateTypeArguments",
+	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "OptimizeInvokedFunction",
+	"PatchStaticCall", "RangeError", "RangeErrorUnboxedInt64",
+	"WriteError", "NullError", "NullErrorWithSelector",
+	"NullCastError", "ArgumentNullError", "DispatchTableNullError",
+	"ArgumentError", "ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
 	"ReThrow", "InterruptOrStackOverflow", "Throw",
 	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"StaticFieldAccessedWithoutIsolateError", "ThrowIfValueCantBeShared",
-	"LateFieldAlreadyInitializedError",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend",
-	"AllocateSubtypeTestCache", "GetFieldForDispatch",
-	"AdjustArgumentsDesciptorForImplicitClosure",
-	"ConvertToInstanceTypeArguments",
-	"ClosureArgumentsValid", "ResolveCallFunction", "ResolveExternalCall",
-	"InterpretedInstanceCallMissHandler",
-	"InvokeNoSuchMethod", "ResumeInterpreter", "InitializeSharedField",
-	// LEAF_RUNTIME_ENTRY_LIST (36) — identical to v3.8.1
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
-	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
-	"EnsureRememberedAndMarkingDeferred",
-	"LibcPow", "DartModulo", "LibcFmod",
-	"LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
+	"InitInstanceField", "InitStaticField", "StaticFieldAccessedWithoutIsolateError",
+	"ThrowIfValueCantBeShared", "LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError",
+	"LateFieldNotInitializedError", "CompileFunction", "ResumeFrame",
+	"SwitchableCallMiss", "NotLoaded", "FfiAsyncCallbackSend",
+	"AllocateSubtypeTestCache", "GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure",
+	"ConvertToInstanceTypeArguments", "ClosureArgumentsValid", "ResolveCallFunction",
+	"ResolveExternalCall", "InterpretedInstanceCallMissHandler", "InvokeNoSuchMethod",
+	"ResumeInterpreter", "InitializeSharedField", "DeoptimizeCopyFrame",
+	"DeoptimizeFillFrame", "StoreBufferBlockProcess", "OldMarkingStackBlockProcess",
+	"NewMarkingStackBlockProcess", "EnsureRememberedAndMarkingDeferred", "LibcPow",
+	"DartModulo", "LibcFmod", "LibcFloor",
+	"LibcCeil", "LibcTrunc", "LibcRound",
+	"LibcCos", "LibcSin", "LibcTan",
+	"LibcAcos", "LibcAsin", "LibcAtan",
 	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
-	"EnterSafepoint", "ExitSafepoint",
-	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
-	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanLoadAcquire", "TsanStoreRelease",
+	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16", "EnterSafepoint",
+	"ExitSafepoint", "EnterHandleScope", "ExitHandleScope",
+	"AllocateHandle", "PropagateError", "MsanUnpoison",
+	"MsanUnpoisonParam", "TsanLoadAcquire", "TsanStoreRelease",
 	"TryDoubleAsInteger", "MemoryMove",
 }
 
 // v3.10.7: 81 RUNTIME entries from 0x2e8 to 0x570 (exclusive). No LEAF in block.
 var runtimeEntriesV3107 = []string{
-	// RUNTIME_ENTRY_LIST (81)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler", "ResumptionBreakpointHandler",
-	"CloneContext", "CloneSuspendState",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"ResumptionBreakpointHandler", "CloneContext", "CloneSuspendState",
 	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
 	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "NoSuchMethodError",
-	"OptimizeInvokedFunction", "PatchStaticCall",
+	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs", "Instanceof",
+	"SubtypeCheck", "TypeCheck", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"NoSuchMethodError", "OptimizeInvokedFunction", "PatchStaticCall",
 	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
 	"NullError", "NullErrorWithSelector", "NullCastError",
 	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"StaticFieldAccessedWithoutIsolateError", "ThrowIfValueCantBeShared",
-	"LateFieldAlreadyInitializedError",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend", "AllocateSubtypeTestCache", "GetFieldForDispatch",
-	// Spelled "Desciptor" upstream at every tag from 3.10.7 to 3.13.0.
-	// The typo is the symbol name; correcting it here made this one entry
-	// stop matching anything greppable in the SDK.
-	"AdjustArgumentsDesciptorForImplicitClosure", "ConvertToInstanceTypeArguments",
+	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException", "ReThrow",
+	"InterruptOrStackOverflow", "Throw", "DeoptimizeMaterialize",
+	"RewindPostDeopt", "UpdateFieldCid", "InitInstanceField",
+	"InitStaticField", "StaticFieldAccessedWithoutIsolateError", "ThrowIfValueCantBeShared",
+	"LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "AllocateSubtypeTestCache",
+	"GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure", "ConvertToInstanceTypeArguments",
 	"ClosureArgumentsValid", "ResolveCallFunction", "ResolveExternalCall",
-	"FfiCall", "CheckFunctionArgumentTypes",
-	"InterpretedInstanceCallMissHandler",
+	"FfiCall", "CheckFunctionArgumentTypes", "InterpretedInstanceCallMissHandler",
 	"InvokeNoSuchMethod", "ResumeInterpreter", "InitializeSharedField",
 }
 
@@ -3308,21 +3500,22 @@ var runtimeEntriesV3107 = []string{
 // In v3.10.7, LEAF entries moved from the main runtime entry block to their own block.
 // Source: dartsdk/v3.10.7/runtime/vm/thread.h:1512-1514 (LEAF_RUNTIME_ENTRY_LIST(DECLARE_MEMBERS))
 var leafEntriesV3107 = []string{
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
-	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
-	"EnsureRememberedAndMarkingDeferred",
+	"DeoptimizeCopyFrame", "DeoptimizeFillFrame", "StoreBufferBlockProcess",
+	"OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess", "EnsureRememberedAndMarkingDeferred",
 	"LibcPow", "DartModulo", "LibcFmod",
-	"LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
-	"LibcAtan2", "LibcExp", "LibcLog",
-	"CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
-	"EnterSafepoint", "ExitSafepoint",
-	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
-	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanAtomic32Load", "TsanAtomic32Store", "TsanAtomic64Load", "TsanAtomic64Store",
-	"TsanRead1", "TsanRead2", "TsanRead4", "TsanRead8", "TsanRead16",
-	"TsanWrite1", "TsanWrite2", "TsanWrite4", "TsanWrite8", "TsanWrite16",
-	"TsanFuncEntry", "TsanFuncExit",
+	"LibcFloor", "LibcCeil", "LibcTrunc",
+	"LibcRound", "LibcCos", "LibcSin",
+	"LibcTan", "LibcAcos", "LibcAsin",
+	"LibcAtan", "LibcAtan2", "LibcExp",
+	"LibcLog", "CaseInsensitiveCompareUCS2", "CaseInsensitiveCompareUTF16",
+	"EnterSafepoint", "ExitSafepoint", "EnterHandleScope",
+	"ExitHandleScope", "AllocateHandle", "PropagateError",
+	"MsanUnpoison", "MsanUnpoisonParam", "TsanAtomic32Load",
+	"TsanAtomic32Store", "TsanAtomic64Load", "TsanAtomic64Store",
+	"TsanRead1", "TsanRead2", "TsanRead4",
+	"TsanRead8", "TsanRead16", "TsanWrite1",
+	"TsanWrite2", "TsanWrite4", "TsanWrite8",
+	"TsanWrite16", "TsanFuncEntry", "TsanFuncExit",
 	"TryDoubleAsInteger", "MemoryMove",
 }
 
@@ -3330,36 +3523,32 @@ var leafEntriesV3107 = []string{
 // Delta from v3.10.7: -ThrowIfValueCantBeShared, +CheckedStoreIntoShared (after
 // StaticFieldAccessedWithoutIsolateError), +FatalError +EnsureDeeplyImmutable at end.
 var runtimeEntriesV3122 = []string{
-	// RUNTIME_ENTRY_LIST (83)
-	"AllocateArray", "AllocateMint", "AllocateDouble", "AllocateFloat32x4",
-	"AllocateFloat64x2", "AllocateInt32x4", "AllocateTypedData", "AllocateClosure",
-	"AllocateContext", "AllocateObject", "AllocateRecord", "AllocateSmallRecord",
-	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4", "BoxFloat64x2",
-	"BreakpointRuntimeHandler", "SingleStepHandler", "ResumptionBreakpointHandler",
-	"CloneContext", "CloneSuspendState",
+	"AllocateArray", "AllocateMint", "AllocateDouble",
+	"AllocateFloat32x4", "AllocateFloat64x2", "AllocateInt32x4",
+	"AllocateTypedData", "AllocateClosure", "AllocateContext",
+	"AllocateObject", "AllocateRecord", "AllocateSmallRecord",
+	"AllocateSuspendState", "BoxDouble", "BoxFloat32x4",
+	"BoxFloat64x2", "BreakpointRuntimeHandler", "SingleStepHandler",
+	"ResumptionBreakpointHandler", "CloneContext", "CloneSuspendState",
 	"DoubleToInteger", "FixCallersTarget", "FixCallersTargetMonomorphic",
 	"FixAllocationStubTarget", "InlineCacheMissHandlerOneArg", "InlineCacheMissHandlerTwoArgs",
-	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs",
-	"Instanceof", "SubtypeCheck", "TypeCheck",
-	"InstantiateType", "InstantiateTypeArguments",
-	"NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue", "NoSuchMethodError",
-	"OptimizeInvokedFunction", "PatchStaticCall",
+	"StaticCallMissHandlerOneArg", "StaticCallMissHandlerTwoArgs", "Instanceof",
+	"SubtypeCheck", "TypeCheck", "InstantiateType",
+	"InstantiateTypeArguments", "NoSuchMethodFromCallStub", "NoSuchMethodFromPrologue",
+	"NoSuchMethodError", "OptimizeInvokedFunction", "PatchStaticCall",
 	"RangeError", "RangeErrorUnboxedInt64", "WriteError",
 	"NullError", "NullErrorWithSelector", "NullCastError",
 	"ArgumentNullError", "DispatchTableNullError", "ArgumentError",
-	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException",
-	"ReThrow", "InterruptOrStackOverflow", "Throw",
-	"DeoptimizeMaterialize", "RewindPostDeopt", "UpdateFieldCid",
-	"InitInstanceField", "InitStaticField",
-	"StaticFieldAccessedWithoutIsolateError", "CheckedStoreIntoShared",
-	"LateFieldAlreadyInitializedError",
-	"LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
-	"CompileFunction", "ResumeFrame", "SwitchableCallMiss", "NotLoaded",
-	"FfiAsyncCallbackSend", "AllocateSubtypeTestCache", "GetFieldForDispatch",
-	"AdjustArgumentsDesciptorForImplicitClosure", "ConvertToInstanceTypeArguments",
+	"ArgumentErrorUnboxedInt64", "IntegerDivisionByZeroException", "ReThrow",
+	"InterruptOrStackOverflow", "Throw", "DeoptimizeMaterialize",
+	"RewindPostDeopt", "UpdateFieldCid", "InitInstanceField",
+	"InitStaticField", "StaticFieldAccessedWithoutIsolateError", "CheckedStoreIntoShared",
+	"LateFieldAlreadyInitializedError", "LateFieldAssignedDuringInitializationError", "LateFieldNotInitializedError",
+	"CompileFunction", "ResumeFrame", "SwitchableCallMiss",
+	"NotLoaded", "FfiAsyncCallbackSend", "AllocateSubtypeTestCache",
+	"GetFieldForDispatch", "AdjustArgumentsDesciptorForImplicitClosure", "ConvertToInstanceTypeArguments",
 	"ClosureArgumentsValid", "ResolveCallFunction", "ResolveExternalCall",
-	"FfiCall", "CheckFunctionArgumentTypes",
-	"InterpretedInstanceCallMissHandler",
+	"FfiCall", "CheckFunctionArgumentTypes", "InterpretedInstanceCallMissHandler",
 	"InvokeNoSuchMethod", "ResumeInterpreter", "InitializeSharedField",
 	"FatalError", "EnsureDeeplyImmutable",
 }
@@ -3369,21 +3558,22 @@ var runtimeEntriesV3122 = []string{
 // TsanRead*/TsanWrite* renamed to SanRead*/SanWrite*.
 // Source: dartsdk/v3.12.2/runtime/vm/runtime_entry_list.h:98-147
 var leafEntriesV3122 = []string{
-	"DeoptimizeCopyFrame", "DeoptimizeFillFrame",
-	"StoreBufferBlockProcess", "OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess",
-	"EnsureRememberedAndMarkingDeferred",
+	"DeoptimizeCopyFrame", "DeoptimizeFillFrame", "StoreBufferBlockProcess",
+	"OldMarkingStackBlockProcess", "NewMarkingStackBlockProcess", "EnsureRememberedAndMarkingDeferred",
 	"LibcPow", "DartModulo", "LibcFmod",
-	"LibcFloor", "LibcCeil", "LibcTrunc", "LibcRound",
-	"LibcCos", "LibcSin", "LibcTan", "LibcAcos", "LibcAsin", "LibcAtan",
-	"LibcAtan2", "LibcExp", "LibcLog",
-	"EnterSafepoint", "ExitSafepoint",
+	"LibcFloor", "LibcCeil", "LibcTrunc",
+	"LibcRound", "LibcCos", "LibcSin",
+	"LibcTan", "LibcAcos", "LibcAsin",
+	"LibcAtan", "LibcAtan2", "LibcExp",
+	"LibcLog", "EnterSafepoint", "ExitSafepoint",
 	"EnterHandleScope", "ExitHandleScope", "AllocateHandle",
 	"PropagateError", "MsanUnpoison", "MsanUnpoisonParam",
-	"TsanAtomic32Load", "TsanAtomic32Store", "TsanAtomic64Load", "TsanAtomic64Store",
-	"SanRead1", "SanRead2", "SanRead4", "SanRead8", "SanRead16",
-	"SanWrite1", "SanWrite2", "SanWrite4", "SanWrite8", "SanWrite16",
-	"TsanFuncEntry", "TsanFuncExit",
-	"TryDoubleAsInteger", "MemoryMove",
+	"TsanAtomic32Load", "TsanAtomic32Store", "TsanAtomic64Load",
+	"TsanAtomic64Store", "SanRead1", "SanRead2",
+	"SanRead4", "SanRead8", "SanRead16",
+	"SanWrite1", "SanWrite2", "SanWrite4",
+	"SanWrite8", "SanWrite16", "TsanFuncEntry",
+	"TsanFuncExit", "TryDoubleAsInteger", "MemoryMove",
 }
 
 // v3.11.5: 82 RUNTIME entries from 0x2f0 to 0x580 (exclusive). No LEAF in block.
@@ -3449,16 +3639,16 @@ var leafEntriesV3115 = []string{
 
 func init() {
 	mergeRuntimeEntries(thrV217, 0x2d8, runtimeEntriesV217)
-	mergeRuntimeEntries(thrV305, 0x2c8, runtimeEntriesV325)
-	mergeRuntimeEntries(thrV310, 0x2c8, runtimeEntriesV325)
+	mergeRuntimeEntries(thrV305, 0x2c8, runtimeEntriesV305)
+	mergeRuntimeEntries(thrV310, 0x2c8, runtimeEntriesV310)
 	mergeRuntimeEntries(thrV325, 0x2c8, runtimeEntriesV325)
 	mergeRuntimeEntries(thrV343, 0x2d0, runtimeEntriesV343)
 	// 3.5.0 inserts shared_field_table_values, so the runtime-entry block
 	// starts one slot later than 3.4.3 (SDK: AllocateArray_entry_point at
 	// 0x2d8, where 0x2d0 is float_zerow_address).
-	mergeRuntimeEntries(thrV350, 0x2d8, runtimeEntriesV343)
+	mergeRuntimeEntries(thrV350, 0x2d8, runtimeEntriesV350)
 	mergeRuntimeEntries(thrV362, 0x2e8, runtimeEntriesV362)
-	mergeRuntimeEntries(thrV370, 0x2e8, runtimeEntriesV362)
+	mergeRuntimeEntries(thrV370, 0x2e8, runtimeEntriesV370)
 	mergeRuntimeEntries(thrV381, 0x2e0, runtimeEntriesV381)
 	mergeRuntimeEntries(thrV392, 0x2f0, runtimeEntriesV392)
 	mergeRuntimeEntries(thrV3107, 0x2e8, runtimeEntriesV3107)
@@ -3483,15 +3673,28 @@ func init() {
 //
 // A warning here now means something actionable: the offsets genuinely
 // disagree, i.e. this base is wrong for that version.
+// runtimeEntryConflicts records every offset where a runtime-entry name
+// collided with a name the table already had.
+//
+// A collision means the base offset is wrong for that version, and it is
+// the ONLY signal that says so: the drift gate checks the offsets the
+// SDK's generated header covers, and the runtime-entry block is not among
+// them. This was a warning on stderr until it caught a real bug that had
+// already shipped -- easy to scroll past, which is not a property a
+// correctness signal should have. TestNoRuntimeEntryConflicts fails on it.
+var runtimeEntryConflicts []string
+
 func mergeRuntimeEntries(m map[int]string, base int, names []string) {
 	for i, name := range names {
 		off := base + i*8
+		want := name + "_entry_point"
 		if existing, exists := m[off]; exists {
-			if existing != name+"_entry_point" {
-				fmt.Fprintf(os.Stderr, "warning: mergeRuntimeEntries: offset 0x%x has %q, skipping runtime entry %q\n", off, existing, name+"_entry_point")
+			if existing != want {
+				runtimeEntryConflicts = append(runtimeEntryConflicts,
+					fmt.Sprintf("offset 0x%x holds %q, runtime entry %q not applied", off, existing, want))
 			}
 		} else {
-			m[off] = name + "_entry_point"
+			m[off] = want
 		}
 	}
 }
