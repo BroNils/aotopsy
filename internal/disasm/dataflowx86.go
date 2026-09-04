@@ -296,6 +296,35 @@ func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
 	return blocks
 }
 
+// BuildX86CFG constructs a FuncCFG for an x86_64 function's byte stream.
+func BuildX86CFG(name string, funcCode []byte, funcVA uint64) FuncCFG {
+	decInsts := decodeX86Flat(funcCode, funcVA)
+	if len(decInsts) == 0 {
+		return FuncCFG{Name: name}
+	}
+	x86Blocks := buildX86Blocks(decInsts)
+	insts := make([]Inst, len(decInsts))
+	for i, d := range decInsts {
+		insts[i] = Inst{Addr: d.VA, Text: x86.InstText(d.Inst)}
+	}
+	blocks := make([]BasicBlock, len(x86Blocks))
+	for i, b := range x86Blocks {
+		blocks[i] = BasicBlock{
+			ID:      i,
+			Start:   b.Start,
+			End:     b.End,
+			Succs:   b.Succs,
+			IsEntry: i == 0,
+			IsTerm:  len(b.Succs) == 0,
+		}
+	}
+	return FuncCFG{
+		Name:   name,
+		Blocks: blocks,
+		Insts:  insts,
+	}
+}
+
 // touchX86InstrEffect applies one instruction's register-definition
 // effect to regs -- the CALL classification itself is handled by the
 // caller (ScanX86FunctionCFG), since CALL doesn't define a register the

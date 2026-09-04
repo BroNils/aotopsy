@@ -15,7 +15,6 @@ import "testing"
 func TestExtractCallEdgesCFGBeyondOldWindow(t *testing.T) {
 	const thrFieldOffset = 0x88
 	fields := map[int]string{thrFieldOffset: "SomeRuntimeEntry"}
-	thrAnn := THRAnnotator(fields)
 
 	var insts []Inst
 	addr := uint64(0x1000)
@@ -41,7 +40,7 @@ func TestExtractCallEdgesCFGBeyondOldWindow(t *testing.T) {
 	blrX5 := uint32(0xD63F0000) | (uint32(5) << 5)
 	push(blrX5, "blr x5")
 
-	annotators := []Annotator{thrAnn}
+	annotators := []Annotator{THRContextAnnotator(insts, fields)}
 
 	edges := ExtractCallEdgesCFG("test_fn", insts, nil, annotators)
 
