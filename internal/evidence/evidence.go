@@ -115,15 +115,23 @@ func (c *Collector) FromCallEdges(edges []disasm.CallEdgeRecord) {
 				// (the name exists only in pkg/dart2wasm and
 				// pkg/dart2bytecode), so the reference pointed at nothing
 				// a reader could look up.
+				sdkFile := "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc"
+				if e.Kind == "call" {
+					sdkFile = "runtime/vm/compiler/backend/flow_graph_compiler_x64.cc"
+				}
 				ev.SDKRef = &SDKReference{
-					File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
+					File:   sdkFile,
 					Symbol: "GenerateStaticDartCall",
 				}
 			}
 		} else if len(e.Targets) > 0 {
 			ev.Result = map[string]any{"targets": e.Targets, "candidate_count": e.Candidates}
+			sdkFile := "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc"
+			if e.Kind == "call" || e.Kind == "call_indirect" {
+				sdkFile = "runtime/vm/compiler/backend/flow_graph_compiler_x64.cc"
+			}
 			ev.SDKRef = &SDKReference{
-				File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
+				File:   sdkFile,
 				Symbol: "EmitDispatchTableCall",
 			}
 		} else if e.Via != "" {

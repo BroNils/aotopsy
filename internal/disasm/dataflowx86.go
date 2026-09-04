@@ -334,7 +334,7 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
-				} else {
+				} else if poolIdxOK {
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d]", poolIdx))
 				}
 			default:

@@ -213,7 +213,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
-				} else {
+				} else if poolIdxOK {
 					baseNote = fmt.Sprintf("pp[%d]", poolIdx)
 				}
 			default:

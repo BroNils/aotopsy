@@ -28,9 +28,10 @@ var (
 
 // File wraps a debug/elf.File with convenience methods for Dart AOT analysis.
 type File struct {
-	ELF  *elf.File
-	raw  io.ReaderAt
-	size int64
+	ELF    *elf.File
+	raw    io.ReaderAt
+	closer io.Closer
+	size   int64
 }
 
 // Open opens an ELF file and validates it is an ARM64 shared object.
@@ -53,7 +54,7 @@ func Open(path string) (*File, error) {
 	}
 
 	if ef.Class != elf.ELFCLASS64 {
-		_ = ef.Close()
+		_ = f.Close()
 		return nil, ErrNot64Bit
 	}
 	// Relaxed to also accept EM_X86_64: the snapshot cluster/fill format
@@ -69,20 +70,27 @@ func Open(path string) (*File, error) {
 	// turn out to differ for a given arch, that will surface as a parse
 	// error downstream, not a silent wrong answer.
 	if ef.Machine != elf.EM_AARCH64 && ef.Machine != elf.EM_X86_64 {
-		_ = ef.Close()
+		_ = f.Close()
 		return nil, ErrNotARM64
 	}
 	if ef.Type != elf.ET_DYN {
-		_ = ef.Close()
+		_ = f.Close()
 		return nil, ErrNotShared
 	}
 
-	return &File{ELF: ef, raw: f, size: info.Size()}, nil
+	return &File{ELF: ef, raw: f, closer: f, size: info.Size()}, nil
 }
 
 // Close releases resources.
 func (f *File) Close() error {
-	return f.ELF.Close()
+	var err error
+	if f.ELF != nil {
+		err = f.ELF.Close()
+	}
+	if f.closer != nil {
+		err = errors.Join(err, f.closer.Close())
+	}
+	return err
 }
 
 // FileSize returns the size of the underlying file.
