@@ -62,6 +62,9 @@ type DecompLoopDeps struct {
 // standalone functions directly, and periodically GC + report
 // progress. Writes one combined.dart file.
 func RunDecompileLoop(d DecompLoopDeps) error {
+	if d.GcEveryN <= 0 {
+		d.GcEveryN = 100
+	}
 	rangeMatchesFilter := func(r cluster.CodeRange) bool {
 		if r.Size == 0 || r.RefID < 0 {
 			return false
@@ -180,7 +183,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			}
 		}()
 
-		if emitted > 0 && emitted%d.GcEveryN == 0 {
+		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
 			if err := d.W.Flush(); err != nil {
 				return fmt.Errorf("flush %s: %w", d.CombinedPath, err)
 			}

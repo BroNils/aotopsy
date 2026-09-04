@@ -47,6 +47,9 @@ type FromMainDeps struct {
 // function EXCEPT those whose owning Dart library resolves to dart:* or
 // package:flutter*.
 func RunFromMain(d FromMainDeps) error {
+	if d.GcEveryN <= 0 {
+		d.GcEveryN = 100
+	}
 	rangeByVA := make(map[uint64]cluster.CodeRange, len(d.Ranges))
 	for _, r := range d.Ranges {
 		if r.Size == 0 || r.RefID < 0 {
@@ -203,7 +206,7 @@ func RunFromMain(d FromMainDeps) error {
 			}
 		}()
 
-		if emitted > 0 && emitted%d.GcEveryN == 0 {
+		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
 			if err := d.W.Flush(); err != nil {
 				return fmt.Errorf("flush %s: %w", d.CombinedPath, err)
 			}
