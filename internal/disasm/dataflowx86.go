@@ -3,7 +3,6 @@ package disasm
 import (
 	"aotopsy/internal/arch/x86"
 	"fmt"
-	"sort"
 	"strconv"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -36,19 +35,17 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 	}
 	blocks := buildX86Blocks(insts)
 
-	type localEffect struct {
-		touched [16]bool
-		final   [16]lvalue
-	}
-	effects := make([]localEffect, len(blocks))
+	effects := make([]provBlockEffect, len(blocks))
 	for bi, blk := range blocks {
 		var regs x86NoWindowRegs
 		var touched [16]bool
 		for i := blk.Start; i < blk.End; i++ {
 			touchX86InstrEffect(insts[i], &regs, &touched, poolDisplay, thrFields)
 		}
-		var eff localEffect
-		eff.touched = touched
+		eff := provBlockEffect{
+			touched: touched[:],
+			final:   make([]lvalue, 16),
+		}
 		for r := 0; r < 16; r++ {
 			if touched[r] {
 				if v := regs[r]; v != "" {
@@ -61,77 +58,9 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		effects[bi] = eff
 	}
 
-	preds := make([][]int, len(blocks))
-	for bi, blk := range blocks {
-		for _, s := range blk.Succs {
-			if s.BlockID >= 0 && s.BlockID < len(blocks) {
-				preds[s.BlockID] = append(preds[s.BlockID], bi)
-			}
-		}
-	}
-
-	entryState := make([][16]lvalue, len(blocks))
-	exitState := make([][16]lvalue, len(blocks))
-	worklist := make([]int, len(blocks))
-	inWorklist := make([]bool, len(blocks))
-	for i := range worklist {
-		worklist[i] = i
-		inWorklist[i] = true
-	}
-
-	maxVisits := len(blocks)*len(blocks) + 64
-	visits := 0
-	for len(worklist) > 0 && visits < maxVisits {
-		id := worklist[0]
-		worklist = worklist[1:]
-		inWorklist[id] = false
-		visits++
-
-		var in [16]lvalue
-		switch {
-		case id == 0:
-			for r := range in {
-				in[r] = lvalue{kind: lvBottom}
-			}
-		case len(preds[id]) == 0:
-			for r := range in {
-				in[r] = lvalue{kind: lvBottom}
-			}
-		default:
-			for r := range in {
-				in[r] = lvalue{kind: lvTop}
-			}
-			for _, p := range preds[id] {
-				for r := 0; r < 16; r++ {
-					in[r] = meetLvalue(in[r], exitState[p][r])
-				}
-			}
-		}
-
-		changed := in != entryState[id]
-		entryState[id] = in
-
-		out := in
-		eff := effects[id]
-		for r := 0; r < 16; r++ {
-			if eff.touched[r] {
-				out[r] = eff.final[r]
-			}
-		}
-		if out != exitState[id] {
-			changed = true
-			exitState[id] = out
-		}
-
-		if changed {
-			for _, s := range blocks[id].Succs {
-				if s.BlockID >= 0 && s.BlockID < len(blocks) && !inWorklist[s.BlockID] {
-					worklist = append(worklist, s.BlockID)
-					inWorklist[s.BlockID] = true
-				}
-			}
-		}
-	}
+	entryState := runProvFixpoint(len(blocks), 16, func(b int) []Succ {
+		return blocks[b].Succs
+	}, effects)
 
 	var res X86ScanResult
 	for bi, blk := range blocks {
@@ -194,106 +123,44 @@ func decodeX86Flat(funcCode []byte, funcVA uint64) []x86.Decoded {
 // split blocks there either), so provenance flows through call sites
 // exactly like it does across ARM64 BLs.
 func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
-	funcStart := insts[0].VA
-	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
-
-	addrToIdx := make(map[uint64]int, len(insts))
-	for i, d := range insts {
-		addrToIdx[d.VA] = i
+	if len(insts) == 0 {
+		return nil
 	}
 
-	const (
-		kOther = iota
-		kJmp
-		kJcc
-		kRet
+	blocks := PartitionBlocks(
+		len(insts),
+		func(i int) uint64 { return insts[i].VA },
+		func(i int) int { return insts[i].Len },
+		func(i int) FlowInfo {
+			d := insts[i]
+			switch {
+			case d.Inst.Op == x86asm.RET:
+				return FlowInfo{Kind: FlowRet}
+			case d.Inst.Op == x86asm.JMP:
+				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+					return FlowInfo{Kind: FlowJump, Target: t, HasTarget: true}
+				}
+				return FlowInfo{Kind: FlowIndirect}
+			case x86.IsCondJump(d.Inst.Op):
+				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+					return FlowInfo{Kind: FlowCondJump, Target: t, HasTarget: true}
+				}
+				return FlowInfo{Kind: FlowNormal}
+			default:
+				return FlowInfo{Kind: FlowNormal}
+			}
+		},
 	)
-	kind := make([]int, len(insts))
-	target := make([]uint64, len(insts))
-	hasTarget := make([]bool, len(insts))
 
-	leaders := map[int]bool{0: true}
-	for i, d := range insts {
-		switch {
-		case d.Inst.Op == x86asm.RET:
-			kind[i] = kRet
-		case d.Inst.Op == x86asm.JMP:
-			kind[i] = kJmp
-			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
-				target[i], hasTarget[i] = t, true
-			}
-		case x86.IsCondJump(d.Inst.Op):
-			kind[i] = kJcc
-			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
-				target[i], hasTarget[i] = t, true
-			}
-		default:
-			continue
-		}
-		if i+1 < len(insts) {
-			leaders[i+1] = true
-		}
-		if hasTarget[i] && target[i] >= funcStart && target[i] < funcEnd {
-			if idx, ok := addrToIdx[target[i]]; ok {
-				leaders[idx] = true
-			}
+	x86Blocks := make([]x86BlockCFG, len(blocks))
+	for i, b := range blocks {
+		x86Blocks[i] = x86BlockCFG{
+			Start: b.Start,
+			End:   b.End,
+			Succs: b.Succs,
 		}
 	}
-
-	sorted := make([]int, 0, len(leaders))
-	for idx := range leaders {
-		sorted = append(sorted, idx)
-	}
-	sort.Ints(sorted)
-
-	leaderToBlock := make(map[int]int, len(sorted))
-	blocks := make([]x86BlockCFG, len(sorted))
-	for i, start := range sorted {
-		end := len(insts)
-		if i+1 < len(sorted) {
-			end = sorted[i+1]
-		}
-		blocks[i] = x86BlockCFG{Start: start, End: end}
-		leaderToBlock[start] = i
-	}
-
-	for bi := range blocks {
-		blk := &blocks[bi]
-		if blk.End <= blk.Start {
-			continue
-		}
-		last := blk.End - 1
-		switch kind[last] {
-		case kRet:
-			// terminal
-		case kJmp:
-			if hasTarget[last] {
-				if idx, ok := addrToIdx[target[last]]; ok {
-					if tb, ok := leaderToBlock[idx]; ok {
-						blk.Succs = append(blk.Succs, Succ{BlockID: tb})
-						continue
-					}
-				}
-			}
-			// indirect jump / unresolved target -- terminal
-		case kJcc:
-			if hasTarget[last] {
-				if idx, ok := addrToIdx[target[last]]; ok {
-					if tb, ok := leaderToBlock[idx]; ok {
-						blk.Succs = append(blk.Succs, Succ{BlockID: tb, Cond: "T"})
-					}
-				}
-			}
-			if nb, ok := leaderToBlock[blk.End]; ok {
-				blk.Succs = append(blk.Succs, Succ{BlockID: nb, Cond: "F"})
-			}
-		default:
-			if nb, ok := leaderToBlock[blk.End]; ok {
-				blk.Succs = append(blk.Succs, Succ{BlockID: nb})
-			}
-		}
-	}
-	return blocks
+	return x86Blocks
 }
 
 // BuildX86CFG constructs a FuncCFG for an x86_64 function's byte stream.

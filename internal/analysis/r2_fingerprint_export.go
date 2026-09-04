@@ -25,19 +25,13 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLoo
 		name string
 	}
 	var entries []r2Entry
+	im := NewCodeImage(nil, codeVA, codeOff, pl, nil)
 	for _, r := range ranges {
-		if r.Size == 0 {
+		fs, ok := im.Slice(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
-		var name string
-		if r.RefID >= 0 {
-			name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
-		} else {
-			name = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-		entries = append(entries, r2Entry{va: funcVA, name: name})
+		entries = append(entries, r2Entry{va: fs.VA, name: fs.Name})
 	}
 	// Sort by VA for deterministic output.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].va < entries[j].va })
@@ -76,29 +70,16 @@ func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *na
 
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
+	im2 := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for _, r := range ranges {
-		if r.Size == 0 {
+		fs, ok := im2.Slice(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		h := sha256.Sum256(funcCode)
-
-		var name string
-		if r.RefID >= 0 {
-			name = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
-		} else {
-			name = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-
-		funcVA := codeVA + funcStart
+		h := sha256.Sum256(fs.Code)
+		name := fs.Name
+		funcVA := fs.VA
+		funcCode := fs.Code
 		rec := struct {
 			Hash string `json:"hash"`
 			VA   string `json:"va"`

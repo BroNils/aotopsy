@@ -26,25 +26,7 @@ func entryStackFor(ctx *TypeContext, name string) map[int]TypeLattice {
 	return map[int]TypeLattice{slot: KnownClass(ownerCID)}
 }
 
-func sortedKeysInsts(m FuncInstsARM64) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedKeysX86(m FuncInstsX86) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedEdgeKeys(m map[string][]BLEdge) []string {
+func sortedKeys[M ~map[string]V, V any](m M) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -253,7 +235,7 @@ func RunInterprocedural(
 	// the map directly made the resolved-BLR set differ between runs of the
 	// same binary.
 	if isARM64 {
-		for _, name := range sortedKeysInsts(funcInstsARM64) {
+		for _, name := range sortedKeys(funcInstsARM64) {
 			insts := funcInstsARM64[name]
 			var entry [31]TypeLattice
 			for i := range entry {
@@ -275,7 +257,7 @@ func RunInterprocedural(
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	} else {
-		for _, name := range sortedKeysX86(funcInstsX86) {
+		for _, name := range sortedKeys(funcInstsX86) {
 			insts := funcInstsX86[name]
 			var entry [31]TypeLattice
 			for i := range entry {
@@ -343,7 +325,7 @@ func RunInterprocedural(
 
 		calleeParamTypes := make(map[string][31]TypeLattice)
 
-		for _, caller := range sortedEdgeKeys(blEdges) {
+		for _, caller := range sortedKeys(blEdges) {
 			edges := blEdges[caller]
 			callerAnalysis, ok := result.Functions[caller]
 			if !ok {
@@ -390,7 +372,7 @@ func RunInterprocedural(
 		// only the first pass left this one random, and call_edges.jsonl
 		// still differed between runs of the same binary.
 		if isARM64 {
-			for _, name := range sortedKeysInsts(funcInstsARM64) {
+			for _, name := range sortedKeys(funcInstsARM64) {
 				insts := funcInstsARM64[name]
 				entry := calleeParamTypes[name]
 				if allTop(entry) {
@@ -409,7 +391,7 @@ func RunInterprocedural(
 				result.Functions[name].Intra = intra
 			}
 		} else {
-			for _, name := range sortedKeysX86(funcInstsX86) {
+			for _, name := range sortedKeys(funcInstsX86) {
 				insts := funcInstsX86[name]
 				entry := calleeParamTypes[name]
 				if allTop(entry) {

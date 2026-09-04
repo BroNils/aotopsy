@@ -365,30 +365,16 @@ func runTypeInference(
 	}
 	var funcRanges []funcRange
 
+	codeImage := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for i := range ranges {
 		r := &ranges[i]
-		if r.Size == 0 {
+		fs, ok := codeImage.Slice(*r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcVA := codeVA + funcStart
-
-		var name string
-		var ownerName string
-		if r.RefID >= 0 {
-			ci := pl.CodeNames[r.RefID]
-			name = ci.Qualified(r.PCOffset)
-			ownerName = ci.OwnerName
-		} else {
-			name = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
+		funcVA := fs.VA
+		name := fs.Name
+		ownerName := fs.Owner
 
 		// Map function name → owner class ID for instance method receiver init.
 		if ownerName != "" {
@@ -414,8 +400,7 @@ func runTypeInference(
 		}
 
 		funcRanges = append(funcRanges, funcRange{start: funcVA, end: funcVA + uint64(r.Size), name: name})
-
-		funcCode := code[funcStart:funcEnd]
+		funcCode := fs.Code
 
 		if isARM64 {
 			insts := disasm.Disassemble(funcCode, disasm.Options{

@@ -50,6 +50,21 @@ type SnapshotContext struct {
 	IsARM64 bool
 }
 
+// Image returns a CodeImage providing unified function slicing.
+func (sc *SnapshotContext) Image() CodeImage {
+	return CodeImage{
+		Code:    sc.Code,
+		CodeVA:  sc.CodeVA,
+		CodeOff: sc.CodeOff,
+		Pool:    sc.Pool,
+	}
+}
+
+// Slice extracts a clamped FuncSlice from a CodeRange within this SnapshotContext.
+func (sc *SnapshotContext) Slice(r cluster.CodeRange) (FuncSlice, bool) {
+	return sc.Image().Slice(r)
+}
+
 // LoadSnapshot opens libPath and runs the full snapshot parse pipeline:
 // ELF → snapshot extract → isolate cluster scan+fill → instructions table
 // → code ranges → code region → VM snapshot parse → pool lookups → pool

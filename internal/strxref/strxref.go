@@ -6,10 +6,6 @@
 package strxref
 
 import (
-	"runtime"
-	"runtime/debug"
-	"strings"
-
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/decompiler"
 )
@@ -57,34 +53,15 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 		target[idx] = true
 	}
 
-	// L-8 fix: save and restore process-wide settings instead of
-	// permanently overriding them. These are global state that affects
-	// all goroutines, so callers shouldn't be surprised by side effects.
-	oldProcs := runtime.GOMAXPROCS(2)
-	defer runtime.GOMAXPROCS(oldProcs)
-	oldLimit := debug.SetMemoryLimit(1536 << 20)
-	defer debug.SetMemoryLimit(oldLimit)
-
 	var refs []Reference
-	scanned := 0
-	for _, r := range ctx.Ranges {
-		if opts.MaxScan > 0 && scanned >= opts.MaxScan {
-			break
-		}
-		if r.Size == 0 || r.RefID < 0 {
-			continue
-		}
-		fir, err := ctx.FuncIRFor(r)
-		if err != nil {
-			continue
-		}
-		if opts.Filter != "" && !strings.Contains(fir.Name, opts.Filter) {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - ctx.CodeOff
-		funcVA := ctx.CodeVA + funcStart
-		scanned++
+	scanOpts := analysis.ScanOptions{
+		MaxScan:        opts.MaxScan,
+		AllowUnbounded: opts.MaxScan == 0, // strxref is unbounded by default when MaxScan == 0
+		Filter:         opts.Filter,
+		GcEveryN:       500,
+	}
 
+	scanned := ctx.ScanFuncs(scanOpts, func(fir *decompiler.FuncIR, funcVA uint64) {
 		for _, blk := range fir.Blocks {
 			for _, ins := range blk.Instrs {
 				if ins.Op == decompiler.OpLoadPool && target[ins.PoolIndex] {
@@ -97,10 +74,7 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 				}
 			}
 		}
-		if scanned%500 == 0 {
-			runtime.GC()
-			debug.FreeOSMemory()
-		}
-	}
+	})
+
 	return refs, scanned
 }
