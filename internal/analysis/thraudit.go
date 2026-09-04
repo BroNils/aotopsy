@@ -24,6 +24,20 @@ type THRAuditData struct {
 	CodeVA  uint64
 }
 
+// Image returns a CodeImage providing unified function slicing.
+func (d THRAuditData) Image() CodeImage {
+	return CodeImage{
+		Code:    d.Code,
+		CodeVA:  d.CodeVA,
+		CodeOff: d.CodeOff,
+	}
+}
+
+// Slice extracts a clamped FuncSlice from a CodeRange within this THRAuditData.
+func (d THRAuditData) Slice(r cluster.CodeRange) (FuncSlice, bool) {
+	return d.Image().Slice(r)
+}
+
 // RunTHRAudit scans every function for THR-relative memory accesses
 // and writes the results as JSONL to outPath. Takes pre-loaded data.
 func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
@@ -114,20 +128,12 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 
 	for i := range n {
 		r := &data.Ranges[i]
-		if r.Size == 0 {
+		fs, ok := data.Slice(*r)
+		if !ok {
 			continue
 		}
-
-		funcStart := uint64(r.PCOffset) - data.CodeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(data.Code)) {
-			funcEnd = uint64(len(data.Code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := data.Code[funcStart:funcEnd]
-		funcVA := data.CodeVA + funcStart
+		funcCode := fs.Code
+		funcVA := fs.VA
 
 		funcName := codeNames[r.RefID].Qualified(r.PCOffset)
 

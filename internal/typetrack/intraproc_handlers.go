@@ -21,6 +21,12 @@ import (
 // table arithmetic, then field loads, then UBFX, MOV, BLR, BL, and finally
 // the default kill.
 
+const (
+	shadowStackOffsetBase = 0x10000
+	fieldStoreKeyBase     = 0x20000
+	fieldStoreKeyClassMul = 100000
+)
+
 // transferCtx bundles the shared state every handler needs, so the handler
 // signatures stay short and the dispatch table reads cleanly.
 type transferCtx struct {
@@ -49,7 +55,7 @@ func handleStackStore(tc *transferCtx) bool {
 	// 0a-pre-bis. STUR Xt, [X15, #imm9] → shadow stack (signed offset).
 	if base, rt, imm9, ok := arm64.STUR64(raw); ok && base == sdk.ARM64SPReg {
 		if rt < 31 {
-			tc.stackTypes[imm9+0x10000] = tc.state[rt]
+			tc.stackTypes[imm9+shadowStackOffsetBase] = tc.state[rt]
 		}
 	}
 	// 0a-pre-ter. STUR Xt, [Xn, #imm9] → object field store (signed offset).
@@ -60,8 +66,8 @@ func handleStackStore(tc *transferCtx) bool {
 				recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), true, tc.inst.Addr)
 			}
 			if tc.state[base].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
-				key := tc.state[base].ClassID*100000 + imm9
-				tc.stackTypes[key+0x20000] = tc.state[rt]
+				key := tc.state[base].ClassID*fieldStoreKeyClassMul + imm9
+				tc.stackTypes[key+fieldStoreKeyBase] = tc.state[rt]
 				recordFieldStore(tc.ctx, tc.state[base].ClassID, int32(imm9), tc.state[rt].ClassID)
 			}
 		}
@@ -76,7 +82,7 @@ func handleStackStore(tc *transferCtx) bool {
 	// 0a-pre-quater-bis. STUR Wt, [X15, #imm9] → compressed shadow stack.
 	if base, rt, imm9, ok := arm64.STUR32(raw); ok && base == sdk.ARM64SPReg {
 		if rt < 31 {
-			tc.stackTypes[imm9+0x10000] = tc.state[rt]
+			tc.stackTypes[imm9+shadowStackOffsetBase] = tc.state[rt]
 		}
 	}
 	// 0a-pre-quater-ter. STUR Wt, [Xn, #imm9] → compressed object field store.
@@ -87,8 +93,8 @@ func handleStackStore(tc *transferCtx) bool {
 				recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), true, tc.inst.Addr)
 			}
 			if tc.state[base].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
-				key := tc.state[base].ClassID*100000 + imm9
-				tc.stackTypes[key+0x20000] = tc.state[rt]
+				key := tc.state[base].ClassID*fieldStoreKeyClassMul + imm9
+				tc.stackTypes[key+fieldStoreKeyBase] = tc.state[rt]
 				recordFieldStore(tc.ctx, tc.state[base].ClassID, int32(imm9), tc.state[rt].ClassID)
 			}
 		}
@@ -107,7 +113,7 @@ func handleStackStore(tc *transferCtx) bool {
 	if baseReg, byteOff, _, ok := arm64.STR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64SPReg {
 		rt := int(raw & 0x1F)
 		if rt < 31 {
-			tc.stackTypes[byteOff+0x10000] = tc.state[rt]
+			tc.stackTypes[byteOff+shadowStackOffsetBase] = tc.state[rt]
 		}
 		// Don't return — STR to shadow stack doesn't kill the source register
 	}
@@ -118,8 +124,8 @@ func handleStackStore(tc *transferCtx) bool {
 		if rt < 31 && baseReg < 31 && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg &&
 			baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT {
 			if tc.state[baseReg].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
-				key := tc.state[baseReg].ClassID*100000 + byteOff
-				tc.stackTypes[key+0x20000] = tc.state[rt]
+				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
+				tc.stackTypes[key+fieldStoreKeyBase] = tc.state[rt]
 			}
 		}
 		// Don't return — STR doesn't kill the source register
@@ -153,7 +159,7 @@ func handleStackLoad(tc *transferCtx) bool {
 		if rt >= 31 {
 			return true
 		}
-		if t, ok2 := tc.stackTypes[byteOff+0x10000]; ok2 {
+		if t, ok2 := tc.stackTypes[byteOff+shadowStackOffsetBase]; ok2 {
 			tc.state[rt] = t
 		} else {
 			tc.state[rt] = Top()
@@ -173,10 +179,10 @@ func handleStackLoad(tc *transferCtx) bool {
 		byteOff := imm7 * 8
 		if rn == sdk.ARM64SPReg {
 			if rt1 < 31 {
-				tc.stackTypes[byteOff+0x10000] = tc.state[rt1]
+				tc.stackTypes[byteOff+shadowStackOffsetBase] = tc.state[rt1]
 			}
 			if rt2 < 31 {
-				tc.stackTypes[byteOff+8+0x10000] = tc.state[rt2]
+				tc.stackTypes[byteOff+8+shadowStackOffsetBase] = tc.state[rt2]
 			}
 			// Don't return — STP doesn't kill source registers
 		}
@@ -194,14 +200,14 @@ func handleStackLoad(tc *transferCtx) bool {
 		byteOff := imm7 * 8
 		if rn == sdk.ARM64SPReg {
 			if rt1 < 31 {
-				if t, ok2 := tc.stackTypes[byteOff+0x10000]; ok2 {
+				if t, ok2 := tc.stackTypes[byteOff+shadowStackOffsetBase]; ok2 {
 					tc.state[rt1] = t
 				} else {
 					tc.state[rt1] = Top()
 				}
 			}
 			if rt2 < 31 {
-				if t, ok2 := tc.stackTypes[byteOff+8+0x10000]; ok2 {
+				if t, ok2 := tc.stackTypes[byteOff+8+shadowStackOffsetBase]; ok2 {
 					tc.state[rt2] = t
 				} else {
 					tc.state[rt2] = Top()
@@ -446,7 +452,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
+			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
 				tc.state[rt] = t
 			} else {
 				tc.state[rt] = Top()
@@ -506,7 +512,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
+			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
 				tc.state[rt] = t
 			} else {
 				tc.state[rt] = Top()
@@ -546,7 +552,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+0x10000]; ok2 {
+			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
 				tc.state[rt] = t
 			} else {
 				tc.state[rt] = Top()
@@ -554,8 +560,8 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base < 31 && tc.state[base].Kind == LatticeKnownClass {
-			key := tc.state[base].ClassID*100000 + imm9
-			if storedType, ok2 := tc.stackTypes[key+0x20000]; ok2 && storedType.Kind != LatticeTop {
+			key := tc.state[base].ClassID*fieldStoreKeyClassMul + imm9
+			if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 				tc.state[rt] = storedType
 				return true
 			}
@@ -596,8 +602,8 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
-				key := tc.state[baseReg].ClassID*100000 + byteOff
-				if storedType, ok2 := tc.stackTypes[key+0x20000]; ok2 && storedType.Kind != LatticeTop {
+				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
+				if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 					tc.state[rt] = storedType
 					return true
 				}
@@ -619,8 +625,8 @@ func handleFieldLoad(tc *transferCtx) bool {
 			// Don't return — let other handlers process
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
-				key := tc.state[baseReg].ClassID*100000 + byteOff
-				if storedType, ok2 := tc.stackTypes[key+0x20000]; ok2 && storedType.Kind != LatticeTop {
+				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
+				if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 					tc.state[rt] = storedType
 					return true
 				}

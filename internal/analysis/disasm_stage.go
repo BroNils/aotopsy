@@ -184,22 +184,15 @@ func RunDisasmStage(
 		err        error
 	}
 
+	codeImage := NewCodeImage(code, codeVA, codeOff, pl, elfFuncSyms)
 	compute := func(r *cluster.CodeRange, out *funcOutput, peep *disasm.PeepholeState) {
-		if r.Size == 0 {
+		fs, ok := codeImage.Slice(*r)
+		if !ok {
 			out.skip = true
 			return
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			out.skip = true
-			return
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
+		funcCode := fs.Code
+		funcVA := fs.VA
 
 		var funcName, ownerName, name string
 		if r.RefID >= 0 {

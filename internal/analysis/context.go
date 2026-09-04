@@ -69,6 +69,21 @@ type AnalysisContext struct {
 	enrichmentBuilt bool
 }
 
+// Image returns a CodeImage providing unified function slicing.
+func (c *AnalysisContext) Image() CodeImage {
+	return CodeImage{
+		Code:    c.Code,
+		CodeVA:  c.CodeVA,
+		CodeOff: c.CodeOff,
+		Pool:    c.Pool,
+	}
+}
+
+// Slice extracts a clamped FuncSlice from a CodeRange within this AnalysisContext.
+func (c *AnalysisContext) Slice(r cluster.CodeRange) (FuncSlice, bool) {
+	return c.Image().Slice(r)
+}
+
 // DecompileEnrichment holds the lazy-built per-binary maps that turn a bare
 // FuncIR into a fully-resolved one: field names by (class, offset), each Code's
 // receiver class, closure parents, exception-handler / PcDescriptor tables,
@@ -482,24 +497,21 @@ func (c *AnalysisContext) buildAccessorFieldNames() {
 // aggregation pass that's only worth paying for when a caller actually
 // needs it, see resolveArgRegIndices's doc comment in decompile_native_cmd.go).
 func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
-	funcStart := uint64(r.PCOffset) - c.CodeOff
-	funcEnd := funcStart + uint64(r.Size)
-	if funcEnd > uint64(len(c.Code)) {
-		funcEnd = uint64(len(c.Code))
-	}
-	if funcStart >= funcEnd {
+	fs, ok := c.Slice(r)
+	if !ok {
 		return nil, fmt.Errorf("empty function range")
 	}
-	funcCode := c.Code[funcStart:funcEnd]
-	funcVA := c.CodeVA + funcStart
-	name := c.SymbolNames[funcVA]
+	name := c.SymbolNames[fs.VA]
+	if name == "" {
+		name = fs.Name
+	}
 
 	var fir *decompiler.FuncIR
 	if c.IsARM64 {
-		insts := disasm.Disassemble(funcCode, disasm.Options{BaseAddr: funcVA})
+		insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fs.VA})
 		fir = decompiler.BuildARM64IR(name, insts)
 	} else {
-		xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
+		xinsts := decompiler.DecodeX86Range(fs.Code, fs.VA)
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
 	fir.ThreadStubOffsets = vmtables.ThreadStubOffsets(c.DartVersion, c.IsARM64)
@@ -524,7 +536,7 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	// Confident real arity from aggregated call-site arg-register masks (opt-in;
 	// only when BuildArgRegMasks was called).
 	if c.Enrichment != nil && c.Enrichment.ArgRegMasks != nil {
-		if masks, ok := c.Enrichment.ArgRegMasks[funcVA]; ok {
+		if masks, ok := c.Enrichment.ArgRegMasks[fs.VA]; ok {
 			if regIdx, confident := ResolveArgRegIndices(masks); confident {
 				fir.ArgRegIndices = regIdx
 			}
@@ -768,20 +780,13 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 		thrFields = vmtables.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
 	}
 	for _, r := range c.Ranges {
-		if r.Size == 0 {
+		fs, ok := c.Slice(r)
+		if !ok {
 			continue
 		}
-		fStart := uint64(r.PCOffset) - c.CodeOff
-		fEnd := fStart + uint64(r.Size)
-		if fEnd > uint64(len(c.Code)) {
-			fEnd = uint64(len(c.Code))
-		}
-		if fStart >= fEnd {
-			continue
-		}
-		fVA := c.CodeVA + fStart
+		fVA := fs.VA
 		if c.IsARM64 {
-			insts := disasm.Disassemble(c.Code[fStart:fEnd], disasm.Options{BaseAddr: fVA})
+			insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fVA})
 			if len(insts) == 0 {
 				continue
 			}
@@ -792,7 +797,7 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 			}
 			continue
 		}
-		scan := disasm.ScanX86FunctionCFG(c.Code[fStart:fEnd], fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
+		scan := disasm.ScanX86FunctionCFG(fs.Code, fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
 		for _, e := range scan.Edges {
 			if e.Kind == "call" && e.ArgRegMask != 0 {
 				c.Enrichment.ArgRegMasks[e.TargetPC] = append(c.Enrichment.ArgRegMasks[e.TargetPC], e.ArgRegMask)
