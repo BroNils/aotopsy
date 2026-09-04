@@ -11,14 +11,13 @@ import (
 	"sync"
 
 	"aotopsy/internal/arch/arm64"
-	"aotopsy/internal/callgraph"
-	"aotopsy/internal/callgraph/render"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
+	"aotopsy/internal/render"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
@@ -141,7 +140,8 @@ func RunDisasmStage(
 	stringRefsEnc.SetEscapeHTML(false)
 
 	dr := &DisasmResult{}
-	var funcInfos []callgraph.FuncInfo
+	var funcRecs []disasm.FuncRecord
+	var edgeRecs []disasm.CallEdgeRecord
 
 	// Disassembly runs in parallel (each function is independent: read-only
 	// code slice, read-only lookup), but every SHARED output is written by
@@ -283,10 +283,9 @@ func RunDisasmStage(
 		}
 
 		if opts.Graph {
-			lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
-			if nblocks > 1 {
-				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
-				out.cfgDot = render.DOTCFG(g, name)
+			dcfg := disasm.BuildCFG(name, insts)
+			if len(dcfg.Blocks) > 1 {
+				out.cfgDot = render.CFGDOT(dcfg, render.NASA)
 				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
 			}
 		}
@@ -389,10 +388,8 @@ func RunDisasmStage(
 					}
 					dr.CFGCount++
 				}
-				funcInfos = append(funcInfos, callgraph.FuncInfo{
-					Name:      o.name,
-					CallEdges: o.edges,
-				})
+				funcRecs = append(funcRecs, o.funcRec)
+				edgeRecs = append(edgeRecs, o.edgeRecs...)
 			}
 			for _, sr := range o.stringRefs {
 				if err := stringRefsEnc.Encode(sr); err != nil {
@@ -420,15 +417,14 @@ func RunDisasmStage(
 	}
 
 	// Build call graph.
-	if opts.Graph && len(funcInfos) > 0 {
-		cg := callgraph.BuildCallGraph(funcInfos)
-		cgDOT := render.DOT(cg, "callgraph")
+	if opts.Graph && len(funcRecs) > 0 {
+		cgDOT := render.CallgraphDOT(funcRecs, edgeRecs, "callgraph", render.NASA, 0)
 		cgPath := filepath.Join(opts.OutDir, "callgraph.dot")
 		if err := os.WriteFile(cgPath, []byte(cgDOT), 0644); err != nil {
 			return nil, fmt.Errorf("write callgraph.dot: %w", err)
 		}
-		opts.logf("  %scallgraph:%s %d nodes, %d edges -> %s%s%s\n",
-			cli.Muted, cli.Reset, len(cg.Nodes), len(cg.Edges), cli.Blue, cgPath, cli.Reset)
+		opts.logf("  %scallgraph:%s %d funcs, %d edges -> %s%s%s\n",
+			cli.Muted, cli.Reset, len(funcRecs), len(edgeRecs), cli.Blue, cgPath, cli.Reset)
 		opts.logf("  %sCFG DOTs:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.CFGCount, cli.Blue, cfgDir, cli.Reset)
 	}
 

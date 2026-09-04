@@ -260,7 +260,7 @@ func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
 			Size: 4,
 			Text: fmt.Sprintf(".word 0x%08x", raw),
 		}
-		text := disasm.DisasmOne(raw, addr)
+		text := disasm.DisasmOne(raw)
 		if text != "" {
 			inst.Text = text
 		}

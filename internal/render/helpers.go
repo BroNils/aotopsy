@@ -46,3 +46,16 @@ func truncLabel(s string, maxLen int) string {
 	}
 	return s[:maxLen-3] + "..."
 }
+
+// IsAllCaps returns true if the name looks like a constant (all uppercase + underscores).
+func IsAllCaps(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
