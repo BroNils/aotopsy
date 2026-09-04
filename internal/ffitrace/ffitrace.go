@@ -20,13 +20,13 @@ import (
 // pseudocode contains the vm_tag native/FFI-leaf-call bookkeeping
 // marker (internal/decompiler's "nativeCall(...)").
 type Finding struct {
-	CallerFunc string // resolved name of the function containing the call site
-	CallerVA   uint64 // start VA of the caller function
-	CallSitePC uint64 // address of the call instruction itself (0 for native_call_site findings, which are function-level, not instruction-level)
-	Kind       string // "dynamic_library_call" | "native_call_site"
-	CalleeName string // resolved callee name for dynamic_library_call findings, e.g. "DynamicLibrary.lookup"
-	LiteralArg string // resolved string literal argument (library path or symbol name), if one was recoverable
-	Resolved   bool   // true only if LiteralArg was actually recovered from a literal pool string
+	CallerFunc string `json:"caller_func"`
+	CallerVA   uint64 `json:"caller_va"`
+	CallSitePC uint64 `json:"call_site_pc,omitempty"`
+	Kind       string `json:"kind"`
+	CalleeName string `json:"callee_name,omitempty"`
+	LiteralArg string `json:"literal_arg,omitempty"`
+	Resolved   bool   `json:"resolved"`
 }
 
 // Options bounds Trace's cost. A real Flutter app's libapp.so bundles
