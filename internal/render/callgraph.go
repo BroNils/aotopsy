@@ -1,7 +1,9 @@
 package render
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 
 	"aotopsy/internal/disasm"
@@ -205,12 +207,22 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	b.WriteByte('\n')
 
 	// Render clustered function nodes (grouped by owner).
-	for owner, funcsInOwner := range ownerFuncs {
+	ownerNames := make([]string, 0, len(ownerFuncs))
+	for owner := range ownerFuncs {
+		ownerNames = append(ownerNames, owner)
+	}
+	slices.Sort(ownerNames)
+
+	for _, owner := range ownerNames {
+		funcsInOwner := ownerFuncs[owner]
 		if len(funcsInOwner) < 2 {
 			// Singletons go at top level.
 			noOwner = append(noOwner, funcsInOwner...)
 			continue
 		}
+		slices.SortFunc(funcsInOwner, func(a, b disasm.FuncRecord) int {
+			return cmp.Compare(a.Name, b.Name)
+		})
 		clusterID := "cluster_" + dotID(owner)
 		ownerLabel := stripOwnerHash(owner)
 		fmt.Fprintf(&b, "  subgraph %s {\n", clusterID)
@@ -232,6 +244,9 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	}
 
 	// Render unclustered nodes (no owner or singletons).
+	slices.SortFunc(noOwner, func(a, b disasm.FuncRecord) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
 	for _, f := range noOwner {
 		id := dotID(f.Name)
 		label := truncLabel(f.Name, 60)
@@ -244,7 +259,12 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	b.WriteByte('\n')
 
 	// Render external nodes.
+	extNames := make([]string, 0, len(externalNodes))
 	for name := range externalNodes {
+		extNames = append(extNames, name)
+	}
+	slices.Sort(extNames)
+	for _, name := range extNames {
 		id := dotID(name)
 		label := truncLabel(name, 50)
 		fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontcolor=%q, fontsize=8];\n",
@@ -253,7 +273,26 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	b.WriteByte('\n')
 
 	// Render edges.
+	type edgeEntry struct {
+		k edgeKey
+		v *edgeVal
+	}
+	sortedEdges := make([]edgeEntry, 0, len(dedupEdges))
 	for k, v := range dedupEdges {
+		sortedEdges = append(sortedEdges, edgeEntry{k: k, v: v})
+	}
+	slices.SortFunc(sortedEdges, func(a, b edgeEntry) int {
+		if c := cmp.Compare(a.k.from, b.k.from); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.k.to, b.k.to); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.k.prov, b.k.prov)
+	})
+
+	for _, e := range sortedEdges {
+		k, v := e.k, e.v
 		if !funcSet[k.from] && !externalNodes[k.from] {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"time"
 
 	"aotopsy/internal/cluster"
@@ -66,6 +67,7 @@ func RunFromMain(d FromMainDeps) error {
 			candidates = append(candidates, va)
 		}
 	}
+	slices.Sort(candidates)
 	if len(candidates) == 0 {
 		runAppVA, ok := FindRunAppVA(d.SymbolNames)
 		if !ok {
@@ -256,7 +258,14 @@ func FindCallerOfAmongAppCode(
 	libraryURLForCodeRef func(int) string,
 	isFrameworkLibraryURL func(string) bool,
 ) (uint64, error) {
-	for va, r := range rangeByVA {
+	vas := make([]uint64, 0, len(rangeByVA))
+	for va := range rangeByVA {
+		vas = append(vas, va)
+	}
+	slices.Sort(vas)
+
+	for _, va := range vas {
+		r := rangeByVA[va]
 		if isFrameworkLibraryURL(libraryURLForCodeRef(r.RefID)) {
 			continue
 		}

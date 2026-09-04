@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -53,11 +54,18 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, edges []d
 		}
 	}
 
+	chNames := make([]string, 0, len(channelMap))
+	for name := range channelMap {
+		chNames = append(chNames, name)
+	}
+	slices.Sort(chNames)
+
 	// 2. Scan call edges for MethodChannel handlers and invocations.
 	for _, edge := range edges {
 		target := edge.Target
 		if strings.Contains(target, "MethodChannel") || strings.Contains(target, "BasicMessageChannel") || strings.Contains(target, "EventChannel") {
-			for chName, rec := range channelMap {
+			for _, chName := range chNames {
+				rec := channelMap[chName]
 				if strings.Contains(edge.FromFunc, chName) || strings.Contains(target, chName) {
 					rec.CallSites = append(rec.CallSites, edge.FromFunc)
 				}
@@ -66,18 +74,12 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, edges []d
 	}
 
 	var results []PlatformChannelRecord
-	for _, rec := range channelMap {
+	for _, chName := range chNames {
+		rec := channelMap[chName]
 		// Deduplicate call sites
 		if len(rec.CallSites) > 1 {
-			seen := make(map[string]bool)
-			var deduped []string
-			for _, cs := range rec.CallSites {
-				if !seen[cs] {
-					seen[cs] = true
-					deduped = append(deduped, cs)
-				}
-			}
-			rec.CallSites = deduped
+			slices.Sort(rec.CallSites)
+			rec.CallSites = slices.Compact(rec.CallSites)
 		}
 		results = append(results, *rec)
 	}
