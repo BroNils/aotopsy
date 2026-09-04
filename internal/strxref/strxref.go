@@ -12,10 +12,10 @@ import (
 
 // Reference is one function that loads one of the target pool indices.
 type Reference struct {
-	FuncName  string // resolved function name
-	FuncVA    uint64 // function's start VA
-	InstrAddr uint64 // exact address of the pool-load instruction
-	PoolIndex int    // which pool slot it loaded
+	FuncName  string `json:"func_name"`
+	FuncVA    uint64 `json:"func_va"`
+	InstrAddr uint64 `json:"instr_addr"`
+	PoolIndex int    `json:"pool_index"`
 }
 
 // Options bounds FindPoolReferences' cost.
