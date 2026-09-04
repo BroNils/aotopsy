@@ -213,9 +213,14 @@ func hasAnyHit(candidates []FindCandidate) bool {
 }
 
 func classifyFindResult(r *FindResult) {
-	// Sort candidates: symbols first, then magic, then none.
+	// Sort candidates: symbols first, then magic, then none. Stable secondary key on PathInAPK.
 	sort.Slice(r.Candidates, func(i, j int) bool {
-		return hitPriority(r.Candidates[i].Hit) < hitPriority(r.Candidates[j].Hit)
+		pi := hitPriority(r.Candidates[i].Hit)
+		pj := hitPriority(r.Candidates[j].Hit)
+		if pi != pj {
+			return pi < pj
+		}
+		return r.Candidates[i].PathInAPK < r.Candidates[j].PathInAPK
 	})
 
 	for i := range r.Candidates {
