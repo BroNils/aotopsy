@@ -694,8 +694,15 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 			e.emit(indent, "}")
 			return
 		}
-		e.emit(indent, "// switch dispatch via %s (indirect branch / jump table)", ins.Target)
-		e.emit(indent, "// target = %s;", ins.Target)
+		// No jump table for this one, so it is not known to be a switch.
+		//
+		// Calling every unresolved indirect jump a "switch dispatch" was a
+		// mislabel, and a load-bearing one: dart-3.7.0-realapp2-x64 has 45 jump
+		// tables in the entire binary against 270 of these in 400 functions, so
+		// the overwhelming majority are something else -- a tail call through a
+		// register, most often. Naming the mechanism (an indirect jump) instead
+		// of guessing the construct is what the tool can actually support.
+		e.emit(indent, "// indirect jump via %s (target computed at runtime)", ins.Target)
 		e.stats.UnresolvedCF++
 		return
 	}

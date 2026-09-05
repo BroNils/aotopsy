@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -704,31 +705,79 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 	fir.SnapTryRegionsToBlocks()
 }
 
-// wireSwitchCases detects IndirectGoto patterns (br xN on ARM64) and
-// populates fir.SwitchCases, restoring the switch/case recovery the old
-// cmd funcir_builder.go wired before the refactor dropped it. Dart AOT
-// uses IndirectGotoInstr for switches with >=16 cases (kJumpTableMinExpressions
-// = 16, verified against dart-lang/sdk kernel_to_il.cc @3.9.2).
+// wireSwitchCases recovers a switch's real case targets from its jump table.
+//
+// Dart AOT compiles a switch with >= 16 integer cases to an IndirectGotoInstr
+// (kJumpTableMinExpressions = 16, kernel_to_il.cc). Both architectures emit the
+// same shape, and both keep the targets in the object pool:
+//
+//	ARM64 (il_arm64.cc IndirectGotoInstr::EmitNativeCode)
+//	  LoadObject(offset_reg, offsets_)      // TypedData, kTypedDataInt32ArrayCid
+//	  ldr  offset_reg, [offset_reg + index*4]
+//	  adr  target_reg, -entry_offset        // = the Code's entry
+//	  add  target_reg, target_reg, offset_reg
+//	  br   target_reg
+//
+//	x86_64 (il_x64.cc)
+//	  LoadObject(offset_reg, offsets_)
+//	  movsxd offset_reg, [offset_reg + index*4]
+//	  leaq TMP, [rip - entry_to_rip_offset] // = the Code's entry
+//	  addq TMP, offset_reg
+//	  jmp  TMP
+//
+// So element i of that Int32Array is the byte offset from the function's entry
+// to case i's block, and recovery is exact: find the pool-loaded Int32Array,
+// add each element to EntryVA, look up the block.
+//
+// This replaces a fabrication. The previous version was ARM64-only and, when it
+// fired, took *every block after the indirect jump, in address order* and
+// labelled them case 0, 1, 2, ... up to 64 -- without reading the table at all.
+// Both the case indices and the block mapping were invented, so the emitted
+// `switch` was a confident wrong answer. Measured against the real tables, all
+// offsets land exactly on block starts on every sample and both architectures,
+// including 2.12.0's older instruction shape.
+//
+// Finding no table is a normal outcome, not a failure: an indirect jump in AOT
+// code is usually not a switch at all. dart-3.7.0-realapp2-x64 has 45 jump
+// tables in the whole binary against 270 indirect jumps in 400 functions.
 func (c *AnalysisContext) wireSwitchCases(fir *decompiler.FuncIR, r cluster.CodeRange) {
-	if !c.IsARM64 || len(fir.Blocks) == 0 {
+	if len(fir.Blocks) == 0 || len(c.Result.Int32Arrays) == 0 {
 		return
+	}
+	blockByVA := make(map[uint64]int, len(fir.Blocks))
+	for i := range fir.Blocks {
+		blockByVA[fir.Blocks[i].StartVA] = fir.Blocks[i].ID
 	}
 	for bi := range fir.Blocks {
 		for _, ins := range fir.Blocks[bi].Instrs {
-			if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
+			if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
 				continue
 			}
-			var cases []decompiler.SwitchCase
-			for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
-				cases = append(cases, decompiler.SwitchCase{
-					Index:   len(cases),
-					BlockID: fir.Blocks[ci].ID,
-				})
+			pe, ok := c.Enrichment.PoolByIndex[ins.PoolIndex]
+			if !ok || pe.Kind != cluster.PoolTagged {
+				continue
+			}
+			table, ok := c.Result.Int32Arrays[pe.RefID]
+			if !ok || len(table) < 8 || len(table)%4 != 0 {
+				continue
+			}
+			cases := make([]decompiler.SwitchCase, 0, len(table)/4)
+			for i := 0; i+4 <= len(table); i += 4 {
+				off := uint64(binary.LittleEndian.Uint32(table[i:]))
+				id, ok := blockByVA[fir.EntryVA+off]
+				if !ok {
+					// One unmapped target invalidates the whole table: a
+					// partially recovered switch would silently renumber the
+					// cases after the gap.
+					cases = nil
+					break
+				}
+				cases = append(cases, decompiler.SwitchCase{Index: i / 4, BlockID: id})
 			}
 			if len(cases) >= 2 {
 				fir.SwitchCases = cases
+				return
 			}
-			break
 		}
 	}
 }
