@@ -13,11 +13,31 @@ type InstructionsTable struct {
 	Length             uint32 // total number of table entries (stubs + code)
 	FirstEntryWithCode uint32 // index of first entry that maps to a Code object
 	Entries            []InstrTableEntry
+
+	// CanonicalStackMapOffset is the Data header's first word: the offset of
+	// the canonicalized global stack-map table, relative to the Data struct.
+	// Entries whose payload uses the table-referencing encoding resolve their
+	// bitmaps through it.
+	CanonicalStackMapOffset uint32
+
+	// RoData is the table's Data struct and everything after it, so an
+	// entry's StackMapOffset can be resolved: the SDK's StackMapAt is
+	// `reinterpret_cast<uword>(this) + offset` with `this` being the Data
+	// struct, so offsets index into this slice directly.
+	//
+	// This is where AOT stack maps live from Dart 2.16 onwards. The Code
+	// object stopped carrying compressed_stackmaps_ then (app_snapshot.cc
+	// guards it with kind() == kFullJIT), and the information moved here --
+	// so a snapshot with zero CompressedStackMaps clusters still has a stack
+	// map for every entry.
+	RoData []byte
 }
 
 // InstrTableEntry is one entry in the InstructionsTable.
 type InstrTableEntry struct {
-	PCOffset       uint32 // offset from instructions image base
+	PCOffset uint32 // offset from instructions image base
+	// StackMapOffset locates this entry's CompressedStackMaps payload within
+	// InstructionsTable.RoData. Zero means the entry has no stack map.
 	StackMapOffset uint32
 }
 
@@ -101,6 +121,7 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 	payloadOff := int(tableObjOff) + oneByteStringHeaderSize
 
 	// Read Data header: {canon_offset u32, length u32, first_entry_with_code u32, padding u32}
+	canonOff := binary.LittleEndian.Uint32(data[payloadOff : payloadOff+4])
 	length := binary.LittleEndian.Uint32(data[payloadOff+4 : payloadOff+8])
 	firstCode := binary.LittleEndian.Uint32(data[payloadOff+8 : payloadOff+12])
 
@@ -129,10 +150,52 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 	}
 
 	return &InstructionsTable{
-		Length:             length,
-		FirstEntryWithCode: firstCode,
-		Entries:            entries,
+		Length:                  length,
+		FirstEntryWithCode:      firstCode,
+		Entries:                 entries,
+		CanonicalStackMapOffset: canonOff,
+		RoData:                  data[payloadOff:],
 	}, nil
+}
+
+// StackMapsAt decodes the CompressedStackMaps payload of table entry i.
+//
+// Returns nil when the entry has none, or when the table predates the move of
+// stack maps into the instructions table (Dart <= 2.15, where they are still
+// on the Code object and reached through Code.CompressedStackMapsRef).
+//
+// Offsets are relative to the Data struct, matching the SDK:
+//
+//	const Payload* StackMapAt(intptr_t offset) const {
+//	  return reinterpret_cast<Payload*>(reinterpret_cast<uword>(this) + offset);
+//	}
+func (t *InstructionsTable) StackMapsAt(i int) ([]StackMapEntry, error) {
+	if t == nil || i < 0 || i >= len(t.Entries) {
+		return nil, nil
+	}
+	off := t.Entries[i].StackMapOffset
+	if off == 0 || int(off) >= len(t.RoData) {
+		return nil, nil
+	}
+	var global []byte
+	if c := t.CanonicalStackMapOffset; c != 0 && int(c) < len(t.RoData) {
+		global = t.RoData[c:]
+	}
+	return DecodeCompressedStackMaps(t.RoData[off:], global)
+}
+
+// HasStackMaps reports whether this table carries stack maps at all, so a
+// caller can tell "this build has none" from "we did not look".
+func (t *InstructionsTable) HasStackMaps() bool {
+	if t == nil || len(t.RoData) == 0 {
+		return false
+	}
+	for i := range t.Entries {
+		if t.Entries[i].StackMapOffset != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveCodeRanges maps each CodeEntry to its instruction byte range using the

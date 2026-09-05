@@ -31,37 +31,106 @@ package cluster
 // Verified via gh api to dart-lang/sdk at tag 3.12.2.
 
 // StackMapEntry is one decoded CSM entry at a specific PC offset.
+//
+// Both bitmaps describe FRAME SLOTS, not registers, and both say "holds a
+// tagged pointer" rather than "is live". stack_frame.cc walks them like this:
+//
+//	intptr_t spill_slot_count = it.SpillSlotBitCount();
+//	for (bit = 0; bit < spill_slot_count; ++bit) {
+//	  if (it.IsObject(bit)) visitor->VisitPointer(last);
+//	  --last;                       // last starts at fp + first_local_from_fp
+//	}
+//	for (bit = it.Length()-1; bit >= spill_slot_count; --bit) {
+//	  if (it.IsObject(bit)) visitor->VisitPointer(first);
+//	  ++first;                      // first starts at sp
+//	}
+//
+// So spill bit i is the slot i words below the first local, and the remaining
+// bits are the saved-register and slow-path-argument slots at the top of the
+// frame, consumed from the END of the bitmap downwards.
+//
+// The distinction matters: a slot holding an unboxed double has a clear bit
+// and is perfectly live, so a clear bit proves nothing about liveness. Only
+// SET bits carry information -- "this slot definitely holds a tagged object".
+//
+// The two bitmaps are ONE tightly packed bit array, not two byte arrays: the
+// saved-slot bits begin at bit index SpillSlotCount, which is almost never a
+// byte boundary. An earlier version of this decoder split the payload at
+// ceil(SpillSlotCount/8) bytes, which misaligned every saved-slot bit whenever
+// the spill count was not a multiple of 8, and could slice past the end of the
+// payload because ceil(a/8)+ceil(b/8) exceeds ceil((a+b)/8). Keeping the single
+// array and the two counts, exactly as the VM does, removes both faults.
 type StackMapEntry struct {
-	PCOffset      uint32 // accumulated PC offset from function entry
-	SpillSlotBits []byte // bitmap: bit i = spill slot i holds a live object
-	NonSpillBits  []byte // bitmap: bit i = non-spill register i holds a live object
+	PCOffset       uint32 // accumulated PC offset from function entry
+	SpillSlotCount int    // number of leading bits describing spill slots
+	SavedSlotCount int    // number of trailing bits describing saved slots
+	// Bits is the packed bitmap, LSB-first within each byte, matching
+	// UntaggedCompressedStackMaps::Payload. Index it through the accessors.
+	Bits []byte
 }
 
-// IsSpillObject returns whether spill slot index holds a live tagged object pointer.
+// Length is the total bit count, matching CompressedStackMapsIterator::Length.
+func (e StackMapEntry) Length() int { return e.SpillSlotCount + e.SavedSlotCount }
+
+// isObject is the VM's IsObject(bit_index): LSB-first within each byte.
+func (e StackMapEntry) isObject(bitIndex int) bool {
+	if bitIndex < 0 || bitIndex >= e.Length() {
+		return false
+	}
+	byteIdx := bitIndex / 8
+	if byteIdx >= len(e.Bits) {
+		return false
+	}
+	return (e.Bits[byteIdx] & (1 << uint(bitIndex%8))) != 0
+}
+
+// IsSpillObject reports whether spill slot i definitely holds a tagged object
+// pointer at this safepoint. False means "not a pointer", which includes
+// unboxed live values -- it does not mean the slot is dead.
 func (e StackMapEntry) IsSpillObject(slotIndex int) bool {
-	if slotIndex < 0 {
+	if slotIndex < 0 || slotIndex >= e.SpillSlotCount {
 		return false
 	}
-	byteIdx := slotIndex / 8
-	bitIdx := uint(slotIndex % 8)
-	if byteIdx >= len(e.SpillSlotBits) {
-		return false
-	}
-	return (e.SpillSlotBits[byteIdx] & (1 << bitIdx)) != 0
+	return e.isObject(slotIndex)
 }
 
-// IsNonSpillObject returns whether non-spill register index holds a live tagged object pointer.
-func (e StackMapEntry) IsNonSpillObject(regIndex int) bool {
-	if regIndex < 0 {
+// SavedSlotIsObject reports whether the saved-register slot at `slotsFromSP`
+// words above SP holds a tagged object.
+//
+// The VM reads these bits backwards -- the slot at SP is the LAST bit of the
+// whole bitmap, not the first saved-slot bit -- so this is not an index into
+// the payload and must not be used as one. An earlier accessor here was named
+// IsNonSpillObject and documented as taking a *register index*, which is
+// neither the right domain nor the right order; the emitter used it to delete
+// register values and was wrong on both counts.
+func (e StackMapEntry) SavedSlotIsObject(slotsFromSP int) bool {
+	if slotsFromSP < 0 || slotsFromSP >= e.SavedSlotCount {
 		return false
 	}
-	byteIdx := regIndex / 8
-	bitIdx := uint(regIndex % 8)
-	if byteIdx >= len(e.NonSpillBits) {
-		return false
-	}
-	return (e.NonSpillBits[byteIdx] & (1 << bitIdx)) != 0
+	return e.isObject(e.Length() - 1 - slotsFromSP)
 }
+
+// ObjectSpillSlotOffsets returns the frame-pointer-relative BYTE offsets of
+// the spill slots that definitely hold tagged objects at this safepoint.
+//
+// Spill slot i sits at fp + (kFirstLocalSlotFromFp - i) * wordSize, with
+// kFirstLocalSlotFromFp = -3 on both ARM64 and x64 (stack_frame_arm64.h:42,
+// stack_frame_x64.h:45). Only set bits are reported: a clear bit means "not a
+// pointer", not "unused".
+func (e StackMapEntry) ObjectSpillSlotOffsets(wordSize int64) []int64 {
+	var out []int64
+	for i := 0; i < e.SpillSlotCount; i++ {
+		if e.IsSpillObject(i) {
+			out = append(out, (FirstLocalSlotFromFP-int64(i))*wordSize)
+		}
+	}
+	return out
+}
+
+// FirstLocalSlotFromFP is kFirstLocalSlotFromFp: the word offset from FP to
+// the first local slot. -3 on ARM64 (stack_frame_arm64.h:42) and on x64
+// (stack_frame_x64.h:45).
+const FirstLocalSlotFromFP int64 = -3
 
 // DecodeCompressedStackMaps decodes a CSM payload into per-PC register/spill
 // liveness entries. Returns entries sorted by PC offset.
@@ -88,11 +157,11 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 
 	// Global table CSM: entries have no PC offset, just bitmaps.
 	if globalTableBit {
-		spillBits, nonSpillBits, _, err := readCSMBitmapBody(data, pos)
-		if err != nil {
-			return nil, err
+		e, _, ok := readCSMBitmapBody(data, pos)
+		if !ok {
+			return nil, nil
 		}
-		return []StackMapEntry{{PCOffset: 0, SpillSlotBits: spillBits, NonSpillBits: nonSpillBits}}, nil
+		return []StackMapEntry{e}, nil
 	}
 
 	// Prepare global table data if referenced.
@@ -122,50 +191,28 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 			}
 			pos = newPos2
 			currentPC += uint32(pcDelta)
-			var spillBits, nonSpillBits []byte
+			var e StackMapEntry
 			if len(gtData) > 0 && int(gtOffset) < len(gtData) {
-				spillBits, nonSpillBits, _, _ = readCSMBitmapBody(gtData, int(gtOffset))
+				e, _, _ = readCSMBitmapBody(gtData, int(gtOffset))
 			}
-			entries = append(entries, StackMapEntry{
-				PCOffset:      currentPC,
-				SpillSlotBits: spillBits,
-				NonSpillBits:  nonSpillBits,
-			})
+			e.PCOffset = currentPC
+			entries = append(entries, e)
 		} else {
-			// Standalone entry: PC delta + spill bits + non-spill bits + bitmap.
+			// Standalone entry: PC delta, then the same body shape the
+			// global table uses.
 			pcDelta, newPos, err := readLEB128(data, pos)
 			if err != nil {
 				break
 			}
 			pos = newPos
-			spillCount, newPos2, err := readLEB128(data, pos)
-			if err != nil {
+			e, newPos2, ok := readCSMBitmapBody(data, pos)
+			if !ok {
 				break
 			}
 			pos = newPos2
-			nonSpillCount, newPos3, err := readLEB128(data, pos)
-			if err != nil {
-				break
-			}
-			pos = newPos3
-			totalBits := int(spillCount) + int(nonSpillCount)
-			totalBytes := (totalBits + 7) / 8
-			if pos+totalBytes > len(data) {
-				break
-			}
-			bitmap := data[pos : pos+totalBytes]
-			pos += totalBytes
 			currentPC += uint32(pcDelta)
-			spillBytes := (int(spillCount) + 7) / 8
-			nonSpillBytes := (int(nonSpillCount) + 7) / 8
-			spillBits := bitmap[:spillBytes]
-			nonSpillStart := spillBytes
-			nonSpillBits := bitmap[nonSpillStart : nonSpillStart+nonSpillBytes]
-			entries = append(entries, StackMapEntry{
-				PCOffset:      currentPC,
-				SpillSlotBits: append([]byte(nil), spillBits...),
-				NonSpillBits:  append([]byte(nil), nonSpillBits...),
-			})
+			e.PCOffset = currentPC
+			entries = append(entries, e)
 		}
 	}
 
@@ -192,28 +239,38 @@ func readLEB128(data []byte, pos int) (uint64, int, error) {
 	return 0, pos, nil
 }
 
-// readCSMBitmapBody reads spill/non-spill bit counts and the bitmap body
-// from a global table entry at position pos.
-func readCSMBitmapBody(data []byte, pos int) ([]byte, []byte, int, error) {
+// readCSMBitmapBody reads the two bit counts and the packed bitmap that follow
+// them, which is the body shape shared by standalone entries and global-table
+// entries. It returns the entry (without a PC offset), the position just past
+// the body, and whether the body was well-formed.
+//
+// A truncated or absurd body returns ok=false rather than a partial entry:
+// these payloads are attacker-influenced binary data, and the previous version
+// sliced first and checked later, which panicked on a real 2.16.0 sample.
+func readCSMBitmapBody(data []byte, pos int) (StackMapEntry, int, bool) {
 	spillCount, newPos, err := readLEB128(data, pos)
 	if err != nil {
-		return nil, nil, pos, err
+		return StackMapEntry{}, pos, false
 	}
 	pos = newPos
-	nonSpillCount, newPos2, err := readLEB128(data, pos)
+	savedCount, newPos2, err := readLEB128(data, pos)
 	if err != nil {
-		return nil, nil, pos, err
+		return StackMapEntry{}, pos, false
 	}
 	pos = newPos2
-	totalBits := int(spillCount) + int(nonSpillCount)
-	totalBytes := (totalBits + 7) / 8
-	if pos+totalBytes > len(data) {
-		return nil, nil, pos, nil
+	// Guard the addition itself: both counts are LEB128 and unvalidated.
+	const maxBits = 1 << 20
+	if spillCount > maxBits || savedCount > maxBits {
+		return StackMapEntry{}, pos, false
 	}
-	bitmap := data[pos : pos+totalBytes]
-	pos += totalBytes
-	spillBits := bitmap[:(int(spillCount)+7)/8]
-	nonSpillStart := (int(spillCount) + 7) / 8
-	nonSpillBits := bitmap[nonSpillStart : nonSpillStart+(int(nonSpillCount)+7)/8]
-	return append([]byte(nil), spillBits...), append([]byte(nil), nonSpillBits...), pos, nil
+	totalBytes := (int(spillCount) + int(savedCount) + 7) / 8
+	if pos+totalBytes > len(data) {
+		return StackMapEntry{}, pos, false
+	}
+	e := StackMapEntry{
+		SpillSlotCount: int(spillCount),
+		SavedSlotCount: int(savedCount),
+		Bits:           append([]byte(nil), data[pos:pos+totalBytes]...),
+	}
+	return e, pos + totalBytes, true
 }
