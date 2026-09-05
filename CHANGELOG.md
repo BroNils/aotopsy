@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An unresolved x86_64 pool load left the destination register carrying its
+  previous provenance.** Removing the fabricated `pp[0]` fallback took the
+  `else` branch away entirely, so `mov reg, [PP+disp]` with a displacement that
+  names no pool slot neither defined nor killed `reg`. The block then reported
+  itself as transparent for that register, and the reaching-definitions fixpoint
+  carried the note from *before* the load straight through — a stale claim
+  attributed to an instruction that had overwritten it. The load now kills the
+  register: an unresolved slot is unknown, not zero and not whatever was there a
+  moment ago. Measured 0 of 47,172 pool loads across three x64 samples reach this
+  path, so nothing observable changes today; it is a correctness hole, not an
+  active defect.
+- **The same hole in type inference.** `handleX86Load` returned early on an
+  unresolvable pool index without touching the destination's type, so a
+  `KnownClass` survived a load it did not survive. `KnownClass` is authoritative
+  downstream — it selects dispatch targets. The destination is now `Top`.
+- **A conditional jump with an unresolvable target no longer swallows the branch.**
+  The unified block partitioner classified it `FlowNormal`, so no leader was
+  placed after it and the block did not end — quieter than the pre-unification
+  partitioner, which split and emitted the fallthrough edge alone. Unreachable on
+  the corpus (0 of 120,814 conditional jumps; every x86-64 Jcc carries a
+  rel8/rel32), fixed because a silently merged basic block is expensive to notice.
+- **`NO_COLOR` now beats `CLICOLOR_FORCE`.** Detection checked force first, so
+  `NO_COLOR=1 CLICOLOR_FORCE=1` emitted escapes at a user who had opted out.
+  Ordering matched against `muesli/termenv`, whose `EnvNoColor` documents that
+  `NO_COLOR` is honoured "ignoring CLICOLOR/CLICOLOR_FORCE". `CLICOLOR=0` remains
+  the weaker request and still yields to force, and a forced run on `TERM=dumb`
+  gets plain 16-colour ANSI rather than nothing.
+- **`--graph` draws call targets in per-function CFGs again.** Routing the
+  renderer from `internal/callgraph` to `internal/render` dropped them: the old
+  renderer read `BasicBlock.Calls`, and `disasm.BasicBlock` has no such field. The
+  CFG showed where a block branched but no longer what it called.
+
+### Changed
+- **One implementation of function slicing.** The `PCOffset - CodeOff` / clamp /
+  add-CodeVA arithmetic was written out by hand at nineteen call sites across six
+  packages; it now lives once in `cluster.CodeImage`, which `analysis.CodeImage`
+  embeds and extends with naming. Sites that only needed a virtual address
+  previously skipped both the clamp and the underflow check, so a range beginning
+  before the image produced an address near 2^64 instead of being rejected.
+  `SliceExact` is the all-or-nothing variant for content hashing, where a clamped
+  read would digest something that is not the function.
+
+### Added
+- **JSONL schema gates.** `functions.jsonl`, `call_edges.jsonl`,
+  `string_refs.jsonl`, `unresolved_thr.jsonl`, ffi-trace findings and strxref
+  references now have tests pinning their exact wire keys and their `omitempty`
+  sets. These names are a published interface, and a renamed key fails silently on
+  both sides — it decodes to the zero value. That is how `string_refs.jsonl`'s
+  caller name reached the Frida exporter as `""`: the writer said `func`, the
+  reader asked for `from_func`, and neither complained.
+- **A test that reads a `.dot`.** Golden covers the JSONL artifacts only, so the
+  graph output had no coverage at all, which is why the CFG regression above went
+  unnoticed.
+- `analysis.DefaultMaxScan` replaces `ffitrace`'s private copy of the same number.
+  After the scan loop moved to `analysis`, that copy survived only in ffitrace's
+  test, which therefore asserted against a constant that no longer drove anything.
+
 ## [1.4.0] - 2026-09-03
 
 The per-version VM tables are now generated from dart-lang/sdk, and every

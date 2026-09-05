@@ -65,15 +65,18 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 	if d.GcEveryN <= 0 {
 		d.GcEveryN = 100
 	}
+	im := cluster.CodeImage{CodeVA: d.CodeVA, CodeOff: d.CodeOff}
 	rangeMatchesFilter := func(r cluster.CodeRange) bool {
-		if r.Size == 0 || r.RefID < 0 {
+		if r.RefID < 0 {
+			return false
+		}
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
 			return false
 		}
 		if d.FilterSubstr == "" {
 			return true
 		}
-		funcStart := uint64(r.PCOffset) - d.CodeOff
-		funcVA := d.CodeVA + funcStart
 		return strings.Contains(d.SymbolNames[funcVA], d.FilterSubstr)
 	}
 
@@ -139,9 +142,9 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 		}
 
 		if d.DebugTrace {
-			funcStart := uint64(r.PCOffset) - d.CodeOff
-			funcVA := d.CodeVA + funcStart
-			fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s\n", funcVA, r.Size, d.SymbolNames[funcVA])
+			if funcVA, ok := im.FuncVA(r); ok {
+				fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s\n", funcVA, r.Size, d.SymbolNames[funcVA])
+			}
 		}
 
 		func() {
@@ -171,8 +174,13 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			AggregateStats(&agg, art.Stats)
 			emitted++
 			if d.GenFrida {
-				funcStart := uint64(r.PCOffset) - d.CodeOff
-				fridaHooks = append(fridaHooks, frida.FridaHook{VA: d.CodeVA + funcStart, Name: art.FunctionName, ArgRegs: frida.RealArgRegs(fir)})
+				// Probe collection stays outside the address check: a hook
+				// needs a VA, an indirect-call probe does not, and gating
+				// both on the address would drop probes for a function
+				// whose range merely failed to place.
+				if funcVA, ok := im.FuncVA(r); ok {
+					fridaHooks = append(fridaHooks, frida.FridaHook{VA: funcVA, Name: art.FunctionName, ArgRegs: frida.RealArgRegs(fir)})
+				}
 				for _, p := range frida.CollectIndirectCallProbes(fir) {
 					if len(fridaProbes) >= frida.MaxFridaProbes {
 						fridaProbesDropped++

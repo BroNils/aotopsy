@@ -145,7 +145,18 @@ func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
 				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 					return FlowInfo{Kind: FlowCondJump, Target: t, HasTarget: true}
 				}
-				return FlowInfo{Kind: FlowNormal}
+				// A conditional branch whose target does not resolve is
+				// still a conditional branch: it ends the block and its
+				// fallthrough edge is real. Reporting FlowNormal here
+				// swallowed the branch entirely -- no leader at i+1, no
+				// block boundary -- which is a quieter answer than the
+				// pre-unification partitioner gave (it split anyway and
+				// emitted the F edge alone). Unreachable on the corpus
+				// today, since every x86-64 Jcc carries a rel8/rel32:
+				// measured 0 of 120,814 conditional jumps across three
+				// x64 samples. Kept honest anyway, because the cost of
+				// being wrong here is a silently merged basic block.
+				return FlowInfo{Kind: FlowCondJump}
 			default:
 				return FlowInfo{Kind: FlowNormal}
 			}
@@ -228,10 +239,31 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 				}
 			case sdk.X86PP:
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
-				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
-					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
-				} else if poolIdxOK {
-					x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d]", poolIdx))
+				switch {
+				case !poolIdxOK:
+					// The displacement does not name a pool slot (it is
+					// negative relative to the first element, or not a
+					// multiple of the element size). The load still
+					// happened, so the destination must be killed.
+					//
+					// This branch used to emit pp[0] -- a slot the
+					// analysis had not identified, claimed as if it had.
+					// Removing that fabrication without putting a kill in
+					// its place is the opposite error and a worse one:
+					// leaving the register untouched makes the block
+					// report itself as transparent for it, so
+					// runProvFixpoint carries the provenance from BEFORE
+					// the load straight through, and a stale note gets
+					// attributed to an instruction that overwrote it. An
+					// unresolved slot is unknown, not zero, and not
+					// whatever the register held a moment ago.
+					x86Kill(regs, touched, dstIdx)
+				default:
+					if disp, ok := poolDisplay[poolIdx]; ok {
+						x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d] %s", poolIdx, disp))
+					} else {
+						x86Define(regs, touched, dstIdx, fmt.Sprintf("pp[%d]", poolIdx))
+					}
 				}
 			default:
 				// Generic memory-dereference load (vtable/closure-style calls

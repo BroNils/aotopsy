@@ -170,7 +170,7 @@ func cmdRender(args []string) error {
 			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir cfg: %w", err)
 			}
-			cfgFuncs, err = generateCFGs(funcs, reachable, *asmDir, cfgDir, !*noDot)
+			cfgFuncs, err = generateCFGs(funcs, edges, reachable, *asmDir, cfgDir, !*noDot)
 			if err != nil {
 				return fmt.Errorf("generate CFGs: %w", err)
 			}
@@ -196,7 +196,13 @@ func cmdRender(args []string) error {
 	return nil
 }
 
-func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, cfgDir string, genSVG bool) (int, error) {
+func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, asmDir, cfgDir string, genSVG bool) (int, error) {
+	// Call edges bucketed by caller, so each CFG can be drawn with the
+	// callees of that function rather than of the whole binary.
+	edgesByFunc := make(map[string][]disasm.CallEdgeRecord, len(funcs))
+	for _, e := range edges {
+		edgesByFunc[e.FromFunc] = append(edgesByFunc[e.FromFunc], e)
+	}
 	count := 0
 	for _, f := range funcs {
 		if !reachable[f.Name] {
@@ -231,7 +237,7 @@ func generateCFGs(funcs []disasm.FuncRecord, reachable map[string]bool, asmDir, 
 			continue
 		}
 
-		dot := render.CFGDOT(cfg, render.NASA)
+		dot := render.CFGDOT(cfg, edgesByFunc[f.Name], render.NASA)
 		dotPath := filepath.Join(cfgDir, safeName+".dot")
 		if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
 			return count, fmt.Errorf("write %s: %w", dotPath, err)
