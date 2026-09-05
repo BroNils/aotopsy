@@ -228,14 +228,11 @@ func (e *emitter) extractLoopCondition(id int) string {
 		}
 	}
 
-	// Check if taken successor is a back-edge (exits loop by branching back)
-	takenIsBackEdge := false
-	if takenID >= 0 && takenID < len(e.fir.Blocks) {
-		target := &e.fir.Blocks[takenID]
-		if target.StartVA <= blk.StartVA {
-			takenIsBackEdge = true
-		}
-	}
+	// Check if taken successor is a back-edge (exits loop by branching back).
+	// Dominance, not address order: a backward JUMP is not a back EDGE, and
+	// treating the two as the same inverted loop conditions on the strength of
+	// a stack-overflow slow path. See dom.go.
+	takenIsBackEdge := dominates(e.idom, takenID, blk.ID)
 
 	if takenIsBackEdge {
 		// Taken = back-edge (exit loop), fall-through = continue.
@@ -245,14 +242,6 @@ func (e *emitter) extractLoopCondition(id int) string {
 	}
 
 	// Taken = continue loop (forward edge). Condition is as-is.
-	// But verify taken is NOT a back-edge.
-	if takenID >= 0 && takenID < len(e.fir.Blocks) {
-		target := &e.fir.Blocks[takenID]
-		if target.StartVA <= blk.StartVA {
-			return "" // do-while pattern
-		}
-	}
-
 	return cond
 }
 
