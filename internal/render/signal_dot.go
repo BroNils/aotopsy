@@ -158,7 +158,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	// entry points nor signal functions and have exactly 1 in + 1 out edge.
 	for changed := true; changed; {
 		changed = false
-		for name := range pathNodes {
+		// Sorted, not map order: this loop DELETES nodes and rewires edges,
+		// so the iteration order decides which chains collapse and the
+		// rendered graph differs run to run. See sortedSet.
+		for _, name := range sortedSet(pathNodes) {
 			fi := funcMap[name]
 			if fi == nil {
 				continue
@@ -200,6 +203,16 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			}
 		}
 	}
+	// pathBLR is emitted in order at the bottom of this function.
+	sort.Slice(pathBLR, func(a, b int) bool {
+		if pathBLR[a].from != pathBLR[b].from {
+			return pathBLR[a].from < pathBLR[b].from
+		}
+		if pathBLR[a].to != pathBLR[b].to {
+			return pathBLR[a].to < pathBLR[b].to
+		}
+		return pathBLR[a].via < pathBLR[b].via
+	})
 
 	// Collect string ref nodes for signal functions in the path.
 	// Deduplicate by value per function, cap at 5 strings per function.
@@ -212,7 +225,9 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	var strNodes []strNode
 	strEdges := make(map[[2]string]bool) // func DOT id → str DOT id
 	strIdx := 0
-	for name := range pathNodes {
+	// Sorted: strIdx numbers the emitted str_N nodes, so map order would
+	// rename every string node between runs.
+	for _, name := range sortedSet(pathNodes) {
 		fi := funcMap[name]
 		if fi == nil || !signalSet[name] || len(fi.stringRefs) == 0 {
 			continue
@@ -269,7 +284,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	// Group by owner for clustering.
 	ownerNodes := make(map[string][]string)
 	var noOwner []string
-	for name := range pathNodes {
+	for _, name := range sortedSet(pathNodes) {
 		fi := funcMap[name]
 		if fi != nil && fi.owner != "" {
 			ownerNodes[fi.owner] = append(ownerNodes[fi.owner], name)
@@ -310,7 +325,13 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		fmt.Fprintf(&b, "    %s [label=%q%s];\n", id, label, attrs)
 	}
 
-	for owner, names := range ownerNodes {
+	owners := make([]string, 0, len(ownerNodes))
+	for owner := range ownerNodes {
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		names := ownerNodes[owner]
 		if len(names) < 2 {
 			noOwner = append(noOwner, names...)
 			continue
@@ -355,7 +376,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	}
 
 	// BL edges (direct calls).
-	for edge := range pathEdges {
+	for _, edge := range sortedPairs(pathEdges) {
 		fromID := dotID(edge[0])
 		toID := dotID(edge[1])
 		attrs := fmt.Sprintf("color=%q", t.EdgeDirect)
@@ -381,11 +402,43 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	}
 
 	// String ref edges — dotted, thin.
-	for edge := range strEdges {
+	for _, edge := range sortedPairs(strEdges) {
 		fmt.Fprintf(&b, "  %s -> %s [style=dotted, arrowsize=0.3, penwidth=0.4, color=\"#C2185B\"];\n",
 			edge[0], edge[1])
 	}
 
 	b.WriteString("}\n")
 	return b.String()
+}
+
+// sortedSet returns a set's keys in a stable order.
+//
+// Every rendered artifact has to be byte-identical across runs -- the golden
+// gate compares hashes, and a graph that wobbles makes any diff unreadable.
+// signal.dot and signal_cfg.dot are not in the golden manifest, which is
+// exactly why four `for k := range someMap` loops here went unnoticed: one of
+// them deleted nodes while iterating, so the graph's SHAPE differed run to
+// run, not just its line order.
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sortedPairs returns an edge set's keys in a stable order.
+func sortedPairs(m map[[2]string]bool) [][2]string {
+	out := make([][2]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(a, b int) bool {
+		if out[a][0] != out[b][0] {
+			return out[a][0] < out[b][0]
+		}
+		return out[a][1] < out[b][1]
+	})
+	return out
 }

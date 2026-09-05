@@ -20,12 +20,13 @@ import (
 // update. It is reset to zero at the start of each object in the loop.
 type scalarState struct {
 	// Function
-	codeIndex   int
-	numFixed    int
-	numOptional int
-	isStatic    bool
-	hasKindTag  bool
-	funcKind    FunctionKind
+	codeIndex     int
+	numFixed      int
+	numOptional   int
+	isStatic      bool
+	isSuspendable bool
+	hasKindTag    bool
+	funcKind      FunctionKind
 	// Field
 	fieldKindBits int32
 	// Script
@@ -115,6 +116,7 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 			return fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
 		}
 		state.isStatic = (kindTag>>16)&1 == 1
+		state.isSuspendable = kindTag&kindTagModifierMask != 0
 		state.hasKindTag = true
 		state.funcKind = decodeFunctionKind(kindTag, profile)
 		return nil
@@ -126,6 +128,7 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 			return fmt.Errorf("obj %d/%d kind_tag: %w", i, count, err)
 		}
 		state.funcKind = decodeFunctionKind(kindTag, profile)
+		state.isSuspendable = kindTag&kindTagModifierMask != 0
 		state.hasKindTag = true
 		return nil
 	}

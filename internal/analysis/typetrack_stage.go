@@ -444,18 +444,24 @@ func runTypeInference(
 				ctx.FuncOwnerClass[name] = cid
 				// Before Dart 3.4.3 there is no register calling convention:
 				// the receiver comes in on the caller's stack and the prologue
-				// loads it out. Parameter i of a function with N fixed
-				// parameters lives at
-				//   FP + (kParamEndSlotFromFp + N - i) * wordSize
-				// kParamEndSlotFromFp is 1 on BOTH architectures
-				// (stack_frame_arm64.h and stack_frame_x64.h), so the receiver
-				// -- parameter 0 -- is the highest slot on both. Confirmed on a
-				// real 2.12.0 arm64 binary: a two-parameter operator+ loads its
-				// receiver with `ldr x3, [x29, #24]`, which is (1 + 2 - 0) * 8,
-				// and immediately reads a field off it.
+				// loads it out. WHERE depends on whether the function copies
+				// its parameters -- see cluster.ReceiverFrameSlot, which
+				// carries the SDK derivation and all three cases.
+				//
+				// This used to be a single unconditional
+				// `(1 + FixedParamsWithReceiver) * 8`, which is the no-copy
+				// case only. A function with optional parameters addresses
+				// them off ArgumentsDescriptor.count at runtime, so it has no
+				// static slot and the old formula recorded one no load could
+				// match -- a dead seed rather than a wrong one, but still a
+				// claim with nothing behind it.
 				if receiverOnStack && r.RefID >= 0 {
-					if n := pl.CodeNames[r.RefID].FixedParamsWithReceiver; n > 0 {
-						ctx.FuncReceiverStackSlot[name] = (1 + n) * 8
+					ci := pl.CodeNames[r.RefID]
+					if slot, ok := cluster.ReceiverFrameSlot(
+						ci.FixedParamsWithReceiver, ci.OptionalParams,
+						ci.IsSuspendable, 8,
+					); ok {
+						ctx.FuncReceiverStackSlot[name] = int(slot)
 					}
 				}
 			}
@@ -473,11 +479,17 @@ func runTypeInference(
 			// Pre-3.4.3 receiver-slot recovery from CODE when arity was absent
 			// from the snapshot (2.14..3.3.0). See receiver_recovery.go.
 			if receiverOnStack {
-				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
-					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+				if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+					if _, set := ctx.FuncReceiverStackSlot[name]; !set {
 						if slot, ok := typetrack.RecoverReceiverStackSlotARM64(insts, ownerCID, ctx); ok {
 							ctx.FuncReceiverStackSlot[name] = slot
 						}
+					}
+					// Functions that address parameters through the
+					// ArgumentsDescriptor have no static slot for the scan
+					// above to find; their receiver is typed at the load.
+					if pc, rl, ok := typetrack.RecoverArgsDescReceiverARM64(insts, ownerCID, ctx); ok {
+						ctx.ReceiverLoadAtPC[pc] = rl
 					}
 				}
 			}

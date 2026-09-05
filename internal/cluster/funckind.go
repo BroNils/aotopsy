@@ -12,10 +12,18 @@ import "aotopsy/internal/snapshot"
 //	ModifierBits    next
 //	single-bit flags (is_static first) after those
 //
-// so the kind sits at bit 0, but its WIDTH is derived from how many kinds
-// FOR_EACH_RAW_FUNCTION_KIND declares -- and the ORDINAL of any particular
-// kind moves whenever one is inserted before it. Counted from the SDK at
-// every version this project supports:
+// so the kind sits at bit 0 and the ORDINAL of any particular kind moves
+// whenever one is inserted before it.
+//
+// The WIDTH does NOT move, contrary to what this comment used to claim.
+// object.h hardcodes `kKindTagSize = 5` at every version from 2.10.0 through
+// 3.4.3 (checked at each; the enum only becomes computed from
+// `Utils::BitLength(kRecordFieldGetter)` -- still 5 -- somewhere after 3.4.3).
+// The narrower masks in the table below therefore read a 5-bit field with 4
+// bits at 2.12..2.18, which happens to be harmless because the last kind there
+// is FfiTrampoline = 15 and fits. The ordinals are the part that matters, and
+// they are what the table is really for. Counted from the SDK at every version
+// this project supports:
 //
 //	tag       kinds  last kind          width  Constructor
 //	2.10.0      17   FfiTrampoline        5        6
@@ -165,6 +173,20 @@ func funcKindLayoutFor(profile *snapshot.VersionProfile) *funcKindLayout {
 	}
 	return funcKindLayouts[profile.DartVersion]
 }
+
+// kindTagModifierMask selects UntaggedFunction::ModifierBits in kind_tag_:
+// kModifierPos = 14, kModifierSize = 2.
+//
+// Unlike the kind ordinal above, this position does NOT move between versions.
+// object.h's KindTagBits enum hardcodes kKindTagSize = 5 and
+// kRecognizedTagSize = 9 -- read at 2.10.0, 2.12.0, 2.17.6, 2.19.0, 3.0.5,
+// 3.1.0, 3.2.5, 3.3.0 and 3.4.3, identical at every one. The single-bit flags
+// begin at bit 16, which is where IsStatic reads is_static; that agreement is
+// a second, independent confirmation of the position.
+//
+// AsyncModifier is kNoModifier=0, kAsync=1, kSyncGen=2, kAsyncGen=3, so a
+// nonzero field means suspendable.
+const kindTagModifierMask uint32 = 0b11 << 14
 
 // decodeFunctionKind extracts and normalises the kind from a raw kind_tag_.
 func decodeFunctionKind(kindTag uint32, profile *snapshot.VersionProfile) FunctionKind {

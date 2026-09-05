@@ -81,6 +81,18 @@ type TypeContext struct {
 	// receiver really is in R0.
 	FuncReceiverStackSlot map[string]int
 
+	// ReceiverLoadAtPC types the destination of an
+	// ArgumentsDescriptor-relative parameter-0 load, keyed by the load's PC.
+	//
+	// It is keyed by PC rather than by function because that is where the
+	// value comes into existence: a function with optional parameters has no
+	// static receiver slot to seed and no receiver register at entry, so an
+	// entry seed would be overwritten by the load itself. See
+	// RecoverArgsDescReceiverARM64.
+	//
+	// Empty on 3.4.3 and later, where the receiver arrives in R0.
+	ReceiverLoadAtPC map[uint64]ReceiverLoad
+
 	// ClassIDTagPos and ClassIDTagSize are the ClassIdTag bitfield's position
 	// and width in the object header's tags word, from
 	// snapshot.ClassIdTagLayout:
@@ -380,6 +392,9 @@ type TypeContext struct {
 	// FieldValueClass actually produced a hit. Diagnoses whether
 	// the bottleneck is declared types, instance types, or store types.
 	FieldTypeDeclaredHits int // FieldByOwnerOffset + FieldTypes
+	// ArgsDescReceiverHits counts parameter-0 loads typed from the
+	// ArgumentsDescriptor pattern. See RecoverArgsDescReceiverARM64.
+	ArgsDescReceiverHits  int
 	FieldTypeInstanceHits int // InstanceFieldTypes (already counted in InstanceFieldHits)
 	FieldTypeStoreHits    int // FieldStoreTypes
 	// Field type map sizes: how many classes have entries in each map.
@@ -514,6 +529,7 @@ func BuildTypeContext(
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
 		FuncReceiverStackSlot:   make(map[string]int),
+		ReceiverLoadAtPC:        make(map[uint64]ReceiverLoad),
 		FuncReturnType:          make(map[int]int),
 		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),
 		KOriginElement:          kOriginElement,

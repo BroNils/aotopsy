@@ -72,6 +72,18 @@ var goldenFiles = []string{
 	"native_capabilities.jsonl",
 }
 
+// signal.dot and signal_cfg.dot are NOT here, and cannot be: this harness runs
+// the pipeline with Signal:false (their titles embed the host path), so they
+// are never produced during a golden run and would be silently skipped -- a
+// manifest entry that looks like coverage and is not.
+//
+// They were nondeterministic for their whole life because of that gap: five
+// `for k := range someMap` loops across the two renderers, one of which
+// DELETED nodes while iterating, so the graph's SHAPE differed between two
+// runs of the same input. They are covered instead by
+// TestSignalDOTIsDeterministic in internal/render, which exercises the
+// renderers directly and needs no corpus. See docs/findings-repo/011.
+
 type goldenRecord struct {
 	Sample      string            `json:"sample"`
 	InputSHA256 string            `json:"input_sha256"`

@@ -1149,6 +1149,20 @@ func packedParamLayoutFor(dartVersion string) PackedParamLayout {
 //	2.12  optimizable(0,1) backgroundOptimizable(1,1) numTypeParameters(2,7)
 //	      hasNamedOptional(9,1) numFixed(10,10) numOptional(20,10)
 //
+// The 2.12 row applies to 2.12.0 and 2.13.0 ONLY. At 2.14.0 the field became
+// `AtomicBitFieldContainer<uint8_t> packed_fields_` holding just the
+// optimizable flags -- the arity moved to FunctionType. The serializer still
+// writes the word as `s->Write<uint32_t>(packed_fields_)`, so the scalar
+// stream stays aligned and this is NOT a desync; the value simply has nothing
+// above bit 7, so numFixed and numOptional read 0 rather than garbage. That is
+// luck, not design: it holds only because a uint8 cannot reach bits 10 and 20.
+//
+// Measured consequence: arity from packed_fields_ is 7083 functions on
+// dart-2.12.0-arm64 and exactly 0 on 2.17.6, 3.1.0 and 3.3.0. From 2.14 the
+// only source is FunctionType, reachable through a WeakSerializationReference
+// the AOT serializer does not write, so ~80% of functions have no arity at
+// all. See docs/findings-repo/010.
+//
 // Reading 2.10 with the 2.12 shifts does not merely garble a reported arity:
 // num_fixed_parameters is what CodeNameInfo.FixedParamsWithReceiver turns into
 // the frame slot the receiver arrives at on every version before 3.4.3. A wrong

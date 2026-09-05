@@ -9,14 +9,14 @@
     "call_edges.jsonl": 40502,
     "classes.jsonl": 1575,
     "dispatch_table.jsonl": 18929,
-    "field_accessor_xref.jsonl": 3698,
+    "field_accessor_xref.jsonl": 3692,
     "functions.jsonl": 7714,
     "index.jsonl": 7714,
     "native_capabilities.jsonl": 24,
     "pool_immediates.jsonl": 49,
     "string_refs.jsonl": 3163,
     "string_value_xref.jsonl": 1303,
-    "typetrack_report.json": 39,
+    "typetrack_report.json": 41,
     "unresolved_thr.jsonl": 0
   },
   "sha256": {
@@ -24,14 +24,14 @@
     "call_edges.jsonl": "925489ccb841cb6929d9009ea4a39762307e56e70591afcd4af003ec7a2144b6",
     "classes.jsonl": "ba20766ddae2b64ee2b0b0cc83cc58da814fa9ad3a59232ba26eabd2a5e385fd",
     "dispatch_table.jsonl": "06e8a1d5213fa7ec3cae99a359cf5d66fca796f0dc86c35de5e7d6a075ef1690",
-    "field_accessor_xref.jsonl": "4518b6d9dcc1284e082f767b29e5633f6afc81e989432578ef2334d148ed5042",
+    "field_accessor_xref.jsonl": "7a971b7a25dbb05fb4312fec6b071c605a19632e091276a4b2c829a7f61ff879",
     "functions.jsonl": "d6e842ef5538e682c14218ccae906c560ebe45f85971899911c4dcb3ca3a0cfd",
     "index.jsonl": "9dc292aaf7c252ec87bea3d00085eccd7d060c6bcf70f3973096cdfdba6310e9",
     "native_capabilities.jsonl": "5a2cab562bdf9cd407f0388ff3c55bbd9618aa270e92afefb569ec981bfb9618",
     "pool_immediates.jsonl": "26552bc0a29cb07f0570f307dbc49979d0a6e1f9e3bbbd72f40f3364bd6bb778",
     "string_refs.jsonl": "269e96f54bdf717496a69180145836b7353cb9d5dac98e21f4a7fc82a9076295",
     "string_value_xref.jsonl": "367d5b735d83bf9b0ba5693317af92a78d962dd0a072568d6f95c5bb3c908beb",
-    "typetrack_report.json": "1269cb72a8a9b791024146fe27c1884cc06be32a8696013634b511c2486d9a37",
+    "typetrack_report.json": "ab5579eb9e7b00545f9e1fa41520eb75d628c7a16c08bc690be867acf9309921",
     "unresolved_thr.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }

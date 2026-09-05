@@ -110,6 +110,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
 		FuncReturnTypeCount      int `json:"func_return_type_count,omitempty"`
 		FuncReturnTypeSeeds      int `json:"func_return_type_seeds,omitempty"`
+		ArgsDescReceiverHits     int `json:"args_desc_receiver_hits,omitempty"`
+		ArgsDescReceiverFuncs    int `json:"args_desc_receiver_funcs,omitempty"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -156,6 +158,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.SelectorMonomorphicCount = len(ctx.SelectorMonomorphic)
 		report.FuncReturnTypeCount = len(ctx.FuncReturnType)
 		report.FuncReturnTypeSeeds = ctx.FuncReturnTypeSeeds
+		report.ArgsDescReceiverHits = ctx.ArgsDescReceiverHits
+		report.ArgsDescReceiverFuncs = len(ctx.ReceiverLoadAtPC)
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")
