@@ -44,12 +44,28 @@ var (
 	reLibMangle = regexp.MustCompile(`@\d+`)
 	// Marker prefixes on the member part, stripped for EVERY dialect because
 	// none of them survive in the symbol table.
+	// Which markers survive is a property of the ELF DIALECT, so neither list
+	// may be applied unconditionally. Measured on the same getter across the
+	// three dialects:
+	//
+	//	<=2.16   Precompiled__ByteBuffer_7027147_get_lengthInBytes_257
+	//	2.17-2.18 _ByteBuffer.lengthInBytes_454
+	//	>=2.19    _StringBase.codeUnits
+	//
+	// So the oldest dialect KEEPS `get`, and the two newer ones drop it.
+	//
+	// memberMarkers are dropped by the scrubbed (2.17-2.18) and prose (2.19+)
+	// dialects and KEPT by the assembler dialect (<=2.16). They used to be
+	// stripped unconditionally, which made every accessor and dynamic
+	// forwarder on the oldest dialect structurally unable to agree no matter
+	// how right the name was: 1081 of 1399 disagreements on
+	// dart-2.16.0-gt-arm64. See docs/findings-repo/013.
 	memberMarkers = []string{"dyn:", "get:", "set:"}
-	// proseMarkers are stripped only in the 3.x prose comparison. `init:`
-	// marks a lazy field initializer; the prose symbol drops it
-	// (`Zone.init:_current` -> `Zone._current`), but the 2.13-2.17 and 2.18+
-	// assembly dialects KEEP it (as `init_`), so stripping it there turns
-	// matches into misses -- measured, it dropped 2.14.0 from 82.4% to 80.8%.
+	// proseMarkers are dropped ONLY by the prose dialect. `init:` marks a
+	// lazy field initializer; prose drops it (`Zone.init:_current` ->
+	// `Zone._current`) while both assembly dialects keep it as `init_` --
+	// measured, stripping it in the assembly path dropped 2.14.0 from 82.4%
+	// to 80.8%.
 	proseMarkers = []string{"init:"}
 )
 
@@ -67,19 +83,10 @@ func normalizeRecovered(name string, stripMangle bool) string {
 	if stripMangle {
 		n = reLibMangle.ReplaceAllString(n, "")
 	}
-	// Markers sit on the member, which is after the last '.' -- except for a
-	// bare top-level function, where there is no dot at all.
-	if i := strings.LastIndex(n, "."); i >= 0 {
-		owner, member := n[:i+1], n[i+1:]
-		for _, m := range memberMarkers {
-			member = strings.TrimPrefix(member, m)
-		}
-		n = owner + member
-	} else {
-		for _, m := range memberMarkers {
-			n = strings.TrimPrefix(n, m)
-		}
-	}
+	// Member markers are NOT stripped here. Which of them survive is a
+	// property of the ELF dialect, so it is proseFold's decision -- see
+	// proseMarkers.
+	//
 	// An unnamed constructor's Function name is the class followed by a bare
 	// `.` -- `_GrowableList@0150898.` -- so stripping the mangling leaves a
 	// trailing dot that the ELF does not have.
@@ -221,7 +228,10 @@ func NamesAgree(ours, sym string) bool {
 		return asmFold(mine) == asmFold(body)
 	}
 	if body, allocStub, ok := scrubbedAsmBody(sym); ok {
-		mine := NormalizeRecoveredName(ours)
+		// This dialect drops the member markers (`_ByteBuffer.lengthInBytes`
+		// for our `_ByteBuffer@7027147.get:lengthInBytes`) while the one
+		// above keeps them. See memberMarkers.
+		mine := stripMarkers(NormalizeRecoveredName(ours), memberMarkers)
 		if !allocStub {
 			mine = qualifiedScrubbed(mine)
 		}
@@ -241,17 +251,24 @@ func NamesAgree(ours, sym string) bool {
 // `init:` field-initializer marker away.
 func proseFold(n string) string {
 	n = foldMixinOwner(n)
-	if i := strings.LastIndex(n, "."); i >= 0 {
-		owner, member := n[:i+1], n[i+1:]
-		for _, m := range proseMarkers {
-			member = strings.TrimPrefix(member, m)
+	// Prose drops both kinds; the assembler dialect keeps both, and the
+	// scrubbed one keeps init: but drops the rest. See memberMarkers.
+	return stripMarkers(n, append(append([]string{}, proseMarkers...), memberMarkers...))
+}
+
+// stripMarkers removes any of the given markers from the member component --
+// the part after the last '.', or the whole name for a top-level function.
+func stripMarkers(n string, markers []string) string {
+	strip := func(s string) string {
+		for _, m := range markers {
+			s = strings.TrimPrefix(s, m)
 		}
-		return owner + member
+		return s
 	}
-	for _, m := range proseMarkers {
-		n = strings.TrimPrefix(n, m)
+	if i := strings.LastIndex(n, "."); i >= 0 {
+		return n[:i+1] + strip(n[i+1:])
 	}
-	return n
+	return strip(n)
 }
 
 // reAsmIndex is the `_<code_index>` SnapshotNameFor appends to every name.
