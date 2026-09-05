@@ -67,6 +67,14 @@ var (
 	// measured, stripping it in the assembly path dropped 2.14.0 from 82.4%
 	// to 80.8%.
 	proseMarkers = []string{"init:"}
+	// scrubbedMarkers is what the 2.17-2.18 dialect drops: the member markers
+	// AND `init:`. It keeps neither, so it sits between the assembler dialect
+	// (keeps both) and prose (drops both plus the mixin chain).
+	//
+	// Measured: `init:_printClosure@9040228` against `_printClosure`, 151 of
+	// the 505 remaining disagreements on dart-2.17.6-gt-arm64 and 141 of 498
+	// on 2.18.0.
+	scrubbedMarkers = append(append([]string{}, memberMarkers...), proseMarkers...)
 )
 
 // NormalizeRecoveredName reduces one of our names to the shape the ELF symbol
@@ -231,7 +239,21 @@ func NamesAgree(ours, sym string) bool {
 		// This dialect drops the member markers (`_ByteBuffer.lengthInBytes`
 		// for our `_ByteBuffer@7027147.get:lengthInBytes`) while the one
 		// above keeps them. See memberMarkers.
-		mine := stripMarkers(NormalizeRecoveredName(ours), memberMarkers)
+		mine := stripMarkers(NormalizeRecoveredName(ours), scrubbedMarkers)
+		// This dialect also unwraps the closure marker: `anonymous_closure`,
+		// not `<anonymous closure>`. Ours keeps the brackets, and
+		// addAssemblerIdentifier maps them through the SDK's OPERATOR table
+		// (`<` -> `operator_lt`), which is right for a real `operator <` and
+		// wrong here -- it produced
+		// `operator_ltanonymous_closureoperator_gt`.
+		//
+		// Only the brackets around this one marker are removed, not `<` and
+		// `>` generally, and only in this dialect: the prose symbols KEEP
+		// them (`new Future.<anonymous closure>`) and the assembler dialect
+		// turns them into underscores that asmFold collapses away.
+		// NormalizeRecoveredName has already folded the space, so the marker
+		// arrives as `<anonymous_closure>`, not `<anonymous closure>`.
+		mine = strings.ReplaceAll(mine, "<anonymous_closure>", "anonymous_closure")
 		if !allocStub {
 			mine = qualifiedScrubbed(mine)
 		}
@@ -389,6 +411,19 @@ func scrubbedAsmBody(sym string) (body string, allocStub, ok bool) {
 	s = reAsmIndex.ReplaceAllString(s, "")
 	if rest, cut := strings.CutPrefix(s, "AllocationStub_"); cut {
 		return "new_" + rest, true, true
+	}
+	// This dialect ALSO spells an ordinary constructor `new_List.of`, which is
+	// our own un-expanded shape rather than ToQualifiedCString's
+	// `List.List.of`. Running qualifiedScrubbed over it turns a match into a
+	// miss, so the second return value means "already in our `new_` shape,
+	// do not expand" -- which is what it always meant, the AllocationStub_
+	// prefix simply being the only way it used to be reached.
+	//
+	// Measured: 187 constructors on dart-2.17.6-gt-arm64 and 191 on 2.18.0
+	// disagreed purely because of this, plus the `new _List@0150898.of` cases
+	// counted under the private-library bucket.
+	if strings.HasPrefix(s, "new_") {
+		return s, true, true
 	}
 	return s, false, true
 }
