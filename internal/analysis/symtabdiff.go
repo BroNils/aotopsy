@@ -127,6 +127,7 @@ func normalizeRecovered(name string, stripMangle bool) string {
 func NormalizeSymbolName(sym string) string {
 	s := strings.TrimSpace(sym)
 	s = strings.TrimPrefix(s, "stub ")
+	s = foldIsolateStub(s)
 	if rest, ok := strings.CutPrefix(s, "assert type is "); ok {
 		s = "TypeTestingStub_" + rest
 	}
@@ -430,7 +431,7 @@ func scrubbedAsmBody(sym string) (body string, allocStub, ok bool) {
 	}
 	// A Stub_ symbol is scrubbed-asm even without a code index.
 	if rest, cut := strings.CutPrefix(s, "Stub_"); cut {
-		return rest, false, true
+		return foldIsolateStub(rest), false, true
 	}
 	// Otherwise the tell of the scrubbed-asm dialect is the trailing
 	// `_<code_index>` SnapshotNameFor always appends. Without it the symbol is
@@ -603,6 +604,27 @@ func collapseSelfDouble(s string) string {
 		if s[i-len(tail):i] == tail {
 			return s[:i]
 		}
+	}
+	return s
+}
+
+// foldIsolateStub removes the prefix and suffix the ELF puts on an isolate
+// stub, which say only "this is a stub" -- something the name already says.
+//
+//	prose      _iso_stub_ArrayWriteBarrierStub
+//	assembler  Precompiled_Stub__iso_stub_ArrayWriteBarrierStub  (after the
+//	           dialect's own Precompiled_/Stub_ stripping)
+//	ours       ArrayWriteBarrier
+//
+// Applied in all three dialects, because all three carry it. Folding it in
+// the prose path alone left the 2.x assembler samples with 61 disagreements
+// that were pure convention.
+//
+// The prefix and suffix are removed only together: a bare `SomethingStub`
+// keeps its suffix, since the ELF spells the ordinary VM stubs that way too.
+func foldIsolateStub(s string) string {
+	if rest, ok := strings.CutPrefix(s, "_iso_stub_"); ok {
+		return strings.TrimSuffix(rest, "Stub")
 	}
 	return s
 }

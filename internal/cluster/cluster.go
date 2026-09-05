@@ -146,7 +146,21 @@ type Result struct {
 	MintValues map[int]int64  // Mint/Smi ref→int64 value from alloc phase
 	FillStart  int            // byte offset where the fill section begins
 	FillEnd    int            // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
-	Diags      []dartfmt.Diag
+
+	// ObjectStoreRefs holds the isolate roots section's ObjectStore field
+	// refs, in serialized order -- ObjectStore::from() through
+	// to_snapshot(kFullAOT), the same range ObjectStoreAOTFieldCount counts.
+	// Set by ReadObjectStoreRefs (which LoadContext calls early, so the
+	// names are available when symbol names are built) and by
+	// ParseDispatchTable, which reads the same prefix on its way to the
+	// dispatch table. Nil when neither ran.
+	//
+	// Index i is the i-th field of that range, so a per-version list of
+	// field NAMES turns these into named objects. The 89 `RW(Code, *_stub)`
+	// entries are the only place an isolate stub's name exists in the
+	// snapshot: their Code objects carry a null owner.
+	ObjectStoreRefs []int
+	Diags           []dartfmt.Diag
 
 	// unboxedByClassID memoizes classUnboxedBitmaps' index.
 	unboxedByClassID map[int32]uint64

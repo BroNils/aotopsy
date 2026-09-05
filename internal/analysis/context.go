@@ -142,42 +142,8 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		return nil, err
 	}
 
-	symbolNames := make(map[uint64]string, len(sc.Ranges))
-	symbolSizes := make(map[uint64]uint32, len(sc.Ranges))
-	// A type-testing stub's Code has the tested Type as its owner
-	// (type_testing_stubs.cc, `code.set_owner(type)`), which is how the VM
-	// form is looked up for the addresses that have one.
-	ttsOwnerByCodeRef := make(map[int]int, len(sc.Result.Codes))
-	for _, ce := range sc.Result.Codes {
-		if ce.OwnerRef >= 0 {
-			ttsOwnerByCodeRef[ce.RefID] = ce.OwnerRef
-		}
-	}
-	symbolNamesVMForm := make(map[uint64]string)
-	im := sc.Image()
-	for _, r := range sc.Ranges {
-		funcVA, ok := im.FuncVA(r)
-		if !ok {
-			continue
-		}
-		symbolSizes[funcVA] = r.Size
-		if r.RefID >= 0 {
-			symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
-			if owner, ok := ttsOwnerByCodeRef[r.RefID]; ok {
-				if vm := sc.Pool.TypeTestingStubSDKNames[owner]; vm != "" {
-					symbolNamesVMForm[funcVA] = vm
-				}
-			}
-		} else {
-			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	for va, name := range naming.BuildVMStubSymbols(sc.Info, dartfmtOptionsDefault()) {
-		symbolNames[va] = name
-	}
-	for va, name := range naming.BuildDiscardedFunctionSymbols(sc.Result.Named, sc.Info.Version.CIDs, sc.Table, sc.Pool, sc.CodeVA, sc.CodeOff, sc.Info.Version.CodeIndexOneBased) {
-		symbolNames[va] = name
-	}
+	syms := BuildSymbolNames(sc.Ranges, sc.Image().CodeImage, sc.Pool, sc.Result, sc.Info,
+		sc.Table, dartfmtOptionsDefault(), sc.Info.IsolateData.Data)
 
 	return &AnalysisContext{
 		EF:                sc.EF,
@@ -190,9 +156,9 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		Code:              sc.Code,
 		CodeVA:            sc.CodeVA,
 		CodeOff:           sc.CodeOff,
-		SymbolNames:       symbolNames,
-		SymbolNamesVMForm: symbolNamesVMForm,
-		SymbolSizes:       symbolSizes,
+		SymbolNames:       syms.Names,
+		SymbolNamesVMForm: syms.VMForm,
+		SymbolSizes:       syms.Sizes,
 		IsARM64:           sc.IsARM64,
 		DartVersion:       sc.Info.Version.DartVersion,
 	}, nil

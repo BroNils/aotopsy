@@ -51,32 +51,14 @@ func RunDisasmStage(
 	fmtOpts dartfmt.Options,
 	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
-	// Build symbol map for cross-references during disassembly.
-	symbols := make(map[uint64]string)
+	// Build symbol map for cross-references during disassembly. Shared with
+	// LoadContext and RunDisasmStageX86 so a name recovered anywhere reaches
+	// call_edges.jsonl, signal.dot and callgraph.dot too -- the signal graph's
+	// IsInterestingCallee filter drops sub_*/0x.. names, so a stub named in
+	// only one of the three builders silently vanished from the graph. (F-036)
 	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
-	for _, r := range ranges {
-		va, ok := vaImage.FuncVA(r)
-		if !ok {
-			continue
-		}
-		if r.RefID >= 0 {
-			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
-		} else {
-			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	// Merge VM stub symbols and discarded function symbols so that
-	// call_edges.jsonl, signal.dot, and callgraph.dot show real names
-	// instead of stub_<hex>/sub_<hex>. This mirrors LoadContext's
-	// pattern (context.go:170-175). Without this, the signal graph's
-	// IsInterestingCallee filter excludes real signal functions because
-	// it filters out sub_* and 0x.. names. (F-036)
-	for va, name := range naming.BuildVMStubSymbols(info, fmtOpts) {
-		symbols[va] = name
-	}
-	for va, name := range naming.BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
-		symbols[va] = name
-	}
+	symbols := BuildSymbolNames(ranges, vaImage, pl, clResult, info, table,
+		fmtOpts, info.IsolateData.Data).Names
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
