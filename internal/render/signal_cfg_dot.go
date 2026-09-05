@@ -79,7 +79,9 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 
 	// BFS from each signal function through context nodes to find signal→signal reachability.
 	// This captures indirect paths: signal_A → context → context → signal_B.
-	for src := range signalSet {
+	// Sorted: signalEdges is appended to in this order and rendered in
+	// order, so map iteration would reorder the graph between runs.
+	for _, src := range sortedSet(signalSet) {
 		visited := map[string]bool{src: true}
 		queue := []string{src}
 		for len(queue) > 0 {
@@ -144,7 +146,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 	// Group by owner for clustering.
 	ownerNodes := make(map[string][]string)
 	var noOwner []string
-	for name := range activeSignal {
+	for _, name := range sortedSet(activeSignal) {
 		fi := funcMap[name]
 		if fi != nil && fi.owner != "" {
 			ownerNodes[fi.owner] = append(ownerNodes[fi.owner], name)
@@ -240,7 +242,13 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 	}
 
 	// Render clusters.
-	for owner, names := range ownerNodes {
+	owners := make([]string, 0, len(ownerNodes))
+	for owner := range ownerNodes {
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		names := ownerNodes[owner]
 		if len(names) < 2 {
 			noOwner = append(noOwner, names...)
 			continue

@@ -55,6 +55,21 @@ type NamedObject struct {
 	// HasKindTag is false when kind_tag was not captured, so IsStatic=false
 	// cannot be mistaken for "known to be an instance method".
 	HasKindTag bool
+
+	// IsSuspendable is UntaggedFunction::modifier() != kNoModifier -- the
+	// function is async, sync* or async*.
+	//
+	// It decides where the receiver lives before Dart 3.4.3, via
+	// Function::MakesCopyOfParameters() = HasOptionalParameters() ||
+	// IsSuspendableFunction(). See ReceiverFrameSlot.
+	//
+	// ModifierBits sits at bit 14 with width 2 in kind_tag_, immediately
+	// below the single-bit flags (is_static is the first, at bit 16, which
+	// is what IsStatic reads). Verified constant across every supported
+	// version -- object.h KindTagBits gives kKindTagSize=5,
+	// kRecognizedTagSize=9, kModifierPos=14, kModifierSize=2 identically at
+	// 2.10.0, 2.12.0, 2.17.6, 2.19.0, 3.0.5, 3.1.0, 3.2.5, 3.3.0 and 3.4.3.
+	IsSuspendable bool
 }
 
 // FuncTypeInfo holds parameter count data extracted from a FunctionType object.

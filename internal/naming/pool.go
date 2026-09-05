@@ -16,11 +16,22 @@ type CodeNameInfo struct {
 
 	// FixedParamsWithReceiver is num_fixed_parameters as the SDK counts it:
 	// the fixed parameters INCLUDING the implicit receiver, and excluding
-	// optionals. It is what locates a parameter's stack slot on the Dart
-	// versions that pass arguments on the stack -- parameter i of a function
-	// with N fixed parameters sits at FP + (kParamEndSlotFromFp + N - i) *
-	// wordSize, so the receiver is the highest slot. 0 when unknown.
+	// optionals. 0 when unknown.
+	//
+	// On the Dart versions that pass arguments on the stack it is ONE of
+	// three inputs that locate the receiver, not the whole answer: a
+	// function with optional parameters or an async modifier copies its
+	// parameters into the locals area instead, and its receiver is below FP
+	// rather than above it. See cluster.ReceiverFrameSlot, which is the only
+	// thing that should turn these fields into an offset.
 	FixedParamsWithReceiver int
+	// OptionalParams is NumOptionalParameters(). Nonzero means the function
+	// copies its parameters -- the predicate is HasOptionalParameters() ||
+	// IsSuspendableFunction() -- which moves the receiver below FP.
+	OptionalParams int
+	// IsSuspendable is modifier() != kNoModifier: async, sync* or async*.
+	// The other half of the copy-parameters predicate.
+	IsSuspendable bool
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
@@ -196,6 +207,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ci.IsAllocationStub = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
+		ci.IsSuspendable = owner.IsSuspendable
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
@@ -203,6 +215,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				if ft.HasImplicit {
 					ci.FixedParamsWithReceiver++
 				}
+				ci.OptionalParams = ft.NumOptional
 			}
 		}
 		// Dart 2.x keeps arity on the Function object instead
@@ -219,6 +232,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ci.ParamCount = visible
 			// owner.NumFixedParams already counts the receiver.
 			ci.FixedParamsWithReceiver = owner.NumFixedParams
+			ci.OptionalParams = owner.NumOptionalParams
 		}
 		l.CodeNames[ce.RefID] = ci
 	}
