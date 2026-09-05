@@ -90,11 +90,14 @@ type PoolLookups struct {
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
 // dartVersion selects the VM-isolate base object name table; pass "" to leave
 // those references unnamed.
-// typeClassIDIsRef must be VersionProfile.TypeClassIdIsRef: on those versions
-// a Type cannot be resolved to its class, which disables type-testing-stub
-// naming rather than letting it emit confidently wrong labels. See
+// dartVersion also decides whether type-testing-stub naming runs at all; see
 // buildTypeTestingStubNames.
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string, typeClassIDIsRef bool) *PoolLookups {
+//
+// It used to take a separate typeClassIDIsRef bool for that. The two were
+// different questions that happened to have the same answer, and coupling them
+// broke as soon as one changed: correcting 2.15.0's Type layout (it is a
+// scalar there, not a ref) silently switched TTS naming on for that version.
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *PoolLookups {
 	l := &PoolLookups{
 		RefToStr:        make(map[int]string),
 		RefToNamed:      make(map[int]*cluster.NamedObject),
@@ -154,7 +157,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
-	ttsNames := buildTypeTestingStubNames(result, l, ct, typeClassIDIsRef)
+	ttsNames := buildTypeTestingStubNames(result, l, ct, dartVersion)
 	l.TypeTestingStubNames = ttsNames
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)

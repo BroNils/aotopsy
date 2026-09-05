@@ -191,28 +191,6 @@ func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 	return Bottom()
 }
 
-// resolveTypeClassIDs fills in TypeInfo.ClassID for Dart 2.10-2.15, where
-// Type.type_class_id is serialised as a Smi ref rather than a scalar, so
-// ReadFill leaves ClassID at 0. MintValues holds the real value (not
-// Smi-encoded), matching how BuildClassLayouts reads word offsets.
-//
-// Must run before anything reads ClassID. It used to be done inline next to
-// the field-type lookup, which is AFTER BuildClassHierarchy -- so the
-// hierarchy saw 0 for every Type and came out empty on 2.x, taking LCA, CHA
-// and any leaf-class test with it.
-//
-// No-op on 3.x, where the class id is already decoded from the packed flags.
-func resolveTypeClassIDs(clResult *cluster.Result) {
-	for i := range clResult.Types {
-		ti := &clResult.Types[i]
-		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
-			if v, ok := clResult.MintValues[ti.TypeClassIdRef]; ok {
-				ti.ClassID = int32(v)
-			}
-		}
-	}
-}
-
 // BuildClassHierarchy builds a superclass map from cluster.ClassInfo data.
 // Returns a map: classID → superclassID (or -1 if no superclass / unknown).
 func BuildClassHierarchy(classes []cluster.ClassInfo, types []cluster.TypeInfo, refToNamed map[int]*cluster.NamedObject) map[int]int {

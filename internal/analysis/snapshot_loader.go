@@ -164,7 +164,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 
 	// Pool lookups + display.
 	pl := naming.BuildPoolLookups(result, info.Version.CIDs, vmResult,
-		info.Version.CodeIndexOneBased, info.Version.DartVersion, info.Version.TypeClassIdIsRef)
+		info.Version.CodeIndexOneBased, info.Version.DartVersion)
 	poolDisplay := naming.ResolvePoolDisplay(result.Pool, pl)
 
 	return &SnapshotContext{

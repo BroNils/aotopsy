@@ -73,7 +73,7 @@ func TestTypeTestingStubsAreNamed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			res, vmRes, profile := loadForNaming(t, libPath)
 			pl := BuildPoolLookups(res, profile.CIDs, vmRes, profile.CodeIndexOneBased,
-				profile.DartVersion, profile.TypeClassIdIsRef)
+				profile.DartVersion)
 
 			var stubs, distinct = 0, map[string]bool{}
 			for _, ce := range res.Codes {
@@ -98,22 +98,26 @@ func TestTypeTestingStubsAreNamed(t *testing.T) {
 	}
 }
 
-// On versions where Type.type_class_id is its own ref (2.10-2.15) nothing in
-// this pipeline resolves it, and the failure is total rather than partial: a
-// real Dart 2.12.0 sample resolved 251 of 251 type-owned Codes to a
-// real-looking name -- all to the SAME class. 251 confident wrong labels is
-// worse than 251 honest `sub_` placeholders, so the feature stays off there.
+// Type-testing-stub naming is off below 2.16. A real Dart 2.12.0 sample
+// resolved 251 of 251 type-owned Codes to a real-looking name -- all to the
+// SAME class. 251 confident wrong labels is worse than 251 honest `sub_`
+// placeholders.
 //
-// This pins the gate. If Type->ClassID is ever implemented for 2.x, this test
-// fails and the gate can be removed on purpose rather than by accident.
+// The boundary is a version, not VersionProfile.TypeClassIdIsRef, which this
+// test used to assert as a precondition. The two were different questions with
+// the same answer until 2.15.0's Type layout was corrected (it is a scalar
+// there, not a ref); after that, keying off the flag switched naming on for
+// 2.15 and the symtab differential fell 82.1% -> 78.4% with agreement
+// unchanged. See buildTypeTestingStubNames.
 func TestTypeTestingStubNamingIsOffWhereTypesCannotResolve(t *testing.T) {
 	libPath := corpusSample(t, sampleDart212Name)
 	res, vmRes, profile := loadForNaming(t, libPath)
-	if !profile.TypeClassIdIsRef {
-		t.Fatalf("sample no longer has TypeClassIdIsRef; this test guards the wrong thing now")
+	if snapshot.VersionAtLeast(profile.DartVersion, "2.16.0") {
+		t.Fatalf("sample is %s, at or above the 2.16.0 boundary; this test guards the wrong thing now",
+			profile.DartVersion)
 	}
 	pl := BuildPoolLookups(res, profile.CIDs, vmRes, profile.CodeIndexOneBased,
-		profile.DartVersion, profile.TypeClassIdIsRef)
+		profile.DartVersion)
 	for _, ce := range res.Codes {
 		if strings.HasPrefix(pl.CodeNames[ce.RefID].FuncName, "TypeTestingStub_") {
 			t.Fatalf("named a type-testing stub on a version that cannot resolve a Type to its class: %q",
@@ -130,14 +134,13 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 		Types: []cluster.TypeInfo{{RefID: 100, ClassID: 4242}},
 	}
 	pl := &PoolLookups{RefToNamed: map[int]*cluster.NamedObject{}, RefToStr: map[int]string{}}
-	if got := buildTypeTestingStubNames(res, pl, nil, false); len(got) != 0 {
+	if got := buildTypeTestingStubNames(res, pl, nil, "3.3.0"); len(got) != 0 {
 		t.Errorf("named an unresolvable class: %v", got)
 	}
-	// typeClassIdIsRef (Dart 2.10-2.15): naming is OFF because
-	// resolveTypeClassIDs fills ClassID from MintValues but all types
-	// resolve to the same class on real 2.x samples (verified on 2.12.0:
-	// 251/251 → "TypeParameters"). The guard returns nil.
-	if got := buildTypeTestingStubNames(res, pl, nil, true); got != nil {
-		t.Errorf("TypeClassIdIsRef must disable naming entirely, got %v", got)
+	// Below 2.16 naming is OFF outright: on real 2.x samples every type
+	// resolves to the same class (verified on 2.12.0: 251/251 →
+	// "TypeParameters"). The guard returns nil.
+	if got := buildTypeTestingStubNames(res, pl, nil, "2.15.0"); got != nil {
+		t.Errorf("pre-2.16 must disable naming entirely, got %v", got)
 	}
 }
