@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/cmacro"
+	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
 
@@ -875,6 +876,126 @@ func arm64ProductTarget(tag string) (extractTarget, bool) {
 // Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
 // runtime/vm/stub_code_list.h, runtime/vm/class_id.h.
 // Verified via gh api at tag 3.13.0.
+// reClassIdTagPosComment matches the pre-3.6 enum form, where the position is
+// an expression whose value only exists in the trailing comment:
+//
+//	kClassIdTagPos = kSizeTagPos + kSizeTagSize,  // = 16
+var reClassIdTagPosComment = regexp.MustCompile(`kClassIdTagPos\s*=[^,]*,\s*//\s*=\s*(\d+)`)
+
+// reClassIdTagSizeLiteral matches the same era's width, a plain literal:
+//
+//	kClassIdTagSize = 16,
+var reClassIdTagSizeLiteral = regexp.MustCompile(`kClassIdTagSize\s*=\s*(\d+)\s*,`)
+
+// reClassIdTagBitField matches the 3.6-3.11 form, where the width is the last
+// template argument and the position is a computed expression:
+//
+//	using ClassIdTag =
+//	    BitField<decltype(tags_), ClassIdTagType, SizeTagBits::kNextBit, 20>;
+var reClassIdTagBitField = regexp.MustCompile(`using ClassIdTag\s*=\s*BitField<[^>]*?,\s*(\d+)>`)
+
+// reExtractedClassIdTag matches the generated header, which carries both as
+// literals from 3.12.2 onwards.
+var reExtractedClassIdTagPos = regexp.MustCompile(`UntaggedObject_kClassIdTagPos\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
+var reExtractedClassIdTagSize = regexp.MustCompile(`UntaggedObject_kClassIdTagSize\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
+
+// sdkClassIdTagLayout recovers the ClassIdTag bitfield layout from the SDK at
+// a tag, returning pos = -1 when only the width is machine-readable.
+//
+// Three shapes across the supported range, because the SDK rewrote this twice:
+//
+//	<= 3.5.0     raw_object.h enum, value in a trailing comment
+//	3.6.2-3.11.0 raw_object.h `using ClassIdTag = BitField<..., 20>`
+//	>= 3.12.2    runtime_offsets_extracted.h, both as literals
+//
+// The width alone still decides the layout: across every version AOTopsy
+// supports, size 16 means pos 16 and size 20 means pos 12. A fourth shape
+// would fail to parse rather than pass quietly.
+func sdkClassIdTagLayout(tag string) (pos, size int, source string, err error) {
+	if src, e := fetchHeader(tag); e == nil {
+		mp := reExtractedClassIdTagPos.FindStringSubmatch(src)
+		ms := reExtractedClassIdTagSize.FindStringSubmatch(src)
+		if mp != nil && ms != nil {
+			p, e1 := strconv.ParseInt(mp[1], 0, 32)
+			s, e2 := strconv.ParseInt(ms[1], 0, 32)
+			if e1 == nil && e2 == nil {
+				return int(p), int(s), "runtime_offsets_extracted.h", nil
+			}
+		}
+	}
+	raw, e := fetchSDKFile("runtime/vm/raw_object.h", tag)
+	if e != nil {
+		return 0, 0, "", e
+	}
+	if mp := reClassIdTagPosComment.FindStringSubmatch(raw); mp != nil {
+		if ms := reClassIdTagSizeLiteral.FindStringSubmatch(raw); ms != nil {
+			p, _ := strconv.Atoi(mp[1])
+			s, _ := strconv.Atoi(ms[1])
+			return p, s, "raw_object.h (enum)", nil
+		}
+	}
+	if mb := reClassIdTagBitField.FindStringSubmatch(raw); mb != nil {
+		s, _ := strconv.Atoi(mb[1])
+		return -1, s, "raw_object.h (BitField)", nil
+	}
+	return 0, 0, "", fmt.Errorf("no recognised ClassIdTag declaration in raw_object.h@%s", tag)
+}
+
+// runCheckClassIdTag verifies snapshot.ClassIdTagLayout against the SDK for
+// every supported version.
+//
+// This constant had no gate at all, unlike the Thread fields, the stub names,
+// the stub offsets, the runtime entries, the object-store field count and the
+// roots prefix. It is a hand-written version boundary of exactly the shape
+// that has been wrong four times in this project (see the cross-version
+// differential table in AGENTS-local.md), and it decides how every object
+// header's class id is read.
+func runCheckClassIdTag() int {
+	seen := map[string]bool{}
+	bad, checked, partial := 0, 0, 0
+	for _, t := range allTargets {
+		if seen[t.tag] {
+			continue
+		}
+		seen[t.tag] = true
+
+		sdkPos, sdkSize, source, err := sdkClassIdTagLayout(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		wantPos, wantSize := snapshot.ClassIdTagLayout(t.tag)
+		checked++
+
+		if sdkSize != wantSize {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: size committed=%d sdk=%d (%s)\n",
+				t.tag, wantSize, sdkSize, source)
+			bad++
+			continue
+		}
+		if sdkPos < 0 {
+			partial++
+			fmt.Fprintf(os.Stderr, "  OK %s: size %d (%s; position not machine-readable at this tag)\n",
+				t.tag, sdkSize, source)
+			continue
+		}
+		if sdkPos != wantPos {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: pos committed=%d sdk=%d (%s)\n",
+				t.tag, wantPos, sdkPos, source)
+			bad++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  OK %s: pos %d size %d (%s)\n", t.tag, sdkPos, sdkSize, source)
+	}
+	if bad > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d ClassIdTag layout mismatch(es) across %d version(s)\n", bad, checked)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nClassIdTag layout matches SDK for all %d version(s) (%d width-only)\n",
+			checked, partial)
+	}
+	return bad
+}
+
 func runCheckRoots() int {
 	mismatches := 0
 	// Only 3.13.0+ has RootsPrefixRefCount.
@@ -1861,6 +1982,7 @@ func main() {
 	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
+	checkClassIdTagFlag := flag.Bool("check-classid-tag", false, "verify snapshot.ClassIdTagLayout against SDK's raw_object.h / runtime_offsets_extracted.h for every version; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "verify every runtime entry in SDK's runtime_entry_list.h is named in the committed THR tables; exit 1 on any gap")
 	emitStubNamesFlag := flag.String("emit-stub-names", "", "comma-separated tags: print Go source for their VM stub name tables")
 	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
@@ -1910,6 +2032,13 @@ func main() {
 
 	if *checkRootsFlag {
 		if runCheckRoots() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkClassIdTagFlag {
+		if runCheckClassIdTag() > 0 {
 			os.Exit(1)
 		}
 		return

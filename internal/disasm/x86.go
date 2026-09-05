@@ -146,8 +146,14 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 		if rel, ok := arg.(x86asm.Rel); ok {
 			target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
 			e.TargetPC = target
-			if name, ok := symbols(target); ok {
-				e.TargetName = name
+			// Nil-safe, matching ARM64: arm64.go's Format and
+			// dataflowarm64.go's touchInstrEffect both guard their lookup,
+			// so the same call with the same arguments worked on one
+			// architecture and panicked on the other.
+			if symbols != nil {
+				if name, ok := symbols(target); ok {
+					e.TargetName = name
+				}
 			}
 			return e
 		}

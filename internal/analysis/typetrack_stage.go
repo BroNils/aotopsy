@@ -111,6 +111,63 @@ type TypeInferenceOutput struct {
 
 // runTypeInference is the core logic, separated from RunTypeInferenceStage
 // for testability.
+// buildAllocationStubCIDs maps each per-class allocation stub's entry VA to
+// the class id it allocates.
+//
+// The join is entirely structural: PoolLookups already marks a Code whose
+// owner is a Class (naming/pool.go, IsAllocationStub, named "new X"), and
+// ClassInfo carries that Class object's ref alongside the class id it
+// describes. Nothing here is inferred from instructions.
+//
+// It exists because IsAllocationStub had no reader at all -- the flag was set
+// and dropped, while typetrack answered the same question by reading RDI, a
+// register AllocateObjectABI does not use.
+func buildAllocationStubCIDs(
+	clResult *cluster.Result,
+	pl *naming.PoolLookups,
+	ranges []cluster.CodeRange,
+	codeVA, codeOff uint64,
+) map[uint64]int {
+	if clResult == nil || pl == nil {
+		return nil
+	}
+	// Class object ref → the class id instances of it carry.
+	cidByClassRef := make(map[int]int32, len(clResult.Classes))
+	for _, ci := range clResult.Classes {
+		cidByClassRef[ci.RefID] = ci.ClassID
+	}
+
+	// Code ref → allocated class id, for the Codes marked IsAllocationStub.
+	// The owner ref lives on the CodeEntry (Code.owner_), not on a
+	// NamedObject: a Code is not itself a named object, which is why
+	// ResolveCodeOwner takes ce.OwnerRef rather than looking the Code up.
+	cidByCodeRef := make(map[int]int32)
+	for _, ce := range clResult.Codes {
+		ci, ok := pl.CodeNames[ce.RefID]
+		if !ok || !ci.IsAllocationStub {
+			continue
+		}
+		if cid, ok := cidByClassRef[ce.OwnerRef]; ok && cid > 0 {
+			cidByCodeRef[ce.RefID] = cid
+		}
+	}
+
+	im := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
+	out := make(map[uint64]int, len(cidByCodeRef))
+	for _, r := range ranges {
+		cid, ok := cidByCodeRef[r.RefID]
+		if !ok {
+			continue
+		}
+		va, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
+		out[va] = int(cid)
+	}
+	return out
+}
+
 func runTypeInference(
 	outDir string,
 	clResult *cluster.Result,
@@ -312,7 +369,8 @@ func runTypeInference(
 	// Get allocation stub offsets from ThreadStubOffsets (arch-independent).
 	allocStubOffsets := vmtables.ThreadStubOffsets(info.Version.DartVersion, isARM64)
 
-	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets)
+	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets,
+		buildAllocationStubCIDs(clResult, pl, ranges, codeVA, codeOff))
 
 	// Build class name → class ID lookup from ClassIDToName.
 	// ClassIDToName is built from ClassInfo.ClassID (Dart runtime CID).
@@ -357,8 +415,9 @@ func runTypeInference(
 	// constants_arm64.h at 3.4.3; before it, every argument including the
 	// receiver is passed on the stack.
 	receiverOnStack := !snapshot.VersionAtLeast(info.Version.DartVersion, "3.4.3")
-	// See TypeContext.ClassIDIsHalfWord.
-	ctx.ClassIDIsHalfWord = !snapshot.VersionAtLeast(info.Version.DartVersion, "2.19.0")
+	// One source for the ClassIdTag layout: snapshot.ClassIdTagLayout, which
+	// is also what fill_strings.go reads and what the SDK drift gate checks.
+	ctx.SetClassIDTagLayout(snapshot.ClassIdTagLayout(info.Version.DartVersion))
 	blEdges := make(map[string][]typetrack.BLEdge)
 
 	// Build address → function name lookup for BL/CALL target resolution.

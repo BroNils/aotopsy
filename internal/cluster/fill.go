@@ -154,14 +154,30 @@ type ArrayInfo struct {
 
 // ClassInfo holds class layout data extracted from a Class object's fill.
 type ClassInfo struct {
-	RefID          int
-	NameRefID      int
-	ClassID        int32
-	InstanceSize   int32
-	NextFieldOff   int32 // next_field_offset in bytes
-	TypeArgsOff    int32 // type_arguments field offset in bytes
-	SuperTypeRefID int   // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
-	LibraryRefID   int   // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
+	RefID     int
+	NameRefID int
+	ClassID   int32
+
+	// InstanceSize, NextFieldOff and TypeArgsOff are all in WORDS, not bytes.
+	// The serializer writes them straight from the *_in_words fields:
+	//
+	//	s->Write<int32_t>(Class::target_instance_size_in_words(cls));
+	//	s->Write<int32_t>(Class::target_next_field_offset_in_words(cls));
+	//	s->Write<int32_t>(Class::target_type_arguments_field_offset_in_words(cls));
+	//	                        -- app_snapshot.cc:1050-1053 @3.13.0
+	//
+	// Two of these carried "in bytes" comments while the code that used them
+	// multiplied by wordSize, which is right. The comments were the wrong
+	// half, and TypeArgsOff had no reader at all to contradict them -- so the
+	// first consumer would have been wrong by a factor of 8.
+	InstanceSize int32
+	NextFieldOff int32
+	// TypeArgsOff is the word offset of the instance's TypeArguments pointer,
+	// or NoTypeArguments (-1) for a class that has none. object.h:1369 defines
+	// that sentinel; treating it as an offset yields word -1.
+	TypeArgsOff    int32
+	SuperTypeRefID int // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
+	LibraryRefID   int // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
 
 	// UnboxedFieldBitmap marks which of this class's instance field slots hold
 	// a raw machine word rather than a ref, indexed by word offset from the
@@ -178,6 +194,25 @@ type ClassInfo struct {
 	// the ONLY copy at 2.10; from 2.12 the Instance cluster writes its own
 	// copy in its fill and reads it back there. See InstanceUnboxedBitmaps.
 	UnboxedFieldBitmap uint64
+}
+
+// NoTypeArguments is the sentinel ClassInfo.TypeArgsOff carries for a class
+// with no type-arguments field. Source: object.h:1369,
+// `static constexpr intptr_t kNoTypeArguments = -1`.
+const NoTypeArguments int32 = -1
+
+// HasTypeArguments reports whether instances of this class carry a
+// TypeArguments pointer, i.e. whether TypeArgsOff is a real offset rather
+// than the sentinel.
+func (c ClassInfo) HasTypeArguments() bool { return c.TypeArgsOff != NoTypeArguments }
+
+// TypeArgsByteOffset returns the byte offset of the TypeArguments pointer
+// within an instance, and false when the class has none.
+func (c ClassInfo) TypeArgsByteOffset(wordSize int32) (int32, bool) {
+	if !c.HasTypeArguments() {
+		return 0, false
+	}
+	return c.TypeArgsOff * wordSize, true
 }
 
 // TypeInfo holds the resolved type_class_id for a Type object -- i.e. which

@@ -74,13 +74,42 @@ type CodeEntry struct {
 	TextOffset           int64 // text_offset_delta from fill (v2.10-v2.15 only; 0 otherwise)
 	ExceptionHandlersRef int   // ref ID of ExceptionHandlers object (ref index 1); -1 if not captured
 	PcDescriptorsRef     int   // ref ID of PcDescriptors object (ref index 2); -1 if not captured
-	CodeSourceMapRef     int   // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.x AOT); -1 if not captured
-	InlinedFuncsRef      int   // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.x AOT); -1 if not captured
+	// CodeSourceMapRef and InlinedFuncsRef are refs, but the serializer writes
+	// them as NULL when the binary was built with dwarf stack traces:
+	//
+	//	if (FLAG_precompiled_mode && FLAG_dwarf_stack_traces_mode) {
+	//	  WriteFieldValue(inlined_id_to_function_, Array::null());
+	//	  WriteFieldValue(code_source_map_, CodeSourceMap::null());
+	//	}
+	//	                        -- app_snapshot.cc:2911-2913 @3.13.0
+	//
+	// The ref count does not change, so parsing is unaffected; the objects
+	// simply are not there. Measured on the corpus: every sample carries
+	// thousands of CodeSourceMaps except the obfuscated production one, which
+	// carries zero. Inline attribution is therefore unavailable on exactly
+	// the binaries built that way, and that is a property of the input, not
+	// a parse failure.
+	CodeSourceMapRef int // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.10-2.15 AOT); -1 if not captured
+	InlinedFuncsRef  int // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.10-2.15 AOT); -1 if not captured
+
 	// CompressedStackMapsRef is the ref ID of the CompressedStackMaps object.
-	// In 2.x AOT (CodeNumRefs=7), compressed_stackmaps_ is a ref at index 4.
-	// In 3.x AOT (CodeNumRefs=6), compressed_stackmaps_ is null (not a ref).
+	//
+	// Written in AOT only up to 2.15.0. From 2.16.0 the serializer guards it
+	// with `if (s->kind() == Snapshot::kFullJIT)`, so an AOT snapshot has no
+	// such ref at all and the Code cluster writes one fewer ref:
+	//
+	//	2.10.0-2.14.0  clustered_snapshot.cc  InCurrentLoadingUnit[OrRoot](...)
+	//	2.15.0         app_snapshot.cc        InCurrentLoadingUnitOrRoot(...)
+	//	2.16.0+        app_snapshot.cc        kind() == kFullJIT
+	//
+	// That boundary is carried by CodeNumRefs (7 for 2.10-2.15, absent after),
+	// not by a version comparison here -- fill_code.go gates on numRefs == 7.
+	// Saying "2.x" would be wrong: 2.16.0-2.19.0 are 2.x and do not have it.
+	// Confirmed on the corpus: 3611 CompressedStackMaps on dart-2.12.0-arm64,
+	// zero on every 3.x sample.
+	//
 	// -1 if not captured or not present in this version's AOT format.
-	CompressedStackMapsRef int // ref ID of CompressedStackMaps object (ref index 4 in 2.x AOT); -1 if not captured
+	CompressedStackMapsRef int
 }
 
 // PoolEntryKind distinguishes ObjectPool entry types.

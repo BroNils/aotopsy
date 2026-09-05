@@ -161,8 +161,21 @@ func Run(opts Opts) (*Result, error) {
 		if info.Version != nil {
 			dv, compressed = info.Version.DartVersion, info.Version.CompressedPointers
 		}
-		if err := WriteProvenance(opts.OutDir, opts.LibPath, dv, isARM64, compressed); err != nil {
+		discarded := 0
+		if table != nil {
+			discarded = int(table.FirstEntryWithCode)
+		}
+		build := DetectBuildMode(len(clResult.CodeSourceMaps), discarded, len(ranges))
+		if err := WriteProvenance(opts.OutDir, opts.LibPath, dv, isARM64, compressed, build); err != nil {
 			opts.logf("  provenance: %v\n", err)
+		}
+		if build.DwarfStackTraces {
+			// Say it out loud. Without this line, "0 code source maps" and
+			// "most functions named stub_<hex>" look like the analyser
+			// failing, when they are what the binary was built to be.
+			opts.logf("  %sbuild:%s dwarf stack traces (--split-debug-info/--obfuscate): "+
+				"%d code source maps, %d discarded Code objects -- inline attribution unavailable\n",
+				cli.Gold, cli.Reset, build.CodeSourceMaps, build.DiscardedCodes)
 		}
 	}
 

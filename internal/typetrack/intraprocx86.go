@@ -16,8 +16,14 @@ import (
 const (
 	x86RegRCX = sdk.X86ClassIdReg // kClassIdReg (DispatchTableNullErrorABI)
 	x86RegRAX = 0                 // return value / allocation result
-	x86RegRDI = 7                 // SysV arg 0 (receiver for instance methods)
 )
+
+// x86RegRDI is deliberately absent. It was defined here as "SysV arg 0
+// (receiver for instance methods)" and used to answer what class an
+// allocation returned. AllocateObjectABI is {kResultReg RAX,
+// kTypeArgumentsReg RDX, kTagsReg R8} -- RDI is not in it, and inside
+// GenerateAllocateObjectHelper it is only a scratch register. The class is
+// now read from Code.owner via TypeContext.AllocationStubCID.
 
 // x86ArgRegCanon lists Dart's OWN calling-convention integer argument
 // registers as canonical indices, parameter 0 first. This is NOT the
@@ -523,7 +529,8 @@ func handleX86Load(tc *transferCtxX86) bool {
 			// sample, against 83417 Bottom on 2.19.0. Bottom is what makes
 			// the selector-offset scan possible, so x86_64 dispatch
 			// resolution was dead on every version up to 2.18.
-			if tc.ctx.ClassIDIsHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == 1 && baseIdx >= 0 && baseIdx < 31 &&
+			hwDisp, hasHalfWord := tc.ctx.HalfWordClassIDDisp()
+			if hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
 				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
 				if tc.state[baseIdx].Kind == LatticeKnownClass {
 					tc.state[dstIdx] = KnownClass(tc.state[baseIdx].ClassID)
@@ -745,17 +752,18 @@ func handleX86Call(tc *transferCtxX86) bool {
 		// CALL rel32 — direct call (allocation stub or regular function).
 		if rel, ok := ins.Args[0].(x86asm.Rel); ok {
 			callTarget = tc.inst.VA + uint64(tc.inst.Len) + uint64(int64(rel))
-			if tc.state[x86RegRAX].Kind == LatticeKnownStub {
-				sn := tc.state[x86RegRAX].StubName
-				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
-					if tc.state[x86RegRDI].Kind == LatticeKnownClass {
-						tc.state[x86RegRAX] = tc.state[x86RegRDI]
-					} else {
-						tc.state[x86RegRAX] = Top()
-					}
-					killX86ArgRegs(tc.state)
-					return true
-				}
+			// A call to a per-class allocation stub returns an instance of
+			// that class, exactly, from Code.owner. This replaces a rule that
+			// copied RDI's class into RAX whenever the callee's name started
+			// with "Allocate" -- RDI is not in AllocateObjectABI at all
+			// ({RAX, RDX, R8}), it is a scratch register inside the stub, and
+			// the class never travels in a caller register: the per-class stub
+			// materialises the tags word itself.
+			if cid, ok := tc.ctx.AllocationStubCID[callTarget]; ok {
+				tc.ctx.AllocStubHits++
+				tc.state[sdk.X86AllocResultReg] = KnownClass(cid)
+				killX86ArgRegs(tc.state)
+				return true
 			}
 			if calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[callTarget]; hasFull {
 				for r := 0; r < 31; r++ {
@@ -776,13 +784,13 @@ func handleX86Call(tc *transferCtxX86) bool {
 			regIdx := x86.CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
 				sn := tc.state[regIdx].StubName
-				if strings.HasPrefix(sn, "Allocate") || strings.HasPrefix(sn, "allocate") {
-					if tc.state[x86RegRDI].Kind == LatticeKnownClass {
-						tc.state[x86RegRAX] = tc.state[x86RegRDI]
-						killX86ArgRegs(tc.state)
-						return true
-					}
-				}
+				// No allocation case here. An indirect call through a THR
+				// stub slot reaches the GENERIC AllocateObject stub, which
+				// allocates whatever the tags word says -- there is no
+				// per-class Code to read an owner from, and the caller does
+				// not hold the class in a register. The rule that used to sit
+				// here copied RDI's class into RAX, which the ABI does not
+				// support; see AllocationStubCID.
 				if strings.HasPrefix(sn, "UnlinkedCall:") {
 					methodName := sn[len("UnlinkedCall:"):]
 					if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {

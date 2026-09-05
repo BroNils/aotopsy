@@ -1292,3 +1292,31 @@ func ProfileForVersion(version string) *VersionProfile {
 func VersionAtLeast(version, minimum string) bool {
 	return compareDartVersions(version, minimum) >= 0
 }
+
+// ClassIdTagLayout returns the bit position and width of the ClassIdTag
+// bitfield inside an object header's tags word, for a Dart version:
+//
+//	cid = (tags >> pos) & ((1 << size) - 1)
+//
+// Verified by reading runtime/vm/raw_object.h at each tag:
+//
+//	<= 2.18.0   kClassIdTagPos = 16, kClassIdTagSize = 16
+//	>= 2.19.0   kClassIdTagPos = 12, kClassIdTagSize = 20
+//
+// (From 3.12.2 the same numbers also appear in the generated
+// runtime_offsets_extracted.h as UntaggedObject_kClassIdTagPos/Size, which is
+// what TestClassIdTagLayoutMatchesSDK cross-checks.)
+//
+// This exists because the same fact was being decided three different ways.
+// internal/sdk carried the numbers, typetrack carried a boolean
+// (ClassIDIsHalfWord) that threw the numbers away, and fill_strings.go chose
+// between them on VersionProfile.PreV32Format -- a flag that means "PatchClass
+// has 3 refs; ObjectPool uses v2 type bits" and is set for 2.19.0, 3.0.5 and
+// 3.1.0, three versions whose tag layout is already the 20-bit one. One
+// predicate, in one place, so a fourth cannot appear.
+func ClassIdTagLayout(dartVersion string) (pos, size int) {
+	if VersionAtLeast(dartVersion, "2.19.0") {
+		return 12, 20
+	}
+	return 16, 16
+}
