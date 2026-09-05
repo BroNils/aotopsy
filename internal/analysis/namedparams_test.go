@@ -40,7 +40,7 @@ func TestNamedParamNames_Chain(t *testing.T) {
 	if len(res.FuncTypes) == 0 {
 		t.Fatal("no FunctionType objects captured")
 	}
-	pl := naming.BuildPoolLookups(res, nil, nil, true, "", false)
+	pl := naming.BuildPoolLookups(res, nil, nil, true, "")
 	r := naming.NewTypeParamResolver(res, pl)
 
 	var (

@@ -269,14 +269,26 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // buildTypeTestingStubNames maps a Type's reference ID to the display name
 // for the stub that tests it. Returns nil when the Dart version cannot
 // resolve a Type to its class, in which case callers simply find nothing.
-func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, typeClassIDIsRef bool) map[int]string {
-	// typeClassIdIsRef (Dart 2.10-2.15): Type.type_class_id is a Smi ref,
-	// not a scalar packed into the "flags" word. resolveTypeClassIDs
-	// (called in BuildTypeContext) fills ClassID from MintValues, but on
-	// a real 2.12.0 sample ALL 251 type-owned Codes resolved to the SAME
-	// class ("TypeParameters") — 251 confident wrong labels is worse than
-	// 251 honest sub_ placeholders, so naming stays OFF for these versions.
-	if typeClassIDIsRef {
+func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
+	// OFF below 2.16. On a real 2.12.0 sample ALL 251 type-owned Codes
+	// resolved to the SAME class ("TypeParameters") — 251 confident wrong
+	// labels is worse than 251 honest sub_ placeholders.
+	//
+	// This used to key off VersionProfile.TypeClassIdIsRef, on the reasoning
+	// that a Type whose class id is a ref cannot be resolved. That reasoning
+	// is obsolete twice over: the ref IS resolvable (2324 of 2325 on 2.13.0,
+	// now resolved at parse time in cluster.ReadFill), and the ref era ends
+	// at 2.14, not 2.15. Correcting 2.15.0's profile therefore switched this
+	// on by accident, and the symtab differential caught it: 327 newly named
+	// stubs, agreement unchanged at 5805, so the rate fell 82.1% -> 78.4%.
+	//
+	// The names are not obviously junk -- 327 stubs resolve to 279 distinct
+	// classes, the same shape as 2.16.0's 293/247 -- but every one of them
+	// disagrees with the ELF symbol table, while the identical code agrees on
+	// 2.16.0. Until that is explained, the honest position is the one the
+	// external ground truth supports, so the boundary stays where it was and
+	// is now stated as a version rather than borrowed from an unrelated flag.
+	if !snapshot.VersionAtLeast(dartVersion, "2.16.0") {
 		return nil
 	}
 	if len(result.Types) == 0 {

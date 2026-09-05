@@ -836,7 +836,48 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 		}
 	}
 
+	resolveTypeClassIDs(result)
+
 	return nil
+}
+
+// resolveTypeClassIDs turns the captured Type.type_class_id Smi ref into a
+// class id, for the Dart versions (2.10-2.14) that serialise it as a pointer
+// inside the visited range rather than as a scalar after it.
+//
+// This runs HERE, at the end of the fill phase, rather than in whichever
+// consumer happens to need it first. It used to live in
+// typetrack.BuildTypeContext and mutate the shared Result in place, which made
+// TypeInfo.ClassID mean different things depending on which package had run:
+//
+//   - Its own doc comment records the first casualty -- it once ran after
+//     BuildClassHierarchy, so "the hierarchy saw 0 for every Type and came out
+//     empty on 2.x, taking LCA, CHA and any leaf-class test with it."
+//   - The second was analysis.BuildFieldTypeByClassOffset, which reads
+//     result.Types[i].ClassID directly from a path that never calls
+//     BuildTypeContext. Measured on byte-identical Dart source: 0 classes and
+//     0 resolved field-type slots at 2.13.0 and 2.14.0, against 84 and 178 at
+//     2.16.0.
+//
+// Moving the call a second time would only relocate the hazard. Resolving at
+// parse time removes it: ClassID is meaningful the moment a Result exists, and
+// no consumer needs to know TypeClassIdRef is there.
+//
+// MintValues is filled during the alloc phase, which precedes fill, so the
+// values are already available. No-op from 2.15 on, where the class id is a
+// scalar and TypeClassIdRef is never set.
+func resolveTypeClassIDs(result *Result) {
+	if len(result.MintValues) == 0 {
+		return
+	}
+	for i := range result.Types {
+		ti := &result.Types[i]
+		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
+			if v, ok := result.MintValues[ti.TypeClassIdRef]; ok {
+				ti.ClassID = int32(v)
+			}
+		}
+	}
 }
 
 // fillOneCluster advances the stream past one cluster's fill data.

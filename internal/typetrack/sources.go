@@ -560,8 +560,10 @@ func BuildTypeContext(
 		ctx.WordSize = 4
 	}
 
-	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
-	resolveTypeClassIDs(clResult)
+	// Type class IDs are resolved at parse time now (cluster.ReadFill), so
+	// TypeInfo.ClassID is already meaningful here and on every other path.
+	// See cluster.resolveTypeClassIDs for why it does not live in this
+	// package any more.
 
 	// 0b. Build RefToType once: isolate Types + VM Types.
 	// Shared across buildFieldTypes, buildPoolClassByIndex, buildFuncParamTypes.
