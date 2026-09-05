@@ -222,8 +222,13 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 					pcDescRef = int(r)
 				}
 				if numRefs == 7 {
-					// 2.x AOT: compressed_stackmaps_ is a ref at index 4,
-					// inlined_id_to_function_ at 5, code_source_map_ at 6.
+					// Dart 2.10-2.15 AOT: compressed_stackmaps_ is a ref at
+					// index 4, inlined_id_to_function_ at 5, code_source_map_
+					// at 6. Not "2.x" -- 2.16.0 moved compressed_stackmaps_
+					// behind `kind() == kFullJIT` (app_snapshot.cc), so
+					// 2.16-2.19 have six refs like 3.x. The numRefs == 7 test
+					// is what encodes that; CodeNumRefs is set for exactly
+					// 2.10.0-2.15.0.
 					if j == 4 {
 						compressedStackMapsRef = int(r)
 					}

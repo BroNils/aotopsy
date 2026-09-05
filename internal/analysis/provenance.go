@@ -25,23 +25,69 @@ const ProvenanceFileName = "snapshot.json"
 // which binary they are describing, and neither can anyone reading the
 // output later.
 type Provenance struct {
-	Source             string `json:"source"`
-	SourceName         string `json:"source_name"`
-	SHA256             string `json:"sha256"`
-	Size               int64  `json:"size"`
-	Arch               string `json:"arch"`
-	DartVersion        string `json:"dart_version,omitempty"`
-	CompressedPointers bool   `json:"compressed_pointers"`
+	Source             string    `json:"source"`
+	SourceName         string    `json:"source_name"`
+	SHA256             string    `json:"sha256"`
+	Size               int64     `json:"size"`
+	Arch               string    `json:"arch"`
+	DartVersion        string    `json:"dart_version,omitempty"`
+	CompressedPointers bool      `json:"compressed_pointers"`
+	Build              BuildMode `json:"build"`
+}
+
+// BuildMode records how gen_snapshot was invoked, inferred from the snapshot
+// itself rather than from anything the binary declares.
+//
+// It exists because two of AOTopsy's outputs go empty for a reason that is a
+// property of the input, and an empty artifact reads exactly like a parse
+// failure. `--split-debug-info` / `--obfuscate` turn on
+// FLAG_dwarf_stack_traces_mode, and then:
+//
+//   - app_snapshot.cc:2911 writes code_source_map_ and inlined_id_to_function_
+//     as null, so inline attribution has nothing to attribute; and
+//   - with !FLAG_retain_code_objects, Code objects are discarded wholesale, so
+//     most InstructionsTable entries have no Code and names must come from
+//     Function.code_index instead.
+//
+// Measured on the corpus: the one obfuscated production sample has 0
+// CodeSourceMaps and 91012 of 128999 entries discarded; the other four have
+// thousands of CodeSourceMaps and zero discarded.
+type BuildMode struct {
+	// DwarfStackTraces is true when the snapshot shows the marks of
+	// FLAG_dwarf_stack_traces_mode.
+	DwarfStackTraces bool `json:"dwarf_stack_traces"`
+	// DiscardedCodes is InstructionsTable.FirstEntryWithCode: entries with no
+	// Code object. Non-zero PROVES dwarf mode (app_snapshot.cc:2624 asserts
+	// it).
+	DiscardedCodes int `json:"discarded_codes"`
+	// CodeSourceMaps is how many were recovered. Zero alongside a non-empty
+	// code population is the other mark of dwarf mode.
+	CodeSourceMaps int `json:"code_source_maps"`
+}
+
+// DetectBuildMode infers the build mode from what the snapshot contains.
+//
+// Discarded entries are proof: the serializer asserts
+// `kFullAOT && FLAG_dwarf_stack_traces_mode && !FLAG_retain_code_objects`
+// before discarding. Zero CodeSourceMaps against a non-empty code population
+// is the weaker signal -- it is what dwarf mode does, and there is no other
+// way to get code without source maps -- so it is accepted too, and the two
+// raw counts are recorded either way so a reader can judge.
+func DetectBuildMode(csmCount, discarded, codeRanges int) BuildMode {
+	b := BuildMode{DiscardedCodes: discarded, CodeSourceMaps: csmCount}
+	b.DwarfStackTraces = discarded > 0 || (csmCount == 0 && codeRanges > 0)
+	return b
 }
 
 // WriteProvenance records the analysed binary in outDir.
-func WriteProvenance(outDir, libPath, dartVersion string, isARM64, compressedPtrs bool) error {
+func WriteProvenance(outDir, libPath, dartVersion string, isARM64, compressedPtrs bool, build BuildMode) error {
 	p := Provenance{
 		Source:             libPath,
 		SourceName:         filepath.Base(libPath),
 		Arch:               "x64",
 		DartVersion:        dartVersion,
 		CompressedPointers: compressedPtrs,
+		Build:              build,
 	}
 	if isARM64 {
 		p.Arch = "arm64"
