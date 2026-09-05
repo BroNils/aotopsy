@@ -72,10 +72,8 @@ type AnalysisContext struct {
 // Image returns a CodeImage providing unified function slicing.
 func (c *AnalysisContext) Image() CodeImage {
 	return CodeImage{
-		Code:    c.Code,
-		CodeVA:  c.CodeVA,
-		CodeOff: c.CodeOff,
-		Pool:    c.Pool,
+		CodeImage: cluster.CodeImage{Code: c.Code, CodeVA: c.CodeVA, CodeOff: c.CodeOff},
+		Pool:      c.Pool,
 	}
 }
 
@@ -135,12 +133,12 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 
 	symbolNames := make(map[uint64]string, len(sc.Ranges))
 	symbolSizes := make(map[uint64]uint32, len(sc.Ranges))
+	im := sc.Image()
 	for _, r := range sc.Ranges {
-		if r.Size == 0 {
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - sc.CodeOff
-		funcVA := sc.CodeVA + funcStart
 		symbolSizes[funcVA] = r.Size
 		if r.RefID >= 0 {
 			symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
@@ -442,7 +440,11 @@ func (c *AnalysisContext) buildAccessorFieldNames() {
 		if !ok || classID <= 0 {
 			continue
 		}
-		nm := c.SymbolNames[c.CodeVA+(uint64(r.PCOffset)-c.CodeOff)]
+		funcVA, ok := c.Image().FuncVA(r)
+		if !ok {
+			continue
+		}
+		nm := c.SymbolNames[funcVA]
 		base := nm
 		if i := strings.LastIndex(base, "."); i >= 0 {
 			base = base[i+1:]
@@ -713,7 +715,10 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 	if !ok || len(entries) == 0 {
 		return
 	}
-	funcStart := uint64(r.PCOffset) - c.CodeOff
+	funcVA, ok := c.Image().FuncVA(r)
+	if !ok {
+		return
+	}
 	regions := cluster.BuildTryRegions(entries, r.Size)
 	regions = cluster.ExpandOuterTryRegions(regions, handlers)
 	for _, reg := range regions {
@@ -722,11 +727,11 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 		}
 		h := fir.ExceptionHandlers[reg.TryIndex]
 		fir.TryRegions = append(fir.TryRegions, decompiler.TryRegionEntry{
-			StartVA:   funcStart + c.CodeVA + uint64(reg.StartPC),
-			EndVA:     funcStart + c.CodeVA + uint64(reg.EndPC),
+			StartVA:   funcVA + uint64(reg.StartPC),
+			EndVA:     funcVA + uint64(reg.EndPC),
 			TryIndex:  reg.TryIndex,
 			Handler:   h,
-			HandlerVA: funcStart + c.CodeVA + uint64(h.PCOffset),
+			HandlerVA: funcVA + uint64(h.PCOffset),
 		})
 	}
 	fir.SnapTryRegionsToBlocks()

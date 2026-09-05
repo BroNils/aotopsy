@@ -51,13 +51,16 @@ func RunFromMain(d FromMainDeps) error {
 	if d.GcEveryN <= 0 {
 		d.GcEveryN = 100
 	}
+	im := cluster.CodeImage{CodeVA: d.CodeVA, CodeOff: d.CodeOff}
 	rangeByVA := make(map[uint64]cluster.CodeRange, len(d.Ranges))
 	for _, r := range d.Ranges {
-		if r.Size == 0 || r.RefID < 0 {
+		if r.RefID < 0 {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - d.CodeOff
-		funcVA := d.CodeVA + funcStart
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
 		rangeByVA[funcVA] = r
 	}
 

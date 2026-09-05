@@ -53,8 +53,12 @@ func RunDisasmStage(
 ) (*DisasmResult, error) {
 	// Build symbol map for cross-references during disassembly.
 	symbols := make(map[uint64]string)
+	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
 	for _, r := range ranges {
-		va := codeVA + uint64(r.PCOffset) - codeOff
+		va, ok := vaImage.FuncVA(r)
+		if !ok {
+			continue
+		}
 		if r.RefID >= 0 {
 			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
@@ -278,7 +282,7 @@ func RunDisasmStage(
 		if opts.Graph {
 			dcfg := disasm.BuildCFG(name, insts)
 			if len(dcfg.Blocks) > 1 {
-				out.cfgDot = render.CFGDOT(dcfg, render.NASA)
+				out.cfgDot = render.CFGDOT(dcfg, out.edgeRecs, render.NASA)
 				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
 			}
 		}

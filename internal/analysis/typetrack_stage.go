@@ -178,7 +178,10 @@ func runTypeInference(
 		if !ok || ci.FuncName == "" {
 			continue
 		}
-		start := codeVA + uint64(r.PCOffset) - codeOff
+		start, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.FuncVA(r)
+		if !ok {
+			continue
+		}
 		spans = append(spans, funcSpan{start: start, end: start + uint64(r.Size), name: ci.FuncName})
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })

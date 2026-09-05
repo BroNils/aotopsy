@@ -154,6 +154,56 @@ func TestDetectColorMode(t *testing.T) {
 	}
 }
 
+// TestNoColorBeatsForce pins the precedence between the two conventions.
+// They contradict each other by construction -- NO_COLOR says "never",
+// CLICOLOR_FORCE says "no matter what" -- and the resolution is not a
+// matter of taste: no-color.org is absolute and termenv's EnvNoColor
+// documents that NO_COLOR is honoured "ignoring CLICOLOR/CLICOLOR_FORCE".
+// Detection originally checked force first and coloured output for a user
+// who had explicitly opted out.
+func TestNoColorBeatsForce(t *testing.T) {
+	t.Setenv("CLICOLOR", "")
+	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	if !IsColorDisabled() {
+		t.Errorf("NO_COLOR must win over CLICOLOR_FORCE")
+	}
+	if mode := DetectColorMode(nil); mode != ColorNone {
+		t.Errorf("expected ColorNone when NO_COLOR and CLICOLOR_FORCE are both set, got %v", mode)
+	}
+}
+
+// TestForceBeatsCliColorZero is the other half: CLICOLOR=0 is the weaker
+// request and does yield to CLICOLOR_FORCE.
+func TestForceBeatsCliColorZero(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("CLICOLOR", "0")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	if IsColorDisabled() {
+		t.Errorf("CLICOLOR=0 must yield to CLICOLOR_FORCE")
+	}
+	if mode := DetectColorMode(nil); mode != ColorTrue {
+		t.Errorf("expected ColorTrue when force overrides CLICOLOR=0, got %v", mode)
+	}
+}
+
+// TestForcedDumbTerminalStillGetsAnsi pins the forced-on-dumb case.
+func TestForcedDumbTerminalStillGetsAnsi(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR", "")
+	t.Setenv("COLORTERM", "")
+	t.Setenv("TERM", "dumb")
+	t.Setenv("CLICOLOR_FORCE", "1")
+
+	if mode := DetectColorMode(nil); mode != Color16 {
+		t.Errorf("expected Color16 on a forced dumb terminal, got %v", mode)
+	}
+}
+
 func TestLogger(t *testing.T) {
 	var buf bytes.Buffer
 	l := NewLogger(&buf, false)

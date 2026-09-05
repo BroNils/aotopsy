@@ -128,7 +128,10 @@ func cmdExportDart(args []string) error {
 			break
 		}
 
-		funcVA := codeVA + (uint64(r.PCOffset) - codeOff)
+		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.FuncVA(r)
+		if !ok {
+			continue
+		}
 		funcName := symbolNames[funcVA]
 		if funcName == "" || strings.HasPrefix(funcName, "stub_") || strings.HasPrefix(funcName, "Stub_") {
 			continue

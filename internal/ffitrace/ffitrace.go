@@ -68,8 +68,6 @@ type Options struct {
 	Filter string
 }
 
-const defaultMaxScan = 500
-
 // Trace runs two detectors per function, both gated by the same scan
 // bound (see Options):
 //

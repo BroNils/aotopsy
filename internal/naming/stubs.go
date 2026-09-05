@@ -114,8 +114,12 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 		return out
 	}
 
+	im := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
 	for i, r := range sorted {
-		funcVA := codeVA + uint64(r.PCOffset) - codeOff
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
 		out[funcVA] = names[i]
 	}
 	return out
@@ -212,7 +216,10 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if no.IsConstructor() && name != "" {
 			name = "new " + name
 		}
-		funcVA := codeVA + uint64(table.Entries[idx].PCOffset) - codeOff
+		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.VAAt(table.Entries[idx].PCOffset)
+		if !ok {
+			continue
+		}
 		out[funcVA] = name
 	}
 	return out

@@ -110,12 +110,16 @@ func TestFindDynamicLibraryCalls_IgnoresIndirectAndUnrelatedCalls(t *testing.T) 
 // using synthetic ranges (no real ELF needed) so it runs anywhere
 // without depending on an external sample file.
 func TestTrace_DefaultBoundLimitsScan(t *testing.T) {
-	const numFuncs = defaultMaxScan + 50 // deliberately more than the default cap
+	// Bound against analysis.DefaultMaxScan, the constant ScanFuncs
+	// actually reads. ffitrace kept its own copy of 500 after the scan
+	// loop moved to analysis, so this test pinned a number that no longer
+	// had any effect on what Trace did.
+	const numFuncs = analysis.DefaultMaxScan + 50 // deliberately more than the default cap
 	ctx := syntheticContext(numFuncs)
 
 	_, scanned := Trace(ctx, Options{}) // no MaxScan, no AllowUnbounded -- must use the default cap
-	if scanned == 0 || scanned > defaultMaxScan {
-		t.Fatalf("expected Trace to process at most %d functions by default, processed %d", defaultMaxScan, scanned)
+	if scanned == 0 || scanned > analysis.DefaultMaxScan {
+		t.Fatalf("expected Trace to process at most %d functions by default, processed %d", analysis.DefaultMaxScan, scanned)
 	}
 }
 

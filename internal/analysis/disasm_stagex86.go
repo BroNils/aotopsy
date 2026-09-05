@@ -42,8 +42,12 @@ func RunDisasmStageX86(
 	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
 	symbols := make(map[uint64]string)
+	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
 	for _, r := range ranges {
-		va := codeVA + uint64(r.PCOffset) - codeOff
+		va, ok := vaImage.FuncVA(r)
+		if !ok {
+			continue
+		}
 		if r.RefID >= 0 {
 			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
 		} else {
@@ -241,7 +245,7 @@ func RunDisasmStageX86(
 		if opts.Graph {
 			dcfg := disasm.BuildX86CFG(name, funcCode, funcVA)
 			if len(dcfg.Blocks) > 1 {
-				dot := render.CFGDOT(dcfg, render.NASA)
+				dot := render.CFGDOT(dcfg, fnEdgeRecs, render.NASA)
 				dotPath := filepath.Join(cfgDir, relName+".dot")
 				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
 					return nil, fmt.Errorf("mkdir cfg: %w", err)

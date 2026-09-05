@@ -84,9 +84,24 @@ var (
 
 var currentMode = ColorTrue
 
-// IsColorDisabled checks NO_COLOR and CLICOLOR conventions.
+// IsColorDisabled reports whether the environment asks for no color,
+// resolving the two conventions against each other the way they are
+// actually specified.
+//
+// NO_COLOR (https://no-color.org/) is absolute: set and non-empty means no
+// color, and CLICOLOR_FORCE does not override it. CLICOLOR=0
+// (https://bixense.com/clicolors/) is the weaker request -- it yields to
+// CLICOLOR_FORCE.
+//
+// The first version of this checked CLICOLOR_FORCE before NO_COLOR, so
+// `NO_COLOR=1 CLICOLOR_FORCE=1` emitted escapes at a user who had said not
+// to. Ordering matched against muesli/termenv, whose EnvNoColor documents
+// exactly this precedence.
 func IsColorDisabled() bool {
-	return os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0"
+	if os.Getenv("NO_COLOR") != "" {
+		return true
+	}
+	return os.Getenv("CLICOLOR") == "0" && !IsColorForced()
 }
 
 // IsColorForced checks CLICOLOR_FORCE convention.
@@ -97,16 +112,13 @@ func IsColorForced() bool {
 
 // DetectColorMode determines terminal capability from environment and output stream.
 func DetectColorMode(f *os.File) ColorMode {
-	if IsColorForced() {
-		if isTrueColorSupported() {
-			return ColorTrue
-		}
-		return Color256
-	}
 	if IsColorDisabled() {
 		return ColorNone
 	}
-	if f != nil {
+	forced := IsColorForced()
+	// A forced run skips the TTY test -- that is the whole point of the
+	// flag: piping into a pager or a CI log that renders escapes.
+	if !forced && f != nil {
 		fi, err := f.Stat()
 		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
 			return ColorNone
@@ -120,6 +132,13 @@ func DetectColorMode(f *os.File) ColorMode {
 		return Color256
 	}
 	if term == "dumb" {
+		// Forced output still gets plain ANSI on a dumb terminal, matching
+		// termenv: "if the terminal does not support any colors, but
+		// CLICOLOR_FORCE is set and not 0, then the ANSI color profile
+		// will be returned".
+		if forced {
+			return Color16
+		}
 		return ColorNone
 	}
 	return Color16

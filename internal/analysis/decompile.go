@@ -150,8 +150,10 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 			continue
 		}
 		classRef := effectiveOwnerClassRef(funcObj)
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
+		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.FuncVA(r)
+		if !ok {
+			continue
+		}
 		functionsByOwnerClassRef[classRef] = append(functionsByOwnerClassRef[classRef], funcVA)
 	}
 	classRefTouchedByPoolLoad := func(poolIndex int) int {

@@ -53,10 +53,8 @@ type SnapshotContext struct {
 // Image returns a CodeImage providing unified function slicing.
 func (sc *SnapshotContext) Image() CodeImage {
 	return CodeImage{
-		Code:    sc.Code,
-		CodeVA:  sc.CodeVA,
-		CodeOff: sc.CodeOff,
-		Pool:    sc.Pool,
+		CodeImage: cluster.CodeImage{Code: sc.Code, CodeVA: sc.CodeVA, CodeOff: sc.CodeOff},
+		Pool:      sc.Pool,
 	}
 }
 

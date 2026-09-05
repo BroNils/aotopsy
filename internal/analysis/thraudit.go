@@ -27,9 +27,7 @@ type THRAuditData struct {
 // Image returns a CodeImage providing unified function slicing.
 func (d THRAuditData) Image() CodeImage {
 	return CodeImage{
-		Code:    d.Code,
-		CodeVA:  d.CodeVA,
-		CodeOff: d.CodeOff,
+		CodeImage: cluster.CodeImage{Code: d.Code, CodeVA: d.CodeVA, CodeOff: d.CodeOff},
 	}
 }
 
@@ -100,8 +98,12 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 
 	// Build symbol map.
 	symbols := make(map[uint64]string)
+	im := data.Image()
 	for _, r := range data.Ranges {
-		va := data.CodeVA + uint64(r.PCOffset) - data.CodeOff
+		va, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
 		symbols[va] = codeNames[r.RefID].Qualified(r.PCOffset)
 	}
 	lookup := disasm.PlaceholderLookup(symbols)

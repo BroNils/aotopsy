@@ -378,6 +378,18 @@ type transferCtxX86 struct {
 }
 
 // handleX86Store handles stack stores and object field stores.
+//
+// Only the RBP (stack) case existed here originally. An object field store
+// was not handled at all, which meant two things on x86_64 that were true
+// on ARM64: field_accessor_xref.jsonl had no store rows, and
+// TypeContext.FieldStoreTypes -- the whole-program field-store to
+// field-load type channel -- was never written to. It stayed empty on
+// every x86_64 run, so one of the three type sources FieldValueClass
+// consults simply did not exist for this architecture.
+//
+// PP/THR/SP bases address the pool, the Thread and the stack, none of
+// which are Dart objects with fields; the same exclusions ARM64's STUR
+// handler applies.
 func handleX86Store(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
@@ -448,6 +460,13 @@ func handleX86Load(tc *transferCtxX86) bool {
 			if baseIdx == sdk.X86PP {
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
 				if !poolIdxOK {
+					// Same rule as disasm's provenance tracker: the load
+					// executed, so the destination's old type is gone.
+					// Returning without touching state[dstIdx] left the
+					// PREVIOUS type in place, and a KnownClass surviving a
+					// load it did not survive is authoritative downstream
+					// -- it picks dispatch targets.
+					tc.state[dstIdx] = Top()
 					return true
 				}
 				lat, hit := ResolvePoolEntry(tc.ctx, poolIdx, int(mem.Disp))
@@ -486,6 +505,24 @@ func handleX86Load(tc *transferCtxX86) bool {
 				}
 			}
 			// Class-id load, Dart <= 2.18 form: MOVZX reg, word [obj + 1].
+			//
+			// Assembler::LoadClassId emits a 16-bit zero-extending load
+			// there, because kClassIdTagPos is 16 and kClassIdTagSize is
+			// 16, so the class id occupies the high half-word of the tags
+			// word and can be read whole:
+			//
+			//	movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
+			//
+			// FieldAddress subtracts the heap-object tag, so tags_offset 0
+			// becomes displacement +1. From 2.19.0 the field is 20 bits at
+			// position 12 and no longer half-word aligned, so the SDK
+			// switched to movl + shrl -- the form the 32-bit path handles.
+			//
+			// Missing this shape left the class-id register Top on every
+			// dispatch call: 83415 of 83415 sites on the 2.18.0 x64
+			// sample, against 83417 Bottom on 2.19.0. Bottom is what makes
+			// the selector-offset scan possible, so x86_64 dispatch
+			// resolution was dead on every version up to 2.18.
 			if tc.ctx.ClassIDIsHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == 1 && baseIdx >= 0 && baseIdx < 31 &&
 				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
 				if tc.state[baseIdx].Kind == LatticeKnownClass {
@@ -498,17 +535,49 @@ func handleX86Load(tc *transferCtxX86) bool {
 			}
 			// Field type lookup — MOV reg, [reg+offset] where base has KnownClass.
 			if baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownClass {
+				// Displacement -1 is the object header (FieldAddress
+				// subtracts the heap tag), i.e. a class-ID extraction, not
+				// a field. Matching 0 as well was too broad; ARM64 checks
+				// only -1.
 				if mem.Disp == -1 {
 					tc.state[dstIdx] = KnownClass(tc.state[baseIdx].ClassID)
 					tc.ctx.HeaderHits++
 					return true
 				}
+				// ARM64 has recorded field accesses since the file
+				// existed; x86_64 never called recordFieldAccess at all,
+				// which is why field_accessor_xref.jsonl was absent from
+				// an x86_64 run rather than merely empty.
 				recordFieldAccess(tc.result, tc.state[baseIdx].ClassID, int32(mem.Disp), false, tc.inst.VA)
+				// Declared type first, then the type observed in const
+				// Instance objects -- shared with ARM64 through
+				// TypeContext.FieldValueClass so the precedence rule has
+				// one definition.
 				if classID, ok2 := tc.ctx.FieldValueClass(tc.state[baseIdx].ClassID, int32(mem.Disp)); ok2 {
 					tc.state[dstIdx] = KnownClass(classID)
 					return true
 				}
+				// An unknown field types NOTHING, so this deliberately
+				// falls through. It used to end in
+				// `state[dstIdx] = KnownClass(state[baseIdx].ClassID)`,
+				// commented "keep KnownClass as approximation" -- claiming
+				// a field's value has the same class as the object holding
+				// it. True for a linked-list `next`, false for nearly
+				// everything else, and KnownClass is authoritative
+				// downstream: it selects dispatch targets. ARM64 has no
+				// such fallback and never did. It also incremented
+				// HeaderHits, so the counter meant to measure header loads
+				// was partly measuring this guess.
 			}
+			// Header load with an UNKNOWN receiver type. ARM64 sets Bottom
+			// here rather than Top, and the distinction is load-bearing:
+			// the SHR/AND handler only recognises a class-ID extraction
+			// when its source is Bottom, which is what keeps the
+			// selector-offset scan alive when the receiver class is
+			// unknown. x86 had the consumer of that signal but never the
+			// producer -- this path fell through to Top, so the check could
+			// not fire. Measured consequence: 91.6% of x86_64 dispatch
+			// calls reached the call site with no class in cid_reg.
 			if mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
 				tc.state[dstIdx] = Bottom()
 				tc.ctx.HeaderHits++
@@ -575,6 +644,14 @@ func handleX86LEA(tc *transferCtxX86) bool {
 }
 
 // handleX86Bitwise handles class ID bitfield extraction from headers.
+//
+// SHR/AND reg, imm is the 2.19+ form of LoadClassId (movl + shrl). If the
+// source has KnownClass, preserve it -- the same rule as ARM64's UBFX. If
+// it is Bottom, preserve Bottom: extracting class-ID bits from an unknown
+// header still yields "a class id, but not known which", which is what the
+// selector-offset dispatch path consumes. Killing Bottom here is what left
+// x86_64 dispatch resolution far behind ARM64; the matching ARM64 fix
+// unlocked 11550 field hits.
 func handleX86Bitwise(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if (ins.Op == x86asm.SHR || ins.Op == x86asm.AND) && len(ins.Args) >= 2 {

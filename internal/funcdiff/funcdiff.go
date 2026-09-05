@@ -83,15 +83,18 @@ func Build(result *cluster.Result, pl *naming.PoolLookups, ct *snapshot.CIDTable
 		hash string
 	}
 	byOwner := make(map[int]codeInfo, len(ranges))
+	im := cluster.CodeImage{Code: code, CodeOff: codeOff}
 	for i := range ranges {
 		r := &ranges[i]
 		if r.OwnerRef < 0 {
 			continue
 		}
 		ci := codeInfo{size: int64(r.Size)}
-		if lo := int64(r.PCOffset) - int64(codeOff); code != nil && lo >= 0 &&
-			lo+int64(r.Size) <= int64(len(code)) && r.Size > 0 {
-			sum := sha256.Sum256(code[lo : lo+int64(r.Size)])
+		// SliceExact, not Slice: a clamped read would hash fewer bytes
+		// than the function has and produce a digest that differs from
+		// every other build for a reason unrelated to the code.
+		if fnCode, _, ok := im.SliceExact(*r); ok {
+			sum := sha256.Sum256(fnCode)
 			ci.hash = hex.EncodeToString(sum[:])
 		}
 		byOwner[r.OwnerRef] = ci

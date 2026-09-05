@@ -16,12 +16,15 @@ type FuncSlice struct {
 	Owner string
 }
 
-// CodeImage encapsulates the instruction image bytes, virtual address base,
-// and offset, providing unified, clamped function slicing.
+// CodeImage adds naming to cluster.CodeImage: the same bytes and the same
+// slicing arithmetic, plus the pool and ELF lookups that turn a range into
+// a named function.
+//
+// The arithmetic itself is NOT repeated here. It lives in cluster, next to
+// CodeRange, so that naming, funcdiff, frida and cmd/ -- none of which can
+// import analysis -- cut functions the same way this does.
 type CodeImage struct {
-	Code    []byte
-	CodeVA  uint64
-	CodeOff uint64
+	cluster.CodeImage
 	Pool    *naming.PoolLookups
 	ElfSyms map[uint64]string
 }
@@ -29,36 +32,19 @@ type CodeImage struct {
 // NewCodeImage constructs a CodeImage from raw image components.
 func NewCodeImage(code []byte, codeVA, codeOff uint64, pool *naming.PoolLookups, elfSyms map[uint64]string) CodeImage {
 	return CodeImage{
-		Code:    code,
-		CodeVA:  codeVA,
-		CodeOff: codeOff,
-		Pool:    pool,
-		ElfSyms: elfSyms,
+		CodeImage: cluster.CodeImage{Code: code, CodeVA: codeVA, CodeOff: codeOff},
+		Pool:      pool,
+		ElfSyms:   elfSyms,
 	}
 }
 
 // Slice extracts a clamped FuncSlice from a CodeRange.
 // Returns false if the range is empty or falls outside the image.
 func (im CodeImage) Slice(r cluster.CodeRange) (FuncSlice, bool) {
-	if r.Size == 0 || uint64(r.PCOffset) < im.CodeOff {
+	funcCode, funcVA, ok := im.CodeImage.Slice(r)
+	if !ok {
 		return FuncSlice{}, false
 	}
-	funcStart := uint64(r.PCOffset) - im.CodeOff
-	var funcCode []byte
-	if len(im.Code) > 0 {
-		if funcStart >= uint64(len(im.Code)) {
-			return FuncSlice{}, false
-		}
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(im.Code)) {
-			funcEnd = uint64(len(im.Code))
-		}
-		if funcStart >= funcEnd {
-			return FuncSlice{}, false
-		}
-		funcCode = im.Code[funcStart:funcEnd]
-	}
-	funcVA := im.CodeVA + funcStart
 
 	var funcName string
 	var owner string
