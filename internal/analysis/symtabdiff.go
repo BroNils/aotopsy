@@ -288,9 +288,28 @@ func NamesAgree(ours, sym string) bool {
 // `init:` field-initializer marker away.
 func proseFold(n string) string {
 	n = foldMixinOwner(n)
+	// A setter is `set:foo` for us and `foo=` in prose -- the marker does not
+	// vanish, it moves to the other end and changes shape. Stripping it
+	// without putting the `=` back left every setter disagreeing on the two
+	// prose samples: 125 of 420 remaining disagreements on
+	// dart-2.19.0-gt-arm64 and 117 of 577 on dart-3.3.0-gt-arm64.
+	isSetter := hasMemberPrefix(n, "set:")
 	// Prose drops both kinds; the assembler dialect keeps both, and the
 	// scrubbed one keeps init: but drops the rest. See memberMarkers.
-	return stripMarkers(n, append(append([]string{}, proseMarkers...), memberMarkers...))
+	n = stripMarkers(n, append(append([]string{}, proseMarkers...), memberMarkers...))
+	if isSetter {
+		n += "="
+	}
+	return n
+}
+
+// hasMemberPrefix reports whether the member component -- the part after the
+// last '.', or the whole name for a top-level function -- starts with marker.
+func hasMemberPrefix(n, marker string) bool {
+	if i := strings.LastIndex(n, "."); i >= 0 {
+		return strings.HasPrefix(n[i+1:], marker)
+	}
+	return strings.HasPrefix(n, marker)
 }
 
 // stripMarkers removes any of the given markers from the member component --
