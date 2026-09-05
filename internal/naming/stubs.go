@@ -270,24 +270,31 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // for the stub that tests it. Returns nil when the Dart version cannot
 // resolve a Type to its class, in which case callers simply find nothing.
 func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	// OFF below 2.16. On a real 2.12.0 sample ALL 251 type-owned Codes
-	// resolved to the SAME class ("TypeParameters") — 251 confident wrong
-	// labels is worse than 251 honest sub_ placeholders.
+	// OFF below 2.16, and the reason is no longer the original one.
 	//
-	// This used to key off VersionProfile.TypeClassIdIsRef, on the reasoning
-	// that a Type whose class id is a ref cannot be resolved. That reasoning
-	// is obsolete twice over: the ref IS resolvable (2324 of 2325 on 2.13.0,
-	// now resolved at parse time in cluster.ReadFill), and the ref era ends
-	// at 2.14, not 2.15. Correcting 2.15.0's profile therefore switched this
-	// on by accident, and the symtab differential caught it: 327 newly named
-	// stubs, agreement unchanged at 5805, so the rate fell 82.1% -> 78.4%.
+	// It was switched off because a real 2.12.0 sample resolved ALL 251
+	// type-owned Codes to the SAME class ("TypeParameters"). That collapse is
+	// gone: Type class ids resolve at parse time now (cluster.ReadFill), and
+	// forcing the namer on for that sample yields 2187 names over 1885
+	// distinct classes, the most common being `TypeTestingStub_Future` x8,
+	// with 389 carrying type arguments. The names are good.
 	//
-	// The names are not obviously junk -- 327 stubs resolve to 279 distinct
-	// classes, the same shape as 2.16.0's 293/247 -- but every one of them
-	// disagrees with the ELF symbol table, while the identical code agrees on
-	// 2.16.0. Until that is explained, the honest position is the one the
-	// external ground truth supports, so the boundary stays where it was and
-	// is now stated as a version rather than borrowed from an unrelated flag.
+	// What keeps it off is the COMPARISON, not the names. Below 2.16 the ELF
+	// speaks the assembler dialect, which spells a stub the way
+	// TypeTestingStubNamer does --
+	// `TypeTestingStub_dart_core__List__dart_core__int` -- while we use Dart
+	// source form, `TypeTestingStub_List<int>`. Switching the namer on costs
+	// about 4 points on 2.13-2.15 with the AGREEMENT COUNT UNCHANGED (6571,
+	// 6555, 6796 either way): 280-330 more functions named, none of them
+	// scoring, which is the same convention gap findings 013 and 014 were
+	// about.
+	//
+	// The right order is to teach the instrument first -- generate the SDK's
+	// assembly spelling alongside the readable one, using
+	// ClassInfo.LibraryRefID for the library URL it prefixes -- and only then
+	// switch this on. Doing it the other way trades the project's only
+	// external ground truth for names it cannot yet score.
+	// See docs/findings-repo/015.
 	if !snapshot.VersionAtLeast(dartVersion, "2.16.0") {
 		return nil
 	}
