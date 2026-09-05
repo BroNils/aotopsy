@@ -8,7 +8,7 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-func identifyLoopHeaders(fir *FuncIR) map[int]bool {
+func identifyLoopHeaders(fir *FuncIR, idom []int) map[int]bool {
 	headers := make(map[int]bool)
 	for i := range fir.Blocks {
 		blk := &fir.Blocks[i]
@@ -16,9 +16,12 @@ func identifyLoopHeaders(fir *FuncIR) map[int]bool {
 			if s.BlockID < 0 || s.BlockID >= len(fir.Blocks) {
 				continue
 			}
-			target := &fir.Blocks[s.BlockID]
-			// Back-edge: target address <= current address (backward branch).
-			if target.StartVA <= blk.StartVA {
+			// A back edge is an edge into a block that DOMINATES its own
+			// source: every path from the entry to i already passed through
+			// s.BlockID, so following this edge re-enters it. See dom.go for
+			// why the previous address-order test (target.StartVA <=
+			// blk.StartVA) was not this, and what it swept in.
+			if dominates(idom, s.BlockID, i) {
 				headers[s.BlockID] = true
 			}
 		}

@@ -117,6 +117,10 @@ type emitter struct {
 	budgetHit   bool
 	stats       Stats
 	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	// idom is the dominator tree, computed once per function. Every question
+	// of the form "is this edge a back edge?" goes through it -- see dom.go
+	// for why block addresses cannot answer that.
+	idom []int
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -252,7 +256,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	}
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
-	e.loopHeaders = identifyLoopHeaders(fir)
+	e.idom = dominators(fir)
+	e.loopHeaders = identifyLoopHeaders(fir, e.idom)
 	// Pre-emission reaching-definition fixpoint: correct value state at each
 	// block entry regardless of the recursive walk's path (ssa.go). The same
 	// fixpoint's exit states drive loop-carried phi detection.
