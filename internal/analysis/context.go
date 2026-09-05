@@ -371,37 +371,11 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 		c.Enrichment.InlinedFuncNamesByCodeRef[ce.RefID] = names
 	}
 
-	// FP-1: Decode CompressedStackMaps payloads and map them by Code.RefID.
-	// Each Code has a CompressedStackMapsRef pointing to a CSM object whose
-	// raw payload was captured in result.CompressedStackMaps. Decoding gives
-	// per-PC register/spill liveness at safepoints.
-	csmByRef := make(map[int]*cluster.CompressedStackMapsInfo, len(result.CompressedStackMaps))
-	var globalTablePayload []byte
-	for i := range result.CompressedStackMaps {
-		csmByRef[result.CompressedStackMaps[i].RefID] = &result.CompressedStackMaps[i]
-		p := result.CompressedStackMaps[i].Payload
-		if len(p) >= 4 && globalTablePayload == nil {
-			flagsAndSize := uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16 | uint32(p[3])<<24
-			if flagsAndSize&1 != 0 { // GlobalTableBit
-				globalTablePayload = p
-			}
-		}
-	}
-	c.Enrichment.DecodedStackMapsByCodeRef = make(map[int][]cluster.StackMapEntry)
-	for _, ce := range result.Codes {
-		if ce.CompressedStackMapsRef < 0 {
-			continue
-		}
-		csm, ok := csmByRef[ce.CompressedStackMapsRef]
-		if !ok || len(csm.Payload) == 0 {
-			continue
-		}
-		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload, globalTablePayload)
-		if err != nil || len(entries) == 0 {
-			continue
-		}
-		c.Enrichment.DecodedStackMapsByCodeRef[ce.RefID] = entries
-	}
+	// GC stack maps, from the CompressedStackMaps cluster (<=2.15) or the
+	// InstructionsTable rodata (every 3.x build). See DecodeAllStackMaps --
+	// the decoding lives there because stack_maps.jsonl needs the same
+	// answer and two copies would drift.
+	c.Enrichment.DecodedStackMapsByCodeRef = DecodeAllStackMaps(result, c.InstrTable)
 
 	// Build Code.RefID → CodeSourceMap ref ID map for O(1) lookup in
 	// wireInlineFrames (avoids looping through result.Codes per function).

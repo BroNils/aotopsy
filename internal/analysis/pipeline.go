@@ -228,7 +228,7 @@ func Run(opts Opts) (*Result, error) {
 	//
 	// Confirmed empirically: 0 entries for all three across 16 corpus samples
 	// (Dart 2.12.0 / 3.7.0 / 3.9.2 / 3.10.7 / 3.11.0 / 3.12.2, arm64 + x64).
-	writeCapturedJSONL(&opts, clResult, pl, classLayouts, opts.log())
+	writeCapturedJSONL(&opts, clResult, pl, classLayouts, table, opts.log())
 
 	// Write pool_immediates.jsonl for crypto constant identification.
 	poolImmPath := filepath.Join(opts.OutDir, "pool_immediates.jsonl")
@@ -465,7 +465,7 @@ func Run(opts Opts) (*Result, error) {
 // writeCapturedJSONL writes all captured-data JSONL files from the fill-phase
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Errors are logged but non-fatal (captured data is supplementary).
-func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, log io.Writer) {
+func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, table *cluster.InstructionsTable, log io.Writer) {
 	// Build all records first, then write each non-empty slice.
 	scripts := BuildScripts(clResult, pl)
 	loadingUnits := BuildLoadingUnits(clResult)
@@ -474,6 +474,7 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	contexts := BuildContexts(clResult)
 	typeArgs := BuildTypeArguments(clResult)
 	excHandlers := BuildExceptionHandlers(clResult)
+	stackMaps := BuildStackMaps(DecodeAllStackMaps(clResult, table))
 	icdata := BuildICData(clResult)
 	closureData := BuildClosureData(clResult)
 	libFuncs := BuildLibraryFunctions(clResult, pl)
@@ -529,6 +530,10 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	if len(excHandlers) > 0 {
 		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "exception_handlers.jsonl"), excHandlers)
 		entries = append(entries, entry{"exception_handlers.jsonl", "exception_handlers", n, err})
+	}
+	if len(stackMaps) > 0 {
+		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "stack_maps.jsonl"), stackMaps)
+		entries = append(entries, entry{"stack_maps.jsonl", "stack_maps", n, err})
 	}
 	if len(icdata) > 0 {
 		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "icdata.jsonl"), icdata)
