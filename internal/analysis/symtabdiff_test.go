@@ -86,7 +86,7 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 		return false
 	}
 
-	comp := CompareNamesToSymbols(recovered, elfSyms)
+	comp := CompareNamesToSymbols(recovered, ctx.SymbolNamesVMForm, elfSyms)
 	rate := comp.AgreementRate()
 	t.Logf("%d compared, %d agree, %d disagree, rate=%.1f%%",
 		comp.Compared, comp.Agree, len(comp.Disagreement), rate*100)

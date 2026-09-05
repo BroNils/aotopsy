@@ -61,6 +61,17 @@ type AnalysisContext struct {
 	SymbolNames map[uint64]string
 	SymbolSizes map[uint64]uint32
 
+	// SymbolNamesVMForm carries the VM's OWN spelling for the addresses
+	// where it differs from the display name -- currently type-testing
+	// stubs, which we show as `TypeTestingStub_List<int>` and the VM writes
+	// as `TypeTestingStub_dart_core__List__dart_core__int`.
+	//
+	// It is not an output: nothing renders it. It exists so the symtab
+	// differential can compare against whichever notation a given ELF
+	// dialect uses, instead of scoring every type-testing stub as a
+	// disagreement on every version. Sparse -- most addresses are absent.
+	SymbolNamesVMForm map[uint64]string
+
 	IsARM64     bool
 	DartVersion string
 
@@ -133,6 +144,16 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 
 	symbolNames := make(map[uint64]string, len(sc.Ranges))
 	symbolSizes := make(map[uint64]uint32, len(sc.Ranges))
+	// A type-testing stub's Code has the tested Type as its owner
+	// (type_testing_stubs.cc, `code.set_owner(type)`), which is how the VM
+	// form is looked up for the addresses that have one.
+	ttsOwnerByCodeRef := make(map[int]int, len(sc.Result.Codes))
+	for _, ce := range sc.Result.Codes {
+		if ce.OwnerRef >= 0 {
+			ttsOwnerByCodeRef[ce.RefID] = ce.OwnerRef
+		}
+	}
+	symbolNamesVMForm := make(map[uint64]string)
 	im := sc.Image()
 	for _, r := range sc.Ranges {
 		funcVA, ok := im.FuncVA(r)
@@ -142,6 +163,11 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		symbolSizes[funcVA] = r.Size
 		if r.RefID >= 0 {
 			symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
+			if owner, ok := ttsOwnerByCodeRef[r.RefID]; ok {
+				if vm := sc.Pool.TypeTestingStubSDKNames[owner]; vm != "" {
+					symbolNamesVMForm[funcVA] = vm
+				}
+			}
 		} else {
 			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
@@ -154,20 +180,21 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 	}
 
 	return &AnalysisContext{
-		EF:          sc.EF,
-		Info:        sc.Info,
-		Result:      sc.Result,
-		Ranges:      sc.Ranges,
-		InstrTable:  sc.Table,
-		Pool:        sc.Pool,
-		PoolDisplay: sc.PoolDisplay,
-		Code:        sc.Code,
-		CodeVA:      sc.CodeVA,
-		CodeOff:     sc.CodeOff,
-		SymbolNames: symbolNames,
-		SymbolSizes: symbolSizes,
-		IsARM64:     sc.IsARM64,
-		DartVersion: sc.Info.Version.DartVersion,
+		EF:                sc.EF,
+		Info:              sc.Info,
+		Result:            sc.Result,
+		Ranges:            sc.Ranges,
+		InstrTable:        sc.Table,
+		Pool:              sc.Pool,
+		PoolDisplay:       sc.PoolDisplay,
+		Code:              sc.Code,
+		CodeVA:            sc.CodeVA,
+		CodeOff:           sc.CodeOff,
+		SymbolNames:       symbolNames,
+		SymbolNamesVMForm: symbolNamesVMForm,
+		SymbolSizes:       symbolSizes,
+		IsARM64:           sc.IsARM64,
+		DartVersion:       sc.Info.Version.DartVersion,
 	}, nil
 }
 

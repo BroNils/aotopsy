@@ -72,6 +72,16 @@ type PoolLookups struct {
 	// invoke one. Nil on versions that cannot resolve a Type to its class.
 	// See buildTypeTestingStubNames.
 	TypeTestingStubNames map[int]string
+
+	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
+	// `TypeTestingStub_dart_core__List__dart_core__int` where
+	// TypeTestingStubNames has `TypeTestingStub_List<int>`. Keyed the same
+	// way, by the tested Type's ref ID.
+	//
+	// It exists for the symtab differential: the ELF's two assembly dialects
+	// use this notation, so without it every type-testing stub scores as a
+	// disagreement on every version. See buildTypeTestingStubSDKNames.
+	TypeTestingStubSDKNames map[int]string
 	// ClosureParents maps a closure Function's ref ID to the name of the
 	// function it was declared inside (BuildClosureParents). Both the
 	// Code-name path and the pool-display path qualify a closure by its
@@ -159,6 +169,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	l.CodeNames = make(map[int]CodeNameInfo)
 	ttsNames := buildTypeTestingStubNames(result, l, ct, dartVersion)
 	l.TypeTestingStubNames = ttsNames
+	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
 		if !ok {
