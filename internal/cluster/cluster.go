@@ -132,20 +132,26 @@ type PoolEntry struct {
 
 // Result holds all parsed cluster data.
 type Result struct {
-	Header     Header
-	Clusters   []ClusterMeta
-	Strings    []ParsedString
-	Named      []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
-	FuncTypes  []FuncTypeInfo // FunctionType parameter counts extracted from fill
-	Classes    []ClassInfo    // class layout data extracted from fill
-	Types      []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
-	Fields     []FieldInfo    // field layout data extracted from fill
-	Codes      []CodeEntry    // Code objects with owner refs, extracted from fill
-	Arrays     []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
-	Pool       []PoolEntry    // ObjectPool entries extracted from fill
-	MintValues map[int]int64  // Mint/Smi ref→int64 value from alloc phase
-	FillStart  int            // byte offset where the fill section begins
-	FillEnd    int            // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
+	Header    Header
+	Clusters  []ClusterMeta
+	Strings   []ParsedString
+	Named     []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
+	FuncTypes []FuncTypeInfo // FunctionType parameter counts extracted from fill
+	Classes   []ClassInfo    // class layout data extracted from fill
+	Types     []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
+	Fields    []FieldInfo    // field layout data extracted from fill
+	Codes     []CodeEntry    // Code objects with owner refs, extracted from fill
+	Arrays    []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
+	Pool      []PoolEntry    // ObjectPool entries extracted from fill
+	// Int32Arrays maps a TypedDataInt32Array's ref to its raw little-endian
+	// payload. These are captured because one of them is a switch's jump
+	// table: IndirectGotoInstr keeps its targets in `const TypedData& offsets_`
+	// of kTypedDataInt32ArrayCid, one int32 per case, each the byte offset
+	// from the Code's entry to that case's block. See readFillTypedData.
+	Int32Arrays map[int][]byte
+	MintValues  map[int]int64 // Mint/Smi ref→int64 value from alloc phase
+	FillStart   int           // byte offset where the fill section begins
+	FillEnd     int           // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
 
 	// ObjectStoreRefs holds the isolate roots section's ObjectStore field
 	// refs, in serialized order -- ObjectStore::from() through

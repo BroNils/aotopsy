@@ -732,7 +732,10 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillTypedData:
-			if err := skipFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit); err != nil {
+			if result.Int32Arrays == nil {
+				result.Int32Arrays = make(map[int][]byte)
+			}
+			if err := readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, result.Int32Arrays); err != nil {
 				return fmt.Errorf("fill: cluster %d (TypedData CID %d): %w", i, cm.CID, err)
 			}
 
@@ -914,7 +917,9 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillWeakArray:
 		return skipFillWeakArray(s, cm, fillRefUnsigned)
 	case FillTypedData:
-		return skipFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit)
+		// Skip-only path (used to step over a cluster whose contents are not
+		// wanted): pass no sink, so nothing is captured.
+		return readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, nil)
 	case FillExceptionHandlers:
 		_, err := readFillExceptionHandlers(s, cm, fillRefUnsigned)
 		return err
