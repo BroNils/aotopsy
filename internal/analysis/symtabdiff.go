@@ -165,7 +165,18 @@ func (c NameComparison) AgreementRate() float64 {
 //
 // Disagreements are returned sorted by address so a failing gate prints the
 // same list every run.
-func CompareNamesToSymbols(recovered map[uint64]string, symbols map[uint64]string) NameComparison {
+// alt holds a SECOND spelling of a recovered name, for the addresses that have
+// one: currently the type-testing stubs, whose readable form
+// (`TypeTestingStub_List<int>`) and VM form
+// (`TypeTestingStub_dart_core__List__dart_core__int`) are the same claim in
+// two notations, and which of the two the ELF uses depends on its dialect.
+// A VA agrees if EITHER spelling agrees.
+//
+// This is not a way of getting two chances at a match: both strings are
+// generated from the same resolved class and type arguments, so they succeed
+// and fail together. What varies is only which notation the symbol table
+// happens to be written in.
+func CompareNamesToSymbols(recovered, alt map[uint64]string, symbols map[uint64]string) NameComparison {
 	var c NameComparison
 	if len(symbols) == 0 {
 		return c
@@ -178,6 +189,10 @@ func CompareNamesToSymbols(recovered map[uint64]string, symbols map[uint64]strin
 		}
 		c.Compared++
 		if NamesAgree(ours, sym) {
+			c.Agree++
+			continue
+		}
+		if a, ok := alt[va]; ok && a != "" && NamesAgree(a, sym) {
 			c.Agree++
 			continue
 		}

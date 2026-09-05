@@ -270,34 +270,25 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // for the stub that tests it. Returns nil when the Dart version cannot
 // resolve a Type to its class, in which case callers simply find nothing.
 func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	// OFF below 2.16, and the reason is no longer the original one.
+	// This was OFF below 2.16 for two reasons, both of which are now gone.
 	//
-	// It was switched off because a real 2.12.0 sample resolved ALL 251
-	// type-owned Codes to the SAME class ("TypeParameters"). That collapse is
-	// gone: Type class ids resolve at parse time now (cluster.ReadFill), and
-	// forcing the namer on for that sample yields 2187 names over 1885
-	// distinct classes, the most common being `TypeTestingStub_Future` x8,
-	// with 389 carrying type arguments. The names are good.
+	// The first was a real 2.12.0 sample resolving ALL 251 type-owned Codes
+	// to the SAME class ("TypeParameters"). That collapse does not reproduce:
+	// Type class ids resolve at parse time now (cluster.ReadFill), and the
+	// same sample yields 2187 names over 1885 distinct classes, the most
+	// common being `TypeTestingStub_Future` x8, with 389 carrying type
+	// arguments.
 	//
-	// What keeps it off is the COMPARISON, not the names. Below 2.16 the ELF
+	// The second was the COMPARISON rather than the names. Below 2.16 the ELF
 	// speaks the assembler dialect, which spells a stub the way
 	// TypeTestingStubNamer does --
-	// `TypeTestingStub_dart_core__List__dart_core__int` -- while we use Dart
-	// source form, `TypeTestingStub_List<int>`. Switching the namer on costs
-	// about 4 points on 2.13-2.15 with the AGREEMENT COUNT UNCHANGED (6571,
-	// 6555, 6796 either way): 280-330 more functions named, none of them
-	// scoring, which is the same convention gap findings 013 and 014 were
-	// about.
-	//
-	// The right order is to teach the instrument first -- generate the SDK's
-	// assembly spelling alongside the readable one, using
-	// ClassInfo.LibraryRefID for the library URL it prefixes -- and only then
-	// switch this on. Doing it the other way trades the project's only
-	// external ground truth for names it cannot yet score.
-	// See docs/findings-repo/015.
-	if !snapshot.VersionAtLeast(dartVersion, "2.16.0") {
-		return nil
-	}
+	// `TypeTestingStub_dart_core__List__dart_core__int` -- while we show Dart
+	// source form, `TypeTestingStub_List<int>`. Switching the namer on used to
+	// cost about 4 points on 2.13-2.15 with the agreement count UNCHANGED:
+	// hundreds of newly named functions, none of them scoring. That is fixed
+	// at the source -- PoolLookups.TypeTestingStubSDKNames generates the VM
+	// spelling too, and the differential compares against whichever notation
+	// the symbol table uses. See docs/findings-repo/015.
 	if len(result.Types) == 0 {
 		return nil
 	}

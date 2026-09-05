@@ -98,31 +98,50 @@ func TestTypeTestingStubsAreNamed(t *testing.T) {
 	}
 }
 
-// Type-testing-stub naming is off below 2.16. A real Dart 2.12.0 sample
-// resolved 251 of 251 type-owned Codes to a real-looking name -- all to the
-// SAME class. 251 confident wrong labels is worse than 251 honest `sub_`
-// placeholders.
+// Type-testing-stub naming on Dart 2.x must not COLLAPSE.
 //
-// The boundary is a version, not VersionProfile.TypeClassIdIsRef, which this
-// test used to assert as a precondition. The two were different questions with
-// the same answer until 2.15.0's Type layout was corrected (it is a scalar
-// there, not a ref); after that, keying off the flag switched naming on for
-// 2.15 and the symtab differential fell 82.1% -> 78.4% with agreement
-// unchanged. See buildTypeTestingStubNames.
-func TestTypeTestingStubNamingIsOffWhereTypesCannotResolve(t *testing.T) {
+// This test used to assert that naming was off below 2.16 entirely, because a
+// real 2.12.0 sample resolved 251 of 251 type-owned Codes to a real-looking
+// name -- all to the SAME class. 251 confident wrong labels is worse than 251
+// honest `sub_` placeholders, and that is still true.
+//
+// What changed is the cause: Type class ids did not resolve on 2.x at all
+// (docs/findings-repo/012), so every Type reported the same one. They resolve
+// at parse time now, so the guard is no longer a version but the property it
+// was standing in for -- that the names actually discriminate. Pinning the
+// property rather than the workaround is what lets the workaround go away.
+func TestTypeTestingStubNamingDoesNotCollapseOn2x(t *testing.T) {
 	libPath := corpusSample(t, sampleDart212Name)
 	res, vmRes, profile := loadForNaming(t, libPath)
-	if snapshot.VersionAtLeast(profile.DartVersion, "2.16.0") {
-		t.Fatalf("sample is %s, at or above the 2.16.0 boundary; this test guards the wrong thing now",
-			profile.DartVersion)
-	}
 	pl := BuildPoolLookups(res, profile.CIDs, vmRes, profile.CodeIndexOneBased,
 		profile.DartVersion)
+
+	total := 0
+	distinct := map[string]int{}
 	for _, ce := range res.Codes {
-		if strings.HasPrefix(pl.CodeNames[ce.RefID].FuncName, "TypeTestingStub_") {
-			t.Fatalf("named a type-testing stub on a version that cannot resolve a Type to its class: %q",
-				pl.CodeNames[ce.RefID].FuncName)
+		n := pl.CodeNames[ce.RefID].FuncName
+		if !strings.HasPrefix(n, "TypeTestingStub_") {
+			continue
 		}
+		total++
+		distinct[n]++
+	}
+	if total == 0 {
+		t.Fatalf("no type-testing stubs named on %s; naming has regressed to off", profile.DartVersion)
+	}
+	// Measured at the time of writing: 2187 stubs over 1885 distinct names,
+	// most common x8. The floor is deliberately far below that -- this guards
+	// against a COLLAPSE, not against normal sharing of a stub between types.
+	if ratio := float64(len(distinct)) / float64(total); ratio < 0.5 {
+		var worst string
+		var worstN int
+		for k, v := range distinct {
+			if v > worstN {
+				worst, worstN = k, v
+			}
+		}
+		t.Errorf("%s: %d stubs collapsed onto %d distinct names (%.2f); most common %q x%d",
+			profile.DartVersion, total, len(distinct), ratio, worst, worstN)
 	}
 }
 
@@ -134,13 +153,15 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 		Types: []cluster.TypeInfo{{RefID: 100, ClassID: 4242}},
 	}
 	pl := &PoolLookups{RefToNamed: map[int]*cluster.NamedObject{}, RefToStr: map[int]string{}}
-	if got := buildTypeTestingStubNames(res, pl, nil, "3.3.0"); len(got) != 0 {
-		t.Errorf("named an unresolvable class: %v", got)
-	}
-	// Below 2.16 naming is OFF outright: on real 2.x samples every type
-	// resolves to the same class (verified on 2.12.0: 251/251 →
-	// "TypeParameters"). The guard returns nil.
-	if got := buildTypeTestingStubNames(res, pl, nil, "2.15.0"); got != nil {
-		t.Errorf("pre-2.16 must disable naming entirely, got %v", got)
+	for _, v := range []string{"2.12.0", "2.15.0", "3.3.0"} {
+		if got := buildTypeTestingStubNames(res, pl, nil, v); len(got) != 0 {
+			t.Errorf("%s: named an unresolvable class: %v", v, got)
+		}
+		// The VM spelling is generated from the same inputs and must refuse
+		// on the same terms -- a name that scores against the ELF but was
+		// invented is the worst of both.
+		if got := buildTypeTestingStubSDKNames(res, pl, nil, v); len(got) != 0 {
+			t.Errorf("%s: VM-form named an unresolvable class: %v", v, got)
+		}
 	}
 }
