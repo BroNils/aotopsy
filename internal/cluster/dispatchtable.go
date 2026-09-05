@@ -125,13 +125,30 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 		}
 	}
 
-	// 1. ObjectStore fields -- plain refs, contents intentionally
-	// discarded: ParseDispatchTable only needs to advance the stream by
-	// the correct number of bytes, not interpret what each field means.
+	// 1. ObjectStore fields -- kept, indexed by their position in the
+	// serialized range (ObjectStore::from() through to_snapshot(kFullAOT)).
+	// ReadObjectStoreRefs reads the same prefix on its own for callers that
+	// need the names before type tracking runs; the two must stay identical,
+	// which is why this loop fills the same slice rather than a private one.
+	//
+	// These used to be read and thrown away, on the grounds that the
+	// dispatch table only needs the stream advanced. But 89 of these fields
+	// are `RW(Code, <name>_stub)`, and they are the ONLY route to a name for
+	// the isolate stubs: their Code objects have a null owner, so
+	// buildTypeTestingStubNames and the owner walk both find nothing and
+	// every one of them falls through to `sub_<pcOffset>`. Measured on
+	// dart-3.9.2-gt-arm64: 85 of 8049 ranges unnamed, and all 85 are
+	// `_iso_stub_*` in the ELF symbol table.
+	osRefs := make([]int, 0, profile.ObjectStoreAOTFieldCount)
 	for i := 0; i < profile.ObjectStoreAOTFieldCount; i++ {
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
+		r, err := readRef(s, fillRefUnsigned)
+		if err != nil {
 			return nil, fmt.Errorf("dispatch table: object_store field %d/%d: %w", i, profile.ObjectStoreAOTFieldCount, err)
 		}
+		osRefs = append(osRefs, int(r))
+	}
+	if result.ObjectStoreRefs == nil {
+		result.ObjectStoreRefs = osRefs
 	}
 
 	// 2. initial_field_table, 3. shared_initial_field_table.

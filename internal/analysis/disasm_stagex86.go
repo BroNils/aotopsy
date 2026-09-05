@@ -41,27 +41,10 @@ func RunDisasmStageX86(
 	thrFields map[int]string, // H-3 fix: pass THR fields for annotation
 	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
-	symbols := make(map[uint64]string)
+	// See RunDisasmStage: one shared builder for all three call sites. (F-036)
 	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
-	for _, r := range ranges {
-		va, ok := vaImage.FuncVA(r)
-		if !ok {
-			continue
-		}
-		if r.RefID >= 0 {
-			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
-		} else {
-			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	// Merge VM stub symbols and discarded function symbols (F-036).
-	// Same pattern as RunDisasmStage and LoadContext (context.go:170-175).
-	for va, name := range naming.BuildVMStubSymbols(info, fmtOpts) {
-		symbols[va] = name
-	}
-	for va, name := range naming.BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
-		symbols[va] = name
-	}
+	symbols := BuildSymbolNames(ranges, vaImage, pl, clResult, info, table,
+		fmtOpts, info.IsolateData.Data).Names
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	opts.stagef("disasm", "%s%d%s functions (x86_64), pool %s%d%s entries (%d resolved)",
