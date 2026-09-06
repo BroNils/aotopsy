@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
@@ -25,7 +24,6 @@ type Stats struct {
 	NonLastBranch         int `json:"non_last_branch"`
 	TryBlocks             int `json:"try_blocks"`
 	CatchHandlers         int `json:"catch_handlers"`
-	CSMDeadRegsKilled     int `json:"csm_dead_regs_killed,omitempty"`
 	// OrphanBlocks counts blocks emitted only because the entry walk
 	// never reached them -- see emitOrphanBlocks.
 	OrphanBlocks int `json:"orphan_blocks,omitempty"`
@@ -119,6 +117,10 @@ type emitter struct {
 	budgetHit   bool
 	stats       Stats
 	loopHeaders map[int]bool // Fase 7 TASK 2: blocks that are loop entry points
+	// idom is the dominator tree, computed once per function. Every question
+	// of the form "is this edge a back edge?" goes through it -- see dom.go
+	// for why block addresses cannot answer that.
+	idom []int
 
 	// blockTryRegion maps a block ID to the index in fir.TryRegions whose PC
 	// range covers it, for per-block try annotation. See annotateBlockTry.
@@ -132,12 +134,6 @@ type emitter struct {
 	// zero value means "none". Prevents a region re-opening inside itself.
 	curTryRegion int
 
-	// csmByPC maps a PC offset (relative to function entry) to the
-	// CompressedStackMaps entry at that offset. Built from fir.StackMaps
-	// in EmitPseudocode. Used by emitBlockBody to kill dead registers at
-	// GC safepoints, improving pseudocode quality by removing stores to
-	// registers that are dead at the safepoint.
-	csmByPC map[uint32]cluster.StackMapEntry
 	// tryOpened records regions already structured with real try/catch, so the
 	// many recursion paths into a region do not each emit their own.
 	tryOpened map[int]bool
@@ -156,6 +152,21 @@ type emitter struct {
 	// subtree from a fresh visit map and re-emitted join blocks the main
 	// body had already shown.
 	emittedAnywhere map[int]bool
+
+	// spillSeq numbers the `_tN` temporaries setReg materializes for
+	// expressions too large to keep inlining. Shared with helper sub-emitters
+	// for the same reason emittedAnywhere is: the names land in one source
+	// file and must not collide.
+	spillSeq *int
+}
+
+// drainSpills writes out any temporary declarations the last instruction
+// produced. Called before the statement that reads them, so the declaration
+// always precedes the use.
+func (e *emitter) drainSpills(indent int) {
+	for _, line := range e.state.TakeSpills() {
+		e.emit(indent, "%s", line)
+	}
 }
 
 // buildBlockTryIndex assigns each block to the try region covering its start.
@@ -232,7 +243,8 @@ func (e *emitter) annotateInlineFrames(va uint64, indent int) {
 // loop headers (blocks that are targets of back-edges) and wraps loop
 // bodies in `while (true) { ... break; }` instead of bare `continue;`.
 func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact {
-	fir.ComputePreds() // A3: compute predecessors for if/else inlining
+	fir.ComputePreds()         // A3: compute predecessors for if/else inlining
+	annotateDispatchCalls(fir) // mark DispatchTable calls and recover their selector
 	e := &emitter{
 		fir:         fir,
 		symbols:     symbols,
@@ -245,7 +257,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		phiDeclared: make(map[int]bool),
 
 		emittedAnywhere: make(map[int]bool),
+		spillSeq:        new(int),
 	}
+	// One sequence per function, shared with every clone and helper
+	// sub-emitter, so two spilled temporaries can never take the same name.
+	e.state.AttachSpillSink(e.spillSeq)
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
 	// through operandExpr, not emitLoadPool. See poolOperandExpr.
@@ -260,7 +276,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	}
 
 	// Fase 7 TASK 2: identify loop headers (blocks targeted by back-edges).
-	e.loopHeaders = identifyLoopHeaders(fir)
+	e.idom = dominators(fir)
+	e.loopHeaders = identifyLoopHeaders(fir, e.idom)
 	// Pre-emission reaching-definition fixpoint: correct value state at each
 	// block entry regardless of the recursive walk's path (ssa.go). The same
 	// fixpoint's exit states drive loop-carried phi detection.
@@ -281,13 +298,12 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		e.tryOpened = make(map[int]bool, len(fir.TryRegions))
 		e.handlerBlocks = make(map[int]bool)
 	}
-	// Build CSM lookup map for dead-register elimination at safepoints.
-	if len(fir.StackMaps) > 0 {
-		e.csmByPC = make(map[uint32]cluster.StackMapEntry, len(fir.StackMaps))
-		for _, sm := range fir.StackMaps {
-			e.csmByPC[sm.PCOffset] = sm
-		}
-	}
+	// fir.StackMaps is deliberately NOT consumed here. The emitter has no
+	// sound use for it: naming the object slots is a no-op because localName
+	// is deterministic and lift.go already assigns the same name on demand,
+	// and the only non-trivial use anyone attempted -- killing "dead"
+	// registers -- misread the bitmap three different ways. The stack maps
+	// are emitted as data instead, in stack_maps.jsonl.
 
 	// fir.ArgRegIndices (when resolved) is the real declared arity, found by
 	// aggregating cross-function call-site evidence -- NOT a positional

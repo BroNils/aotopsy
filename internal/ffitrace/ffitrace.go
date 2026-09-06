@@ -8,8 +8,6 @@
 package ffitrace
 
 import (
-	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -22,13 +20,13 @@ import (
 // pseudocode contains the vm_tag native/FFI-leaf-call bookkeeping
 // marker (internal/decompiler's "nativeCall(...)").
 type Finding struct {
-	CallerFunc string // resolved name of the function containing the call site
-	CallerVA   uint64 // start VA of the caller function
-	CallSitePC uint64 // address of the call instruction itself (0 for native_call_site findings, which are function-level, not instruction-level)
-	Kind       string // "dynamic_library_call" | "native_call_site"
-	CalleeName string // resolved callee name for dynamic_library_call findings, e.g. "DynamicLibrary.lookup"
-	LiteralArg string // resolved string literal argument (library path or symbol name), if one was recoverable
-	Resolved   bool   // true only if LiteralArg was actually recovered from a literal pool string
+	CallerFunc string `json:"caller_func"`
+	CallerVA   uint64 `json:"caller_va"`
+	CallSitePC uint64 `json:"call_site_pc,omitempty"`
+	Kind       string `json:"kind"`
+	CalleeName string `json:"callee_name,omitempty"`
+	LiteralArg string `json:"literal_arg,omitempty"`
+	Resolved   bool   `json:"resolved"`
 }
 
 // Options bounds Trace's cost. A real Flutter app's libapp.so bundles
@@ -70,8 +68,6 @@ type Options struct {
 	Filter string
 }
 
-const defaultMaxScan = 500
-
 // Trace runs two detectors per function, both gated by the same scan
 // bound (see Options):
 //
@@ -96,44 +92,19 @@ const defaultMaxScan = 500
 // use the scanned count to verify bounding actually took effect,
 // rather than only inferring it indirectly from findings.
 func Trace(ctx *analysis.AnalysisContext, opts Options) ([]Finding, int) {
-	maxScan := opts.MaxScan
-	if maxScan == 0 && !opts.AllowUnbounded {
-		maxScan = defaultMaxScan
+	var findings []Finding
+	scanOpts := analysis.ScanOptions{
+		MaxScan:        opts.MaxScan,
+		AllowUnbounded: opts.AllowUnbounded,
+		Filter:         opts.Filter,
+		GcEveryN:       100,
 	}
 
-	// M-11 fix: save/restore GOMAXPROCS and memory limit (same as strxref L-8 fix)
-	oldProcs := runtime.GOMAXPROCS(2)
-	defer runtime.GOMAXPROCS(oldProcs)
-	oldLimit := debug.SetMemoryLimit(1536 << 20)
-	defer debug.SetMemoryLimit(oldLimit)
-
-	var findings []Finding
-	scanned := 0
-	for _, r := range ctx.Ranges {
-		if !opts.AllowUnbounded && scanned >= maxScan {
-			break
-		}
-		if r.Size == 0 || r.RefID < 0 {
-			continue
-		}
-		fir, err := ctx.FuncIRFor(r)
-		if err != nil {
-			continue
-		}
-		if opts.Filter != "" && !strings.Contains(fir.Name, opts.Filter) {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - ctx.CodeOff
-		funcVA := ctx.CodeVA + funcStart
-		scanned++
-
+	scanned := ctx.ScanFuncs(scanOpts, func(fir *decompiler.FuncIR, funcVA uint64) {
 		findings = append(findings, findDynamicLibraryCalls(ctx, fir, funcVA)...)
 
 		// The marker is `ffi_call(`, which is what emitIndirectCall
 		// actually writes when a register carries the vm_tag sentinel.
-		// This read `nativeCall(` -- a string the decompiler has never
-		// emitted -- so signal 2 could not fire at all, on any sample or
-		// architecture, and the only findings came from signal 1.
 		art := decompiler.EmitPseudocode(fir, ctx.SymbolLookup, ctx.PoolLookup)
 		if strings.Contains(art.Source, decompiler.FFICallMarker) {
 			findings = append(findings, Finding{
@@ -142,11 +113,7 @@ func Trace(ctx *analysis.AnalysisContext, opts Options) ([]Finding, int) {
 				Kind:       "native_call_site",
 			})
 		}
-		if scanned%100 == 0 {
-			runtime.GC()
-			debug.FreeOSMemory()
-		}
-	}
+	})
 	return findings, scanned
 }
 

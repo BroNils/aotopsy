@@ -34,7 +34,12 @@ func (f *FuncIR) ArgRegAt(i int) string {
 
 // callArgExprs collects the first few argument-register expressions'
 // CURRENT symbolic values, for both display and selector-hint sniffing.
-func (e *emitter) callArgExprs(n int) []string {
+//
+// calleeVA is the target of a direct call, or 0 when the target is not a known
+// address. When the callee's arity is known the argument list is cut to it,
+// which is the only truthful bound available: everything else here is a
+// heuristic over whatever the registers happen to hold.
+func (e *emitter) callArgExprs(n int, calleeVA uint64) []string {
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		reg := e.fir.ArgRegAt(i)
@@ -43,9 +48,21 @@ func (e *emitter) callArgExprs(n int) []string {
 		}
 		out = append(out, e.state.lookupReg(reg))
 	}
-	// D2: If declared arity is resolved, truncate to the real argument count.
-	if len(e.fir.ArgRegIndices) > 0 && len(e.fir.ArgRegIndices) <= len(out) {
-		return out[:len(e.fir.ArgRegIndices)]
+	// There used to be a truncation here by e.fir.ArgRegIndices -- the arity of
+	// the function being DECOMPILED, applied to a call it makes. Those are two
+	// unrelated numbers. It was removed rather than corrected: resolving the
+	// callee's own arity from ArgRegMasks and truncating by that was built and
+	// measured, and changed the emitted source of 2400 functions across six
+	// samples by zero bytes, so it was machinery with no effect to keep.
+	//
+	// An indirect call is a switchable/dynamic call, and those pass their
+	// arguments on the STACK. The register at sdk.ICDataArgRegIndex holds the
+	// UnlinkedCall/MegamorphicCache the call sequence just loaded, so it is
+	// provably not an argument -- and arguments being positional, nothing above
+	// it is either. See sdk.ICDataArgRegIndex for the SDK sequence and for why
+	// this hurt x86_64 far more than ARM64.
+	if calleeVA == 0 && len(out) > sdk.ICDataArgRegIndex {
+		out = out[:sdk.ICDataArgRegIndex]
 	}
 	// D2: Truncate trailing unassigned argument registers (where lookupReg(reg) == reg or argN)
 	for len(out) > 0 {
@@ -85,7 +102,13 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	e.callIdx++
 	tmpName := fmt.Sprintf("t%d", e.callIdx)
 
-	args := e.callArgExprs(len(e.fir.ArgRegs))
+	// Resolve the target first: the callee's identity is what bounds the
+	// argument list.
+	calleeVA, isDirect := parseHexVA(ins.Target)
+	if !isDirect {
+		calleeVA = 0
+	}
+	args := e.callArgExprs(len(e.fir.ArgRegs), calleeVA)
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 
@@ -95,8 +118,23 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	e.state.clearRegClass(e.fir.ReturnReg)
 
 	var bound bool
-	if va, ok := parseHexVA(ins.Target); ok {
-		bound = e.emitDirectCall(tmpName, va, argsText, selectorHint, indent)
+	if ins.IsDispatchCall {
+		// A DispatchTable call dispatches on `selector_offset + receiver cid`.
+		// The cid is a runtime value, so there is no single callee to name --
+		// but the selector offset is right there in the instruction, it is
+		// stable, and two sites sharing one call the same selector. Saying
+		// that beats `dynamicCall(indirectTarget__rax_8_rcx_0x200a8_, ...)`,
+		// which named the addressing mode.
+		if ins.DispatchSelector == dispatchSelectorUnknown {
+			e.emit(indent, "final %s = dispatchCall([%s]);", tmpName, argsText)
+		} else {
+			e.emit(indent, "final %s = dispatchCall(selector: %d, [%s]);",
+				tmpName, ins.DispatchSelector, argsText)
+		}
+		e.stats.IndirectCalls++
+		bound = true
+	} else if isDirect {
+		bound = e.emitDirectCall(tmpName, calleeVA, argsText, selectorHint, indent)
 	} else {
 		bound = e.emitIndirectCall(tmpName, ins.Target, argsText, selectorHint, indent)
 	}

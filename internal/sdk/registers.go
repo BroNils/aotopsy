@@ -173,6 +173,51 @@ func DartArgRegisters(isARM64 bool) []int {
 	return []int{7, 6, 2, 3, 8, 9}
 }
 
+// DispatchTableOriginElement is DispatchTable::kOriginElement, the element the
+// dispatch-table register points AT rather than the start of the table.
+//
+//	runtime/vm/dispatch_table.h @3.12.2
+//	  #if defined(TARGET_ARCH_X64)
+//	    static constexpr intptr_t kOriginElement = 16;    // max negative byte offset / 8
+//	  #elif defined(TARGET_ARCH_ARM64)
+//	    static constexpr intptr_t kOriginElement = 4096;  // max consecutive sub immediate
+//
+// It exists so a selector below the origin can still be reached with a
+// negative displacement (x86_64) or a `sub` immediate (ARM64), which is why
+// recovering a selector from a call site has to add it back.
+func DispatchTableOriginElement(isARM64 bool) int {
+	if isARM64 {
+		return 4096
+	}
+	return 16
+}
+
+// ICDataArgRegIndex is the position of IC_DATA_REG within
+// DartCallingConvention::kCpuRegistersForArgs. It is index 3 on BOTH
+// architectures:
+//
+//	constants_arm64.h: IC_DATA_REG = R5;  args = {R1, R2, R3, R5, R6, R7}
+//	constants_x64.h:   IC_DATA_REG = RBX; args = {RDI, RSI, RDX, RBX, R8, R9}
+//
+// At an indirect call this register holds the UnlinkedCall/MegamorphicCache,
+// not an argument -- FlowGraphCompiler::EmitInstanceCallAOT loads it there
+// immediately before the call on both targets. Since arguments are positional,
+// nothing at or above this index can be one either.
+//
+// This matters because an AOT switchable call passes its arguments on the
+// STACK, not in registers: EmitInstanceCallAOT reads the receiver back out of
+// the stack (`movq RDX, [RSP + (size-1)*8]` / `LoadFromOffset(R0, SP, ...)`)
+// and ends with EmitDropArguments. So the argument REGISTERS at such a site
+// hold whatever surrounding code left in them.
+//
+// The damage was architecture-shaped. The receiver lands in RDX on x86_64 --
+// argument index 2 -- and in R0 on ARM64, which is not an argument register at
+// all. So on x86_64 two of the six "argument" registers are written by the call
+// sequence itself and always look live, and one of them sits early enough that
+// truncating from the tail can never reach it. Measured on the same program
+// built for both: x86_64 emitted 1.7-1.8x ARM64's placeholder tokens.
+const ICDataArgRegIndex = 3
+
 // DartArgRegNames returns the string names of the Dart calling-convention
 // argument registers, parameter 0 first — for the decompiler's pseudocode
 // display.

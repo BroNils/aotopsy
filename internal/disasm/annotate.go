@@ -35,27 +35,9 @@ func PPAnnotator(pool map[int]string) Annotator {
 	}
 }
 
-// THRAnnotator annotates LDR Xt, [X26, #imm] instructions with thread offset.
-// If fields is non-nil, resolved field names are included.
-func THRAnnotator(fields map[int]string) Annotator {
-	return func(inst Inst) string {
-		baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(inst.Raw)
-		if !ok || baseReg != sdk.ARM64THR {
-			return ""
-		}
-		if fields != nil {
-			if name, found := fields[byteOff]; found {
-				return fmt.Sprintf("THR.%s", name)
-			}
-		}
-		return fmt.Sprintf("THR+0x%x", byteOff)
-	}
-}
-
 // THRContextAnnotator pre-computes THR annotations for an instruction stream,
 // including classification labels for unresolved offsets using instruction context.
 // It handles LDR64, LDR32, STR64, and STR32 on X26.
-// Replaces the simple THRAnnotator when full context is available.
 func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 	anns := make(map[uint64]string)
 

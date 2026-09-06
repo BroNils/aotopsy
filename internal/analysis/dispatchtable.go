@@ -68,24 +68,18 @@ func resolveDispatchEntries(ctx *AnalysisContext, raw []cluster.DispatchTableEnt
 	// byStubIndex covers DispatchStub targets.
 	byClusterIndex := make(map[int]string, len(ctx.Ranges))
 	byStubIndex := make(map[int]string, len(ctx.Ranges))
+	byCodeRef := make(map[int]string, len(ctx.Ranges))
 	for _, r := range ctx.Ranges {
-		funcStart := uint64(r.PCOffset) - ctx.CodeOff
-		funcVA := ctx.CodeVA + funcStart
-		name := ctx.SymbolNames[funcVA]
+		fs, ok := ctx.Slice(r)
+		if !ok {
+			continue
+		}
+		name := ctx.SymbolNames[fs.VA]
 		if r.RefID < 0 {
 			byStubIndex[r.Index] = name
 		} else {
 			byClusterIndex[r.Index] = name
-		}
-	}
-
-	// TARGET 3: For 2.x fallback, build refID → function name map.
-	byCodeRef := make(map[int]string, len(ctx.Ranges))
-	for _, r := range ctx.Ranges {
-		if r.RefID >= 0 {
-			funcStart := uint64(r.PCOffset) - ctx.CodeOff
-			funcVA := ctx.CodeVA + funcStart
-			byCodeRef[r.RefID] = ctx.SymbolNames[funcVA]
+			byCodeRef[r.RefID] = name
 		}
 	}
 

@@ -7,8 +7,9 @@ import (
 )
 
 func ttsFixture() (*PoolLookups, []cluster.PoolEntry) {
-	pl := &PoolLookups{TypeTestingStubNames: map[int]string{
-		4242: "TypeTestingStub_RenderBox",
+	// TypeNames holds the BARE type name; the stub spelling is derived.
+	pl := &PoolLookups{TypeNames: map[int]string{
+		4242: "RenderBox",
 	}}
 	pool := []cluster.PoolEntry{
 		{Index: 6963, Kind: cluster.PoolTagged, RefID: 4242}, // the Type

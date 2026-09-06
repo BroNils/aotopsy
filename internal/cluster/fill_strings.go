@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -84,6 +83,7 @@ func readFillStrings(s *dartfmt.Stream, cm *ClusterMeta, oldFormat bool, ct *sna
 //   - CID decode: uses DecodeTags (bits 12-31, 20-bit mask) for v3.x+
 //     (was hardcoded >> 16 & 0xFFFF, wrong for CIDs > 65535 — P0-4/D-002)
 func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, dataImageObjStart int64, profile *snapshot.VersionProfile, isVM bool) []ParsedString {
+	classIDTagPos, classIDTagSize := snapshot.ClassIdTagLayout(profile.DartVersion)
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 {
 		return nil
 	}
@@ -131,17 +131,18 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		}
 
 		tags := binary.LittleEndian.Uint64(data[objPos : objPos+8])
-		// C-3 fix: Object header tags use ClassIdTag bitfield, NOT the
-		// cluster stream tag style. The ClassIdTag position differs by
-		// version (verified against dart-lang/sdk raw_object.h):
-		//   v2.12–v2.17: kClassIdTagPos=16, kClassIdTagSize=16 → bits 16-31
-		//   v3.0+:       kClassIdTagPos=12, kClassIdTagSize=20 → bits 12-31
-		var cid int
-		if profile.PreV32Format {
-			cid = int((uint32(tags) >> sdk.ClassIdTagPosV2) & ((1 << sdk.ClassIdTagSizeV2) - 1))
-		} else {
-			cid = int((uint32(tags) >> sdk.ClassIdTagPosV3) & ((1 << sdk.ClassIdTagSizeV3) - 1))
-		}
+		// Object header tags use the ClassIdTag bitfield, NOT the cluster
+		// stream tag style, and the layout changes at 2.19.0 (pos 16/size 16
+		// before, pos 12/size 20 after).
+		//
+		// This used to branch on profile.PreV32Format, which is a statement
+		// about PatchClass refs and ObjectPool type bits, not about the tags
+		// word. It is set for 2.19.0, 3.0.5 and 3.1.0 -- three versions that
+		// already use the 20-bit layout -- so those three read bits 16..31 of
+		// a field living at 12..31 and every OneByteString test below would
+		// have failed. Measured as unreachable (no String cluster on those
+		// versions takes the ROData path), but wrong is wrong.
+		cid := int((uint32(tags) >> classIDTagPos) & ((1 << classIDTagSize) - 1))
 
 		// Check if this is a string object.
 		isOneByte := cid == ct.OneByteString

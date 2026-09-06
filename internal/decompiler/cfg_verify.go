@@ -63,7 +63,7 @@ func VerifyCFG(fir *FuncIR, artifact Artifact) CFGVerification {
 			}
 		}
 	}
-	v.TotalLoops = len(identifyLoopHeaders(fir))
+	v.TotalLoops = len(identifyLoopHeaders(fir, dominators(fir)))
 
 	// Count pseudocode structures by scanning emitted lines.
 	src := artifact.Source

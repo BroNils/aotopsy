@@ -198,3 +198,23 @@ func FuzzELFOpen(f *testing.F) {
 		ef.Close()
 	})
 }
+
+func TestFileCloseClosesUnderlyingFD(t *testing.T) {
+	p := sampleWithSymbol(t, "")
+	ef, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	rawFile, ok := ef.raw.(*os.File)
+	if !ok {
+		t.Fatalf("expected ef.raw to be *os.File")
+	}
+	fd := rawFile.Fd()
+	if err := ef.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	var buf [1]byte
+	if _, readErr := rawFile.Read(buf[:]); readErr == nil {
+		t.Fatalf("expected Read on closed raw file (fd %d) to fail, but it succeeded", fd)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"time"
 
 	"aotopsy/internal/cluster"
@@ -47,13 +48,19 @@ type FromMainDeps struct {
 // function EXCEPT those whose owning Dart library resolves to dart:* or
 // package:flutter*.
 func RunFromMain(d FromMainDeps) error {
+	if d.GcEveryN <= 0 {
+		d.GcEveryN = 100
+	}
+	im := cluster.CodeImage{CodeVA: d.CodeVA, CodeOff: d.CodeOff}
 	rangeByVA := make(map[uint64]cluster.CodeRange, len(d.Ranges))
 	for _, r := range d.Ranges {
-		if r.Size == 0 || r.RefID < 0 {
+		if r.RefID < 0 {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - d.CodeOff
-		funcVA := d.CodeVA + funcStart
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
 		rangeByVA[funcVA] = r
 	}
 
@@ -63,6 +70,7 @@ func RunFromMain(d FromMainDeps) error {
 			candidates = append(candidates, va)
 		}
 	}
+	slices.Sort(candidates)
 	if len(candidates) == 0 {
 		runAppVA, ok := FindRunAppVA(d.SymbolNames)
 		if !ok {
@@ -203,7 +211,7 @@ func RunFromMain(d FromMainDeps) error {
 			}
 		}()
 
-		if emitted > 0 && emitted%d.GcEveryN == 0 {
+		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
 			if err := d.W.Flush(); err != nil {
 				return fmt.Errorf("flush %s: %w", d.CombinedPath, err)
 			}
@@ -253,7 +261,14 @@ func FindCallerOfAmongAppCode(
 	libraryURLForCodeRef func(int) string,
 	isFrameworkLibraryURL func(string) bool,
 ) (uint64, error) {
-	for va, r := range rangeByVA {
+	vas := make([]uint64, 0, len(rangeByVA))
+	for va := range rangeByVA {
+		vas = append(vas, va)
+	}
+	slices.Sort(vas)
+
+	for _, va := range vas {
+		r := rangeByVA[va]
 		if isFrameworkLibraryURL(libraryURLForCodeRef(r.RefID)) {
 			continue
 		}

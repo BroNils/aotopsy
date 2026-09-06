@@ -95,29 +95,29 @@ func cmdRun(args []string) error {
 }
 
 func printSummary(result *analysis.Result) {
-	fmt.Fprintf(os.Stderr, "\n%ssummary%s\n", cli.Pink, cli.Reset)
-	fmt.Fprintf(os.Stderr, "  %soutput:%s     %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.OutDir, cli.Reset)
+	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("summary"))
+	fmt.Fprintf(os.Stderr, "  %s     %s\n", cli.MutedColor.S("output:"), cli.BlueColor.S(result.OutDir))
 	if result.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "  %sdart:%s       %s%s%s\n", cli.Muted, cli.Reset, cli.Gold, result.DartVersion, cli.Reset)
+		fmt.Fprintf(os.Stderr, "  %s       %s\n", cli.MutedColor.S("dart:"), cli.GoldColor.S(result.DartVersion))
 	}
-	fmt.Fprintf(os.Stderr, "  %sptr_size:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.PointerSize, cli.Reset)
-	fmt.Fprintf(os.Stderr, "  %sfunctions:%s %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.FuncCount, cli.Reset)
-	fmt.Fprintf(os.Stderr, "  %sclasses:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.ClassCount, cli.Reset)
-	fmt.Fprintf(os.Stderr, "  %ssignal:%s    %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.SignalCount, cli.Reset)
+	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("ptr_size:"), cli.GoldColor.F("%d", result.PointerSize))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", cli.MutedColor.S("functions:"), cli.GoldColor.F("%d", result.FuncCount))
+	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("classes:"), cli.GoldColor.F("%d", result.ClassCount))
+	fmt.Fprintf(os.Stderr, "  %s    %s\n", cli.MutedColor.S("signal:"), cli.GoldColor.F("%d", result.SignalCount))
 	if result.MetaPath != "" {
-		fmt.Fprintf(os.Stderr, "  %smeta:%s      %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.MetaPath, cli.Reset)
+		fmt.Fprintf(os.Stderr, "  %s      %s\n", cli.MutedColor.S("meta:"), cli.BlueColor.S(result.MetaPath))
 	}
 	if result.DecompiledCount > 0 {
-		fmt.Fprintf(os.Stderr, "  %spseudocode:%s %s%d%s functions\n", cli.Muted, cli.Reset, cli.Gold, result.DecompiledCount, cli.Reset)
+		fmt.Fprintf(os.Stderr, "  %s %s functions\n", cli.MutedColor.S("pseudocode:"), cli.GoldColor.F("%d", result.DecompiledCount))
 	}
 
 	// Follow-up commands.
 	absOut, _ := filepath.Abs(result.OutDir)
 	signalHTML := filepath.Join(absOut, "signal.html")
-	fmt.Fprintf(os.Stderr, "\n%snext%s\n", cli.Pink, cli.Reset)
-	fmt.Fprintf(os.Stderr, "  %sopen %s%s\n", cli.White, signalHTML, cli.Reset)
+	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("next"))
+	fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
 	if result.LibPath != "" {
-		fmt.Fprintf(os.Stderr, "  %saotopsy ghidra %s --from %s%s\n", cli.White, result.LibPath, absOut, cli.Reset)
-		fmt.Fprintf(os.Stderr, "  %saotopsy ida %s --from %s%s\n", cli.White, result.LibPath, absOut, cli.Reset)
+		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+result.LibPath+" --from "+absOut))
+		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ida "+result.LibPath+" --from "+absOut))
 	}
 }

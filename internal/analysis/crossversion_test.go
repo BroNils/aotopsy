@@ -102,30 +102,37 @@ type knownGap struct {
 // band, and the resolved fields match the 3.4.3 output for the same source. So
 // field_type_declared/instance/accessor no longer collapse on 2.15..3.3.0.
 //
-// Two residual gaps remain, both distinct from the (now-fixed) receiver cliff:
+// One residual gap remains, distinct from the (now-fixed) receiver cliff:
 const storeResidualReason = "field_type_store_hits tracks store->load field-type " +
 	"propagation, a separate and sparser mechanism than receiver-based field-type " +
 	"resolution; the receiver-slot recovery that closed declared/instance hits does " +
 	"not feed it, so 3.3.0 store hits stay below the same-source median."
 
-// 2.14.0 is the LAST uncompressed-pointer Dart version (2.15 enabled pointer
-// compression). The receiver IS recovered there -- field ACCESSES resolve with
-// correct class ids (field_accessor_xref is populated) -- but the field's
-// DECLARED TYPE does not resolve: FieldTypes ends up empty because the
-// uncompressed era resolves Field.TypeRefID -> Type -> ClassID differently, the
-// same family of Type-object boundary bugs already recorded for 2.16-2.19. This
-// is a separate, not-yet-root-caused issue in Type resolution, NOT the receiver
-// cliff, and it affects only this single version.
-const uncompressedTypeResolutionReason = "2.14.0 is the last uncompressed-pointer " +
-	"version; its receiver is recovered (field accesses resolve) but the field's " +
-	"declared TYPE does not (FieldTypes empty -- uncompressed-era Field.TypeRefID -> " +
-	"Type -> ClassID resolution, same family as the 2.16-2.19 Type boundary bugs). " +
-	"Separate from the receiver cliff; not yet root-caused."
+// A second gap used to be listed here, for field_type_declared_hits and
+// field_type_instance_hits on 2.14.0, blamed on it being "the last
+// uncompressed-pointer version" and called not-yet-root-caused. Both halves
+// were wrong, and the entry is deleted rather than reworded.
+//
+// The span was 2.13.0-2.15.0, not 2.14.0 alone, and pointer compression had
+// nothing to do with it. Type.type_class_id is a Smi ref before 2.15 and a
+// scalar from 2.15 on, and BOTH sides of that boundary were broken:
+//
+//   - 2.10-2.14: the ref resolved fine (2324 of 2325 on 2.13.0) but the code
+//     that resolved it lived in typetrack and mutated the shared Result in
+//     place, so analysis.BuildFieldTypeByClassOffset -- on a path that never
+//     calls BuildTypeContext -- read ClassID 0. Now resolved at parse time in
+//     cluster.ReadFill, where no consumer can miss it.
+//   - 2.15.0: the version profile still claimed TypeClassIdIsRef. raw_object.h
+//     says otherwise -- UntaggedType at 2.15.0 is byte-identical to 2.16.0's,
+//     with `ClassIdTagType type_class_id_;` as a scalar -- so 0 of 2228 refs
+//     resolved. An off-by-one version boundary.
+//
+// Measured on byte-identical Dart source, field-type map (classes/slots):
+// 2.13.0 0/0 -> 122/210, 2.14.0 0/0 -> 76/162, 2.15.0 0/0 -> 82/175, against
+// 2.16.0's 84/178. See docs/findings-repo/012.
 
 var knownGaps = []knownGap{
 	{metric: "field_type_store_hits", versions: []string{"3.3.0/arm64", "3.3.0/x64", "2.13.0/arm64", "2.13.0/x64", "2.14.0/arm64"}, reason: storeResidualReason},
-	{metric: "field_type_declared_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
-	{metric: "field_type_instance_hits", versions: []string{"2.14.0/arm64", "2.14.0/x64"}, reason: uncompressedTypeResolutionReason},
 }
 
 func gapAllows(metric, version string) (string, bool) {

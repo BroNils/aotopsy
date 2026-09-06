@@ -121,10 +121,10 @@ func Format(insts []Inst, lookup SymbolLookup, annotators ...Annotator) string {
 
 // DisasmOne decodes a single ARM64 instruction from its raw encoding.
 // Returns the disassembly text, or "" if decoding fails.
-func DisasmOne(raw uint32, addr uint64) string {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, raw)
-	inst, err := arm64asm.Decode(buf)
+func DisasmOne(raw uint32) string {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], raw)
+	inst, err := arm64asm.Decode(buf[:])
 	if err != nil {
 		return ""
 	}

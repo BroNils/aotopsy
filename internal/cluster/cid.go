@@ -302,6 +302,23 @@ var typedDataInternalNames = [14]string{
 	"TypedDataInt32x4Array", "TypedDataFloat64x2Array",
 }
 
+// typedDataInt32ArrayCid returns kTypedDataInt32ArrayCid for this version, or
+// 0 when the CID table has no TypedData range.
+//
+// Derived from the committed base + stride rather than stored as its own
+// profile field: the internal TypedData CIDs are one contiguous strided run in
+// the order typedDataInternalNames spells out, so a separate field would be a
+// second copy of the same fact with its own way of going stale.
+func typedDataInt32ArrayCid(ct *snapshot.CIDTable) int {
+	if ct.TypedDataInt8ArrayCid == 0 || ct.TypedDataCidStride == 0 {
+		return 0
+	}
+	return ct.TypedDataInt8ArrayCid + typedDataInt32ArrayIndex*ct.TypedDataCidStride
+}
+
+// typedDataInt32ArrayIndex is Int32Array's position in typedDataInternalNames.
+const typedDataInt32ArrayIndex = 5
+
 func typedDataInternalName(cid int, ct *snapshot.CIDTable) string {
 	if ct.TypedDataCidStride == 0 {
 		return ""

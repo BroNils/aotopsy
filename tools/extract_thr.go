@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/cmacro"
+	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
 
@@ -875,6 +876,126 @@ func arm64ProductTarget(tag string) (extractTarget, bool) {
 // Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
 // runtime/vm/stub_code_list.h, runtime/vm/class_id.h.
 // Verified via gh api at tag 3.13.0.
+// reClassIdTagPosComment matches the pre-3.6 enum form, where the position is
+// an expression whose value only exists in the trailing comment:
+//
+//	kClassIdTagPos = kSizeTagPos + kSizeTagSize,  // = 16
+var reClassIdTagPosComment = regexp.MustCompile(`kClassIdTagPos\s*=[^,]*,\s*//\s*=\s*(\d+)`)
+
+// reClassIdTagSizeLiteral matches the same era's width, a plain literal:
+//
+//	kClassIdTagSize = 16,
+var reClassIdTagSizeLiteral = regexp.MustCompile(`kClassIdTagSize\s*=\s*(\d+)\s*,`)
+
+// reClassIdTagBitField matches the 3.6-3.11 form, where the width is the last
+// template argument and the position is a computed expression:
+//
+//	using ClassIdTag =
+//	    BitField<decltype(tags_), ClassIdTagType, SizeTagBits::kNextBit, 20>;
+var reClassIdTagBitField = regexp.MustCompile(`using ClassIdTag\s*=\s*BitField<[^>]*?,\s*(\d+)>`)
+
+// reExtractedClassIdTag matches the generated header, which carries both as
+// literals from 3.12.2 onwards.
+var reExtractedClassIdTagPos = regexp.MustCompile(`UntaggedObject_kClassIdTagPos\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
+var reExtractedClassIdTagSize = regexp.MustCompile(`UntaggedObject_kClassIdTagSize\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
+
+// sdkClassIdTagLayout recovers the ClassIdTag bitfield layout from the SDK at
+// a tag, returning pos = -1 when only the width is machine-readable.
+//
+// Three shapes across the supported range, because the SDK rewrote this twice:
+//
+//	<= 3.5.0     raw_object.h enum, value in a trailing comment
+//	3.6.2-3.11.0 raw_object.h `using ClassIdTag = BitField<..., 20>`
+//	>= 3.12.2    runtime_offsets_extracted.h, both as literals
+//
+// The width alone still decides the layout: across every version AOTopsy
+// supports, size 16 means pos 16 and size 20 means pos 12. A fourth shape
+// would fail to parse rather than pass quietly.
+func sdkClassIdTagLayout(tag string) (pos, size int, source string, err error) {
+	if src, e := fetchHeader(tag); e == nil {
+		mp := reExtractedClassIdTagPos.FindStringSubmatch(src)
+		ms := reExtractedClassIdTagSize.FindStringSubmatch(src)
+		if mp != nil && ms != nil {
+			p, e1 := strconv.ParseInt(mp[1], 0, 32)
+			s, e2 := strconv.ParseInt(ms[1], 0, 32)
+			if e1 == nil && e2 == nil {
+				return int(p), int(s), "runtime_offsets_extracted.h", nil
+			}
+		}
+	}
+	raw, e := fetchSDKFile("runtime/vm/raw_object.h", tag)
+	if e != nil {
+		return 0, 0, "", e
+	}
+	if mp := reClassIdTagPosComment.FindStringSubmatch(raw); mp != nil {
+		if ms := reClassIdTagSizeLiteral.FindStringSubmatch(raw); ms != nil {
+			p, _ := strconv.Atoi(mp[1])
+			s, _ := strconv.Atoi(ms[1])
+			return p, s, "raw_object.h (enum)", nil
+		}
+	}
+	if mb := reClassIdTagBitField.FindStringSubmatch(raw); mb != nil {
+		s, _ := strconv.Atoi(mb[1])
+		return -1, s, "raw_object.h (BitField)", nil
+	}
+	return 0, 0, "", fmt.Errorf("no recognised ClassIdTag declaration in raw_object.h@%s", tag)
+}
+
+// runCheckClassIdTag verifies snapshot.ClassIdTagLayout against the SDK for
+// every supported version.
+//
+// This constant had no gate at all, unlike the Thread fields, the stub names,
+// the stub offsets, the runtime entries, the object-store field count and the
+// roots prefix. It is a hand-written version boundary of exactly the shape
+// that has been wrong four times in this project (see the cross-version
+// differential table in AGENTS-local.md), and it decides how every object
+// header's class id is read.
+func runCheckClassIdTag() int {
+	seen := map[string]bool{}
+	bad, checked, partial := 0, 0, 0
+	for _, t := range allTargets {
+		if seen[t.tag] {
+			continue
+		}
+		seen[t.tag] = true
+
+		sdkPos, sdkSize, source, err := sdkClassIdTagLayout(t.tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			continue
+		}
+		wantPos, wantSize := snapshot.ClassIdTagLayout(t.tag)
+		checked++
+
+		if sdkSize != wantSize {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: size committed=%d sdk=%d (%s)\n",
+				t.tag, wantSize, sdkSize, source)
+			bad++
+			continue
+		}
+		if sdkPos < 0 {
+			partial++
+			fmt.Fprintf(os.Stderr, "  OK %s: size %d (%s; position not machine-readable at this tag)\n",
+				t.tag, sdkSize, source)
+			continue
+		}
+		if sdkPos != wantPos {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: pos committed=%d sdk=%d (%s)\n",
+				t.tag, wantPos, sdkPos, source)
+			bad++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  OK %s: pos %d size %d (%s)\n", t.tag, sdkPos, sdkSize, source)
+	}
+	if bad > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d ClassIdTag layout mismatch(es) across %d version(s)\n", bad, checked)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nClassIdTag layout matches SDK for all %d version(s) (%d width-only)\n",
+			checked, partial)
+	}
+	return bad
+}
+
 func runCheckRoots() int {
 	mismatches := 0
 	// Only 3.13.0+ has RootsPrefixRefCount.
@@ -1595,11 +1716,29 @@ const versionProfilePath = "internal/snapshot/version.go"
 // dispatch table, so the dispatch table parses as garbage and BLR resolution
 // silently collapses to zero.
 func objectStoreFieldCount(tag string) (int, string, error) {
+	names, desc, err := objectStoreFields(tag)
+	if err != nil {
+		return 0, "", err
+	}
+	return len(names), desc, nil
+}
+
+// objectStoreFields returns the ObjectStore field NAMES an AOT snapshot
+// writes, in serialized order -- the same range objectStoreFieldCount counts,
+// so index i here is root ref i in ParseDispatchTable.
+//
+// The names matter as well as the count: 76-89 of them are
+// `RW(Code, <name>_stub)`, and those are the only place an isolate stub's
+// identity survives. Their Code objects carry a null owner, so every one of
+// them otherwise falls through to `sub_<pcOffset>` -- measured at 85 of 8049
+// ranges on dart-3.9.2-gt-arm64, all of them `_iso_stub_*` in the ELF symbol
+// table.
+func objectStoreFields(tag string) ([]string, string, error) {
 	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
 		fmt.Sprintf("repos/dart-lang/sdk/contents/runtime/vm/object_store.h?ref=%s", tag))
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, "", fmt.Errorf("gh api object_store.h@%s: %w", tag, err)
+		return nil, "", fmt.Errorf("gh api object_store.h@%s: %w", tag, err)
 	}
 	src := string(out)
 
@@ -1653,7 +1792,7 @@ func objectStoreFieldCount(tag string) (int, string, error) {
 	aotRe := regexp.MustCompile(`kFullAOT:\s*\n?\s*return[^&]*&(\w+)_\)`)
 	fm, am := fromRe.FindStringSubmatch(body), aotRe.FindStringSubmatch(body)
 	if fm == nil || am == nil {
-		return 0, "", fmt.Errorf("%s: could not locate from()/to_snapshot(kFullAOT)", tag)
+		return nil, "", fmt.Errorf("%s: could not locate from()/to_snapshot(kFullAOT)", tag)
 	}
 	idx := func(name string) int {
 		for i, n := range names {
@@ -1665,10 +1804,10 @@ func objectStoreFieldCount(tag string) (int, string, error) {
 	}
 	i0, i1 := idx(fm[1]), idx(am[1])
 	if i0 < 0 || i1 < 0 {
-		return 0, "", fmt.Errorf("%s: from=%q(%d) aot=%q(%d) not found among %d fields",
+		return nil, "", fmt.Errorf("%s: from=%q(%d) aot=%q(%d) not found among %d fields",
 			tag, fm[1], i0, am[1], i1, len(names))
 	}
-	return i1 - i0 + 1, fmt.Sprintf("from=%s to=%s", fm[1], am[1]), nil
+	return names[i0 : i1+1], fmt.Sprintf("from=%s to=%s", fm[1], am[1]), nil
 }
 
 // committedFieldCounts parses DartVersion -> ObjectStoreAOTFieldCount out of
@@ -1859,8 +1998,10 @@ func main() {
 	checkFlag := flag.Bool("check", false, "verify the committed THR tables against the SDK headers; exit 1 on any unexplained difference")
 	writeFlag := flag.Bool("write", false, "rewrite the committed THR tables in place from the SDK headers (run gofmt afterwards)")
 	checkObjectStoreFlag := flag.Bool("check-objectstore", false, "verify every profile's ObjectStoreAOTFieldCount against the SDK's object_store.h; exit 1 on mismatch")
+	writeObjectStoreStubsFlag := flag.Bool("write-objectstore-stubs", false, "regenerate internal/vmtables/objectstorestubs.go from the SDK's object_store.h")
 	checkStubsFlag := flag.Bool("check-stubs", false, "verify stubnames.go against SDK's stub_code_list.h; exit 1 on mismatch")
 	checkRootsFlag := flag.Bool("check-roots", false, "verify RootsPrefixRefCount for Dart 3.13.0+ against SDK's roots.h, symbol_list.h, stub_code_list.h, class_id.h; exit 1 on mismatch")
+	checkClassIdTagFlag := flag.Bool("check-classid-tag", false, "verify snapshot.ClassIdTagLayout against SDK's raw_object.h / runtime_offsets_extracted.h for every version; exit 1 on mismatch")
 	checkRuntimeEntriesFlag := flag.Bool("check-runtime-entries", false, "verify every runtime entry in SDK's runtime_entry_list.h is named in the committed THR tables; exit 1 on any gap")
 	emitStubNamesFlag := flag.String("emit-stub-names", "", "comma-separated tags: print Go source for their VM stub name tables")
 	emitStubOffsetsFlag := flag.String("emit-stub-offsets", "", "comma-separated tags: print Go source for their Thread-cached stub offset tables")
@@ -1894,6 +2035,13 @@ func main() {
 		return
 	}
 
+	if *writeObjectStoreStubsFlag {
+		if runWriteObjectStoreStubs() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *checkStubsFlag {
 		if runCheckStubs() > 0 {
 			os.Exit(1)
@@ -1910,6 +2058,13 @@ func main() {
 
 	if *checkRootsFlag {
 		if runCheckRoots() > 0 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *checkClassIdTagFlag {
+		if runCheckClassIdTag() > 0 {
 			os.Exit(1)
 		}
 		return
@@ -2427,5 +2582,99 @@ func writeStubTables() int {
 		fmt.Fprintf(os.Stderr, "write: SKIP %s\n", f)
 	}
 	fmt.Printf("write: %d stub/runtime table(s) rewritten\n", total)
+	return 0
+}
+
+// --- ObjectStore stub-field table generation ---
+
+// runWriteObjectStoreStubs regenerates internal/vmtables/objectstorestubs.go:
+// for every version whose ObjectStoreAOTFieldCount is committed, the index and
+// name of each `RW(Code, <name>_stub)` field inside the serialized root range.
+//
+// This is the only route to an isolate stub's name. Their Code objects have a
+// null owner, so the owner walk and the type-testing-stub namer both find
+// nothing and they render as `sub_<pcOffset>` -- 85 of 8049 ranges on
+// dart-3.9.2-gt-arm64, every one of them `_iso_stub_*` in the ELF symbol
+// table, and called often enough to account for 639 of the 840
+// `unresolvedCall` tokens the fidelity census counts.
+//
+// A version with no entry names nothing, exactly as VMStubNamesInImageOrder
+// does: the table is a verified fact per version or it is absent.
+func runWriteObjectStoreStubs() int {
+	committed, err := committedFieldCounts()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: %v\n", err)
+		return 1
+	}
+	versions := make([]string, 0, len(committed))
+	for v := range committed {
+		versions = append(versions, v)
+	}
+	sort.Strings(versions)
+
+	type entry struct {
+		idx  int
+		name string
+	}
+	byVersion := map[string][]entry{}
+	for _, v := range versions {
+		if strings.IndexByte(v, '-') >= 0 {
+			continue // pre-release, no SDK tag
+		}
+		names, _, err := objectStoreFields(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %-12s SKIP (%v)\n", v, err)
+			continue
+		}
+		if len(names) != committed[v] {
+			fmt.Fprintf(os.Stderr, "  %-12s SKIP (field count %d != committed %d)\n", v, len(names), committed[v])
+			continue
+		}
+		var es []entry
+		for i, n := range names {
+			if strings.HasSuffix(n, "_stub") {
+				es = append(es, entry{i, n})
+			}
+		}
+		byVersion[v] = es
+		fmt.Fprintf(os.Stderr, "  %-12s %d stub fields of %d\n", v, len(es), len(names))
+	}
+
+	var b strings.Builder
+	b.WriteString(`// Code generated by tools/extract_thr.go -write-objectstore-stubs. DO NOT EDIT.
+
+package vmtables
+
+// objectStoreStubField is one ` + "`RW(Code, <name>_stub)`" + ` entry in the
+// isolate roots section: its index among the serialized ObjectStore fields,
+// and the field's name.
+type objectStoreStubField struct {
+	Index int
+	Name  string
+}
+
+// objectStoreStubFields is indexed by Dart version. Absent means "not
+// verified for this version" -- callers must name nothing rather than guess.
+var objectStoreStubFields = map[string][]objectStoreStubField{
+`)
+	for _, v := range versions {
+		es, ok := byVersion[v]
+		if !ok || len(es) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\t%q: {\n", v)
+		for _, e := range es {
+			fmt.Fprintf(&b, "\t\t{%d, %q},\n", e.idx, e.name)
+		}
+		b.WriteString("\t},\n")
+	}
+	b.WriteString("}\n")
+
+	path := "internal/vmtables/objectstorestubs.go"
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "write-objectstore-stubs: wrote %s for %d version(s)\n", path, len(byVersion))
 	return 0
 }

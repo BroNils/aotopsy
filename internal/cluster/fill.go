@@ -55,6 +55,21 @@ type NamedObject struct {
 	// HasKindTag is false when kind_tag was not captured, so IsStatic=false
 	// cannot be mistaken for "known to be an instance method".
 	HasKindTag bool
+
+	// IsSuspendable is UntaggedFunction::modifier() != kNoModifier -- the
+	// function is async, sync* or async*.
+	//
+	// It decides where the receiver lives before Dart 3.4.3, via
+	// Function::MakesCopyOfParameters() = HasOptionalParameters() ||
+	// IsSuspendableFunction(). See ReceiverFrameSlot.
+	//
+	// ModifierBits sits at bit 14 with width 2 in kind_tag_, immediately
+	// below the single-bit flags (is_static is the first, at bit 16, which
+	// is what IsStatic reads). Verified constant across every supported
+	// version -- object.h KindTagBits gives kKindTagSize=5,
+	// kRecognizedTagSize=9, kModifierPos=14, kModifierSize=2 identically at
+	// 2.10.0, 2.12.0, 2.17.6, 2.19.0, 3.0.5, 3.1.0, 3.2.5, 3.3.0 and 3.4.3.
+	IsSuspendable bool
 }
 
 // FuncTypeInfo holds parameter count data extracted from a FunctionType object.
@@ -154,14 +169,30 @@ type ArrayInfo struct {
 
 // ClassInfo holds class layout data extracted from a Class object's fill.
 type ClassInfo struct {
-	RefID          int
-	NameRefID      int
-	ClassID        int32
-	InstanceSize   int32
-	NextFieldOff   int32 // next_field_offset in bytes
-	TypeArgsOff    int32 // type_arguments field offset in bytes
-	SuperTypeRefID int   // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
-	LibraryRefID   int   // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
+	RefID     int
+	NameRefID int
+	ClassID   int32
+
+	// InstanceSize, NextFieldOff and TypeArgsOff are all in WORDS, not bytes.
+	// The serializer writes them straight from the *_in_words fields:
+	//
+	//	s->Write<int32_t>(Class::target_instance_size_in_words(cls));
+	//	s->Write<int32_t>(Class::target_next_field_offset_in_words(cls));
+	//	s->Write<int32_t>(Class::target_type_arguments_field_offset_in_words(cls));
+	//	                        -- app_snapshot.cc:1050-1053 @3.13.0
+	//
+	// Two of these carried "in bytes" comments while the code that used them
+	// multiplied by wordSize, which is right. The comments were the wrong
+	// half, and TypeArgsOff had no reader at all to contradict them -- so the
+	// first consumer would have been wrong by a factor of 8.
+	InstanceSize int32
+	NextFieldOff int32
+	// TypeArgsOff is the word offset of the instance's TypeArguments pointer,
+	// or NoTypeArguments (-1) for a class that has none. object.h:1369 defines
+	// that sentinel; treating it as an offset yields word -1.
+	TypeArgsOff    int32
+	SuperTypeRefID int // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
+	LibraryRefID   int // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
 
 	// UnboxedFieldBitmap marks which of this class's instance field slots hold
 	// a raw machine word rather than a ref, indexed by word offset from the
@@ -178,6 +209,25 @@ type ClassInfo struct {
 	// the ONLY copy at 2.10; from 2.12 the Instance cluster writes its own
 	// copy in its fill and reads it back there. See InstanceUnboxedBitmaps.
 	UnboxedFieldBitmap uint64
+}
+
+// NoTypeArguments is the sentinel ClassInfo.TypeArgsOff carries for a class
+// with no type-arguments field. Source: object.h:1369,
+// `static constexpr intptr_t kNoTypeArguments = -1`.
+const NoTypeArguments int32 = -1
+
+// HasTypeArguments reports whether instances of this class carry a
+// TypeArguments pointer, i.e. whether TypeArgsOff is a real offset rather
+// than the sentinel.
+func (c ClassInfo) HasTypeArguments() bool { return c.TypeArgsOff != NoTypeArguments }
+
+// TypeArgsByteOffset returns the byte offset of the TypeArguments pointer
+// within an instance, and false when the class has none.
+func (c ClassInfo) TypeArgsByteOffset(wordSize int32) (int32, bool) {
+	if !c.HasTypeArguments() {
+		return 0, false
+	}
+	return c.TypeArgsOff * wordSize, true
 }
 
 // TypeInfo holds the resolved type_class_id for a Type object -- i.e. which
@@ -682,7 +732,10 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillTypedData:
-			if err := skipFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit); err != nil {
+			if result.Int32Arrays == nil {
+				result.Int32Arrays = make(map[int][]byte)
+			}
+			if err := readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, result.Int32Arrays); err != nil {
 				return fmt.Errorf("fill: cluster %d (TypedData CID %d): %w", i, cm.CID, err)
 			}
 
@@ -786,7 +839,48 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 		}
 	}
 
+	resolveTypeClassIDs(result)
+
 	return nil
+}
+
+// resolveTypeClassIDs turns the captured Type.type_class_id Smi ref into a
+// class id, for the Dart versions (2.10-2.14) that serialise it as a pointer
+// inside the visited range rather than as a scalar after it.
+//
+// This runs HERE, at the end of the fill phase, rather than in whichever
+// consumer happens to need it first. It used to live in
+// typetrack.BuildTypeContext and mutate the shared Result in place, which made
+// TypeInfo.ClassID mean different things depending on which package had run:
+//
+//   - Its own doc comment records the first casualty -- it once ran after
+//     BuildClassHierarchy, so "the hierarchy saw 0 for every Type and came out
+//     empty on 2.x, taking LCA, CHA and any leaf-class test with it."
+//   - The second was analysis.BuildFieldTypeByClassOffset, which reads
+//     result.Types[i].ClassID directly from a path that never calls
+//     BuildTypeContext. Measured on byte-identical Dart source: 0 classes and
+//     0 resolved field-type slots at 2.13.0 and 2.14.0, against 84 and 178 at
+//     2.16.0.
+//
+// Moving the call a second time would only relocate the hazard. Resolving at
+// parse time removes it: ClassID is meaningful the moment a Result exists, and
+// no consumer needs to know TypeClassIdRef is there.
+//
+// MintValues is filled during the alloc phase, which precedes fill, so the
+// values are already available. No-op from 2.15 on, where the class id is a
+// scalar and TypeClassIdRef is never set.
+func resolveTypeClassIDs(result *Result) {
+	if len(result.MintValues) == 0 {
+		return
+	}
+	for i := range result.Types {
+		ti := &result.Types[i]
+		if ti.ClassID == 0 && ti.TypeClassIdRef > 0 {
+			if v, ok := result.MintValues[ti.TypeClassIdRef]; ok {
+				ti.ClassID = int32(v)
+			}
+		}
+	}
 }
 
 // fillOneCluster advances the stream past one cluster's fill data.
@@ -823,7 +917,9 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillWeakArray:
 		return skipFillWeakArray(s, cm, fillRefUnsigned)
 	case FillTypedData:
-		return skipFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit)
+		// Skip-only path (used to step over a cluster whose contents are not
+		// wanted): pass no sink, so nothing is captured.
+		return readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, nil)
 	case FillExceptionHandlers:
 		_, err := readFillExceptionHandlers(s, cm, fillRefUnsigned)
 		return err

@@ -58,6 +58,10 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		UBFXHits          int `json:"ubfx_hits,omitempty"`
 		ADDClassHits      int `json:"add_class_hits,omitempty"`
 		InstanceFieldHits int `json:"instance_field_hits,omitempty"`
+		// AllocStubHits counts calls whose result class came from a
+		// per-class allocation stub's Code.owner -- a structural fact, not
+		// an inference from registers. Both architectures.
+		AllocStubHits int `json:"alloc_stub_hits,omitempty"`
 		// x86_64 dispatch-call diagnosis; see TypeContext for what each
 		// counter separates. Absent on ARM64, which computes the slot with
 		// an ADD before the call rather than in the addressing mode.
@@ -106,6 +110,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
 		FuncReturnTypeCount      int `json:"func_return_type_count,omitempty"`
 		FuncReturnTypeSeeds      int `json:"func_return_type_seeds,omitempty"`
+		ArgsDescReceiverHits     int `json:"args_desc_receiver_hits,omitempty"`
+		ArgsDescReceiverFuncs    int `json:"args_desc_receiver_funcs,omitempty"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -117,6 +123,7 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.HeaderHits = ctx.HeaderHits
 		report.DispatchHits = ctx.DispatchHits
 		report.UBFXHits = ctx.UBFXHits
+		report.AllocStubHits = ctx.AllocStubHits
 		report.X86DispatchShape = ctx.X86DispatchShape
 		report.X86DispatchNoTable = ctx.X86DispatchNoTable
 		report.X86DispatchNoClass = ctx.X86DispatchNoClass
@@ -151,6 +158,8 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.SelectorMonomorphicCount = len(ctx.SelectorMonomorphic)
 		report.FuncReturnTypeCount = len(ctx.FuncReturnType)
 		report.FuncReturnTypeSeeds = ctx.FuncReturnTypeSeeds
+		report.ArgsDescReceiverHits = ctx.ArgsDescReceiverHits
+		report.ArgsDescReceiverFuncs = len(ctx.ReceiverLoadAtPC)
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

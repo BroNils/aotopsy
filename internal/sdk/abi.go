@@ -187,3 +187,19 @@ func ClassIdRegName(isARM64 bool) string {
 	}
 	return "rcx"
 }
+
+// Allocation stub result registers.
+//
+// AllocateObjectABI::kResultReg -- R0 on ARM64, RAX on x86_64. Source:
+// runtime/vm/constants_arm64.h:334-338 and runtime/vm/constants_x64.h:299-304
+// @3.13.0, stable across every version AOTopsy supports.
+//
+// The rest of that ABI is kTypeArgumentsReg (R1 / RDX) and kTagsReg
+// (R2 / R8); the class id travels in the tags word, which the per-class stub
+// materialises internally. Notably RDI is NOT part of it on x86_64 -- inside
+// GenerateAllocateObjectHelper it is only a scratch register -- which is why
+// reading the allocated class from RDI was never grounded in the ABI.
+const (
+	ARM64AllocResultReg = 0 // R0
+	X86AllocResultReg   = 0 // RAX (canonical index 0)
+)

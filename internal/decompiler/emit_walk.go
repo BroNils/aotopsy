@@ -5,11 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"aotopsy/internal/cluster"
 	"aotopsy/internal/sdk"
 )
 
-func identifyLoopHeaders(fir *FuncIR) map[int]bool {
+func identifyLoopHeaders(fir *FuncIR, idom []int) map[int]bool {
 	headers := make(map[int]bool)
 	for i := range fir.Blocks {
 		blk := &fir.Blocks[i]
@@ -17,9 +16,12 @@ func identifyLoopHeaders(fir *FuncIR) map[int]bool {
 			if s.BlockID < 0 || s.BlockID >= len(fir.Blocks) {
 				continue
 			}
-			target := &fir.Blocks[s.BlockID]
-			// Back-edge: target address <= current address (backward branch).
-			if target.StartVA <= blk.StartVA {
+			// A back edge is an edge into a block that DOMINATES its own
+			// source: every path from the entry to i already passed through
+			// s.BlockID, so following this edge re-enters it. See dom.go for
+			// why the previous address-order test (target.StartVA <=
+			// blk.StartVA) was not this, and what it swept in.
+			if dominates(idom, s.BlockID, i) {
 				headers[s.BlockID] = true
 			}
 		}
@@ -208,16 +210,6 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	e.seedFromFixpoint(id)
 	for i, ins := range blk.Instrs {
 		isLast := i == len(blk.Instrs)-1
-		// CSM liveness: if a CompressedStackMaps entry exists at this PC
-		// offset, kill registers that are dead at this safepoint. This
-		// removes stores to temporaries that the GC doesn't see as live,
-		// improving pseudocode quality (fewer dead assignments).
-		if e.csmByPC != nil && e.fir.EntryVA > 0 && ins.Addr >= e.fir.EntryVA {
-			pcOff := uint32(ins.Addr - e.fir.EntryVA)
-			if sm, ok := e.csmByPC[pcOff]; ok {
-				e.killDeadRegsAtSafepoint(sm)
-			}
-		}
 		// RegClass invariant: drop the tracked class of any register this
 		// instruction overwrites BEFORE lifting it, so a stale type can never
 		// survive a redefinition (see LiftState.RegClass).
@@ -313,10 +305,16 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				e.stats.NonLastBranch++
 			}
 		default:
-			if line, ok := ApplyOther(e.fir, e.state, ins); ok && !sdk.IsWriteBarrierStmt(line) {
+			line, ok := ApplyOther(e.fir, e.state, ins)
+			// Declarations first: `line` may read a name that was just spilled.
+			e.drainSpills(indent)
+			if ok && !sdk.IsWriteBarrierStmt(line) {
 				e.emit(indent, "%s", line)
 			}
 		}
+		// Catches the paths that set registers without returning a line of
+		// their own (pool loads, call results).
+		e.drainSpills(indent)
 		// SSA phi: if this instruction redefined a loop-carried (pinned)
 		// register, emit its update as an explicit assignment to the induction
 		// local and re-pin, so the loop body carries the value across iterations.
@@ -702,8 +700,15 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 			e.emit(indent, "}")
 			return
 		}
-		e.emit(indent, "// switch dispatch via %s (indirect branch / jump table)", ins.Target)
-		e.emit(indent, "// target = %s;", ins.Target)
+		// No jump table for this one, so it is not known to be a switch.
+		//
+		// Calling every unresolved indirect jump a "switch dispatch" was a
+		// mislabel, and a load-bearing one: dart-3.7.0-realapp2-x64 has 45 jump
+		// tables in the entire binary against 270 of these in 400 functions, so
+		// the overwhelming majority are something else -- a tail call through a
+		// register, most often. Naming the mechanism (an indirect jump) instead
+		// of guessing the construct is what the tool can actually support.
+		e.emit(indent, "// indirect jump via %s (target computed at runtime)", ins.Target)
 		e.stats.UnresolvedCF++
 		return
 	}
@@ -716,7 +721,9 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 				}
 			}
 			name = cleanCalleeName(name)
-			args := e.callArgExprs(len(e.fir.ArgRegs))
+			// A tail call is a call: bound its arguments by the callee's
+			// arity too.
+			args := e.callArgExprs(len(e.fir.ArgRegs), va)
 			argsText := strings.Join(args, ", ")
 			e.emit(indent, "return %s(%s);", name, argsText)
 			return
@@ -726,101 +733,4 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 	}
 	e.emit(indent, "// unresolved jump target")
 	e.stats.UnresolvedCF++
-}
-
-// killDeadRegsAtSafepoint uses CompressedStackMaps liveness data to drop
-// register values that are dead at a GC safepoint. The NonSpillBits bitmap
-// has bit i set when non-spill register i holds a live object at this PC.
-// Registers whose bit is clear and whose current value is a non-constant
-// expression (not a reserved register like THR/PP/SP) are killed, removing
-// dead stores from the pseudocode.
-//
-// This is conservative: it only kills registers that the CSM says are NOT
-// live, and only if the register currently holds a non-reserved value.
-// Reserved registers (THR, PP, SP, HEAP_BITS, CODE, argsDesc) are never
-// killed because they are function-invariant, not temporaries.
-func (e *emitter) killDeadRegsAtSafepoint(sm cluster.StackMapEntry) {
-	if len(sm.NonSpillBits) == 0 {
-		return
-	}
-	reserved := map[string]bool{
-		e.fir.ThreadReg: true, e.fir.PoolReg: true, e.fir.StackReg: true,
-		e.fir.HeapBitsReg: true, e.fir.CodeReg: true, e.fir.ArgsDescReg: true,
-		e.fir.NullReg: true, e.fir.FrameReg: true, e.fir.LinkReg: true,
-		e.fir.ReturnReg: true,
-	}
-	for reg := range e.state.Regs {
-		if reserved[reg] {
-			continue
-		}
-		// Try to map register name to a non-spill bitmap index.
-		// ARM64: x0-x30 → index 0-30. x86_64: rax-r15 → index 0-15.
-		idx := regNameToCSMIndex(reg, e.fir.ArgRegs)
-		if idx < 0 || idx >= len(sm.NonSpillBits)*8 {
-			continue
-		}
-		bit := sm.NonSpillBits[idx/8] & (1 << uint(idx%8))
-		if bit == 0 {
-			// Register is dead at this safepoint — kill it.
-			delete(e.state.Regs, reg)
-			e.stats.CSMDeadRegsKilled++
-		}
-	}
-}
-
-// regNameToCSMIndex maps a canonical register name to its index in the CSM
-// NonSpillBits bitmap. ARM64: x0-x30 → 0-30. x86_64: rax-r15 → 0-15.
-// Returns -1 for unrecognized names.
-func regNameToCSMIndex(reg string, argRegs []string) int {
-	// ARM64: x0-x30, w0-w30
-	if len(reg) >= 2 && (reg[0] == 'x' || reg[0] == 'w') {
-		n := 0
-		for _, c := range reg[1:] {
-			if c >= '0' && c <= '9' {
-				n = n*10 + int(c-'0')
-			} else {
-				return -1
-			}
-		}
-		if n <= 30 {
-			return n
-		}
-	}
-	// x86_64: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7,
-	// r8-r15 = 8-15. Also handle sub-width aliases (eax, ax, al, etc.)
-	switch reg {
-	case "rax", "eax", "ax", "al":
-		return 0
-	case "rcx", "ecx", "cx", "cl":
-		return 1
-	case "rdx", "edx", "dx", "dl":
-		return 2
-	case "rbx", "ebx", "bx", "bl":
-		return 3
-	case "rsp", "esp", "sp":
-		return 4
-	case "rbp", "ebp", "bp":
-		return 5
-	case "rsi", "esi", "si":
-		return 6
-	case "rdi", "edi", "di":
-		return 7
-	case "r8", "r8d", "r8w", "r8b":
-		return 8
-	case "r9", "r9d", "r9w", "r9b":
-		return 9
-	case "r10", "r10d", "r10w", "r10b":
-		return 10
-	case "r11", "r11d", "r11w", "r11b":
-		return 11
-	case "r12", "r12d", "r12w", "r12b":
-		return 12
-	case "r13", "r13d", "r13w", "r13b":
-		return 13
-	case "r14", "r14d", "r14w", "r14b":
-		return 14
-	case "r15", "r15d", "r15w", "r15b":
-		return 15
-	}
-	return -1
 }

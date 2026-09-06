@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -61,12 +62,36 @@ type AnalysisContext struct {
 	SymbolNames map[uint64]string
 	SymbolSizes map[uint64]uint32
 
+	// SymbolNamesVMForm carries the VM's OWN spelling for the addresses
+	// where it differs from the display name -- currently type-testing
+	// stubs, which we show as `TypeTestingStub_List<int>` and the VM writes
+	// as `TypeTestingStub_dart_core__List__dart_core__int`.
+	//
+	// It is not an output: nothing renders it. It exists so the symtab
+	// differential can compare against whichever notation a given ELF
+	// dialect uses, instead of scoring every type-testing stub as a
+	// disagreement on every version. Sparse -- most addresses are absent.
+	SymbolNamesVMForm map[uint64]string
+
 	IsARM64     bool
 	DartVersion string
 
 	// Enrichment holds lazy-built decompile maps. Nil until ensureDecompileMaps.
 	Enrichment      *DecompileEnrichment
 	enrichmentBuilt bool
+}
+
+// Image returns a CodeImage providing unified function slicing.
+func (c *AnalysisContext) Image() CodeImage {
+	return CodeImage{
+		CodeImage: cluster.CodeImage{Code: c.Code, CodeVA: c.CodeVA, CodeOff: c.CodeOff},
+		Pool:      c.Pool,
+	}
+}
+
+// Slice extracts a clamped FuncSlice from a CodeRange within this AnalysisContext.
+func (c *AnalysisContext) Slice(r cluster.CodeRange) (FuncSlice, bool) {
+	return c.Image().Slice(r)
 }
 
 // DecompileEnrichment holds the lazy-built per-binary maps that turn a bare
@@ -118,43 +143,25 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		return nil, err
 	}
 
-	symbolNames := make(map[uint64]string, len(sc.Ranges))
-	symbolSizes := make(map[uint64]uint32, len(sc.Ranges))
-	for _, r := range sc.Ranges {
-		if r.Size == 0 {
-			continue
-		}
-		funcStart := uint64(r.PCOffset) - sc.CodeOff
-		funcVA := sc.CodeVA + funcStart
-		symbolSizes[funcVA] = r.Size
-		if r.RefID >= 0 {
-			symbolNames[funcVA] = naming.QualifiedCodeName(r.RefID, sc.Pool, r.PCOffset)
-		} else {
-			symbolNames[funcVA] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	for va, name := range naming.BuildVMStubSymbols(sc.Info, dartfmtOptionsDefault()) {
-		symbolNames[va] = name
-	}
-	for va, name := range naming.BuildDiscardedFunctionSymbols(sc.Result.Named, sc.Info.Version.CIDs, sc.Table, sc.Pool, sc.CodeVA, sc.CodeOff, sc.Info.Version.CodeIndexOneBased) {
-		symbolNames[va] = name
-	}
+	syms := BuildSymbolNames(sc.Ranges, sc.Image().CodeImage, sc.Pool, sc.Result, sc.Info,
+		sc.Table, dartfmtOptionsDefault(), sc.Info.IsolateData.Data)
 
 	return &AnalysisContext{
-		EF:          sc.EF,
-		Info:        sc.Info,
-		Result:      sc.Result,
-		Ranges:      sc.Ranges,
-		InstrTable:  sc.Table,
-		Pool:        sc.Pool,
-		PoolDisplay: sc.PoolDisplay,
-		Code:        sc.Code,
-		CodeVA:      sc.CodeVA,
-		CodeOff:     sc.CodeOff,
-		SymbolNames: symbolNames,
-		SymbolSizes: symbolSizes,
-		IsARM64:     sc.IsARM64,
-		DartVersion: sc.Info.Version.DartVersion,
+		EF:                sc.EF,
+		Info:              sc.Info,
+		Result:            sc.Result,
+		Ranges:            sc.Ranges,
+		InstrTable:        sc.Table,
+		Pool:              sc.Pool,
+		PoolDisplay:       sc.PoolDisplay,
+		Code:              sc.Code,
+		CodeVA:            sc.CodeVA,
+		CodeOff:           sc.CodeOff,
+		SymbolNames:       syms.Names,
+		SymbolNamesVMForm: syms.VMForm,
+		SymbolSizes:       syms.Sizes,
+		IsARM64:           sc.IsARM64,
+		DartVersion:       sc.Info.Version.DartVersion,
 	}, nil
 }
 
@@ -358,37 +365,11 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 		c.Enrichment.InlinedFuncNamesByCodeRef[ce.RefID] = names
 	}
 
-	// FP-1: Decode CompressedStackMaps payloads and map them by Code.RefID.
-	// Each Code has a CompressedStackMapsRef pointing to a CSM object whose
-	// raw payload was captured in result.CompressedStackMaps. Decoding gives
-	// per-PC register/spill liveness at safepoints.
-	csmByRef := make(map[int]*cluster.CompressedStackMapsInfo, len(result.CompressedStackMaps))
-	var globalTablePayload []byte
-	for i := range result.CompressedStackMaps {
-		csmByRef[result.CompressedStackMaps[i].RefID] = &result.CompressedStackMaps[i]
-		p := result.CompressedStackMaps[i].Payload
-		if len(p) >= 4 && globalTablePayload == nil {
-			flagsAndSize := uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16 | uint32(p[3])<<24
-			if flagsAndSize&1 != 0 { // GlobalTableBit
-				globalTablePayload = p
-			}
-		}
-	}
-	c.Enrichment.DecodedStackMapsByCodeRef = make(map[int][]cluster.StackMapEntry)
-	for _, ce := range result.Codes {
-		if ce.CompressedStackMapsRef < 0 {
-			continue
-		}
-		csm, ok := csmByRef[ce.CompressedStackMapsRef]
-		if !ok || len(csm.Payload) == 0 {
-			continue
-		}
-		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload, globalTablePayload)
-		if err != nil || len(entries) == 0 {
-			continue
-		}
-		c.Enrichment.DecodedStackMapsByCodeRef[ce.RefID] = entries
-	}
+	// GC stack maps, from the CompressedStackMaps cluster (<=2.15) or the
+	// InstructionsTable rodata (every 3.x build). See DecodeAllStackMaps --
+	// the decoding lives there because stack_maps.jsonl needs the same
+	// answer and two copies would drift.
+	c.Enrichment.DecodedStackMapsByCodeRef = DecodeAllStackMaps(result, c.InstrTable)
 
 	// Build Code.RefID → CodeSourceMap ref ID map for O(1) lookup in
 	// wireInlineFrames (avoids looping through result.Codes per function).
@@ -427,7 +408,11 @@ func (c *AnalysisContext) buildAccessorFieldNames() {
 		if !ok || classID <= 0 {
 			continue
 		}
-		nm := c.SymbolNames[c.CodeVA+(uint64(r.PCOffset)-c.CodeOff)]
+		funcVA, ok := c.Image().FuncVA(r)
+		if !ok {
+			continue
+		}
+		nm := c.SymbolNames[funcVA]
 		base := nm
 		if i := strings.LastIndex(base, "."); i >= 0 {
 			base = base[i+1:]
@@ -482,24 +467,21 @@ func (c *AnalysisContext) buildAccessorFieldNames() {
 // aggregation pass that's only worth paying for when a caller actually
 // needs it, see resolveArgRegIndices's doc comment in decompile_native_cmd.go).
 func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, error) {
-	funcStart := uint64(r.PCOffset) - c.CodeOff
-	funcEnd := funcStart + uint64(r.Size)
-	if funcEnd > uint64(len(c.Code)) {
-		funcEnd = uint64(len(c.Code))
-	}
-	if funcStart >= funcEnd {
+	fs, ok := c.Slice(r)
+	if !ok {
 		return nil, fmt.Errorf("empty function range")
 	}
-	funcCode := c.Code[funcStart:funcEnd]
-	funcVA := c.CodeVA + funcStart
-	name := c.SymbolNames[funcVA]
+	name := c.SymbolNames[fs.VA]
+	if name == "" {
+		name = fs.Name
+	}
 
 	var fir *decompiler.FuncIR
 	if c.IsARM64 {
-		insts := disasm.Disassemble(funcCode, disasm.Options{BaseAddr: funcVA})
+		insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fs.VA})
 		fir = decompiler.BuildARM64IR(name, insts)
 	} else {
-		xinsts := decompiler.DecodeX86Range(funcCode, funcVA)
+		xinsts := decompiler.DecodeX86Range(fs.Code, fs.VA)
 		fir = decompiler.BuildX86IR(name, xinsts)
 	}
 	fir.ThreadStubOffsets = vmtables.ThreadStubOffsets(c.DartVersion, c.IsARM64)
@@ -524,7 +506,7 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	// Confident real arity from aggregated call-site arg-register masks (opt-in;
 	// only when BuildArgRegMasks was called).
 	if c.Enrichment != nil && c.Enrichment.ArgRegMasks != nil {
-		if masks, ok := c.Enrichment.ArgRegMasks[funcVA]; ok {
+		if masks, ok := c.Enrichment.ArgRegMasks[fs.VA]; ok {
 			if regIdx, confident := ResolveArgRegIndices(masks); confident {
 				fir.ArgRegIndices = regIdx
 			}
@@ -701,7 +683,10 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 	if !ok || len(entries) == 0 {
 		return
 	}
-	funcStart := uint64(r.PCOffset) - c.CodeOff
+	funcVA, ok := c.Image().FuncVA(r)
+	if !ok {
+		return
+	}
 	regions := cluster.BuildTryRegions(entries, r.Size)
 	regions = cluster.ExpandOuterTryRegions(regions, handlers)
 	for _, reg := range regions {
@@ -710,41 +695,89 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 		}
 		h := fir.ExceptionHandlers[reg.TryIndex]
 		fir.TryRegions = append(fir.TryRegions, decompiler.TryRegionEntry{
-			StartVA:   funcStart + c.CodeVA + uint64(reg.StartPC),
-			EndVA:     funcStart + c.CodeVA + uint64(reg.EndPC),
+			StartVA:   funcVA + uint64(reg.StartPC),
+			EndVA:     funcVA + uint64(reg.EndPC),
 			TryIndex:  reg.TryIndex,
 			Handler:   h,
-			HandlerVA: funcStart + c.CodeVA + uint64(h.PCOffset),
+			HandlerVA: funcVA + uint64(h.PCOffset),
 		})
 	}
 	fir.SnapTryRegionsToBlocks()
 }
 
-// wireSwitchCases detects IndirectGoto patterns (br xN on ARM64) and
-// populates fir.SwitchCases, restoring the switch/case recovery the old
-// cmd funcir_builder.go wired before the refactor dropped it. Dart AOT
-// uses IndirectGotoInstr for switches with >=16 cases (kJumpTableMinExpressions
-// = 16, verified against dart-lang/sdk kernel_to_il.cc @3.9.2).
+// wireSwitchCases recovers a switch's real case targets from its jump table.
+//
+// Dart AOT compiles a switch with >= 16 integer cases to an IndirectGotoInstr
+// (kJumpTableMinExpressions = 16, kernel_to_il.cc). Both architectures emit the
+// same shape, and both keep the targets in the object pool:
+//
+//	ARM64 (il_arm64.cc IndirectGotoInstr::EmitNativeCode)
+//	  LoadObject(offset_reg, offsets_)      // TypedData, kTypedDataInt32ArrayCid
+//	  ldr  offset_reg, [offset_reg + index*4]
+//	  adr  target_reg, -entry_offset        // = the Code's entry
+//	  add  target_reg, target_reg, offset_reg
+//	  br   target_reg
+//
+//	x86_64 (il_x64.cc)
+//	  LoadObject(offset_reg, offsets_)
+//	  movsxd offset_reg, [offset_reg + index*4]
+//	  leaq TMP, [rip - entry_to_rip_offset] // = the Code's entry
+//	  addq TMP, offset_reg
+//	  jmp  TMP
+//
+// So element i of that Int32Array is the byte offset from the function's entry
+// to case i's block, and recovery is exact: find the pool-loaded Int32Array,
+// add each element to EntryVA, look up the block.
+//
+// This replaces a fabrication. The previous version was ARM64-only and, when it
+// fired, took *every block after the indirect jump, in address order* and
+// labelled them case 0, 1, 2, ... up to 64 -- without reading the table at all.
+// Both the case indices and the block mapping were invented, so the emitted
+// `switch` was a confident wrong answer. Measured against the real tables, all
+// offsets land exactly on block starts on every sample and both architectures,
+// including 2.12.0's older instruction shape.
+//
+// Finding no table is a normal outcome, not a failure: an indirect jump in AOT
+// code is usually not a switch at all. dart-3.7.0-realapp2-x64 has 45 jump
+// tables in the whole binary against 270 indirect jumps in 400 functions.
 func (c *AnalysisContext) wireSwitchCases(fir *decompiler.FuncIR, r cluster.CodeRange) {
-	if !c.IsARM64 || len(fir.Blocks) == 0 {
+	if len(fir.Blocks) == 0 || len(c.Result.Int32Arrays) == 0 {
 		return
+	}
+	blockByVA := make(map[uint64]int, len(fir.Blocks))
+	for i := range fir.Blocks {
+		blockByVA[fir.Blocks[i].StartVA] = fir.Blocks[i].ID
 	}
 	for bi := range fir.Blocks {
 		for _, ins := range fir.Blocks[bi].Instrs {
-			if ins.Op != decompiler.OpJump || strings.HasPrefix(ins.Target, "0x") || ins.Target == "" {
+			if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
 				continue
 			}
-			var cases []decompiler.SwitchCase
-			for ci := bi + 1; ci < len(fir.Blocks) && len(cases) < 64; ci++ {
-				cases = append(cases, decompiler.SwitchCase{
-					Index:   len(cases),
-					BlockID: fir.Blocks[ci].ID,
-				})
+			pe, ok := c.Enrichment.PoolByIndex[ins.PoolIndex]
+			if !ok || pe.Kind != cluster.PoolTagged {
+				continue
+			}
+			table, ok := c.Result.Int32Arrays[pe.RefID]
+			if !ok || len(table) < 8 || len(table)%4 != 0 {
+				continue
+			}
+			cases := make([]decompiler.SwitchCase, 0, len(table)/4)
+			for i := 0; i+4 <= len(table); i += 4 {
+				off := uint64(binary.LittleEndian.Uint32(table[i:]))
+				id, ok := blockByVA[fir.EntryVA+off]
+				if !ok {
+					// One unmapped target invalidates the whole table: a
+					// partially recovered switch would silently renumber the
+					// cases after the gap.
+					cases = nil
+					break
+				}
+				cases = append(cases, decompiler.SwitchCase{Index: i / 4, BlockID: id})
 			}
 			if len(cases) >= 2 {
 				fir.SwitchCases = cases
+				return
 			}
-			break
 		}
 	}
 }
@@ -768,20 +801,13 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 		thrFields = vmtables.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
 	}
 	for _, r := range c.Ranges {
-		if r.Size == 0 {
+		fs, ok := c.Slice(r)
+		if !ok {
 			continue
 		}
-		fStart := uint64(r.PCOffset) - c.CodeOff
-		fEnd := fStart + uint64(r.Size)
-		if fEnd > uint64(len(c.Code)) {
-			fEnd = uint64(len(c.Code))
-		}
-		if fStart >= fEnd {
-			continue
-		}
-		fVA := c.CodeVA + fStart
+		fVA := fs.VA
 		if c.IsARM64 {
-			insts := disasm.Disassemble(c.Code[fStart:fEnd], disasm.Options{BaseAddr: fVA})
+			insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fVA})
 			if len(insts) == 0 {
 				continue
 			}
@@ -792,7 +818,7 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 			}
 			continue
 		}
-		scan := disasm.ScanX86FunctionCFG(c.Code[fStart:fEnd], fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
+		scan := disasm.ScanX86FunctionCFG(fs.Code, fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
 		for _, e := range scan.Edges {
 			if e.Kind == "call" && e.ArgRegMask != 0 {
 				c.Enrichment.ArgRegMasks[e.TargetPC] = append(c.Enrichment.ArgRegMasks[e.TargetPC], e.ArgRegMask)

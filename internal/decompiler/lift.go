@@ -34,6 +34,32 @@ type LiftState struct {
 	// in unit tests that lift instructions in isolation, in which case a
 	// pool operand renders as `pool[N]` rather than its contents.
 	Pool PoolLookup
+
+	// Spills holds `var _tN = <expr>;` declarations produced by setReg when a
+	// forwarded expression outgrew maxForwardedExprLen. The emitter drains
+	// them after every instruction, before the statement that uses the name.
+	Spills []string
+	// spillSeq numbers those temporaries. It is a POINTER so clones and joins
+	// share one sequence per function: two states each minting `_t1` for
+	// different expressions would collide in the emitted source. Nil means no
+	// sink is attached (the pre-emission fixpoint), and setReg drops an
+	// over-long value rather than naming something it cannot declare.
+	spillSeq *int
+}
+
+// AttachSpillSink makes this state materialize over-long expressions into named
+// temporaries instead of dropping them. Only the emitter calls it: it is the
+// layer that can actually write the declaration out.
+func (s *LiftState) AttachSpillSink(seq *int) { s.spillSeq = seq }
+
+// TakeSpills returns and clears the pending temporary declarations.
+func (s *LiftState) TakeSpills() []string {
+	if len(s.Spills) == 0 {
+		return nil
+	}
+	out := s.Spills
+	s.Spills = nil
+	return out
 }
 
 // newLiftState seeds the registers that hold a known value for the whole of
@@ -65,7 +91,9 @@ func newLiftState(nullReg string) *LiftState {
 // frame-global (a stack slot is the same slot regardless of which branch
 // wrote to it).
 func (s *LiftState) Clone() *LiftState {
-	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool}
+	// spillSeq is carried before the copy loop below: it decides whether an
+	// over-long value survives the clone as a name or is dropped.
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool, spillSeq: s.spillSeq}
 	for k, v := range s.Regs {
 		c.setReg(k, v)
 	}
@@ -1004,6 +1032,20 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 		// pointer is stored through directly) -- render it as a pointer
 		// dereference rather than an invalid "(x - y) = value;" lvalue.
 		lhs = fmt.Sprintf("*(%s)", baseExpr)
+	} else {
+		// `str x1, [x0]` is exactly `str x1, [x0, #0]`: a store THROUGH the
+		// pointer in x0, not a rebinding of whatever variable happens to hold
+		// it. Rendering it as `t35 = value;` claimed the wrong operation, and
+		// where t35 was a call temp -- declared `final t35 = f();` -- it also
+		// produced invalid Dart. The full-corpus sweep found it as
+		// `assign-to-final` in `ThemeData.copyWith`, `RenderParagraph.
+		// performLayout`, `FfiTrampoline_*` and others, in every sample.
+		//
+		// The displaced form already went through fieldExpr above, so the same
+		// machine operation was being rendered two different ways depending on
+		// whether the assembler wrote `#0`. It is one operation; it gets one
+		// rendering.
+		lhs = fieldExpr(baseExpr, 0, dartFieldResolver(fir, s, base))
 	}
 	return fmt.Sprintf("%s = %s;", lhs, valExpr), true
 }

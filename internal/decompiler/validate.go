@@ -79,17 +79,23 @@ func ValidateSource(src string) []Problem {
 		if !ok {
 			text = strings.TrimSpace(line)
 		}
-		texts[i] = text
+		// Syntax rules see only the CODE part of the line. The emitter writes
+		// prose into comments -- inlined-frame markers, omitted-path notes --
+		// and prose is not Dart. Matching it reported invalid syntax in 55
+		// functions of dart-3.12.2-x64 that were entirely valid. See
+		// stmt.CodePrefix.
+		code := stmt.CodePrefix(text)
+		texts[i] = code
 		add := func(rule string) {
 			out = append(out, Problem{Line: i + 1, Text: text, Rule: rule})
 		}
-		if reKeywordAsOperator.MatchString(text) {
+		if reKeywordAsOperator.MatchString(code) {
 			add("keyword-as-operator")
 		}
-		if reSpacedMemberOperator.MatchString(text) {
+		if reSpacedMemberOperator.MatchString(code) {
 			add("spaced-member-operator")
 		}
-		if m := reFinalDecl.FindStringSubmatch(text); m != nil {
+		if m := reFinalDecl.FindStringSubmatch(code); m != nil {
 			finalNames[m[1]] = i + 1
 		}
 		// Brace accounting, ignoring braces inside strings and comments --
