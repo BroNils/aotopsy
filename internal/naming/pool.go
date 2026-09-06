@@ -79,6 +79,14 @@ type PoolLookups struct {
 	// TypeTestingStubName.
 	TypeNames map[int]string
 
+	// TypeArgumentNames maps a TypeArguments object's ref ID to its rendered
+	// argument list, `<int, Display>`. Several hundred pool slots per binary
+	// hold one of these directly and rendered as the bare `<TypeArguments>`;
+	// 82% of them (442 of 542 on dart-3.12.2, identical on both architectures)
+	// were nameable from data already parsed. Built alongside TypeNames, from
+	// the same lookups. All-or-nothing per list: see typeArgsListString.
+	TypeArgumentNames map[int]string
+
 	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
 	// `TypeTestingStub_dart_core__List__dart_core__int` where TypeNames plus
 	// TypeTestingStubName gives `TypeTestingStub_List<int>`. Keyed the same
@@ -173,8 +181,9 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
-	typeNames := buildTypeNames(result, l, ct, dartVersion)
+	typeNames, typeArgNames := buildTypeNames(result, l, ct, dartVersion)
 	l.TypeNames = typeNames
+	l.TypeArgumentNames = typeArgNames
 	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
@@ -748,6 +757,9 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				// `List<int>` would read as a value of that type rather than
 				// the type itself.
 				display[pe.Index] = "Type: " + name
+			} else if args := l.TypeArgumentNames[pe.RefID]; args != "" {
+				// A bare TypeArguments object: render the list it holds.
+				display[pe.Index] = "TypeArgs: " + args
 			} else if cidNum, ok := l.RefCID[pe.RefID]; ok {
 				cidName := cluster.CidNameV(cidNum, l.CT)
 				if cidName != "" {

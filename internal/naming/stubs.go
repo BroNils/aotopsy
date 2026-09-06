@@ -272,7 +272,11 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 //
 // It produces the BARE type name. Wrap it with TypeTestingStubName for the
 // stub spelling; the object pool wants the type itself.
-func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
+//
+// It also returns the TypeArguments names -- `<int, String>` for a
+// TypeArguments object reached directly, as the object pool holds them -- since
+// both come from the same three lookups.
+func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) (typeNames, argNames map[int]string) {
 	// This was OFF below 2.16 for two reasons, both of which are now gone.
 	//
 	// The first was a real 2.12.0 sample resolving ALL 251 type-owned Codes
@@ -293,7 +297,7 @@ func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTabl
 	// spelling too, and the differential compares against whichever notation
 	// the symbol table uses. See docs/findings-repo/015.
 	if len(result.Types) == 0 {
-		return nil
+		return nil, nil
 	}
 	classNames := make(map[int32]string)
 	for i := range result.Classes {
@@ -341,7 +345,19 @@ func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTabl
 		}
 		out[t.RefID] = name
 	}
-	return out
+
+	// TypeArguments objects, from the same inputs. They are built here rather
+	// than in their own pass because they need exactly typeByRef, taByRef and
+	// nameOfClass -- three maps this function has already assembled, and which
+	// a second pass would have to build identically or drift from.
+	argNames = make(map[int]string, len(result.TypeArguments))
+	for i := range result.TypeArguments {
+		ta := &result.TypeArguments[i]
+		if s, ok := typeArgsListString(ta, typeByRef, taByRef, nameOfClass, 0); ok {
+			argNames[ta.RefID] = s
+		}
+	}
+	return out, argNames
 }
 
 // TypeTestingStubName returns the display name for the stub that tests the
@@ -387,8 +403,29 @@ func typeArgsString(
 	if depth > 4 || t == nil || t.ArgumentsRef <= 0 {
 		return "", false
 	}
-	ta, ok := taByRef[t.ArgumentsRef]
-	if !ok || ta.Length == 0 || len(ta.TypeRefs) == 0 {
+	return typeArgsListString(taByRef[t.ArgumentsRef], typeByRef, taByRef, nameOfClass, depth)
+}
+
+// typeArgsListString renders a TypeArguments object as "<A, B>".
+//
+// Split out of typeArgsString so the same rendering serves a TypeArguments
+// object reached directly -- which is how the object pool holds them. Several
+// hundred pool slots per binary are a bare TypeArguments, and they used to
+// render as the placeholder `<TypeArguments>` while this exact function could
+// have named 82% of them.
+//
+// The all-or-nothing rule is typeArgsString's and is the point of sharing the
+// code rather than copying it: one unresolvable element makes the whole list
+// unavailable, because a partially-rendered argument list is a name that looks
+// precise and is not.
+func typeArgsListString(
+	ta *cluster.TypeArgumentsInfo,
+	typeByRef map[int]*cluster.TypeInfo,
+	taByRef map[int]*cluster.TypeArgumentsInfo,
+	nameOfClass func(int32) string,
+	depth int,
+) (string, bool) {
+	if depth > 4 || ta == nil || ta.Length == 0 || len(ta.TypeRefs) == 0 {
 		return "", false
 	}
 	parts := make([]string, 0, len(ta.TypeRefs))
