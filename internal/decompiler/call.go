@@ -118,7 +118,22 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	e.state.clearRegClass(e.fir.ReturnReg)
 
 	var bound bool
-	if isDirect {
+	if ins.IsDispatchCall {
+		// A DispatchTable call dispatches on `selector_offset + receiver cid`.
+		// The cid is a runtime value, so there is no single callee to name --
+		// but the selector offset is right there in the instruction, it is
+		// stable, and two sites sharing one call the same selector. Saying
+		// that beats `dynamicCall(indirectTarget__rax_8_rcx_0x200a8_, ...)`,
+		// which named the addressing mode.
+		if ins.DispatchSelector == dispatchSelectorUnknown {
+			e.emit(indent, "final %s = dispatchCall([%s]);", tmpName, argsText)
+		} else {
+			e.emit(indent, "final %s = dispatchCall(selector: %d, [%s]);",
+				tmpName, ins.DispatchSelector, argsText)
+		}
+		e.stats.IndirectCalls++
+		bound = true
+	} else if isDirect {
 		bound = e.emitDirectCall(tmpName, calleeVA, argsText, selectorHint, indent)
 	} else {
 		bound = e.emitIndirectCall(tmpName, ins.Target, argsText, selectorHint, indent)

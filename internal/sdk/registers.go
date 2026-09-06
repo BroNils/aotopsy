@@ -173,6 +173,25 @@ func DartArgRegisters(isARM64 bool) []int {
 	return []int{7, 6, 2, 3, 8, 9}
 }
 
+// DispatchTableOriginElement is DispatchTable::kOriginElement, the element the
+// dispatch-table register points AT rather than the start of the table.
+//
+//	runtime/vm/dispatch_table.h @3.12.2
+//	  #if defined(TARGET_ARCH_X64)
+//	    static constexpr intptr_t kOriginElement = 16;    // max negative byte offset / 8
+//	  #elif defined(TARGET_ARCH_ARM64)
+//	    static constexpr intptr_t kOriginElement = 4096;  // max consecutive sub immediate
+//
+// It exists so a selector below the origin can still be reached with a
+// negative displacement (x86_64) or a `sub` immediate (ARM64), which is why
+// recovering a selector from a call site has to add it back.
+func DispatchTableOriginElement(isARM64 bool) int {
+	if isARM64 {
+		return 4096
+	}
+	return 16
+}
+
 // ICDataArgRegIndex is the position of IC_DATA_REG within
 // DartCallingConvention::kCpuRegistersForArgs. It is index 3 on BOTH
 // architectures:

@@ -7,6 +7,7 @@ docs/
 .playwright-mcp/
 .graph/
 .devin/
+.handoff/
 *.so
 *.o
 *.dylib

@@ -243,7 +243,8 @@ func (e *emitter) annotateInlineFrames(va uint64, indent int) {
 // loop headers (blocks that are targets of back-edges) and wraps loop
 // bodies in `while (true) { ... break; }` instead of bare `continue;`.
 func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact {
-	fir.ComputePreds() // A3: compute predecessors for if/else inlining
+	fir.ComputePreds()         // A3: compute predecessors for if/else inlining
+	annotateDispatchCalls(fir) // mark DispatchTable calls and recover their selector
 	e := &emitter{
 		fir:         fir,
 		symbols:     symbols,

@@ -55,6 +55,15 @@ type Instr struct {
 	CondOp   string // Dart comparison operator, e.g. "==", "!=", "<", "<=", ">", ">="
 	CondReg  string
 	CondBit  int
+
+	// IsDispatchCall marks an OpCall as a DispatchTable call, with
+	// DispatchSelector holding its selector offset. The two are separate
+	// because 0 is a real selector offset, so a zero DispatchSelector cannot
+	// stand in for "not one". Set by annotateDispatchCalls; see that file for
+	// how the offset is recovered on each architecture, and why the selector's
+	// NAME is not.
+	IsDispatchCall   bool
+	DispatchSelector int
 }
 
 // Succ is a control-flow edge out of a Block.
