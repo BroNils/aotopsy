@@ -305,10 +305,16 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 				e.stats.NonLastBranch++
 			}
 		default:
-			if line, ok := ApplyOther(e.fir, e.state, ins); ok && !sdk.IsWriteBarrierStmt(line) {
+			line, ok := ApplyOther(e.fir, e.state, ins)
+			// Declarations first: `line` may read a name that was just spilled.
+			e.drainSpills(indent)
+			if ok && !sdk.IsWriteBarrierStmt(line) {
 				e.emit(indent, "%s", line)
 			}
 		}
+		// Catches the paths that set registers without returning a line of
+		// their own (pool loads, call results).
+		e.drainSpills(indent)
 		// SSA phi: if this instruction redefined a loop-carried (pinned)
 		// register, emit its update as an explicit assignment to the induction
 		// local and re-pin, so the loop body carries the value across iterations.
