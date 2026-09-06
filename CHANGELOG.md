@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-09-06
+
+Name recovery from the snapshot's own tables, and a round of fabrications
+removed. The theme of the release is that several things the decompiler stated
+confidently were not recovered at all — invented loops, invented switch cases,
+invented call arguments — and that a corpus of 93 binaries was being checked
+400 functions at a time, which is where they were hiding.
 
 ### Fixed
 - **An unresolved x86_64 pool load left the destination register carrying its
@@ -39,6 +45,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renderer from `internal/callgraph` to `internal/render` dropped them: the old
   renderer read `BasicBlock.Calls`, and `disasm.BasicBlock` has no such field. The
   CFG showed where a block branched but no longer what it called.
+- **The decompiler wrapped straight-line code in `while (true)` in 40–46% of
+  functions.** The back-edge test compared block addresses, which is a backward
+  *jump* in the code layout, not a back *edge*. Dart AOT emits two backward
+  jumps that are not loops and are everywhere: the stack-overflow slow path
+  placed at the end of the function, and the monomorphic entry check that jumps
+  back on a cid miss (present in every `dyn:` forwarder and most constructors).
+  Replaced with the definition that excludes both without knowing about either
+  — `u → v` is a back edge exactly when `v` dominates `u` — on a new dominator
+  analysis. Functions with a loop per 400: 186→54, 182→43, 168→47, 65→4.
+- **Switch recovery was ARM64-only, and on ARM64 it invented its answer.** It
+  took every block after the indirect jump, in address order, and labelled them
+  case 0, 1, 2 … up to 64, without ever reading the jump table. The real targets
+  are in `IndirectGotoInstr`'s `offsets_`, a `TypedDataInt32Array` in the object
+  pool holding one byte offset per case from the Code's entry. Validated before
+  implementing: every offset lands exactly on a block start, on both
+  architectures and including 2.12.0's older instruction shape.
+- **A two-block, 896-byte function emitted ~570 MB of source and took the
+  process out of memory at 5.9 GB.** Register values are held as expression
+  *text* and arithmetic emits no statement of its own, so an instruction that
+  reads a register three times triples the stored string — and Dart's hash
+  combiner does exactly that, twenty times over in `SystemHash.hash20`. Over-long
+  expressions now materialise into a named temporary, which turns exponential
+  growth into linear. `maxStepsPerEmitter` could not see it: the step count is
+  tiny, the blowup is in string length.
+- **A pointer store was rendered as a rebinding.** `str x1, [x0]` writes to the
+  memory *at* the address in x0; it does not rebind the variable holding it. The
+  displaced form `[x0, #0]` — the identical machine operation — already rendered
+  correctly as a field store, so one operation had two renderings and one of them
+  stated something else.
+- **Two distinct variables could be renamed into one.** The semantic-rename pass
+  checked whether its target name already existed in the source but never whether
+  another rename in the same pass had claimed it, so two temps classifying the
+  same way both became `accumulator`. The invalid Dart was the symptom; the
+  defect is an identity the binary does not have. Fixed with the missing guard
+  plus a deterministic ordering, without which map iteration order would decide
+  the winner.
+- **`ValidateSource` reported invalid syntax in comments.** The syntax rules ran
+  against whole raw lines while only brace-counting was comment-aware, so
+  inlined-frame markers — which contain a constructor name ending in a dot —
+  failed 55 valid functions on one sample. A gate that cries wolf hides things:
+  the pointer-store defect above was invisible until this was fixed.
+- **Indirect calls were shown with a register dump for an argument list.** An
+  AOT switchable call passes its arguments on the stack; the argument registers
+  at such a site hold whatever surrounding code left in them, and the register at
+  argument index 3 is `IC_DATA_REG` on both architectures. x86_64 suffered far
+  more than ARM64 because its receiver lands in RDX — argument index 2 — while
+  ARM64's lands in R0, which is not an argument register at all.
 
 ### Changed
 - **One implementation of function slicing.** The `PCOffset - CodeOff` / clamp /
@@ -49,6 +102,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the image produced an address near 2^64 instead of being rejected.
   `SliceExact` is the all-or-nothing variant for content hashing, where a clamped
   read would digest something that is not the function.
+- **One symbol-name builder.** `LoadContext`, `RunDisasmStage` and
+  `RunDisasmStageX86` each built their own, with comments pointing at each other.
+  Teaching one about isolate stubs left the other two emitting `sub_<pcOffset>`
+  into `call_edges.jsonl` and the signal graph, which is how this was found.
+- **`PoolLookups.TypeTestingStubNames` is now `TypeNames`, and holds the bare
+  type name.** The stub prefix is derived by `TypeTestingStubName`. The name was
+  being computed complete with type arguments and then made unusable by the
+  prefix, which is why 517 pool entries per binary rendered as `<Type>`.
+- **Unresolved indirect jumps are no longer called "switch dispatch".** One
+  sample has 45 jump tables in the whole binary against 270 indirect jumps in 400
+  functions, so the overwhelming majority are something else. The mechanism is
+  named; the construct is not guessed.
 
 ### Added
 - **JSONL schema gates.** `functions.jsonl`, `call_edges.jsonl`,
@@ -64,6 +129,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `analysis.DefaultMaxScan` replaces `ffitrace`'s private copy of the same number.
   After the scan loop moved to `analysis`, that copy survived only in ffitrace's
   test, which therefore asserted against a constant that no longer drove anything.
+- **Isolate stub names.** These are the only Codes in an AOT snapshot with no
+  owner at all, so the owner walk finds nothing and every one rendered as
+  `sub_<pcOffset>` — 639 of 840 unresolved-call tokens on one sample pointed at
+  just 85 of them. Their names survive only in the isolate roots section, whose
+  `RW(Code, <name>_stub)` fields are now committed per version and gated against
+  dart-lang/sdk. `sub_` counts fell 85→9, 86→10 and 54→1.
+- **Type-testing-stub naming on every supported version**, generating the VM's
+  own spelling alongside so the symtab differential compares like with like
+  rather than scoring every stub as a disagreement.
+- **GC stack maps**, recovered from the InstructionsTable and shipped as
+  `stack_maps.jsonl`.
+- **Dispatch-table calls are recognised as such**, with the selector offset
+  recovered from the instruction stream on both architectures. The selector's
+  *name* is deliberately not recovered: reading the table at `selector + cid` for
+  every cid gives 72–152 distinct method names per offset, because the table is
+  packed and the neighbouring slots belong to other selectors. The offset is
+  reported instead — it is stable, and two sites sharing one call the same
+  selector.
+- **`TestFullCorpusSweep`** decompiles every function of every sample — 93
+  binaries, 786 362 functions — failing on a panic, invalid Dart, or more than
+  2 MB of source from one function. It exists because three consecutive rounds of
+  defects all lived past function #400, which is where every other decompiler
+  check stops looking. Opt-in via `AOTOPSY_SWEEP=1`.
 
 ## [1.4.0] - 2026-09-03
 
@@ -397,7 +485,8 @@ mindmap
       Parity reporting
 ```
 
-[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/BroNils/aotopsy/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/BroNils/aotopsy/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/BroNils/aotopsy/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/BroNils/aotopsy/compare/v1.1.0...v1.2.0
