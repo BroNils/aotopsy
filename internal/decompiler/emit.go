@@ -152,6 +152,21 @@ type emitter struct {
 	// subtree from a fresh visit map and re-emitted join blocks the main
 	// body had already shown.
 	emittedAnywhere map[int]bool
+
+	// spillSeq numbers the `_tN` temporaries setReg materializes for
+	// expressions too large to keep inlining. Shared with helper sub-emitters
+	// for the same reason emittedAnywhere is: the names land in one source
+	// file and must not collide.
+	spillSeq *int
+}
+
+// drainSpills writes out any temporary declarations the last instruction
+// produced. Called before the statement that reads them, so the declaration
+// always precedes the use.
+func (e *emitter) drainSpills(indent int) {
+	for _, line := range e.state.TakeSpills() {
+		e.emit(indent, "%s", line)
+	}
 }
 
 // buildBlockTryIndex assigns each block to the try region covering its start.
@@ -241,7 +256,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		phiDeclared: make(map[int]bool),
 
 		emittedAnywhere: make(map[int]bool),
+		spillSeq:        new(int),
 	}
+	// One sequence per function, shared with every clone and helper
+	// sub-emitter, so two spilled temporaries can never take the same name.
+	e.state.AttachSpillSink(e.spillSeq)
 	// The pool is reachable from the lift layer too: instructions that name
 	// a pool slot without loading it (x86_64 compare-against-memory) resolve
 	// through operandExpr, not emitLoadPool. See poolOperandExpr.
