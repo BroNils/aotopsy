@@ -154,7 +154,7 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 	}
 	pl := &PoolLookups{RefToNamed: map[int]*cluster.NamedObject{}, RefToStr: map[int]string{}}
 	for _, v := range []string{"2.12.0", "2.15.0", "3.3.0"} {
-		if got := buildTypeNames(res, pl, nil, v); len(got) != 0 {
+		if got, _ := buildTypeNames(res, pl, nil, v); len(got) != 0 {
 			t.Errorf("%s: named an unresolvable class: %v", v, got)
 		}
 		// The VM spelling is generated from the same inputs and must refuse
