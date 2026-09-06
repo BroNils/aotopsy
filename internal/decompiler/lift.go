@@ -1032,6 +1032,20 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 		// pointer is stored through directly) -- render it as a pointer
 		// dereference rather than an invalid "(x - y) = value;" lvalue.
 		lhs = fmt.Sprintf("*(%s)", baseExpr)
+	} else {
+		// `str x1, [x0]` is exactly `str x1, [x0, #0]`: a store THROUGH the
+		// pointer in x0, not a rebinding of whatever variable happens to hold
+		// it. Rendering it as `t35 = value;` claimed the wrong operation, and
+		// where t35 was a call temp -- declared `final t35 = f();` -- it also
+		// produced invalid Dart. The full-corpus sweep found it as
+		// `assign-to-final` in `ThemeData.copyWith`, `RenderParagraph.
+		// performLayout`, `FfiTrampoline_*` and others, in every sample.
+		//
+		// The displaced form already went through fieldExpr above, so the same
+		// machine operation was being rendered two different ways depending on
+		// whether the assembler wrote `#0`. It is one operation; it gets one
+		// rendering.
+		lhs = fieldExpr(baseExpr, 0, dartFieldResolver(fir, s, base))
 	}
 	return fmt.Sprintf("%s = %s;", lhs, valExpr), true
 }
