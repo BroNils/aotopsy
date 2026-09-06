@@ -75,15 +75,44 @@ func ApplyIdentReclassification(source string) string {
 	stats := CollectIdentStats(source)
 
 	// Build rename map: old name → new semantic name.
+	//
+	// Two guards, and the second one was missing. Checking only "is this
+	// semantic name already an identifier in the source" lets two DIFFERENT
+	// temps both classify as, say, `accumulator` and both get renamed to it.
+	// The result is not merely `final accumulator = …` followed by
+	// `accumulator = …` -- invalid Dart, which is how the corpus sweep found
+	// it -- but two distinct values presented as one variable. That is a
+	// fabrication: the output states an identity the binary does not have.
+	//
+	// Measured across the corpus before the fix: every sample had functions
+	// hit, `ThemeData.copyWith`, `EdgeInsetsGeometry.==` and
+	// `PlatformDispatcher._unpackPointerDataPacket` among them on almost all
+	// of them.
+	//
+	// Candidates are sorted first because the winner of a collision must not
+	// depend on Go's map iteration order; without it the same binary would
+	// decompile differently between runs.
+	ordered := make([]string, 0, len(stats))
+	for name := range stats {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+
 	renames := make(map[string]string)
-	for name, s := range stats {
-		if newName := s.ClassifyIdent(); newName != "" {
-			// Avoid collisions: if the semantic name is already
-			// used as an identifier, skip.
-			if _, exists := stats[newName]; !exists {
-				renames[name] = newName
-			}
+	claimed := make(map[string]bool)
+	for _, name := range ordered {
+		newName := stats[name].ClassifyIdent()
+		if newName == "" {
+			continue
 		}
+		if _, exists := stats[newName]; exists {
+			continue // the semantic name is already a real identifier here
+		}
+		if claimed[newName] {
+			continue // another temp in this pass already took it
+		}
+		claimed[newName] = true
+		renames[name] = newName
 	}
 
 	if len(renames) == 0 {

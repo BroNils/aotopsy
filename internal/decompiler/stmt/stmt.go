@@ -119,15 +119,12 @@ func PrintStmts(stmts []Stmt) []string {
 // which counts braces in emitted string literals and in `// ...` comments.
 // One such line shifted every structural decision after it.
 func BraceDelta(text string) int {
+	code := CodePrefix(text)
 	d := 0
-	for i := 0; i < len(text); i++ {
-		switch c := text[i]; c {
+	for i := 0; i < len(code); i++ {
+		switch code[i] {
 		case '\'', '"':
-			i = skipStringLiteral(text, i)
-		case '/':
-			if i+1 < len(text) && text[i+1] == '/' {
-				return d // rest of line is a comment
-			}
+			i = skipStringLiteral(code, i)
 		case '{':
 			d++
 		case '}':
@@ -135,6 +132,34 @@ func BraceDelta(text string) int {
 		}
 	}
 	return d
+}
+
+// CodePrefix returns the part of text that is code: everything before a `//`
+// that is not inside a string literal. A line that is entirely a comment
+// returns "".
+//
+// Every syntax check has to run on this rather than on the raw line, because
+// the emitter writes prose into comments that is not Dart and was never meant
+// to be. Inline-frame markers are the case that exposed it:
+//
+//	// [inlined: _AsyncCompleter._AsyncCompleter. -> _Completer._Completer.]
+//
+// An unnamed constructor's name ends in a dot, so `. ` appears in the text and
+// ValidateSource's spaced-member-operator rule fired on 55 functions of one
+// sample -- reporting invalid Dart in something that is not Dart. Only
+// BraceDelta was comment-aware; the syntax rules were not.
+func CodePrefix(text string) string {
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\'', '"':
+			i = skipStringLiteral(text, i)
+		case '/':
+			if i+1 < len(text) && text[i+1] == '/' {
+				return text[:i]
+			}
+		}
+	}
+	return text
 }
 
 // skipStringLiteral returns the index of the closing quote of the literal
