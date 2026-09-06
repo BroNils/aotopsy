@@ -721,7 +721,9 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 				}
 			}
 			name = cleanCalleeName(name)
-			args := e.callArgExprs(len(e.fir.ArgRegs))
+			// A tail call is a call: bound its arguments by the callee's
+			// arity too.
+			args := e.callArgExprs(len(e.fir.ArgRegs), va)
 			argsText := strings.Join(args, ", ")
 			e.emit(indent, "return %s(%s);", name, argsText)
 			return
