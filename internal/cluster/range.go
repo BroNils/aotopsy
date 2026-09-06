@@ -8,14 +8,14 @@ package cluster
 // decompile_native_cmd.go, x64refs.go (dumpFuncDisasm), and x64refs.go
 // (indirectInFunc).
 func FindRangeContainingVA(ranges []CodeRange, codeVA, codeOff, targetVA uint64) *CodeRange {
+	im := CodeImage{CodeVA: codeVA, CodeOff: codeOff}
 	var found *CodeRange
 	for i := range ranges {
 		r := &ranges[i]
-		if r.Size == 0 {
+		funcVA, ok := im.FuncVA(*r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcVA := codeVA + funcStart
 		if targetVA < funcVA || targetVA >= funcVA+uint64(r.Size) {
 			continue
 		}

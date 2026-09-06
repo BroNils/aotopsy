@@ -16,11 +16,22 @@ type CodeNameInfo struct {
 
 	// FixedParamsWithReceiver is num_fixed_parameters as the SDK counts it:
 	// the fixed parameters INCLUDING the implicit receiver, and excluding
-	// optionals. It is what locates a parameter's stack slot on the Dart
-	// versions that pass arguments on the stack -- parameter i of a function
-	// with N fixed parameters sits at FP + (kParamEndSlotFromFp + N - i) *
-	// wordSize, so the receiver is the highest slot. 0 when unknown.
+	// optionals. 0 when unknown.
+	//
+	// On the Dart versions that pass arguments on the stack it is ONE of
+	// three inputs that locate the receiver, not the whole answer: a
+	// function with optional parameters or an async modifier copies its
+	// parameters into the locals area instead, and its receiver is below FP
+	// rather than above it. See cluster.ReceiverFrameSlot, which is the only
+	// thing that should turn these fields into an offset.
 	FixedParamsWithReceiver int
+	// OptionalParams is NumOptionalParameters(). Nonzero means the function
+	// copies its parameters -- the predicate is HasOptionalParameters() ||
+	// IsSuspendableFunction() -- which moves the receiver below FP.
+	OptionalParams int
+	// IsSuspendable is modifier() != kNoModifier: async, sync* or async*.
+	// The other half of the copy-parameters predicate.
+	IsSuspendable bool
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
@@ -55,12 +66,36 @@ type PoolLookups struct {
 	// the Dart version is outside the verified table, in which case those
 	// refs simply stay unnamed. See snapshot.BaseObjectNames.
 	BaseObjectNames []string
-	// TypeTestingStubNames maps a Type's reference ID to the display name of
-	// the stub that tests it. Built once in BuildPoolLookups; used both to
-	// name the stub Codes themselves and to resolve indirect calls that
-	// invoke one. Nil on versions that cannot resolve a Type to its class.
-	// See buildTypeTestingStubNames.
-	TypeTestingStubNames map[int]string
+	// TypeNames maps a Type's reference ID to its Dart-source display name,
+	// type arguments included -- `List<int>`, not `TypeTestingStub_List<int>`.
+	// Built once in BuildPoolLookups; nil on versions that cannot resolve a
+	// Type to its class. See buildTypeNames.
+	//
+	// It used to hold only the PREFIXED stub spelling, which made it unusable
+	// for the thing a Type in the object pool actually is: a type. 76% of the
+	// pool entries that rendered as the bare placeholder `<Type>` (393 of 517
+	// on dart-3.12.2, identical on both architectures) had their name computed
+	// here and thrown away. Callers that want the stub spelling wrap this with
+	// TypeTestingStubName.
+	TypeNames map[int]string
+
+	// TypeArgumentNames maps a TypeArguments object's ref ID to its rendered
+	// argument list, `<int, Display>`. Several hundred pool slots per binary
+	// hold one of these directly and rendered as the bare `<TypeArguments>`;
+	// 82% of them (442 of 542 on dart-3.12.2, identical on both architectures)
+	// were nameable from data already parsed. Built alongside TypeNames, from
+	// the same lookups. All-or-nothing per list: see typeArgsListString.
+	TypeArgumentNames map[int]string
+
+	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
+	// `TypeTestingStub_dart_core__List__dart_core__int` where TypeNames plus
+	// TypeTestingStubName gives `TypeTestingStub_List<int>`. Keyed the same
+	// way, by the tested Type's ref ID.
+	//
+	// It exists for the symtab differential: the ELF's two assembly dialects
+	// use this notation, so without it every type-testing stub scores as a
+	// disagreement on every version. See buildTypeTestingStubSDKNames.
+	TypeTestingStubSDKNames map[int]string
 	// ClosureParents maps a closure Function's ref ID to the name of the
 	// function it was declared inside (BuildClosureParents). Both the
 	// Code-name path and the pool-display path qualify a closure by its
@@ -79,11 +114,14 @@ type PoolLookups struct {
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
 // dartVersion selects the VM-isolate base object name table; pass "" to leave
 // those references unnamed.
-// typeClassIDIsRef must be VersionProfile.TypeClassIdIsRef: on those versions
-// a Type cannot be resolved to its class, which disables type-testing-stub
-// naming rather than letting it emit confidently wrong labels. See
-// buildTypeTestingStubNames.
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string, typeClassIDIsRef bool) *PoolLookups {
+// dartVersion also decides whether type-testing-stub naming runs at all; see
+// buildTypeNames.
+//
+// It used to take a separate typeClassIDIsRef bool for that. The two were
+// different questions that happened to have the same answer, and coupling them
+// broke as soon as one changed: correcting 2.15.0's Type layout (it is a
+// scalar there, not a ref) silently switched TTS naming on for that version.
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *PoolLookups {
 	l := &PoolLookups{
 		RefToStr:        make(map[int]string),
 		RefToNamed:      make(map[int]*cluster.NamedObject),
@@ -143,8 +181,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
-	ttsNames := buildTypeTestingStubNames(result, l, ct, typeClassIDIsRef)
-	l.TypeTestingStubNames = ttsNames
+	typeNames, typeArgNames := buildTypeNames(result, l, ct, dartVersion)
+	l.TypeNames = typeNames
+	l.TypeArgumentNames = typeArgNames
+	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
 		if !ok {
@@ -152,8 +192,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			// the SDK gives a type-testing stub the tested Type as its
 			// owner (type_testing_stubs.cc, `code.set_owner(type)`), which
 			// is why these fail both the CodeIndex cross-reference and the
-			// RefToNamed lookup. See buildTypeTestingStubNames.
-			if name := ttsNames[ce.OwnerRef]; name != "" {
+			// RefToNamed lookup. See buildTypeNames.
+			if name := TypeTestingStubName(typeNames, ce.OwnerRef); name != "" {
 				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
 			}
 			continue
@@ -196,6 +236,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ci.IsAllocationStub = true
 		}
 		// Follow Function→FunctionType chain for parameter count.
+		ci.IsSuspendable = owner.IsSuspendable
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
@@ -203,6 +244,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				if ft.HasImplicit {
 					ci.FixedParamsWithReceiver++
 				}
+				ci.OptionalParams = ft.NumOptional
 			}
 		}
 		// Dart 2.x keeps arity on the Function object instead
@@ -219,6 +261,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			ci.ParamCount = visible
 			// owner.NumFixedParams already counts the receiver.
 			ci.FixedParamsWithReceiver = owner.NumFixedParams
+			ci.OptionalParams = owner.NumOptionalParams
 		}
 		l.CodeNames[ce.RefID] = ci
 	}
@@ -703,6 +746,20 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				}
 			} else if fn, ok := l.CodeRefDisplay[pe.RefID]; ok {
 				display[pe.Index] = fn
+			} else if name := l.TypeNames[pe.RefID]; name != "" {
+				// A Type object: name it. The class and its type arguments are
+				// already resolved for the type-testing stubs, and rendering
+				// the bare CID name instead threw that away -- `<Type>` where
+				// `EfficientLengthIterable` or `StringBuffer` was known.
+				//
+				// The name is the Dart-source spelling of the type, so it is
+				// prefixed to say what the pool slot holds; an unprefixed
+				// `List<int>` would read as a value of that type rather than
+				// the type itself.
+				display[pe.Index] = "Type: " + name
+			} else if args := l.TypeArgumentNames[pe.RefID]; args != "" {
+				// A bare TypeArguments object: render the list it holds.
+				display[pe.Index] = "TypeArgs: " + args
 			} else if cidNum, ok := l.RefCID[pe.RefID]; ok {
 				cidName := cluster.CidNameV(cidNum, l.CT)
 				if cidName != "" {

@@ -83,8 +83,10 @@ func cmdX64Refs(args []string) error {
 				} else {
 					funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 				}
-				funcStart := uint64(r.PCOffset) - codeOff
-				funcVA := codeVA + funcStart
+				funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.FuncVA(r)
+				if !ok {
+					return fmt.Errorf("CodeRange with Index==%d starts before the instructions image", targetIdx)
+				}
 				fmt.Fprintf(os.Stderr, "resolved code index %d -> %s @ 0x%x\n", *disasmByCodeIndex, funcName, funcVA)
 				return analysis.DumpFuncDisasm(funcVA, ranges, code, codeOff, codeVA, pl, poolDisplay)
 			}

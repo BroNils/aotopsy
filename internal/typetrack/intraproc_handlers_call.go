@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
 )
 
 // handleUBFX handles case 5b-ubfx: UBFX/UBFM bitfield extract for class ID.
@@ -167,6 +168,19 @@ func handleBL(tc *transferCtx) bool {
 		var callSiteState [31]TypeLattice
 		copy(callSiteState[:], tc.state[:])
 		tc.result.BLCallSiteTypes[tc.inst.Addr] = callSiteState
+
+		// A call to a per-class allocation stub returns an instance of that
+		// class, exactly. AllocateObjectABI::kResultReg is R0 on ARM64.
+		// This is the structural answer -- Code.owner is the Class -- so it
+		// takes precedence over any inferred exit type for the callee.
+		if cid, ok := tc.ctx.AllocationStubCID[target]; ok {
+			tc.ctx.AllocStubHits++
+			tc.state[sdk.ARM64AllocResultReg] = KnownClass(cid)
+			for r := 1; r <= 7; r++ {
+				tc.state[r] = Top()
+			}
+			return true
+		}
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {

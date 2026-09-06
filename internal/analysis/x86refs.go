@@ -22,21 +22,15 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	if r == nil {
 		return fmt.Errorf("no range contains VA 0x%x", targetVA)
 	}
-	funcStart := uint64(r.PCOffset) - codeOff
-	funcEnd := funcStart + uint64(r.Size)
-	if funcEnd > uint64(len(code)) {
-		funcEnd = uint64(len(code))
+	im := NewCodeImage(code, codeVA, codeOff, pl, nil)
+	fs, ok := im.Slice(*r)
+	if !ok {
+		return fmt.Errorf("range for VA 0x%x is empty or out of bounds", targetVA)
 	}
-	funcVA := codeVA + funcStart
-	var funcName string
-	if r.RefID >= 0 {
-		funcName = QualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-	} else {
-		funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-	}
+	funcName := fs.Name
+	funcVA := fs.VA
+	funcCode := fs.Code
 	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
-
-	funcCode := code[funcStart:funcEnd]
 	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 		if d.Bad {
 			fmt.Printf("0x%x: <decode error>\n", d.VA)
@@ -75,27 +69,15 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 // instructions targeting targetVA's entry point.
 func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, maxHits int) error {
 	hits := 0
+	im := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for _, r := range ranges {
-		if r.Size == 0 {
+		fs, ok := im.Slice(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
-
-		var funcName string
-		if r.RefID >= 0 {
-			funcName = QualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
+		funcCode := fs.Code
+		funcVA := fs.VA
+		funcName := fs.Name
 
 		capped := false
 		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
@@ -146,20 +128,14 @@ type hashScanResult struct {
 // instructions vs. total instructions, ranking candidates by raw hash-op count.
 func ScanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, minOps int) error {
 	var results []hashScanResult
+	im := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for _, r := range ranges {
-		if r.Size == 0 {
+		fs, ok := im.Slice(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
+		funcCode := fs.Code
+		funcVA := fs.VA
 
 		hashOps := 0
 		rotateOps := 0
@@ -180,12 +156,7 @@ func ScanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		if hashOps < minOps {
 			continue
 		}
-		var funcName string
-		if r.RefID >= 0 {
-			funcName = QualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
+		funcName := fs.Name
 		results = append(results, hashScanResult{funcName, funcVA, r.Size, hashOps, rotateOps, total})
 	}
 
@@ -217,27 +188,15 @@ func QualifiedCodeNameLocal(refID int, pl *naming.PoolLookups, pcOffset uint32) 
 // prints matches containing findSubstr (or all if empty), capped at maxHits.
 func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, poolDisplay map[int]string, findSubstr string, maxHits int) error {
 	hits := 0
+	im := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for _, r := range ranges {
-		if r.Size == 0 {
+		fs, ok := im.Slice(r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
-
-		var funcName string
-		if r.RefID >= 0 {
-			funcName = QualifiedCodeNameLocal(r.RefID, pl, r.PCOffset)
-		} else {
-			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
+		funcCode := fs.Code
+		funcVA := fs.VA
+		funcName := fs.Name
 
 		capped := false
 		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {

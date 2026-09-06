@@ -140,14 +140,10 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) frida.FridaMetadata {
 			if line == "" {
 				continue
 			}
-			var r struct {
-				FromFunc string `json:"from_func"`
-				Value    string `json:"value"`
-				Kind     string `json:"kind"`
-			}
+			var r disasm.StringRefRecord
 			if json.Unmarshal([]byte(line), &r) == nil && r.Value != "" {
 				meta.StringRefs = append(meta.StringRefs, frida.FridaStringRef{
-					FromFunc: r.FromFunc,
+					FromFunc: r.Func,
 					Value:    r.Value,
 					Kind:     r.Kind,
 				})

@@ -2,17 +2,48 @@ package render
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"aotopsy/internal/disasm"
 )
 
+// maxBlockCalls caps how many callees are drawn out of one block, so a
+// dispatch-heavy block does not bury the control flow it belongs to.
+const maxBlockCalls = 10
+
 // CFGDOT renders a per-function basic-block CFG as DOT.
-// Each basic block is a node; edges represent control flow.
-// Entry block is highlighted. Conditional edges use T/F colors.
-func CFGDOT(cfg disasm.FuncCFG, t Theme) string {
+// Each basic block is a node; edges represent control flow. Call sites in
+// a block are drawn as edges to plaintext callee nodes. Entry block is
+// highlighted. Conditional edges use T/F colors.
+//
+// edges are the call edges of THIS function (call_edges.jsonl records
+// whose FromFunc is cfg.Name); pass nil to draw control flow only.
+//
+// The callee edges are here because the renderer this replaced drew them
+// and the replacement did not. internal/callgraph's DOTCFG read
+// BasicBlock.Calls, disasm.BasicBlock has no such field, and so the
+// consolidation quietly turned a CFG that showed what each block called
+// into one that showed only where it branched. Nothing caught it: golden
+// covers the JSONL artifacts, and no test reads a .dot at all.
+func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 	if len(cfg.Blocks) == 0 {
 		return ""
+	}
+
+	// Call sites by the PC they occur at, so each can be attributed to the
+	// block containing that instruction.
+	calleeAt := make(map[uint64]string, len(edges))
+	for _, e := range edges {
+		pc, err := strconv.ParseUint(strings.TrimPrefix(e.FromPC, "0x"), 16, 64)
+		if err != nil {
+			continue
+		}
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
+			continue
+		}
+		calleeAt[pc] = targets[0]
 	}
 
 	var b strings.Builder
@@ -61,6 +92,39 @@ func CFGDOT(cfg disasm.FuncCFG, t Theme) string {
 			attrs += fmt.Sprintf(", fillcolor=%q", t.StubFill)
 		}
 		fmt.Fprintf(&b, "  %s [label=<%s>%s];\n", id, label, attrs)
+	}
+	b.WriteByte('\n')
+
+	// Render callee nodes and the call edges into them.
+	externalSeen := map[string]bool{}
+	for _, blk := range cfg.Blocks {
+		from := fmt.Sprintf("bb%d", blk.ID)
+		end := blk.End
+		if end > len(cfg.Insts) {
+			end = len(cfg.Insts)
+		}
+		drawn := 0
+		for i := blk.Start; i < end; i++ {
+			callee, ok := calleeAt[cfg.Insts[i].Addr]
+			if !ok {
+				continue
+			}
+			if drawn >= maxBlockCalls {
+				break
+			}
+			drawn++
+			id := dotID(callee)
+			if !externalSeen[callee] {
+				externalSeen[callee] = true
+				font := "Helvetica Neue,Helvetica"
+				if IsAllCaps(callee) {
+					font = "Courier,monospace"
+				}
+				fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontname=%q, fontcolor=%q, fontsize=8];\n",
+					id, truncLabel(callee, 50), font, t.EdgeDirect)
+			}
+			fmt.Fprintf(&b, "  %s -> %s [color=%q, style=dashed, arrowsize=0.4];\n", from, id, t.EdgeDirect)
+		}
 	}
 	b.WriteByte('\n')
 

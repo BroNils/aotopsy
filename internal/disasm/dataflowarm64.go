@@ -44,19 +44,17 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 	// register untouched by the block simply passes its entry value
 	// through unchanged, and a touched register ends up at the same
 	// final value regardless of what reached the block's start.
-	type localEffect struct {
-		touched [31]bool
-		final   [31]lvalue
-	}
-	effects := make([]localEffect, len(cfg.Blocks))
+	effects := make([]provBlockEffect, len(cfg.Blocks))
 	for bi, blk := range cfg.Blocks {
 		var regs noWindowRegs
 		var touched [31]bool
 		for i := blk.Start; i < blk.End && i < len(insts); i++ {
 			touchInstrEffect(insts[i], &regs, annotators, &touched)
 		}
-		var eff localEffect
-		eff.touched = touched
+		eff := provBlockEffect{
+			touched: touched[:],
+			final:   make([]lvalue, 31),
+		}
 		for r := 0; r < 31; r++ {
 			if touched[r] {
 				if v := regs[r]; v != "" {
@@ -69,91 +67,9 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 		effects[bi] = eff
 	}
 
-	// Predecessor lists, needed for the meet at each block's entry.
-	preds := make([][]int, len(cfg.Blocks))
-	for bi, blk := range cfg.Blocks {
-		for _, s := range blk.Succs {
-			if s.BlockID >= 0 && s.BlockID < len(cfg.Blocks) {
-				preds[s.BlockID] = append(preds[s.BlockID], bi)
-			}
-		}
-	}
-
-	// entryState[b] = converged IN state for block b (top-initialized,
-	// except the function entry block, which starts with no established
-	// provenance at all -- same starting point the old window-based scan
-	// used at the top of every function).
-	entryState := make([][31]lvalue, len(cfg.Blocks))
-	exitState := make([][31]lvalue, len(cfg.Blocks))
-
-	worklist := make([]int, len(cfg.Blocks))
-	inWorklist := make([]bool, len(cfg.Blocks))
-	for i := range worklist {
-		worklist[i] = i
-		inWorklist[i] = true
-	}
-
-	// Bound the total number of block visits generously but finitely --
-	// this is a monotonic lattice so it always converges, but a hard cap
-	// avoids any risk of an unbounded loop on a malformed/adversarial CFG.
-	maxVisits := len(cfg.Blocks)*len(cfg.Blocks) + 64
-	visits := 0
-
-	for len(worklist) > 0 && visits < maxVisits {
-		id := worklist[0]
-		worklist = worklist[1:]
-		inWorklist[id] = false
-		visits++
-
-		var in [31]lvalue
-		switch {
-		case id == 0:
-			// Function entry: no incoming provenance (matches Reset()
-			// at the start of the old per-function scan).
-			for r := range in {
-				in[r] = lvalue{kind: lvBottom}
-			}
-		case len(preds[id]) == 0:
-			// Unreachable block (no predecessors resolved) -- treat as
-			// no info, same conservative default as before.
-			for r := range in {
-				in[r] = lvalue{kind: lvBottom}
-			}
-		default:
-			for r := range in {
-				in[r] = lvalue{kind: lvTop}
-			}
-			for _, p := range preds[id] {
-				for r := 0; r < 31; r++ {
-					in[r] = meetLvalue(in[r], exitState[p][r])
-				}
-			}
-		}
-
-		changed := in != entryState[id]
-		entryState[id] = in
-
-		out := in
-		eff := effects[id]
-		for r := 0; r < 31; r++ {
-			if eff.touched[r] {
-				out[r] = eff.final[r]
-			}
-		}
-		if out != exitState[id] {
-			changed = true
-			exitState[id] = out
-		}
-
-		if changed {
-			for _, s := range cfg.Blocks[id].Succs {
-				if s.BlockID >= 0 && s.BlockID < len(cfg.Blocks) && !inWorklist[s.BlockID] {
-					worklist = append(worklist, s.BlockID)
-					inWorklist[s.BlockID] = true
-				}
-			}
-		}
-	}
+	entryState := runProvFixpoint(len(cfg.Blocks), 31, func(b int) []Succ {
+		return cfg.Blocks[b].Succs
+	}, effects)
 
 	// Final pass: walk every block once more, seeded with its converged
 	// entry state, to actually classify BL/BLR/dispatch-table sites and

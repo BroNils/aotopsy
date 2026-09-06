@@ -110,20 +110,12 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 	var out []IndirectCall
 	hits := 0
 
+	im := cluster.CodeImage{Code: code, CodeVA: codeVA, CodeOff: codeOff}
 	for _, r := range ranges {
-		if r.Size == 0 {
+		funcCode, funcVA, ok := im.Slice(r)
+		if !ok || len(funcCode) == 0 {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
 
 		var funcName string
 		if r.RefID >= 0 {

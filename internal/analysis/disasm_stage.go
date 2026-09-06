@@ -11,14 +11,13 @@ import (
 	"sync"
 
 	"aotopsy/internal/arch/arm64"
-	"aotopsy/internal/callgraph"
-	"aotopsy/internal/callgraph/render"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
+	"aotopsy/internal/render"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
@@ -52,28 +51,14 @@ func RunDisasmStage(
 	fmtOpts dartfmt.Options,
 	elfFuncSyms map[uint64]string,
 ) (*DisasmResult, error) {
-	// Build symbol map for cross-references during disassembly.
-	symbols := make(map[uint64]string)
-	for _, r := range ranges {
-		va := codeVA + uint64(r.PCOffset) - codeOff
-		if r.RefID >= 0 {
-			symbols[va] = naming.QualifiedCodeName(r.RefID, pl, r.PCOffset)
-		} else {
-			symbols[va] = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
-	}
-	// Merge VM stub symbols and discarded function symbols so that
-	// call_edges.jsonl, signal.dot, and callgraph.dot show real names
-	// instead of stub_<hex>/sub_<hex>. This mirrors LoadContext's
-	// pattern (context.go:170-175). Without this, the signal graph's
-	// IsInterestingCallee filter excludes real signal functions because
-	// it filters out sub_* and 0x.. names. (F-036)
-	for va, name := range naming.BuildVMStubSymbols(info, fmtOpts) {
-		symbols[va] = name
-	}
-	for va, name := range naming.BuildDiscardedFunctionSymbols(clResult.Named, info.Version.CIDs, table, pl, codeVA, codeOff, info.Version.CodeIndexOneBased) {
-		symbols[va] = name
-	}
+	// Build symbol map for cross-references during disassembly. Shared with
+	// LoadContext and RunDisasmStageX86 so a name recovered anywhere reaches
+	// call_edges.jsonl, signal.dot and callgraph.dot too -- the signal graph's
+	// IsInterestingCallee filter drops sub_*/0x.. names, so a stub named in
+	// only one of the three builders silently vanished from the graph. (F-036)
+	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
+	symbols := BuildSymbolNames(ranges, vaImage, pl, clResult, info, table,
+		fmtOpts, info.IsolateData.Data).Names
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
@@ -141,7 +126,8 @@ func RunDisasmStage(
 	stringRefsEnc.SetEscapeHTML(false)
 
 	dr := &DisasmResult{}
-	var funcInfos []callgraph.FuncInfo
+	var funcRecs []disasm.FuncRecord
+	var edgeRecs []disasm.CallEdgeRecord
 
 	// Disassembly runs in parallel (each function is independent: read-only
 	// code slice, read-only lookup), but every SHARED output is written by
@@ -184,22 +170,15 @@ func RunDisasmStage(
 		err        error
 	}
 
+	codeImage := NewCodeImage(code, codeVA, codeOff, pl, elfFuncSyms)
 	compute := func(r *cluster.CodeRange, out *funcOutput, peep *disasm.PeepholeState) {
-		if r.Size == 0 {
+		fs, ok := codeImage.Slice(*r)
+		if !ok {
 			out.skip = true
 			return
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			out.skip = true
-			return
-		}
-		funcCode := code[funcStart:funcEnd]
-		funcVA := codeVA + funcStart
+		funcCode := fs.Code
+		funcVA := fs.VA
 
 		var funcName, ownerName, name string
 		if r.RefID >= 0 {
@@ -283,10 +262,9 @@ func RunDisasmStage(
 		}
 
 		if opts.Graph {
-			lcfg, nblocks := callgraph.BuildFuncCFG(name, insts, edges)
-			if nblocks > 1 {
-				g := &callgraph.CFGGraph{Funcs: []*callgraph.FuncCFG{lcfg}}
-				out.cfgDot = render.DOTCFG(g, name)
+			dcfg := disasm.BuildCFG(name, insts)
+			if len(dcfg.Blocks) > 1 {
+				out.cfgDot = render.CFGDOT(dcfg, out.edgeRecs, render.NASA)
 				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
 			}
 		}
@@ -389,10 +367,8 @@ func RunDisasmStage(
 					}
 					dr.CFGCount++
 				}
-				funcInfos = append(funcInfos, callgraph.FuncInfo{
-					Name:      o.name,
-					CallEdges: o.edges,
-				})
+				funcRecs = append(funcRecs, o.funcRec)
+				edgeRecs = append(edgeRecs, o.edgeRecs...)
 			}
 			for _, sr := range o.stringRefs {
 				if err := stringRefsEnc.Encode(sr); err != nil {
@@ -420,15 +396,14 @@ func RunDisasmStage(
 	}
 
 	// Build call graph.
-	if opts.Graph && len(funcInfos) > 0 {
-		cg := callgraph.BuildCallGraph(funcInfos)
-		cgDOT := render.DOT(cg, "callgraph")
+	if opts.Graph && len(funcRecs) > 0 {
+		cgDOT := render.CallgraphDOT(funcRecs, edgeRecs, "callgraph", render.NASA, 0)
 		cgPath := filepath.Join(opts.OutDir, "callgraph.dot")
 		if err := os.WriteFile(cgPath, []byte(cgDOT), 0644); err != nil {
 			return nil, fmt.Errorf("write callgraph.dot: %w", err)
 		}
-		opts.logf("  %scallgraph:%s %d nodes, %d edges -> %s%s%s\n",
-			cli.Muted, cli.Reset, len(cg.Nodes), len(cg.Edges), cli.Blue, cgPath, cli.Reset)
+		opts.logf("  %scallgraph:%s %d funcs, %d edges -> %s%s%s\n",
+			cli.Muted, cli.Reset, len(funcRecs), len(edgeRecs), cli.Blue, cgPath, cli.Reset)
 		opts.logf("  %sCFG DOTs:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.CFGCount, cli.Blue, cfgDir, cli.Reset)
 	}
 

@@ -44,13 +44,37 @@ var (
 	reLibMangle = regexp.MustCompile(`@\d+`)
 	// Marker prefixes on the member part, stripped for EVERY dialect because
 	// none of them survive in the symbol table.
+	// Which markers survive is a property of the ELF DIALECT, so neither list
+	// may be applied unconditionally. Measured on the same getter across the
+	// three dialects:
+	//
+	//	<=2.16   Precompiled__ByteBuffer_7027147_get_lengthInBytes_257
+	//	2.17-2.18 _ByteBuffer.lengthInBytes_454
+	//	>=2.19    _StringBase.codeUnits
+	//
+	// So the oldest dialect KEEPS `get`, and the two newer ones drop it.
+	//
+	// memberMarkers are dropped by the scrubbed (2.17-2.18) and prose (2.19+)
+	// dialects and KEPT by the assembler dialect (<=2.16). They used to be
+	// stripped unconditionally, which made every accessor and dynamic
+	// forwarder on the oldest dialect structurally unable to agree no matter
+	// how right the name was: 1081 of 1399 disagreements on
+	// dart-2.16.0-gt-arm64. See docs/findings-repo/013.
 	memberMarkers = []string{"dyn:", "get:", "set:"}
-	// proseMarkers are stripped only in the 3.x prose comparison. `init:`
-	// marks a lazy field initializer; the prose symbol drops it
-	// (`Zone.init:_current` -> `Zone._current`), but the 2.13-2.17 and 2.18+
-	// assembly dialects KEEP it (as `init_`), so stripping it there turns
-	// matches into misses -- measured, it dropped 2.14.0 from 82.4% to 80.8%.
+	// proseMarkers are dropped ONLY by the prose dialect. `init:` marks a
+	// lazy field initializer; prose drops it (`Zone.init:_current` ->
+	// `Zone._current`) while both assembly dialects keep it as `init_` --
+	// measured, stripping it in the assembly path dropped 2.14.0 from 82.4%
+	// to 80.8%.
 	proseMarkers = []string{"init:"}
+	// scrubbedMarkers is what the 2.17-2.18 dialect drops: the member markers
+	// AND `init:`. It keeps neither, so it sits between the assembler dialect
+	// (keeps both) and prose (drops both plus the mixin chain).
+	//
+	// Measured: `init:_printClosure@9040228` against `_printClosure`, 151 of
+	// the 505 remaining disagreements on dart-2.17.6-gt-arm64 and 141 of 498
+	// on 2.18.0.
+	scrubbedMarkers = append(append([]string{}, memberMarkers...), proseMarkers...)
 )
 
 // NormalizeRecoveredName reduces one of our names to the shape the ELF symbol
@@ -67,19 +91,10 @@ func normalizeRecovered(name string, stripMangle bool) string {
 	if stripMangle {
 		n = reLibMangle.ReplaceAllString(n, "")
 	}
-	// Markers sit on the member, which is after the last '.' -- except for a
-	// bare top-level function, where there is no dot at all.
-	if i := strings.LastIndex(n, "."); i >= 0 {
-		owner, member := n[:i+1], n[i+1:]
-		for _, m := range memberMarkers {
-			member = strings.TrimPrefix(member, m)
-		}
-		n = owner + member
-	} else {
-		for _, m := range memberMarkers {
-			n = strings.TrimPrefix(n, m)
-		}
-	}
+	// Member markers are NOT stripped here. Which of them survive is a
+	// property of the ELF dialect, so it is proseFold's decision -- see
+	// proseMarkers.
+	//
 	// An unnamed constructor's Function name is the class followed by a bare
 	// `.` -- `_GrowableList@0150898.` -- so stripping the mangling leaves a
 	// trailing dot that the ELF does not have.
@@ -112,6 +127,7 @@ func normalizeRecovered(name string, stripMangle bool) string {
 func NormalizeSymbolName(sym string) string {
 	s := strings.TrimSpace(sym)
 	s = strings.TrimPrefix(s, "stub ")
+	s = foldIsolateStub(s)
 	if rest, ok := strings.CutPrefix(s, "assert type is "); ok {
 		s = "TypeTestingStub_" + rest
 	}
@@ -150,7 +166,18 @@ func (c NameComparison) AgreementRate() float64 {
 //
 // Disagreements are returned sorted by address so a failing gate prints the
 // same list every run.
-func CompareNamesToSymbols(recovered map[uint64]string, symbols map[uint64]string) NameComparison {
+// alt holds a SECOND spelling of a recovered name, for the addresses that have
+// one: currently the type-testing stubs, whose readable form
+// (`TypeTestingStub_List<int>`) and VM form
+// (`TypeTestingStub_dart_core__List__dart_core__int`) are the same claim in
+// two notations, and which of the two the ELF uses depends on its dialect.
+// A VA agrees if EITHER spelling agrees.
+//
+// This is not a way of getting two chances at a match: both strings are
+// generated from the same resolved class and type arguments, so they succeed
+// and fail together. What varies is only which notation the symbol table
+// happens to be written in.
+func CompareNamesToSymbols(recovered, alt map[uint64]string, symbols map[uint64]string) NameComparison {
 	var c NameComparison
 	if len(symbols) == 0 {
 		return c
@@ -163,6 +190,10 @@ func CompareNamesToSymbols(recovered map[uint64]string, symbols map[uint64]strin
 		}
 		c.Compared++
 		if NamesAgree(ours, sym) {
+			c.Agree++
+			continue
+		}
+		if a, ok := alt[va]; ok && a != "" && NamesAgree(a, sym) {
 			c.Agree++
 			continue
 		}
@@ -221,7 +252,24 @@ func NamesAgree(ours, sym string) bool {
 		return asmFold(mine) == asmFold(body)
 	}
 	if body, allocStub, ok := scrubbedAsmBody(sym); ok {
-		mine := NormalizeRecoveredName(ours)
+		// This dialect drops the member markers (`_ByteBuffer.lengthInBytes`
+		// for our `_ByteBuffer@7027147.get:lengthInBytes`) while the one
+		// above keeps them. See memberMarkers.
+		mine := stripMarkers(NormalizeRecoveredName(ours), scrubbedMarkers)
+		// This dialect also unwraps the closure marker: `anonymous_closure`,
+		// not `<anonymous closure>`. Ours keeps the brackets, and
+		// addAssemblerIdentifier maps them through the SDK's OPERATOR table
+		// (`<` -> `operator_lt`), which is right for a real `operator <` and
+		// wrong here -- it produced
+		// `operator_ltanonymous_closureoperator_gt`.
+		//
+		// Only the brackets around this one marker are removed, not `<` and
+		// `>` generally, and only in this dialect: the prose symbols KEEP
+		// them (`new Future.<anonymous closure>`) and the assembler dialect
+		// turns them into underscores that asmFold collapses away.
+		// NormalizeRecoveredName has already folded the space, so the marker
+		// arrives as `<anonymous_closure>`, not `<anonymous closure>`.
+		mine = strings.ReplaceAll(mine, "<anonymous_closure>", "anonymous_closure")
 		if !allocStub {
 			mine = qualifiedScrubbed(mine)
 		}
@@ -241,17 +289,43 @@ func NamesAgree(ours, sym string) bool {
 // `init:` field-initializer marker away.
 func proseFold(n string) string {
 	n = foldMixinOwner(n)
-	if i := strings.LastIndex(n, "."); i >= 0 {
-		owner, member := n[:i+1], n[i+1:]
-		for _, m := range proseMarkers {
-			member = strings.TrimPrefix(member, m)
-		}
-		return owner + member
-	}
-	for _, m := range proseMarkers {
-		n = strings.TrimPrefix(n, m)
+	// A setter is `set:foo` for us and `foo=` in prose -- the marker does not
+	// vanish, it moves to the other end and changes shape. Stripping it
+	// without putting the `=` back left every setter disagreeing on the two
+	// prose samples: 125 of 420 remaining disagreements on
+	// dart-2.19.0-gt-arm64 and 117 of 577 on dart-3.3.0-gt-arm64.
+	isSetter := hasMemberPrefix(n, "set:")
+	// Prose drops both kinds; the assembler dialect keeps both, and the
+	// scrubbed one keeps init: but drops the rest. See memberMarkers.
+	n = stripMarkers(n, append(append([]string{}, proseMarkers...), memberMarkers...))
+	if isSetter {
+		n += "="
 	}
 	return n
+}
+
+// hasMemberPrefix reports whether the member component -- the part after the
+// last '.', or the whole name for a top-level function -- starts with marker.
+func hasMemberPrefix(n, marker string) bool {
+	if i := strings.LastIndex(n, "."); i >= 0 {
+		return strings.HasPrefix(n[i+1:], marker)
+	}
+	return strings.HasPrefix(n, marker)
+}
+
+// stripMarkers removes any of the given markers from the member component --
+// the part after the last '.', or the whole name for a top-level function.
+func stripMarkers(n string, markers []string) string {
+	strip := func(s string) string {
+		for _, m := range markers {
+			s = strings.TrimPrefix(s, m)
+		}
+		return s
+	}
+	if i := strings.LastIndex(n, "."); i >= 0 {
+		return n[:i+1] + strip(n[i+1:])
+	}
+	return strip(n)
 }
 
 // reAsmIndex is the `_<code_index>` SnapshotNameFor appends to every name.
@@ -357,7 +431,7 @@ func scrubbedAsmBody(sym string) (body string, allocStub, ok bool) {
 	}
 	// A Stub_ symbol is scrubbed-asm even without a code index.
 	if rest, cut := strings.CutPrefix(s, "Stub_"); cut {
-		return rest, false, true
+		return foldIsolateStub(rest), false, true
 	}
 	// Otherwise the tell of the scrubbed-asm dialect is the trailing
 	// `_<code_index>` SnapshotNameFor always appends. Without it the symbol is
@@ -372,6 +446,19 @@ func scrubbedAsmBody(sym string) (body string, allocStub, ok bool) {
 	s = reAsmIndex.ReplaceAllString(s, "")
 	if rest, cut := strings.CutPrefix(s, "AllocationStub_"); cut {
 		return "new_" + rest, true, true
+	}
+	// This dialect ALSO spells an ordinary constructor `new_List.of`, which is
+	// our own un-expanded shape rather than ToQualifiedCString's
+	// `List.List.of`. Running qualifiedScrubbed over it turns a match into a
+	// miss, so the second return value means "already in our `new_` shape,
+	// do not expand" -- which is what it always meant, the AllocationStub_
+	// prefix simply being the only way it used to be reached.
+	//
+	// Measured: 187 constructors on dart-2.17.6-gt-arm64 and 191 on 2.18.0
+	// disagreed purely because of this, plus the `new _List@0150898.of` cases
+	// counted under the private-library bucket.
+	if strings.HasPrefix(s, "new_") {
+		return s, true, true
 	}
 	return s, false, true
 }
@@ -517,6 +604,27 @@ func collapseSelfDouble(s string) string {
 		if s[i-len(tail):i] == tail {
 			return s[:i]
 		}
+	}
+	return s
+}
+
+// foldIsolateStub removes the prefix and suffix the ELF puts on an isolate
+// stub, which say only "this is a stub" -- something the name already says.
+//
+//	prose      _iso_stub_ArrayWriteBarrierStub
+//	assembler  Precompiled_Stub__iso_stub_ArrayWriteBarrierStub  (after the
+//	           dialect's own Precompiled_/Stub_ stripping)
+//	ours       ArrayWriteBarrier
+//
+// Applied in all three dialects, because all three carry it. Folding it in
+// the prose path alone left the 2.x assembler samples with 61 disagreements
+// that were pure convention.
+//
+// The prefix and suffix are removed only together: a bare `SomethingStub`
+// keeps its suffix, since the ELF spells the ordinary VM stubs that way too.
+func foldIsolateStub(s string) string {
+	if rest, ok := strings.CutPrefix(s, "_iso_stub_"); ok {
+		return strings.TrimSuffix(rest, "Stub")
 	}
 	return s
 }

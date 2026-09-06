@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
@@ -11,17 +12,25 @@ import (
 
 // AggregateStats folds one function's per-artifact Stats into the
 // running aggregate.
+//
+// Every field of decompiler.Stats is an int counter, so this sums them all
+// by reflection rather than by a hand-written list. The list version had
+// silently dropped OrphanBlocks and the stack-map counter: a new field
+// reported zero forever and looked like "the feature does nothing" instead
+// of "nobody added a line here". Reflection makes forgetting impossible;
+// the guard below turns a future non-int field into a loud test failure
+// rather than a silently ignored one.
 func AggregateStats(agg *decompiler.Stats, s decompiler.Stats) {
-	agg.TotalCalls += s.TotalCalls
-	agg.IndirectCalls += s.IndirectCalls
-	agg.SemanticDirectCalls += s.SemanticDirectCalls
-	agg.SemanticIndirectCalls += s.SemanticIndirectCalls
-	agg.PlaceholderIfs += s.PlaceholderIfs
-	agg.UnresolvedCF += s.UnresolvedCF
-	agg.RawRegisterCalls += s.RawRegisterCalls
-	agg.NonLastBranch += s.NonLastBranch
-	agg.TryBlocks += s.TryBlocks
-	agg.CatchHandlers += s.CatchHandlers
+	dst := reflect.ValueOf(agg).Elem()
+	src := reflect.ValueOf(s)
+	for i := 0; i < src.NumField(); i++ {
+		f := src.Field(i)
+		if f.Kind() != reflect.Int {
+			panic("AggregateStats: decompiler.Stats." + src.Type().Field(i).Name +
+				" is not an int; teach this function how to fold it")
+		}
+		dst.Field(i).SetInt(dst.Field(i).Int() + f.Int())
+	}
 }
 
 // EmitSingleFuncFrida generates and writes a Frida script for the

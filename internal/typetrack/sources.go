@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -80,19 +81,39 @@ type TypeContext struct {
 	// receiver really is in R0.
 	FuncReceiverStackSlot map[string]int
 
-	// ClassIDIsHalfWord marks the Dart versions whose Assembler::LoadClassId
-	// reads the class id as a 16-bit field:
+	// ReceiverLoadAtPC types the destination of an
+	// ArgumentsDescriptor-relative parameter-0 load, keyed by the load's PC.
 	//
-	//	<= 2.18.0  movzxw(result, FieldAddress(object, tags_offset + 16 / 8))
-	//	>= 2.19.0  movl(result, FieldAddress(object, tags_offset)); shrl(12)
+	// It is keyed by PC rather than by function because that is where the
+	// value comes into existence: a function with optional parameters has no
+	// static receiver slot to seed and no receiver register at entry, so an
+	// entry seed would be overwritten by the load itself. See
+	// RecoverArgsDescReceiverARM64.
 	//
-	// (assembler_x64.cc at 2.17.6, 2.18.0 and 2.19.0 -- kClassIdTagPos and
-	// kClassIdTagSize went from 16/16 to 12/20.) The x86 handler must only
-	// treat a half-word load at displacement +1 as a class id where the
-	// compiler actually emits one; on later versions such a load is an
-	// ordinary 16-bit field read and calling it a class id would invent type
-	// information.
-	ClassIDIsHalfWord bool
+	// Empty on 3.4.3 and later, where the receiver arrives in R0.
+	ReceiverLoadAtPC map[uint64]ReceiverLoad
+
+	// ClassIDTagPos and ClassIDTagSize are the ClassIdTag bitfield's position
+	// and width in the object header's tags word, from
+	// snapshot.ClassIdTagLayout:
+	//
+	//	<= 2.18.0  pos 16, size 16 -- movzxw(result, FieldAddress(obj, tags + 16/8))
+	//	>= 2.19.0  pos 12, size 20 -- movl(result, FieldAddress(obj, tags)); shrl(12)
+	//
+	// These replace a ClassIDIsHalfWord boolean. The boolean answered
+	// "is it the 16-bit form?" and threw away the two numbers that answer it,
+	// so the x86 handler then hardcoded `mem.Disp == 1` to rediscover what
+	// position 16 implies -- FieldAddress subtracts the heap tag, so the
+	// half-word sits at (pos/8) - kHeapObjectTag = 1. Carrying the numbers
+	// lets the handler compute that displacement, and makes a future third
+	// layout a changed constant rather than a silent misread.
+	ClassIDTagPos  int
+	ClassIDTagSize int
+
+	// HalfWordClassIDDisp is computed from the two above by
+	// SetClassIDTagLayout; see its doc comment.
+	halfWordClassIDDisp int64
+	halfWordClassID     bool
 
 	// FuncReturnType maps function NamedObject refID → return type ClassID.
 	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
@@ -173,6 +194,30 @@ type TypeContext struct {
 
 	// PoolCodeNames maps PP index to function name for Code objects.
 	PoolCodeNames map[int]string
+
+	// AllocationStubCID maps the entry VA of a per-class allocation stub to
+	// the class id it allocates.
+	//
+	// This is a structural fact, not an inference. raw_object.h says of
+	// UntaggedCode::owner_: "If owner_ is a Class the owner is the allocation
+	// stub for that class." naming/pool.go already computes it (and names
+	// those Codes "new X"), it simply had no reader.
+	//
+	// What it replaces: a rule that took the allocated class from RDI on
+	// x86_64, described in the code as "SysV arg 0 (receiver for instance
+	// methods)". AllocateObjectABI is not the SysV convention -- it is
+	// {RAX, RDX, R8} on x64 and {R0, R1, R2} on ARM64, and RDI appears inside
+	// GenerateAllocateObjectHelper only as a scratch register (kNextFieldReg,
+	// kTypeOffsetReg). The class actually reaches the stub in the tags word,
+	// which the per-class stub materialises internally
+	// (stub_code_compiler_x64.cc:2355-2362), so the caller carries it in no
+	// register at all. The guess produced KnownClass, which is authoritative
+	// downstream -- it selects dispatch targets.
+	//
+	// Measured on 3.12.2: 918 allocation stubs, reached by 3202 of 35060
+	// direct calls on ARM64 and 3202 of 28828 on x64. ARM64 had no allocation
+	// handling at all before this.
+	AllocationStubCID map[uint64]int
 
 	// TypeTestingStubNames maps PP index to the type testing stub name
 	// for the Type in that pool slot. Used to resolve BLR calls through
@@ -293,6 +338,10 @@ type TypeContext struct {
 	UBFXHits     int
 	ADDClassHits int
 	DispatchHits int
+	// AllocStubHits counts calls resolved to a per-class allocation stub,
+	// where the result register's class comes from Code.owner rather than
+	// from any register the caller set up. Both architectures.
+	AllocStubHits int
 	// NarrowHits counts flow-sensitive narrowings actually applied: a
 	// `CMP class_id, #N` whose equality edge turned the compared register
 	// into KnownClass(N). Both ARM64 and x86_64 implement narrowing.
@@ -343,6 +392,9 @@ type TypeContext struct {
 	// FieldValueClass actually produced a hit. Diagnoses whether
 	// the bottleneck is declared types, instance types, or store types.
 	FieldTypeDeclaredHits int // FieldByOwnerOffset + FieldTypes
+	// ArgsDescReceiverHits counts parameter-0 loads typed from the
+	// ArgumentsDescriptor pattern. See RecoverArgsDescReceiverARM64.
+	ArgsDescReceiverHits  int
 	FieldTypeInstanceHits int // InstanceFieldTypes (already counted in InstanceFieldHits)
 	FieldTypeStoreHits    int // FieldStoreTypes
 	// Field type map sizes: how many classes have entries in each map.
@@ -459,6 +511,7 @@ func BuildTypeContext(
 	kOriginElement int,
 	thrFields map[int]string,
 	allocStubOffsets map[int64]string,
+	allocationStubCID map[uint64]int,
 ) *TypeContext {
 	ctx := &TypeContext{
 		FuncParamTypes:          make(map[int][]int),
@@ -476,11 +529,13 @@ func BuildTypeContext(
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
 		FuncReceiverStackSlot:   make(map[string]int),
+		ReceiverLoadAtPC:        make(map[uint64]ReceiverLoad),
 		FuncReturnType:          make(map[int]int),
 		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),
 		KOriginElement:          kOriginElement,
 		THRFields:               thrFields,
 		AllocStubOffsets:        allocStubOffsets,
+		AllocationStubCID:       allocationStubCID,
 		CalleeExitTypes:         make(map[uint64]TypeLattice),
 		CalleeAllExitTypes:      make(map[uint64][31]TypeLattice),
 		MinAppClassID:           minAppClassIDSafe(pl.CT),
@@ -505,8 +560,10 @@ func BuildTypeContext(
 		ctx.WordSize = 4
 	}
 
-	// 0. Resolve Dart 2.x Type class IDs before anything reads them.
-	resolveTypeClassIDs(clResult)
+	// Type class IDs are resolved at parse time now (cluster.ReadFill), so
+	// TypeInfo.ClassID is already meaningful here and on every other path.
+	// See cluster.resolveTypeClassIDs for why it does not live in this
+	// package any more.
 
 	// 0b. Build RefToType once: isolate Types + VM Types.
 	// Shared across buildFieldTypes, buildPoolClassByIndex, buildFuncParamTypes.
@@ -577,6 +634,30 @@ func BuildTypeContext(
 // InstanceFieldTypes, FieldStoreTypes) are keyed by field_offset (from object
 // start, without kHeapObjectTag subtraction). So we add kHeapObjectTag back
 // before lookup.
+// SetClassIDTagLayout records the ClassIdTag bitfield layout and derives the
+// displacement at which Assembler::LoadClassId emits its half-word read.
+//
+// The derivation, rather than the hardcoded +1 it replaces: the class id is a
+// 16-bit field starting at bit `pos`, so it is readable whole by a MOVZX at
+// byte offset pos/8 from the tags word; FieldAddress subtracts kHeapObjectTag,
+// so the emitted displacement is pos/8 - 1. For pos 16 that is 1, which is the
+// number the handler used to assert. A layout whose class id is not 16 bits
+// or not byte-aligned has no half-word form at all, and the compiler emits
+// movl+shrl instead.
+func (ctx *TypeContext) SetClassIDTagLayout(pos, size int) {
+	ctx.ClassIDTagPos, ctx.ClassIDTagSize = pos, size
+	ctx.halfWordClassID = size == 16 && pos%8 == 0
+	if ctx.halfWordClassID {
+		ctx.halfWordClassIDDisp = int64(pos/8) - sdk.HeapObjectTag
+	}
+}
+
+// HalfWordClassIDDisp returns the displacement of the half-word class-id load
+// for this build, and false when the build uses the 32-bit shift form.
+func (ctx *TypeContext) HalfWordClassIDDisp() (int64, bool) {
+	return ctx.halfWordClassIDDisp, ctx.halfWordClassID
+}
+
 func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bool) {
 	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
 	// map key = field_offset. Add 1 to align.

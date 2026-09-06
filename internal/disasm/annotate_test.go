@@ -132,22 +132,23 @@ func TestPPAnnotator(t *testing.T) {
 	}
 }
 
-func TestTHRAnnotator(t *testing.T) {
-	ann := THRAnnotator(nil)
-
+func TestTHRContextAnnotator(t *testing.T) {
 	// LDR X16, [X26, #72] → THR+0x48
 	raw := uint32(0xF9400000 | (9 << 10) | (26 << 5) | 16)
-	got := ann(Inst{Raw: raw})
-	if got != "THR+0x48" {
-		t.Errorf("THRAnnotator = %q, want %q", got, "THR+0x48")
+	insts := []Inst{{Addr: 0x1000, Raw: raw}}
+
+	ann := THRContextAnnotator(insts, nil)
+	got := ann(insts[0])
+	if got != "THR+0x48 LDR[UNKNOWN]" {
+		t.Errorf("THRContextAnnotator = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
 	}
 
 	// With field map.
 	fields := map[int]string{0x48: "stack_limit"}
-	annFields := THRAnnotator(fields)
-	got = annFields(Inst{Raw: raw})
+	annFields := THRContextAnnotator(insts, fields)
+	got = annFields(insts[0])
 	if got != "THR.stack_limit" {
-		t.Errorf("THRAnnotator with fields = %q, want %q", got, "THR.stack_limit")
+		t.Errorf("THRContextAnnotator with fields = %q, want %q", got, "THR.stack_limit")
 	}
 }
 
@@ -183,10 +184,10 @@ func TestPPAnnotator_RealBytes(t *testing.T) {
 	buf[0], buf[1], buf[2], buf[3] = 0x50, 0x27, 0x40, 0xf9
 	raw := binary.LittleEndian.Uint32(buf[:])
 
-	thr := THRAnnotator(nil)
-	got := thr(Inst{Raw: raw})
-	if got != "THR+0x48" {
-		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48")
+	thr := THRContextAnnotator([]Inst{{Addr: 0x1000, Raw: raw}}, nil)
+	got := thr(Inst{Addr: 0x1000, Raw: raw})
+	if got != "THR+0x48 LDR[UNKNOWN]" {
+		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
 	}
 
 	pp := PPAnnotator(pool)

@@ -131,11 +131,21 @@ func skipFillWeakArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool)
 	return nil
 }
 
-// skipFillTypedData skips TypedData fill.
+// readFillTypedData reads TypedData fill, capturing Int32Array payloads.
 // Per object: ReadUnsigned(length) + length × element_size raw bytes.
 // v2.10: Read<bool>(is_canonical) after length.
-func skipFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, preCanonicalSplit bool) error {
+//
+// Only Int32Arrays are kept, and only their bytes. That is not a size
+// compromise -- it is the one TypedData the static analyzer can read a
+// meaning out of: a switch's jump table. IndirectGotoInstr holds its targets
+// in `const TypedData& offsets_` of kTypedDataInt32ArrayCid, one int32 per
+// case, each the byte offset from the Code's entry to that case's block.
+// Every other TypedData in a snapshot is program data whose bytes mean
+// nothing without the program.
+func readFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, preCanonicalSplit bool, out map[int][]byte) error {
 	elemSize := typedDataElementSize(cm.CID, ct)
+	keep := cm.CID == typedDataInt32ArrayCid(ct)
+	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
 		// Fill reads: ReadUnsigned(length), then length * element_size raw bytes.
 		length, err := s.ReadUnsigned()
@@ -148,7 +158,18 @@ func skipFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable
 			}
 		}
 		nbytes := int(length) * elemSize
-		if err := s.Skip(nbytes); err != nil {
+		if keep && out != nil && nbytes > 0 {
+			payload, err := s.ReadBytes(nbytes)
+			if err != nil {
+				return fmt.Errorf("typed_data %d/%d data (%d bytes): %w", i, cm.Count, nbytes, err)
+			}
+			// Copy: the stream's buffer is the whole snapshot image, and a
+			// sub-slice of it would pin the entire file for the lifetime of
+			// the Result.
+			b := make([]byte, len(payload))
+			copy(b, payload)
+			out[ref+int(i)] = b
+		} else if err := s.Skip(nbytes); err != nil {
 			return fmt.Errorf("typed_data %d/%d data (%d bytes): %w", i, cm.Count, nbytes, err)
 		}
 	}

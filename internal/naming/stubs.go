@@ -114,8 +114,12 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 		return out
 	}
 
+	im := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
 	for i, r := range sorted {
-		funcVA := codeVA + uint64(r.PCOffset) - codeOff
+		funcVA, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
 		out[funcVA] = names[i]
 	}
 	return out
@@ -212,7 +216,10 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if no.IsConstructor() && name != "" {
 			name = "new " + name
 		}
-		funcVA := codeVA + uint64(table.Entries[idx].PCOffset) - codeOff
+		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.VAAt(table.Entries[idx].PCOffset)
+		if !ok {
+			continue
+		}
 		out[funcVA] = name
 	}
 	return out
@@ -259,21 +266,38 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // and 271 distinct classes out of 324 and 339, which is what working looks
 // like.
 
-// buildTypeTestingStubNames maps a Type's reference ID to the display name
-// for the stub that tests it. Returns nil when the Dart version cannot
-// resolve a Type to its class, in which case callers simply find nothing.
-func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, typeClassIDIsRef bool) map[int]string {
-	// typeClassIdIsRef (Dart 2.10-2.15): Type.type_class_id is a Smi ref,
-	// not a scalar packed into the "flags" word. resolveTypeClassIDs
-	// (called in BuildTypeContext) fills ClassID from MintValues, but on
-	// a real 2.12.0 sample ALL 251 type-owned Codes resolved to the SAME
-	// class ("TypeParameters") — 251 confident wrong labels is worse than
-	// 251 honest sub_ placeholders, so naming stays OFF for these versions.
-	if typeClassIDIsRef {
-		return nil
-	}
+// buildTypeNames maps a Type's reference ID to its Dart-source display name,
+// type arguments included. Returns nil when the Dart version cannot resolve a
+// Type to its class, in which case callers simply find nothing.
+//
+// It produces the BARE type name. Wrap it with TypeTestingStubName for the
+// stub spelling; the object pool wants the type itself.
+//
+// It also returns the TypeArguments names -- `<int, String>` for a
+// TypeArguments object reached directly, as the object pool holds them -- since
+// both come from the same three lookups.
+func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) (typeNames, argNames map[int]string) {
+	// This was OFF below 2.16 for two reasons, both of which are now gone.
+	//
+	// The first was a real 2.12.0 sample resolving ALL 251 type-owned Codes
+	// to the SAME class ("TypeParameters"). That collapse does not reproduce:
+	// Type class ids resolve at parse time now (cluster.ReadFill), and the
+	// same sample yields 2187 names over 1885 distinct classes, the most
+	// common being `TypeTestingStub_Future` x8, with 389 carrying type
+	// arguments.
+	//
+	// The second was the COMPARISON rather than the names. Below 2.16 the ELF
+	// speaks the assembler dialect, which spells a stub the way
+	// TypeTestingStubNamer does --
+	// `TypeTestingStub_dart_core__List__dart_core__int` -- while we show Dart
+	// source form, `TypeTestingStub_List<int>`. Switching the namer on used to
+	// cost about 4 points on 2.13-2.15 with the agreement count UNCHANGED:
+	// hundreds of newly named functions, none of them scoring. That is fixed
+	// at the source -- PoolLookups.TypeTestingStubSDKNames generates the VM
+	// spelling too, and the differential compares against whichever notation
+	// the symbol table uses. See docs/findings-repo/015.
 	if len(result.Types) == 0 {
-		return nil
+		return nil, nil
 	}
 	classNames := make(map[int32]string)
 	for i := range result.Classes {
@@ -319,9 +343,36 @@ func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snaps
 		if args, ok := typeArgsString(&t, typeByRef, taByRef, nameOfClass, 0); ok {
 			name += args
 		}
-		out[t.RefID] = fmt.Sprintf("TypeTestingStub_%s", name)
+		out[t.RefID] = name
 	}
-	return out
+
+	// TypeArguments objects, from the same inputs. They are built here rather
+	// than in their own pass because they need exactly typeByRef, taByRef and
+	// nameOfClass -- three maps this function has already assembled, and which
+	// a second pass would have to build identically or drift from.
+	argNames = make(map[int]string, len(result.TypeArguments))
+	for i := range result.TypeArguments {
+		ta := &result.TypeArguments[i]
+		if s, ok := typeArgsListString(ta, typeByRef, taByRef, nameOfClass, 0); ok {
+			argNames[ta.RefID] = s
+		}
+	}
+	return out, argNames
+}
+
+// TypeTestingStubName returns the display name for the stub that tests the
+// Type at ref, or "" when the type could not be named.
+//
+// The bare type name is the useful unit -- a Type in the object pool is just a
+// type, not a stub -- so buildTypeNames produces that and the stub prefix is
+// added here. Previously only the prefixed form existed, which is why 76% of
+// the Types the pool displays could be named and were not: the name was being
+// computed and then made unusable by the prefix.
+func TypeTestingStubName(typeNames map[int]string, ref int) string {
+	if n := typeNames[ref]; n != "" {
+		return fmt.Sprintf("TypeTestingStub_%s", n)
+	}
+	return ""
 }
 
 // typeArgsString renders a Type's type arguments as "<A, B>", or reports
@@ -352,8 +403,29 @@ func typeArgsString(
 	if depth > 4 || t == nil || t.ArgumentsRef <= 0 {
 		return "", false
 	}
-	ta, ok := taByRef[t.ArgumentsRef]
-	if !ok || ta.Length == 0 || len(ta.TypeRefs) == 0 {
+	return typeArgsListString(taByRef[t.ArgumentsRef], typeByRef, taByRef, nameOfClass, depth)
+}
+
+// typeArgsListString renders a TypeArguments object as "<A, B>".
+//
+// Split out of typeArgsString so the same rendering serves a TypeArguments
+// object reached directly -- which is how the object pool holds them. Several
+// hundred pool slots per binary are a bare TypeArguments, and they used to
+// render as the placeholder `<TypeArguments>` while this exact function could
+// have named 82% of them.
+//
+// The all-or-nothing rule is typeArgsString's and is the point of sharing the
+// code rather than copying it: one unresolvable element makes the whole list
+// unavailable, because a partially-rendered argument list is a name that looks
+// precise and is not.
+func typeArgsListString(
+	ta *cluster.TypeArgumentsInfo,
+	typeByRef map[int]*cluster.TypeInfo,
+	taByRef map[int]*cluster.TypeArgumentsInfo,
+	nameOfClass func(int32) string,
+	depth int,
+) (string, bool) {
+	if depth > 4 || ta == nil || ta.Length == 0 || len(ta.TypeRefs) == 0 {
 		return "", false
 	}
 	parts := make([]string, 0, len(ta.TypeRefs))
@@ -417,7 +489,7 @@ var viaPoolIndex = regexp.MustCompile(`^pp\[(\d+)\]`)
 // when no type-testing stub names are available, so callers resolve nothing
 // rather than guessing.
 func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]string {
-	if pl == nil || len(pl.TypeTestingStubNames) == 0 {
+	if pl == nil || len(pl.TypeNames) == 0 {
 		return nil
 	}
 	out := make(map[int]string)
@@ -425,7 +497,7 @@ func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]stri
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
-		if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok {
+		if name := TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
 			out[pe.Index] = name
 		}
 	}

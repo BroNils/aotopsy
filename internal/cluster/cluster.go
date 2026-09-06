@@ -74,13 +74,42 @@ type CodeEntry struct {
 	TextOffset           int64 // text_offset_delta from fill (v2.10-v2.15 only; 0 otherwise)
 	ExceptionHandlersRef int   // ref ID of ExceptionHandlers object (ref index 1); -1 if not captured
 	PcDescriptorsRef     int   // ref ID of PcDescriptors object (ref index 2); -1 if not captured
-	CodeSourceMapRef     int   // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.x AOT); -1 if not captured
-	InlinedFuncsRef      int   // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.x AOT); -1 if not captured
+	// CodeSourceMapRef and InlinedFuncsRef are refs, but the serializer writes
+	// them as NULL when the binary was built with dwarf stack traces:
+	//
+	//	if (FLAG_precompiled_mode && FLAG_dwarf_stack_traces_mode) {
+	//	  WriteFieldValue(inlined_id_to_function_, Array::null());
+	//	  WriteFieldValue(code_source_map_, CodeSourceMap::null());
+	//	}
+	//	                        -- app_snapshot.cc:2911-2913 @3.13.0
+	//
+	// The ref count does not change, so parsing is unaffected; the objects
+	// simply are not there. Measured on the corpus: every sample carries
+	// thousands of CodeSourceMaps except the obfuscated production one, which
+	// carries zero. Inline attribution is therefore unavailable on exactly
+	// the binaries built that way, and that is a property of the input, not
+	// a parse failure.
+	CodeSourceMapRef int // ref ID of CodeSourceMap object (ref index 5 in 3.x AOT, ref index 6 in 2.10-2.15 AOT); -1 if not captured
+	InlinedFuncsRef  int // ref ID of inlined_id_to_function Array (ref index 4 in 3.x AOT, ref index 5 in 2.10-2.15 AOT); -1 if not captured
+
 	// CompressedStackMapsRef is the ref ID of the CompressedStackMaps object.
-	// In 2.x AOT (CodeNumRefs=7), compressed_stackmaps_ is a ref at index 4.
-	// In 3.x AOT (CodeNumRefs=6), compressed_stackmaps_ is null (not a ref).
+	//
+	// Written in AOT only up to 2.15.0. From 2.16.0 the serializer guards it
+	// with `if (s->kind() == Snapshot::kFullJIT)`, so an AOT snapshot has no
+	// such ref at all and the Code cluster writes one fewer ref:
+	//
+	//	2.10.0-2.14.0  clustered_snapshot.cc  InCurrentLoadingUnit[OrRoot](...)
+	//	2.15.0         app_snapshot.cc        InCurrentLoadingUnitOrRoot(...)
+	//	2.16.0+        app_snapshot.cc        kind() == kFullJIT
+	//
+	// That boundary is carried by CodeNumRefs (7 for 2.10-2.15, absent after),
+	// not by a version comparison here -- fill_code.go gates on numRefs == 7.
+	// Saying "2.x" would be wrong: 2.16.0-2.19.0 are 2.x and do not have it.
+	// Confirmed on the corpus: 3611 CompressedStackMaps on dart-2.12.0-arm64,
+	// zero on every 3.x sample.
+	//
 	// -1 if not captured or not present in this version's AOT format.
-	CompressedStackMapsRef int // ref ID of CompressedStackMaps object (ref index 4 in 2.x AOT); -1 if not captured
+	CompressedStackMapsRef int
 }
 
 // PoolEntryKind distinguishes ObjectPool entry types.
@@ -103,21 +132,41 @@ type PoolEntry struct {
 
 // Result holds all parsed cluster data.
 type Result struct {
-	Header     Header
-	Clusters   []ClusterMeta
-	Strings    []ParsedString
-	Named      []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
-	FuncTypes  []FuncTypeInfo // FunctionType parameter counts extracted from fill
-	Classes    []ClassInfo    // class layout data extracted from fill
-	Types      []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
-	Fields     []FieldInfo    // field layout data extracted from fill
-	Codes      []CodeEntry    // Code objects with owner refs, extracted from fill
-	Arrays     []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
-	Pool       []PoolEntry    // ObjectPool entries extracted from fill
-	MintValues map[int]int64  // Mint/Smi ref→int64 value from alloc phase
-	FillStart  int            // byte offset where the fill section begins
-	FillEnd    int            // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
-	Diags      []dartfmt.Diag
+	Header    Header
+	Clusters  []ClusterMeta
+	Strings   []ParsedString
+	Named     []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
+	FuncTypes []FuncTypeInfo // FunctionType parameter counts extracted from fill
+	Classes   []ClassInfo    // class layout data extracted from fill
+	Types     []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
+	Fields    []FieldInfo    // field layout data extracted from fill
+	Codes     []CodeEntry    // Code objects with owner refs, extracted from fill
+	Arrays    []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
+	Pool      []PoolEntry    // ObjectPool entries extracted from fill
+	// Int32Arrays maps a TypedDataInt32Array's ref to its raw little-endian
+	// payload. These are captured because one of them is a switch's jump
+	// table: IndirectGotoInstr keeps its targets in `const TypedData& offsets_`
+	// of kTypedDataInt32ArrayCid, one int32 per case, each the byte offset
+	// from the Code's entry to that case's block. See readFillTypedData.
+	Int32Arrays map[int][]byte
+	MintValues  map[int]int64 // Mint/Smi ref→int64 value from alloc phase
+	FillStart   int           // byte offset where the fill section begins
+	FillEnd     int           // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
+
+	// ObjectStoreRefs holds the isolate roots section's ObjectStore field
+	// refs, in serialized order -- ObjectStore::from() through
+	// to_snapshot(kFullAOT), the same range ObjectStoreAOTFieldCount counts.
+	// Set by ReadObjectStoreRefs (which LoadContext calls early, so the
+	// names are available when symbol names are built) and by
+	// ParseDispatchTable, which reads the same prefix on its way to the
+	// dispatch table. Nil when neither ran.
+	//
+	// Index i is the i-th field of that range, so a per-version list of
+	// field NAMES turns these into named objects. The 89 `RW(Code, *_stub)`
+	// entries are the only place an isolate stub's name exists in the
+	// snapshot: their Code objects carry a null owner.
+	ObjectStoreRefs []int
+	Diags           []dartfmt.Diag
 
 	// unboxedByClassID memoizes classUnboxedBitmaps' index.
 	unboxedByClassID map[int32]uint64

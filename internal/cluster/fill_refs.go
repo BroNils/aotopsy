@@ -210,12 +210,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 				if ti != nil {
-					// arguments is the last ref of UntaggedType's visited
-					// range; see TypeInfo.ArgumentsRef.
-					ti.ArgumentsRef = -1
-					if n := len(allRefs); n > 0 {
-						ti.ArgumentsRef = allRefs[n-1]
-					}
+					ti.ArgumentsRef = typeArgumentsRef(allRefs, profile.DartVersion)
 					types = append(types, *ti)
 				}
 			case isScript:
@@ -335,22 +330,18 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 		// Ref index depends on version:
 		//   v2.10 (NumRefs=5): type_test_stub(0), type_class_id(1), arguments(2), hash(3), signature(4)
 		//   v2.12-v2.13 (NumRefs=4): type_test_stub(0), type_class_id(1), arguments(2), hash(3)
-		//   v2.14-v2.15 (NumRefs=3): type_class_id(0), arguments(1), hash(2)
+		//   v2.14 (NumRefs=3): type_class_id(0), arguments(1), hash(2)
 		if profile.TypeClassIdIsRef && profile.CIDs != nil && cm.CID == profile.CIDs.Type && len(allRefs) > 0 {
 			typeClassIdIdx := 1 // default for v2.10-v2.13 (NumRefs >= 4)
 			if spec.NumRefs == 3 {
-				typeClassIdIdx = 0 // v2.14-v2.15: type_class_id at index 0
+				typeClassIdIdx = 0 // v2.14: type_class_id at index 0
 			}
 			if typeClassIdIdx < len(allRefs) {
 				types = append(types, TypeInfo{
 					RefID:          ref,
 					ClassID:        0, // resolved later via MintValues
 					TypeClassIdRef: allRefs[typeClassIdIdx],
-					// Not captured for the 2.10-2.15 layouts: TTS naming
-					// is deliberately off there (see
-					// buildTypeTestingStubNames), so there is no consumer
-					// to justify guessing the index.
-					ArgumentsRef: -1,
+					ArgumentsRef:   typeArgumentsRef(allRefs, profile.DartVersion),
 				})
 			}
 		}
@@ -380,6 +371,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				NumFixedParams:    ss.numFixed,
 				NumOptionalParams: ss.numOptional,
 				IsStatic:          ss.isStatic,
+				IsSuspendable:     ss.isSuspendable,
 				HasKindTag:        ss.hasKindTag,
 				FuncKind:          ss.funcKind,
 			})
@@ -427,4 +419,45 @@ func skipScalar(s *dartfmt.Stream, op ScalarOp) error {
 	default:
 		return fmt.Errorf("unknown scalar op %d", op)
 	}
+}
+
+// typeRefsAfterArguments is how many refs follow UntaggedType.arguments inside
+// the visited range, which is what decides where `arguments` sits counting
+// back from the end. raw_object.h, at every supported version:
+//
+//	2.10.0     ... arguments, hash, signature   VISIT_TO(signature_)   2
+//	2.12-2.13  ... arguments, hash              VISIT_TO(hash)         1
+//	2.14-3.0.5 ... arguments, hash              VISIT_TO(hash)         1
+//	3.1.0+     ... arguments                    VISIT_TO(arguments)    0
+//
+// Counting back rather than forward keeps this independent of what precedes
+// `arguments`, which moved twice on its own (type_test_stub left the range at
+// 2.14 and came back at 2.15; type_class_id stopped being a ref at 2.15).
+func typeRefsAfterArguments(dartVersion string) int {
+	switch {
+	case snapshot.VersionAtLeast(dartVersion, "3.1.0"):
+		return 0
+	case snapshot.VersionAtLeast(dartVersion, "2.12.0"):
+		return 1
+	default:
+		return 2 // 2.10.0 also carries `signature`
+	}
+}
+
+// typeArgumentsRef picks UntaggedType.arguments out of the Type cluster's
+// visited ref list.
+//
+// This used to be an unconditional "last ref", which is right only from 3.1.0
+// on. Below that it captured `hash` -- a Smi -- so the TypeArguments lookup
+// missed every time and no type-testing stub ever got its type arguments.
+// Measured: 0 of 2146 Types on dart-2.16.0-gt-arm64 resolved to a
+// TypeArguments object, 0 of 2310 on 2.19.0, against 745 of 2447 on 3.3.0.
+//
+// Returns -1 when there are too few refs to name one.
+func typeArgumentsRef(allRefs []int, dartVersion string) int {
+	idx := len(allRefs) - 1 - typeRefsAfterArguments(dartVersion)
+	if idx < 0 || idx >= len(allRefs) {
+		return -1
+	}
+	return allRefs[idx]
 }

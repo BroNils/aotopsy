@@ -291,7 +291,7 @@ func isCleanPhiInit(v string) bool {
 // genuinely flows around the loop, and its in-loop update is emitted at the real
 // definition site (see the emitter's phi-update hook).
 func computeLoopPhis(fir *FuncIR, exit []*LiftState) map[int]map[string]string {
-	headers := identifyLoopHeaders(fir)
+	headers := identifyLoopHeaders(fir, dominators(fir))
 	if len(headers) == 0 {
 		return nil
 	}

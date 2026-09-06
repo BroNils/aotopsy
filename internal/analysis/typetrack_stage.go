@@ -111,6 +111,63 @@ type TypeInferenceOutput struct {
 
 // runTypeInference is the core logic, separated from RunTypeInferenceStage
 // for testability.
+// buildAllocationStubCIDs maps each per-class allocation stub's entry VA to
+// the class id it allocates.
+//
+// The join is entirely structural: PoolLookups already marks a Code whose
+// owner is a Class (naming/pool.go, IsAllocationStub, named "new X"), and
+// ClassInfo carries that Class object's ref alongside the class id it
+// describes. Nothing here is inferred from instructions.
+//
+// It exists because IsAllocationStub had no reader at all -- the flag was set
+// and dropped, while typetrack answered the same question by reading RDI, a
+// register AllocateObjectABI does not use.
+func buildAllocationStubCIDs(
+	clResult *cluster.Result,
+	pl *naming.PoolLookups,
+	ranges []cluster.CodeRange,
+	codeVA, codeOff uint64,
+) map[uint64]int {
+	if clResult == nil || pl == nil {
+		return nil
+	}
+	// Class object ref → the class id instances of it carry.
+	cidByClassRef := make(map[int]int32, len(clResult.Classes))
+	for _, ci := range clResult.Classes {
+		cidByClassRef[ci.RefID] = ci.ClassID
+	}
+
+	// Code ref → allocated class id, for the Codes marked IsAllocationStub.
+	// The owner ref lives on the CodeEntry (Code.owner_), not on a
+	// NamedObject: a Code is not itself a named object, which is why
+	// ResolveCodeOwner takes ce.OwnerRef rather than looking the Code up.
+	cidByCodeRef := make(map[int]int32)
+	for _, ce := range clResult.Codes {
+		ci, ok := pl.CodeNames[ce.RefID]
+		if !ok || !ci.IsAllocationStub {
+			continue
+		}
+		if cid, ok := cidByClassRef[ce.OwnerRef]; ok && cid > 0 {
+			cidByCodeRef[ce.RefID] = cid
+		}
+	}
+
+	im := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
+	out := make(map[uint64]int, len(cidByCodeRef))
+	for _, r := range ranges {
+		cid, ok := cidByCodeRef[r.RefID]
+		if !ok {
+			continue
+		}
+		va, ok := im.FuncVA(r)
+		if !ok {
+			continue
+		}
+		out[va] = int(cid)
+	}
+	return out
+}
+
 func runTypeInference(
 	outDir string,
 	clResult *cluster.Result,
@@ -178,7 +235,10 @@ func runTypeInference(
 		if !ok || ci.FuncName == "" {
 			continue
 		}
-		start := codeVA + uint64(r.PCOffset) - codeOff
+		start, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.FuncVA(r)
+		if !ok {
+			continue
+		}
 		spans = append(spans, funcSpan{start: start, end: start + uint64(r.Size), name: ci.FuncName})
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
@@ -270,12 +330,12 @@ func runTypeInference(
 	// type_test_stub_entry_point_ (offset 7 from tagged) is called via BLR,
 	// the type tracker needs the stub name to resolve the call.
 	poolTTSNames := make(map[int]string)
-	if len(pl.TypeTestingStubNames) > 0 {
+	if len(pl.TypeNames) > 0 {
 		for _, pe := range clResult.Pool {
 			if pe.Kind != cluster.PoolTagged {
 				continue
 			}
-			if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok && name != "" {
+			if name := naming.TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
 				poolTTSNames[pe.Index] = name
 			}
 		}
@@ -309,7 +369,8 @@ func runTypeInference(
 	// Get allocation stub offsets from ThreadStubOffsets (arch-independent).
 	allocStubOffsets := vmtables.ThreadStubOffsets(info.Version.DartVersion, isARM64)
 
-	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets)
+	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets,
+		buildAllocationStubCIDs(clResult, pl, ranges, codeVA, codeOff))
 
 	// Build class name → class ID lookup from ClassIDToName.
 	// ClassIDToName is built from ClassInfo.ClassID (Dart runtime CID).
@@ -354,8 +415,9 @@ func runTypeInference(
 	// constants_arm64.h at 3.4.3; before it, every argument including the
 	// receiver is passed on the stack.
 	receiverOnStack := !snapshot.VersionAtLeast(info.Version.DartVersion, "3.4.3")
-	// See TypeContext.ClassIDIsHalfWord.
-	ctx.ClassIDIsHalfWord = !snapshot.VersionAtLeast(info.Version.DartVersion, "2.19.0")
+	// One source for the ClassIdTag layout: snapshot.ClassIdTagLayout, which
+	// is also what fill_strings.go reads and what the SDK drift gate checks.
+	ctx.SetClassIDTagLayout(snapshot.ClassIdTagLayout(info.Version.DartVersion))
 	blEdges := make(map[string][]typetrack.BLEdge)
 
 	// Build address → function name lookup for BL/CALL target resolution.
@@ -365,30 +427,16 @@ func runTypeInference(
 	}
 	var funcRanges []funcRange
 
+	codeImage := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	for i := range ranges {
 		r := &ranges[i]
-		if r.Size == 0 {
+		fs, ok := codeImage.Slice(*r)
+		if !ok {
 			continue
 		}
-		funcStart := uint64(r.PCOffset) - codeOff
-		funcEnd := funcStart + uint64(r.Size)
-		if funcEnd > uint64(len(code)) {
-			funcEnd = uint64(len(code))
-		}
-		if funcStart >= funcEnd {
-			continue
-		}
-		funcVA := codeVA + funcStart
-
-		var name string
-		var ownerName string
-		if r.RefID >= 0 {
-			ci := pl.CodeNames[r.RefID]
-			name = ci.Qualified(r.PCOffset)
-			ownerName = ci.OwnerName
-		} else {
-			name = fmt.Sprintf("stub_%x", r.PCOffset)
-		}
+		funcVA := fs.VA
+		name := fs.Name
+		ownerName := fs.Owner
 
 		// Map function name → owner class ID for instance method receiver init.
 		if ownerName != "" {
@@ -396,26 +444,31 @@ func runTypeInference(
 				ctx.FuncOwnerClass[name] = cid
 				// Before Dart 3.4.3 there is no register calling convention:
 				// the receiver comes in on the caller's stack and the prologue
-				// loads it out. Parameter i of a function with N fixed
-				// parameters lives at
-				//   FP + (kParamEndSlotFromFp + N - i) * wordSize
-				// kParamEndSlotFromFp is 1 on BOTH architectures
-				// (stack_frame_arm64.h and stack_frame_x64.h), so the receiver
-				// -- parameter 0 -- is the highest slot on both. Confirmed on a
-				// real 2.12.0 arm64 binary: a two-parameter operator+ loads its
-				// receiver with `ldr x3, [x29, #24]`, which is (1 + 2 - 0) * 8,
-				// and immediately reads a field off it.
+				// loads it out. WHERE depends on whether the function copies
+				// its parameters -- see cluster.ReceiverFrameSlot, which
+				// carries the SDK derivation and all three cases.
+				//
+				// This used to be a single unconditional
+				// `(1 + FixedParamsWithReceiver) * 8`, which is the no-copy
+				// case only. A function with optional parameters addresses
+				// them off ArgumentsDescriptor.count at runtime, so it has no
+				// static slot and the old formula recorded one no load could
+				// match -- a dead seed rather than a wrong one, but still a
+				// claim with nothing behind it.
 				if receiverOnStack && r.RefID >= 0 {
-					if n := pl.CodeNames[r.RefID].FixedParamsWithReceiver; n > 0 {
-						ctx.FuncReceiverStackSlot[name] = (1 + n) * 8
+					ci := pl.CodeNames[r.RefID]
+					if slot, ok := cluster.ReceiverFrameSlot(
+						ci.FixedParamsWithReceiver, ci.OptionalParams,
+						ci.IsSuspendable, 8,
+					); ok {
+						ctx.FuncReceiverStackSlot[name] = int(slot)
 					}
 				}
 			}
 		}
 
 		funcRanges = append(funcRanges, funcRange{start: funcVA, end: funcVA + uint64(r.Size), name: name})
-
-		funcCode := code[funcStart:funcEnd]
+		funcCode := fs.Code
 
 		if isARM64 {
 			insts := disasm.Disassemble(funcCode, disasm.Options{
@@ -426,11 +479,17 @@ func runTypeInference(
 			// Pre-3.4.3 receiver-slot recovery from CODE when arity was absent
 			// from the snapshot (2.14..3.3.0). See receiver_recovery.go.
 			if receiverOnStack {
-				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
-					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+				if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+					if _, set := ctx.FuncReceiverStackSlot[name]; !set {
 						if slot, ok := typetrack.RecoverReceiverStackSlotARM64(insts, ownerCID, ctx); ok {
 							ctx.FuncReceiverStackSlot[name] = slot
 						}
+					}
+					// Functions that address parameters through the
+					// ArgumentsDescriptor have no static slot for the scan
+					// above to find; their receiver is typed at the load.
+					if pc, rl, ok := typetrack.RecoverArgsDescReceiverARM64(insts, ownerCID, ctx); ok {
+						ctx.ReceiverLoadAtPC[pc] = rl
 					}
 				}
 			}

@@ -865,6 +865,14 @@ func transferInstruction(
 		stackTypes: stackTypes,
 	}
 
+	// The ArgumentsDescriptor-relative receiver load is checked first: it is
+	// a plain `LDR Xr, [Xt, #disp]` that handleFieldLoad would otherwise
+	// treat as a field read off an untyped base, and the prepass has already
+	// proved -- via the owner-field-base gate -- that this exact PC produces
+	// `this`. See TypeContext.ReceiverLoadAtPC.
+	if handleArgsDescReceiver(&tc) {
+		return
+	}
 	// Handlers run in the same order as the original if-chain.
 	// Stack stores don't kill source registers, so they return false to
 	// let subsequent handlers run (except STR [X29] which returns true).
