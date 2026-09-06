@@ -266,10 +266,13 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // and 271 distinct classes out of 324 and 339, which is what working looks
 // like.
 
-// buildTypeTestingStubNames maps a Type's reference ID to the display name
-// for the stub that tests it. Returns nil when the Dart version cannot
-// resolve a Type to its class, in which case callers simply find nothing.
-func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
+// buildTypeNames maps a Type's reference ID to its Dart-source display name,
+// type arguments included. Returns nil when the Dart version cannot resolve a
+// Type to its class, in which case callers simply find nothing.
+//
+// It produces the BARE type name. Wrap it with TypeTestingStubName for the
+// stub spelling; the object pool wants the type itself.
+func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
 	// This was OFF below 2.16 for two reasons, both of which are now gone.
 	//
 	// The first was a real 2.12.0 sample resolving ALL 251 type-owned Codes
@@ -336,9 +339,24 @@ func buildTypeTestingStubNames(result *cluster.Result, l *PoolLookups, ct *snaps
 		if args, ok := typeArgsString(&t, typeByRef, taByRef, nameOfClass, 0); ok {
 			name += args
 		}
-		out[t.RefID] = fmt.Sprintf("TypeTestingStub_%s", name)
+		out[t.RefID] = name
 	}
 	return out
+}
+
+// TypeTestingStubName returns the display name for the stub that tests the
+// Type at ref, or "" when the type could not be named.
+//
+// The bare type name is the useful unit -- a Type in the object pool is just a
+// type, not a stub -- so buildTypeNames produces that and the stub prefix is
+// added here. Previously only the prefixed form existed, which is why 76% of
+// the Types the pool displays could be named and were not: the name was being
+// computed and then made unusable by the prefix.
+func TypeTestingStubName(typeNames map[int]string, ref int) string {
+	if n := typeNames[ref]; n != "" {
+		return fmt.Sprintf("TypeTestingStub_%s", n)
+	}
+	return ""
 }
 
 // typeArgsString renders a Type's type arguments as "<A, B>", or reports
@@ -434,7 +452,7 @@ var viaPoolIndex = regexp.MustCompile(`^pp\[(\d+)\]`)
 // when no type-testing stub names are available, so callers resolve nothing
 // rather than guessing.
 func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]string {
-	if pl == nil || len(pl.TypeTestingStubNames) == 0 {
+	if pl == nil || len(pl.TypeNames) == 0 {
 		return nil
 	}
 	out := make(map[int]string)
@@ -442,7 +460,7 @@ func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]stri
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
-		if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok {
+		if name := TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
 			out[pe.Index] = name
 		}
 	}

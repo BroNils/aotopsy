@@ -145,7 +145,7 @@ func TestTypeTestingStubNamingDoesNotCollapseOn2x(t *testing.T) {
 	}
 }
 
-// buildTypeTestingStubNames must refuse rather than guess, on the same
+// buildTypeNames must refuse rather than guess, on the same
 // principle as the pool-index arithmetic: a wrong label propagates into every
 // call site that references the stub.
 func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
@@ -154,7 +154,7 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 	}
 	pl := &PoolLookups{RefToNamed: map[int]*cluster.NamedObject{}, RefToStr: map[int]string{}}
 	for _, v := range []string{"2.12.0", "2.15.0", "3.3.0"} {
-		if got := buildTypeTestingStubNames(res, pl, nil, v); len(got) != 0 {
+		if got := buildTypeNames(res, pl, nil, v); len(got) != 0 {
 			t.Errorf("%s: named an unresolvable class: %v", v, got)
 		}
 		// The VM spelling is generated from the same inputs and must refuse

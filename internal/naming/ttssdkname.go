@@ -47,7 +47,7 @@ import (
 // type-testing stub name, keyed by the tested Type's ref ID.
 //
 // Empty when the Dart version's Types cannot be resolved to a class, matching
-// buildTypeTestingStubNames -- the two are built from the same inputs and must
+// buildTypeNames -- the two are built from the same inputs and must
 // agree on which Types they can name.
 func buildTypeTestingStubSDKNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
 	if len(result.Types) == 0 {

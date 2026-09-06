@@ -508,7 +508,7 @@ func (f *FuncIR) addBlock(b Block) {
 // rather than with the ordinary Dart calling convention.
 //
 // The name is the signal because it is the only one available here: these
-// stubs are named by naming.buildTypeTestingStubNames after the SDK's own
+// stubs are named by naming.buildTypeNames after the SDK's own
 // TypeTestingStubNamer::WriteStubNameForTypeTo, so the prefix is not a
 // guess about shape, it is the same label the SDK writes.
 func (f *FuncIR) IsTypeTestStub() bool {

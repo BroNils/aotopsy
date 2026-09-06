@@ -66,16 +66,22 @@ type PoolLookups struct {
 	// the Dart version is outside the verified table, in which case those
 	// refs simply stay unnamed. See snapshot.BaseObjectNames.
 	BaseObjectNames []string
-	// TypeTestingStubNames maps a Type's reference ID to the display name of
-	// the stub that tests it. Built once in BuildPoolLookups; used both to
-	// name the stub Codes themselves and to resolve indirect calls that
-	// invoke one. Nil on versions that cannot resolve a Type to its class.
-	// See buildTypeTestingStubNames.
-	TypeTestingStubNames map[int]string
+	// TypeNames maps a Type's reference ID to its Dart-source display name,
+	// type arguments included -- `List<int>`, not `TypeTestingStub_List<int>`.
+	// Built once in BuildPoolLookups; nil on versions that cannot resolve a
+	// Type to its class. See buildTypeNames.
+	//
+	// It used to hold only the PREFIXED stub spelling, which made it unusable
+	// for the thing a Type in the object pool actually is: a type. 76% of the
+	// pool entries that rendered as the bare placeholder `<Type>` (393 of 517
+	// on dart-3.12.2, identical on both architectures) had their name computed
+	// here and thrown away. Callers that want the stub spelling wrap this with
+	// TypeTestingStubName.
+	TypeNames map[int]string
 
 	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
-	// `TypeTestingStub_dart_core__List__dart_core__int` where
-	// TypeTestingStubNames has `TypeTestingStub_List<int>`. Keyed the same
+	// `TypeTestingStub_dart_core__List__dart_core__int` where TypeNames plus
+	// TypeTestingStubName gives `TypeTestingStub_List<int>`. Keyed the same
 	// way, by the tested Type's ref ID.
 	//
 	// It exists for the symtab differential: the ELF's two assembly dialects
@@ -101,7 +107,7 @@ type PoolLookups struct {
 // dartVersion selects the VM-isolate base object name table; pass "" to leave
 // those references unnamed.
 // dartVersion also decides whether type-testing-stub naming runs at all; see
-// buildTypeTestingStubNames.
+// buildTypeNames.
 //
 // It used to take a separate typeClassIDIsRef bool for that. The two were
 // different questions that happened to have the same answer, and coupling them
@@ -167,8 +173,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
-	ttsNames := buildTypeTestingStubNames(result, l, ct, dartVersion)
-	l.TypeTestingStubNames = ttsNames
+	typeNames := buildTypeNames(result, l, ct, dartVersion)
+	l.TypeNames = typeNames
 	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
@@ -177,8 +183,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			// the SDK gives a type-testing stub the tested Type as its
 			// owner (type_testing_stubs.cc, `code.set_owner(type)`), which
 			// is why these fail both the CodeIndex cross-reference and the
-			// RefToNamed lookup. See buildTypeTestingStubNames.
-			if name := ttsNames[ce.OwnerRef]; name != "" {
+			// RefToNamed lookup. See buildTypeNames.
+			if name := TypeTestingStubName(typeNames, ce.OwnerRef); name != "" {
 				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
 			}
 			continue
@@ -731,6 +737,17 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 				}
 			} else if fn, ok := l.CodeRefDisplay[pe.RefID]; ok {
 				display[pe.Index] = fn
+			} else if name := l.TypeNames[pe.RefID]; name != "" {
+				// A Type object: name it. The class and its type arguments are
+				// already resolved for the type-testing stubs, and rendering
+				// the bare CID name instead threw that away -- `<Type>` where
+				// `EfficientLengthIterable` or `StringBuffer` was known.
+				//
+				// The name is the Dart-source spelling of the type, so it is
+				// prefixed to say what the pool slot holds; an unprefixed
+				// `List<int>` would read as a value of that type rather than
+				// the type itself.
+				display[pe.Index] = "Type: " + name
 			} else if cidNum, ok := l.RefCID[pe.RefID]; ok {
 				cidName := cluster.CidNameV(cidNum, l.CT)
 				if cidName != "" {
