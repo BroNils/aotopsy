@@ -330,12 +330,12 @@ func runTypeInference(
 	// type_test_stub_entry_point_ (offset 7 from tagged) is called via BLR,
 	// the type tracker needs the stub name to resolve the call.
 	poolTTSNames := make(map[int]string)
-	if len(pl.TypeTestingStubNames) > 0 {
+	if len(pl.TypeNames) > 0 {
 		for _, pe := range clResult.Pool {
 			if pe.Kind != cluster.PoolTagged {
 				continue
 			}
-			if name, ok := pl.TypeTestingStubNames[pe.RefID]; ok && name != "" {
+			if name := naming.TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
 				poolTTSNames[pe.Index] = name
 			}
 		}

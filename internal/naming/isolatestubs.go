@@ -13,7 +13,7 @@ import (
 // These are the only Codes in an AOT snapshot with no owner at all. The SDK
 // sets `code.set_owner(...)` to a Function, a Class (allocation stub) or an
 // AbstractType (type-testing stub); an isolate stub gets none, so the owner
-// walk and buildTypeTestingStubNames both come up empty and every one of them
+// walk and buildTypeNames both come up empty and every one of them
 // renders as `sub_<pcOffset>`. Measured on dart-3.9.2-gt-arm64: 85 of 8049
 // ranges unnamed, all 85 spelled `_iso_stub_*` by the ELF symbol table, and
 // called often enough to be 639 of the 840 `unresolvedCall` tokens in the

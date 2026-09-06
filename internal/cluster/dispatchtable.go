@@ -135,7 +135,7 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// dispatch table only needs the stream advanced. But 89 of these fields
 	// are `RW(Code, <name>_stub)`, and they are the ONLY route to a name for
 	// the isolate stubs: their Code objects have a null owner, so
-	// buildTypeTestingStubNames and the owner walk both find nothing and
+	// buildTypeNames and the owner walk both find nothing and
 	// every one of them falls through to `sub_<pcOffset>`. Measured on
 	// dart-3.9.2-gt-arm64: 85 of 8049 ranges unnamed, and all 85 are
 	// `_iso_stub_*` in the ELF symbol table.
