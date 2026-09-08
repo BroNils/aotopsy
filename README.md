@@ -279,7 +279,8 @@ Requires Go 1.25+.
 
 ```bash
 make build      # build ./aotopsy
-make install    # install to ~/.aotopsy/bin
+make install    # install to ~/.aotopsy/bin, plus the Ghidra/IDA integration
+                # assets into ~/.aotopsy/ghidra_scripts and ~/.aotopsy/ida_scripts
 make test       # run tests
 make bench      # regenerate BENCHMARK.md (needs local ground-truth twins)
 make coverage   # regenerate COVERAGE.md (needs local corpus samples)
@@ -303,6 +304,9 @@ Contribute against `develop`; open a PR into `main` only when a batch of work is
 
 Prebuilt binaries for Linux, macOS, and Windows (amd64/arm64) are attached to each
 [GitHub release](../../releases). AOTopsy is pure Go, so `make build` cross-compiles cleanly for any target.
+Each release archive also carries `ghidra_scripts/` and `ida_scripts/` next to the
+binary, which is the layout `aotopsy ghidra` and `aotopsy ida` discover — so those
+commands work straight from an unpacked download, with no checkout needed.
 
 ## Limitations & Scope
 

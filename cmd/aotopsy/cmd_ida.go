@@ -84,10 +84,14 @@ func cmdIDA(args []string) error {
 		metaPath = filepath.Join(pipeResult.OutDir, "flutter_meta.json")
 	}
 
-	// Step 2: Copy script into artifact directory.
-	if copyErr := analysis.CopyIDAArtifacts(pipeResult.OutDir); copyErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not copy IDA script: %v\n", copyErr)
+	// Step 2: Copy the script into the artifact directory and execute that
+	// copy, so the artifact is self-contained. A copy failure means the script
+	// is missing or unreadable, which is fatal.
+	scriptPath, err := analysis.CopyIDAArtifacts(pipeResult.OutDir)
+	if err != nil {
+		return fmt.Errorf("ida script: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "script: %s\n", scriptPath)
 
 	// Step 3: Find python3 with idapro.
 	python, err := analysis.FindPython(*pythonBin)
@@ -95,13 +99,6 @@ func cmdIDA(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "python: %s\n", python)
-
-	// Step 4: Find IDA script.
-	scriptPath, err := analysis.FindIDAScript()
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "script: %s\n", scriptPath)
 
 	// Step 5: Run idalib.
 	decompDir := filepath.Join(pipeResult.OutDir, "decompiled")
