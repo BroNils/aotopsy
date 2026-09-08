@@ -57,6 +57,15 @@ func TestIntegrationAssetsPresentInSourceTree(t *testing.T) {
 	}
 }
 
+// setHome points os.UserHomeDir at dir. Both variables are set because
+// UserHomeDir reads USERPROFILE on Windows and HOME elsewhere, and the CI
+// matrix runs all three platforms.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 // installLayout builds the directory tree `make install` produces under a
 // throwaway HOME and returns that HOME.
 func installLayout(t *testing.T) string {
@@ -81,7 +90,7 @@ func installLayout(t *testing.T) string {
 
 func TestFindScriptPathUsesInstalledLayout(t *testing.T) {
 	home := installLayout(t)
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	got, err := FindScriptPath()
 	if err != nil {
@@ -109,7 +118,7 @@ func TestFindScriptPathRejectsPartialInstall(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "aotopsy_apply.py"), []byte("# apply\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	got, err := FindScriptPath()
 	if err == nil {
@@ -119,7 +128,7 @@ func TestFindScriptPathRejectsPartialInstall(t *testing.T) {
 
 func TestFindIDAScriptUsesInstalledLayout(t *testing.T) {
 	home := installLayout(t)
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	got, err := FindIDAScript()
 	if err != nil {
@@ -133,7 +142,7 @@ func TestFindIDAScriptUsesInstalledLayout(t *testing.T) {
 
 func TestCopyGhidraArtifactsReturnsSelfContainedDir(t *testing.T) {
 	home := installLayout(t)
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	outDir := t.TempDir()
 
 	scriptPath, err := CopyGhidraArtifacts(outDir)
@@ -169,7 +178,7 @@ func TestCopyGhidraArtifactsReturnsSelfContainedDir(t *testing.T) {
 
 func TestCopyIDAArtifactsReturnsCopiedScript(t *testing.T) {
 	home := installLayout(t)
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	outDir := t.TempDir()
 
 	scriptPath, err := CopyIDAArtifacts(outDir)
@@ -202,7 +211,7 @@ func TestCopyIDAArtifactsReturnsCopiedScript(t *testing.T) {
 // Missing assets must surface as an error, not as a silent no-op that leaves
 // the caller pointing at an empty artifact directory.
 func TestCopyArtifactsFailsWhenAssetsMissing(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	// Run from a directory with no ghidra_scripts/ or ida_scripts/ so the
 	// relative discovery candidates cannot find the repository's own copies.
 	t.Chdir(t.TempDir())
