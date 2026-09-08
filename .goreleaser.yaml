@@ -32,6 +32,14 @@ archives:
       - NOTICE
       - SECURITY.md
       - CHANGELOG.md
+      # Ghidra/IDA integration assets. The binary's script discovery looks for
+      # ghidra_scripts/ and ida_scripts/ next to the executable, so the archive
+      # layout has to carry them or `aotopsy ghidra`/`aotopsy ida` cannot work
+      # from a release download (issue #17).
+      - ghidra_scripts/aotopsy_prescript.py
+      - ghidra_scripts/aotopsy_apply.py
+      - ghidra_scripts/AARCH64_dart.cspec
+      - ida_scripts/aotopsy_apply.py
 
 checksum:
   name_template: "SHA256SUMS.txt"

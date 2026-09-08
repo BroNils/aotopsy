@@ -12,13 +12,23 @@ fuzz:
 	go test -fuzz=FuzzELFOpen -fuzztime=30s ./internal/elfx/
 	go test -fuzz=FuzzExtract -fuzztime=30s ./internal/snapshot/
 
-install: build
+# Integration assets, listed one by one rather than globbed: a missing file
+# then names itself in the install error instead of expanding to nothing
+# (issue #17), and no stray script gets installed without a decision.
+GHIDRA_ASSETS := \
+	ghidra_scripts/aotopsy_prescript.py \
+	ghidra_scripts/aotopsy_apply.py \
+	ghidra_scripts/AARCH64_dart.cspec
+IDA_ASSETS := \
+	ida_scripts/aotopsy_apply.py
+
+install: build $(GHIDRA_ASSETS) $(IDA_ASSETS)
 	install -d ~/.aotopsy/bin
 	install -d ~/.aotopsy/ghidra_scripts
 	install -d ~/.aotopsy/ida_scripts
 	install -m 755 $(BINARY) ~/.aotopsy/bin/$(BINARY)
-	install -m 644 ghidra_scripts/*.py ~/.aotopsy/ghidra_scripts/
-	install -m 644 ida_scripts/*.py ~/.aotopsy/ida_scripts/
+	install -m 644 $(GHIDRA_ASSETS) ~/.aotopsy/ghidra_scripts/
+	install -m 644 $(IDA_ASSETS) ~/.aotopsy/ida_scripts/
 	@echo ""
 	@echo "installed: ~/.aotopsy/bin/$(BINARY)"
 	@echo "installed: ~/.aotopsy/ghidra_scripts/"
