@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-09
+
+The Ghidra and IDA integration was documented, wired into the CLI, and read by
+the runtime — and absent from the repository. A clean clone had none of the
+three Python scripts, so `make install` died on a glob that expanded to
+nothing, and no release archive ever carried them. The theme of this release is
+that an asset the code depends on is not optional, and that discovering this
+required installing from a clean export rather than from a working tree that
+had the files untracked.
+
+### Fixed
+- **`make install` failed on a clean checkout** at
+  `install -m 644 ghidra_scripts/*.py`, reported as issue #17. The Makefile was
+  not wrong about the paths; the files were not in the repository. Line 67 of
+  `.gitignore` read `aotopsy_*` — unanchored, so it matched
+  `ghidra_scripts/aotopsy_prescript.py`, `ghidra_scripts/aotopsy_apply.py` and
+  `ida_scripts/aotopsy_apply.py` along with the root-level build binaries it
+  was written for. Anyone who had the scripts had them untracked, which is why
+  the gap only appeared from a fresh clone. The pattern is now `/aotopsy_*`:
+  root binaries stay ignored, the subdirectory scripts are tracked.
+- **The `install` target globbed instead of naming its inputs.** A missing file
+  produced `cannot stat 'ghidra_scripts/*.py'` rather than its own name, and
+  fixing only the Ghidra line would have moved the same failure to the IDA
+  line. Assets are now listed explicitly and are prerequisites of the target.
+  `AARCH64_dart.cspec` is installed as well — it was tracked but silently
+  dropped by a `*.py` glob.
+- **Release archives carried no integration assets.** The v1.5.0 tarballs held
+  the binary and five markdown files, while script discovery looks for
+  `ghidra_scripts/` and `ida_scripts/` beside the executable. `aotopsy ghidra`
+  and `aotopsy ida` therefore could not work from a release download at all.
+  GoReleaser now archives the same four files `make install` installs.
+
+### Changed
+- **The artifact copy is now the script that runs.** `CopyGhidraArtifacts` and
+  `CopyIDAArtifacts` return the paths they wrote, and the `ghidra` and `ida`
+  commands execute those. Both previously copied the scripts into the output
+  directory and then ran the *install* location anyway — IDA unconditionally,
+  the Ghidra GUI path by re-running discovery — so an artifact reused with
+  `--from` was never portable. A copy failure was a warning that left the
+  caller pointing at an empty directory; it is fatal now.
+
+### Added
+- Asset contract coverage in `internal/analysis/integration_assets_test.go`:
+  the four assets exist and are non-empty, discovery resolves them from the
+  `$HOME/.aotopsy/` layout `make install` produces, a directory holding only
+  one of the two Ghidra scripts is rejected, the copies match their sources,
+  and missing assets surface as an error rather than an empty output directory.
+
 ## [1.5.0] - 2026-09-06
 
 Name recovery from the snapshot's own tables, and a round of fabrications
@@ -485,7 +533,8 @@ mindmap
       Parity reporting
 ```
 
-[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/BroNils/aotopsy/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/BroNils/aotopsy/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/BroNils/aotopsy/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/BroNils/aotopsy/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/BroNils/aotopsy/compare/v1.2.0...v1.3.0

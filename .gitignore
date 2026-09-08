@@ -64,7 +64,12 @@ GEMINI.md
 /findpool
 /findpool305
 /aotopsy
-aotopsy_*
+# Root-level build outputs only. Anchored to the root on purpose: unanchored,
+# this pattern also ignored ghidra_scripts/aotopsy_*.py and
+# ida_scripts/aotopsy_apply.py, which is how a clean clone ended up without
+# the integration scripts that `make install` and the runtime both require
+# (issue #17).
+/aotopsy_*
 *.exe
 docs/roadmap/
 docs/SESSION-HANDOFF*.md

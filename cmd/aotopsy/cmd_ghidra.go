@@ -87,18 +87,13 @@ func cmdGhidra(args []string) error {
 		metaPath = filepath.Join(pipeResult.OutDir, "flutter_meta.json")
 	}
 
-	// Step 2: Copy scripts into artifact directory and use that as scriptPath.
-	// This ensures Ghidra always finds both scripts, regardless of install layout.
-	absOutDir, _ := filepath.Abs(pipeResult.OutDir)
-	scriptPath := filepath.Join(absOutDir, "ghidra")
-	if copyErr := analysis.CopyGhidraArtifacts(pipeResult.OutDir); copyErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not copy Ghidra scripts: %v\n", copyErr)
-		// Fallback: find scripts in their original location.
-		var findErr error
-		scriptPath, findErr = analysis.FindScriptPath()
-		if findErr != nil {
-			return fmt.Errorf("ghidra scripts not found: %v (copy also failed: %v)", findErr, copyErr)
-		}
+	// Step 2: Copy scripts into the artifact directory and run from there, so
+	// the artifact is self-contained. A failure here means the scripts are
+	// missing or unreadable, which is fatal — there is no fallback that would
+	// keep the artifact portable.
+	scriptPath, err := analysis.CopyGhidraArtifacts(pipeResult.OutDir)
+	if err != nil {
+		return fmt.Errorf("ghidra scripts: %w", err)
 	}
 
 	// Step 3: Find Ghidra.
@@ -110,7 +105,7 @@ func cmdGhidra(args []string) error {
 
 	// Step 4: Handle --gui (launch interactive Ghidra).
 	if *gui {
-		return launchGhidraGUI(ghHome, absLibPath, pipeResult.OutDir)
+		return launchGhidraGUI(ghHome, absLibPath, pipeResult.OutDir, scriptPath)
 	}
 
 	// Step 5: Run headless analysis.
@@ -169,15 +164,12 @@ func cmdGhidra(args []string) error {
 }
 
 // launchGhidraGUI starts Ghidra in interactive mode and prints instructions.
-func launchGhidraGUI(ghidraHome, libPath, outDir string) error {
+// scriptPath is the artifact copy made by the caller, so the directory the
+// user is told to add in the Script Manager is the same one headless mode uses.
+func launchGhidraGUI(ghidraHome, libPath, outDir, scriptPath string) error {
 	ghidraRun := filepath.Join(ghidraHome, "ghidraRun")
 	if _, err := os.Stat(ghidraRun); err != nil {
 		return fmt.Errorf("ghidraRun not found at %s", ghidraRun)
-	}
-
-	scriptPath, err := analysis.FindScriptPath()
-	if err != nil {
-		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "\nLaunching Ghidra GUI...\n")
