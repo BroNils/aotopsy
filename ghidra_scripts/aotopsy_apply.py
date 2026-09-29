@@ -76,6 +76,10 @@ def main():
     with open(meta_path, "r") as f:
         meta = json.load(f)
 
+    if meta.get("version") != "2" or meta.get("arch") != "arm64":
+        println("ERROR: flutter_meta.json must be schema version 2 for arch arm64")
+        return
+
     stats = {
         "functions": len(meta.get("functions", [])),
         "renamed": 0,

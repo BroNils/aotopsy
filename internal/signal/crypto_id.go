@@ -2,14 +2,17 @@ package signal
 
 import (
 	"bytes"
+	"debug/elf"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"aotopsy/internal/jsonutil"
 )
 
 // CryptoAlgorithmID identifies crypto algorithms from pool immediate values.
@@ -80,23 +83,102 @@ type CryptoFinding struct {
 	Value     string `json:"value"`
 }
 
+type cryptoPattern struct {
+	algo  string
+	hex   string
+	value uint64
+	width int
+	bytes []byte
+}
+
+func cryptoPatterns() []cryptoPattern {
+	keys := make([]string, 0, len(cryptoAlgorithmID))
+	for hex := range cryptoAlgorithmID {
+		keys = append(keys, hex)
+	}
+	sort.Strings(keys)
+	patterns := make([]cryptoPattern, 0, len(keys))
+	for _, hex := range keys {
+		if !isDistinctiveConstant(hex) {
+			continue
+		}
+		var val uint64
+		if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
+			continue
+		}
+		width := 4
+		if len(strings.TrimPrefix(hex, "0x")) > 8 {
+			width = 8
+		}
+		buf := make([]byte, width)
+		if width == 4 {
+			binary.LittleEndian.PutUint32(buf, uint32(val))
+		} else {
+			binary.LittleEndian.PutUint64(buf, val)
+		}
+		patterns = append(patterns, cryptoPattern{
+			algo: cryptoAlgorithmID[hex], hex: hex, value: val, width: width, bytes: buf,
+		})
+	}
+	return patterns
+}
+
+type cryptoAccumulator struct {
+	seen       map[string]bool
+	familyHits map[string]int
+	findings   []CryptoFinding
+}
+
+func newCryptoAccumulator() *cryptoAccumulator {
+	return &cryptoAccumulator{seen: map[string]bool{}, familyHits: map[string]int{}}
+}
+
+func (a *cryptoAccumulator) add(p cryptoPattern, absoluteOffset int) {
+	key := p.algo + ":" + p.hex
+	if a.seen[key] {
+		return
+	}
+	a.seen[key] = true
+	a.familyHits[algorithmFamily(p.algo)]++
+	a.findings = append(a.findings, CryptoFinding{
+		Algorithm: p.algo,
+		Constant:  p.hex,
+		PoolIndex: -1,
+		Value:     fmt.Sprintf("binary_offset=0x%x", absoluteOffset),
+	})
+}
+
+func (a *cryptoAccumulator) finish() []CryptoFinding {
+	kept := a.findings[:0]
+	for _, f := range a.findings {
+		if isPrintableASCIIConstant(f.Constant) && a.familyHits[algorithmFamily(f.Algorithm)] < 2 {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	sort.Slice(kept, func(i, j int) bool {
+		if kept[i].Algorithm != kept[j].Algorithm {
+			return kept[i].Algorithm < kept[j].Algorithm
+		}
+		return kept[i].Constant < kept[j].Constant
+	})
+	return kept
+}
+
 // IdentifyCryptoFromPoolImmediates reads pool_immediates.jsonl and identifies
 // crypto algorithm constants. Returns a list of findings.
 func IdentifyCryptoFromPoolImmediates(inDir string) ([]CryptoFinding, error) {
 	path := filepath.Join(inDir, "pool_immediates.jsonl")
-	f, err := os.Open(path)
+	records, err := jsonutil.ReadJSONL[PoolImmediateRecord](path, jsonutil.StandardLimits)
 	if err != nil {
-		return nil, nil // not fatal — file may not exist
+		if os.IsNotExist(err) {
+			return nil, nil // optional artifact
+		}
+		return nil, fmt.Errorf("read pool immediates: %w", err)
 	}
-	defer func() { _ = f.Close() }()
 
 	var findings []CryptoFinding
-	dec := json.NewDecoder(f)
-	for dec.More() {
-		var rec PoolImmediateRecord
-		if err := dec.Decode(&rec); err != nil {
-			break
-		}
+	for _, rec := range records {
 		hex := strings.ToLower(rec.Hex)
 		if algo, ok := cryptoAlgorithmID[hex]; ok {
 			findings = append(findings, CryptoFinding{
@@ -107,6 +189,15 @@ func IdentifyCryptoFromPoolImmediates(inDir string) ([]CryptoFinding, error) {
 			})
 		}
 	}
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].Algorithm != findings[j].Algorithm {
+			return findings[i].Algorithm < findings[j].Algorithm
+		}
+		if findings[i].Constant != findings[j].Constant {
+			return findings[i].Constant < findings[j].Constant
+		}
+		return findings[i].PoolIndex < findings[j].PoolIndex
+	})
 	return findings, nil
 }
 
@@ -149,119 +240,137 @@ func isDistinctiveConstant(hex string) bool {
 	return true
 }
 
-// IdentifyCryptoFromBinary scans the raw ELF binary for crypto constant bytes.
-// Dart AOT compiles integer constants to MOVZ/MOVK instructions (ARM64) or
-// MOV imm (x86_64), so they appear as raw bytes in the .text section, not
-// as pool immediates. This function scans for 32-bit and 64-bit little-endian
-// representations of known crypto constants.
+// IdentifyCryptoFromBinary identifies constants in executable code. x86_64 can
+// carry a complete immediate byte sequence in an instruction, but AArch64
+// LoadImmediate materialises values as MOVZ/MOVN followed by MOVK chunks. A raw
+// little-endian byte search therefore systematically misses AArch64 constants
+// and can match unrelated data. For real ELFs we use the architecture-specific
+// model and restrict work to executable sections; non-ELF input keeps a raw
+// scan solely for small synthetic/unit-test fixtures.
 func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
 	data, err := os.ReadFile(libPath)
 	if err != nil {
 		return nil, err
 	}
+	patterns := cryptoPatterns()
+	acc := newCryptoAccumulator()
 
-	var findings []CryptoFinding
-	seen := map[string]bool{} // dedup by algorithm+constant
-
-	// Build a lookup: hex string → algorithm name
-	// Also build byte patterns for searching
-	type cryptoPattern struct {
-		algo  string
-		hex   string
-		bytes []byte
-	}
-	var patterns []cryptoPattern
-	for hex, algo := range cryptoAlgorithmID {
-		// Skip constants whose byte pattern is not distinctive. A 4-byte LE
-		// search for AES Rcon[0] (0x01000000 → 00 00 00 01) matches in every
-		// binary ever built -- it is three zero bytes and a 1. Reporting
-		// "AES Rcon[0] found" from that is a guaranteed false positive, so
-		// only high-entropy constants are searched in raw bytes. (The pool
-		// scan in IdentifyCryptoFromPoolImmediates still reports them: there
-		// the value is a real declared constant, not an accidental byte run.)
-		if !isDistinctiveConstant(hex) {
-			continue
+	if ef, openErr := elf.Open(libPath); openErr == nil {
+		defer func() { _ = ef.Close() }()
+		for _, sec := range ef.Sections {
+			if sec.Flags&elf.SHF_EXECINSTR == 0 || sec.Type == elf.SHT_NOBITS || sec.Size == 0 {
+				continue
+			}
+			if sec.Offset > uint64(len(data)) || sec.Size > uint64(len(data))-sec.Offset {
+				return nil, fmt.Errorf("ELF executable section %q exceeds file", sec.Name)
+			}
+			start := int(sec.Offset)
+			end := start + int(sec.Size)
+			code := data[start:end]
+			switch ef.Machine {
+			case elf.EM_AARCH64:
+				identifyCryptoFromARM64Code(code, start, patterns, acc)
+			case elf.EM_X86_64:
+				identifyCryptoFromRawBytes(code, start, patterns, acc)
+			default:
+				return nil, fmt.Errorf("unsupported ELF machine %s for crypto scan", ef.Machine)
+			}
 		}
-		// Parse hex to bytes
-		var val uint64
-		if _, err := fmt.Sscanf(hex, "0x%x", &val); err != nil {
-			continue
-		}
-		// Determine search width from the HEX STRING length, not the runtime
-		// value. A constant declared as 16 hex digits (e.g. "0x0000000000000001",
-		// Keccak RC[0]) is a 64-bit constant and must be searched as 8-byte LE,
-		// even though its value (1) fits in 32 bits. Searching it as 4-byte LE
-		// ("01 00 00 00") matches millions of unrelated bytes (every `MOV X0, #1`,
-		// boolean true, array length 1) and floods findings with false positives.
-		// A constant declared as <=8 hex digits is a genuine 32-bit constant.
-		hexDigits := len(strings.TrimPrefix(hex, "0x"))
-		is64Bit := hexDigits > 8
-		if !is64Bit && val <= 0xFFFFFFFF {
-			// 32-bit constant: search as 4-byte LE
-			buf := make([]byte, 4)
-			binary.LittleEndian.PutUint32(buf, uint32(val))
-			patterns = append(patterns, cryptoPattern{algo: algo, hex: hex, bytes: buf})
-		} else {
-			// 64-bit constant: search as 8-byte LE
-			buf := make([]byte, 8)
-			binary.LittleEndian.PutUint64(buf, val)
-			patterns = append(patterns, cryptoPattern{algo: algo, hex: hex, bytes: buf})
-		}
+		return acc.finish(), nil
 	}
 
-	// Scan binary for each pattern
-	familyHits := map[string]int{}
+	// Non-ELF inputs are accepted only as synthetic byte fixtures. This keeps
+	// the pure detector unit-testable without weakening the real ELF path.
+	identifyCryptoFromRawBytes(data, 0, patterns, acc)
+	return acc.finish(), nil
+}
+
+func identifyCryptoFromRawBytes(data []byte, baseOffset int, patterns []cryptoPattern, acc *cryptoAccumulator) {
 	for _, pat := range patterns {
 		offset := 0
-		for {
+		for offset <= len(data)-len(pat.bytes) {
 			idx := bytes.Index(data[offset:], pat.bytes)
 			if idx < 0 {
 				break
 			}
-			absOffset := offset + idx
-			key := pat.algo + ":" + pat.hex
-			if !seen[key] {
-				seen[key] = true
-				familyHits[algorithmFamily(pat.algo)]++
-				findings = append(findings, CryptoFinding{
-					Algorithm: pat.algo,
-					Constant:  pat.hex,
-					PoolIndex: -1, // not from pool — from binary
-					Value:     fmt.Sprintf("binary_offset=0x%x", absOffset),
-				})
-			}
-			offset = absOffset + len(pat.bytes)
+			abs := offset + idx
+			acc.add(pat, baseOffset+abs)
+			offset = abs + len(pat.bytes)
 		}
 	}
+}
 
-	// Drop lone ASCII-looking constants.
-	//
-	// ChaCha20's constants ARE text: "expand 32-byte k" split into four
-	// 32-bit words, so 0x61707865 is literally the bytes "expa". A raw
-	// scan therefore matched it inside `expando_patch.dart` -- a Dart core
-	// library filename -- and reported "ChaCha20 detected" on a binary
-	// containing no ChaCha20 at all. The other three words had zero hits,
-	// which is exactly the corroboration this now requires.
-	//
-	// isDistinctiveConstant cannot catch this: "expa" has four distinct
-	// non-zero bytes and is not a power of two, so it passes every test
-	// there. The property that matters is not entropy, it is that the
-	// bytes are printable text, which collides with identifiers in any
-	// real binary.
-	//
-	// Only ASCII constants need a second witness. A lone SHA-256 K[0]
-	// (0x428a2f98 -> 98 2f 8a 42) is not text and is still reported on its
-	// own, so no existing detection is weakened. For an RE tool a
-	// confident wrong "ChaCha20 found" is worse than silence: it sends the
-	// analyst hunting a cipher that is not there.
-	kept := findings[:0]
-	for _, f := range findings {
-		if isPrintableASCIIConstant(f.Constant) && familyHits[algorithmFamily(f.Algorithm)] < 2 {
+type moveWideKind uint8
+
+const (
+	moveWideN moveWideKind = iota + 1
+	moveWideZ
+	moveWideK
+)
+
+// decodeMoveWide decodes AArch64 MOVN/MOVZ/MOVK (32- and 64-bit). These are
+// the instructions used by Dart's Assembler::LoadImmediate to materialise
+// integer constants that are not pool-loaded.
+func decodeMoveWide(raw uint32) (kind moveWideKind, rd int, imm uint64, shift uint, width int, ok bool) {
+	top := raw & 0x7F800000 // ignore sf (bit 31)
+	switch top {
+	case 0x12800000:
+		kind = moveWideN
+	case 0x52800000:
+		kind = moveWideZ
+	case 0x72800000:
+		kind = moveWideK
+	default:
+		return 0, 0, 0, 0, 0, false
+	}
+	width = 32
+	if raw&(1<<31) != 0 {
+		width = 64
+	}
+	hw := uint((raw >> 21) & 0x3)
+	if width == 32 && hw >= 2 {
+		return 0, 0, 0, 0, 0, false
+	}
+	return kind, int(raw & 0x1F), uint64((raw >> 5) & 0xFFFF), hw * 16, width, true
+}
+
+func identifyCryptoFromARM64Code(code []byte, baseOffset int, patterns []cryptoPattern, acc *cryptoAccumulator) {
+	byValue := make(map[uint64][]cryptoPattern)
+	for _, p := range patterns {
+		byValue[p.value] = append(byValue[p.value], p)
+	}
+	for off := 0; off+4 <= len(code); off += 4 {
+		raw := binary.LittleEndian.Uint32(code[off : off+4])
+		kind, rd, imm, shift, width, ok := decodeMoveWide(raw)
+		if !ok || kind == moveWideK {
 			continue
 		}
-		kept = append(kept, f)
+		mask := uint64(^uint32(0))
+		if width == 64 {
+			mask = ^uint64(0)
+		}
+		value := (imm << shift) & mask
+		if kind == moveWideN {
+			value = (^value) & mask
+		}
+		end := off + 4
+		for end+4 <= len(code) {
+			next := binary.LittleEndian.Uint32(code[end : end+4])
+			nextKind, nextRD, nextImm, nextShift, nextWidth, nextOK := decodeMoveWide(next)
+			if !nextOK || nextKind != moveWideK || nextRD != rd || nextWidth != width {
+				break
+			}
+			chunkMask := uint64(0xFFFF) << nextShift
+			value = (value &^ chunkMask) | ((nextImm << nextShift) & chunkMask)
+			value &= mask
+			end += 4
+		}
+		for _, p := range byValue[value] {
+			if p.width*8 == width {
+				acc.add(p, baseOffset+off)
+			}
+		}
 	}
-	return kept, nil
 }
 
 // algorithmFamily is the cipher name in an entry like "ChaCha20 'expa'"
@@ -296,8 +405,8 @@ func isPrintableASCIIConstant(hex string) bool {
 
 // MethodChannelFinding is a Flutter MethodChannel enumeration finding.
 type MethodChannelFinding struct {
-	Channel string `json:"channel"`
-	Func    string `json:"func,omitempty"`
+	Channel   string   `json:"channel"`
+	Functions []string `json:"functions,omitempty"`
 }
 
 var methodChannelRe = regexp.MustCompile(`MethodChannel\s*\(\s*["']([^"']+)["']\s*\)`)
@@ -305,8 +414,18 @@ var methodChannelRe = regexp.MustCompile(`MethodChannel\s*\(\s*["']([^"']+)["']\
 // EnumerateMethodChannels scans string refs for MethodChannel("name") patterns
 // and also detects Flutter platform channel names by pattern matching.
 func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFinding {
-	var findings []MethodChannelFinding
-	seen := map[string]bool{}
+	funcsByChannel := map[string]map[string]bool{}
+	add := func(channel, fn string) {
+		if channel == "" {
+			return
+		}
+		if funcsByChannel[channel] == nil {
+			funcsByChannel[channel] = map[string]bool{}
+		}
+		if fn != "" {
+			funcsByChannel[channel][fn] = true
+		}
+	}
 	for _, sr := range stringRefs {
 		if sr.Value == "" {
 			continue
@@ -314,30 +433,19 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 		// Pattern 1: MethodChannel("name") — Dart source pattern
 		matches := methodChannelRe.FindStringSubmatch(sr.Value)
 		if len(matches) >= 2 {
-			channel := matches[1]
-			if !seen[channel] {
-				seen[channel] = true
-				findings = append(findings, MethodChannelFinding{
-					Channel: channel,
-					Func:    sr.Func,
-				})
-			}
+			add(matches[1], sr.Func)
 			continue
 		}
 		// Pattern 2: Explicit MethodChannel references
 		if strings.Contains(sr.Value, "methodChannel") || strings.Contains(sr.Value, "MethodChannel") {
-			if !seen[sr.Value] && len(sr.Value) > 5 && len(sr.Value) < 200 {
-				seen[sr.Value] = true
-				findings = append(findings, MethodChannelFinding{
-					Channel: sr.Value,
-					Func:    sr.Func,
-				})
+			if len(sr.Value) > 5 && len(sr.Value) < 200 {
+				add(sr.Value, sr.Func)
 			}
 			continue
 		}
 		// Pattern 3: Flutter platform channel naming convention
 		// Channels like "dev.flutter/channel-buffers", "flutter/platform", etc.
-		if (strings.Contains(sr.Value, "dev.flutter/") ||
+		if strings.Contains(sr.Value, "dev.flutter/") ||
 			strings.Contains(sr.Value, "flutter/platform") ||
 			strings.Contains(sr.Value, "flutter/navigation") ||
 			strings.Contains(sr.Value, "flutter/textinput") ||
@@ -347,34 +455,28 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 			strings.Contains(sr.Value, "flutter/localization") ||
 			strings.Contains(sr.Value, "flutter/sensors") ||
 			strings.Contains(sr.Value, "flutter/settings") ||
-			strings.Contains(sr.Value, "flutter/lifecycle")) &&
-			!seen[sr.Value] {
-			seen[sr.Value] = true
-			findings = append(findings, MethodChannelFinding{
-				Channel: sr.Value,
-				Func:    sr.Func,
-			})
+			strings.Contains(sr.Value, "flutter/lifecycle") {
+			add(sr.Value, sr.Func)
 		}
 		// Pattern 4: BinaryMessenger / platform channel infrastructure
 		if strings.Contains(sr.Value, "BinaryMessenger") ||
 			strings.Contains(sr.Value, "PlatformChannel") ||
 			strings.Contains(sr.Value, "BasicMessageChannel") {
-			if !seen[sr.Value] {
-				seen[sr.Value] = true
-				findings = append(findings, MethodChannelFinding{
-					Channel: sr.Value,
-					Func:    sr.Func,
-				})
-			}
+			add(sr.Value, sr.Func)
 		}
 	}
+	findings := make([]MethodChannelFinding, 0, len(funcsByChannel))
+	for channel, set := range funcsByChannel {
+		findings = append(findings, MethodChannelFinding{Channel: channel, Functions: sortedSet(set)})
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Channel < findings[j].Channel })
 	return findings
 }
 
 // PluginFinding is a Flutter plugin enumeration finding.
 type PluginFinding struct {
-	Plugin string `json:"plugin"`
-	Func   string `json:"func,omitempty"`
+	Plugin    string   `json:"plugin"`
+	Functions []string `json:"functions,omitempty"`
 }
 
 // Known Flutter plugin package name patterns.
@@ -391,8 +493,7 @@ var pluginPatterns = []string{
 
 // EnumeratePlugins scans string refs for Flutter plugin package names.
 func EnumeratePlugins(stringRefs []StringRefRecord) []PluginFinding {
-	var findings []PluginFinding
-	seen := map[string]bool{}
+	funcsByPlugin := map[string]map[string]bool{}
 	for _, sr := range stringRefs {
 		if sr.Value == "" {
 			continue
@@ -400,25 +501,29 @@ func EnumeratePlugins(stringRefs []StringRefRecord) []PluginFinding {
 		val := strings.ToLower(sr.Value)
 		for _, pat := range pluginPatterns {
 			if strings.Contains(val, pat) {
-				if !seen[sr.Value] {
-					seen[sr.Value] = true
-					findings = append(findings, PluginFinding{
-						Plugin: sr.Value,
-						Func:   sr.Func,
-					})
+				if funcsByPlugin[sr.Value] == nil {
+					funcsByPlugin[sr.Value] = map[string]bool{}
+				}
+				if sr.Func != "" {
+					funcsByPlugin[sr.Value][sr.Func] = true
 				}
 				break
 			}
 		}
 	}
+	findings := make([]PluginFinding, 0, len(funcsByPlugin))
+	for plugin, set := range funcsByPlugin {
+		findings = append(findings, PluginFinding{Plugin: plugin, Functions: sortedSet(set)})
+	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Plugin < findings[j].Plugin })
 	return findings
 }
 
 // NetworkEndpointFinding is a network endpoint extraction finding.
 type NetworkEndpointFinding struct {
-	Type  string `json:"type"` // "url", "ip", "domain"
-	Value string `json:"value"`
-	Func  string `json:"func,omitempty"`
+	Type      string   `json:"type"` // "url", "ip", "domain"
+	Value     string   `json:"value"`
+	Functions []string `json:"functions,omitempty"`
 }
 
 var (
@@ -487,38 +592,31 @@ func isNotADomain(m string) bool {
 
 // ExtractNetworkEndpoints scans string refs for URLs, IPs, and domains.
 func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFinding {
-	var findings []NetworkEndpointFinding
-	seen := map[string]bool{}
+	type endpointKey struct{ typ, value string }
+	funcsByEndpoint := map[endpointKey]map[string]bool{}
+	add := func(typ, value, fn string) {
+		key := endpointKey{typ: typ, value: value}
+		if funcsByEndpoint[key] == nil {
+			funcsByEndpoint[key] = map[string]bool{}
+		}
+		if fn != "" {
+			funcsByEndpoint[key][fn] = true
+		}
+	}
 	for _, sr := range stringRefs {
 		if sr.Value == "" || len(sr.Value) < 4 {
 			continue
 		}
 		// URLs
 		for _, m := range urlRe.FindAllString(sr.Value, -1) {
-			key := "url:" + m
-			if !seen[key] {
-				seen[key] = true
-				findings = append(findings, NetworkEndpointFinding{
-					Type:  "url",
-					Value: m,
-					Func:  sr.Func,
-				})
-			}
+			add("url", m, sr.Func)
 		}
 		// IPs (skip 0.0.0.0, 127.0.0.1, 255.x)
 		for _, m := range ipRe.FindAllString(sr.Value, -1) {
 			if m == "0.0.0.0" || m == "127.0.0.1" || strings.HasPrefix(m, "255.") {
 				continue
 			}
-			key := "ip:" + m
-			if !seen[key] {
-				seen[key] = true
-				findings = append(findings, NetworkEndpointFinding{
-					Type:  "ip",
-					Value: m,
-					Func:  sr.Func,
-				})
-			}
+			add("ip", m, sr.Func)
 		}
 		// Domains (must have at least one dot, not start with a number)
 		for _, m := range domainRe.FindAllString(sr.Value, -1) {
@@ -529,18 +627,32 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 			if isNotADomain(m) {
 				continue
 			}
-			key := "domain:" + m
-			if !seen[key] {
-				seen[key] = true
-				findings = append(findings, NetworkEndpointFinding{
-					Type:  "domain",
-					Value: m,
-					Func:  sr.Func,
-				})
-			}
+			add("domain", m, sr.Func)
 		}
 	}
+	findings := make([]NetworkEndpointFinding, 0, len(funcsByEndpoint))
+	for key, set := range funcsByEndpoint {
+		findings = append(findings, NetworkEndpointFinding{Type: key.typ, Value: key.value, Functions: sortedSet(set)})
+	}
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].Type != findings[j].Type {
+			return findings[i].Type < findings[j].Type
+		}
+		return findings[i].Value < findings[j].Value
+	})
 	return findings
+}
+
+func sortedSet(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DeobfuscationFinding is a string deobfuscation detection finding.
@@ -643,10 +755,7 @@ type StringRefRecord struct {
 
 // WriteCryptoFindings writes crypto findings to crypto_findings.jsonl.
 func WriteCryptoFindings(outDir string, findings []CryptoFinding) error {
-	if len(findings) == 0 {
-		return nil
-	}
-	return writeJSONLFile(filepath.Join(outDir, "crypto_findings.jsonl"), findings)
+	return writeSignalJSONL(filepath.Join(outDir, "crypto_findings.jsonl"), findings)
 }
 
 // WriteSignalExpansionJSONL writes all signal expansion findings to JSONL files.
@@ -655,108 +764,32 @@ func WriteCryptoFindings(outDir string, findings []CryptoFinding) error {
 func WriteSignalExpansionJSONL(outDir string, stringRefs []StringRefRecord) error {
 	// 1. Method Channel enumeration
 	mcFindings := EnumerateMethodChannels(stringRefs)
-	if len(mcFindings) > 0 {
-		if err := writeJSONLFile(filepath.Join(outDir, "method_channels.jsonl"), mcFindings); err != nil {
-			return fmt.Errorf("write method_channels.jsonl: %w", err)
-		}
+	if err := writeSignalJSONL(filepath.Join(outDir, "method_channels.jsonl"), mcFindings); err != nil {
+		return fmt.Errorf("write method_channels.jsonl: %w", err)
 	}
 
 	// 2. Plugin enumeration
 	pluginFindings := EnumeratePlugins(stringRefs)
-	if len(pluginFindings) > 0 {
-		if err := writeJSONLFile(filepath.Join(outDir, "plugins.jsonl"), pluginFindings); err != nil {
-			return fmt.Errorf("write plugins.jsonl: %w", err)
-		}
+	if err := writeSignalJSONL(filepath.Join(outDir, "plugins.jsonl"), pluginFindings); err != nil {
+		return fmt.Errorf("write plugins.jsonl: %w", err)
 	}
 
 	// 3. String deobfuscation
 	deobFindings := DetectObfuscatedStrings(stringRefs)
-	if len(deobFindings) > 0 {
-		if err := writeJSONLFile(filepath.Join(outDir, "deobfuscation.jsonl"), deobFindings); err != nil {
-			return fmt.Errorf("write deobfuscation.jsonl: %w", err)
-		}
+	if err := writeSignalJSONL(filepath.Join(outDir, "deobfuscation.jsonl"), deobFindings); err != nil {
+		return fmt.Errorf("write deobfuscation.jsonl: %w", err)
 	}
 
 	// 4. Network endpoint extraction
 	netFindings := ExtractNetworkEndpoints(stringRefs)
-	if len(netFindings) > 0 {
-		if err := writeJSONLFile(filepath.Join(outDir, "network_endpoints.jsonl"), netFindings); err != nil {
-			return fmt.Errorf("write network_endpoints.jsonl: %w", err)
-		}
+	if err := writeSignalJSONL(filepath.Join(outDir, "network_endpoints.jsonl"), netFindings); err != nil {
+		return fmt.Errorf("write network_endpoints.jsonl: %w", err)
 	}
 
 	return nil
 }
 
-func writeJSONLFile(path string, entries interface{}) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-
-	switch v := entries.(type) {
-	case []CryptoFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []MethodChannelFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []PluginFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []DeobfuscationFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []NetworkEndpointFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []YaraFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []TaintFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []BehavioralFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	case []EntropyFinding:
-		for _, e := range v {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-		}
-	default:
-		// Without this, a finding type added later silently produced an
-		// empty file instead of an error.
-		return fmt.Errorf("writeJSONLFile: unsupported entry type %T for %s", entries, path)
-	}
-	return nil
+func writeSignalJSONL[T any](path string, entries []T) error {
+	_, err := jsonutil.WriteJSONLFile(path, entries)
+	return err
 }

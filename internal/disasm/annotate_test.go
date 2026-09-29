@@ -152,6 +152,23 @@ func TestTHRContextAnnotator(t *testing.T) {
 	}
 }
 
+func TestTHRContextAnnotatorClassifiesUnresolvedARM64(t *testing.T) {
+	// LDR X16, [X26, #72] followed by BLR X16 is strong runtime-entrypoint
+	// evidence. The inline annotator must preserve ARM64 provenance when it
+	// constructs the temporary audit record, or the classifier returns UNKNOWN.
+	ldr := uint32(0xF9400000 | (9 << 10) | (26 << 5) | 16)
+	blr := uint32(0xd63f0200) // BLR X16
+	insts := []Inst{
+		{Addr: 0x1000, Raw: ldr, Text: "LDR X16, [X26,#72]"},
+		{Addr: 0x1004, Raw: blr, Text: "BLR X16"},
+	}
+
+	ann := THRContextAnnotator(insts, nil)
+	if got, want := ann(insts[0]), "THR+0x48 LDR[RUNTIME_ENTRY]"; got != want {
+		t.Fatalf("THRContextAnnotator unresolved ARM64 = %q, want %q", got, want)
+	}
+}
+
 func TestPeepholeState(t *testing.T) {
 	pool := map[int]string{
 		2046: `"large pool string"`,
@@ -171,6 +188,21 @@ func TestPeepholeState(t *testing.T) {
 	want := `PP[2046] "large pool string"`
 	if got != want {
 		t.Errorf("peephole = %q, want %q", got, want)
+	}
+}
+
+func TestPeepholeStateAutoResetsOnReplay(t *testing.T) {
+	pool := map[int]string{2046: `"large pool string"`}
+	ps := NewPeepholeState(pool)
+	addRaw := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
+	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
+
+	// End a first pass with a pending future ADD.
+	_ = ps.Annotate(Inst{Addr: 0x2000, Raw: addRaw})
+	// A semantic replay starts from an earlier address. The stale ADD from
+	// 0x2000 must not annotate the earlier load.
+	if got := ps.Annotate(Inst{Addr: 0x1000, Raw: ldrRaw}); got != "" {
+		t.Fatalf("cross-pass stale peephole state produced %q", got)
 	}
 }
 

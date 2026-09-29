@@ -320,20 +320,26 @@ func TestThreadDataFieldsAreNotStubs(t *testing.T) {
 	}
 }
 
-// TestGeneratorSuspendStubsAreAsync: generators suspend through the same
-// machinery as async functions. Keying only on "async" left the sync_star
-// stubs classified as unrecognised, reporting them as a gap in our tables
-// when they are the strongest evidence a function is a generator.
-func TestGeneratorSuspendStubsAreAsync(t *testing.T) {
+func TestGeneratorSuspendStubsStayDistinctFromAsync(t *testing.T) {
 	for _, name := range []string{
 		"suspend_state_init_sync_star_entry_point",
 		"suspend_state_suspend_sync_star_at_start_entry_point",
 		"suspend_state_return_sync_star_entry_point",
+	} {
+		if sdk.IsAsyncStubName(name) {
+			t.Errorf("IsAsyncStubName(%q) = true for sync* generator machinery", name)
+		}
+		if role := sdk.ClassifyStubRole(name); role == sdk.StubRoleNone {
+			t.Errorf("ClassifyStubRole(%q) lost recognized generator evidence", name)
+		}
+	}
+	for _, name := range []string{
 		"suspend_state_init_async_entry_point",
 		"suspend_state_await_entry_point",
+		"suspend_state_yield_async_star_entry_point",
 	} {
 		if !sdk.IsAsyncStubName(name) {
-			t.Errorf("IsAsyncStubName(%q) = false; suspension is what these stubs are for", name)
+			t.Errorf("IsAsyncStubName(%q) = false for async/async* machinery", name)
 		}
 	}
 }

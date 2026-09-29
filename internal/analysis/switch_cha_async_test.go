@@ -202,7 +202,7 @@ func TestAsyncFunctionExists(t *testing.T) {
 func countWithInline(csm *cluster.CodeSourceMapInfo) int {
 	count := 0
 	for _, e := range csm.Entries {
-		if len(e.InlineStack) > 0 {
+		if e.InlineDepth() > 0 {
 			count++
 		}
 	}

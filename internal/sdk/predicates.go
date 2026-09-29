@@ -1,6 +1,10 @@
 package sdk
 
-import "strings"
+import (
+	"strings"
+
+	"aotopsy/internal/snapshot"
+)
 
 // ── Write-barrier detection ───────────────────────────────────────────
 //
@@ -19,11 +23,11 @@ import "strings"
 //	testb(FieldAddress(value, tags_offset()), scratch)
 //	j(ZERO, &done)
 //
-// On ARM64 the mask lives in HEAP_BITS (R28); on x86_64 there is no
-// HEAP_BITS register and the compiler ANDs against the THR.write_barrier_mask
-// field. Both tokens are barrier-only — a reserved register / dedicated
-// thread field that user Dart never reads — so either one appearing in a
-// branch condition or statement is unambiguously the barrier check.
+// On Dart 2.10-2.13 ARM64 the mask lives in BARRIER_MASK (R28). Dart 2.14+
+// folds that mask together with the compressed-pointer heap base in HEAP_BITS:
+// the barrier reads HEAP_BITS >> 32, while pointer decompression reads
+// HEAP_BITS << 32. On x86_64 the compiler ANDs against the dedicated
+// THR.write_barrier_mask field.
 //
 // The store the check guards has already been emitted, so eliding the
 // branch drops pure GC bookkeeping with no source-level meaning.
@@ -32,7 +36,7 @@ import "strings"
 // generational write-barrier check. Used by the decompiler to elide the
 // branch, and by signal/disasm to classify it as compiler bookkeeping.
 func IsWriteBarrierCond(cond string) bool {
-	return strings.Contains(cond, "HEAP_BITS") || strings.Contains(cond, "write_barrier_mask")
+	return containsWriteBarrierMask(cond)
 }
 
 // IsWriteBarrierStmt reports whether an emitted statement is the
@@ -41,7 +45,18 @@ func IsWriteBarrierCond(cond string) bool {
 // is materialized into a statement rather than forwarded into the branch
 // condition, so the condition-level predicate above never sees it.
 func IsWriteBarrierStmt(line string) bool {
-	return strings.Contains(line, "write_barrier_mask") || strings.Contains(line, "HEAP_BITS")
+	return containsWriteBarrierMask(line)
+}
+
+func containsWriteBarrierMask(s string) bool {
+	if strings.Contains(s, "write_barrier_mask") || strings.Contains(s, SymBarrierMask) {
+		return true
+	}
+	// HEAP_BITS itself is not barrier-only: `HEAP_BITS << 32` is compressed
+	// pointer decompression. Only the SDK's right-shifted high half is the
+	// write-barrier mask.
+	compact := strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(s)
+	return strings.Contains(compact, SymHeapBits+">>32")
 }
 
 // ── Stack-overflow detection ──────────────────────────────────────────
@@ -144,29 +159,51 @@ func itoa(n int64) string {
 
 // ── Pointer decompression detection ───────────────────────────────────
 //
-// Source: runtime/vm/compiler/assembler/assembler_arm64.cc @3.9.2,
-//   under DART_COMPRESSED_POINTERS:
+// Source: runtime/vm/compiler/assembler/assembler_arm64.cc:
+//   @2.13.0 under DART_COMPRESSED_POINTERS:
+//     add(dst, src, Operand(HEAP_BASE))
+//   @2.14.0+ under DART_COMPRESSED_POINTERS:
 //     add(dst, src, Operand(HEAP_BITS, LSL, 32))
 // Source: runtime/vm/compiler/assembler/assembler_x64.cc @3.9.2:
 //     addq(dst, Address(THR, heap_base_offset()))
 //
-// On ARM64, HEAP_BITS (R28) holds write_barrier_mask<<32 | heap_base>>32,
-// so shifting left by 32 drops the mask and leaves heap_base — the
-// decompression of a compressed pointer. On x86_64, the compiler adds
-// THR.heap_base directly. Both are invisible at source level (compression is
-// a VM implementation detail), so the decompiler elides them and typetrack
-// treats them as identity transforms (the object's class is unchanged).
+// Dart 2.13 ARM64 keeps the full heap base in the dedicated HEAP_BASE (R23).
+// Dart 2.14+ ARM64 folds write_barrier_mask<<32 | heap_base>>32 into HEAP_BITS
+// (R28), so shifting left by 32 recovers the aligned heap base. On x86_64 the
+// compiler adds THR.heap_base directly. All forms are invisible at source level
+// and are identity transforms for object type tracking.
+
+// ARM64PointerDecompressionSpec returns the SDK-reserved source register and
+// LSL amount used by pointer decompression for an exact Dart version. ok=false
+// means that version has no supported ARM64 register decompression form.
+func ARM64PointerDecompressionSpec(dartVersion string) (srcReg, lslAmount int, ok bool) {
+	if dartVersion == "" {
+		return 0, 0, false
+	}
+	if snapshot.VersionAtLeast(dartVersion, "2.14.0") {
+		return ARM64HeapBits, 32, true
+	}
+	if snapshot.VersionAtLeast(dartVersion, "2.13.0") {
+		return ARM64HeapBaseLegacy, 0, true
+	}
+	return 0, 0, false
+}
 
 // IsARM64PointerDecompression reports whether an ADD instruction with the
-// given source register and shift is a compressed-pointer decompression:
-// `add Xd, Xn, X28, LSL #32` (HEAP_BITS shifted left by 32).
-func IsARM64PointerDecompression(srcReg, shiftSpec string) bool {
-	if strings.ToLower(strings.TrimSpace(srcReg)) != ARM64HeapBitsStr {
+// given source register and shift matches that version's SDK decompression
+// shape. Dart 2.13 is `add Xd, Xn, X23`; Dart 2.14+ is
+// `add Xd, Xn, X28, LSL #32`.
+func IsARM64PointerDecompression(dartVersion, srcReg, shiftSpec string) bool {
+	reg, wantShift, ok := ARM64PointerDecompressionSpec(dartVersion)
+	if !ok || strings.ToLower(strings.TrimSpace(srcReg)) != ARM64RegName(reg) {
 		return false
 	}
 	spec := strings.ToLower(strings.TrimSpace(shiftSpec))
+	if wantShift == 0 {
+		return spec == "" || spec == "lsl #0"
+	}
 	i := strings.Index(spec, "#")
-	return strings.HasPrefix(spec, "lsl") && i >= 0 && strings.TrimSpace(spec[i+1:]) == "32"
+	return strings.HasPrefix(spec, "lsl") && i >= 0 && strings.TrimSpace(spec[i+1:]) == itoa(int64(wantShift))
 }
 
 // IsX86PointerDecompression reports whether an ADD instruction with the

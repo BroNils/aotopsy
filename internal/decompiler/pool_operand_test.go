@@ -50,6 +50,20 @@ func TestPoolOperandResolvesWithoutALoad(t *testing.T) {
 	}
 }
 
+func TestDartPoolDisplayEscapesLiteralDollars(t *testing.T) {
+	tests := map[string]string{
+		`"price $5"`:       `"price \$5"`,
+		`"path \\$HOME"`:   `"path \\\$HOME"`,
+		`"already \$HOME"`: `"already \$HOME"`,
+		`SomeClass.method`: `SomeClass.method`,
+	}
+	for in, want := range tests {
+		if got := dartPoolDisplay(in); got != want {
+			t.Errorf("dartPoolDisplay(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // The pool register is tagged on x86_64 and untagged on ARM64, so the same
 // element sits at displacements one byte apart. Getting this wrong shifts
 // every pool-derived fact by a constant number of slots -- invisible in

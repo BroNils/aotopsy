@@ -1,6 +1,9 @@
 package sdk
 
-import "strings"
+import (
+	_ "embed"
+	"strings"
+)
 
 // VM native function names.
 //
@@ -121,12 +124,32 @@ var dartNativeExact = map[string]string{
 	"Ffi_createNativeCallableListener": NativeCatFFI,
 }
 
+// dartnatives_known.txt is generated from the exact native lists in the local
+// dart-lang/sdk release tags supported by this project. Namespace membership
+// alone is not evidence that an arbitrary application string is a VM native:
+// `Socket_NotARealNative` has the right prefix but the VM will never resolve it.
+//
+//go:embed dartnatives_known.txt
+var dartNativeKnownText string
+
+var dartNativeKnown = func() map[string]struct{} {
+	lines := strings.Fields(dartNativeKnownText)
+	out := make(map[string]struct{}, len(lines))
+	for _, name := range lines {
+		out[name] = struct{}{}
+	}
+	return out
+}()
+
 // DartNativeCategory classifies a VM native function name.
 //
 // The match is exact-then-namespace, never substring: a substring match
 // is what turned SecurityContext_UsePrivateKeyBytes into a blockchain
 // signal.
 func DartNativeCategory(name string) (string, bool) {
+	if _, ok := dartNativeKnown[name]; !ok {
+		return "", false
+	}
 	if cat, ok := dartNativeExact[name]; ok {
 		return cat, true
 	}

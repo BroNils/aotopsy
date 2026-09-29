@@ -38,16 +38,27 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 	effects := make([]provBlockEffect, len(blocks))
 	for bi, blk := range blocks {
 		var regs x86NoWindowRegs
+		for r := range regs {
+			regs[r] = provInputNote(r)
+		}
 		var touched [16]bool
 		for i := blk.Start; i < blk.End; i++ {
 			touchX86InstrEffect(insts[i], &regs, &touched, poolDisplay, thrFields)
 		}
 		eff := provBlockEffect{
-			touched: touched[:],
-			final:   make([]lvalue, 16),
+			touched:  touched[:],
+			final:    make([]lvalue, 16),
+			copyFrom: make([]int, 16),
+		}
+		for r := range eff.copyFrom {
+			eff.copyFrom[r] = -1
 		}
 		for r := 0; r < 16; r++ {
 			if touched[r] {
+				if src, ok := provInputReg(regs[r]); ok {
+					eff.copyFrom[r] = src
+					continue
+				}
 				if v := regs[r]; v != "" {
 					eff.final[r] = lvalue{kind: lvKnown, note: v}
 				} else {
@@ -81,11 +92,16 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 			if d.Inst.Op == x86asm.CALL {
 				e := classifyX86Call(d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
 				if e.TargetPC != 0 {
-					argMask := inferX86CallArgRegMaskLocal(insts, i)
+					argMask := inferX86CallArgRegMaskLocal(insts, i, blk.Start)
 					e.ArgRegMask = argMask
 					e.ArgCountHint = popcount8(argMask)
 				}
 				res.Edges = append(res.Edges, e)
+				var callTouched [16]bool
+				touchX86InstrEffect(d, &regs, &callTouched, poolDisplay, thrFields)
+				for r := 0; r < 16; r++ {
+					fakeRT.defs[r] = x86RegProvenance{note: regs[r]}
+				}
 				continue
 			}
 			touchX86InstrEffect(d, &regs, &[16]bool{}, poolDisplay, thrFields)
@@ -134,6 +150,8 @@ func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
 		func(i int) FlowInfo {
 			d := insts[i]
 			switch {
+			case d.Bad || x86.IsSemanticBarrier(d.Inst):
+				return FlowInfo{Kind: FlowIndirect}
 			case d.Inst.Op == x86asm.RET:
 				return FlowInfo{Kind: FlowRet}
 			case d.Inst.Op == x86asm.JMP:
@@ -208,7 +226,18 @@ func BuildX86CFG(name string, funcCode []byte, funcVA uint64) FuncCFG {
 // caller (ScanX86FunctionCFG), since CALL doesn't define a register the
 // way MOV/LEA do.
 func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool, poolDisplay map[int]string, thrFields map[int]string) {
+	if d.Bad || x86.IsSemanticBarrier(d.Inst) {
+		x86KillAll(regs, touched)
+		return
+	}
 	inst := d.Inst
+	if inst.Op == x86asm.CALL {
+		// Ordinary Dart calls are full register-allocation barriers: the SDK's
+		// linear-scan allocator blocks every CPU register at a non-callee-safe
+		// call. Classify the target first, then discard all temporary provenance.
+		x86KillAll(regs, touched)
+		return
+	}
 	if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
 		dstReg, dstOK := inst.Args[0].(x86asm.Reg)
 		if !dstOK {
@@ -221,6 +250,12 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 			} else {
 				x86Kill(regs, touched, dstIdx)
 			}
+			return
+		}
+		if _, ok := inst.Args[1].(x86asm.Mem); ok && inst.Op == x86asm.LEA {
+			// LEA computes an address; it does not dereference PP/THR/object
+			// memory. The address expression is outside this provenance lattice.
+			x86Kill(regs, touched, x86.CanonReg(dstReg))
 			return
 		}
 		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
@@ -304,6 +339,12 @@ func x86Kill(regs *x86NoWindowRegs, touched *[16]bool, idx int) {
 	}
 	regs[idx] = ""
 	touched[idx] = true
+}
+
+func x86KillAll(regs *x86NoWindowRegs, touched *[16]bool) {
+	for r := range regs {
+		x86Kill(regs, touched, r)
+	}
 }
 
 type poolStringRef struct {

@@ -87,3 +87,36 @@ func TestReclassificationIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestReclassificationIgnoresAndPreservesStringLiteralIdentifiers(t *testing.T) {
+	src := strings.Join([]string{
+		"void f() {",
+		"  final t1 = makeValue();",
+		`  log("t1 t1");`,
+		"  return t1;",
+		"}",
+	}, "\n")
+
+	out := ApplyIdentReclassification(src)
+	if !strings.Contains(out, "final result = makeValue();") || !strings.Contains(out, "return result;") {
+		t.Fatalf("literal text influenced code-identifier classification:\n%s", out)
+	}
+	if !strings.Contains(out, `log("t1 t1");`) {
+		t.Fatalf("identifier rewrite corrupted string literal contents:\n%s", out)
+	}
+}
+
+func TestReclassificationRenamesLiveStringInterpolationIdentifiers(t *testing.T) {
+	src := strings.Join([]string{
+		"void f() {",
+		"  final t1 = makeValue();",
+		`  log("$t1");`,
+		"  return t1;",
+		"}",
+	}, "\n")
+
+	out := ApplyIdentReclassification(src)
+	if !strings.Contains(out, `log("$result");`) || !strings.Contains(out, "return result;") {
+		t.Fatalf("live interpolation identifier was not renamed with its declaration:\n%s", out)
+	}
+}

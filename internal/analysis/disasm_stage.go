@@ -57,8 +57,12 @@ func RunDisasmStage(
 	// IsInterestingCallee filter drops sub_*/0x.. names, so a stub named in
 	// only one of the three builders silently vanished from the graph. (F-036)
 	vaImage := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}
-	symbols := BuildSymbolNames(ranges, vaImage, pl, clResult, info, table,
-		fmtOpts, info.IsolateData.Data).Names
+	symbolSet, err := BuildSymbolNames(ranges, vaImage, pl, clResult, info, table,
+		fmtOpts, info.IsolateData.Data)
+	if err != nil {
+		return nil, err
+	}
+	symbols := symbolSet.Names
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
@@ -234,6 +238,8 @@ func RunDisasmStage(
 		}
 		out.funcRec = disasm.FuncRecord{
 			PC:         fmt.Sprintf("0x%x", funcVA),
+			PCOffset:   r.PCOffset,
+			RefID:      r.RefID,
 			Size:       int(r.Size),
 			Name:       name,
 			Owner:      ownerName,
@@ -362,7 +368,7 @@ func RunDisasmStage(
 					if err := os.MkdirAll(filepath.Dir(o.cfgPath), 0755); err != nil {
 						return nil, fmt.Errorf("mkdir cfg: %w", err)
 					}
-					if err := os.WriteFile(o.cfgPath, []byte(o.cfgDot), 0644); err != nil {
+					if err := output.WriteFileAtomic(o.cfgPath, []byte(o.cfgDot), 0o644); err != nil {
 						return nil, fmt.Errorf("write cfg dot %s: %w", o.filename, err)
 					}
 					dr.CFGCount++
@@ -386,6 +392,28 @@ func RunDisasmStage(
 		}
 	}
 
+	// json.Encoder writes directly to the files above, so encode errors catch
+	// ordinary short writes. Sync+close is still part of publication correctness:
+	// a delayed filesystem error must abort the surrounding directory transaction
+	// rather than leave a generation whose JSONL only looked successfully written.
+	for _, item := range []struct {
+		name string
+		file *os.File
+	}{
+		{"index.jsonl", indexFile},
+		{"functions.jsonl", funcsFile},
+		{"call_edges.jsonl", edgesFile},
+		{"unresolved_thr.jsonl", unresTHRFile},
+		{"string_refs.jsonl", stringRefsFile},
+	} {
+		if err := item.file.Sync(); err != nil {
+			return nil, fmt.Errorf("sync %s: %w", item.name, err)
+		}
+		if err := item.file.Close(); err != nil {
+			return nil, fmt.Errorf("close %s: %w", item.name, err)
+		}
+	}
+
 	opts.logf("  %sfunctions:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.Written, cli.Blue, asmDir, cli.Reset)
 	opts.logf("  %scall edges:%s %d (%d BLR: %d annotated, %d unannotated)\n",
 		cli.Muted, cli.Reset, dr.TotalEdges, dr.TotalBLR, dr.BLRAnnotated, dr.BLRUnannotated)
@@ -399,7 +427,7 @@ func RunDisasmStage(
 	if opts.Graph && len(funcRecs) > 0 {
 		cgDOT := render.CallgraphDOT(funcRecs, edgeRecs, "callgraph", render.NASA, 0)
 		cgPath := filepath.Join(opts.OutDir, "callgraph.dot")
-		if err := os.WriteFile(cgPath, []byte(cgDOT), 0644); err != nil {
+		if err := output.WriteFileAtomic(cgPath, []byte(cgDOT), 0o644); err != nil {
 			return nil, fmt.Errorf("write callgraph.dot: %w", err)
 		}
 		opts.logf("  %scallgraph:%s %d funcs, %d edges -> %s%s%s\n",

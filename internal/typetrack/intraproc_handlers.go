@@ -27,6 +27,62 @@ const (
 	fieldStoreKeyClassMul = 100000
 )
 
+// shadowSPState tracks Dart's software stack pointer X15 relative to the
+// current frame pointer X29. A relative coordinate is stable across the
+// compiler's pre/post-index Push/Pop sequences, unlike the old key of
+// shadowStackOffsetBase+instructionImmediate.
+type shadowSPState struct {
+	Known bool
+	RelFP int
+}
+
+func (s shadowSPState) Equal(other shadowSPState) bool {
+	return s.Known == other.Known && (!s.Known || s.RelFP == other.RelFP)
+}
+
+func meetShadowSP(a, b shadowSPState) shadowSPState {
+	if !a.Known || !b.Known || a.RelFP != b.RelFP {
+		return shadowSPState{}
+	}
+	return a
+}
+
+func (s *shadowSPState) singleAccess(mode arm64.AddressMode, byteOff int) (int, bool) {
+	if s == nil || !s.Known {
+		return 0, false
+	}
+	switch mode {
+	case arm64.AddressPreIndex:
+		s.RelFP += byteOff
+		return s.RelFP, true
+	case arm64.AddressPostIndex:
+		access := s.RelFP
+		s.RelFP += byteOff
+		return access, true
+	default:
+		return s.RelFP + byteOff, true
+	}
+}
+
+func (s *shadowSPState) pairAccess(mode arm64.PairMode, byteOff int) (int, bool) {
+	if s == nil || !s.Known {
+		return 0, false
+	}
+	switch mode {
+	case arm64.PairPreIndex:
+		s.RelFP += byteOff
+		return s.RelFP, true
+	case arm64.PairPostIndex:
+		access := s.RelFP
+		s.RelFP += byteOff
+		return access, true
+	default:
+		return s.RelFP + byteOff, true
+	}
+}
+
+func shadowStackKey(relFP int) int { return shadowStackOffsetBase + relFP }
+
 // transferCtx bundles the shared state every handler needs, so the handler
 // signatures stay short and the dispatch table reads cleanly.
 type transferCtx struct {
@@ -37,6 +93,89 @@ type transferCtx struct {
 	result     *IntraResult
 	lca        func(int, int) int
 	stackTypes map[int]TypeLattice
+	shadowSP   *shadowSPState
+}
+
+// observeShadowFrameUpdate handles non-memory instructions that establish or
+// move Dart's X15 software stack pointer relative to X29. Memory writeback is
+// intentionally handled by the load/store handlers so they can use the
+// pre-vs-post access address before mutating the relation.
+func observeShadowFrameUpdate(raw uint32, s *shadowSPState) {
+	if s == nil {
+		return
+	}
+	if m, ok := arm64.Load64Immediate(raw); ok && m.BaseReg == sdk.ARM64SPReg {
+		return
+	}
+	if m, ok := arm64.Store64Immediate(raw); ok && m.BaseReg == sdk.ARM64SPReg {
+		return
+	}
+	if p, ok := arm64.LoadPair64(raw); ok && p.BaseReg == sdk.ARM64SPReg {
+		return
+	}
+	if p, ok := arm64.StorePair64(raw); ok && p.BaseReg == sdk.ARM64SPReg {
+		return
+	}
+
+	if rd, ok := arm64.MOVOrr(raw); ok {
+		rm := int((raw >> 16) & 0x1F)
+		switch {
+		case rd == sdk.ARM64FrameReg && rm == sdk.ARM64SPReg,
+			rd == sdk.ARM64SPReg && rm == sdk.ARM64FrameReg:
+			s.Known = true
+			s.RelFP = 0
+		case rd == sdk.ARM64FrameReg || rd == sdk.ARM64SPReg:
+			*s = shadowSPState{}
+		}
+		return
+	}
+
+	if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok {
+		switch {
+		case rd == sdk.ARM64SPReg && rn == sdk.ARM64SPReg:
+			if s.Known {
+				s.RelFP += imm
+			}
+		case rd == sdk.ARM64SPReg && rn == sdk.ARM64FrameReg:
+			s.Known, s.RelFP = true, imm
+		case rd == sdk.ARM64FrameReg && rn == sdk.ARM64SPReg:
+			s.Known, s.RelFP = true, -imm
+		case rd == sdk.ARM64FrameReg && rn == sdk.ARM64FrameReg:
+			if s.Known {
+				s.RelFP -= imm
+			}
+		case rd == sdk.ARM64FrameReg || rd == sdk.ARM64SPReg:
+			*s = shadowSPState{}
+		}
+		return
+	}
+
+	if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok {
+		switch {
+		case rd == sdk.ARM64SPReg && rn == sdk.ARM64SPReg:
+			if s.Known {
+				s.RelFP -= imm
+			}
+		case rd == sdk.ARM64SPReg && rn == sdk.ARM64FrameReg:
+			s.Known, s.RelFP = true, -imm
+		case rd == sdk.ARM64FrameReg && rn == sdk.ARM64SPReg:
+			s.Known, s.RelFP = true, imm
+		case rd == sdk.ARM64FrameReg && rn == sdk.ARM64FrameReg:
+			if s.Known {
+				s.RelFP += imm
+			}
+		case rd == sdk.ARM64FrameReg || rd == sdk.ARM64SPReg:
+			*s = shadowSPState{}
+		}
+		return
+	}
+
+	for _, rd := range arm64.DstRegsOfInst(raw) {
+		if rd == sdk.ARM64FrameReg || rd == sdk.ARM64SPReg {
+			*s = shadowSPState{}
+			return
+		}
+	}
 }
 
 // handleStackStore handles case 0: STUR/STR to stack, shadow stack, and
@@ -45,18 +184,21 @@ type transferCtx struct {
 func handleStackStore(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
+	// STR/STUR/STR(pre/post) Xt through Dart's software SP (X15). The access
+	// address differs for pre- vs post-index, so canonicalize it through the
+	// tracked X15-relative-to-X29 coordinate before recording the slot.
+	if mem, ok := arm64.Store64Immediate(raw); ok && mem.BaseReg == sdk.ARM64SPReg {
+		if rel, tracked := tc.shadowSP.singleAccess(mem.Mode, mem.ByteOffset); tracked && mem.Reg < 31 {
+			tc.stackTypes[shadowStackKey(rel)] = tc.state[mem.Reg]
+		}
+	}
+
 	// 0a-pre. STUR Xt, [X29, #imm9] → save to stack (signed offset).
 	if base, rt, imm9, ok := arm64.STUR64(raw); ok && base == sdk.ARM64FrameReg {
 		if rt < 31 {
 			tc.stackTypes[imm9] = tc.state[rt]
 		}
 		// Don't return — STUR doesn't kill the source register
-	}
-	// 0a-pre-bis. STUR Xt, [X15, #imm9] → shadow stack (signed offset).
-	if base, rt, imm9, ok := arm64.STUR64(raw); ok && base == sdk.ARM64SPReg {
-		if rt < 31 {
-			tc.stackTypes[imm9+shadowStackOffsetBase] = tc.state[rt]
-		}
 	}
 	// 0a-pre-ter. STUR Xt, [Xn, #imm9] → object field store (signed offset).
 	if base, rt, imm9, ok := arm64.STUR64(raw); ok {
@@ -77,12 +219,6 @@ func handleStackStore(tc *transferCtx) bool {
 	if base, rt, imm9, ok := arm64.STUR32(raw); ok && base == sdk.ARM64FrameReg {
 		if rt < 31 {
 			tc.stackTypes[imm9] = tc.state[rt]
-		}
-	}
-	// 0a-pre-quater-bis. STUR Wt, [X15, #imm9] → compressed shadow stack.
-	if base, rt, imm9, ok := arm64.STUR32(raw); ok && base == sdk.ARM64SPReg {
-		if rt < 31 {
-			tc.stackTypes[imm9+shadowStackOffsetBase] = tc.state[rt]
 		}
 	}
 	// 0a-pre-quater-ter. STUR Wt, [Xn, #imm9] → compressed object field store.
@@ -109,26 +245,37 @@ func handleStackStore(tc *transferCtx) bool {
 		return true
 	}
 
-	// 0a-bis. STR Xt, [X15, #imm] → shadow stack (unsigned offset).
-	if baseReg, byteOff, _, ok := arm64.STR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64SPReg {
-		rt := int(raw & 0x1F)
-		if rt < 31 {
-			tc.stackTypes[byteOff+shadowStackOffsetBase] = tc.state[rt]
-		}
-		// Don't return — STR to shadow stack doesn't kill the source register
-	}
-
 	// 0a-ter. STR Xt, [Xn, #imm] → object field store (unsigned offset).
 	if baseReg, byteOff, _, ok := arm64.STR64UnsignedOffset(raw); ok {
 		rt := int(raw & 0x1F)
 		if rt < 31 && baseReg < 31 && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg &&
 			baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT {
+			if tc.state[baseReg].Kind == LatticeKnownClass {
+				recordFieldAccess(tc.result, tc.state[baseReg].ClassID, int32(byteOff), true, tc.inst.Addr)
+			}
 			if tc.state[baseReg].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
 				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
 				tc.stackTypes[key+fieldStoreKeyBase] = tc.state[rt]
+				recordFieldStore(tc.ctx, tc.state[baseReg].ClassID, int32(byteOff), tc.state[rt].ClassID)
 			}
 		}
 		// Don't return — STR doesn't kill the source register
+	}
+
+	// 0a-quater. STR Wt, [Xn, #imm] is the normal compressed-pointer object
+	// field store emitted by Dart AOT. Track it exactly like STUR32/STR64.
+	if baseReg, byteOff, rt, ok := arm64.STR32UnsignedOffset(raw); ok {
+		if rt < 31 && baseReg < 31 && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg &&
+			baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT {
+			if tc.state[baseReg].Kind == LatticeKnownClass {
+				recordFieldAccess(tc.result, tc.state[baseReg].ClassID, int32(byteOff), true, tc.inst.Addr)
+			}
+			if tc.state[baseReg].Kind == LatticeKnownClass && tc.state[rt].Kind == LatticeKnownClass {
+				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
+				tc.stackTypes[key+fieldStoreKeyBase] = tc.state[rt]
+				recordFieldStore(tc.ctx, tc.state[baseReg].ClassID, int32(byteOff), tc.state[rt].ClassID)
+			}
+		}
 	}
 
 	return false
@@ -138,6 +285,30 @@ func handleStackStore(tc *transferCtx) bool {
 // STP/LDP pair operations.
 func handleStackLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
+
+	// All 64-bit immediate LDR forms through Dart's X15 software SP, including
+	// the post-index Pop shape emitted by every supported SDK.
+	if mem, ok := arm64.Load64Immediate(raw); ok && mem.BaseReg == sdk.ARM64SPReg {
+		rel, tracked := tc.shadowSP.singleAccess(mem.Mode, mem.ByteOffset)
+		if mem.Reg < 31 {
+			if tracked {
+				if t, ok2 := tc.stackTypes[shadowStackKey(rel)]; ok2 {
+					tc.state[mem.Reg] = t
+				} else {
+					tc.state[mem.Reg] = Top()
+				}
+			} else {
+				tc.state[mem.Reg] = Top()
+			}
+		}
+		if mem.Mode == arm64.AddressPreIndex || mem.Mode == arm64.AddressPostIndex {
+			tc.state[sdk.ARM64SPReg] = Top()
+		}
+		if mem.Reg == sdk.ARM64FrameReg && tc.shadowSP != nil {
+			*tc.shadowSP = shadowSPState{}
+		}
+		return true
+	}
 
 	// 0b. LDR Xt, [X29, #imm] → load from stack.
 	if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64FrameReg {
@@ -153,68 +324,44 @@ func handleStackLoad(tc *transferCtx) bool {
 		return true
 	}
 
-	// 0b-bis. LDR Xt, [X15, #imm] → load from shadow stack.
-	if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(raw); ok && baseReg == sdk.ARM64SPReg {
-		rt := int(raw & 0x1F)
-		if rt >= 31 {
-			return true
+	// STP pair stores, including the PairPreIndex PushPair shape. Non-temporal
+	// and offset forms do not write back; post/pre do.
+	if pair, ok := arm64.StorePair64(raw); ok && pair.BaseReg == sdk.ARM64SPReg {
+		if rel, tracked := tc.shadowSP.pairAccess(pair.Mode, pair.ByteOffset); tracked {
+			if pair.Reg1 < 31 {
+				tc.stackTypes[shadowStackKey(rel)] = tc.state[pair.Reg1]
+			}
+			if pair.Reg2 < 31 {
+				tc.stackTypes[shadowStackKey(rel+8)] = tc.state[pair.Reg2]
+			}
 		}
-		if t, ok2 := tc.stackTypes[byteOff+shadowStackOffsetBase]; ok2 {
-			tc.state[rt] = t
-		} else {
-			tc.state[rt] = Top()
+	}
+
+	// LDP pair loads, including PairPostIndex PopPair. Resolve the access before
+	// invalidating a restored X29 frame pointer.
+	if pair, ok := arm64.LoadPair64(raw); ok && pair.BaseReg == sdk.ARM64SPReg {
+		rel, tracked := tc.shadowSP.pairAccess(pair.Mode, pair.ByteOffset)
+		for i, reg := range []int{pair.Reg1, pair.Reg2} {
+			if reg >= 31 {
+				continue
+			}
+			if tracked {
+				if t, ok2 := tc.stackTypes[shadowStackKey(rel+i*8)]; ok2 {
+					tc.state[reg] = t
+				} else {
+					tc.state[reg] = Top()
+				}
+			} else {
+				tc.state[reg] = Top()
+			}
+		}
+		if pair.Mode == arm64.PairPreIndex || pair.Mode == arm64.PairPostIndex {
+			tc.state[sdk.ARM64SPReg] = Top()
+		}
+		if (pair.Reg1 == sdk.ARM64FrameReg || pair.Reg2 == sdk.ARM64FrameReg) && tc.shadowSP != nil {
+			*tc.shadowSP = shadowSPState{}
 		}
 		return true
-	}
-
-	// 0c. STP Xt1, Xt2, [X15, #imm]! → save pair to shadow stack.
-	if raw&0xFFC00000 == 0xA9000000 || raw&0xFFC00000 == 0xA9800000 || raw&0xFFC00000 == 0xA8000000 {
-		rt1 := int(raw & 0x1F)
-		rt2 := int((raw >> 10) & 0x1F)
-		rn := int((raw >> 5) & 0x1F)
-		imm7 := int((raw >> 15) & 0x7F)
-		if imm7 >= 64 {
-			imm7 -= 128
-		}
-		byteOff := imm7 * 8
-		if rn == sdk.ARM64SPReg {
-			if rt1 < 31 {
-				tc.stackTypes[byteOff+shadowStackOffsetBase] = tc.state[rt1]
-			}
-			if rt2 < 31 {
-				tc.stackTypes[byteOff+8+shadowStackOffsetBase] = tc.state[rt2]
-			}
-			// Don't return — STP doesn't kill source registers
-		}
-	}
-
-	// 0d. LDP Xt1, Xt2, [X15, #imm] → load pair from shadow stack.
-	if raw&0xFFC00000 == 0xA9C00000 || raw&0xFFC00000 == 0xA9400000 || raw&0xFFC00000 == 0xA8400000 {
-		rt1 := int(raw & 0x1F)
-		rt2 := int((raw >> 10) & 0x1F)
-		rn := int((raw >> 5) & 0x1F)
-		imm7 := int((raw >> 15) & 0x7F)
-		if imm7 >= 64 {
-			imm7 -= 128
-		}
-		byteOff := imm7 * 8
-		if rn == sdk.ARM64SPReg {
-			if rt1 < 31 {
-				if t, ok2 := tc.stackTypes[byteOff+shadowStackOffsetBase]; ok2 {
-					tc.state[rt1] = t
-				} else {
-					tc.state[rt1] = Top()
-				}
-			}
-			if rt2 < 31 {
-				if t, ok2 := tc.stackTypes[byteOff+8+shadowStackOffsetBase]; ok2 {
-					tc.state[rt2] = t
-				} else {
-					tc.state[rt2] = Top()
-				}
-			}
-			return true
-		}
 	}
 
 	return false
@@ -400,20 +547,22 @@ func handleDispatchArith(tc *transferCtx) bool {
 	}
 
 	// 4c. ADD Xd, Xn, Xm (register-register) — dispatch slot or decompression.
-	if rd, rn, rm, ok := arm64.ADD64Register(raw); ok {
+	if rd, rn, rm, shift, amount, ok := arm64.ADD64Register(raw); ok {
 		if rd < 31 && rn < 31 && tc.state[rn].Kind == LatticeKnownClass {
-			if rm == sdk.ARM64HeapBits { // HEAP_BITS — decompress
-				tc.state[rd] = tc.state[rn]
-				return true
+			if tc.ctx != nil {
+				if heapReg, heapShift, ok := sdk.ARM64PointerDecompressionSpec(tc.ctx.DartVersion); ok &&
+					rm == heapReg && shift == arm64.ShiftLSL && amount == heapShift {
+					tc.state[rd] = tc.state[rn]
+					return true
+				}
 			}
-			if rm < 31 && tc.state[rm].Kind == LatticeKnownDispatchIndex {
+			if shift == arm64.ShiftLSL && amount == 0 && rm < 31 && tc.state[rm].Kind == LatticeKnownDispatchIndex {
 				tc.state[rd] = KnownDispatch(tc.state[rn].ClassID + tc.state[rm].DispatchIndex)
 				tc.ctx.ADDClassHits++
 				return true
 			}
-			tc.state[rd] = KnownDispatch(tc.state[rn].ClassID)
-			tc.ctx.ADDClassHits++
-			return true
+			// Any other transformed/additional operand changes the value. Do not
+			// silently discard it and fabricate a dispatch index from rn alone.
 		}
 	}
 
@@ -435,13 +584,9 @@ func handleFieldLoad(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 
 	// 5. LDUR Xt, [Xn, #imm9] — field/header/stack load.
-	if base, rt, _, ok := arm64.LDUR64(raw); ok {
+	if base, rt, imm9, ok := arm64.LDUR64(raw); ok {
 		if rt >= 31 {
 			return true
-		}
-		imm9 := int(int32(raw>>12) & 0x1FF)
-		if imm9 > 256 {
-			imm9 -= 512
 		}
 		if base == sdk.ARM64FrameReg {
 			if t, ok2 := tc.stackTypes[imm9]; ok2 {
@@ -451,14 +596,8 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 			return true
 		}
-		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
-				tc.state[rt] = t
-			} else {
-				tc.state[rt] = Top()
-			}
-			return true
-		}
+		// X15-relative 64-bit loads are consumed earlier by handleStackLoad,
+		// which tracks pre/post-index writeback in a stable FP-relative coordinate.
 		if base < 31 && tc.state[base].Kind == LatticeKnownClass {
 			if imm9 == -1 {
 				tc.state[rt] = KnownClass(tc.state[base].ClassID)
@@ -512,11 +651,10 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
-				tc.state[rt] = t
-			} else {
-				tc.state[rt] = Top()
-			}
+			// No supported Dart CodeRange in the 93-sample corpus uses a halfword
+			// X15 stack load. The old immediate-only slot key ignored X15 movement
+			// and was unsound, so unsupported shapes fail closed instead.
+			tc.state[rt] = Top()
 			return true
 		}
 		if imm9 == 1 && base < 31 {
@@ -529,6 +667,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base < 31 && tc.state[base].Kind == LatticeKnownClass {
+			recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), false, tc.inst.Addr)
 			if classID, ok2 := tc.ctx.FieldValueClass(tc.state[base].ClassID, int32(imm9)); ok2 {
 				tc.state[rt] = KnownClass(classID)
 				return true
@@ -552,14 +691,13 @@ func handleFieldLoad(tc *transferCtx) bool {
 			return true
 		}
 		if base == sdk.ARM64SPReg {
-			if t, ok2 := tc.stackTypes[imm9+shadowStackOffsetBase]; ok2 {
-				tc.state[rt] = t
-			} else {
-				tc.state[rt] = Top()
-			}
+			// Likewise, no supported Dart CodeRange emits an unscaled 32-bit
+			// X15 stack load. Do not fabricate a slot identity from imm9 alone.
+			tc.state[rt] = Top()
 			return true
 		}
 		if base < 31 && tc.state[base].Kind == LatticeKnownClass {
+			recordFieldAccess(tc.result, tc.state[base].ClassID, int32(imm9), false, tc.inst.Addr)
 			key := tc.state[base].ClassID*fieldStoreKeyClassMul + imm9
 			if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 				tc.state[rt] = storedType
@@ -569,8 +707,10 @@ func handleFieldLoad(tc *transferCtx) bool {
 				tc.state[rt] = KnownClass(classID)
 				return true
 			}
-			tc.state[rt] = KnownClass(tc.state[base].ClassID)
-			tc.ctx.HeaderHits++
+			// An unknown object field is not evidence that the field has the
+			// receiver's class. The old fallback fabricated self-typed fields and
+			// turned them into authoritative dispatch facts downstream.
+			tc.state[rt] = Top()
 			return true
 		}
 		// Closure field via compressed LDUR32.
@@ -602,6 +742,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
+				recordFieldAccess(tc.result, tc.state[baseReg].ClassID, int32(byteOff), false, tc.inst.Addr)
 				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
 				if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 					tc.state[rt] = storedType
@@ -611,8 +752,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 					tc.state[rt] = KnownClass(classID)
 					return true
 				}
-				tc.state[rt] = KnownClass(tc.state[baseReg].ClassID)
-				tc.ctx.HeaderHits++
+				tc.state[rt] = Top()
 				return true
 			}
 		}
@@ -625,6 +765,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			// Don't return — let other handlers process
 		} else if baseReg < 31 && baseReg != sdk.ARM64PP && baseReg != sdk.ARM64THR && baseReg != sdk.ARM64DT && baseReg != sdk.ARM64FrameReg && baseReg != sdk.ARM64SPReg {
 			if tc.state[baseReg].Kind == LatticeKnownClass {
+				recordFieldAccess(tc.result, tc.state[baseReg].ClassID, int32(byteOff), false, tc.inst.Addr)
 				key := tc.state[baseReg].ClassID*fieldStoreKeyClassMul + byteOff
 				if storedType, ok2 := tc.stackTypes[key+fieldStoreKeyBase]; ok2 && storedType.Kind != LatticeTop {
 					tc.state[rt] = storedType
@@ -634,8 +775,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 					tc.state[rt] = KnownClass(classID)
 					return true
 				}
-				tc.state[rt] = KnownClass(tc.state[baseReg].ClassID)
-				tc.ctx.HeaderHits++
+				tc.state[rt] = Top()
 				return true
 			}
 		}

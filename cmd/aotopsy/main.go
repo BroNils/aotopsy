@@ -4,14 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-)
 
-// Build metadata, injected at release time via -ldflags -X (see .goreleaser.yaml).
-// Defaults keep a `go build` / `go run` binary self-describing.
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
+	"aotopsy/internal/cli"
 )
 
 func main() {
@@ -31,7 +25,7 @@ func main() {
 
 	// Version flags.
 	if cmd == "version" || cmd == "--version" || cmd == "-V" {
-		fmt.Printf("aotopsy %s (commit %s, built %s)\n", version, commit, date)
+		fmt.Printf("aotopsy %s (commit %s, built %s)\n", cli.Version, cli.Commit, cli.Date)
 		os.Exit(0)
 	}
 
@@ -48,7 +42,7 @@ func main() {
 			err = c.Run(rest)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
 			os.Exit(1)
 		}
 		return
@@ -58,7 +52,7 @@ func main() {
 	if resolvePositionalLib(cmd) != "" {
 		err := cmdRun(os.Args[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
 			os.Exit(1)
 		}
 		return
@@ -68,13 +62,13 @@ func main() {
 	if strings.HasPrefix(cmd, "-") {
 		err := cmdRun(os.Args[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
 			os.Exit(1)
 		}
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+	fmt.Fprintf(os.Stderr, "unknown command: %s\n", cli.SafeLine(cmd))
 	printPrimaryUsage()
 	os.Exit(1)
 }
@@ -83,7 +77,7 @@ func main() {
 func hasFlag(args []string, names ...string) bool {
 	for _, a := range args {
 		for _, n := range names {
-			if a == n {
+			if a == n || strings.HasPrefix(a, n+"=") {
 				return true
 			}
 		}

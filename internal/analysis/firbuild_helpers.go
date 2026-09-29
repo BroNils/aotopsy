@@ -1,6 +1,9 @@
 package analysis
 
-import "aotopsy/internal/cluster"
+import (
+	"aotopsy/internal/cluster"
+	"aotopsy/internal/naming"
+)
 
 // BuildFieldTypeByClassOffset maps (ownerClassID, field byte offset) -> the
 // field's declared type's class ID. This types field-load chains (`this.a.b`):
@@ -11,7 +14,11 @@ import "aotopsy/internal/cluster"
 // Shared by Context.ensureDecompileMaps and the cmd funcIRBuilder so both the
 // pipeline and cmd decompile paths type field chains identically instead of one
 // silently lacking it.
-func BuildFieldTypeByClassOffset(result *cluster.Result) map[int]map[int64]int {
+func BuildFieldTypeByClassOffset(result *cluster.Result, pl *naming.PoolLookups, compressedPtrs bool) map[int]map[int64]int {
+	wordSize := int64(8)
+	if compressedPtrs {
+		wordSize = 4
+	}
 	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
 	for i := range result.Classes {
 		classByRef[result.Classes[i].RefID] = &result.Classes[i]
@@ -23,16 +30,25 @@ func BuildFieldTypeByClassOffset(result *cluster.Result) map[int]map[int64]int {
 		}
 	}
 	out := map[int]map[int64]int{}
+	owners := NewLibraryResolver(result, pl)
 	for i := range result.Fields {
 		f := &result.Fields[i]
 		if f.HostOffset < 0 || f.TypeRefID < 0 {
+			continue
+		}
+		// Field.host_offset_or_field_id is serialized as a reference. For an
+		// instance field that ref resolves to a Smi/Mint containing the WORD
+		// offset; it is not itself the byte offset. Keep this coordinate system
+		// identical to BuildClassLayouts and typetrack.FieldByOwnerOffset.
+		wordOff, ok := result.MintValues[int(f.HostOffset)]
+		if !ok || wordOff < 0 {
 			continue
 		}
 		tc, ok := typeClassByRef[f.TypeRefID]
 		if !ok || tc <= 0 {
 			continue
 		}
-		ownerClass, ok := classByRef[f.OwnerRefID]
+		ownerClass, ok := classByRef[owners.EffectiveClassRef(f.OwnerRefID)]
 		if !ok || ownerClass.ClassID <= 0 {
 			continue
 		}
@@ -40,7 +56,7 @@ func BuildFieldTypeByClassOffset(result *cluster.Result) map[int]map[int64]int {
 		if out[ocid] == nil {
 			out[ocid] = map[int64]int{}
 		}
-		out[ocid][int64(f.HostOffset)] = int(tc)
+		out[ocid][wordOff*wordSize] = int(tc)
 	}
 	return out
 }
@@ -50,61 +66,17 @@ func BuildFieldTypeByClassOffset(result *cluster.Result) map[int]map[int64]int {
 // injection (which resolves a class name to an ID) works identically.
 func BuildClassNameToID(layouts []DartClassLayout) map[string]int {
 	m := make(map[string]int, len(layouts))
+	ambiguous := make(map[string]bool)
 	for _, cl := range layouts {
-		if cl.ClassName != "" && cl.ClassID > 0 {
-			m[cl.ClassName] = int(cl.ClassID)
+		if cl.ClassName == "" || cl.ClassID <= 0 || ambiguous[cl.ClassName] {
+			continue
 		}
+		if existing, ok := m[cl.ClassName]; ok && existing != int(cl.ClassID) {
+			delete(m, cl.ClassName)
+			ambiguous[cl.ClassName] = true
+			continue
+		}
+		m[cl.ClassName] = int(cl.ClassID)
 	}
 	return m
-}
-
-// ResolveArgRegIndices decides a confident real arity from a callee's aggregated
-// per-call-site ArgRegMask values (one mask per direct call site targeting it):
-// a bit that is set in a majority of call sites (falling back to the bitwise-AND
-// intersection) is a real argument register. Fewer than two call sites is
-// unresolvable -- a single mask is documented-unreliable noise. Returns the
-// argument register indices and whether they are trustworthy. Shared by both
-// FuncIR-building paths.
-//
-// Two sites are required because a single mask is call-site-specific noise: on a
-// real sample _CompareHomePageState._runAll (one call site) gave a DIFFERENT arg
-// count on ARM64 vs x86_64 for the SAME Dart function -- real arity cannot differ
-// by architecture, so one single-sample answer was wrong. The AND-intersection
-// fallback recovers the consistent signal when sites disagree on noise bits
-// (MathTools.factorial: recursion mask 0b11 & the _runAll mask 0b10 = 0b10, the
-// real X1-only argument).
-func ResolveArgRegIndices(masks []uint8) ([]int, bool) {
-	if len(masks) < 2 {
-		return nil, false
-	}
-	counts := make([]int, 8)
-	for _, m := range masks {
-		for i := 0; i < 8; i++ {
-			if m&(1<<uint(i)) != 0 {
-				counts[i]++
-			}
-		}
-	}
-	threshold := (len(masks) + 1) / 2
-	var idx []int
-	for i := 0; i < 8; i++ {
-		if counts[i] >= threshold {
-			idx = append(idx, i)
-		}
-	}
-	if len(idx) == 0 {
-		core := masks[0]
-		for _, m := range masks[1:] {
-			core &= m
-		}
-		for i := 0; i < 8; i++ {
-			if core&(1<<uint(i)) != 0 {
-				idx = append(idx, i)
-			}
-		}
-	}
-	if len(idx) == 0 {
-		return nil, false
-	}
-	return idx, true
 }

@@ -26,16 +26,36 @@ func BuildDeobfuscationMap(cl *cluster.Result, pl *naming.PoolLookups, stringRef
 		return nil
 	}
 
-	// Map class ID -> string references accessed by its methods
+	// A class name is only library-local in Dart. The disassembly artifact's
+	// function display name intentionally omits the library URL, so `a.login`
+	// cannot identify which class `a` owns it when more than one library has an
+	// `a`. Never let a name collision turn one class's endpoint into evidence for
+	// every other class with the same obfuscated name.
+	classNameCount := make(map[string]int, len(cl.Classes))
+	for _, ci := range cl.Classes {
+		if name := pl.RefToStr[ci.NameRefID]; name != "" {
+			classNameCount[name]++
+		}
+	}
+
+	// Map an unambiguous class display name to string references accessed by its
+	// methods. Ambiguous owners are deliberately excluded until the producer
+	// carries a stable class/library identity rather than only a display string.
 	stringsByOwner := make(map[string][]string)
 	for _, sr := range stringRefs {
-		if sr.Func != "" {
-			parts := strings.Split(sr.Func, ".")
-			if len(parts) > 1 {
-				owner := parts[0]
-				stringsByOwner[owner] = append(stringsByOwner[owner], sr.Value)
-			}
+		dot := strings.IndexByte(sr.Func, '.')
+		if dot <= 0 {
+			continue
 		}
+		owner := sr.Func[:dot]
+		if classNameCount[owner] != 1 {
+			continue
+		}
+		stringsByOwner[owner] = append(stringsByOwner[owner], sr.Value)
+	}
+	typeByRef := make(map[int]cluster.TypeInfo, len(cl.Types))
+	for _, ti := range cl.Types {
+		typeByRef[ti.RefID] = ti
 	}
 
 	var records []DeobfuscatedClassRecord
@@ -53,12 +73,17 @@ func BuildDeobfuscationMap(cl *cluster.Result, pl *naming.PoolLookups, stringRef
 
 		superName := ""
 		if ci.SuperTypeRefID >= 0 {
-			superName = resolveRefName(pl, ci.SuperTypeRefID)
+			if ti, ok := typeByRef[ci.SuperTypeRefID]; ok && ti.ClassID > 0 {
+				superName = ClassNameByCID(ti.ClassID, cl, pl, pl.CT)
+				if superName == "<unnamed>" {
+					superName = ""
+				}
+			}
 		}
 
 		var clues []string
-		predictedRole := "Entity / Data Model"
-		confidence := 0.5
+		predictedRole := "Unknown"
+		confidence := 0.0
 
 		if superName != "" {
 			clues = append(clues, "inherits from "+superName)

@@ -9,7 +9,7 @@ if [ -z "$ROWS" ]; then
   TMP="$(mktemp)"; ROWS="$TMP"
   echo "Parsing every corpus sample present locally (this is heavy)..." >&2
   AOTOPSY_COVERAGE=1 go test ./internal/analysis/ -run TestCoverageCensus -count=1 -timeout 30m -v 2>&1 \
-    | grep -oE "COVROW	.*" | sed 's/^COVROW	//' | sort -u > "$ROWS" || true
+    | grep -oE "COVROW	.*" | sed 's/^COVROW	//' | sort > "$ROWS"
   # The row carries the sample's file name so `sort -u` dedupes repeated log
   # lines without collapsing distinct builds. It used to end at the function
   # counts, so two builds of the same version/arch that recovered the same
@@ -19,9 +19,23 @@ if [ -z "$ROWS" ]; then
 fi
 trap '[ -n "$TMP" ] && rm -f "$TMP"' EXIT
 
+expected=93
+if [ "$total" -ne "$expected" ]; then
+  echo "coverage census produced $total rows; expected exactly $expected" >&2
+  exit 1
+fi
+if [ "$(cut -f6 "$ROWS" | sort -u | wc -l | tr -d ' ')" -ne "$expected" ]; then
+  echo "coverage census contains duplicate or missing sample filenames" >&2
+  exit 1
+fi
+if grep -q $'\tFAIL\t' "$ROWS"; then
+  echo "coverage census contains FAIL rows; refusing to publish" >&2
+  grep $'\tFAIL\t' "$ROWS" >&2
+  exit 1
+fi
+
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 gen_date="$(date -u +%Y-%m-%d)"
-total="$(wc -l < "$ROWS" | tr -d ' ')"
 fails="$(grep -c '	FAIL	' "$ROWS" || true)"
 versions="$(cut -f1 "$ROWS" | sort -uV | wc -l | tr -d ' ')"
 

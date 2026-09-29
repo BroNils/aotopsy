@@ -61,7 +61,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 			return skipRODataAlloc(s, cm, hasCanonicalSet, !profile.SplitCanonical, maxSteps)
 		}
 		// VM snapshot strings never have canonical set data.
-		return skipStringAlloc(s, isCanonical && !isVM, maxSteps)
+		return skipStringAlloc(s, cm, isCanonical && !isVM, maxSteps)
 	case AllocMint:
 		// Handled in the alloc loop via readMintAlloc (captures ref→value mapping).
 		// This path should not be reached.
@@ -219,7 +219,7 @@ func skipCanonicalSet(s *dartfmt.Stream, count int, readFirstElement bool, maxSt
 // skipStringAlloc skips String cluster alloc:
 //
 //	count + per-string encoded length + canonical set (if canonical).
-func skipStringAlloc(s *dartfmt.Stream, isCanonical bool, maxSteps int) (int64, error) {
+func skipStringAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, maxSteps int) (int64, error) {
 	count, err := s.ReadUnsigned()
 	if err != nil {
 		return 0, err
@@ -227,11 +227,14 @@ func skipStringAlloc(s *dartfmt.Stream, isCanonical bool, maxSteps int) (int64, 
 	if count < 0 || int(count) > maxSteps {
 		return 0, fmt.Errorf("string count %d out of range", count)
 	}
+	cm.Lengths = make([]int64, count)
 	for i := int64(0); i < count; i++ {
 		// Each string alloc reads: encoded = ReadUnsigned() (length<<1 | cid_flag)
-		if _, err := s.ReadUnsigned(); err != nil {
+		encoded, err := s.ReadUnsigned()
+		if err != nil {
 			return count, fmt.Errorf("string %d/%d alloc: %w", i, count, err)
 		}
+		cm.Lengths[i] = encoded
 	}
 	if isCanonical {
 		// String canonical sets in ≥2.17 always write first_element (kAllCanonical=true
@@ -517,9 +520,17 @@ func skipInstanceAllocV(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64
 	if err != nil {
 		return count, fmt.Errorf("instance(%d) next_field_offset: %w", cm.CID, err)
 	}
-	cm.NextFieldOffsetInWords = int32(nfo)
-	if _, err := s.ReadTagged32(); err != nil {
+	instanceSize, err := s.ReadTagged32()
+	if err != nil {
 		return count, fmt.Errorf("instance(%d) instance_size: %w", cm.CID, err)
 	}
+	nfoWords := int32(nfo)
+	instanceSizeWords := int32(instanceSize)
+	if nfoWords <= 0 || instanceSizeWords <= 0 || nfoWords > instanceSizeWords {
+		return count, fmt.Errorf("instance(%d) invalid layout next_field_offset=%d instance_size=%d",
+			cm.CID, nfoWords, instanceSizeWords)
+	}
+	cm.NextFieldOffsetInWords = nfoWords
+	cm.InstanceSizeInWords = instanceSizeWords
 	return count, nil
 }

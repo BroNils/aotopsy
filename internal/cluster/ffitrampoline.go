@@ -1,10 +1,15 @@
 package cluster
 
 // FfiTrampolineInfo holds decoded metadata for an FfiTrampolineData object.
-// Dart FFI trampolines connect Dart functions to native C function pointers,
-// native callbacks, or FFI calls.
+// Dart FFI trampolines connect Dart functions to native callbacks and, on
+// older SDKs, outbound FFI calls.
 //
-// Source: runtime/vm/raw_object.h UntaggedFfiTrampolineData @3.12.2
+// CallbackKindRaw is intentionally left uninterpreted. The serialized byte
+// changed meaning across supported SDKs: Dart 3.1 writes callback_kind_ whose
+// FfiCallbackKind is {kSync,kAsync}; Dart 3.3 writes ffi_function_kind_ whose
+// enum is callback locality/type; Dart 3.12 has five callback locality/type
+// values. Treating one numeric table as a stable Sync/Async/Leaf/Callback enum
+// fabricates semantics that are not in the snapshot.
 type FfiTrampolineInfo struct {
 	RefID                        int
 	SignatureTypeRef             int   // TypePtr: Dart-side signature (e.g. int Function(Pointer, int))
@@ -12,29 +17,5 @@ type FfiTrampolineInfo struct {
 	CallbackTargetRef            int   // FunctionPtr: Target Dart method for native callbacks, -1 if none
 	CallbackExceptionalReturnRef int   // InstancePtr: Value returned if Dart callback throws
 	CallbackID                   int32 // Native callback ID (-1 if non-callback)
-	FfiFunctionKind              uint8 // 0=Sync, 1=Async, 2=Leaf, 3=Callback
-}
-
-// FfiFunctionKind names for logging and export.
-const (
-	FfiKindSync     uint8 = 0
-	FfiKindAsync    uint8 = 1
-	FfiKindLeaf     uint8 = 2
-	FfiKindCallback uint8 = 3
-)
-
-// FfiKindString returns the human-readable kind name.
-func FfiKindString(kind uint8) string {
-	switch kind {
-	case FfiKindSync:
-		return "sync"
-	case FfiKindAsync:
-		return "async"
-	case FfiKindLeaf:
-		return "leaf"
-	case FfiKindCallback:
-		return "callback"
-	default:
-		return "unknown"
-	}
+	CallbackKindRaw              uint8 // exact serialized callback_kind_/ffi_function_kind_ byte
 }

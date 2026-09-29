@@ -23,17 +23,24 @@ import "strings"
 type StubRole int
 
 const (
-	StubRoleNone          StubRole = iota // not a recognized stub
-	StubRoleAsyncInit                     // enters an async function
-	StubRoleAsyncAwait                    // suspends at an await point
-	StubRoleAsyncReturn                   // completes an async function
-	StubRoleAllocate                      // allocation stub (AllocateObject, etc.)
-	StubRoleWriteBarrier                  // write barrier stub
-	StubRoleStackOverflow                 // stack overflow check stub
-	StubRoleTypeTest                      // type test / subtype check stub
-	StubRoleSafepoint                     // safepoint / deoptimization stub
-	StubRoleRuntime                       // call_to_runtime / other runtime stub
-	StubRoleError                         // null_error / range_error / etc.
+	StubRoleNone            StubRole = iota // not a recognized stub
+	StubRoleAsyncInit                       // enters an async function
+	StubRoleAsyncAwait                      // suspends at an await point
+	StubRoleAsyncReturn                     // completes an async function
+	StubRoleAsyncStarInit                   // enters an async* generator
+	StubRoleAsyncStarYield                  // suspends an async* generator at yield/yield*
+	StubRoleAsyncStarReturn                 // completes an async* generator
+	StubRoleSyncStarInit                    // enters a sync* generator
+	StubRoleSyncStarSuspend                 // suspends a sync* generator at start/yield
+	StubRoleSyncStarReturn                  // completes a legacy sync* generator
+	StubRoleSuspendResume                   // resumes a suspendable function; kind-neutral
+	StubRoleAllocate                        // allocation stub (AllocateObject, etc.)
+	StubRoleWriteBarrier                    // write barrier stub
+	StubRoleStackOverflow                   // stack overflow check stub
+	StubRoleTypeTest                        // type test / subtype check stub
+	StubRoleSafepoint                       // safepoint / deoptimization stub
+	StubRoleRuntime                         // call_to_runtime / other runtime stub
+	StubRoleError                           // null_error / range_error / etc.
 )
 
 // vmStubTerminators are how a Thread-table stub slot name ends. Requiring one
@@ -70,12 +77,39 @@ func HasSegmentPair(name, a, b string) bool {
 // ClassifyStubRole classifies a call target or THR stub name into its role.
 // Returns StubRoleNone for anything that is not a recognized VM stub.
 func ClassifyStubRole(name string) StubRole {
-	// Dart-side symbols first: these carry their own word boundary.
-	switch {
-	case strings.Contains(name, "InitAsync") || strings.Contains(name, "_initAsync"):
+	// Dart-side helpers and named stubs use a finite SDK vocabulary. Match the
+	// terminal symbol exactly rather than looking for an async substring: an app
+	// function named MyInitAsyncCache is ordinary user code, not a VM stub.
+	leaf := name
+	if i := strings.LastIndex(leaf, "::"); i >= 0 {
+		leaf = leaf[i+2:]
+	}
+	if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	leaf = strings.TrimSuffix(leaf, "Stub")
+	switch leaf {
+	case "InitAsync", "_initAsync":
 		return StubRoleAsyncInit
-	case strings.Contains(name, "ReturnAsync") || strings.Contains(name, "_returnAsync"):
+	case "Await", "AwaitWithTypeCheck", "_await", "_awaitWithTypeCheck":
+		return StubRoleAsyncAwait
+	case "ReturnAsync", "ReturnAsyncNotFuture", "_returnAsync", "_returnAsyncNotFuture":
 		return StubRoleAsyncReturn
+	case "InitAsyncStar", "_initAsyncStar":
+		return StubRoleAsyncStarInit
+	case "YieldAsyncStar", "_yieldAsyncStar":
+		return StubRoleAsyncStarYield
+	case "ReturnAsyncStar", "_returnAsyncStar":
+		return StubRoleAsyncStarReturn
+	case "InitSyncStar", "_initSyncStar":
+		return StubRoleSyncStarInit
+	case "YieldSyncStar", "SuspendSyncStarAtStart", "SuspendSyncStarAtYield",
+		"_yieldSyncStar", "_suspendSyncStarAtStart", "_suspendSyncStarAtYield":
+		return StubRoleSyncStarSuspend
+	case "ReturnSyncStar", "_returnSyncStar":
+		return StubRoleSyncStarReturn
+	case "Resume", "_resume":
+		return StubRoleSuspendResume
 	}
 
 	// VM stub slots require a terminator.
@@ -84,26 +118,31 @@ func ClassifyStubRole(name string) StubRole {
 		return classifyMundanePattern(name)
 	}
 
-	// Async stubs: await checked first because suspend_state_await_entry_point
-	// contains neither init nor return.
+	// Suspendable-function stubs. The SDK deliberately has separate async,
+	// async*, and sync* entry points. Keeping those roles separate matters to
+	// the decompiler: YieldAsyncStar and SuspendSyncStarAtYield are `yield`
+	// machinery, not `await` machinery.
 	switch {
 	case HasSegmentPair(name, "state", "await") || HasSegmentPair(name, "suspend", "await"):
 		return StubRoleAsyncAwait
+	case HasSegmentPair(name, "yield", "async"):
+		return StubRoleAsyncStarYield
+	case HasSegmentPair(name, "init", "async") && strings.Contains(name, "async_star"):
+		return StubRoleAsyncStarInit
+	case HasSegmentPair(name, "return", "async") && strings.Contains(name, "async_star"):
+		return StubRoleAsyncStarReturn
 	case HasSegmentPair(name, "init", "async"):
 		return StubRoleAsyncInit
 	case HasSegmentPair(name, "return", "async"):
 		return StubRoleAsyncReturn
-	// Generators suspend through the same machinery. Keying only on
-	// "async" left suspend_state_init_sync_star_entry_point and
-	// suspend_state_suspend_sync_star_at_start_entry_point classified as
-	// unrecognised stubs, which reported them as a gap in our tables when
-	// they are in fact the strongest evidence a function is a generator.
 	case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
-		return StubRoleAsyncInit
-	case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "state", "suspend"):
-		return StubRoleAsyncAwait
-	case HasSegmentPair(name, "return", "sync"), HasSegmentPair(name, "yield", "async"):
-		return StubRoleAsyncReturn
+		return StubRoleSyncStarInit
+	case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "yield", "sync"):
+		return StubRoleSyncStarSuspend
+	case HasSegmentPair(name, "return", "sync"):
+		return StubRoleSyncStarReturn
+	case name == "resume_stub":
+		return StubRoleSuspendResume
 	}
 
 	// Other VM stub roles.
@@ -172,10 +211,18 @@ func classifyMundanePattern(name string) StubRole {
 }
 
 // IsAsyncStubName reports whether a call to this name proves the caller is an
-// async function, regardless of which of the three async roles it plays.
+// async or async* function. sync* and the kind-neutral Resume stub deliberately
+// return false: both use the same suspension machinery but are not async Dart
+// functions.
 func IsAsyncStubName(name string) bool {
 	role := ClassifyStubRole(name)
-	return role == StubRoleAsyncInit || role == StubRoleAsyncAwait || role == StubRoleAsyncReturn
+	switch role {
+	case StubRoleAsyncInit, StubRoleAsyncAwait, StubRoleAsyncReturn,
+		StubRoleAsyncStarInit, StubRoleAsyncStarYield, StubRoleAsyncStarReturn:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsMundaneStub reports whether a stub name represents compiler bookkeeping
@@ -186,7 +233,8 @@ func IsMundaneStub(name string) bool {
 	role := ClassifyStubRole(name)
 	switch role {
 	case StubRoleAllocate, StubRoleWriteBarrier, StubRoleStackOverflow,
-		StubRoleTypeTest, StubRoleSafepoint, StubRoleRuntime, StubRoleError:
+		StubRoleTypeTest, StubRoleSafepoint, StubRoleRuntime, StubRoleError,
+		StubRoleSuspendResume:
 		return true
 	default:
 		return false

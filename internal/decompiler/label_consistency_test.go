@@ -56,11 +56,11 @@ func TestGeneratorModifierPrecedence(t *testing.T) {
 		isAsync, isSyncStar, isAsyncS bool
 		want                          string
 	}{
-		{"async only", true, false, false, "async "},
-		{"sync* only", false, true, false, "sync* "},
-		{"async* only", false, false, true, "async* "},
-		{"async+async* (yieldAsyncStar)", true, false, true, "async* "},
-		{"async+sync* (resume stub)", true, true, false, "sync* "},
+		{"async only", true, false, false, ") async {"},
+		{"sync* only", false, true, false, ") sync* {"},
+		{"async* only", false, false, true, ") async* {"},
+		{"async+async* (yieldAsyncStar)", true, false, true, ") async* {"},
+		{"async+sync* (resume stub)", true, true, false, ") sync* {"},
 		{"none", false, false, false, ""},
 	}
 	for _, tt := range tests {
@@ -70,13 +70,56 @@ func TestGeneratorModifierPrecedence(t *testing.T) {
 		fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Addr: 0x1000, Op: OpReturn, Src: "ret"}}})
 		src := EmitPseudocode(fir, nil, nil).Source
 		sig := strings.SplitN(src, "\n", 2)[0]
-		if !strings.HasPrefix(sig, tt.want) {
-			t.Errorf("%s: signature %q, want prefix %q", tt.name, sig, tt.want)
+		if tt.want != "" && !strings.Contains(sig, tt.want) {
+			t.Errorf("%s: signature %q, want modifier suffix %q", tt.name, sig, tt.want)
+		}
+		if strings.HasPrefix(sig, "async ") || strings.HasPrefix(sig, "async* ") || strings.HasPrefix(sig, "sync* ") {
+			t.Errorf("%s: modifier is in invalid prefix position: %q", tt.name, sig)
 		}
 		// No modifier may appear twice, and the two forms must not stack.
-		if strings.Count(sig, "async") > 1 || strings.Contains(sig, "async async") ||
-			strings.Contains(sig, "sync* async") {
+		if strings.Count(sig, "async") > 1 || strings.Contains(sig, "async async") || strings.Contains(sig, "sync* async") {
 			t.Errorf("%s: stacked modifiers in %q", tt.name, sig)
 		}
+	}
+}
+
+func TestGeneratorStubsSetGeneratorModifierWithoutAwait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stubName string
+		wantMod  string
+	}{
+		{"sync star init", "InitSyncStarStub", ") sync* {"},
+		{"sync star suspend", "SuspendSyncStarAtYieldStub", ") sync* {"},
+		{"async star yield", "YieldAsyncStarStub", ") async* {"},
+		{"async star return", "ReturnAsyncStarStub", ") async* {"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fir := newFuncIR("generator", 0x1000)
+			fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
+			fir.ReturnReg = sdk.ARM64ReturnRegStr
+			fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
+				{Addr: 0x1000, Op: OpCall, Target: "0x2000", Src: "bl 0x2000"},
+				{Addr: 0x1004, Op: OpReturn, Src: "ret"},
+			}})
+			symbols := func(va uint64) (string, bool) {
+				if va == 0x2000 {
+					return tc.stubName, true
+				}
+				return "", false
+			}
+
+			src := EmitPseudocode(fir, symbols, nil).Source
+			sig := strings.SplitN(src, "\n", 2)[0]
+			if !strings.Contains(sig, tc.wantMod) {
+				t.Fatalf("signature %q, want %q; source:\n%s", sig, tc.wantMod, src)
+			}
+			if strings.Contains(src, " = await ") || strings.Contains(src, " = await;") {
+				t.Fatalf("generator suspension was rendered as await:\n%s", src)
+			}
+			if !strings.Contains(src, tc.stubName+"(") {
+				t.Fatalf("generator runtime call was discarded instead of preserved:\n%s", src)
+			}
+		})
 	}
 }

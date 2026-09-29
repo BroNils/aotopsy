@@ -34,12 +34,10 @@ import (
 // the Flutter releases from 3.44 on keep symbols in merged_native_libs, which
 // is where the six covered samples come from.
 func TestSymtabDifferential(t *testing.T) {
+	requireCompleteCorpus(t)
 	covered := 0
 	for _, s := range samplecorpus.Registry {
-		path := samplecorpus.Path(s.FileName())
-		if path == "" {
-			continue
-		}
+		path := corpusSample(t, s.FileName())
 		name := s.FileName()
 		t.Run(name, func(t *testing.T) {
 			if runSymtabDifferential(t, path, name) {
@@ -62,7 +60,10 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 	}
 	defer func() { _ = ctx.Close() }()
 
-	elfSyms := ctx.EF.FuncSymbols()
+	elfSyms, err := ctx.EF.FuncSymbols()
+	if err != nil {
+		t.Fatalf("FuncSymbols: %v", err)
+	}
 	if len(elfSyms) == 0 {
 		t.Skipf("stripped (no .symtab) -- nothing to compare against")
 		return false

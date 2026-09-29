@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +15,7 @@ func TestParseHeader(t *testing.T) {
 	// Construct a minimal valid header.
 	data := make([]byte, 256)
 	copy(data[0:4], []byte{0xf5, 0xf5, 0xdc, 0xdc})
-	data[4] = 0x10 // size = 16
+	binary.LittleEndian.PutUint64(data[4:12], uint64(len(data)-4))
 	copy(data[0x14:0x34], []byte("abcdef0123456789abcdef0123456789"))
 	copy(data[0x34:], []byte("arm64 android compressed-pointers\x00"))
 
@@ -29,6 +31,25 @@ func TestParseHeader(t *testing.T) {
 	}
 }
 
+func TestParseHeaderRejectsOverflowAndTruncation(t *testing.T) {
+	makeHeader := func(length uint64) []byte {
+		data := make([]byte, 64)
+		copy(data[0:4], snapshotMagic[:])
+		binary.LittleEndian.PutUint64(data[4:12], length)
+		copy(data[0x14:0x34], []byte("abcdef0123456789abcdef0123456789"))
+		data[0x34] = 0
+		return data
+	}
+	for _, length := range []uint64{math.MaxUint64, math.MaxInt64} {
+		if _, err := parseHeader(makeHeader(length)); err == nil {
+			t.Fatalf("length %#x accepted", length)
+		}
+	}
+	if _, err := parseHeader(makeHeader(1000)); err == nil {
+		t.Fatal("declared snapshot larger than backing data was accepted")
+	}
+}
+
 func TestParseHeaderBadMagic(t *testing.T) {
 	data := make([]byte, 64)
 	_, err := parseHeader(data)
@@ -41,6 +62,19 @@ func TestParseHeaderTooShort(t *testing.T) {
 	_, err := parseHeader([]byte{0xf5, 0xf5, 0xdc, 0xdc})
 	if err == nil {
 		t.Fatal("expected error for short data")
+	}
+}
+
+func TestSegmentRemainingAvoidsAddressOverflow(t *testing.T) {
+	vaddr := uint64(math.MaxUint64 - 0xf)
+	filesz := uint64(0x20)
+	va := uint64(math.MaxUint64 - 8)
+	got, ok := segmentRemaining(vaddr, filesz, va)
+	if !ok || got != 0x19 {
+		t.Fatalf("segmentRemaining overflow case = %#x,%v; want 0x19,true", got, ok)
+	}
+	if _, ok := segmentRemaining(vaddr, filesz, vaddr-1); ok {
+		t.Fatal("VA below segment accepted")
 	}
 }
 

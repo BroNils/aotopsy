@@ -108,32 +108,38 @@ func RunInterprocedural(
 	// in ctx. It maps method name (e.g., "adoptChild") → []Function refIDs.
 	// Used by setEntryFromParamTypes to look up FuncParamTypes.
 
-	// Dart AOT's OWN calling convention -- not the platform C ABI.
-	//
-	//	constants_arm64.h @3.12.2
-	//	  kCpuRegistersForArgs[] = {R1, R2, R3, R5, R6, R7}
-	//	constants_x64.h   @3.12.2 and @3.9.2
-	//	  kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
-	//
-	// The ARM64 list was applied to x86_64 as well, with a comment calling
-	// RDI "the SysV ABI first arg". SysV is the C convention; Dart declares
-	// its own, and only the FIRST register happens to coincide. Every other
-	// parameter was typed into the wrong register:
-	//
-	//	param 1  went to R2  = RDX, should be RSI
-	//	param 2  went to R3  = RBX, should be RDX
-	//	param 3  went to R5  = RBP, should be RBX   <- the frame pointer
-	//	param 4  went to R6  = RSI, should be R8
-	//	param 5  went to R7  = RDI, should be R9
-	//
-	// so on x86_64 this did not merely fail to type parameters, it planted
-	// a confident KnownClass on five registers that hold something else,
-	// one of them RBP.
-	//
-	// The struct does not exist before 3.x on x64 -- 2.x passed arguments
-	// on the stack, which is the documented reason x86_64 2.x recovers no
-	// receiver types at all.
-	argRegOrder := sdk.DartArgRegisters(isARM64)
+	// The SDK register table is only a layout, not proof that an individual
+	// Function uses it. It first exists at 3.4.3; even then generic and several
+	// Function kinds are stack-only, and unboxing metadata can force additional
+	// functions to the stack. Build a per-callee evidence map from independent
+	// direct-call setup masks and only propagate those proven positions.
+	cc, hasRegisterCC := sdk.DartRegisterCallingConvention(ctx.DartVersion, isARM64)
+	argRegOrder := cc.GPR
+	regArgsByFunc := make(map[string][]int)
+	if hasRegisterCC {
+		masksByFunc := make(map[string][]uint8)
+		for _, caller := range sortedKeys(blEdges) {
+			for _, edge := range blEdges[caller] {
+				if edge.ArgMask != 0 && ctx.FuncMayUseRegisterCC[edge.Callee] {
+					masksByFunc[edge.Callee] = append(masksByFunc[edge.Callee], edge.ArgMask)
+				}
+			}
+		}
+		for name, masks := range masksByFunc {
+			if idx, ok := disasm.ResolveArgRegIndices(masks); ok {
+				valid := true
+				for _, pos := range idx {
+					if pos < 0 || pos >= len(argRegOrder) {
+						valid = false
+						break
+					}
+				}
+				if valid {
+					regArgsByFunc[name] = idx
+				}
+			}
+		}
+	}
 
 	if isARM64 {
 		funcCount = len(funcInstsARM64)
@@ -145,17 +151,21 @@ func RunInterprocedural(
 		Functions: make(map[string]*FuncAnalysis, funcCount),
 	}
 
-	// Receiver register: ARM64 = X1 (1), x86_64 = RDI (7).
-	// Fase 7 PHASE 1 fix: Dart AOT calling convention uses R1 for receiver
-	// ('this'), NOT R0. R0 is kClassIdReg (used for dispatch table calls).
-	// Verified against dart-lang/sdk constants_arm64.h at 3.9.2:
-	//   DartCallingConvention::kCpuRegistersForArgs[] = {R1, R2, R3, R5, R6, R7}
-	// R0 = kClassIdReg, R4 = ARGS_DESC_REG, R5 = IC_DATA_REG.
-	// The receiver is parameter 0, so it is simply the head of the list
-	// above rather than a separately-maintained constant. Keeping the two in
-	// step by hand is what let x86_64 have a right receiver and five wrong
-	// parameters.
-	receiverReg := argRegOrder[0]
+	receiverReg := -1
+	if len(argRegOrder) > 0 {
+		receiverReg = argRegOrder[0]
+	}
+	hasRegPosition := func(name string, pos int) bool {
+		if pos == 0 && ctx.FuncReceiverInRegister[name] {
+			return true
+		}
+		for _, p := range regArgsByFunc[name] {
+			if p == pos {
+				return true
+			}
+		}
+		return false
+	}
 
 	// Initialize function analyses with entry types.
 	// M-6 fix: only iterate the map for the active architecture.
@@ -171,6 +181,10 @@ func RunInterprocedural(
 	// Q10 fix: try qualified "Owner.method" name first (more precise),
 	// then fall back to bare method name (broader match).
 	setEntryFromParamTypes := func(name string, entry *[31]TypeLattice) {
+		positions := regArgsByFunc[name]
+		if len(positions) == 0 {
+			return
+		}
 		// Function name format: "Owner.method_hexaddr" or "method_hexaddr"
 		// Strip hex suffix to get "Owner.method"
 		lookupName := name
@@ -218,7 +232,14 @@ func RunInterprocedural(
 		if isInstance {
 			startIdx = 1 // Skip 'this' — already set from FuncOwnerClass
 		}
+		allowed := make(map[int]bool, len(positions))
+		for _, pos := range positions {
+			allowed[pos] = true
+		}
 		for i := startIdx; i < len(paramTypes) && i < len(argRegOrder); i++ {
+			if !allowed[i] {
+				continue
+			}
 			cid := paramTypes[i]
 			if cid >= 0 {
 				regIdx := argRegOrder[i]
@@ -243,7 +264,9 @@ func RunInterprocedural(
 			}
 			var entryStack map[int]TypeLattice
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
-				entry[receiverReg] = KnownClass(ownerCID)
+				if receiverReg >= 0 && hasRegPosition(name, 0) {
+					entry[receiverReg] = KnownClass(ownerCID)
+				}
 				// Pre-3.4.3 the receiver arrives on the stack and the
 				// prologue immediately overwrites the register, so the
 				// register seed alone is dead on arrival.
@@ -263,7 +286,7 @@ func RunInterprocedural(
 			for i := range entry {
 				entry[i] = Top()
 			}
-			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 && receiverReg >= 0 && hasRegPosition(name, 0) {
 				entry[receiverReg] = KnownClass(ownerCID)
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
@@ -307,22 +330,31 @@ func RunInterprocedural(
 	// so the first fixed-point iteration's handleBL can see return types.
 	// Don't overwrite FuncReturnType seeds with Top — the declared return
 	// type is more precise than "we don't know from analysis alone".
+	needReanalysis := false
 	for target, name := range blTargetToName {
 		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
 			if fa.Intra.ExitTypes[0].Kind != LatticeTop {
-				ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+				if old, ok := ctx.CalleeExitTypes[target]; !ok || !old.Equal(fa.Intra.ExitTypes[0]) {
+					ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+					needReanalysis = true
+				}
 			}
-			ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+			if old, ok := ctx.CalleeAllExitTypes[target]; !ok || !latticeArrayEqual(old, fa.Intra.ExitTypes) {
+				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+				needReanalysis = true
+			}
 		}
 	}
 
 	// LCA helper.
 	lca := func(a, b int) int { return LCA(a, b, ctx.SuperClass) }
 
-	// Fixed-point iteration.
+	// Fixed-point iteration. Parameter estimates are recomputed from the
+	// current call-site states each round, but convergence is measured against
+	// the PREVIOUS round. Comparing against a fresh all-Top map makes every
+	// non-Top argument look changed forever and forces maxIterations runs.
+	prevParamTypes := make(map[string][31]TypeLattice)
 	for iter := 0; iter < maxIterations; iter++ {
-		changed := false
-
 		calleeParamTypes := make(map[string][31]TypeLattice)
 
 		for _, caller := range sortedKeys(blEdges) {
@@ -348,20 +380,27 @@ func RunInterprocedural(
 					argTypes = callerAnalysis.Intra.ExitTypes
 				}
 
+				positions := regArgsByFunc[edge.Callee]
+				if len(positions) == 0 {
+					continue
+				}
 				current := calleeParamTypes[edge.Callee]
-				for r := 0; r < 31; r++ {
+				for _, pos := range positions {
+					r := argRegOrder[pos]
 					newType := meetType(current[r], argTypes[r], lca)
 					if !newType.Equal(current[r]) {
 						calleeParamTypes[edge.Callee] = updateReg(calleeParamTypes[edge.Callee], r, newType)
-						changed = true
 					}
 				}
 			}
 		}
 
-		if !changed {
+		changed := !paramTypeMapsEqual(prevParamTypes, calleeParamTypes)
+		if !changed && !needReanalysis {
 			break
 		}
+		prevParamTypes = cloneParamTypeMap(calleeParamTypes)
+		needReanalysis = false
 
 		// Re-run intra-procedural analysis with updated parameter types.
 		// M-6 fix: only iterate the map for the active architecture.
@@ -380,7 +419,7 @@ func RunInterprocedural(
 						entry[i] = Top()
 					}
 				}
-				if entry[receiverReg].Kind == LatticeTop {
+				if receiverReg >= 0 && hasRegPosition(name, 0) && entry[receiverReg].Kind == LatticeTop {
 					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 						entry[receiverReg] = KnownClass(ownerCID)
 					}
@@ -399,7 +438,7 @@ func RunInterprocedural(
 						entry[i] = Top()
 					}
 				}
-				if entry[receiverReg].Kind == LatticeTop {
+				if receiverReg >= 0 && hasRegPosition(name, 0) && entry[receiverReg].Kind == LatticeTop {
 					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 						entry[receiverReg] = KnownClass(ownerCID)
 					}
@@ -418,9 +457,15 @@ func RunInterprocedural(
 		for target, name := range blTargetToName {
 			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
 				if fa.Intra.ExitTypes[0].Kind != LatticeTop {
-					ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+					if old, ok := ctx.CalleeExitTypes[target]; !ok || !old.Equal(fa.Intra.ExitTypes[0]) {
+						ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
+						needReanalysis = true
+					}
 				}
-				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+				if old, ok := ctx.CalleeAllExitTypes[target]; !ok || !latticeArrayEqual(old, fa.Intra.ExitTypes) {
+					ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+					needReanalysis = true
+				}
 			}
 		}
 		// Invalidate selector cache: new allocation sites may have been
@@ -443,14 +488,48 @@ func RunInterprocedural(
 	return result
 }
 
+func paramTypeMapsEqual(a, b map[string][31]TypeLattice) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, av := range a {
+		bv, ok := b[name]
+		if !ok || !typesEqual(av, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneParamTypeMap(src map[string][31]TypeLattice) map[string][31]TypeLattice {
+	dst := make(map[string][31]TypeLattice, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 // BLEdge represents a direct BL call edge for inter-procedural propagation.
 type BLEdge struct {
 	Callee string
 	CallPC uint64 // address of the BL instruction
+	// ArgMask is the direct call site's observed register-setup mask in SDK
+	// convention-position order. It is evidence, not a declaration: consumers
+	// aggregate multiple independent call sites before trusting it.
+	ArgMask uint8
 }
 
 // updateReg returns a copy of types with register r set to newType.
 func updateReg(types [31]TypeLattice, r int, newType TypeLattice) [31]TypeLattice {
 	types[r] = newType
 	return types
+}
+
+func latticeArrayEqual(a, b [31]TypeLattice) bool {
+	for i := range a {
+		if !a[i].Equal(b[i]) {
+			return false
+		}
+	}
+	return true
 }

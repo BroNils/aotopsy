@@ -84,6 +84,9 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
         dict with stats: functions_created, functions_named, structs_created,
         signatures_applied, comments_set
     """
+    if meta.get("version") != "2" or meta.get("arch") != "arm64":
+        raise ValueError("flutter_meta.json must be schema version 2 for arch arm64")
+
     pointer_size = meta.get("pointer_size", 8)
     log("  pointer_size: %d" % pointer_size)
 

@@ -10,7 +10,6 @@
 package decompiler
 
 import (
-	"sort"
 	"strings"
 
 	"aotopsy/internal/cluster"
@@ -40,6 +39,11 @@ type Instr struct {
 	Op     Op
 	Src    string
 	Target string // resolved target: "0x<hex>" VA, a register name (indirect), or "" if RET
+	// DefRegs is the canonical general-purpose register write-set for this
+	// instruction. Downstream dataflow consumers use it to invalidate facts on
+	// actual writes rather than guessing from mnemonic text. Names use the same
+	// lowercase 64-bit spelling as FuncIR.ArgRegs (xN / rax..r15).
+	DefRegs []string
 	// PoolIndex is set for OpLoadPool when the pool slot index is known
 	// (ARM64: MOV Xd, [x27/PP, #imm]; x86_64: MOV reg, [r15+imm]). For
 	// OpLoadPool, Target holds the destination register name.
@@ -53,8 +57,12 @@ type Instr struct {
 	//   CondKind "bittest0"/"bittest1" -> ((CondReg >> CondBit) & 1) == 0 / != 0
 	CondKind string
 	CondOp   string // Dart comparison operator, e.g. "==", "!=", "<", "<=", ">", ">="
-	CondReg  string
-	CondBit  int
+	// CondUnsigned distinguishes carry/unsigned conditions (ARM64 HI/HS/LO/LS,
+	// x86 A/AE/B/BE) from signed comparisons. Collapsing the two changes branch
+	// semantics for values with the high bit set.
+	CondUnsigned bool
+	CondReg      string
+	CondBit      int
 
 	// IsDispatchCall marks an OpCall as a DispatchTable call, with
 	// DispatchSelector holding its selector offset. The two are separate
@@ -85,27 +93,29 @@ type Block struct {
 // FuncIR is one function's arch-neutral intermediate representation, the
 // direct input to the pseudocode emitter (emit.go).
 type FuncIR struct {
-	Name      string
-	EntryVA   uint64
-	Blocks    []Block
-	blockByVA map[uint64]int
-	ArgRegs   []string // arg0..argN register names in calling-convention order
-	FrameReg  string   // frame/stack-relative base register name (ARM64: x29; x86_64: rbp)
-	ReturnReg string   // register holding the return value (ARM64: x0; x86_64: rax)
-	LinkReg   string   // return-address register alias name, if any (ARM64: x30; x86_64: "" -- on the stack)
-	PoolReg   string   // object-pool base register (ARM64: x27; x86_64: r15)
-	ThreadReg string   // Dart Thread*-holding register (ARM64: x26/THR; x86_64: r14)
+	Name        string
+	DartVersion string
+	EntryVA     uint64
+	Blocks      []Block
+	blockByVA   map[uint64]int
+	ArgRegs     []string // arg0..argN register names in calling-convention order
+	FrameReg    string   // frame/stack-relative base register name (ARM64: x29; x86_64: rbp)
+	ReturnReg   string   // register holding the return value (ARM64: x0; x86_64: rax)
+	LinkReg     string   // return-address register alias name, if any (ARM64: x30; x86_64: "" -- on the stack)
+	PoolReg     string   // object-pool base register (ARM64: x27; x86_64: r15)
+	ThreadReg   string   // Dart Thread*-holding register (ARM64: x26/THR; x86_64: r14)
 	// NullReg is the register that permanently caches Object::null(), so
 	// every read of it is the literal `null`. ARM64 only (NULL_REG = R22);
 	// empty on x86_64, which has no such register and loads null from the
 	// object pool instead. See arm64NullReg for the SDK reference and the
 	// sample check behind it.
 	NullReg string
-	// HeapBitsReg is the register holding HEAP_BITS, whose left shift by 32
-	// yields heap_base and so marks a compressed-pointer decompression.
-	// ARM64 only; x86_64 adds Thread.heap_base instead. See
-	// isPointerDecompression.
-	HeapBitsReg string
+	// ARM64 heap/GC pinned registers changed at Dart 2.14. HeapBitsReg is R28
+	// in 2.14+; older releases use BarrierMaskReg=R28 and Dart 2.13 compressed
+	// builds additionally use HeapBaseReg=R23. x86_64 uses Thread fields instead.
+	HeapBitsReg    string
+	HeapBaseReg    string
+	BarrierMaskReg string
 
 	// CodeReg holds the current Code object pointer at function entry
 	// (CODE_REG: x24 on ARM64, r12 on x86_64). The prologue derives PP from it
@@ -300,21 +310,17 @@ type FuncIR struct {
 	// EmitPseudocode runs.
 	FieldNameResolver func(classID int, byteOffset int64) string `json:"-"`
 
-	// IsAsync is set when the function is detected as async. Detection paths:
-	// 1. Direct BL to symbols containing "init_async"/"return_async" (pre-scan)
-	// 2. THR stub calls to suspend_state_*_entry_point (emitIndirectCall)
-	// 3. SuspendState CID in pool loads (decompile_native_cmd.go)
-	// 4. Call targets containing "_SuspendState" + "_await"/"_resume"/"_yield"/"_initAsync"/"_returnAsync"
-	// 5. Call targets containing "Future.delayed"/"Future._asyncComplete"/"Future._thenAwait"
-	// 6. Post-walk patch if any of the above set IsAsync during walking
+	// IsAsync is set for async/async* functions from SDK-classified direct or THR
+	// stubs, plus independent SuspendState evidence populated by analysis callers.
+	// sync* generator stubs deliberately do not set it.
 	IsAsync bool `json:"-"`
 
 	// IsSyncStar is set when the function is detected as a sync* generator.
-	// Detection: call targets containing "InitSyncStar" or "_initSyncStar".
+	// Detection comes from SDK-classified Init/Suspend sync-star stubs.
 	IsSyncStar bool `json:"-"`
 
 	// IsAsyncStar is set when the function is detected as an async* generator.
-	// Detection: call targets containing "YieldAsyncStar" or "_yieldAsyncStar".
+	// Detection comes from SDK-classified Init/Yield/Return async-star stubs.
 	IsAsyncStar bool `json:"-"`
 
 	// SwitchCases holds recovered switch/case dispatch info for indirect
@@ -399,76 +405,6 @@ type TryRegionEntry struct {
 	Handler ExceptionHandlerEntry
 	// HandlerVA is the absolute address of the handler's entry point.
 	HandlerVA uint64
-}
-
-// SnapTryRegionsToBlocks widens each try region outward to basic-block
-// boundaries and reports how many regions grew.
-//
-// This is sound, not a heuristic. A basic block is straight-line code with a
-// single entry, so control cannot enter it partway: if ANY pc in a block is
-// inside try N, every pc in that block is inside try N. Snapping therefore
-// cannot over-claim coverage.
-//
-// It matters because raw PcDescriptor ranges are severe lower bounds --
-// descriptors only exist at call sites and runtime calls, so a try whose body
-// contains one call yields a range of a single instruction. Snapping recovers
-// the enclosing straight-line code, which is what a reader actually wants and
-// what any future `try { }` structuring needs.
-//
-// It does NOT fix the other under-report: two nested trys can still merge when
-// descriptors are too sparse to separate them.
-func (f *FuncIR) SnapTryRegionsToBlocks() int {
-	if len(f.TryRegions) == 0 || len(f.Blocks) == 0 {
-		return 0
-	}
-	// Block extent: [StartVA, last instruction's Addr]. The end is inclusive of
-	// the final instruction's address; regions use an exclusive end, so callers
-	// get lastAddr+1 at minimum. Instruction width is unknown here (x86_64 is
-	// variable length), so the next block's StartVA is used where available.
-	type extent struct{ start, end uint64 }
-	extents := make([]extent, 0, len(f.Blocks))
-	for i := range f.Blocks {
-		b := &f.Blocks[i]
-		if len(b.Instrs) == 0 {
-			continue
-		}
-		e := b.Instrs[len(b.Instrs)-1].Addr + 1
-		extents = append(extents, extent{start: b.StartVA, end: e})
-	}
-	if len(extents) == 0 {
-		return 0
-	}
-	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
-	// A block's true end is the next block's start when they are contiguous,
-	// which recovers the final instruction's width.
-	for i := 0; i+1 < len(extents); i++ {
-		if extents[i+1].start > extents[i].end {
-			extents[i].end = extents[i+1].start
-		}
-	}
-
-	widened := 0
-	for i := range f.TryRegions {
-		r := &f.TryRegions[i]
-		newStart, newEnd := r.StartVA, r.EndVA
-		for _, e := range extents {
-			// Overlap test against the region's original extent.
-			if e.end <= r.StartVA || e.start >= r.EndVA {
-				continue
-			}
-			if e.start < newStart {
-				newStart = e.start
-			}
-			if e.end > newEnd {
-				newEnd = e.end
-			}
-		}
-		if newStart != r.StartVA || newEnd != r.EndVA {
-			widened++
-			r.StartVA, r.EndVA = newStart, newEnd
-		}
-	}
-	return widened
 }
 
 // CatchClause renders the Dart catch binding this handler actually has.

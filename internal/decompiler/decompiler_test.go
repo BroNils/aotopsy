@@ -122,12 +122,28 @@ func TestDecodeX86RangeMultipleReturns(t *testing.T) {
 		0x90, // nop
 		0xc3, // ret
 	}
-	insts := DecodeX86Range(code, 0x1000)
+	insts, err := DecodeX86Range(code, 0x1000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(insts) != 5 {
 		t.Fatalf("DecodeX86Range: got %d instructions, want 5 (decoding must not stop at the first RET); insts=%+v", len(insts), insts)
 	}
 	if insts[len(insts)-1].VA != 0x1006 {
 		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].VA)
+	}
+}
+
+func TestDecodeX86RangeReportsMalformedCodeRange(t *testing.T) {
+	// 0xc4 starts a VEX3 prefix and is truncated here. This is inside a
+	// declared CodeRange, so silently returning a zero-instruction prefix would
+	// make the decompiler present incomplete code as complete.
+	insts, err := DecodeX86Range([]byte{0x90, 0xc4}, 0x2000)
+	if err == nil {
+		t.Fatalf("malformed CodeRange returned success with %d decoded instructions", len(insts))
+	}
+	if len(insts) != 1 || insts[0].VA != 0x2000 {
+		t.Fatalf("decoded prefix = %+v, want one NOP before explicit failure", insts)
 	}
 }
 
@@ -336,19 +352,28 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 	}
 }
 
-// TestVoidCallDetection (P3-feasible-3) verifies that known void calls
-// are emitted without a temp variable assignment.
-func TestVoidCallDetection(t *testing.T) {
-	if !isVoidCall("print", "") {
-		t.Error("print should be detected as void")
+// Selector names do not prove a return type: application code may define a
+// method named `clear`, `dispose`, etc. A normal call must keep its result until
+// real signature metadata proves void.
+func TestCallNameDoesNotDiscardReturnValue(t *testing.T) {
+	fir := newFuncIR("caller", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ArgRegs = arm64ArgRegs
+	e := &emitter{
+		fir:   fir,
+		state: newLiftState(""),
+		symbols: func(va uint64) (string, bool) {
+			if va == 0x2000 {
+				return "clear", true
+			}
+			return "", false
+		},
 	}
-	if !isVoidCall("", "setState") {
-		t.Error("setState selector hint should be detected as void")
+	e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+	if len(e.lines) != 1 || !strings.Contains(e.lines[0], "final t1 = clear(") {
+		t.Fatalf("call result was discarded by name heuristic: %v", e.lines)
 	}
-	if isVoidCall("someFunction", "") {
-		t.Error("someFunction should not be detected as void")
-	}
-	if isVoidCall("", "unknownMethod") {
-		t.Error("unknownMethod should not be detected as void")
+	if got := e.state.lookupReg(fir.ReturnReg); got != "t1" {
+		t.Fatalf("return register = %q, want t1", got)
 	}
 }

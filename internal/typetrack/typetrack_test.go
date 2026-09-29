@@ -55,6 +55,8 @@ func TestLatticeEqual(t *testing.T) {
 		{KnownDispatch(3), KnownDispatch(4), false},
 		{KnownStub("A", 0x220), KnownStub("A", 0x220), true},
 		{KnownStub("A", 0x220), KnownStub("B", 0x228), false},
+		{TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, true},
+		{TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, TypeLattice{Kind: LatticePPBase, PPBaseOffset: 24}, false},
 		{Top(), Bottom(), false},
 		{KnownClass(1), KnownDispatch(1), false},
 		{KnownClass(1), KnownStub("A", 0x220), false},
@@ -64,6 +66,27 @@ func TestLatticeEqual(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%+v.Equal(%+v) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+func TestParamTypeMapsCompareAcrossIterations(t *testing.T) {
+	var a [31]TypeLattice
+	var b [31]TypeLattice
+	a[1] = KnownClass(42)
+	b[1] = KnownClass(42)
+	one := map[string][31]TypeLattice{"callee": a}
+	two := map[string][31]TypeLattice{"callee": b}
+	if !paramTypeMapsEqual(one, two) {
+		t.Fatal("identical propagated non-Top parameter maps must converge")
+	}
+	b[1] = KnownClass(43)
+	two["callee"] = b
+	if paramTypeMapsEqual(one, two) {
+		t.Fatal("changed propagated parameter type was treated as converged")
+	}
+	clone := cloneParamTypeMap(one)
+	if !paramTypeMapsEqual(one, clone) {
+		t.Fatal("cloned parameter map changed value")
 	}
 }
 

@@ -39,6 +39,9 @@ func cmdX64Refs(args []string) error {
 		return err
 	}
 	defer func() { _ = sc.Close() }()
+	if sc.IsARM64 {
+		return fmt.Errorf("x64refs requires an x86_64 libapp.so; %s is ARM64", *libapp)
+	}
 
 	info := sc.Info
 	result := sc.Result

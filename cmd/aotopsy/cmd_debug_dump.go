@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -52,11 +53,11 @@ func cmdDump(args []string) error {
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
 
-	// Write snapshot.json.
-	if err := output.WriteSnapshotJSON(*outDir, info); err != nil {
-		return fmt.Errorf("write snapshot.json: %w", err)
+	// Write parser/debug snapshot metadata separately from pipeline provenance.
+	if err := output.WriteSnapshotInfoJSON(*outDir, info); err != nil {
+		return fmt.Errorf("write snapshot_info.json: %w", err)
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "wrote %s/snapshot.json\n", *outDir)
+	_, _ = fmt.Fprintf(os.Stderr, "wrote %s/snapshot_info.json\n", *outDir)
 
 	// Generate placeholder symbols from instruction region.
 	symbols := make(map[uint64]string)
@@ -92,7 +93,7 @@ func cmdDump(args []string) error {
 
 	if isARM64 {
 		if len(info.IsolateInstructions.Data) > 0 {
-			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
+			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "warning: could not parse isolate instructions image header: %v\n", err)
 				code = info.IsolateInstructions.Data
@@ -114,7 +115,7 @@ func cmdDump(args []string) error {
 		}
 
 		if len(info.VmInstructions.Data) > 0 {
-			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data)
+			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
 				code = info.VmInstructions.Data
 				codeOff = 0
@@ -131,7 +132,7 @@ func cmdDump(args []string) error {
 		}
 	} else {
 		if len(info.IsolateInstructions.Data) > 0 {
-			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
+			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "warning: could not parse isolate instructions image header: %v\n", err)
 				code = info.IsolateInstructions.Data
@@ -149,7 +150,7 @@ func cmdDump(args []string) error {
 		}
 
 		if len(info.VmInstructions.Data) > 0 {
-			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data)
+			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
 				code = info.VmInstructions.Data
 				codeOff = 0
@@ -177,33 +178,31 @@ func cmdDump(args []string) error {
 }
 
 func writeX86ASMBlob(path string, code []byte, baseVA uint64, lookup disasm.SymbolLookup, maxSteps int) (int, error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = f.Close() }()
-
 	n := 0
-	x86.Walk(code, baseVA, func(d x86.Decoded) bool {
-		if maxSteps > 0 && n >= maxSteps {
-			return false
-		}
-		if d.Bad {
-			_, _ = fmt.Fprintf(f, "0x%x: <bad>\n", d.VA)
-			n++
-			return true
-		}
-		line := x86.InstText(d.Inst)
-		if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
-			if name, ok := lookup(target); ok {
-				line += fmt.Sprintf("  ; -> %s", name)
-			} else {
-				line += fmt.Sprintf("  ; -> 0x%x", target)
+	err := output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		var writeErr error
+		x86.Walk(code, baseVA, func(d x86.Decoded) bool {
+			if maxSteps > 0 && n >= maxSteps {
+				return false
 			}
-		}
-		_, _ = fmt.Fprintf(f, "0x%x: %s\n", d.VA, line)
-		n++
-		return true
+			if d.Bad {
+				_, writeErr = fmt.Fprintf(w, "0x%x: <bad>\n", d.VA)
+				n++
+				return writeErr == nil
+			}
+			line := x86.InstText(d.Inst)
+			if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+				if name, ok := lookup(target); ok {
+					line += fmt.Sprintf("  ; -> %s", name)
+				} else {
+					line += fmt.Sprintf("  ; -> 0x%x", target)
+				}
+			}
+			_, writeErr = fmt.Fprintf(w, "0x%x: %s\n", d.VA, line)
+			n++
+			return writeErr == nil
+		})
+		return writeErr
 	})
-	return n, nil
+	return n, err
 }

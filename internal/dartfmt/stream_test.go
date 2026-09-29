@@ -1,6 +1,7 @@
 package dartfmt
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -71,6 +72,65 @@ func TestReadUnsigned_EOF(t *testing.T) {
 	}
 }
 
+func TestReadUnsignedRejectsTenthSignBitGroup(t *testing.T) {
+	// Nine continuation groups consume bits 0..62. A tenth group starts at bit
+	// 63 and cannot represent a non-negative intptr_t. The old decoder accepted
+	// terminal 0x81 here and returned MinInt64 with nil error.
+	data := append(make([]byte, 9), byte(0x81))
+	s := NewStream(data)
+	if _, err := s.ReadUnsigned(); err != ErrStreamOverrun {
+		t.Fatalf("ReadUnsigned oversized terminal error = %v, want ErrStreamOverrun", err)
+	}
+}
+
+func TestReadUnsignedAcceptsMaxInt64(t *testing.T) {
+	// Eight full continuation groups followed by a 7-bit terminal group at bit
+	// 56 encode MaxInt64 exactly.
+	data := append([]byte{0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f}, byte(0xff))
+	s := NewStream(data)
+	got, err := s.ReadUnsigned()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != int64(^uint64(0)>>1) {
+		t.Fatalf("ReadUnsigned(max) = %d, want MaxInt64", got)
+	}
+}
+
+func TestReadUnsigned64AcceptsBit63AndMaxUint64(t *testing.T) {
+	// Nine continuation groups occupy bits 0..62; terminal 0x81 contributes
+	// one at bit 63. This exact shape is valid for SDK ReadUnsigned<uint64_t>
+	// but intentionally invalid for intptr_t ReadUnsigned().
+	bit63 := append(make([]byte, 9), byte(0x81))
+	got, err := NewStream(bit63).ReadUnsigned64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != uint64(1)<<63 {
+		t.Fatalf("ReadUnsigned64(bit63) = %#x, want %#x", got, uint64(1)<<63)
+	}
+
+	max := append([]byte{0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f}, byte(0x81))
+	got, err = NewStream(max).ReadUnsigned64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ^uint64(0) {
+		t.Fatalf("ReadUnsigned64(max) = %#x, want MaxUint64", got)
+	}
+}
+
+func TestReadUnsigned64RejectsOversizedFinalGroup(t *testing.T) {
+	data := append(make([]byte, 9), byte(0x82)) // contribution 2 at bit 63
+	if _, err := NewStream(data).ReadUnsigned64(); err != ErrStreamOverrun {
+		t.Fatalf("ReadUnsigned64 oversized terminal error = %v, want ErrStreamOverrun", err)
+	}
+	data = append(make([]byte, 10), byte(0x80)) // continuation at bit 63
+	if _, err := NewStream(data).ReadUnsigned64(); err != ErrStreamOverrun {
+		t.Fatalf("ReadUnsigned64 oversized continuation error = %v, want ErrStreamOverrun", err)
+	}
+}
+
 func TestReadTagged32_SingleByte(t *testing.T) {
 	// Terminal byte > 127: value = byte - 192.
 	// Range: 128→(128-192)=wraps, 192→0, 255→63.
@@ -117,6 +177,19 @@ func TestReadTagged32_MultiByte(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ReadTagged32(%v) = %d, want %d", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestReadTaggedWidthsRejectOversizedFinalGroup(t *testing.T) {
+	// At bit 14 only two signed bits remain in an int16, so contribution +2
+	// (terminal byte 194) is out of range.
+	if _, err := NewStream([]byte{0, 0, 194}).ReadTagged16(); err != ErrStreamOverrun {
+		t.Fatalf("ReadTagged16 oversized final group error = %v, want ErrStreamOverrun", err)
+	}
+	// At bit 28 only four signed bits remain in an int32, so contribution +8
+	// (terminal byte 200) is out of range.
+	if _, err := NewStream([]byte{0, 0, 0, 0, 200}).ReadTagged32(); err != ErrStreamOverrun {
+		t.Fatalf("ReadTagged32 oversized final group error = %v, want ErrStreamOverrun", err)
 	}
 }
 
@@ -181,6 +254,19 @@ func TestReadRefId_MultiByte(t *testing.T) {
 	}
 }
 
+func TestReadRefIdRejectsFifthByte(t *testing.T) {
+	// The SDK's compact ref-id decoder is bounded to four bytes. Four
+	// continuation bytes are therefore already malformed; the fifth byte must
+	// not be consumed as a belated terminator.
+	s := NewStream([]byte{1, 1, 1, 1, 0x80})
+	if _, err := s.ReadRefId(); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("ReadRefId five-byte encoding error = %v, want ErrStreamOverrun", err)
+	}
+	if got := s.Position(); got != 4 {
+		t.Fatalf("ReadRefId consumed %d bytes, want exactly four", got)
+	}
+}
+
 func TestReadCString(t *testing.T) {
 	s := NewStream([]byte("hello\x00world\x00"))
 	got, err := s.ReadCString()
@@ -225,5 +311,41 @@ func TestReadDouble(t *testing.T) {
 	}
 	if f != 0.0 {
 		t.Errorf("ReadDouble = %f, want 0.0", f)
+	}
+}
+
+func TestStreamRejectsNegativeLengthsAndPositions(t *testing.T) {
+	s := NewStreamAt([]byte{0x7f}, -1)
+	if s.Position() != 0 {
+		t.Fatalf("negative constructor offset was not clamped: %d", s.Position())
+	}
+	if _, err := s.ReadByte(); err != nil {
+		t.Fatalf("read after negative constructor offset: %v", err)
+	}
+
+	s = NewStream([]byte{1, 2, 3})
+	s.SetPosition(-100)
+	if s.Position() != 0 {
+		t.Fatalf("negative SetPosition was not clamped: %d", s.Position())
+	}
+	if _, err := s.ReadBytes(-1); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("ReadBytes(-1) error = %v, want ErrStreamOverrun", err)
+	}
+	if err := s.Skip(-1); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("Skip(-1) error = %v, want ErrStreamOverrun", err)
+	}
+	if s.Position() != 0 {
+		t.Fatalf("rejected negative operations moved stream to %d", s.Position())
+	}
+
+	// Addition-based bounds checks overflow for this request when pos > 0.
+	// The stream must reject it before any allocation or slice expression.
+	s = NewStreamAt([]byte{1, 2, 3}, 1)
+	maxInt := int(^uint(0) >> 1)
+	if _, err := s.ReadBytes(maxInt); !errors.Is(err, ErrStreamEOF) {
+		t.Fatalf("ReadBytes(MaxInt) error = %v, want ErrStreamEOF", err)
+	}
+	if err := s.Skip(maxInt); !errors.Is(err, ErrStreamEOF) {
+		t.Fatalf("Skip(MaxInt) error = %v, want ErrStreamEOF", err)
 	}
 }

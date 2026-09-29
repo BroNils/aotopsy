@@ -1,6 +1,9 @@
 package x86
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // A trivial x86-64 sequence: NOP (0x90), INC ECX (0xFF 0xC1), RET (0xC3).
 func TestDecodeBasic(t *testing.T) {
@@ -56,5 +59,30 @@ func TestWalkEarlyStop(t *testing.T) {
 	})
 	if n != 2 {
 		t.Errorf("callback should have run exactly twice, ran %d", n)
+	}
+}
+
+func TestWalkStopsBeforeVirtualAddressWrap(t *testing.T) {
+	got := Decode([]byte{0x90, 0x90}, math.MaxUint64)
+	if len(got) != 1 || got[0].VA != math.MaxUint64 {
+		t.Fatalf("Decode at MaxUint64 = %+v, want exactly one instruction at MaxUint64", got)
+	}
+}
+
+func TestSplitAtInstructionBoundary(t *testing.T) {
+	data := make([]byte, 32)
+	for i := range data {
+		data[i] = 0x90 // NOP
+	}
+	// Five-byte CALL begins two bytes before the budget boundary.
+	copy(data[8:], []byte{0xE8, 0, 0, 0, 0})
+	if got := SplitAtInstructionBoundary(data, 10); got != 8 {
+		t.Fatalf("split = %d, want CALL boundary 8", got)
+	}
+	if got := SplitAtInstructionBoundary([]byte{0xE8, 0, 0, 0, 0}, 2); got != 0 {
+		t.Fatalf("tiny budget split = %d, want 0 (no complete instruction)", got)
+	}
+	if got := SplitAtInstructionBoundary([]byte{0x06, 0x90, 0x90}, 2); got != 2 {
+		t.Fatalf("bad-byte recovery split = %d, want 2", got)
 	}
 }

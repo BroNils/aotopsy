@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -63,12 +64,12 @@ func TestColorWrapAndFormat(t *testing.T) {
 	// Enabled
 	SetColorMode(ColorTrue)
 	s := GoldColor.S("test")
-	if !strings.HasPrefix(s, "\033[38;2;255;200;0m") || !strings.HasSuffix(s, Reset) {
+	if !strings.HasPrefix(s, "\033[38;2;255;200;0m") || !strings.HasSuffix(s, string(Reset)) {
 		t.Errorf("unexpected colored wrap: %q", s)
 	}
 
 	f := GoldColor.F("%d values", 42)
-	if !strings.Contains(f, "42 values") || !strings.HasSuffix(f, Reset) {
+	if !strings.Contains(f, "42 values") || !strings.HasSuffix(f, string(Reset)) {
 		t.Errorf("unexpected colored format: %q", f)
 	}
 
@@ -82,6 +83,16 @@ func TestColorWrapAndFormat(t *testing.T) {
 	fDisabled := GoldColor.F("%d values", 42)
 	if fDisabled != "42 values" {
 		t.Errorf("expected plain text when disabled, got %q", fDisabled)
+	}
+}
+
+func TestSafeLineBlocksLineAndTerminalInjection(t *testing.T) {
+	got := SafeLine("bad\nforged\tfield\r\x1b[8mhidden\x1b[0m\x1b]0;title\aend")
+	if got != "bad forged fieldhiddenend" {
+		t.Fatalf("SafeLine = %q", got)
+	}
+	if strings.ContainsAny(got, "\r\n\t\x1b\a") {
+		t.Fatalf("SafeLine leaked terminal control: %q", got)
 	}
 }
 
@@ -124,6 +135,7 @@ func TestDetectColorMode(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("CLICOLOR", "1")
 	t.Setenv("CLICOLOR_FORCE", "")
+	t.Setenv("TERM", "xterm-256color")
 
 	// Force mode
 	t.Setenv("CLICOLOR_FORCE", "1")
@@ -151,6 +163,12 @@ func TestDetectColorMode(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 	if mode := DetectColorMode(nil); mode != ColorNone {
 		t.Errorf("expected ColorNone under dumb, got %v", mode)
+	}
+
+	// TERM=dumb is authoritative even when COLORTERM claims truecolor.
+	t.Setenv("COLORTERM", "truecolor")
+	if mode := DetectColorMode(nil); mode != ColorNone {
+		t.Errorf("TERM=dumb must beat COLORTERM=truecolor, got %v", mode)
 	}
 }
 
@@ -180,6 +198,7 @@ func TestNoColorBeatsForce(t *testing.T) {
 func TestForceBeatsCliColorZero(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("CLICOLOR", "0")
 	t.Setenv("CLICOLOR_FORCE", "1")
 
@@ -260,5 +279,158 @@ func TestMakeLogfAndMakeStagef(t *testing.T) {
 	stagef("myStage", "count=%d", 5)
 	if !strings.Contains(buf.String(), "myStage") || !strings.Contains(buf.String(), "count=5") {
 		t.Errorf("unexpected stagef output: %q", buf.String())
+	}
+}
+
+func TestLoggerStripsANSIForGenericWriter(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("%svalue%s\n", GoldColor.ANSI(ColorTrue), "\x1b[0m")
+	l.Stage("meta", "%s%d%s functions", GoldColor.ANSI(ColorTrue), 7, "\x1b[0m")
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("non-terminal writer received ANSI: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "value\n") || !strings.Contains(buf.String(), "meta 7 functions") {
+		t.Fatalf("ANSI stripping damaged content: %q", buf.String())
+	}
+}
+
+func TestLoggerStripsANSIForRegularFile(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	f, err := os.CreateTemp(t.TempDir(), "log-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewLogger(f, false)
+	l.Printf("%sx%s\n", GoldColor.ANSI(ColorTrue), "\x1b[0m")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "\x1b[") || string(b) != "x\n" {
+		t.Fatalf("regular-file log = %q, want plain x\\n", b)
+	}
+}
+
+func TestLoggerGenericWriterHonorsForce(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	orig := currentMode
+	defer SetColorMode(orig)
+	SetColorMode(Color16)
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("%sx%s", Gold, Reset)
+	if !strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("forced generic writer lost ANSI: %q", buf.String())
+	}
+}
+
+func TestInvalidColorModeNormalizesToNone(t *testing.T) {
+	orig := currentMode
+	defer SetColorMode(orig)
+	SetColorMode(ColorMode(99))
+	if currentMode != ColorNone {
+		t.Fatalf("invalid mode normalized to %v, want ColorNone", currentMode)
+	}
+	if got := GoldColor.S("x"); got != "x" {
+		t.Fatalf("invalid mode emitted escape residue: %q", got)
+	}
+}
+
+func TestTerminalSanitizationBlocksControlInjectionWithColor(t *testing.T) {
+	orig := currentMode
+	defer SetColorMode(orig)
+	SetColorMode(ColorTrue)
+
+	malicious := "name\x1b]8;;https://evil.invalid\aCLICK\x1b]8;;\a\x1b[2J\x1b[H\a\rrest"
+	got := GoldColor.S(malicious)
+	if strings.Contains(got, "]8;") || strings.Contains(got, "[2J") || strings.Contains(got, "[H") || strings.ContainsAny(got, "\a\r") {
+		t.Fatalf("Color.S leaked terminal action: %q", got)
+	}
+	if !strings.Contains(got, "nameCLICKrest") {
+		t.Fatalf("sanitization lost printable content: %q", got)
+	}
+	// The wrapper's own SGR color must remain intact.
+	if !strings.HasPrefix(got, GoldColor.ANSI(ColorTrue)) || !strings.HasSuffix(got, string(Reset)) {
+		t.Fatalf("trusted color wrapper was stripped: %q", got)
+	}
+}
+
+func TestLoggerColoredModeAllowsOnlyTrustedStyle(t *testing.T) {
+	orig := currentMode
+	defer SetColorMode(orig)
+	SetColorMode(ColorTrue)
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.color = true
+	l.Printf("%sok%s attacker=%s\n", Gold, Reset, "\x1b[8mHIDDEN\x1b[0m\x1b]0;pwned\a\x1b[3Avisible")
+	got := buf.String()
+	if strings.Contains(got, "[8m") || strings.Contains(got, "]0;") || strings.Contains(got, "[3A") || strings.ContainsRune(got, '\a') {
+		t.Fatalf("colored logger leaked terminal control: %q", got)
+	}
+	if !strings.Contains(got, GoldColor.ANSI(ColorTrue)) || !strings.Contains(got, "HIDDENvisible") {
+		t.Fatalf("colored logger damaged trusted SGR/content: %q", got)
+	}
+}
+
+func TestLoggerSanitizesEachFormattedArgument(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%s count=%04d ratio=%.2f padded=[%*s]\n", "one\nforged\tfield", 7, 1.25, 5, "x")
+	got := buf.String()
+	if got != "value=one forged field count=0007 ratio=1.25 padded=[    x]\n" {
+		t.Fatalf("formatted log = %q", got)
+	}
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("untrusted argument forged extra lines: %q", got)
+	}
+}
+
+func TestLoggerSanitizesRuneFormattedInteger(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%c end\n", '\n')
+	got := buf.String()
+	if got != "value=  end\n" {
+		t.Fatalf("rune-formatted integer log = %q", got)
+	}
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("rune-formatted integer forged extra lines: %q", got)
+	}
+}
+
+func TestLoggerPreservesIntegerTypeFormatting(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("%T", 7)
+	if got := buf.String(); got != "int" {
+		t.Fatalf("integer type formatting = %q, want int", got)
+	}
+}
+
+func TestLoggerPreservesIndexedDynamicWidthAndPrecision(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("[%[2]*.[3]*[1]s]\n", "abcdef", 5, 3)
+	if got := buf.String(); got != "[  abc]\n" {
+		t.Fatalf("indexed dynamic formatting = %q", got)
+	}
+}
+
+func TestLoggerSanitizesRuneReusedAsDynamicWidth(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%[1]*[1]c end\n", int('\n'))
+	got := buf.String()
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("indexed width/rune argument forged extra lines: %q", got)
 	}
 }

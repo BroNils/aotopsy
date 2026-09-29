@@ -157,6 +157,7 @@ const rtaMinInstantiatedClasses = 100
 // call to selectorCandidates for each imm will recompute and re-cache.
 func (ctx *TypeContext) InvalidateSelectorCache() {
 	ctx.SelectorCache = make(map[int][]string)
+	ctx.SelectorMonomorphic = make(map[int]string)
 }
 
 // applySelectorCandidates fills res from a selector-offset scan: one name
@@ -212,13 +213,30 @@ type FieldAccess struct {
 	PC         uint64 // instruction address
 }
 
-// recordFieldAccess appends one access, de-duplicated by PC.
+// clearFieldAccessAtPC removes evidence produced by an earlier worklist visit.
+// A block can be processed multiple times before its entry state reaches the
+// fixed point; evidence must describe the latest/final visit, not the first.
+func clearFieldAccessAtPC(result *IntraResult, pc uint64) {
+	if result == nil {
+		return
+	}
+	for i := range result.FieldAccesses {
+		if result.FieldAccesses[i].PC == pc {
+			result.FieldAccesses = append(result.FieldAccesses[:i], result.FieldAccesses[i+1:]...)
+			return
+		}
+	}
+}
+
+// recordFieldAccess records one access, replacing any evidence from an earlier
+// worklist visit to the same instruction.
 func recordFieldAccess(result *IntraResult, classID int, byteOffset int32, isStore bool, pc uint64) {
 	if result == nil || classID < 0 {
 		return
 	}
 	for i := range result.FieldAccesses {
 		if result.FieldAccesses[i].PC == pc {
+			result.FieldAccesses[i] = FieldAccess{ClassID: classID, ByteOffset: byteOffset, IsStore: isStore, PC: pc}
 			return
 		}
 	}
@@ -277,6 +295,9 @@ func AnalyzeFunction(
 	//
 	// The imm gives the selector offset (in slot units, relative to kOriginElement).
 	for i := 0; i < len(insts)-2; i++ {
+		if insts[i].Bad {
+			continue
+		}
 		raw := insts[i].Raw
 		var selectorOffset int
 		var slotReg int // register used as dispatch table index
@@ -331,6 +352,9 @@ func AnalyzeFunction(
 		if !found {
 			if rd, ok := arm64.MOVOrr(raw); ok && rd == sdk.ARM64LinkReg {
 				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
+					if insts[j].Bad || insts[j+1].Bad {
+						break
+					}
 					ldrRaw := insts[j].Raw
 					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm2 == sdk.ARM64LinkReg {
 						if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == sdk.ARM64LinkReg {
@@ -348,11 +372,11 @@ func AnalyzeFunction(
 			continue
 		}
 		// Check next instruction: LDR X30, [X21, XslotReg, LSL #3]
-		if i+1 < len(insts) {
+		if i+1 < len(insts) && !insts[i+1].Bad {
 			ldrRaw := insts[i+1].Raw
 			if base, rm, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm == slotReg {
 				// Check instruction after: BLR X30
-				if i+2 < len(insts) {
+				if i+2 < len(insts) && !insts[i+2].Bad {
 					if blrReg, ok := arm64.BLR(insts[i+2].Raw); ok && blrReg == sdk.ARM64LinkReg {
 						ctx.SelectorOffsets[insts[i+2].Addr] = selectorOffset
 					}
@@ -366,6 +390,9 @@ func AnalyzeFunction(
 	// via MOVZ, then uses register-register ADD instead of ADD with immediate.
 	// This pattern is NOT caught by the ADD/SUB #imm scan above.
 	for i := 0; i < len(insts)-3; i++ {
+		if insts[i].Bad || insts[i+1].Bad || insts[i+2].Bad || insts[i+3].Bad {
+			continue
+		}
 		// Look for MOVZ Xn, #imm16
 		movReg, movImm, movOK := arm64.MOVZ64(insts[i].Raw)
 		if !movOK || movReg >= 31 {
@@ -375,8 +402,8 @@ func AnalyzeFunction(
 		if i+1 >= len(insts) {
 			continue
 		}
-		addRd, _, addRm, addOK := arm64.ADD64Register(insts[i+1].Raw)
-		if !addOK || addRm != movReg || addRd >= 31 {
+		addRd, _, addRm, addShift, addAmount, addOK := arm64.ADD64Register(insts[i+1].Raw)
+		if !addOK || addShift != arm64.ShiftLSL || addAmount != 0 || addRm != movReg || addRd >= 31 {
 			continue
 		}
 		// Next: LDR X30, [X21, Xd, LSL #3]
@@ -404,6 +431,9 @@ func AnalyzeFunction(
 	// the LDURH and the LDR. The MOV bridges the register: LDURH writes Wn,
 	// MOV Xp, Xn copies it, LDR uses Xp.
 	for i := 0; i < len(insts)-2; i++ {
+		if insts[i].Bad {
+			continue
+		}
 		// Look for LDURH Wn, [Xm,#1] (class ID extraction, 2.x style)
 		_, ldurhRt, ldurhImm9, ldurhOK := arm64.LDURH(insts[i].Raw)
 		if !ldurhOK || ldurhImm9 != 1 || ldurhRt >= 31 {
@@ -414,6 +444,9 @@ func AnalyzeFunction(
 		classIdReg := ldurhRt
 		// Scan forward up to 5 instructions for MOV bridge then LDR.
 		for j := i + 1; j < len(insts)-1 && j <= i+5; j++ {
+			if insts[j].Bad || insts[j+1].Bad {
+				break
+			}
 			jraw := insts[j].Raw
 			// Check for MOV Xp, Xn (ORR Xd, XZR, Xm) that bridges the class ID.
 			if movRd, movOK := arm64.MOVOrr(jraw); movOK && movRd < 31 {
@@ -454,10 +487,13 @@ func AnalyzeFunction(
 	// overwrites KnownClass saved by Block A with Top.
 	blockStackEntry := make([]map[int]TypeLattice, len(blocks))
 	blockStackExit := make([]map[int]TypeLattice, len(blocks))
+	blockShadowEntry := make([]shadowSPState, len(blocks))
+	blockShadowSet := make([]bool, len(blocks))
 	for i := range blockStackEntry {
 		blockStackEntry[i] = make(map[int]TypeLattice)
 		blockStackExit[i] = make(map[int]TypeLattice)
 	}
+	blockShadowSet[0] = true // function entry relation is unknown until frame setup
 
 	// Initialize first block's entry with parameter types.
 	blockEntry[0] = entryTypes
@@ -487,6 +523,7 @@ func AnalyzeFunction(
 		for k, v := range blockStackEntry[idx] {
 			stackTypes[k] = v
 		}
+		shadowSP := blockShadowEntry[idx]
 
 		var prevRaw uint32
 		// Type narrowing: track CMP/SUBS that compare a class ID with an
@@ -496,6 +533,12 @@ func AnalyzeFunction(
 		var cmpImm int  // immediate being compared against
 		var hasCmp bool // whether we saw a CMP/SUBS in this block
 		for _, inst := range blk.insts {
+			if inst.Bad {
+				hasCmp = false
+				transferInstruction(&state, inst, 0, ctx, result, lca, stackTypes, &shadowSP)
+				prevRaw = 0
+				continue
+			}
 			// Detect CMP/SUBS Wd, Wn, #imm (CMP is SUBS WZR, Wn, #imm).
 			//
 			// Deliberately 32-bit only. Extending this to the 64-bit form
@@ -512,8 +555,13 @@ func AnalyzeFunction(
 				cmpReg = rn
 				cmpImm = imm
 				hasCmp = true
+			} else if hasCmp && !arm64PreservesCompareFlags(inst.Raw, inst.Addr) {
+				// A later flag-writing/unknown instruction invalidates the CMP.
+				// Previously CMP; <flag clobber>; B.EQ still narrowed the edge
+				// using stale NZCV state.
+				hasCmp = false
 			}
-			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes)
+			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes, &shadowSP)
 			prevRaw = inst.Raw
 		}
 
@@ -580,6 +628,18 @@ func AnalyzeFunction(
 						changed = true
 					}
 				}
+
+				if !blockShadowSet[succ] {
+					blockShadowEntry[succ] = shadowSP
+					blockShadowSet[succ] = true
+					changed = true
+				} else {
+					mergedShadow := meetShadowSP(blockShadowEntry[succ], shadowSP)
+					if !mergedShadow.Equal(blockShadowEntry[succ]) {
+						blockShadowEntry[succ] = mergedShadow
+						changed = true
+					}
+				}
 			}
 
 			if changed {
@@ -619,6 +679,77 @@ func typesEqual(a, b [31]TypeLattice) bool {
 		}
 	}
 	return true
+}
+
+// arm64PreservesCompareFlags is deliberately conservative. Narrowing is an
+// assertion of exact class identity, so when we cannot prove an instruction
+// leaves NZCV untouched we drop the comparison evidence rather than guess.
+func arm64PreservesCompareFlags(raw uint32, pc uint64) bool {
+	if raw == 0xD503201F { // NOP
+		return true
+	}
+	if _, ok := arm64.MOVOrr(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.ADD64Immediate(raw); ok {
+		return true
+	}
+	if _, _, _, _, _, ok := arm64.ADD64Register(raw); ok {
+		return true
+	}
+	if _, _, _, _, ok := arm64.UBFX(raw); ok {
+		return true
+	}
+	if _, _, ok := arm64.LDR64UnsignedOffset(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.LDR32UnsignedOffset(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.LDUR64(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.LDUR32(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.LDURH(raw); ok {
+		return true
+	}
+	if _, _, _, _, ok := arm64.LDP64UnsignedOffset(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.STR64UnsignedOffset(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.STR32UnsignedOffset(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.STUR64(raw); ok {
+		return true
+	}
+	if _, _, _, ok := arm64.STUR32(raw); ok {
+		return true
+	}
+	if arm64.IsRet(raw) {
+		return true
+	}
+	if _, ok := arm64.BL(raw, pc); ok {
+		return true
+	}
+	if _, ok := arm64.BLR(raw); ok {
+		return true
+	}
+	if _, ok := arm64.IsBR(raw); ok {
+		return true
+	}
+	if _, ok := arm64.B(raw, pc); ok {
+		return true
+	}
+	if _, ok := arm64.CondBranch(raw, pc); ok {
+		return true
+	}
+	_, _, kind, ok := arm64.BCond(raw, pc)
+	return ok && kind == arm64.BCondAlways
 }
 
 // allTop checks if all elements in a [31]TypeLattice array are Top.
@@ -676,7 +807,8 @@ func equalitySuccessor(last uint32, numSuccs int) int {
 	// Only B.cond reads the flags a CMP set. CBZ/CBNZ and TBZ/TBNZ test a
 	// register or a single bit directly, so a preceding CMP says nothing
 	// about which way they go.
-	if last&0xFF000010 != 0x54000000 {
+	_, cond, kind, ok := arm64.BCond(last, 0)
+	if !ok || kind != arm64.BCondConditional {
 		return sdk.SuccUnknown
 	}
 	// Same successor convention as x86.EqualitySuccessor. The two
@@ -685,7 +817,7 @@ func equalitySuccessor(last uint32, numSuccs int) int {
 	// function taking both would be a union of unrelated inputs. Only the
 	// convention is shared, because that is the part that can be got
 	// backwards without anything failing loudly.
-	switch last & 0xF {
+	switch cond {
 	case 0: // EQ: the taken edge is the equal one.
 		return sdk.SuccEqual
 	case 1: // NE: the taken edge proves inequality; the fall-through proves equality.
@@ -719,6 +851,18 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 	leaders[insts[0].Addr] = true
 
 	for i, inst := range insts {
+		if disasm.IsARM64SemanticBarrier(inst) {
+			if i+1 < len(insts) {
+				leaders[insts[i+1].Addr] = true
+			}
+			continue
+		}
+		if arm64.IsRet(inst.Raw) {
+			if i+1 < len(insts) {
+				leaders[insts[i+1].Addr] = true
+			}
+			continue
+		}
 		// Check for BL (branch with link) — creates a new block after it.
 		if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 			if i+1 < len(insts) {
@@ -746,16 +890,18 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
-		} else if raw := inst.Raw; raw&0xFF000010 == 0x54000000 {
-			// B.AL (cond=14) / B.NV (cond=15) — unconditional despite B.cond
-			// encoding. isCondBranch returns false for these; treat as
-			// unconditional branch: target is a leader, NO fall-through.
-			imm19 := int32(raw>>5) & 0x7FFFF
-			if imm19&(1<<18) != 0 {
-				imm19 |= ^int32(0x7FFFF)
+		} else if _, kind, ok := arm64.BCondClass(inst.Raw); ok && kind == arm64.BCondAlways {
+			// Historical B.AL — unconditional despite B.cond encoding.
+			// isCondBranch returns false for it; treat it as
+			// unconditional branch. The following instruction must still start
+			// a new (unreachable) block so the branch remains the terminator of
+			// this block, exactly like ordinary B above.
+			if target, _, _, targetOK := arm64.BCond(inst.Raw, inst.Addr); targetOK {
+				leaders[target] = true
 			}
-			target := uint64(int64(inst.Addr) + int64(imm19)*4)
-			leaders[target] = true
+			if i+1 < len(insts) {
+				leaders[insts[i+1].Addr] = true
+			}
 		}
 	}
 
@@ -782,12 +928,20 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 	for i := range blocks {
 		blk := &blocks[i]
 		lastInst := blk.insts[len(blk.insts)-1]
+		if disasm.IsARM64SemanticBarrier(lastInst) {
+			// Unknown instruction semantics and architectural traps are hard
+			// control-flow barriers. Never flow facts into following bytes.
+			continue
+		}
+		if arm64.IsRet(lastInst.Raw) {
+			continue
+		}
 
 		// Find the index of lastInst in the global insts list.
 		// H-1 fix: was O(n) linear search for globalLastIdx.
 		// ARM64 instructions are always 4 bytes (disasm.go:16) and contiguous,
 		// so fallthrough addr = lastInst.Addr + uint64(lastInst.Size).
-		fallThroughAddr := lastInst.Addr + uint64(lastInst.Size)
+		fallThroughAddr, hasFallThroughAddr := arm64.PCRelativeTarget(lastInst.Addr, int64(lastInst.Size))
 
 		// Branch targets.
 		if target, ok := arm64.B(lastInst.Raw, lastInst.Addr); ok {
@@ -803,38 +957,43 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 				}
 			}
 			// Fall-through (if not the last instruction overall).
-			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-				blk.successors = append(blk.successors, bi)
+			if hasFallThroughAddr {
+				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+					blk.successors = append(blk.successors, bi)
+				}
 			}
 			continue
-		} else if raw := lastInst.Raw; raw&0xFF000010 == 0x54000000 {
-			// B.AL (cond=14) / B.NV (cond=15) — unconditional, no fall-through.
-			imm19 := int32(raw>>5) & 0x7FFFF
-			if imm19&(1<<18) != 0 {
-				imm19 |= ^int32(0x7FFFF)
-			}
-			target := uint64(int64(lastInst.Addr) + int64(imm19)*4)
-			if bi, ok2 := addrToBlock[target]; ok2 {
-				blk.successors = append(blk.successors, bi)
+		} else if _, kind, ok := arm64.BCondClass(lastInst.Raw); ok && kind == arm64.BCondAlways {
+			// Historical B.AL — unconditional, no fall-through.
+			if target, _, _, targetOK := arm64.BCond(lastInst.Raw, lastInst.Addr); targetOK {
+				if bi, ok2 := addrToBlock[target]; ok2 {
+					blk.successors = append(blk.successors, bi)
+				}
 			}
 			continue
 		}
 		// BL/BLR: fall-through to next block.
 		if _, ok := arm64.BL(lastInst.Raw, lastInst.Addr); ok {
-			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-				blk.successors = append(blk.successors, bi)
+			if hasFallThroughAddr {
+				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+					blk.successors = append(blk.successors, bi)
+				}
 			}
 			continue
 		}
 		if _, ok := arm64.BLR(lastInst.Raw); ok {
-			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-				blk.successors = append(blk.successors, bi)
+			if hasFallThroughAddr {
+				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+					blk.successors = append(blk.successors, bi)
+				}
 			}
 			continue
 		}
 		// Default: fall-through.
-		if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
-			blk.successors = append(blk.successors, bi)
+		if hasFallThroughAddr {
+			if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
+				blk.successors = append(blk.successors, bi)
+			}
 		}
 	}
 
@@ -854,7 +1013,24 @@ func transferInstruction(
 	result *IntraResult,
 	lca func(int, int) int,
 	stackTypes map[int]TypeLattice,
+	shadowSP *shadowSPState,
 ) {
+	clearFieldAccessAtPC(result, inst.Addr)
+	if disasm.IsARM64SemanticBarrier(inst) {
+		for i := range state {
+			state[i] = Top()
+		}
+		for k := range stackTypes {
+			delete(stackTypes, k)
+		}
+		if shadowSP != nil {
+			*shadowSP = shadowSPState{}
+		}
+		return
+	}
+
+	observeShadowFrameUpdate(inst.Raw, shadowSP)
+
 	tc := transferCtx{
 		state:      state,
 		inst:       inst,
@@ -863,6 +1039,7 @@ func transferInstruction(
 		result:     result,
 		lca:        lca,
 		stackTypes: stackTypes,
+		shadowSP:   shadowSP,
 	}
 
 	// The ArgumentsDescriptor-relative receiver load is checked first: it is
@@ -918,6 +1095,22 @@ func transferInstruction(
 	}
 }
 
+// recordBLRResolution makes call-site evidence fixed-point stable. Worklist
+// revisits replace the prior state for the same machine instruction instead of
+// accumulating intermediate guesses.
+func recordBLRResolution(result *IntraResult, res BlrResolution) {
+	if result == nil {
+		return
+	}
+	for i := range result.BLRResolutions {
+		if result.BLRResolutions[i].PC == res.PC {
+			result.BLRResolutions[i] = res
+			return
+		}
+	}
+	result.BLRResolutions = append(result.BLRResolutions, res)
+}
+
 // resolveBLR attempts to resolve a BLR call site to a dispatch table target.
 // If the BLR register's type is KnownDispatchIndex, look up the slot.
 // If the BLR register was loaded from dispatch table with a known class,
@@ -961,6 +1154,10 @@ func resolveBLR(
 		ctx.BLRAtOther++
 	}
 	switch t.Kind {
+	case LatticeKnownStub:
+		if appendKnownStubResolution(t, inst.Addr, rn, ctx, result) {
+			return
+		}
 	case LatticeKnownDispatchIndex:
 		// P1.2: class unknown, selector immediate known -- scan the dispatch
 		// table at that selector across all classes.
@@ -979,7 +1176,7 @@ func resolveBLR(
 			} else if res.Resolved {
 				res.Confidence = "static_inferred"
 			}
-			result.BLRResolutions = append(result.BLRResolutions, res)
+			recordBLRResolution(result, res)
 			return
 		}
 
@@ -1086,7 +1283,7 @@ func resolveBLR(
 		}
 	}
 
-	result.BLRResolutions = append(result.BLRResolutions, res)
+	recordBLRResolution(result, res)
 }
 
 // --- ARM64 instruction decoders ---

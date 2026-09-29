@@ -32,7 +32,7 @@ func InlineSingleUseTempsStmt(stmts []Stmt) ([]Stmt, bool) {
 	// Count total whole-word occurrences of each identifier across the function.
 	identCounts := map[string]int{}
 	for _, r := range flat {
-		for _, id := range identRe.FindAllString(r.line.Text, -1) {
+		for _, id := range identRe.FindAllString(CodeOutsideStrings(r.line.Text), -1) {
 			identCounts[id]++
 		}
 	}
@@ -75,9 +75,7 @@ func InlineSingleUseTempsStmt(stmts []Stmt) ([]Stmt, bool) {
 			if i+1 < len(body) {
 				nextLine := asLine(body[i+1])
 				if nextLine != nil && !nextLine.isLabel() && ReferencesIdent(nextLine.Text, temp) {
-					re := identBoundaryRe(temp)
-					inlinedText := re.ReplaceAllString(nextLine.Text, rhs)
-					nextLine.Text = inlinedText
+					nextLine.Text = ReplaceIdent(nextLine.Text, temp, rhs)
 
 					// Drop statement i (the declaration).
 					body = append(body[:i], body[i+1:]...)
@@ -96,8 +94,7 @@ func InlineSingleUseTempsStmt(stmts []Stmt) ([]Stmt, bool) {
 						break // do not cross construct boundaries or labels
 					}
 					if ReferencesIdent(targetLine.Text, temp) {
-						re := identBoundaryRe(temp)
-						targetLine.Text = re.ReplaceAllString(targetLine.Text, rhs)
+						targetLine.Text = ReplaceIdent(targetLine.Text, temp, rhs)
 
 						// Drop statement i.
 						body = append(body[:i], body[i+1:]...)

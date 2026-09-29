@@ -78,6 +78,34 @@ jobs:
       - name: Test
         run: go test ./... -count=1 -shuffle=on -timeout 20m
 
+  # SDK-derived tables need an external ground truth. The ordinary test matrix
+  # intentionally runs without network-dependent gates, so give those gates a
+  # dedicated authenticated job instead of letting AOTOPSY_TEST_SDK remain
+  # unset and reporting green after every drift check skipped.
+  sdk-drift:
+    name: SDK drift gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Verify SDK-derived tables
+        env:
+          AOTOPSY_TEST_SDK: '1'
+          AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          go test -p 1
+          ./internal/cluster
+          ./internal/disasm
+          ./internal/sdk
+          ./internal/sdktest
+          ./internal/snapshot
+          ./internal/vmtables
+          -run '(MatchSDK|SDKBacked|SDKFileAtTag)' -count=1 -timeout 20m
+
   race-coverage:
     name: race + coverage (linux/amd64)
     runs-on: ubuntu-latest

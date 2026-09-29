@@ -190,7 +190,7 @@ Both reject x86_64 input. Use `decompile-native` for x86_64 pseudocode.
 
 ```bash
 aotopsy _debug decompile-native --lib libapp.so --func 0x1a92728 --gen-frida --gen-frida-out hooks.js
-frida -U -f com.example.app -l hooks.js --no-pause
+frida -U -f com.example.app -l hooks.js
 ```
 
 See `FRIDA.md` for the full guide.

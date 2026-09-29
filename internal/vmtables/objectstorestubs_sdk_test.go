@@ -1,7 +1,6 @@
 package vmtables
 
 import (
-	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -29,12 +28,10 @@ func TestObjectStoreStubFieldsMatchSDK(t *testing.T) {
 	fieldRe := regexp.MustCompile(`^\s*(R_|RW|CW|FW|ARW_RELAXED|ARW_AR|LAZY_[A-Z]+)\(\s*[\w:]+\s*,\s*(\w+)\s*\)`)
 
 	for version, want := range objectStoreStubFields {
-		out, err := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
-			"repos/dart-lang/sdk/contents/runtime/vm/object_store.h?ref="+version).Output()
+		src, err := sdktest.SDKFileAtTag("runtime/vm/object_store.h", version)
 		if err != nil {
-			t.Fatalf("%s: gh api object_store.h: %v", version, err)
+			t.Fatalf("%s: fetch object_store.h: %v", version, err)
 		}
-		src := string(out)
 		body := src
 		if i := strings.Index(src, "class ObjectStore {"); i >= 0 {
 			body = src[i:]

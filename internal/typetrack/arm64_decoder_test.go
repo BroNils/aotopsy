@@ -93,27 +93,21 @@ func TestIsADD64ImmediateReservedShift(t *testing.T) {
 		t.Errorf("ADD shift=1: imm = 0x%x, want 0x123000", imm)
 	}
 
-	// ADD X0, X0, #0x123, shift=2 (RESERVED) — should return imm=0
+	// Bit 23 set leaves the ordinary ADD-immediate encoding class (ARMv8.5
+	// uses this space for ADDG). It must not be accepted as ADD with imm=0:
+	// that would fabricate dispatch arithmetic from a different instruction.
 	raw = uint32(0x91800000) | (0x123 << 10) | (0 << 5)
-	_, _, imm, ok = arm64.ADD64Immediate(raw)
-	if !ok {
-		t.Error("ADD with shift=2 should still return ok=true")
-	}
-	if imm != 0 {
-		t.Errorf("ADD shift=2 (reserved): imm = 0x%x, want 0", imm)
+	if _, _, _, ok = arm64.ADD64Immediate(raw); ok {
+		t.Error("ADD decoder accepted bit23/MTE-reserved encoding")
 	}
 }
 
 // --- isSUB64Immediate reserved shift tests ---
 
 func TestIsSUB64ImmediateReservedShift(t *testing.T) {
-	// SUB X0, X0, #0x123, shift=2 (RESERVED)
+	// Bit 23 set is outside the ordinary SUB-immediate encoding class.
 	raw := uint32(0xD1800000) | (0x123 << 10) | (0 << 5)
-	_, _, imm, ok := arm64.SUB64Immediate(raw)
-	if !ok {
-		t.Error("SUB with shift=2 should still return ok=true")
-	}
-	if imm != 0 {
-		t.Errorf("SUB shift=2 (reserved): imm = 0x%x, want 0", imm)
+	if _, _, _, ok := arm64.SUB64Immediate(raw); ok {
+		t.Error("SUB decoder accepted bit23/reserved encoding")
 	}
 }

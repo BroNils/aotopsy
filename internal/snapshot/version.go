@@ -1128,9 +1128,13 @@ func ProbeTagStyle(data []byte, clusterStart int) *VersionProfile {
 	for _, prof := range candidates {
 		cid := probeFirstCID(data, clusterStart, prof)
 		if cid > 0 && cid < 200 {
-			// Valid-looking CID. Confirm it maps to a known type.
+			// This proves only a FORMAT FAMILY. Several supported releases share
+			// the same tag/header family while differing in CIDs, object-store
+			// counts and even roots/alloc/fill layouts. Never promote that weak
+			// probe into a trusted exact profile.
 			p := *prof
 			p.DartVersion = ""
+			p.Supported = false
 			return &p
 		}
 	}

@@ -110,6 +110,8 @@ func (a TypeLattice) Equal(b TypeLattice) bool {
 		return a.DispatchIndex == b.DispatchIndex
 	case LatticeKnownStub:
 		return a.StubOff == b.StubOff
+	case LatticePPBase:
+		return a.PPBaseOffset == b.PPBaseOffset
 	}
 	return true
 }
@@ -243,7 +245,9 @@ func LCA(classA, classB int, hierarchy map[int]int) int {
 
 	// Walk B's chain and return the first match.
 	c = classB
-	for c >= 0 {
+	seenB := make(map[int]bool)
+	for c >= 0 && !seenB[c] {
+		seenB[c] = true
 		if ancestorsA[c] {
 			return c
 		}

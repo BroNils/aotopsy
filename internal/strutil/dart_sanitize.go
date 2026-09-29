@@ -1,6 +1,7 @@
 package strutil
 
 import (
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -11,12 +12,31 @@ func SanitizeLibraryPath(url string) string {
 	url = strings.TrimPrefix(url, "package:")
 	url = strings.TrimPrefix(url, "dart:")
 	url = strings.TrimPrefix(url, "file:///")
+	// Library URLs are snapshot-controlled input. Normalize both slash styles
+	// before cleaning so a Windows build cannot interpret a backslash traversal
+	// that a Unix build would treat as an ordinary character.
+	url = strings.ReplaceAll(url, "\\", "/")
 	url = strings.ReplaceAll(url, ":", "/")
 
-	if !strings.HasSuffix(url, ".dart") {
-		url += ".dart"
+	// Prefixing with '/' anchors path.Clean at a synthetic root. Any leading or
+	// embedded '..' components therefore collapse at that root instead of
+	// surviving as a relative traversal. Strip the synthetic root afterwards.
+	clean := strings.TrimPrefix(pathpkg.Clean("/"+url), "/")
+	if clean == "" || clean == "." {
+		clean = "library"
 	}
-	return filepath.Clean(url)
+	if !strings.HasSuffix(clean, ".dart") {
+		clean += ".dart"
+	}
+
+	parts := strings.Split(clean, "/")
+	for i, part := range parts {
+		parts[i] = SanitizeFilename(part)
+		if parts[i] == "" {
+			parts[i] = "_"
+		}
+	}
+	return filepath.FromSlash(strings.Join(parts, "/"))
 }
 
 // DartReservedWords are keywords that cannot appear as a bare identifier in a
@@ -96,6 +116,72 @@ var opMethodReplacerDart = strings.NewReplacer(
 // analyzer flags as undefined rather than a hard syntax error — and an
 // empty named-constructor call `Name.(` becomes `Name(`.
 func SanitizeDartBody(body string) string {
+	var out strings.Builder
+	out.Grow(len(body))
+	codeStart := 0
+	flushCode := func(end int) {
+		if codeStart < end {
+			out.WriteString(sanitizeDartCode(body[codeStart:end]))
+		}
+	}
+
+	for i := 0; i < len(body); {
+		if body[i] == '/' && i+1 < len(body) && body[i+1] == '/' {
+			flushCode(i)
+			end := strings.IndexByte(body[i+2:], '\n')
+			if end < 0 {
+				out.WriteString(body[i:])
+				return out.String()
+			}
+			end += i + 2
+			out.WriteString(body[i:end])
+			i = end
+			codeStart = i
+			continue
+		}
+
+		if body[i] == '/' && i+1 < len(body) && body[i+1] == '*' {
+			flushCode(i)
+			endRel := strings.Index(body[i+2:], "*/")
+			if endRel < 0 {
+				out.WriteString(body[i:])
+				return out.String()
+			}
+			end := i + 2 + endRel + 2
+			comment := body[i:end]
+			if comment == "/* cond */" {
+				out.WriteString("unresolved_cond")
+			} else {
+				out.WriteString(comment)
+			}
+			i = end
+			codeStart = i
+			continue
+		}
+
+		if isDartQuote(body[i]) {
+			flushCode(i)
+			end := dartStringEnd(body, i, false)
+			out.WriteString(body[i:end])
+			i = end
+			codeStart = i
+			continue
+		}
+		if (body[i] == 'r' || body[i] == 'R') && i+1 < len(body) && isDartQuote(body[i+1]) && dartRawPrefixBoundary(body, i) {
+			flushCode(i)
+			end := dartStringEnd(body, i+1, true)
+			out.WriteString(body[i:end])
+			i = end
+			codeStart = i
+			continue
+		}
+		i++
+	}
+	flushCode(len(body))
+	return out.String()
+}
+
+func sanitizeDartCode(body string) string {
 	body = placeholderReDart.ReplaceAllStringFunc(body, func(m string) string {
 		sub := placeholderReDart.FindStringSubmatch(m)
 		prefix, inner := sub[1], sub[2]
@@ -125,11 +211,48 @@ func SanitizeDartBody(body string) string {
 		return base
 	})
 	body = opMethodReplacerDart.Replace(body)
-	// An unrecoverable branch condition is rendered `/* cond */` (a comment, not an
-	// expression). Make it a valid, honestly-undefined identifier so the `if`
-	// parses; the semantics stay "unknown", not fabricated.
-	body = strings.ReplaceAll(body, "/* cond */", "unresolved_cond")
 	body = atHashReDart.ReplaceAllString(body, "")
 	body = strings.ReplaceAll(body, ".(", "(")
 	return body
+}
+
+func isDartQuote(b byte) bool { return b == '\'' || b == '"' }
+
+func dartRawPrefixBoundary(body string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	prev := body[i-1]
+	return !((prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') ||
+		(prev >= '0' && prev <= '9') || prev == '_' || prev == '$')
+}
+
+// dartStringEnd returns the byte just after a Dart single-, double-, or
+// triple-quoted string. Unterminated strings consume the remainder so malformed
+// pseudocode is preserved instead of treating literal data as code.
+func dartStringEnd(body string, quoteStart int, raw bool) int {
+	quote := body[quoteStart]
+	delimLen := 1
+	if quoteStart+2 < len(body) && body[quoteStart+1] == quote && body[quoteStart+2] == quote {
+		delimLen = 3
+	}
+	for i := quoteStart + delimLen; i < len(body); {
+		if !raw && body[i] == '\\' {
+			if i+1 < len(body) {
+				i += 2
+				continue
+			}
+			return len(body)
+		}
+		if body[i] == quote {
+			if delimLen == 1 {
+				return i + 1
+			}
+			if i+2 < len(body) && body[i+1] == quote && body[i+2] == quote {
+				return i + 3
+			}
+		}
+		i++
+	}
+	return len(body)
 }

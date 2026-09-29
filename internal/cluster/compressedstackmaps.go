@@ -1,5 +1,7 @@
 package cluster
 
+import "fmt"
+
 // CompressedStackMaps decoding.
 //
 // A CompressedStackMaps (CSM) payload is a uint32_t flags_and_size header
@@ -140,7 +142,7 @@ const FirstLocalSlotFromFP int64 = -3
 // to resolve each entry's spill and non-spill bitmaps.
 func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, error) {
 	if len(payload) < 4 {
-		return nil, nil
+		return nil, fmt.Errorf("compressed stack maps: truncated header (%d bytes)", len(payload))
 	}
 	// Read flags_and_size header (uint32_t, little-endian, packed without alignment).
 	flagsAndSize := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
@@ -149,7 +151,7 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 	length := flagsAndSize >> 2 // SizeField starts at bit 2
 
 	if int(length)+4 > len(payload) {
-		return nil, nil // truncated payload
+		return nil, fmt.Errorf("compressed stack maps: declared payload length %d exceeds available %d", length, len(payload)-4)
 	}
 
 	data := payload[4 : 4+int(length)]
@@ -157,21 +159,25 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 
 	// Global table CSM: entries have no PC offset, just bitmaps.
 	if globalTableBit {
-		e, _, ok := readCSMBitmapBody(data, pos)
-		if !ok {
-			return nil, nil
+		e, _, err := readCSMBitmapBody(data, pos)
+		if err != nil {
+			return nil, fmt.Errorf("compressed stack maps: global table body: %w", err)
 		}
 		return []StackMapEntry{e}, nil
 	}
 
 	// Prepare global table data if referenced.
 	var gtData []byte
-	if usesTableBit && len(globalTable) >= 4 {
+	if usesTableBit {
+		if len(globalTable) < 4 {
+			return nil, fmt.Errorf("compressed stack maps: table-referencing payload has no valid global table header")
+		}
 		gtFlagsAndSize := uint32(globalTable[0]) | uint32(globalTable[1])<<8 | uint32(globalTable[2])<<16 | uint32(globalTable[3])<<24
 		gtLen := gtFlagsAndSize >> 2
-		if int(gtLen)+4 <= len(globalTable) {
-			gtData = globalTable[4 : 4+int(gtLen)]
+		if int(gtLen)+4 > len(globalTable) {
+			return nil, fmt.Errorf("compressed stack maps: global table length %d exceeds available %d", gtLen, len(globalTable)-4)
 		}
+		gtData = globalTable[4 : 4+int(gtLen)]
 	}
 
 	var entries []StackMapEntry
@@ -182,18 +188,24 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 			// Table-referencing entry: PC delta + global table offset.
 			pcDelta, newPos, err := readLEB128(data, pos)
 			if err != nil {
-				break
+				return entries, fmt.Errorf("compressed stack maps: entry pc delta at %d: %w", pos, err)
 			}
 			pos = newPos
 			gtOffset, newPos2, err := readLEB128(data, pos)
 			if err != nil {
-				break
+				return entries, fmt.Errorf("compressed stack maps: global table offset at %d: %w", pos, err)
 			}
 			pos = newPos2
+			if pcDelta > uint64(^uint32(0)-currentPC) {
+				return entries, fmt.Errorf("compressed stack maps: PC delta %d overflows uint32 offset %#x", pcDelta, currentPC)
+			}
 			currentPC += uint32(pcDelta)
-			var e StackMapEntry
-			if len(gtData) > 0 && int(gtOffset) < len(gtData) {
-				e, _, _ = readCSMBitmapBody(gtData, int(gtOffset))
+			if gtOffset >= uint64(len(gtData)) {
+				return entries, fmt.Errorf("compressed stack maps: global table offset %d outside %d-byte table", gtOffset, len(gtData))
+			}
+			e, _, err := readCSMBitmapBody(gtData, int(gtOffset))
+			if err != nil {
+				return entries, fmt.Errorf("compressed stack maps: global table entry at %d: %w", gtOffset, err)
 			}
 			e.PCOffset = currentPC
 			entries = append(entries, e)
@@ -202,14 +214,17 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 			// global table uses.
 			pcDelta, newPos, err := readLEB128(data, pos)
 			if err != nil {
-				break
+				return entries, fmt.Errorf("compressed stack maps: entry pc delta at %d: %w", pos, err)
 			}
 			pos = newPos
-			e, newPos2, ok := readCSMBitmapBody(data, pos)
-			if !ok {
-				break
+			e, newPos2, err := readCSMBitmapBody(data, pos)
+			if err != nil {
+				return entries, fmt.Errorf("compressed stack maps: bitmap body at %d: %w", pos, err)
 			}
 			pos = newPos2
+			if pcDelta > uint64(^uint32(0)-currentPC) {
+				return entries, fmt.Errorf("compressed stack maps: PC delta %d overflows uint32 offset %#x", pcDelta, currentPC)
+			}
 			currentPC += uint32(pcDelta)
 			e.PCOffset = currentPC
 			entries = append(entries, e)
@@ -222,55 +237,61 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 // readLEB128 reads an unsigned LEB128 value from data at position pos.
 // Returns the value, the new position, and any error.
 func readLEB128(data []byte, pos int) (uint64, int, error) {
+	if pos < 0 || pos >= len(data) {
+		return 0, pos, fmt.Errorf("truncated ULEB128")
+	}
 	var result uint64
 	var shift uint
 	for pos < len(data) {
 		b := data[pos]
 		pos++
+		if shift == 63 && b&0x7f > 1 {
+			return 0, pos, fmt.Errorf("ULEB128 overflows uint64")
+		}
 		result |= uint64(b&0x7F) << shift
 		if b&0x80 == 0 {
 			return result, pos, nil
 		}
 		shift += 7
 		if shift >= 64 {
-			return 0, pos, nil // overflow guard
+			return 0, pos, fmt.Errorf("ULEB128 overflows uint64")
 		}
 	}
-	return 0, pos, nil
+	return 0, pos, fmt.Errorf("truncated ULEB128")
 }
 
 // readCSMBitmapBody reads the two bit counts and the packed bitmap that follow
 // them, which is the body shape shared by standalone entries and global-table
 // entries. It returns the entry (without a PC offset), the position just past
-// the body, and whether the body was well-formed.
+// the body, and an error when the body is malformed.
 //
 // A truncated or absurd body returns ok=false rather than a partial entry:
 // these payloads are attacker-influenced binary data, and the previous version
 // sliced first and checked later, which panicked on a real 2.16.0 sample.
-func readCSMBitmapBody(data []byte, pos int) (StackMapEntry, int, bool) {
+func readCSMBitmapBody(data []byte, pos int) (StackMapEntry, int, error) {
 	spillCount, newPos, err := readLEB128(data, pos)
 	if err != nil {
-		return StackMapEntry{}, pos, false
+		return StackMapEntry{}, pos, fmt.Errorf("spill count: %w", err)
 	}
 	pos = newPos
 	savedCount, newPos2, err := readLEB128(data, pos)
 	if err != nil {
-		return StackMapEntry{}, pos, false
+		return StackMapEntry{}, pos, fmt.Errorf("saved count: %w", err)
 	}
 	pos = newPos2
 	// Guard the addition itself: both counts are LEB128 and unvalidated.
 	const maxBits = 1 << 20
 	if spillCount > maxBits || savedCount > maxBits {
-		return StackMapEntry{}, pos, false
+		return StackMapEntry{}, pos, fmt.Errorf("bitmap bit counts too large: spill=%d saved=%d", spillCount, savedCount)
 	}
 	totalBytes := (int(spillCount) + int(savedCount) + 7) / 8
-	if pos+totalBytes > len(data) {
-		return StackMapEntry{}, pos, false
+	if totalBytes > len(data)-pos {
+		return StackMapEntry{}, pos, fmt.Errorf("bitmap needs %d bytes, only %d remain", totalBytes, len(data)-pos)
 	}
 	e := StackMapEntry{
 		SpillSlotCount: int(spillCount),
 		SavedSlotCount: int(savedCount),
 		Bits:           append([]byte(nil), data[pos:pos+totalBytes]...),
 	}
-	return e, pos + totalBytes, true
+	return e, pos + totalBytes, nil
 }

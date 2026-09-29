@@ -10,7 +10,14 @@ import (
 // handleUBFX handles case 5b-ubfx: UBFX/UBFM bitfield extract for class ID.
 func handleUBFX(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, rn, _, _, ok := arm64.UBFX(raw); ok {
+	if rd, rn, lsb, width, ok := arm64.UBFX(raw); ok {
+		// UBFM has several aliases (including LSR) with the same basic decode.
+		// Only the exact ClassIdTag slice is evidence that the result is a class
+		// id. Anything else is ordinary bit manipulation and must fall through to
+		// the generic destination kill instead of copying a type fact.
+		if lsb != tc.ctx.ClassIDTagPos || width != tc.ctx.ClassIDTagSize {
+			return false
+		}
 		if rd >= 31 {
 			return true
 		}
@@ -66,62 +73,6 @@ func handleBLR(tc *transferCtx) bool {
 		if rn < 31 {
 			resolveBLR(tc.state, rn, tc.inst, tc.ctx, tc.result)
 		}
-		if rn < 31 && tc.state[rn].Kind == LatticeKnownStub {
-			sn := tc.state[rn].StubName
-			if strings.HasPrefix(sn, "UnlinkedCall:") {
-				methodName := sn[len("UnlinkedCall:"):]
-				if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-					res := BlrResolution{
-						PC: tc.inst.Addr, Reg: rn, SlotIndex: -1,
-						Confidence: "static_inferred",
-					}
-					var allTargets []string
-					for _, selOff := range selectorOffsets {
-						allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
-					}
-					applySelectorCandidates(&res, allTargets)
-					if res.Polymorphic {
-						res.Confidence = "polymorphic"
-					}
-					tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
-				} else {
-					tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-						PC: tc.inst.Addr, Reg: rn, TargetName: methodName, Resolved: true,
-						Confidence: "stub",
-					})
-				}
-			} else if strings.HasPrefix(sn, "PPCode:") {
-				funcName := sn[len("PPCode:"):]
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
-					Confidence: "stub",
-				})
-			} else if strings.HasPrefix(sn, "TTS:") {
-				stubName := sn[len("TTS:"):]
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
-					Confidence: "stub",
-				})
-			} else if strings.HasPrefix(sn, "Closure:") || strings.HasPrefix(sn, "ClosureEntry:") {
-				// ClosureEntry is the cached entry_point_ of the same
-				// closure, and it is what the call actually branches to.
-				// Both resolve through the same pool index.
-				poolIdx := tc.state[rn].StubOff
-				if tc.ctx.PoolClosureFunctionNames != nil {
-					if funcName, ok := tc.ctx.PoolClosureFunctionNames[poolIdx]; ok && funcName != "" {
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-							PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
-							Confidence: "stub",
-						})
-					}
-				}
-			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: sn, Resolved: true,
-					Confidence: "stub",
-				})
-			}
-		}
 		isAllocation := false
 		if rn < 31 && tc.state[rn].Kind == LatticeKnownStub {
 			sn := tc.state[rn].StubName
@@ -140,9 +91,11 @@ func handleBLR(tc *transferCtx) bool {
 			}
 		}
 		if isAllocation {
-			if tc.state[0].Kind == LatticeKnownClass {
-				recordAllocationSite(tc.ctx, tc.inst.Addr, tc.state[0].ClassID)
-			}
+			// Generic allocation stubs return their object in R0. R0 is an
+			// output register, not a class-id input (AllocateObjectABI uses R1
+			// for type arguments and R2 for tags). Keeping the pre-call R0 fact
+			// fabricated both an allocation class and the post-call return type.
+			tc.state[0] = Top()
 			for r := 1; r <= 7; r++ {
 				tc.state[r] = Top()
 			}
@@ -184,18 +137,24 @@ func handleBL(tc *transferCtx) bool {
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {
+			ret := calleeAllExit[0]
+			if ret.Kind == LatticeTop {
+				if seeded, ok := tc.ctx.CalleeExitTypes[target]; ok && seeded.Kind != LatticeTop {
+					ret = seeded
+				}
+			}
 			tc.ctx.BLHasExitType++
-			if calleeAllExit[0].Kind == LatticeKnownClass {
+			if ret.Kind == LatticeKnownClass {
 				tc.ctx.BLExitKnown++
-			} else if calleeAllExit[0].Kind == LatticeBottom {
+			} else if ret.Kind == LatticeBottom {
 				tc.ctx.BLExitBottom++
 			}
-			for r := 0; r <= 7; r++ {
-				if calleeAllExit[r].Kind != LatticeTop {
-					tc.state[r] = calleeAllExit[r]
-				} else {
-					tc.state[r] = Top()
-				}
+			// A callee's exit register file is not the caller's post-call
+			// register file. Only the ABI return register crosses the call
+			// boundary; argument/caller-clobbered registers become unknown.
+			tc.state[0] = ret
+			for r := 1; r <= 7; r++ {
+				tc.state[r] = Top()
 			}
 		} else {
 			calleeExit := tc.ctx.CalleeExitTypes[target]

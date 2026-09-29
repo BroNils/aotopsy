@@ -19,6 +19,19 @@ const (
 	ProvUnresolved = "unresolved"
 )
 
+func isSupportedCallKind(kind string) bool {
+	switch kind {
+	case "bl", "call", "blr", "call_indirect":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDirectCallKind(kind string) bool {
+	return kind == "bl" || kind == "call"
+}
+
 // ClassifyEdgeProv returns the provenance category for a call edge.
 func ClassifyEdgeProv(e disasm.CallEdgeRecord) string {
 	if e.Kind == "bl" || e.Kind == "call" {
@@ -98,8 +111,11 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	dedupEdges := make(map[edgeKey]*edgeVal)
 
 	for _, e := range edges {
+		if !funcSet[e.FromFunc] || !isSupportedCallKind(e.Kind) {
+			continue
+		}
 		prov := ClassifyEdgeProv(e)
-		targets := e.ResolvedTargets()
+		targets := concreteCallTargets(e)
 		if len(targets) == 0 {
 			if e.Kind == "blr" || e.Kind == "call_indirect" {
 				targets = []string{"unresolved_blr"}
@@ -339,28 +355,35 @@ type NameCount struct {
 func ComputeStats(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) CallgraphStats {
 	stats := CallgraphStats{
 		TotalFunctions: len(funcs),
-		TotalEdges:     len(edges),
 		ProvCounts:     make(map[string]int),
+	}
+	funcSet := make(map[string]bool, len(funcs))
+	for _, f := range funcs {
+		funcSet[f.Name] = true
 	}
 
 	callerCount := make(map[string]int)
 	calleeCount := make(map[string]int)
 
 	for _, e := range edges {
+		if !funcSet[e.FromFunc] || !isSupportedCallKind(e.Kind) {
+			continue
+		}
+		stats.TotalEdges++
 		prov := ClassifyEdgeProv(e)
 		stats.ProvCounts[prov]++
 
 		callerCount[e.FromFunc]++
-		if e.Kind == "bl" || e.Kind == "call" {
+		if isDirectCallKind(e.Kind) {
 			stats.BLEdges++
-			for _, t := range e.ResolvedTargets() {
-				calleeCount[t]++
-			}
 		} else {
 			stats.BLREdges++
 			if len(e.ResolvedTargets()) > 0 {
 				stats.BLRAnnotated++
 			}
+		}
+		for _, target := range concreteCallTargets(e) {
+			calleeCount[target]++
 		}
 	}
 
@@ -385,13 +408,16 @@ func topNMap(m map[string]int, n int) []NameCount {
 	for name, count := range m {
 		entries = append(entries, NameCount{name, count})
 	}
-	// Sort descending by count.
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].Count > entries[i].Count {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
+	// O(n log n), with a lexical tie-breaker so map iteration cannot change
+	// equal-count output ordering.
+	slices.SortFunc(entries, func(a, b NameCount) int {
+		if c := cmp.Compare(b.Count, a.Count); c != 0 {
+			return c
 		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	if n <= 0 {
+		return nil
 	}
 	if len(entries) > n {
 		entries = entries[:n]

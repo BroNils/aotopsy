@@ -1,11 +1,14 @@
 package ffitrace
 
 import (
+	"strings"
 	"testing"
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
+	"aotopsy/internal/naming"
+	"aotopsy/internal/snapshot"
 )
 
 // arm64Ret is the 4-byte little-endian encoding of ARM64 "ret" (0xD65F03C0)
@@ -19,15 +22,18 @@ var arm64Ret = []byte{0xC0, 0x03, 0x5F, 0xD6}
 // method produces a Finding with Resolved=true and the literal captured.
 func TestFindDynamicLibraryCalls_ResolvesLiteralArg(t *testing.T) {
 	ctx := &analysis.AnalysisContext{
-		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.open"},
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup_abc123"},
 		PoolDisplay: map[int]string{7: `"libbatteryOpt.so"`},
+		DartVersion: "3.13.0",
 	}
 	fir := &decompiler.FuncIR{
-		Name: "caller_fn",
+		Name:     "caller_fn",
+		StackReg: "rsp",
 		Blocks: []decompiler.Block{
 			{Instrs: []decompiler.Instr{
-				{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7},
-				{Addr: 0x1004, Op: decompiler.OpCall, Target: "0x2000"},
+				{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "r11", DefRegs: []string{"r11"}},
+				{Addr: 0x1004, Op: decompiler.OpOther, Src: "mov [rsp+reg(0)], r11"},
+				{Addr: 0x1008, Op: decompiler.OpCall, Target: "0x2000"},
 			}},
 		},
 	}
@@ -45,6 +51,180 @@ func TestFindDynamicLibraryCalls_ResolvesLiteralArg(t *testing.T) {
 	}
 	if f.Kind != "dynamic_library_call" {
 		t.Errorf("expected Kind=dynamic_library_call, got %q", f.Kind)
+	}
+}
+
+func TestFindDynamicLibraryCalls_TracksLiteralIntoArgumentRegister(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "dart:ffi::DynamicLibrary.open"},
+		PoolDisplay: map[int]string{
+			7: `"libreal.so"`,
+			8: `"decoy-nearest.so"`,
+		},
+		DartVersion: "3.13.0",
+	}
+	fir := &decompiler.FuncIR{
+		Name: "caller_fn",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "rdi", DefRegs: []string{"rdi"}},
+			// This is physically nearer to the call but r11 is not a Dart
+			// argument register, so it must not replace the actual path arg.
+			{Addr: 0x1004, Op: decompiler.OpLoadPool, PoolIndex: 8, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x1008, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || !findings[0].Resolved || findings[0].LiteralArg != "libreal.so" {
+		t.Fatalf("argument dataflow = %+v, want resolved libreal.so", findings)
+	}
+}
+
+func TestFindDynamicLibraryCalls_InvalidatesOverwrittenArgument(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup"},
+		PoolDisplay: map[int]string{7: `"native_symbol"`},
+		DartVersion: "3.13.0",
+	}
+	fir := &decompiler.FuncIR{
+		Name: "caller_fn",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "rdi", DefRegs: []string{"rdi"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "mov rdi, rax", DefRegs: []string{"rdi"}},
+			{Addr: 0x1008, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || findings[0].Resolved {
+		t.Fatalf("overwritten argument = %+v, want one unresolved finding", findings)
+	}
+}
+
+func TestFindDynamicLibraryCalls_UnquotesPoolDisplay(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.open"},
+		PoolDisplay: map[int]string{7: `"C:\\native\\lib\tname.so"`},
+		DartVersion: "3.13.0",
+	}
+	fir := &decompiler.FuncIR{
+		Name:     "caller_fn",
+		StackReg: "rsp",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "mov [rsp], r11"},
+			{Addr: 0x1008, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || findings[0].LiteralArg != "C:\\native\\lib\tname.so" {
+		t.Fatalf("unquoted literal = %q, want Go-unquoted path", findings[0].LiteralArg)
+	}
+}
+
+func TestFindDynamicLibraryCalls_TracksARM64StackArgument(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup_20abc"},
+		PoolDisplay: map[int]string{7: `"native_symbol"`},
+		DartVersion: "3.2.5", // stack-only Dart calling convention
+		IsARM64:     true,
+	}
+	fir := &decompiler.FuncIR{
+		Name:     "caller_fn",
+		StackReg: "x15",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "x9", DefRegs: []string{"x9"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "str x9, [x15, #0x8]"},
+			{Addr: 0x1008, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || !findings[0].Resolved || findings[0].LiteralArg != "native_symbol" {
+		t.Fatalf("ARM64 stack argument = %+v, want resolved native_symbol", findings)
+	}
+}
+
+func TestFindDynamicLibraryCalls_TracksDart2PushArgument(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup_3af14"},
+		PoolDisplay: map[int]string{7: `"legacy_symbol"`},
+		DartVersion: "2.10.0",
+	}
+	fir := &decompiler.FuncIR{
+		Name:     "caller_fn",
+		StackReg: "rsp",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "push r11"},
+			{Addr: 0x1005, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || !findings[0].Resolved || findings[0].LiteralArg != "legacy_symbol" {
+		t.Fatalf("Dart 2 PUSH argument = %+v, want resolved legacy_symbol", findings)
+	}
+}
+
+func TestFindDynamicLibraryCalls_StackOverwriteInvalidatesLiteral(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		SymbolNames: map[uint64]string{0x2000: "DynamicLibrary.lookup"},
+		PoolDisplay: map[int]string{7: `"stale_symbol"`},
+		DartVersion: "3.13.0",
+	}
+	fir := &decompiler.FuncIR{
+		Name:     "caller_fn",
+		StackReg: "rsp",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "mov [rsp], r11"},
+			{Addr: 0x1008, Op: decompiler.OpOther, Src: "mov [rsp], -0xe"},
+			{Addr: 0x100c, Op: decompiler.OpCall, Target: "0x2000"},
+		}}},
+	}
+
+	findings := findDynamicLibraryCalls(ctx, fir, 0x1000)
+	if len(findings) != 1 || findings[0].Resolved {
+		t.Fatalf("overwritten stack argument = %+v, want unresolved", findings)
+	}
+}
+
+func TestLiteralPassedToOpenHelperIgnoresUnrelatedStringCall(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		PoolDisplay: map[int]string{
+			7: `"not-the-library.so"`,
+			8: `"libreal.so"`,
+		},
+		DartVersion: "3.2.5",
+	}
+
+	// First prove an unrelated string-bearing call is not enough to fabricate
+	// a DynamicLibrary.open path when _open itself receives a computed value.
+	unresolved := &decompiler.FuncIR{
+		StackReg: "rsp",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x1000, Op: decompiler.OpLoadPool, PoolIndex: 7, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x1004, Op: decompiler.OpOther, Src: "mov [rsp], r11"},
+			{Addr: 0x1008, Op: decompiler.OpCall, Target: "logMessage"},
+			{Addr: 0x100c, Op: decompiler.OpCall, Target: "dart:ffi::_open"},
+		}}},
+	}
+	if got, ok := literalPassedToOpenHelper(ctx, unresolved); ok {
+		t.Fatalf("unrelated call fabricated DynamicLibrary.open literal %q", got)
+	}
+
+	resolved := &decompiler.FuncIR{
+		StackReg: "rsp",
+		Blocks: []decompiler.Block{{Instrs: []decompiler.Instr{
+			{Addr: 0x2000, Op: decompiler.OpLoadPool, PoolIndex: 8, Target: "r11", DefRegs: []string{"r11"}},
+			{Addr: 0x2004, Op: decompiler.OpOther, Src: "mov [rsp], r11"},
+			{Addr: 0x2008, Op: decompiler.OpCall, Target: "dart:ffi::_open"},
+		}}},
+	}
+	if got, ok := literalPassedToOpenHelper(ctx, resolved); !ok || got != "libreal.so" {
+		t.Fatalf("_open literal = %q, %v; want libreal.so, true", got, ok)
 	}
 }
 
@@ -117,7 +297,10 @@ func TestTrace_DefaultBoundLimitsScan(t *testing.T) {
 	const numFuncs = analysis.DefaultMaxScan + 50 // deliberately more than the default cap
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned := Trace(ctx, Options{}) // no MaxScan, no AllowUnbounded -- must use the default cap
+	_, scanned, err := Trace(ctx, Options{}) // no MaxScan, no AllowUnbounded -- must use the default cap
+	if err != nil {
+		t.Fatal(err)
+	}
 	if scanned == 0 || scanned > analysis.DefaultMaxScan {
 		t.Fatalf("expected Trace to process at most %d functions by default, processed %d", analysis.DefaultMaxScan, scanned)
 	}
@@ -131,7 +314,10 @@ func TestTrace_AllowUnboundedProcessesEverything(t *testing.T) {
 	const numFuncs = 20
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned := Trace(ctx, Options{AllowUnbounded: true})
+	_, scanned, err := Trace(ctx, Options{AllowUnbounded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if scanned != numFuncs {
 		t.Fatalf("expected AllowUnbounded to process all %d functions, processed %d", numFuncs, scanned)
 	}
@@ -144,9 +330,152 @@ func TestTrace_MaxScanOverridesDefault(t *testing.T) {
 	const explicitMax = 5
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned := Trace(ctx, Options{MaxScan: explicitMax})
+	_, scanned, err := Trace(ctx, Options{MaxScan: explicitMax})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if scanned != explicitMax {
 		t.Fatalf("expected explicit MaxScan=%d to be honored, processed %d", explicitMax, scanned)
+	}
+}
+
+func TestTrace_NegativeMaxScanUsesSafetyDefault(t *testing.T) {
+	ctx := syntheticContext(analysis.DefaultMaxScan + 25)
+
+	_, scanned, err := Trace(ctx, Options{MaxScan: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned != analysis.DefaultMaxScan {
+		t.Fatalf("negative MaxScan processed %d functions, want safety default %d", scanned, analysis.DefaultMaxScan)
+	}
+}
+
+func TestLooksLikeFfiOpenOrLookupRejectsOtherDynamicLibraryMembers(t *testing.T) {
+	accepted := []string{
+		"DynamicLibrary.open",
+		"new DynamicLibrary.open_3dec8",
+		"dart:ffi::DynamicLibrary.lookup",
+		"DynamicLibrary.lookup_3dd24",
+		"DynamicLibraryExtension.lookupFunction<int, int>",
+	}
+	for _, name := range accepted {
+		if !looksLikeFfiOpenOrLookup(name) {
+			t.Errorf("expected %q to be recognized", name)
+		}
+	}
+
+	rejected := []string{
+		"DynamicLibrary.close",
+		"DynamicLibrary.process",
+		"DynamicLibrary.executable",
+		"DynamicLibrary.providesSymbol",
+		"DynamicLibrary.hashCode",
+		"NotDynamicLibrary.open",
+		"Other.lookupFunction",
+	}
+	for _, name := range rejected {
+		if looksLikeFfiOpenOrLookup(name) {
+			t.Errorf("false positive for %q", name)
+		}
+	}
+}
+
+func TestLooksLikeLegacyFfiOpenNameRequiresExactPrivateHelper(t *testing.T) {
+	for _, name := range []string{"_open", "_open@8050071_46f50", "dart:ffi::_open"} {
+		if !looksLikeLegacyFfiOpenName(name) {
+			t.Errorf("expected legacy dart:ffi open spelling %q to be recognized", name)
+		}
+	}
+	for _, name := range []string{"_openLibrary@8050071_46f50", "reopen@8050071_46f50", "_open@notdigits_46f50"} {
+		if looksLikeLegacyFfiOpenName(name) {
+			t.Errorf("legacy open name false positive for %q", name)
+		}
+	}
+}
+
+func TestIsOutboundFfiRangeDistinguishesCallbacksAndModernClosures(t *testing.T) {
+	ffiOwner := &cluster.NamedObject{CID: 99, RefID: 41, DataRefID: 90, FuncKind: cluster.FunctionKindFfiTrampoline}
+	ctx := &analysis.AnalysisContext{
+		DartVersion: "3.2.5",
+		Pool: &naming.PoolLookups{
+			CT:         &snapshot.CIDTable{Function: 99},
+			RefToNamed: map[int]*cluster.NamedObject{41: ffiOwner},
+		},
+	}
+	r := cluster.CodeRange{RefID: 100, OwnerRef: 41, Index: 7}
+	data := map[int]cluster.FfiTrampolineInfo{
+		90: {RefID: 90, CallbackTargetRef: cluster.RefNull},
+	}
+	if !isOutboundFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data) {
+		t.Fatal("old outbound FFI trampoline with null callback target was not recognized")
+	}
+
+	data[90] = cluster.FfiTrampolineInfo{RefID: 90, CallbackTargetRef: 77}
+	if isOutboundFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data) {
+		t.Fatal("native-to-Dart callback trampoline was misclassified as outbound FFI")
+	}
+	delete(data, 90)
+	if isOutboundFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data) {
+		t.Fatal("FFI trampoline with missing direction metadata must stay unresolved")
+	}
+
+	// Dart 3.3+ kFfiTrampoline is callback-only. Even malformed modern metadata
+	// with a null callback_target must not revive the old outbound rule.
+	ctx.DartVersion = "3.13.0"
+	data[90] = cluster.FfiTrampolineInfo{RefID: 90, CallbackTargetRef: cluster.RefNull}
+	if isOutboundFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data) {
+		t.Fatal("modern callback trampoline with malformed null target was misclassified as outbound FFI")
+	}
+
+	closureOwner := &cluster.NamedObject{CID: 99, RefID: 42, FuncKind: cluster.FunctionKindClosure}
+	ctx.Pool.RefToNamed[42] = closureOwner
+	r.OwnerRef = 42
+	if !isOutboundFfiRange(ctx, r, "main.#ffiClosure0_3e2f0", nil, data) {
+		t.Fatal("modern compiler-generated #ffiClosure was not recognized")
+	}
+	if isOutboundFfiRange(ctx, r, "main.<anonymous closure>_3e2f0", nil, data) {
+		t.Fatal("ordinary closure was misclassified as outbound FFI")
+	}
+
+	// @Native functions are ordinary Functions whose kind_tag carries the
+	// exact predicate used by Function::is_ffi_native() from Dart 3.3 onward.
+	nativeOwner := &cluster.NamedObject{
+		CID: 99, RefID: 43, FuncKind: cluster.FunctionKindRegular,
+		HasKindTag: true, IsNative: true, IsExternal: true,
+	}
+	ctx.Pool.RefToNamed[43] = nativeOwner
+	r.OwnerRef = 43
+	if !isOutboundFfiRange(ctx, r, "nativeAssetEntry_123", nil, data) {
+		t.Fatal("3.13 @Native/is_ffi_native function was not recognized")
+	}
+
+	nativeOwner.IsExternal = false
+	if isOutboundFfiRange(ctx, r, "oldNativeEntry_123", nil, data) {
+		t.Fatal("native but non-external function was misclassified as @Native FFI")
+	}
+	nativeOwner.IsExternal = true
+	nativeOwner.HasKindTag = false
+	if isOutboundFfiRange(ctx, r, "missingKindTag_123", nil, data) {
+		t.Fatal("uncaptured kind_tag flags were trusted as @Native FFI")
+	}
+	nativeOwner.HasKindTag = true
+	ctx.DartVersion = "3.2.5"
+	if isOutboundFfiRange(ctx, r, "preNativeLowering_123", nil, data) {
+		t.Fatal("pre-3.3 native/external flags were interpreted with unverified @Native semantics")
+	}
+}
+
+func TestUsesModernFfiLoweringVersionBoundary(t *testing.T) {
+	for _, version := range []string{"3.3.0", "3.13.0"} {
+		if !usesModernFfiLowering(version) {
+			t.Errorf("usesModernFfiLowering(%q) = false, want true", version)
+		}
+	}
+	for _, version := range []string{"", "3", "3.2.5", "2.19.0", "4.0.0", "not-a-version"} {
+		if usesModernFfiLowering(version) {
+			t.Errorf("usesModernFfiLowering(%q) = true, want false", version)
+		}
 	}
 }
 
@@ -176,5 +505,26 @@ func syntheticContext(n int) *analysis.AnalysisContext {
 		PoolDisplay: map[int]string{},
 		IsARM64:     true,
 		DartVersion: "3.7.0",
+	}
+}
+
+func TestTrace_FilterOnlyProcessesMatchingNames(t *testing.T) {
+	ctx := syntheticContext(4)
+	for va := range ctx.SymbolNames {
+		ctx.SymbolNames[va] = "skip_me"
+	}
+	ctx.SymbolNames[0x1008] = "target_match"
+
+	findings, scanned, err := Trace(ctx, Options{Filter: "target_"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned != 1 {
+		t.Fatalf("filtered scan processed %d functions, want 1", scanned)
+	}
+	for _, f := range findings {
+		if !strings.Contains(f.CallerFunc, "target_") {
+			t.Fatalf("filtered scan leaked finding from %q", f.CallerFunc)
+		}
 	}
 }

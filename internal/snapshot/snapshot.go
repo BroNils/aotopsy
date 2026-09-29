@@ -3,9 +3,11 @@ package snapshot
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"aotopsy/internal/dartfmt"
@@ -157,10 +159,56 @@ type Info struct {
 	Diags               []dartfmt.Diag  `json:"diagnostics,omitempty"`
 }
 
+// PrimaryHeader returns the header that identifies the snapshot carried by
+// this binary. Legacy AOT ELFs have a VM snapshot and an isolate snapshot; the
+// VM header is the version/build identity source there. Dart 3.13+ unified
+// snapshots deliberately have no VM header, so the isolate-mapped unified
+// header is the only header and must be used instead.
+func (i *Info) PrimaryHeader() *Header {
+	if i == nil {
+		return nil
+	}
+	if i.UnifiedSnapshot {
+		return i.IsolateHeader
+	}
+	if i.VmHeader != nil {
+		return i.VmHeader
+	}
+	return i.IsolateHeader
+}
+
+// SnapshotHash returns the version hash from PrimaryHeader, or an empty string
+// when no snapshot header was parsed. Callers should use this instead of
+// directly dereferencing VmHeader: unified snapshots intentionally leave it nil.
+func (i *Info) SnapshotHash() string {
+	if h := i.PrimaryHeader(); h != nil {
+		return h.SnapshotHash
+	}
+	return ""
+}
+
 // Extract locates and reads snapshot regions from an opened ELF file.
 func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	var diags dartfmt.Diags
 	info := &Info{}
+	const maxSnapshotRegionBytes = uint64(256 << 20)
+	const maxSnapshotAggregateBytes = uint64(512 << 20)
+	type loadedRegion struct {
+		off, size uint64
+		data      []byte
+		hash      string
+	}
+	var loaded []loadedRegion
+	var aggregateBytes uint64
+	overlaps := func(aOff, aSize, bOff, bSize uint64) bool {
+		if aSize == 0 || bSize == 0 {
+			return false
+		}
+		if aOff <= bOff {
+			return bOff-aOff < aSize
+		}
+		return aOff-bOff < bSize
+	}
 
 	// Resolve all four snapshot symbols.
 	type symTarget struct {
@@ -225,6 +273,57 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 			readSize = capRegionSize(ef, va)
 		}
 		if readSize > 0 {
+			if readSize > maxSnapshotRegionBytes {
+				err := fmt.Errorf("snapshot: symbol %s size 0x%x exceeds per-region limit 0x%x", t.name, readSize, maxSnapshotRegionBytes)
+				if opts.Mode == dartfmt.ModeStrict {
+					return nil, err
+				}
+				diags.Add(va, dartfmt.DiagOverflow, err.Error())
+				continue
+			}
+
+			// Exact aliases share one backing slice. Partial overlaps are not a
+			// valid way to describe independent snapshot regions and previously
+			// let a tiny ELF retain the same bytes several times.
+			reused := false
+			for _, lr := range loaded {
+				if off == lr.off && readSize == lr.size {
+					t.region.Data = lr.data
+					t.region.DataSize = uint64(len(lr.data))
+					t.region.SHA256 = lr.hash
+					reused = true
+					break
+				}
+				if overlaps(off, readSize, lr.off, lr.size) {
+					err := fmt.Errorf("snapshot: symbol %s partially overlaps another snapshot region", t.name)
+					if opts.Mode == dartfmt.ModeStrict {
+						return nil, err
+					}
+					diags.Add(va, dartfmt.DiagInvalid, err.Error())
+					reused = true // skip this malformed alias in best-effort mode
+					break
+				}
+			}
+			if reused {
+				continue
+			}
+			if aggregateBytes > maxSnapshotAggregateBytes-readSize {
+				err := fmt.Errorf("snapshot: aggregate region budget exceeds 0x%x bytes", maxSnapshotAggregateBytes)
+				if opts.Mode == dartfmt.ModeStrict {
+					return nil, err
+				}
+				diags.Add(va, dartfmt.DiagOverflow, err.Error())
+				continue
+			}
+			maxInt := uint64(^uint(0) >> 1)
+			if readSize > maxInt {
+				err := fmt.Errorf("snapshot: symbol %s size 0x%x exceeds addressable read size", t.name, readSize)
+				if opts.Mode == dartfmt.ModeStrict {
+					return nil, err
+				}
+				diags.Add(va, dartfmt.DiagOverflow, err.Error())
+				continue
+			}
 			data, err := ef.ReadBytesAtVA(va, int(readSize))
 			if err != nil {
 				if opts.Mode == dartfmt.ModeStrict {
@@ -236,6 +335,8 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 				t.region.DataSize = uint64(len(data))
 				h := sha256.Sum256(data)
 				t.region.SHA256 = hex.EncodeToString(h[:])
+				aggregateBytes += readSize
+				loaded = append(loaded, loadedRegion{off: off, size: readSize, data: data, hash: t.region.SHA256})
 			}
 		}
 	}
@@ -244,6 +345,9 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	if len(info.VmData.Data) >= 64 {
 		hdr, err := parseHeader(info.VmData.Data)
 		if err != nil {
+			if opts.Mode == dartfmt.ModeStrict {
+				return nil, fmt.Errorf("snapshot: vm header: %w", err)
+			}
 			diags.Add(info.VmData.VA, dartfmt.DiagInvalid, fmt.Sprintf("vm header: %v", err))
 		} else {
 			info.VmHeader = hdr
@@ -252,6 +356,9 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	if len(info.IsolateData.Data) >= 64 {
 		hdr, err := parseHeader(info.IsolateData.Data)
 		if err != nil {
+			if opts.Mode == dartfmt.ModeStrict {
+				return nil, fmt.Errorf("snapshot: isolate header: %w", err)
+			}
 			diags.Add(info.IsolateData.VA, dartfmt.DiagInvalid, fmt.Sprintf("isolate header: %v", err))
 		} else {
 			info.IsolateHeader = hdr
@@ -315,7 +422,18 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 					"snapshots are supported -- Code fill has 2 extra refs in "+
 					"!defined(PRODUCT) builds and will desync",
 				info.Version.BuildMode.String())
+			// This is a wire-format incompatibility, not a fidelity downgrade.
+			// Mark the profile unsupported even in best-effort mode so callers
+			// cannot proceed into PRODUCT cluster layouts after seeing the
+			// diagnostic. Strict mode fails immediately with the same reason.
+			info.Version.Supported = false
+			if opts.Mode == dartfmt.ModeStrict {
+				return nil, fmt.Errorf("snapshot: non-PRODUCT %s build is unsupported", info.Version.BuildMode.String())
+			}
 		}
+	}
+	if opts.Mode == dartfmt.ModeStrict && info.Version == nil {
+		return nil, fmt.Errorf("snapshot: no valid snapshot header/version profile")
 	}
 
 	info.Diags = diags.Items()
@@ -362,8 +480,7 @@ func capRegionSize(ef *elfx.File, va uint64) uint64 {
 
 	// Find the PT_LOAD segment containing this VA and use its end as bound.
 	for _, seg := range ef.LoadSegments() {
-		if va >= seg.Vaddr && va < seg.Vaddr+seg.Filesz {
-			remaining := seg.Vaddr + seg.Filesz - va
+		if remaining, ok := segmentRemaining(seg.Vaddr, seg.Filesz, va); ok {
 			if remaining > maxCap {
 				remaining = maxCap
 			}
@@ -371,6 +488,17 @@ func capRegionSize(ef *elfx.File, va uint64) uint64 {
 		}
 	}
 	return 0
+}
+
+func segmentRemaining(vaddr, filesz, va uint64) (uint64, bool) {
+	if va < vaddr {
+		return 0, false
+	}
+	rel := va - vaddr
+	if rel >= filesz {
+		return 0, false
+	}
+	return filesz - rel, true
 }
 
 // Snapshot data header layout (observed from Dart AOT snapshots):
@@ -399,15 +527,29 @@ func parseHeader(data []byte) (*Header, error) {
 		return nil, fmt.Errorf("bad magic: %x (want %x)", h.Magic, snapshotMagic)
 	}
 
-	// Bytes 4-11: length (int64 LE, excludes magic).
-	h.Length = int64(data[4]) | int64(data[5])<<8 | int64(data[6])<<16 | int64(data[7])<<24 |
-		int64(data[8])<<32 | int64(data[9])<<40 | int64(data[10])<<48 | int64(data[11])<<56
-	h.TotalSize = h.Length + 4 // add magic size
+	// Bytes 4-11: length (uint64 on disk, excludes magic). Validate before
+	// converting to the signed public fields; MaxUint64 used to become -1 and
+	// then TotalSize=3, which downstream offset arithmetic trusted.
+	rawLength := binary.LittleEndian.Uint64(data[4:12])
+	if rawLength > uint64(math.MaxInt64-4) {
+		return nil, fmt.Errorf("snapshot length 0x%x overflows signed size", rawLength)
+	}
+	total := rawLength + 4
+	if total < headerMinSize {
+		return nil, fmt.Errorf("snapshot total size %d is smaller than minimum header %d", total, headerMinSize)
+	}
+	if total > uint64(len(data)) {
+		return nil, fmt.Errorf("snapshot declares %d bytes, only %d available", total, len(data))
+	}
+	h.Length = int64(rawLength)
+	h.TotalSize = int64(total)
 
 	// Bytes 12-19: kind (int64 LE).
-	kind := int64(data[12]) | int64(data[13])<<8 | int64(data[14])<<16 | int64(data[15])<<24 |
-		int64(data[16])<<32 | int64(data[17])<<40 | int64(data[18])<<48 | int64(data[19])<<56
-	h.Kind = SnapshotKind(kind)
+	rawKind := binary.LittleEndian.Uint64(data[12:20])
+	if rawKind > math.MaxInt64 {
+		return nil, fmt.Errorf("snapshot kind 0x%x overflows signed representation", rawKind)
+	}
+	h.Kind = SnapshotKind(int64(rawKind))
 
 	// Offset 0x14: 32-char hex snapshot version hash.
 	if len(data) >= hashOffset+hashLen {
@@ -425,16 +567,20 @@ func parseHeader(data []byte) (*Header, error) {
 	}
 
 	// Offset 0x34: null-terminated features string.
-	if len(data) > featuresOffset {
+	declaredData := data[:int(total)]
+	if len(declaredData) > featuresOffset {
 		featEnd := featuresOffset
-		for featEnd < len(data) && data[featEnd] != 0 {
+		for featEnd < len(declaredData) && declaredData[featEnd] != 0 {
 			featEnd++
-			if featEnd-featuresOffset > 1024 { // sanity cap
-				break
+			if featEnd-featuresOffset > 1024 {
+				return nil, fmt.Errorf("snapshot features string exceeds 1024 bytes")
 			}
 		}
+		if featEnd == len(declaredData) {
+			return nil, fmt.Errorf("snapshot features string is unterminated")
+		}
 		if featEnd > featuresOffset {
-			h.Features = string(data[featuresOffset:featEnd])
+			h.Features = string(declaredData[featuresOffset:featEnd])
 		}
 	}
 

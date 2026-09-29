@@ -12,6 +12,7 @@ import (
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
@@ -79,6 +80,7 @@ type AnalysisContext struct {
 	// Enrichment holds lazy-built decompile maps. Nil until ensureDecompileMaps.
 	Enrichment      *DecompileEnrichment
 	enrichmentBuilt bool
+	enrichmentErr   error
 }
 
 // Image returns a CodeImage providing unified function slicing.
@@ -142,9 +144,17 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := sc.RequireCompleteVM(); err != nil {
+		_ = sc.Close()
+		return nil, err
+	}
 
-	syms := BuildSymbolNames(sc.Ranges, sc.Image().CodeImage, sc.Pool, sc.Result, sc.Info,
+	syms, err := BuildSymbolNames(sc.Ranges, sc.Image().CodeImage, sc.Pool, sc.Result, sc.Info,
 		sc.Table, dartfmtOptionsDefault(), sc.Info.IsolateData.Data)
+	if err != nil {
+		_ = sc.Close()
+		return nil, err
+	}
 
 	return &AnalysisContext{
 		EF:                sc.EF,
@@ -192,15 +202,21 @@ func (c *AnalysisContext) PoolLookup(idx int) (string, bool) {
 // FuncIRFor used to omit all of these (they lived only in the cmd path), so
 // pipeline-level decompilation left `.fNN` field offsets and receiver fields
 // unresolved. Built lazily because not every Context consumer decompiles.
-func (c *AnalysisContext) ensureDecompileMaps() {
+func (c *AnalysisContext) ensureDecompileMaps() error {
 	if c.enrichmentBuilt {
-		return
+		return c.enrichmentErr
 	}
 	c.enrichmentBuilt = true
 	if c.Result == nil || c.Pool == nil || c.Info == nil {
-		return
+		return nil
 	}
-	c.Enrichment = &DecompileEnrichment{}
+	// BuildArgRegMasks may have populated one enrichment sub-map before the
+	// decompiler asks for the rest. Preserve that work: replacing the whole
+	// struct here made only the FIRST FuncIRFor call see ArgRegMasks, then silently
+	// erased the whole-binary evidence for every subsequent function.
+	if c.Enrichment == nil {
+		c.Enrichment = &DecompileEnrichment{}
+	}
 	result := c.Result
 	pl := c.Pool
 	ct := c.Info.Version.CIDs
@@ -256,7 +272,11 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	}
 
 	// Receiver class per Code, via owner Function -> (PatchClass hop) -> Class.
-	c.Enrichment.ParamTypeByCodeIndex = naming.CodeIndexToFunc(result, ct, c.Info.Version.CodeIndexOneBased)
+	firstEntryWithCode := -1
+	if c.InstrTable != nil {
+		firstEntryWithCode = int(c.InstrTable.FirstEntryWithCode)
+	}
+	c.Enrichment.ParamTypeByCodeIndex = naming.CodeIndexToFunc(result, ct, c.Info.Version.CodeIndexOneBased, firstEntryWithCode)
 	classByRef := make(map[int]*cluster.ClassInfo, len(result.Classes))
 	for i := range result.Classes {
 		classByRef[result.Classes[i].RefID] = &result.Classes[i]
@@ -270,7 +290,7 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	}
 	c.Enrichment.ReceiverClassByCode = make(map[int]int, len(result.Codes))
 	for _, ce := range result.Codes {
-		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, c.Enrichment.ParamTypeByCodeIndex); ok && owner != nil {
+		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, c.Enrichment.ParamTypeByCodeIndex, ct); ok && owner != nil {
 			if classRef := effectiveClassRef(owner); classRef > 0 {
 				if ci, ok2 := classByRef[classRef]; ok2 {
 					c.Enrichment.ReceiverClassByCode[ce.RefID] = int(ci.ClassID)
@@ -282,7 +302,7 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	// Field TYPE by (ownerClassID, byteOffset) -> the field's declared type's
 	// class ID, for typing field-load chains (`this.a.b`). Shared helper so the
 	// cmd decompile path types chains identically.
-	c.Enrichment.FieldTypeByClassOffset = BuildFieldTypeByClassOffset(result)
+	c.Enrichment.FieldTypeByClassOffset = BuildFieldTypeByClassOffset(result, pl, c.Info.Version.CompressedPointers)
 
 	c.Enrichment.ClosureParentByFunc = naming.BuildClosureParents(result, pl)
 
@@ -369,7 +389,12 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	// InstructionsTable rodata (every 3.x build). See DecodeAllStackMaps --
 	// the decoding lives there because stack_maps.jsonl needs the same
 	// answer and two copies would drift.
-	c.Enrichment.DecodedStackMapsByCodeRef = DecodeAllStackMaps(result, c.InstrTable)
+	decodedStackMaps, err := DecodeAllStackMaps(result, c.InstrTable)
+	if err != nil {
+		c.enrichmentErr = fmt.Errorf("decode stack maps: %w", err)
+		return c.enrichmentErr
+	}
+	c.Enrichment.DecodedStackMapsByCodeRef = decodedStackMaps
 
 	// Build Code.RefID → CodeSourceMap ref ID map for O(1) lookup in
 	// wireInlineFrames (avoids looping through result.Codes per function).
@@ -381,6 +406,7 @@ func (c *AnalysisContext) ensureDecompileMaps() {
 	}
 
 	c.buildAccessorFieldNames()
+	return nil
 }
 
 // buildAccessorFieldNames recovers instance-field names that the AOT precompiler
@@ -476,15 +502,49 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 		name = fs.Name
 	}
 
+	// A register table existing in this SDK version does not prove that this
+	// Function uses it. Generic/closure/FFI functions are stack-only, and an
+	// otherwise eligible function can be forced to the stack by precompiler-only
+	// unboxing metadata that full AOT snapshots do not serialize. We therefore
+	// wire argument registers only when snapshot metadata says the function MAY
+	// use register CC and independent multi-call-site setup evidence agrees.
+	var cc sdk.RegisterCallingConvention
+	var argRegIndices []int
+	if c.Pool != nil && r.RefID >= 0 {
+		ci := c.Pool.CodeNames[r.RefID]
+		if ci.MayUseRegisterCC && c.Enrichment != nil && c.Enrichment.ArgRegMasks != nil {
+			if masks := c.Enrichment.ArgRegMasks[fs.VA]; len(masks) > 0 {
+				if idx, confident := disasm.ResolveArgRegIndices(masks); confident {
+					if candidate, ok := sdk.DartRegisterCallingConvention(c.DartVersion, c.IsARM64); ok {
+						valid := true
+						for _, i := range idx {
+							if i < 0 || i >= len(candidate.GPR) {
+								valid = false
+								break
+							}
+						}
+						if valid {
+							cc = candidate
+							argRegIndices = idx
+						}
+					}
+				}
+			}
+		}
+	}
+
 	var fir *decompiler.FuncIR
 	if c.IsARM64 {
 		insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fs.VA})
-		fir = decompiler.BuildARM64IR(name, insts)
+		fir = decompiler.BuildARM64IR(name, c.DartVersion, insts, cc)
 	} else {
-		xinsts := decompiler.DecodeX86Range(fs.Code, fs.VA)
-		fir = decompiler.BuildX86IR(name, xinsts)
+		xinsts, err := decompiler.DecodeX86Range(fs.Code, fs.VA)
+		if err != nil {
+			return nil, fmt.Errorf("decode x86 function %s: %w", name, err)
+		}
+		fir = decompiler.BuildX86IR(name, xinsts, cc)
 	}
-	fir.ThreadStubOffsets = vmtables.ThreadStubOffsets(c.DartVersion, c.IsARM64)
+	fir.ArgRegIndices = argRegIndices
 	// Both tables, not just the stub one. ThreadFieldNames is what
 	// applyStore consults to recognise the vm_tag store that marks an FFI
 	// call target, so leaving it nil disables that detection silently --
@@ -495,22 +555,17 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	if c.Info != nil {
 		profile = c.Info.Version
 	}
-	fir.ThreadFieldNames = ThreadFieldOffsets(c.DartVersion, c.IsARM64, profile)
+	if target, ok := vmtables.TargetProfileFromVersion(profile, c.IsARM64); ok {
+		fir.ThreadStubOffsets = vmtables.ThreadStubOffsets(target)
+		fir.ThreadFieldNames = ThreadFieldOffsets(target)
+	}
 
 	// Enrich: field names, receiver class, closure parent, and ground-truth
 	// try/catch -- the metadata that turns `.fNN` into `.fieldName` and recovers
 	// exception structure on the pipeline path (previously only the cmd path had
 	// these).
-	c.ensureDecompileMaps()
-
-	// Confident real arity from aggregated call-site arg-register masks (opt-in;
-	// only when BuildArgRegMasks was called).
-	if c.Enrichment != nil && c.Enrichment.ArgRegMasks != nil {
-		if masks, ok := c.Enrichment.ArgRegMasks[fs.VA]; ok {
-			if regIdx, confident := ResolveArgRegIndices(masks); confident {
-				fir.ArgRegIndices = regIdx
-			}
-		}
+	if err := c.ensureDecompileMaps(); err != nil {
+		return nil, err
 	}
 
 	if c.Enrichment == nil {
@@ -532,7 +587,7 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 		}
 		if len(c.Enrichment.ClosureParentByFunc) > 0 {
 			ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-			if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex); ok {
+			if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex, c.Pool.CT); ok {
 				if parent := c.Enrichment.ClosureParentByFunc[owner.RefID]; parent != "" &&
 					parent != fir.Name && !strings.HasPrefix(fir.Name, parent+"_") {
 					fir.EnclosingFunction = parent
@@ -562,7 +617,7 @@ func (c *AnalysisContext) enrichSignatureAndAsync(fir *decompiler.FuncIR, r clus
 		return
 	}
 	ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-	if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex); ok && owner != nil && owner.SignatureRefID > 0 {
+	if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex, c.Pool.CT); ok && owner != nil && owner.SignatureRefID > 0 {
 		if ft, ok := c.Enrichment.ParamFuncTypeByRef[owner.SignatureRefID]; ok {
 			names := c.Enrichment.TypeParams.ParamTypeNames(*ft)
 			if ft.HasImplicit && len(names) > 0 {
@@ -702,7 +757,6 @@ func (c *AnalysisContext) wireTryCatch(fir *decompiler.FuncIR, r cluster.CodeRan
 			HandlerVA: funcVA + uint64(h.PCOffset),
 		})
 	}
-	fir.SnapTryRegionsToBlocks()
 }
 
 // wireSwitchCases recovers a switch's real case targets from its jump table.
@@ -795,10 +849,15 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 		return
 	}
 	c.Enrichment.ArgRegMasks = make(map[uint64][]uint8)
+	if _, ok := sdk.DartRegisterCallingConvention(c.DartVersion, c.IsARM64); !ok {
+		return
+	}
 	symLk := func(va uint64) (string, bool) { s, ok := c.SymbolNames[va]; return s, ok && s != "" }
 	var thrFields map[int]string
 	if c.Info != nil {
-		thrFields = vmtables.THRFieldsWithProfile(c.DartVersion, c.IsARM64, c.Info.Version)
+		if target, ok := vmtables.TargetProfileFromVersion(c.Info.Version, c.IsARM64); ok {
+			thrFields = vmtables.THRFields(target)
+		}
 	}
 	for _, r := range c.Ranges {
 		fs, ok := c.Slice(r)

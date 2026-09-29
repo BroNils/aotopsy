@@ -12,6 +12,13 @@ import (
 // dispatch-heavy block does not bury the control flow it belongs to.
 const maxBlockCalls = 10
 
+func cfgBlockID(id int) string {
+	if id < 0 {
+		return "bb_n" + strings.TrimPrefix(strconv.Itoa(id), "-")
+	}
+	return fmt.Sprintf("bb%d", id)
+}
+
 // CFGDOT renders a per-function basic-block CFG as DOT.
 // Each basic block is a node; edges represent control flow. Call sites in
 // a block are drawn as edges to plaintext callee nodes. Entry block is
@@ -30,20 +37,41 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 	if len(cfg.Blocks) == 0 {
 		return ""
 	}
+	blockRange := func(blk disasm.BasicBlock) (int, int) {
+		start, end := blk.Start, blk.End
+		if start < 0 {
+			start = 0
+		} else if start > len(cfg.Insts) {
+			start = len(cfg.Insts)
+		}
+		if end < start {
+			end = start
+		} else if end > len(cfg.Insts) {
+			end = len(cfg.Insts)
+		}
+		return start, end
+	}
+	blockIDs := make(map[int]bool, len(cfg.Blocks))
+	for _, blk := range cfg.Blocks {
+		blockIDs[blk.ID] = true
+	}
 
 	// Call sites by the PC they occur at, so each can be attributed to the
 	// block containing that instruction.
-	calleeAt := make(map[uint64]string, len(edges))
+	calleeAt := make(map[uint64][]string, len(edges))
 	for _, e := range edges {
+		if e.FromFunc != cfg.Name || !isSupportedCallKind(e.Kind) {
+			continue
+		}
 		pc, err := strconv.ParseUint(strings.TrimPrefix(e.FromPC, "0x"), 16, 64)
 		if err != nil {
 			continue
 		}
-		targets := e.ResolvedTargets()
+		targets := concreteCallTargets(e)
 		if len(targets) == 0 {
 			continue
 		}
-		calleeAt[pc] = targets[0]
+		calleeAt[pc] = append(calleeAt[pc], targets...)
 	}
 
 	var b strings.Builder
@@ -62,15 +90,12 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 
 	// Render blocks as nodes.
 	for _, blk := range cfg.Blocks {
-		id := fmt.Sprintf("bb%d", blk.ID)
+		id := cfgBlockID(blk.ID)
 
 		// Build label: one line per instruction.
 		var lines []string
-		end := blk.End
-		if end > len(cfg.Insts) {
-			end = len(cfg.Insts)
-		}
-		for i := blk.Start; i < end; i++ {
+		start, end := blockRange(blk)
+		for i := start; i < end; i++ {
 			inst := cfg.Insts[i]
 			line := fmt.Sprintf("0x%x: %s", inst.Addr, inst.Text)
 			lines = append(lines, dotEscape(line))
@@ -98,41 +123,48 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 	// Render callee nodes and the call edges into them.
 	externalSeen := map[string]bool{}
 	for _, blk := range cfg.Blocks {
-		from := fmt.Sprintf("bb%d", blk.ID)
-		end := blk.End
-		if end > len(cfg.Insts) {
-			end = len(cfg.Insts)
-		}
+		from := cfgBlockID(blk.ID)
+		start, end := blockRange(blk)
 		drawn := 0
-		for i := blk.Start; i < end; i++ {
-			callee, ok := calleeAt[cfg.Insts[i].Addr]
+		blockCallees := make(map[string]bool)
+		for i := start; i < end; i++ {
+			callees, ok := calleeAt[cfg.Insts[i].Addr]
 			if !ok {
 				continue
 			}
-			if drawn >= maxBlockCalls {
-				break
-			}
-			drawn++
-			id := dotID(callee)
-			if !externalSeen[callee] {
-				externalSeen[callee] = true
-				font := "Helvetica Neue,Helvetica"
-				if IsAllCaps(callee) {
-					font = "Courier,monospace"
+			for _, callee := range callees {
+				if blockCallees[callee] {
+					continue
 				}
-				fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontname=%q, fontcolor=%q, fontsize=8];\n",
-					id, truncLabel(callee, 50), font, t.EdgeDirect)
+				if drawn >= maxBlockCalls {
+					break
+				}
+				blockCallees[callee] = true
+				drawn++
+				id := dotID(callee)
+				if !externalSeen[callee] {
+					externalSeen[callee] = true
+					font := "Helvetica Neue,Helvetica"
+					if IsAllCaps(callee) {
+						font = "Courier,monospace"
+					}
+					fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontname=%q, fontcolor=%q, fontsize=8];\n",
+						id, truncLabel(callee, 50), font, t.EdgeDirect)
+				}
+				fmt.Fprintf(&b, "  %s -> %s [color=%q, style=dashed, arrowsize=0.4];\n", from, id, t.EdgeDirect)
 			}
-			fmt.Fprintf(&b, "  %s -> %s [color=%q, style=dashed, arrowsize=0.4];\n", from, id, t.EdgeDirect)
 		}
 	}
 	b.WriteByte('\n')
 
 	// Render edges.
 	for _, blk := range cfg.Blocks {
-		from := fmt.Sprintf("bb%d", blk.ID)
+		from := cfgBlockID(blk.ID)
 		for _, s := range blk.Succs {
-			to := fmt.Sprintf("bb%d", s.BlockID)
+			if !blockIDs[s.BlockID] {
+				continue
+			}
+			to := cfgBlockID(s.BlockID)
 			switch s.Cond {
 			case "T":
 				fmt.Fprintf(&b, "  %s -> %s [color=%q, label=<<font point-size=\"7\" color=\"%s\">T</font>>];\n",

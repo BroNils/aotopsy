@@ -98,10 +98,14 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 
 	// Library classification for --from-main.
 	ct := info.Version.CIDs
-	byCodeIndex := naming.CodeIndexToFunc(result, ct, info.Version.CodeIndexOneBased)
+	firstEntryWithCode := -1
+	if ctx.InstrTable != nil {
+		firstEntryWithCode = int(ctx.InstrTable.FirstEntryWithCode)
+	}
+	byCodeIndex := naming.CodeIndexToFunc(result, ct, info.Version.CodeIndexOneBased, firstEntryWithCode)
 	codeOwnerFunc := make(map[int]int, len(result.Codes))
 	for _, ce := range result.Codes {
-		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndex); ok {
+		if owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, byCodeIndex, ct); ok {
 			codeOwnerFunc[ce.RefID] = owner.RefID
 		}
 	}

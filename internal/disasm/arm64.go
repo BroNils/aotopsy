@@ -17,6 +17,11 @@ type Inst struct {
 	Mnemonic string
 	Operands string
 	Text     string // full disassembly line
+	// Bad marks a 32-bit word the architecture decoder rejected. Listing
+	// recovery still emits it as `.word`, but semantic analyses must treat it
+	// as a control-flow/provenance barrier rather than flowing facts through
+	// bytes whose instruction semantics are unknown.
+	Bad bool
 }
 
 // SymbolLookup resolves an address to a symbolic name. Returns ("", false) if unknown.
@@ -58,7 +63,9 @@ func Disassemble(data []byte, opts Options) []Inst {
 
 		inst, err := arm64asm.Decode(data[off : off+4])
 		var mnemonic, operands, text string
+		bad := false
 		if err != nil {
+			bad = true
 			mnemonic = ".word"
 			operands = fmt.Sprintf("0x%08x", raw)
 			text = fmt.Sprintf(".word 0x%08x", raw)
@@ -79,6 +86,7 @@ func Disassemble(data []byte, opts Options) []Inst {
 			Mnemonic: mnemonic,
 			Operands: operands,
 			Text:     text,
+			Bad:      bad,
 		})
 	}
 	return result

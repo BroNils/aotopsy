@@ -56,7 +56,7 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 		}
 		return out
 	}
-	if err := cluster.ReadFill(info.VmData.Data, result, info.Version, true, 0); err != nil {
+	if err := cluster.ReadFill(info.VmData.Data, result, info.Version, true, 0, dartfmt.Options{}); err != nil {
 		if debug {
 			fmt.Fprintf(os.Stderr, "vmstubs: ReadFill: %v\n", err)
 		}
@@ -76,7 +76,7 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 		}
 		return out
 	}
-	_, codeOff, payloadLen, err := snapshot.CodeRegion(info.VmInstructions.Data)
+	_, codeOff, payloadLen, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 	if err != nil {
 		if debug {
 			fmt.Fprintf(os.Stderr, "vmstubs: CodeRegion: %v\n", err)
@@ -195,15 +195,9 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if idx < 0 || idx >= firstEntryWithCode || idx >= len(table.Entries) {
 			continue // not a discarded entry (or out of range) -- already handled by the normal Code cluster path
 		}
-		name := pl.ResolveName(no)
-		if name == "" {
-			name = pl.ResolveVMName(no)
-		}
+		name := pl.resolveIsolateName(no)
 		if name == "" {
 			continue
-		}
-		if owner := pl.ResolveOwnerName(no); owner != "" {
-			name = owner + "." + name
 		}
 		// X-4: Prefix constructors with "new ", mirroring BuildPoolLookups'
 		// handling of non-discarded Codes (helpers.go). Without this, a
@@ -215,6 +209,8 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		// discarded Code and were named here without the "new " prefix.
 		if no.IsConstructor() && name != "" {
 			name = "new " + name
+		} else if owner := pl.ResolveOwnerName(no); owner != "" {
+			name = owner + "." + name
 		}
 		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.VAAt(table.Entries[idx].PCOffset)
 		if !ok {
@@ -253,25 +249,20 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 // The second group is a Code with a genuinely null owner. Nothing in the
 // isolate snapshot names it, so it stays a placeholder -- an honest one.
 //
-// KNOWN LIMITATION, measured before shipping rather than discovered after.
-// Naming these requires Type -> type_class_id, which only lands in
-// Result.Types for the v3.x flags-packed encoding. On versions where
-// type_class_id is its own ref (VersionProfile.TypeClassIdIsRef, v2.10-2.15)
-// it is not resolved anywhere in this pipeline, and the failure is silent
-// and total rather than partial: a real Dart 2.12.0 sample resolved 251 of
-// 251 type-owned Codes to a real-looking name, but to a SINGLE distinct
-// class ("TypeParameters") for all 251. That is worse than no name -- it
-// invents 251 confident, wrong labels -- so this is switched off there and
-// those Codes keep the `sub_` placeholder. The same 3.x samples resolve 260
-// and 271 distinct classes out of 324 and 339, which is what working looks
-// like.
+// The old v2.x failure mode is intentionally kept fail-closed rather than
+// approximated. Type class ids, TypeParameter canonical names, generic
+// argument vectors and nullability are now captured across the supported
+// layouts, but a TTS Code receives a name only when the exact identity can be
+// reconstructed. buildTypeNames below remains the looser pool-display path;
+// PoolLookups.TypeTestingStubNames is the exact Code/call-target path.
 
 // buildTypeNames maps a Type's reference ID to its Dart-source display name,
 // type arguments included. Returns nil when the Dart version cannot resolve a
 // Type to its class, in which case callers simply find nothing.
 //
-// It produces the BARE type name. Wrap it with TypeTestingStubName for the
-// stub spelling; the object pool wants the type itself.
+// It produces the BARE best-effort type name for display. Do not use it to
+// identify a Code or indirect TTS target; those require the exact map built by
+// buildExactTypeTestingStubNames.
 //
 // It also returns the TypeArguments names -- `<int, String>` for a
 // TypeArguments object reached directly, as the object pool holds them -- since
@@ -306,10 +297,7 @@ func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTabl
 		if !ok {
 			continue
 		}
-		name := l.ResolveName(no)
-		if name == "" {
-			name = l.ResolveVMName(no)
-		}
+		name := l.resolveIsolateName(no)
 		if name != "" {
 			classNames[ci.ClassID] = name
 		}
@@ -360,8 +348,11 @@ func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTabl
 	return out, argNames
 }
 
-// TypeTestingStubName returns the display name for the stub that tests the
-// Type at ref, or "" when the type could not be named.
+// TypeTestingStubName wraps a caller-supplied type-name map with the readable
+// stub prefix. It is retained for display-oriented callers/tests; TypeNames is
+// intentionally best-effort and may omit unresolved generic detail. Code
+// identities and call targets MUST use PoolLookups.TypeTestingStubNames, whose
+// builder is exact-or-empty.
 //
 // The bare type name is the useful unit -- a Type in the object pool is just a
 // type, not a stub -- so buildTypeNames produces that and the stub prefix is
@@ -482,14 +473,14 @@ func typeArgsListString(
 
 // viaPoolIndex matches the provenance annotation the disassembler attaches to
 // a register loaded from the object pool: "pp[123]" or "pp[123] <Type>".
-var viaPoolIndex = regexp.MustCompile(`^pp\[(\d+)\]`)
+var viaPoolIndex = regexp.MustCompile(`(?i)^pp\[(\d+)\]`)
 
 // BuildTTSCallTargets maps an object-pool INDEX to the type-testing stub name
 // for the type in that slot, for slots that hold a Type at all. Returns nil
 // when no type-testing stub names are available, so callers resolve nothing
 // rather than guessing.
 func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]string {
-	if pl == nil || len(pl.TypeNames) == 0 {
+	if pl == nil || len(pl.TypeTestingStubNames) == 0 {
 		return nil
 	}
 	out := make(map[int]string)
@@ -497,7 +488,7 @@ func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]stri
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
-		if name := TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
+		if name := pl.TypeTestingStubNames[pe.RefID]; name != "" {
 			out[pe.Index] = name
 		}
 	}

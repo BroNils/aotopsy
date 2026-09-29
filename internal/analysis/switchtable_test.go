@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/samplecorpus"
 )
 
 // TestSwitchJumpTableRecovery checks the one property that makes switch
@@ -30,11 +29,7 @@ func TestSwitchJumpTableRecovery(t *testing.T) {
 	}
 	anyRun := false
 	for _, name := range samples {
-		path := samplecorpus.Path(name)
-		if path == "" {
-			t.Logf("%s: absent", name)
-			continue
-		}
+		path := corpusSample(t, name)
 		anyRun = true
 		t.Run(name, func(t *testing.T) {
 			ctx, err := LoadContext(path)

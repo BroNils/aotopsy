@@ -326,3 +326,59 @@ func TestDart212StringExtractionClusterOnly(t *testing.T) {
 		t.Errorf("Classes: got %d, expected >100 (Class cluster fill should yield >100 classes)", len(res.Classes))
 	}
 }
+
+func TestPipelineLimitBoundsPerFunctionArtifacts(t *testing.T) {
+	libPath := sample312X64(t)
+	outDir := filepath.Join(t.TempDir(), "limited")
+	const limit = 10
+	result, err := Run(Opts{
+		LibPath: libPath,
+		OutDir:  outDir,
+		Limit:   limit,
+		Quiet:   true,
+	})
+	if err != nil {
+		t.Fatalf("limited pipeline failed: %v", err)
+	}
+	if result.FuncCount != limit {
+		t.Fatalf("FuncCount = %d, want %d", result.FuncCount, limit)
+	}
+
+	funcRows := readJSONL(t, filepath.Join(outDir, "functions.jsonl"))
+	if len(funcRows) != limit {
+		t.Fatalf("functions.jsonl records = %d, want %d", len(funcRows), limit)
+	}
+	funcNames := make(map[string]bool, limit)
+	for _, rec := range funcRows {
+		if name, _ := rec["name"].(string); name != "" {
+			funcNames[name] = true
+		}
+	}
+
+	// Fingerprints hash function bytes, so they must use exactly the same
+	// function population as disassembly rather than silently scanning the
+	// whole binary behind --limit.
+	if got := len(readJSONL(t, filepath.Join(outDir, "function_fingerprints.jsonl"))); got != limit {
+		t.Fatalf("function_fingerprints.jsonl records = %d, want %d", got, limit)
+	}
+
+	// Type-inference field accesses and unified evidence are function-scoped.
+	// None may refer to a function outside functions.jsonl in a limited run.
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "field_accessor_xref.jsonl")) {
+		for _, key := range []string{"readers", "writers"} {
+			vals, _ := rec[key].([]any)
+			for _, v := range vals {
+				name, _ := v.(string)
+				if name != "" && !funcNames[name] {
+					t.Fatalf("field_accessor_xref contains out-of-population function %q", name)
+				}
+			}
+		}
+	}
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "evidence.jsonl")) {
+		name, _ := rec["function"].(string)
+		if name != "" && !funcNames[name] {
+			t.Fatalf("evidence contains out-of-population function %q", name)
+		}
+	}
+}

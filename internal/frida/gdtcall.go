@@ -84,6 +84,12 @@ func (rt *X86RegTracker) kill(idx int) {
 	rt.defs[idx] = regProvenance{}
 }
 
+func (rt *X86RegTracker) reset() {
+	for i := range rt.defs {
+		rt.defs[i] = regProvenance{}
+	}
+}
+
 func (rt *X86RegTracker) lookup(idx int) string {
 	if idx < 0 || idx > 15 {
 		return ""
@@ -131,7 +137,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			addr := d.VA
 			inst := d.Inst
 			if d.Bad {
-				rt.tick()
+				rt.reset()
 				return true
 			}
 
@@ -176,6 +182,10 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break
 					}
 				}
+				for _, dst := range x86.DstRegsOfInst(inst) {
+					rt.kill(dst)
+				}
+				rt.kill(sdk.X86ReturnReg)
 				rt.tick()
 				if maxHits > 0 && hits >= maxHits {
 					fmt.Fprintf(os.Stderr, "stopping at --max=%d indirect-call hits\n", maxHits)
@@ -188,7 +198,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			// Track MOV dst, [R14+disp] (THR field load) / [R15+disp] (pool load)
 			// so a later indirect CALL through dst can be annotated. Mirrors
 			// LoadDispatchTable's exact shape: movq(dst, Address(THR, dispatch_table_array_offset())).
-			if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
+			if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
 				dstReg, dstOK := inst.Args[0].(x86asm.Reg)
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && dstOK && inst.Op == x86asm.MOV {
 					// Register-to-register copy: propagate provenance so a
@@ -228,13 +238,13 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					rt.tick()
 					return true
 				}
-				if dstOK {
-					rt.kill(x86.CanonReg(dstReg))
-				}
-			} else if len(inst.Args) >= 1 {
-				if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-					rt.kill(x86.CanonReg(dstReg))
-				}
+			}
+
+			// Invalidate exactly the GP registers the shared x86 decoder says are
+			// written. The old operand-0 heuristic killed read-only CMP/TEST/BT/
+			// PUSH operands and missed implicit or multi-register writes.
+			for _, dst := range x86.DstRegsOfInst(inst) {
+				rt.kill(dst)
 			}
 
 			rt.tick()

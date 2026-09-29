@@ -3,14 +3,15 @@ package analysis
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"sort"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/strutil"
 )
 
@@ -37,24 +38,22 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLoo
 	sort.Slice(entries, func(i, j int) bool { return entries[i].va < entries[j].va })
 
 	path := filepath.Join(outDir, "aotopsy.r2")
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	for _, e := range entries {
-		// r2 flag: f name @ addr
-		// SanitizeR2FlagName returns "" for a name that carries nothing
-		// once the separators are stripped, and guarantees the rest is
-		// accepted by r2's r_name_check.
-		r2Name := strutil.SanitizeR2FlagName(e.name)
-		if r2Name == "" {
-			continue
+	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		for _, e := range entries {
+			// r2 flag: f name @ addr
+			// SanitizeR2FlagName returns "" for a name that carries nothing
+			// once the separators are stripped, and guarantees the rest is
+			// accepted by r2's r_name_check.
+			r2Name := strutil.SanitizeR2FlagName(e.name)
+			if r2Name == "" {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "f %s @ 0x%x\n", r2Name, e.va); err != nil {
+				return fmt.Errorf("write r2 export: %w", err)
+			}
 		}
-		fmt.Fprintf(f, "f %s @ 0x%x\n", r2Name, e.va)
-	}
-	return nil
+		return nil
+	})
 }
 
 // writeFunctionFingerprints writes function_fingerprints.jsonl —
@@ -62,38 +61,42 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLoo
 // with the cross-sample name transfer dictionary (Item 13/15).
 func writeFunctionFingerprints(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLookups, code []byte, codeOff, codeVA uint64) error {
 	path := filepath.Join(outDir, "function_fingerprints.jsonl")
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
 	im2 := NewCodeImage(code, codeVA, codeOff, pl, nil)
+	type fingerprintRecord struct {
+		Hash  string `json:"hash"`
+		VA    string `json:"va"`
+		Size  int    `json:"size"`
+		Name  string `json:"name"`
+		Owner string `json:"owner,omitempty"`
+	}
+	records := make([]fingerprintRecord, 0, len(ranges))
 	for _, r := range ranges {
-		fs, ok := im2.Slice(r)
+		fs, ok := im2.SliceExact(r)
 		if !ok {
-			continue
+			return fmt.Errorf("fingerprint range pc=0x%x size=%d falls outside code image", r.PCOffset, r.Size)
 		}
 		h := sha256.Sum256(fs.Code)
-		name := fs.Name
+		// Persist semantic components, not the display-qualified name. fs.Name
+		// contains owner + PC suffix (e.g. Owner.method_1a2b), which changes
+		// across binaries and used to be stored alongside Owner a second time.
+		// The dictionary must reconstruct qualification at the target binary's PC.
+		name, owner := "", ""
+		if r.RefID >= 0 {
+			if ci, ok := pl.CodeNames[r.RefID]; ok {
+				name, owner = ci.FuncName, ci.OwnerName
+			}
+		}
 		funcVA := fs.VA
 		funcCode := fs.Code
-		rec := struct {
-			Hash string `json:"hash"`
-			VA   string `json:"va"`
-			Size int    `json:"size"`
-			Name string `json:"name"`
-		}{
-			Hash: hex.EncodeToString(h[:]),
-			VA:   fmt.Sprintf("0x%x", funcVA),
-			Size: len(funcCode),
-			Name: name,
+		rec := fingerprintRecord{
+			Hash:  hex.EncodeToString(h[:]),
+			VA:    fmt.Sprintf("0x%x", funcVA),
+			Size:  len(funcCode),
+			Name:  name,
+			Owner: owner,
 		}
-		if err := enc.Encode(rec); err != nil {
-			return err
-		}
+		records = append(records, rec)
 	}
-	return nil
+	_, err := jsonutil.WriteJSONLFile(path, records)
+	return err
 }

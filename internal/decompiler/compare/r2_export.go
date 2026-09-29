@@ -49,6 +49,9 @@ func (r *R2Export) AddFunction(va uint64, name string) {
 	}
 	// r2 flag names can't contain dots, @, or spaces.
 	r2Name := strutil.SanitizeR2FlagName(name)
+	if r2Name == "" {
+		return
+	}
 	r.Lines = append(r.Lines, fmt.Sprintf("f %s @ 0x%x", r2Name, va))
 }
 

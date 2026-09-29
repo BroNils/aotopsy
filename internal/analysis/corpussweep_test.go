@@ -50,6 +50,7 @@ func TestFullCorpusSweep(t *testing.T) {
 	if os.Getenv("AOTOPSY_SWEEP") == "" {
 		t.Skip("set AOTOPSY_SWEEP=1 to sweep every function of every sample")
 	}
+	requireCompleteCorpus(t)
 	filter := os.Getenv("AOTOPSY_SWEEP_SAMPLE")
 
 	type outlier struct {
@@ -66,10 +67,7 @@ func TestFullCorpusSweep(t *testing.T) {
 		if filter != "" && !strings.Contains(name, filter) {
 			continue
 		}
-		path := samplecorpus.Path(name)
-		if path == "" {
-			continue
-		}
+		path := corpusSample(t, name)
 		totalSamples++
 
 		t.Run(name, func(t *testing.T) {

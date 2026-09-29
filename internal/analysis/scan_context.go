@@ -1,10 +1,12 @@
 package analysis
 
 import (
+	"fmt"
 	"runtime"
 	"runtime/debug"
 	"strings"
 
+	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 )
 
@@ -39,9 +41,15 @@ type ScanOptions struct {
 // ScanFuncs runs a bounded, memory-hardened scan over functions in the AnalysisContext.
 // It manages GOMAXPROCS and memory limits safely, performs range filtering,
 // and invokes fn for each function's FuncIR and virtual address.
-func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(fir *decompiler.FuncIR, funcVA uint64)) int {
+func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(r cluster.CodeRange, fir *decompiler.FuncIR, funcVA uint64)) (int, error) {
+	if c == nil {
+		return 0, fmt.Errorf("scan functions: nil analysis context")
+	}
+	if fn == nil {
+		return 0, fmt.Errorf("scan functions: nil callback")
+	}
 	maxScan := opts.MaxScan
-	if maxScan == 0 && !opts.AllowUnbounded {
+	if maxScan <= 0 && !opts.AllowUnbounded {
 		maxScan = DefaultMaxScan
 	}
 	gcInterval := opts.GcEveryN
@@ -54,7 +62,6 @@ func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(fir *decompiler.Fu
 	oldLimit := debug.SetMemoryLimit(1536 << 20)
 	defer debug.SetMemoryLimit(oldLimit)
 
-	im := c.Image()
 	scanned := 0
 	for _, r := range c.Ranges {
 		if !opts.AllowUnbounded && maxScan > 0 && scanned >= maxScan {
@@ -63,25 +70,36 @@ func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(fir *decompiler.Fu
 		if r.Size == 0 || r.RefID < 0 {
 			continue
 		}
-		fir, err := c.FuncIRFor(r)
-		if err != nil || fir == nil {
-			continue
-		}
-		if opts.Filter != "" && !strings.Contains(fir.Name, opts.Filter) {
-			continue
-		}
-		funcVA, ok := im.FuncVA(r)
+		// Resolve the exact same name FuncIRFor will use, but before paying for
+		// disassembly and IR construction. Filter is a cost bound as well as an
+		// output predicate; applying it after FuncIRFor defeats its purpose.
+		fs, ok := c.Slice(r)
 		if !ok {
 			continue
 		}
+		name := c.SymbolNames[fs.VA]
+		if name == "" {
+			name = fs.Name
+		}
+		if opts.Filter != "" && !strings.Contains(name, opts.Filter) {
+			continue
+		}
+		fir, err := c.FuncIRFor(r)
+		if err != nil {
+			return scanned, fmt.Errorf("build IR for %s: %w", name, err)
+		}
+		if fir == nil {
+			continue
+		}
+		funcVA := fs.VA
 		scanned++
 
-		fn(fir, funcVA)
+		fn(r, fir, funcVA)
 
 		if scanned%gcInterval == 0 {
 			runtime.GC()
 			debug.FreeOSMemory()
 		}
 	}
-	return scanned
+	return scanned, nil
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 )
 
 // cmdSDKCheck runs all SDK verification gates (THR, ObjectStore, stubs, roots)
@@ -24,16 +26,28 @@ func cmdSDKCheck(args []string) error {
 	objectStoreOnly := fs.Bool("objectstore", false, "check ObjectStore field count only")
 	stubsOnly := fs.Bool("stubs", false, "check VM stub names only")
 	rootsOnly := fs.Bool("roots", false, "check roots prefix count only")
+	classIDOnly := fs.Bool("classid-tag", false, "check versioned object-header class-id layout only")
+	runtimeEntriesOnly := fs.Bool("runtime-entries", false, "check runtime-entry THR naming coverage only")
+	stubOffsetsOnly := fs.Bool("stub-offsets", false, "check Thread-cached stub offsets only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("sdk-check does not accept positional arguments")
+	}
 
-	all := !*thrOnly && !*objectStoreOnly && !*stubsOnly && !*rootsOnly
+	all := !*thrOnly && !*objectStoreOnly && !*stubsOnly && !*rootsOnly && !*classIDOnly && !*runtimeEntriesOnly && !*stubOffsetsOnly
 	failed := false
+	root, err := sdkCheckSourceRoot()
+	if err != nil {
+		return err
+	}
+	tool := filepath.Join(root, "tools", "extract_thr.go")
 
-	runCheck := func(name, flag string) {
+	runCheck := func(name, checkFlag string) {
 		fmt.Fprintf(os.Stderr, "=== %s ===\n", name)
-		cmd := exec.Command("go", "run", "tools/extract_thr.go", flag)
+		cmd := exec.Command("go", "run", tool, checkFlag)
+		cmd.Dir = root
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -56,10 +70,57 @@ func cmdSDKCheck(args []string) error {
 	if all || *rootsOnly {
 		runCheck("Roots prefix count", "-check-roots")
 	}
+	if all || *classIDOnly {
+		runCheck("ClassIdTag layout", "-check-classid-tag")
+	}
+	if all || *runtimeEntriesOnly {
+		runCheck("Runtime entry coverage", "-check-runtime-entries")
+	}
+	if all || *stubOffsetsOnly {
+		runCheck("Thread-cached stub offsets", "-check-stub-offsets")
+	}
 
 	if failed {
 		return fmt.Errorf("one or more SDK checks failed")
 	}
 	fmt.Fprintf(os.Stderr, "All SDK checks passed.\n")
 	return nil
+}
+
+func sdkCheckSourceRoot() (string, error) {
+	var starts []string
+	if cwd, err := os.Getwd(); err == nil {
+		starts = append(starts, cwd)
+	}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		starts = append(starts, filepath.Dir(file))
+	}
+	if exe, err := os.Executable(); err == nil {
+		starts = append(starts, filepath.Dir(exe))
+	}
+	seen := make(map[string]bool)
+	for _, start := range starts {
+		abs, err := filepath.Abs(start)
+		if err != nil {
+			continue
+		}
+		for dir := abs; ; dir = filepath.Dir(dir) {
+			if !seen[dir] {
+				seen[dir] = true
+				if regularFile(filepath.Join(dir, "go.mod")) && regularFile(filepath.Join(dir, "tools", "extract_thr.go")) {
+					return dir, nil
+				}
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	return "", fmt.Errorf("sdk-check requires the aotopsy source tree (go.mod + tools/extract_thr.go); none found from cwd, compiled source path, or executable path")
+}
+
+func regularFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
 }

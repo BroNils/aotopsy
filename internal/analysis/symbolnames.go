@@ -46,7 +46,7 @@ func BuildSymbolNames(
 	table *cluster.InstructionsTable,
 	fmtOpts dartfmt.Options,
 	isolateData []byte,
-) SymbolNameSet {
+) (SymbolNameSet, error) {
 	out := SymbolNameSet{
 		Names:  make(map[uint64]string, len(ranges)),
 		VMForm: make(map[uint64]string),
@@ -59,7 +59,7 @@ func BuildSymbolNames(
 	var isoStubs map[int]string
 	if len(isolateData) > 0 {
 		if err := cluster.ReadObjectStoreRefs(isolateData, clResult, info.Version); err != nil {
-			clResult.ObjectStoreRefs = nil
+			return SymbolNameSet{}, fmt.Errorf("read ObjectStore roots for isolate-stub naming: %w", err)
 		}
 		isoStubs = naming.BuildIsolateStubSymbols(clResult, info.Version.DartVersion)
 	}
@@ -102,5 +102,5 @@ func BuildSymbolNames(
 		image.CodeVA, image.CodeOff, info.Version.CodeIndexOneBased) {
 		out.Names[va] = name
 	}
-	return out
+	return out, nil
 }

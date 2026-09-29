@@ -2,14 +2,16 @@ package strutil
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/jsonutil"
 )
 
 // FlutterMetaFunc is a function entry in flutter_meta.json.
@@ -30,6 +32,7 @@ type FlutterMetaTHRField struct {
 // FlutterMetaJSON is the top-level flutter_meta.json structure.
 type FlutterMetaJSON struct {
 	Version            string                 `json:"version,omitempty"`
+	Architecture       string                 `json:"arch,omitempty"`
 	DartVersion        string                 `json:"dart_version,omitempty"`
 	CompressedPointers bool                   `json:"compressed_pointers"`
 	PointerSize        int                    `json:"pointer_size,omitempty"`
@@ -57,12 +60,14 @@ type FlutterMetaJSONClass struct {
 
 // FlutterMetaField is one field in a FlutterMetaJSONClass.
 type FlutterMetaField struct {
-	Name       string `json:"name"`
-	ByteOffset int32  `json:"byte_offset"`
+	Name        string `json:"name"`
+	ByteOffset  int32  `json:"byte_offset"`
+	IsReference bool   `json:"is_reference"`
+	SlotType    string `json:"slot_type"`
 }
 
 // WriteDartMeta writes dart_meta.json with snapshot metadata.
-func WriteDartMeta(outDir, dartVersion string, compressed bool, ptrSize int, thrFields map[int]string) error {
+func WriteDartMeta(outDir, dartVersion, arch string, compressed bool, ptrSize int, thrFields map[int]string) error {
 	fields := make([]FlutterMetaTHRField, 0, len(thrFields))
 	for off, name := range thrFields {
 		fields = append(fields, FlutterMetaTHRField{Offset: off, Name: name})
@@ -70,23 +75,14 @@ func WriteDartMeta(outDir, dartVersion string, compressed bool, ptrSize int, thr
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Offset < fields[j].Offset })
 
 	meta := FlutterMetaJSON{
+		Architecture:       arch,
 		DartVersion:        dartVersion,
 		CompressedPointers: compressed,
 		PointerSize:        ptrSize,
 		THRFields:          fields,
 	}
 
-	f, err := os.Create(filepath.Join(outDir, "dart_meta.json"))
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(meta); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	return jsonutil.WriteJSONFile(filepath.Join(outDir, "dart_meta.json"), meta)
 }
 
 // NormalizeHexAddr strips leading zeros: "0x000652e4" → "0x652e4".
@@ -111,28 +107,29 @@ func ParseHexAddr(s string) uint64 {
 // AsmCommentRe matches annotated asm lines: address + instruction + "; comment"
 var AsmCommentRe = regexp.MustCompile(`^(0x[0-9a-fA-F]+)\s+.*;\s+(.+)$`)
 
-// ExtractAsmComments parses all .txt files in asmDir for instruction-level annotations.
+// ExtractAsmComments parses all .txt files below asmDir for instruction-level
+// annotations. Disassembly artifacts are grouped under owner directories, so a
+// top-level-only scan would silently omit almost every named method.
 func ExtractAsmComments(asmDir string) ([]FlutterMetaComment, error) {
-	entries, err := os.ReadDir(asmDir)
+	var comments []FlutterMetaComment
+	seen := make(map[string]bool)
+	err := filepath.WalkDir(asmDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt") {
+			return nil
+		}
+		fc, err := extractFileComments(path, seen)
+		if err != nil {
+			return fmt.Errorf("extract comments from %s: %w", path, err)
+		}
+		comments = append(comments, fc...)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	var comments []FlutterMetaComment
-	seen := make(map[string]bool)
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt") {
-			continue
-		}
-		path := filepath.Join(asmDir, entry.Name())
-		fc, err := extractFileComments(path, seen)
-		if err != nil {
-			continue
-		}
-		comments = append(comments, fc...)
-	}
-
 	return comments, nil
 }
 
@@ -145,6 +142,12 @@ func extractFileComments(path string, seen map[string]bool) ([]FlutterMetaCommen
 
 	var comments []FlutterMetaComment
 	scanner := bufio.NewScanner(f)
+	// Disassembly lines are normally tiny; allow unusually long annotated
+	// strings without inheriting Scanner's opaque 64 KiB failure, but still cap
+	// attacker-controlled reused artifacts so one line cannot allocate without
+	// bound.
+	const maxAsmLineBytes = 1 << 20
+	scanner.Buffer(make([]byte, 64<<10), maxAsmLineBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		m := AsmCommentRe.FindStringSubmatch(line)

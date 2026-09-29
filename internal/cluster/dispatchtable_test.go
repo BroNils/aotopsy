@@ -178,7 +178,7 @@ func TestParseDispatchTable_NullCodeRecentRepeatStub(t *testing.T) {
 			}
 			table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
 
-			entries, err := ParseDispatchTable(data, result, profile, table)
+			entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 			if err != nil {
 				t.Fatalf("ParseDispatchTable: %v", err)
 			}
@@ -221,7 +221,7 @@ func TestParseDispatchTable_WrongRootsShapeIsDetected(t *testing.T) {
 				}
 				table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
 
-				entries, err := ParseDispatchTable(data, result, profile, table)
+				entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 				if err == nil && len(entries) == 3 {
 					t.Errorf("a %s stream read as %s produced a plausible 3-entry table; "+
 						"the version gate is not doing anything",
@@ -242,7 +242,7 @@ func TestParseDispatchTable_ZeroLengthReturnsNilNoError(t *testing.T) {
 	profile := &snapshot.VersionProfile{DartVersion: rootsShapes[2].dartVersion, ObjectStoreAOTFieldCount: 1}
 	table := &InstructionsTable{FirstEntryWithCode: 0}
 
-	entries, err := ParseDispatchTable(data, result, profile, table)
+	entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestParseDispatchTable_UnverifiedVersionReturnsError(t *testing.T) {
 	profile := &snapshot.VersionProfile{DartVersion: "9.9.9-unverified"}
 	table := &InstructionsTable{}
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, table); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, table, dartfmt.Options{}); err == nil {
 		t.Error("expected an error for ObjectStoreAOTFieldCount == 0, got nil")
 	}
 }
@@ -275,7 +275,7 @@ func TestParseDispatchTable_FillEndUnsetReturnsError(t *testing.T) {
 	profile := &snapshot.VersionProfile{DartVersion: "test", ObjectStoreAOTFieldCount: 5}
 	table := &InstructionsTable{}
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, table); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, table, dartfmt.Options{}); err == nil {
 		t.Error("expected an error when FillEnd is unset, got nil")
 	}
 }
@@ -286,7 +286,44 @@ func TestParseDispatchTable_NilInstructionsTableReturnsError(t *testing.T) {
 	result := &Result{FillEnd: dispatchTableTestFillEnd}
 	profile := &snapshot.VersionProfile{DartVersion: "test", ObjectStoreAOTFieldCount: 1}
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, nil); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, nil, dartfmt.Options{}); err == nil {
 		t.Error("expected an error for a nil InstructionsTable, got nil")
+	}
+}
+
+func TestParseDispatchTableHonorsDecodedOutputBudgets(t *testing.T) {
+	shape := rootsShapes[2]
+	rle := make([][]byte, 20)
+	for i := range rle {
+		rle[i] = encTagged64(0)
+	}
+	data := buildDispatchTableStream(shape, 1, rle, int64(len(rle)))
+	result := &Result{FillEnd: dispatchTableTestFillEnd}
+	profile := &snapshot.VersionProfile{
+		DartVersion:              shape.dartVersion,
+		ObjectStoreAOTFieldCount: 1,
+		CodeIndexOneBased:        true,
+	}
+	table := &InstructionsTable{}
+
+	if _, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{MaxSteps: 10}); err == nil {
+		t.Fatal("dispatch table length above MaxSteps was accepted")
+	}
+	if _, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{MaxBytes: 1}); err == nil {
+		t.Fatal("dispatch table decoded output above MaxBytes was accepted")
+	}
+}
+
+func TestParseDispatchTableRejectsRepeatPastDeclaredEnd(t *testing.T) {
+	shape := rootsShapes[2]
+	data := buildDispatchTableStream(shape, 1, [][]byte{encTagged64(10)}, 1)
+	result := &Result{FillEnd: dispatchTableTestFillEnd}
+	profile := &snapshot.VersionProfile{
+		DartVersion:              shape.dartVersion,
+		ObjectStoreAOTFieldCount: 1,
+		CodeIndexOneBased:        true,
+	}
+	if _, err := ParseDispatchTable(data, result, profile, &InstructionsTable{}, dartfmt.Options{}); err == nil {
+		t.Fatal("repeat marker extending past declared table length was accepted")
 	}
 }

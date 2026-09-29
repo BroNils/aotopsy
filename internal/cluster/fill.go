@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 
 	"aotopsy/internal/dartfmt"
@@ -11,7 +12,9 @@ import (
 
 var debugFill = os.Getenv("DEFLUTTER_DEBUG_FILL") != ""
 
-// NamedObject holds a named object extracted from the fill section.
+// NamedObject holds an object that participates in name/owner resolution.
+// Most entries have a source name, while structural carriers such as
+// PatchClass and TypeParameter intentionally use NameRefID=-1.
 type NamedObject struct {
 	CID            int
 	RefID          int
@@ -42,10 +45,14 @@ type NamedObject struct {
 	NumFixedParams    int
 	NumOptionalParams int
 
-	// IsStatic comes from UntaggedFunction.kind_tag_ on Dart 2.x. A static
+	// IsStatic comes from UntaggedFunction.kind_tag_. A static
 	// method has no receiver, so its argument 0 is an ordinary parameter --
 	// seeding it with the owning class would be a fabricated type.
 	IsStatic bool
+	// IsNative/IsExternal are the corresponding kind_tag_ flags. The VM's
+	// Function::is_ffi_native() is exactly is_native() && is_external().
+	IsNative   bool
+	IsExternal bool
 	// FuncKind is UntaggedFunction::Kind, NORMALISED: the raw ordinal is
 	// version-dependent (2.10 numbers Constructor 6, later versions 5) and
 	// so is the field width, so decodeFunctionKind maps both onto a
@@ -70,6 +77,19 @@ type NamedObject struct {
 	// kRecognizedTagSize=9, kModifierPos=14, kModifierSize=2 identically at
 	// 2.10.0, 2.12.0, 2.17.6, 2.19.0, 3.0.5, 3.1.0, 3.2.5, 3.3.0 and 3.4.3.
 	IsSuspendable bool
+
+	// TypeParameter metadata is carried here because TypeParameter is an
+	// AbstractType with no source name of its own. The VM names it from
+	// (class-vs-function, base, index), e.g. X0/Y0/C1X0/F1Y0. Keeping the
+	// scalar metadata next to the object's RefID lets exact type rendering
+	// resolve TypeArguments entries that point at a TypeParameter instead of a
+	// concrete Type. HasTypeParamMetadata distinguishes zero-valued fields from
+	// an object whose version/layout was not captured.
+	HasTypeParamMetadata bool
+	TypeParamIsFunction  bool
+	TypeParamBase        int
+	TypeParamIndex       int
+	TypeParamNullability TypeNullability
 }
 
 // FuncTypeInfo holds parameter count data extracted from a FunctionType object.
@@ -193,6 +213,12 @@ type ClassInfo struct {
 	TypeArgsOff    int32
 	SuperTypeRefID int // ref ID of the super_type Type object (-1 if not captured for this spec.NumRefs)
 	LibraryRefID   int // ref ID of the owning Library object (-1 if not captured for this spec.NumRefs)
+	// TypeParamsRefID is the class's TypeParameters object. RefNull means the
+	// class declares no type parameters; -1 means the field was not captured.
+	// For Dart <=3.0 the TTS namer uses this class-local arity to select only
+	// the trailing own arguments from Type.arguments(). Dart >=3.1 names the
+	// full vector instead.
+	TypeParamsRefID int
 
 	// UnboxedFieldBitmap marks which of this class's instance field slots hold
 	// a raw machine word rather than a ref, indexed by word offset from the
@@ -254,7 +280,26 @@ type TypeInfo struct {
 	// single largest category of symbol-table disagreement: the ELF says
 	// "assert type is List<double>".
 	ArgumentsRef int
+	// Nullability is decoded from the same scalar that carries Type state:
+	// v2.15-v2.18 use the low bits of the trailing combined byte, while
+	// v2.19+ packs them into flags. Unknown means the layout was not captured
+	// and exact type naming must refuse rather than silently drop a suffix.
+	Nullability TypeNullability
 }
+
+// TypeNullability mirrors the VM's semantic nullability states without
+// exposing their version-dependent packed bit width. Dart 2.x/early 3.x use
+// two bits (nullable=0, non-nullable=1, legacy=2); Dart 3.5+ uses one bit and
+// therefore has only nullable/non-nullable. Unknown is deliberately separate
+// from nullable even though the VM encodes nullable as zero.
+type TypeNullability uint8
+
+const (
+	TypeNullabilityUnknown TypeNullability = iota
+	TypeNullabilityNullable
+	TypeNullabilityNonNullable
+	TypeNullabilityLegacy
+)
 
 // --- New capture types (previously skipped) ---
 
@@ -406,10 +451,10 @@ type ClosureInfo struct {
 	FunctionRef int // ref ID of the wrapped Function (-1 if not captured)
 }
 
-// CompressedStackMapsInfo holds a raw CompressedStackMaps payload.
-// Not decoded yet — the payload is a compressed bitmap of which registers
-// are live at each safepoint. No consumer exists currently, but the data
-// is captured so future decompilation quality improvements can access it.
+// CompressedStackMapsInfo holds one CompressedStackMaps object's canonical
+// decoder input: the little-endian uint32 flags_and_size header followed by
+// the encoded map bytes. The analysis pipeline consumes these maps for GC
+// pointer-slot annotations in both decompilation and stack_maps.jsonl.
 type CompressedStackMapsInfo struct {
 	RefID   int
 	Payload []byte
@@ -421,7 +466,7 @@ type FieldInfo struct {
 	NameRefID        int
 	OwnerRefID       int
 	KindBits         int32
-	HostOffset       int32 // byte offset within instance; -1 for static fields
+	HostOffset       int32 // ref ID of instance-field word offset Smi/Mint; -1 for static fields
 	TypeRefID        int   // ref ID of the field's declared Type object (-1 if not captured); used by typetrack to resolve field-load receiver types
 	InitializerRefID int   // ref ID of the Function that lazily initializes this field (-1 if none)
 }
@@ -434,6 +479,77 @@ func readRef(s *dartfmt.Stream, fillRefUnsigned bool) (int64, error) {
 		return s.ReadUnsigned()
 	}
 	return s.ReadRefId()
+}
+
+// initialCaptureCap bounds speculative slice capacity derived from snapshot
+// counts. Counts are attacker-controlled and can be large while the remaining
+// fill stream is tiny; preallocating the declared count before reading a single
+// object turns a few bytes of malformed input into a large memory allocation.
+//
+// This affects capacity only, never the number of objects parsed. Slices grow
+// normally as valid input is consumed.
+func initialCaptureCap(count int64, remaining int) int {
+	if count <= 0 || remaining <= 0 {
+		return 0
+	}
+	n := count
+	if n > int64(remaining) {
+		n = int64(remaining)
+	}
+	const maxInitialCapture = 4096
+	if n > maxInitialCapture {
+		n = maxInitialCapture
+	}
+	return int(n)
+}
+
+// validateFillLength cross-checks the size scalar serialized twice by Dart's
+// variable-size clusters: once during ReadAlloc (to allocate the object) and
+// again during ReadFill (to initialize/populate it). The alloc pass records the
+// first copy in ClusterMeta.Lengths. Accepting a different fill copy lets a
+// corrupt snapshot drive large loops/allocations even though the object that
+// was supposedly allocated had a different shape.
+func validateFillLength(cm *ClusterMeta, index int64, got int64, label string) error {
+	if cm == nil || index < 0 || index >= cm.Count {
+		return fmt.Errorf("%s: invalid object index %d", label, index)
+	}
+	if int64(len(cm.Lengths)) != cm.Count {
+		return fmt.Errorf("%s %d/%d: alloc lengths missing or incomplete (%d recorded)", label, index, cm.Count, len(cm.Lengths))
+	}
+	want := cm.Lengths[index]
+	if got != want {
+		return fmt.Errorf("%s %d/%d: fill length %d differs from alloc length %d", label, index, cm.Count, got, want)
+	}
+	return nil
+}
+
+// advanceRODataOffset applies the VM's `delta << kObjectAlignmentLog2` using
+// checked arithmetic. Both delta and the cumulative offset are snapshot data;
+// unchecked signed shifts/additions can wrap to a negative slice index.
+func advanceRODataOffset(current, delta int64, shift uint) (int64, bool) {
+	if current < 0 || delta < 0 || shift >= 63 {
+		return 0, false
+	}
+	maxInt64 := int64(^uint64(0) >> 1)
+	if delta > maxInt64>>shift {
+		return 0, false
+	}
+	inc := delta << shift
+	if current > maxInt64-inc {
+		return 0, false
+	}
+	return current + inc, true
+}
+
+func checkedAddNonnegativeInt64(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	maxInt64 := int64(^uint64(0) >> 1)
+	if a > maxInt64-b {
+		return 0, false
+	}
+	return a + b, true
 }
 
 // classUnboxedBitmaps indexes the per-class unboxed-field bitmaps captured
@@ -465,6 +581,11 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 	s := dartfmt.NewStreamAt(data, result.FillStart)
 	fillRefUnsigned := profile.FillRefUnsigned
 	instrIdx := 0
+	// Keep the minimal fill state needed by later clusters. In particular,
+	// Dart 2.10 stores Instance unboxed-field bitmaps only in the preceding
+	// Class cluster, so a stateless debug walk cannot size Instance fill
+	// correctly. Using a scratch Result also avoids mutating the scan result.
+	scratch := &Result{}
 	for i := range result.Clusters {
 		cm := &result.Clusters[i]
 		spec := GetFillSpec(cm.CID, cm, profile)
@@ -473,7 +594,7 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 		if name == "" {
 			name = fmt.Sprintf("CID_%d", cm.CID)
 		}
-		err := fillOneCluster(s, cm, &spec, fillRefUnsigned, profile, &instrIdx, nil)
+		err := fillOneCluster(s, cm, &spec, fillRefUnsigned, profile, &instrIdx, scratch)
 		endPos := s.Position()
 		delta := endPos - startPos
 		status := "OK"
@@ -557,12 +678,21 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 // ReadFill parses the fill section of the snapshot, extracting strings
 // and named objects. It processes ALL clusters in alloc order.
 // snapshotSize is the TotalSize from the snapshot header (needed for ROData string extraction).
-func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, snapshotSize int64) error {
+func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, snapshotSize int64, opts dartfmt.Options) error {
 	if result.FillStart <= 0 || result.FillStart >= len(data) {
 		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
 	}
 
 	s := dartfmt.NewStreamAt(data, result.FillStart)
+	if opts.MaxBytes > 0 {
+		est, err := estimateFillCaptureBytes(result, profile)
+		if err != nil {
+			return fmt.Errorf("fill: capture budget estimate: %w", err)
+		}
+		if est > int64(opts.MaxBytes) {
+			return fmt.Errorf("fill: decoded capture estimate %d bytes exceeds max_bytes %d", est, opts.MaxBytes)
+		}
+	}
 	ct := profile.CIDs
 	fillRefUnsigned := profile.FillRefUnsigned
 	instrIdx := 0 // running instructions_index_ across Code clusters
@@ -642,7 +772,13 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			capturePcDesc := ct != nil && ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors
 			captureCSM := ct != nil && ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap
 			captureCSM2 := ct != nil && ct.CompressedStackMaps != 0 && cm.CID == ct.CompressedStackMaps
-			payloads, err := readFillInlineBytes(s, cm, capturePcDesc || captureCSM || captureCSM2, spec.InlineBytesLengthShift)
+			var payloads [][]byte
+			var err error
+			if captureCSM2 {
+				payloads, err = readFillCompressedStackMaps(s, cm, spec.InlineBytesLengthShift)
+			} else {
+				payloads, err = readFillInlineBytes(s, cm, capturePcDesc || captureCSM, spec.InlineBytesLengthShift)
+			}
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d) pos=0x%x: %w", i, cm.CID, fillPos, err)
 			}
@@ -829,12 +965,12 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 				result.CodeSourceMaps = append(result.CodeSourceMaps,
 					extractRODataCodeSourceMaps(data, cm, objStart, profile, isVM)...)
 			}
-			// CompressedStackMaps ROData extraction (non-compressed builds).
+			// CompressedStackMaps has a different ROData object header from
+			// PcDescriptors/CodeSourceMap: flags_and_size replaces their uword
+			// length_. Use its dedicated extractor so the flags survive.
 			for _, cm := range rodataCSM2Clusters {
-				for _, p := range extractRODataPayloads(data, cm, profile.CIDs.CompressedStackMaps, objStart, profile) {
-					result.CompressedStackMaps = append(result.CompressedStackMaps,
-						CompressedStackMapsInfo(p))
-				}
+				result.CompressedStackMaps = append(result.CompressedStackMaps,
+					extractRODataCompressedStackMaps(data, cm, objStart, profile)...)
 			}
 		}
 	}
@@ -842,6 +978,156 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 	resolveTypeClassIDs(result)
 
 	return nil
+}
+
+// estimateFillCaptureBytes computes a conservative logical retained-output
+// budget from alloc-phase metadata before the fill parser allocates any of the
+// variable-sized capture slices. It intentionally overestimates fixed records;
+// MaxBytes is a safety ceiling, not a serialization-size promise.
+func estimateFillCaptureBytes(result *Result, profile *snapshot.VersionProfile) (int64, error) {
+	var total int64
+	add := func(n int64) error {
+		if n < 0 || total > math.MaxInt64-n {
+			return fmt.Errorf("capture-size overflow")
+		}
+		total += n
+		return nil
+	}
+	mul := func(a, b int64) (int64, error) {
+		if a < 0 || b < 0 || (a != 0 && b > math.MaxInt64/a) {
+			return 0, fmt.Errorf("capture-size multiplication overflow (%d*%d)", a, b)
+		}
+		return a * b, nil
+	}
+	sumLengths := func(cm *ClusterMeta, shift uint) (int64, error) {
+		var sum int64
+		for _, raw := range cm.Lengths {
+			if raw < 0 {
+				return 0, fmt.Errorf("CID %d has negative alloc length %d", cm.CID, raw)
+			}
+			v := raw >> shift
+			if sum > math.MaxInt64-v {
+				return 0, fmt.Errorf("CID %d length sum overflow", cm.CID)
+			}
+			sum += v
+		}
+		return sum, nil
+	}
+	ct := profile.CIDs
+	for i := range result.Clusters {
+		cm := &result.Clusters[i]
+		spec := GetFillSpec(cm.CID, cm, profile)
+		count := cm.Count
+		if count < 0 {
+			return 0, fmt.Errorf("CID %d negative count %d", cm.CID, count)
+		}
+		// Fixed per-object bookkeeping retained by the capture layer. 192 bytes
+		// comfortably covers current structs/maps/slice headers without relying
+		// on Go's architecture-specific unsafe.Sizeof values.
+		fixed := int64(0)
+		switch spec.Kind {
+		case FillRefs, FillCode, FillObjectPool, FillArray, FillExceptionHandlers,
+			FillContext, FillTypeArguments, FillClass, FillField, FillInstance:
+			fixed = 192
+		case FillString, FillInlineBytes:
+			fixed = 48
+		}
+		if fixed != 0 {
+			n, err := mul(count, fixed)
+			if err != nil {
+				return 0, err
+			}
+			if err := add(n); err != nil {
+				return 0, err
+			}
+		}
+
+		switch spec.Kind {
+		case FillString:
+			sum, err := sumLengths(cm, func() uint {
+				if profile.OldStringFormat {
+					return 0
+				}
+				return 1
+			}())
+			if err != nil {
+				return 0, err
+			}
+			// UTF-16 decoding transiently uses []rune and the resulting UTF-8
+			// string; 8 bytes/code-unit is a conservative combined budget.
+			n, err := mul(sum, 8)
+			if err != nil {
+				return 0, err
+			}
+			if err := add(n); err != nil {
+				return 0, err
+			}
+		case FillInlineBytes:
+			capture := ct != nil && ((ct.PcDescriptors != 0 && cm.CID == ct.PcDescriptors) ||
+				(ct.CodeSourceMap != 0 && cm.CID == ct.CodeSourceMap) ||
+				(ct.CompressedStackMaps != 0 && cm.CID == ct.CompressedStackMaps))
+			if capture {
+				sum, err := sumLengths(cm, spec.InlineBytesLengthShift)
+				if err != nil {
+					return 0, err
+				}
+				if err := add(sum); err != nil {
+					return 0, err
+				}
+			}
+		case FillArray, FillContext, FillTypeArguments:
+			sum, err := sumLengths(cm, 0)
+			if err != nil {
+				return 0, err
+			}
+			n, err := mul(sum, 8)
+			if err != nil {
+				return 0, err
+			}
+			if err := add(n); err != nil {
+				return 0, err
+			}
+		case FillObjectPool:
+			sum, err := sumLengths(cm, 0)
+			if err != nil {
+				return 0, err
+			}
+			n, err := mul(sum, 48)
+			if err != nil {
+				return 0, err
+			}
+			if err := add(n); err != nil {
+				return 0, err
+			}
+		case FillExceptionHandlers:
+			sum, err := sumLengths(cm, 0)
+			if err != nil {
+				return 0, err
+			}
+			n, err := mul(sum, 24)
+			if err != nil {
+				return 0, err
+			}
+			if err := add(n); err != nil {
+				return 0, err
+			}
+		case FillTypedData:
+			if ct != nil && cm.CID == typedDataInt32ArrayCid(ct) {
+				sum, err := sumLengths(cm, 0)
+				if err != nil {
+					return 0, err
+				}
+				n, err := mul(sum, 4)
+				if err != nil {
+					return 0, err
+				}
+				if err := add(n); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+	return total, nil
 }
 
 // resolveTypeClassIDs turns the captured Type.type_class_id Smi ref into a
@@ -930,7 +1216,10 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		_, err := readFillTypeArguments(s, cm, fillRefUnsigned, profile)
 		return err
 	case FillClass:
-		_, _, err := readFillClass(s, cm, spec, fillRefUnsigned, profile.TopLevelCid16, profile.ClassHasTokenPos)
+		_, classes, err := readFillClass(s, cm, spec, fillRefUnsigned, profile.TopLevelCid16, profile.ClassHasTokenPos)
+		if err == nil && result != nil {
+			result.Classes = append(result.Classes, classes...)
+		}
 		return err
 	case FillField:
 		_, _, err := readFillField(s, cm, spec, fillRefUnsigned)

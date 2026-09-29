@@ -101,6 +101,9 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	e.stats.TotalCalls++
 	e.callIdx++
 	tmpName := fmt.Sprintf("t%d", e.callIdx)
+	// Even though CALL/BL itself need not modify flags, arbitrary callee code may.
+	// Never let a comparison from before a call feed a branch after it.
+	e.state.clearCmp()
 
 	// Resolve the target first: the callee's identity is what bounds the
 	// argument list.
@@ -184,66 +187,56 @@ func parseHexVA(target string) (uint64, bool) {
 	return v, true
 }
 
-// knownVoidSelectors is a set of Dart method names that are known to return
-// void. Calls to these should not be assigned to a temp variable.
-// (P3-feasible-3 / E-018)
-//
-// M-2 (oracle-audit): "add" and "remove" were removed because they are
-// NOT universally void — Set.add returns bool, List.remove returns bool,
-// Set.remove returns bool. Since the decompiler can't distinguish List.add
-// (void) from Set.add (bool) by selector name alone, it's safer to not
-// mark them as void and keep the temp assignment.
-//
-// Additional removals (bug-fix): "apply", "close", "cancel", "start",
-// "stop", "resume", "pause", "reset" were removed because they are NOT
-// universally void:
-//   - Function.apply returns dynamic (dart:core)
-//   - IOSink.close returns Future, File.close returns Future
-//   - Timer.cancel returns void, but StreamSubscription.cancel returns Future
-//   - Stopwatch.start/stop return void, but many start/stop methods return Future
-//   - StreamSubscription.resume/pause return void, but Isolate.resume/pause
-//     return Future/void depending on overload
-//   - List.reset doesn't exist, but many custom reset methods return values
-//
-// Keeping these as void would silently drop return values in decompiled output.
-var knownVoidSelectors = map[string]bool{
-	"setState":          true,
-	"print":             true,
-	"notifyListeners":   true,
-	"addListener":       true,
-	"removeListener":    true,
-	"clear":             true,
-	"dispose":           true,
-	"markNeedsBuild":    true,
-	"requestLayout":     true,
-	"markNeedsLayout":   true,
-	"scheduleMicrotask": true,
-	"complete":          true,
-	"completeError":     true,
-	"insert":            true,
-	"forEach":           true,
-	"sort":              true,
-	"shuffle":           true,
-	"clearCache":        true,
-	"notifyClients":     true,
-	"performRebuild":    true,
-	"performLayout":     true,
-	"assemble":          true,
-	"reassemble":        true,
-	"visitChildren":     true,
-	"visitAncestors":    true,
-	"visitDescendants":  true,
+// markSuspendableStubRole records the Dart function kind proved by a VM
+// suspendable-function stub. Async, async*, and sync* share low-level suspend
+// machinery, but only the first two are async Dart functions and only the
+// ordinary async Await stub corresponds to an `await` expression.
+func markSuspendableStubRole(fir *FuncIR, role sdk.StubRole) bool {
+	switch role {
+	case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
+		fir.IsAsync = true
+		return true
+	case sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn:
+		fir.IsAsync = true
+		fir.IsAsyncStar = true
+		return true
+	case sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn:
+		fir.IsSyncStar = true
+		return true
+	case sdk.StubRoleSuspendResume:
+		return true
+	default:
+		return false
+	}
 }
 
-// isVoidCall returns true if the call target is a known void function/method.
-func isVoidCall(name, selectorHint string) bool {
-	if knownVoidSelectors[name] {
-		return true
+// emitAsyncStubSemantics handles only the ordinary async stubs whose source
+// meaning is established: init, await, and return. Generator stubs still mark
+// async*/sync* above, but fall through to a normal call so we do not fabricate
+// an `await`, `yield`, or `return` from runtime suspension bookkeeping.
+func (e *emitter) emitAsyncStubSemantics(role sdk.StubRole, tmpName, argsText string, indent int) (handled, bound bool) {
+	markSuspendableStubRole(e.fir, role)
+	switch role {
+	case sdk.StubRoleAsyncInit:
+		e.emit(indent, "// async function entry (InitAsync stub)")
+		return true, false
+	case sdk.StubRoleAsyncAwait:
+		if argsText != "" {
+			e.emit(indent, "final %s = await %s;", tmpName, argsText)
+		} else {
+			e.emit(indent, "final %s = await;", tmpName)
+		}
+		return true, true
+	case sdk.StubRoleAsyncReturn:
+		if argsText != "" {
+			e.emit(indent, "return %s;", argsText)
+		} else {
+			e.emit(indent, "return %s;", tmpName)
+		}
+		return true, false
+	default:
+		return false, false
 	}
-	if selectorHint != "" && knownVoidSelectors[selectorHint] {
-		return true
-	}
-	return false
 }
 
 // emitDirectCall emits the call and returns true when it bound the result into
@@ -270,39 +263,10 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	//
 	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
 	// pre-pass in emit.go so the two cannot drift apart.
-	switch sdk.ClassifyStubRole(name) {
-	case sdk.StubRoleAsyncInit:
-		e.fir.IsAsync = true
-		e.emit(indent, "// async function entry (InitAsync stub)")
-		return false
-	case sdk.StubRoleAsyncAwait:
-		e.fir.IsAsync = true
-		if argsText != "" {
-			e.emit(indent, "final %s = await %s;", tmpName, argsText)
-		} else {
-			e.emit(indent, "final %s = await;", tmpName)
-		}
-		return true
-	case sdk.StubRoleAsyncReturn:
-		e.fir.IsAsync = true
-		if argsText != "" {
-			e.emit(indent, "return %s;", argsText)
-		} else {
-			e.emit(indent, "return %s;", tmpName)
-		}
-		return false
+	if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(name), tmpName, argsText, indent); handled {
+		return bound
 	}
 	intent := resolveCallIntent(name, selectorHint)
-	// P3-feasible-3: Skip temp assignment for known void calls.
-	if isVoidCall(name, selectorHint) {
-		if intent != "" {
-			e.stats.SemanticDirectCalls++
-			e.emit(indent, "%s(%s); // %s", name, argsText, intent)
-			return false
-		}
-		e.emit(indent, "%s(%s);", name, argsText)
-		return false
-	}
 	if intent != "" {
 		e.stats.SemanticDirectCalls++
 		e.emit(indent, "final %s = %s(%s); // %s", tmpName, name, argsText, intent)
@@ -353,27 +317,8 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
 		// snake_case Thread-table spellings.
-		switch sdk.ClassifyStubRole(stubName) {
-		case sdk.StubRoleAsyncInit:
-			e.fir.IsAsync = true
-			e.emit(indent, "// async function entry (InitAsync stub)")
-			return false
-		case sdk.StubRoleAsyncAwait:
-			e.fir.IsAsync = true
-			if argsText != "" {
-				e.emit(indent, "final %s = await %s;", tmpName, argsText)
-			} else {
-				e.emit(indent, "final %s = await;", tmpName)
-			}
-			return true
-		case sdk.StubRoleAsyncReturn:
-			e.fir.IsAsync = true
-			if argsText != "" {
-				e.emit(indent, "return %s;", argsText)
-			} else {
-				e.emit(indent, "return %s;", tmpName)
-			}
-			return false
+		if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(stubName), tmpName, argsText, indent); handled {
+			return bound
 		}
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s(%s); // Dart AOT runtime stub call (Thread cached entry point)", tmpName, stubName, argsText)
@@ -401,22 +346,6 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	}
 
 	named := namedIndirectTarget(targetText, e.fir)
-
-	// P3-feasible-3: Skip temp assignment for known void calls (indirect).
-	if isVoidCall("", selectorHint) {
-		intent := resolveCallIntent("", selectorHint)
-		if intent != "" {
-			e.stats.SemanticIndirectCalls++
-			e.emit(indent, "%s(%s); // %s, indirect via: %s", sanitizeCallName(selectorHint), argsText, intent, named)
-			return false
-		}
-		if selectorHint != "" {
-			if fallback := fallbackCallNameFromSelector(selectorHint); fallback != "" {
-				e.emit(indent, "%s(%s); // indirect via: %s", fallback, argsText, named)
-				return false
-			}
-		}
-	}
 
 	intent := resolveCallIntent("", selectorHint)
 	if intent != "" {

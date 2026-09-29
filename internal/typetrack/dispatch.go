@@ -3,11 +3,12 @@ package typetrack
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 // WriteTypeInferenceReport writes a summary report of the type inference
@@ -168,27 +169,23 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 	}
 
 	path := filepath.Join(outDir, "typetrack_report.json")
-	return os.WriteFile(path, data, 0644)
+	return output.WriteFileAtomic(path, data, 0o644)
+}
+
+type dispatchRecord struct {
+	Index    int    `json:"index"`
+	Kind     string `json:"kind"`
+	Target   string `json:"target,omitempty"`
+	SlotInfo string `json:"slot_info,omitempty"`
 }
 
 // WriteDispatchTable writes the parsed dispatch table to dispatch_table.jsonl
 // in the output directory, for debugging and verification.
 func WriteDispatchTable(outDir string, entries []cluster.DispatchTableEntry, ctx *TypeContext) error {
 	path := filepath.Join(outDir, "dispatch_table.jsonl")
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
+	records := make([]dispatchRecord, 0, len(entries))
 	for _, e := range entries {
-		record := struct {
-			Index    int    `json:"index"`
-			Kind     string `json:"kind"`
-			Target   string `json:"target,omitempty"`
-			SlotInfo string `json:"slot_info,omitempty"`
-		}{
+		record := dispatchRecord{
 			Index: e.Index,
 			Kind:  dispatchKindString(e.Kind),
 		}
@@ -203,12 +200,10 @@ func WriteDispatchTable(outDir string, entries []cluster.DispatchTableEntry, ctx
 			record.SlotInfo = fmt.Sprintf("stub index=%d", e.StubIndex)
 		}
 
-		if err := enc.Encode(record); err != nil {
-			return err
-		}
+		records = append(records, record)
 	}
-
-	return nil
+	_, err := jsonutil.WriteJSONLFile(path, records)
+	return err
 }
 
 func dispatchKindString(k cluster.DispatchTableEntryKind) string {

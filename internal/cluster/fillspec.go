@@ -103,6 +103,10 @@ type FillSpec struct {
 	IsFuncType bool // true for FunctionType clusters (extract packed_parameter_counts)
 	IsField    bool // true for Field clusters (extract kind_bits + host_offset)
 	IsFunction bool // true for Function clusters (extract code_index, scalar 0)
+	// IsTypeParameter captures base/index/kind/nullability for the nameless
+	// TypeParameter objects that appear inside TypeArguments. Those scalars are
+	// required to reproduce the VM's canonical X0/Y0/C1X0/F1Y0 spelling.
+	IsTypeParameter bool
 	// DataIdx is the ref-loop index of Function.data; see specFunction.
 	DataIdx int
 
@@ -150,16 +154,16 @@ type FillSpec struct {
 	// get an inline-bytes payload length.
 	//
 	// It is 0 for PcDescriptors and CodeSourceMap, whose ReadFill writes a
-	// plain length, and 2 for CompressedStackMaps from Dart 2.15.0 on, where
+	// plain length, and 2 for CompressedStackMaps, whose dedicated ReadFill
 	// the leading value is flags_and_size and the length is
 	// SizeField::decode(flags_and_size) -- GlobalTableBit at bit 0,
 	// UsesTableBit at bit 1, SizeField from bit 2
 	// (raw_object.h UntaggedCompressedStackMaps).
 	//
-	// Dart 2.14.0 and earlier wrote a plain length here too
-	// (clustered_snapshot.cc: `const intptr_t length = d->ReadUnsigned();`),
-	// which is why the 2.14.0 sample parses without it and the 2.15.0 one
-	// asks for a 299796-byte stack map.
+	// The apparent pre-2.15 plain length is the ALLOC stream field, not the
+	// FILL field. Exact 2.14.0 source already reads flags_and_size in
+	// CompressedStackMapsDeserializationCluster::ReadFill. Those older Full AOT
+	// builds normally take the non-compressed ROData route, which hid this mixup.
 	InlineBytesLengthShift uint
 
 	// PackedParams describes how to decode the parameter-count word of a
@@ -544,22 +548,24 @@ func specTypeParameter(hasParamClassId, typeParamByteScalars, typeParamWideScala
 		scalars = []ScalarOp{OpTagged32, OpTagged32, OpInt16, OpUint8}
 	case typeParamWideScalars:
 		// v2.13: parameterized_class_id(int32) + base(uint16) + index(uint16) + combined(uint8)
-		scalars = []ScalarOp{OpTagged32, OpTagged32, OpTagged32, OpUint8}
+		scalars = []ScalarOp{OpTagged32, OpUint16, OpUint16, OpUint8}
 	case hasParamClassId && typeParamByteScalars:
 		// v2.14-v2.19: parameterized_class_id(int32) + base(uint8) + index(uint8) + combined(uint8)
 		scalars = []ScalarOp{OpTagged32, OpUint8, OpUint8, OpUint8}
 	case hasParamClassId:
 		// v3.0.x: parameterized_class_id(int32) + base(uint16) + index(uint16) + flags(uint8)
-		scalars = []ScalarOp{OpTagged32, OpTagged32, OpTagged32, OpUint8}
+		scalars = []ScalarOp{OpTagged32, OpUint16, OpUint16, OpUint8}
 	default:
 		// v3.1.0+: base(uint16) + index(uint16) + flags(uint8)
-		scalars = []ScalarOp{OpTagged32, OpTagged32, OpUint8}
+		scalars = []ScalarOp{OpUint16, OpUint16, OpUint8}
 	}
 	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: numRefs,
-		Scalars: scalars,
-		NameIdx: -1, OwnerIdx: -1,
+		Kind:            FillRefs,
+		NumRefs:         numRefs,
+		Scalars:         scalars,
+		NameIdx:         -1,
+		OwnerIdx:        -1,
+		IsTypeParameter: true,
 	}
 }
 
@@ -1021,7 +1027,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		// Without compressed pointers, they use ROData (no fill).
 		if profile.CompressedPointers {
 			spec := FillSpec{Kind: FillInlineBytes, NameIdx: -1, OwnerIdx: -1}
-			if cid == ct.CompressedStackMaps && snapshot.VersionAtLeast(profile.DartVersion, "2.15.0") {
+			if cid == ct.CompressedStackMaps {
 				spec.InlineBytesLengthShift = 2
 			}
 			return spec

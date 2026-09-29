@@ -1,6 +1,7 @@
 package snapshot_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -30,9 +31,12 @@ func eachSample(t *testing.T, fn func(t *testing.T, s samplecorpus.Sample, info 
 	for _, entry := range samplecorpus.Registry {
 		entry := entry
 		t.Run(entry.FileName(), func(t *testing.T) {
-			path := samplecorpus.Path(entry.FileName())
-			if path == "" {
+			path, err := samplecorpus.RequireSample(entry.FileName())
+			if errors.Is(err, samplecorpus.ErrNoCorpus) {
 				t.Skip(samplecorpus.MissingMessage(entry))
+			}
+			if err != nil {
+				t.Fatalf("resolve sample: %v", err)
 			}
 			if entry.ProfileIncomplete != "" {
 				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)

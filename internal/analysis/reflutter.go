@@ -3,13 +3,13 @@ package analysis
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"aotopsy/internal/frida"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 // ReFlutterDumpEntry represents one entry from reFlutter's dump.dart.
@@ -61,6 +61,9 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	if opts.LibPath == "" {
 		return nil, fmt.Errorf("--lib is required (offset->VA conversion needs the original libapp.so's codeVA base; see LoadContext)")
 	}
+	if _, err := VerifyProvenanceBinary(opts.StaticDir, opts.LibPath); err != nil {
+		return nil, fmt.Errorf("verify --lib against --static provenance: %w", err)
+	}
 
 	// codeVA is NOT persisted in any static output artifact — it's derived fresh
 	// from the ELF/snapshot every run (see internal/analysis/context.go).
@@ -72,7 +75,7 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	codeVA := ctx.CodeVA
 
 	// Read dump.dart
-	data, err := os.ReadFile(opts.DumpPath)
+	data, err := readFileBounded(opts.DumpPath, maxMetadataArtifactBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read dump.dart: %v", err)
 	}
@@ -84,9 +87,6 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	outDir := opts.OutDir
 	if outDir == "" {
 		outDir = opts.StaticDir + "_reflutter"
-	}
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return nil, fmt.Errorf("mkdir output: %v", err)
 	}
 
 	// Build offset → {name, owning class} map from reFlutter dump.
@@ -114,44 +114,38 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 
 	// Read static functions.jsonl and merge
 	funcsPath := filepath.Join(opts.StaticDir, "functions.jsonl")
-	funcsData, err := os.ReadFile(funcsPath)
+	funcs, err := jsonutil.ReadJSONL[map[string]interface{}](funcsPath, jsonutil.StandardLimits)
 	if err != nil {
 		return nil, fmt.Errorf("read functions: %v", err)
 	}
 
 	var mergedFuncs []string
 	enrichedCount := 0
-	for _, line := range strings.Split(string(funcsData), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var f map[string]interface{}
-		if json.Unmarshal([]byte(line), &f) == nil {
-			if pc, ok := f["pc"].(string); ok {
-				// reFlutter's dump.dart offsets are relative to the isolate
-				// instructions region; aotopsy's functions.jsonl "pc" is an
-				// absolute ELF VA. offset = VA - codeVA converts between the two.
-				if va, perr := strconv.ParseUint(strings.TrimPrefix(pc, "0x"), 16, 64); perr == nil && va >= codeVA {
-					offset := va - codeVA
-					key := fmt.Sprintf("0x%x", offset)
-					if entry, found := offsetMap[key]; found {
-						f["reflutter_name"] = entry.Name
-						if entry.Class != "" {
-							f["reflutter_class"] = entry.Class
-							if lib, ok := libraryMap[entry.Class]; ok {
-								f["reflutter_library"] = lib
-							}
+	for _, f := range funcs {
+		if pc, ok := f["pc"].(string); ok {
+			// reFlutter's dump.dart offsets are relative to the isolate
+			// instructions region; aotopsy's functions.jsonl "pc" is an
+			// absolute ELF VA. offset = VA - codeVA converts between the two.
+			if va, perr := strconv.ParseUint(strings.TrimPrefix(pc, "0x"), 16, 64); perr == nil && va >= codeVA {
+				offset := va - codeVA
+				key := fmt.Sprintf("0x%x", offset)
+				if entry, found := offsetMap[key]; found {
+					f["reflutter_name"] = entry.Name
+					if entry.Class != "" {
+						f["reflutter_class"] = entry.Class
+						if lib, ok := libraryMap[entry.Class]; ok {
+							f["reflutter_library"] = lib
 						}
-						enrichedCount++
 					}
+					enrichedCount++
 				}
 			}
-			merged, _ := json.Marshal(f)
-			mergedFuncs = append(mergedFuncs, string(merged))
-		} else {
-			mergedFuncs = append(mergedFuncs, line)
 		}
+		merged, err := json.Marshal(f)
+		if err != nil {
+			return nil, fmt.Errorf("encode merged functions: %w", err)
+		}
+		mergedFuncs = append(mergedFuncs, string(merged))
 	}
 
 	// Write reFlutter data as separate JSON
@@ -162,16 +156,44 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 		"entry_count":    len(entries),
 		"function_count": len(offsetMap),
 	}
-	reflutterJSON, _ := json.MarshalIndent(reflutterData, "", "  ")
-	os.WriteFile(filepath.Join(outDir, "reflutter_data.json"), reflutterJSON, 0644)
-
-	// Copy static files FIRST — copyStaticFiles blanket-copies functions.jsonl
-	// from staticDir too, so it must run BEFORE the enriched write below.
-	frida.CopyStaticFiles(opts.StaticDir, outDir)
-
-	// Write merged functions (must come after frida.CopyStaticFiles)
-	os.WriteFile(filepath.Join(outDir, "functions.jsonl"),
-		[]byte(strings.Join(mergedFuncs, "\n")+"\n"), 0644)
+	staticAbs, err := filepath.Abs(opts.StaticDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve static output: %w", err)
+	}
+	outAbs, err := filepath.Abs(outDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve merged output: %w", err)
+	}
+	if staticAbs != outAbs {
+		overlap, err := output.PathsOverlap(staticAbs, outAbs)
+		if err != nil {
+			return nil, fmt.Errorf("compare static/output paths: %w", err)
+		}
+		if overlap {
+			return nil, fmt.Errorf("static and merged output directories must not contain one another")
+		}
+	}
+	tx, err := output.BeginDirTransaction(outAbs)
+	if err != nil {
+		return nil, fmt.Errorf("begin reFlutter output transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stage := tx.StageDir()
+	if err := output.CloneTree(staticAbs, stage); err != nil {
+		return nil, fmt.Errorf("clone static generation: %w", err)
+	}
+	if err := output.WriteJSONFile(filepath.Join(stage, "reflutter_data.json"), reflutterData); err != nil {
+		return nil, fmt.Errorf("write reFlutter data: %w", err)
+	}
+	if err := output.WriteFileAtomic(filepath.Join(stage, "functions.jsonl"),
+		[]byte(strings.Join(mergedFuncs, "\n")+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("write merged functions: %w", err)
+	}
 
 	// Write report
 	report := "reFlutter Import Report\n"
@@ -184,8 +206,14 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	report += fmt.Sprintf("Classes with fields: %d\n", len(fieldMap))
 	report += fmt.Sprintf("Functions enriched: %d\n", enrichedCount)
 
-	reportPath := filepath.Join(outDir, "reflutter_import_report.txt")
-	os.WriteFile(reportPath, []byte(report), 0644)
+	reportPath := filepath.Join(stage, "reflutter_import_report.txt")
+	if err := output.WriteFileAtomic(reportPath, []byte(report), 0o644); err != nil {
+		return nil, fmt.Errorf("write reFlutter import report: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("publish reFlutter generation: %w", err)
+	}
+	committed = true
 
 	return &ReFlutterImportResult{
 		Libraries:     len(libraryMap),

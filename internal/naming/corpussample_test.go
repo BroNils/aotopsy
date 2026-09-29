@@ -1,6 +1,7 @@
 package naming
 
 import (
+	"errors"
 	"testing"
 
 	"aotopsy/internal/samplecorpus"
@@ -22,12 +23,12 @@ const (
 // fails. See samplecorpus.Available for why those are different.
 func corpusSample(t *testing.T, name string) string {
 	t.Helper()
-	p := samplecorpus.Path(name)
-	if p == "" {
-		if !samplecorpus.Available() {
-			t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
-		}
-		t.Fatalf("corpus sample %s is missing from samples/; restore it rather than skipping", name)
+	p, err := samplecorpus.RequireSample(name)
+	if errors.Is(err, samplecorpus.ErrNoCorpus) {
+		t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
+	}
+	if err != nil {
+		t.Fatalf("corpus sample %s cannot be used: %v", name, err)
 	}
 	return p
 }

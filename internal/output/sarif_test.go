@@ -1,6 +1,8 @@
 package output
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ func TestWriteSARIF(t *testing.T) {
 			StringValue: "su",
 			Function:    "isRooted",
 			PC:          "0x1000",
+			AddressKind: "function",
 		},
 		{
 			Category:    "ssl_pinning",
@@ -38,7 +41,10 @@ func TestWriteSARIF(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := WriteSARIF(tempDir, findings, "1.0.0", libPath)
+	sum := sha256.Sum256([]byte("\x7fELF fake binary"))
+	err := WriteSARIF(tempDir, findings, "9.9.9", ArtifactIdentity{
+		URI: libPath, Size: 16, SHA256: hex.EncodeToString(sum[:]),
+	})
 	if err != nil {
 		t.Fatalf("WriteSARIF failed: %v", err)
 	}
@@ -64,6 +70,9 @@ func TestWriteSARIF(t *testing.T) {
 	run := log.Runs[0]
 	if run.Tool.Driver.Name != "AOTopsy" {
 		t.Errorf("driver name = %q, want AOTopsy", run.Tool.Driver.Name)
+	}
+	if run.Tool.Driver.Version != "9.9.9" {
+		t.Errorf("driver version = %q, want 9.9.9", run.Tool.Driver.Version)
 	}
 	if len(run.Tool.Driver.Rules) != 3 {
 		t.Errorf("len(rules) = %d, want 3", len(run.Tool.Driver.Rules))
@@ -116,6 +125,9 @@ func TestWriteSARIF(t *testing.T) {
 	if loc.Address.Name != "isRooted" {
 		t.Errorf("address name = %q, want isRooted", loc.Address.Name)
 	}
+	if loc.Address.Kind != "function" {
+		t.Errorf("address kind = %q, want function", loc.Address.Kind)
+	}
 	if loc.ArtifactLocation.Index == nil || *loc.ArtifactLocation.Index != 0 {
 		t.Error("result does not index the artifact it was found in")
 	}
@@ -130,7 +142,7 @@ func TestWriteSARIFBinaryLevelFinding(t *testing.T) {
 		{Category: "obfuscation", StringValue: "aB", Function: "", PC: ""},
 		{Category: "obfuscation", StringValue: "cD", Function: "", PC: ""},
 	}
-	if err := WriteSARIF(dir, findings, "1.0.0", ""); err != nil {
+	if err := WriteSARIF(dir, findings, "1.0.0", ArtifactIdentity{}); err != nil {
 		t.Fatalf("WriteSARIF: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "aotopsy.sarif"))
@@ -150,7 +162,41 @@ func TestWriteSARIFBinaryLevelFinding(t *testing.T) {
 			t.Errorf("result[%d] has an address; it has no PC and one must not be fabricated", i)
 		}
 	}
-	if res[0].PartialFingerprints["aotopsyFindingV1"] == res[1].PartialFingerprints["aotopsyFindingV1"] {
+	if res[0].PartialFingerprints[sarifFindingFingerprintKey] == res[1].PartialFingerprints[sarifFindingFingerprintKey] {
 		t.Error("two distinct binary-level findings share a fingerprint")
+	}
+	if _, ok := res[0].PartialFingerprints["aotopsyFindingV2"]; ok {
+		t.Error("fingerprint version is embedded in one component instead of SARIF's /vN version component")
+	}
+}
+
+func TestWriteSARIFEmptyResultsAreArrays(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteSARIF(dir, nil, "1.0.0", ArtifactIdentity{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "aotopsy.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	runs := raw["runs"].([]any)
+	run := runs[0].(map[string]any)
+	if _, ok := run["results"].([]any); !ok {
+		t.Fatalf("results encoded as %T, want JSON array", run["results"])
+	}
+	driver := run["tool"].(map[string]any)["driver"].(map[string]any)
+	if _, ok := driver["rules"].([]any); !ok {
+		t.Fatalf("rules encoded as %T, want JSON array", driver["rules"])
+	}
+}
+
+func TestDescribeArtifactEncodesRelativeURI(t *testing.T) {
+	got := describeArtifact(ArtifactIdentity{URI: filepath.Join(t.TempDir(), "app #100%.so")})
+	if got.Location.URI != "app%20%23100%25.so" {
+		t.Fatalf("artifact URI = %q, want percent-encoded relative URI", got.Location.URI)
 	}
 }

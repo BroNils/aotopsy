@@ -19,7 +19,7 @@ func (e *emitter) emitLoadPool(ins Instr) {
 	dst := strings.ToLower(ins.Target)
 	if e.pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := e.pool(ins.PoolIndex); ok {
-			e.state.setReg(dst, disp)
+			e.state.setReg(dst, dartPoolDisplay(disp))
 			return
 		}
 	}
@@ -84,7 +84,9 @@ func (e *emitter) appendHelperFunctions() {
 			pinnedPhi:       make(map[string]string),
 			phiDeclared:     make(map[int]bool),
 			// Shared, unlike visits: see emitter.emittedAnywhere.
-			emittedAnywhere: e.emittedAnywhere}
+			emittedAnywhere: e.emittedAnywhere,
+			emittedEdges:    e.emittedEdges,
+			currentBlock:    -1}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,

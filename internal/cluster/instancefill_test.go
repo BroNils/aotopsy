@@ -192,3 +192,11 @@ func TestReadFillInstanceFieldOffsetsUseTheCompressedWordSize(t *testing.T) {
 			got[0].Fields[0].ByteOffset, got[0].Fields[1].ByteOffset)
 	}
 }
+
+func TestReadFillInstanceRejectsFieldOffsetInsideCompressedHeader(t *testing.T) {
+	s := dartfmt.NewStream([]byte{unsignedByte(0)})
+	cm := &ClusterMeta{CID: 100, Count: 1, StartRef: 50, NextFieldOffsetInWords: 1, InstanceSizeInWords: 2}
+	if _, err := readFillInstance(s, cm, instanceProfile("3.9.2", true), nil); err == nil {
+		t.Fatal("compressed instance accepted next_field_offset inside two-word object header")
+	}
+}

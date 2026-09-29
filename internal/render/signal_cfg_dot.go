@@ -43,25 +43,40 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 			signalSet[f.Name] = true
 		}
 	}
+	validEdges := validSignalEdges(g)
 
-	// Build forward adjacency from all edges (BL/call only) for path finding.
-	fwd := make(map[string][]string)
-	for _, e := range g.Edges {
-		if (e.Kind == "bl" || e.Kind == "call") && e.To != "" {
-			fwd[e.From] = append(fwd[e.From], e.To)
+	// Build forward adjacency from every resolved edge. SignalGraph has already
+	// expanded polymorphic indirect candidates, so dropping BLR/call_indirect
+	// here would make the "through context" path search semantically incomplete.
+	fwd := make(map[string][]signal.SignalEdge)
+	for _, e := range validEdges {
+		if e.To != "" {
+			fwd[e.From] = append(fwd[e.From], e)
 		}
+	}
+	for from := range fwd {
+		sort.Slice(fwd[from], func(i, j int) bool {
+			a, b := fwd[from][i], fwd[from][j]
+			if a.To != b.To {
+				return a.To < b.To
+			}
+			if a.Kind != b.Kind {
+				return a.Kind < b.Kind
+			}
+			return a.Via < b.Via
+		})
 	}
 
 	// Find direct signal→signal edges (BL and BLR).
 	type edgeInfo struct {
 		from, to string
-		kind     string // "bl" or "blr"
+		kind     string // exact call kind, "path", or "path_indirect"
 		via      string
 	}
 	var signalEdges []edgeInfo
-	edgeSeen := make(map[[2]string]bool)
+	edgeSeen := make(map[[3]string]bool)
 
-	for _, e := range g.Edges {
+	for _, e := range validEdges {
 		if e.To == "" {
 			continue
 		}
@@ -69,7 +84,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		if !signalSet[from] || !signalSet[to] {
 			continue
 		}
-		key := [2]string{from, to}
+		key := [3]string{from, to, e.Kind}
 		if edgeSeen[key] {
 			continue
 		}
@@ -82,31 +97,64 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 	// Sorted: signalEdges is appended to in this order and rendered in
 	// order, so map iteration would reorder the graph between runs.
 	for _, src := range sortedSet(signalSet) {
-		visited := map[string]bool{src: true}
-		queue := []string{src}
+		type pathState struct {
+			name       string
+			indirect   bool
+			hasContext bool
+		}
+		visited := map[pathState]bool{{name: src}: true}
+		queue := []pathState{{name: src}}
 		for len(queue) > 0 {
 			cur := queue[0]
 			queue = queue[1:]
-			for _, next := range fwd[cur] {
-				if visited[next] {
+			for _, edge := range fwd[cur.name] {
+				next := edge.To
+				nextState := pathState{
+					name:       next,
+					indirect:   cur.indirect || edge.Kind == "blr" || edge.Kind == "call_indirect",
+					hasContext: cur.hasContext || !signalSet[next],
+				}
+				if visited[nextState] {
 					continue
 				}
-				visited[next] = true
+				visited[nextState] = true
 				if signalSet[next] {
-					// Found a path from src to next signal function.
-					key := [2]string{src, next}
+					if !nextState.hasContext {
+						continue // exact signal→signal call; already represented above
+					}
+					// Found a path from src to next signal function. Keep a
+					// transitive path visually distinct from an exact call and retain
+					// whether any hop was indirect.
+					kind := "path"
+					if nextState.indirect {
+						kind = "path_indirect"
+					}
+					key := [3]string{src, next, kind}
 					if !edgeSeen[key] {
 						edgeSeen[key] = true
-						signalEdges = append(signalEdges, edgeInfo{src, next, "bl", ""})
+						signalEdges = append(signalEdges, edgeInfo{src, next, kind, ""})
 					}
 					// Don't continue BFS through signal nodes (they're their own roots).
 				} else {
 					// Context/other node — keep searching through it.
-					queue = append(queue, next)
+					queue = append(queue, nextState)
 				}
 			}
 		}
 	}
+	sort.Slice(signalEdges, func(i, j int) bool {
+		a, b := signalEdges[i], signalEdges[j]
+		if a.from != b.from {
+			return a.from < b.from
+		}
+		if a.to != b.to {
+			return a.to < b.to
+		}
+		if a.kind != b.kind {
+			return a.kind < b.kind
+		}
+		return a.via < b.via
+	})
 
 	// Only render signal functions that have content or edges.
 	hasEdge := make(map[string]bool)
@@ -184,10 +232,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		fmt.Fprintf(&tbl, "    <TR><TD BGCOLOR=%q ALIGN=\"LEFT\"><FONT POINT-SIZE=\"9\" COLOR=%q><B>%s</B></FONT>",
 			headerBG, borderColor, dotEscape(label))
 		if fi != nil && len(fi.categories) > 0 {
-			cats := strings.Join(fi.categories, ", ")
-			if len(cats) > 35 {
-				cats = cats[:35] + "..."
-			}
+			cats := truncLabel(strings.Join(fi.categories, ", "), 35)
 			fmt.Fprintf(&tbl, "<BR/><FONT POINT-SIZE=\"7\" COLOR=\"#757575\">%s</FONT>", dotEscape(cats))
 		}
 		tbl.WriteString("</TD></TR>\n")
@@ -203,10 +248,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 						len(c.Calls)-maxCalls)
 					break
 				}
-				cl := callee
-				if len(cl) > 45 {
-					cl = cl[:42] + "..."
-				}
+				cl := truncLabel(callee, 45)
 				icon := "&#x2192;" // →
 				fmt.Fprintf(&tbl, "    <TR><TD ALIGN=\"LEFT\"><FONT POINT-SIZE=\"7\" FACE=\"monospace\" COLOR=\"#424242\">%s %s</FONT></TD></TR>\n",
 					icon, dotEscape(cl))
@@ -223,10 +265,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 						len(c.Strings)-maxStrs)
 					break
 				}
-				sv := s.Value
-				if len(sv) > 50 {
-					sv = sv[:47] + "..."
-				}
+				sv := truncLabel(s.Value, 50)
 				color := strCategoryColor(s.Category)
 				catLabel := ""
 				if s.Category != "" {
@@ -278,13 +317,19 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		if e.kind == "blr" || e.kind == "call_indirect" {
 			attrs := fmt.Sprintf("style=dashed, color=%q, penwidth=0.5", t.EdgePP)
 			if e.via != "" {
-				via := e.via
-				if len(via) > 20 {
-					via = via[:20]
-				}
+				via := truncLabel(e.via, 20)
 				attrs += fmt.Sprintf(", label=%q, fontsize=7, fontcolor=%q", via, t.ClusterLabel)
 			}
 			fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
+		} else if e.kind == "path" || e.kind == "path_indirect" {
+			style := "dotted"
+			label := "via context"
+			if e.kind == "path_indirect" {
+				style = "dashed"
+				label = "via indirect/context"
+			}
+			fmt.Fprintf(&b, "  %s -> %s [style=%s, color=%q, penwidth=0.5, label=%q, fontsize=7, fontcolor=%q];\n",
+				fromID, toID, style, t.EdgePP, label, t.ClusterLabel)
 		} else {
 			fmt.Fprintf(&b, "  %s -> %s [color=%q];\n", fromID, toID, t.EdgeDirect)
 		}

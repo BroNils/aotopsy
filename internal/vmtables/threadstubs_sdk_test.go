@@ -8,92 +8,81 @@ import (
 	"testing"
 
 	"aotopsy/internal/sdktest"
+	"aotopsy/internal/snapshot"
 )
 
-// TestThreadStubOffsetsMatchSDK runs `go run tools/extract_thr.go
-// -check-stub-offsets`, which re-derives every Thread-cached stub offset
-// from dart-lang/sdk -- the field name and the stub name both come from
-// thread.h's CACHED_ADDRESSES_LIST, the offset from
-// runtime_offsets_extracted.h -- and diffs it against the tables in
-// threadstubs.go.
-//
-// This gate did not exist until 2026-09, and its absence is the whole
-// story of the bug it found: five tables (2.17.6, 3.0.5/3.2.5, 3.4.3,
-// 3.6.2) were each missing the same four entries -- MegamorphicCall,
-// SwitchableCallMiss, OptimizeFunction, Deoptimize -- 20 offsets across
-// 10 (version, arch) pairs.
-//
-// Nothing local could catch it, because a missing offset is not a wrong
-// annotation, it is an absent one: the call still resolves and prints
-// "THR.f248" instead of "THR.MegamorphicCall". The file's own comments
-// asserted the four stubs "did not yet exist as Thread-cached stubs in
-// 2.17.6" and "were added in 3.7.0"; both were false, and a comment is
-// not a gate.
-//
-//	AOTOPSY_TEST_SDK=1 go test ./internal/vmtables/ -run ThreadStubOffsetsMatchSDK
 func TestThreadStubOffsetsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 	out, err := runStubOffsetCheck()
 	t.Logf("extract_thr -check-stub-offsets output:\n%s", out)
 	if err != nil {
-		t.Fatalf("ThreadStubOffsets disagrees with the Dart SDK: %v\n"+
-			"A MISSING line means the committed table is short, which downstream reads as\n"+
-			"an unnamed THR.fNN call rather than as an error. Do not silence it by trimming\n"+
-			"the target list -- add the offsets.", err)
+		t.Fatalf("ThreadStubOffsets disagrees with the Dart SDK: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "verified") {
+		t.Fatalf("stub-offset drift gate did not prove any target:\n%s", out)
 	}
 }
 
-// supportedStubOffsetVersions is every version ThreadStubOffsets answers
-// for. Keep in sync with the switch in threadstubs.go; a version there
-// but not here is unverified, which is the state the whole file was in.
-var supportedStubOffsetVersions = []string{
-	"2.10.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0", "2.16.0",
-	"2.17.6", "2.18.0", "2.19.0",
-	"3.0.5", "3.1.0", "3.2.5", "3.3.0", "3.4.3", "3.5.0",
-	"3.6.2", "3.7.0", "3.8.1", "3.9.2",
-	"3.10.7", "3.11.0", "3.12.2", "3.13.0",
+func target(version string, arch Architecture, compressed bool) TargetProfile {
+	return TargetProfile{
+		DartVersion:        version,
+		Architecture:       arch,
+		CompressedPointers: compressed,
+		BuildMode:          snapshot.BuildProduct,
+	}
 }
 
-// TestThreadStubTargetsCoverSupportedVersions keeps the gate honest: a
-// version that ThreadStubOffsets answers for but stubOffsetTargets never
-// probes is unverified, and unverified is the state the whole file was
-// in. The list lives in the tool, so this checks the other direction --
-// every version the switch handles must be a version the tool knows.
-func TestThreadStubTargetsCoverSupportedVersions(t *testing.T) {
-	supported := supportedStubOffsetVersions
-	for _, v := range supported {
-		for _, arm := range []bool{true, false} {
-			if ThreadStubOffsets(v, arm) == nil {
-				t.Errorf("ThreadStubOffsets(%q, arm64=%v) = nil, but the version is listed as supported", v, arm)
-			}
+func TestThreadStubOffsetsAreProfileAware(t *testing.T) {
+	compressed := ThreadStubOffsets(target("3.12.2", ArchitectureX64, true))
+	uncompressed := ThreadStubOffsets(target("3.12.2", ArchitectureX64, false))
+	if compressed == nil || uncompressed == nil {
+		t.Fatalf("3.12.2 x64 tables missing: compressed=%v uncompressed=%v", compressed != nil, uncompressed != nil)
+	}
+	if compressed[0x200] != "WriteBarrier" {
+		t.Fatalf("compressed 3.12.2 x64 WriteBarrier=%q at 0x200", compressed[0x200])
+	}
+	if uncompressed[0x1f8] != "WriteBarrier" {
+		t.Fatalf("uncompressed 3.12.2 x64 WriteBarrier=%q at 0x1f8", uncompressed[0x1f8])
+	}
+	if uncompressed[0x200] != "ArrayWriteBarrier" {
+		t.Fatalf("uncompressed 3.12.2 x64 offset 0x200=%q, want ArrayWriteBarrier", uncompressed[0x200])
+	}
+}
+
+func TestThreadStubOffsetsRefuseUnsupportedProfile(t *testing.T) {
+	for _, p := range []TargetProfile{
+		target("3.14.0", ArchitectureARM64, true),
+		{DartVersion: "3.12.2", Architecture: ArchitectureUnknown, CompressedPointers: true},
+		{DartVersion: "3.12.2", Architecture: ArchitectureX64, CompressedPointers: true, BuildMode: snapshot.BuildRelease},
+	} {
+		if got := ThreadStubOffsets(p); got != nil {
+			t.Fatalf("ThreadStubOffsets(%+v) returned %d entries, want nil", p, len(got))
 		}
 	}
-	// The deliberate nil for anything else must hold: borrowing a
-	// neighbour's offsets is how a whole table ends up shifted.
-	for _, v := range []string{"", "2.11.0", "3.14.0", "nonsense"} {
-		if ThreadStubOffsets(v, true) != nil {
-			t.Errorf("ThreadStubOffsets(%q) returned a table, want nil", v)
-		}
-	}
 }
 
-// TestThreadStubTablesAreInjective is a local invariant needing no
-// network: two offsets naming the same stub means an entry was pasted at
-// the wrong displacement, which silently steals the real one's name.
 func TestThreadStubTablesAreInjective(t *testing.T) {
-	for _, v := range supportedStubOffsetVersions {
-		tbl := ThreadStubOffsets(v, true)
+	profiles := []TargetProfile{
+		target("2.10.0", ArchitectureARM64, false), target("2.12.0", ArchitectureX64, false),
+		target("2.18.0", ArchitectureARM64, true), target("3.9.2", ArchitectureX64, true),
+		target("3.9.2", ArchitectureX64, false), target("3.12.2", ArchitectureX64, true),
+		target("3.12.2", ArchitectureX64, false), target("3.13.0", ArchitectureARM64, true),
+	}
+	for _, p := range profiles {
+		tbl := ThreadStubOffsets(p)
+		if len(tbl) == 0 {
+			t.Fatalf("%+v: no stub offsets", p)
+		}
 		seen := map[string]int64{}
 		for off, name := range tbl {
 			if prev, dup := seen[name]; dup {
-				t.Errorf("%s: stub %q appears at both 0x%x and 0x%x", v, name, prev, off)
+				t.Errorf("%+v: stub %q appears at both 0x%x and 0x%x", p, name, prev, off)
 			}
 			seen[name] = off
 		}
 	}
 }
 
-// runStubOffsetCheck runs the extractor from the repo root.
 func runStubOffsetCheck() ([]byte, error) {
 	cmd := exec.Command("go", "run", "tools/extract_thr.go", "-check-stub-offsets")
 	cmd.Dir = ".."

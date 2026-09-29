@@ -10,6 +10,7 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/frida"
+	"aotopsy/internal/output"
 )
 
 // cmdFridaExport exports analysis metadata and generated hooks for Frida.
@@ -23,14 +24,23 @@ func cmdFridaExport(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: aotopsy frida-export (--lib <libapp.so> | --from <aotopsy_dir>) [--out <metadata.json>] [--gen-script] [--script-out <hooks.js>]")
+	}
 
 	dir := *fromDir
+	var provenance analysis.Provenance
+	var hasProvenance bool
 	if dir == "" {
 		if *libPath == "" {
 			return fmt.Errorf("--lib or --from is required")
 		}
-		base := strings.TrimSuffix(filepath.Base(*libPath), ".so")
-		dir = base + ".aotopsy"
+		resolved := resolvePositionalLib(*libPath)
+		if resolved == "" {
+			return fmt.Errorf("file not found: %s", *libPath)
+		}
+		*libPath = resolved
+		dir = defaultOutDir(*libPath)
 		opts := analysis.Opts{
 			LibPath:  *libPath,
 			OutDir:   dir,
@@ -40,41 +50,97 @@ func cmdFridaExport(args []string) error {
 			MaxSteps: 100000,
 		}
 		fmt.Fprintf(os.Stderr, "Running full analysis...\n")
-		result, err := analysis.Run(opts)
+		_, err := analysis.Run(opts)
 		if err != nil {
-			return fmt.Errorf("pipeline failed: %v", err)
+			return fmt.Errorf("pipeline failed: %w", err)
 		}
-		_ = result
 	} else {
-		if *libPath == "" {
-			*libPath = filepath.Join(dir, "..", "libapp.so")
-			if _, err := os.Stat(*libPath); err != nil {
-				return fmt.Errorf("--lib is required when using --from (could not auto-detect)")
-			}
+		var err error
+		provenance, hasProvenance, err = analysis.ReadProvenance(dir)
+		if err != nil {
+			return fmt.Errorf("read --from provenance: %w", err)
 		}
+		if !hasProvenance || provenance.SHA256 == "" || provenance.Arch == "" || provenance.DartVersion == "" {
+			return fmt.Errorf("--from directory lacks complete provenance identity")
+		}
+		if *libPath == "" {
+			if provenance.Source == "" || !filepath.IsAbs(provenance.Source) {
+				return fmt.Errorf("--lib is required: provenance source path is unavailable or not absolute")
+			}
+			*libPath = provenance.Source
+		}
+		resolved := resolvePositionalLib(*libPath)
+		if resolved == "" {
+			return fmt.Errorf("file not found: %s", *libPath)
+		}
+		*libPath = resolved
 	}
 
 	ctx, err := analysis.LoadContext(*libPath)
 	if err != nil {
-		return fmt.Errorf("load context: %v", err)
+		return fmt.Errorf("load context: %w", err)
 	}
 	defer func() { _ = ctx.Close() }()
+	if hasProvenance {
+		sha, err := ctx.EF.SHA256()
+		if err != nil {
+			return fmt.Errorf("hash --lib for provenance check: %w", err)
+		}
+		arch := "x64"
+		if ctx.IsARM64 {
+			arch = "arm64"
+		}
+		if !strings.EqualFold(sha, provenance.SHA256) || provenance.Arch != arch ||
+			provenance.DartVersion != ctx.DartVersion ||
+			(provenance.Size > 0 && provenance.Size != ctx.EF.FileSize()) {
+			return fmt.Errorf("--lib does not match --from provenance (sha256/arch/version/size mismatch)")
+		}
+	}
 
 	if *outPath == "" {
 		*outPath = filepath.Join(dir, "frida_metadata.json")
 	}
-
-	meta := analysis.BuildFridaMetadata(ctx, dir)
-
-	f, err := os.Create(*outPath)
-	if err != nil {
-		return fmt.Errorf("create output: %v", err)
+	if *genScript && *scriptPath == "" {
+		*scriptPath = filepath.Join(dir, "frida_hooks.js")
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(meta); err != nil {
-		return fmt.Errorf("encode: %v", err)
+
+	// Export consumes these files from dir. A custom destination may live
+	// anywhere else, but must never overwrite an input artifact or the analysed
+	// binary while export is still using that generation.
+	if err := validateFridaExportDestinations(*libPath, dir, *outPath, *scriptPath, *genScript); err != nil {
+		return err
+	}
+
+	meta, err := analysis.BuildFridaMetadata(ctx, dir)
+	if err != nil {
+		return err
+	}
+	metaBytes, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Frida metadata: %w", err)
+	}
+	metaBytes = append(metaBytes, '\n')
+	binding := frida.BindingFromMetadata(meta)
+	bindingBytes, err := json.MarshalIndent(binding, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Frida generation binding: %w", err)
+	}
+	bindingBytes = append(bindingBytes, '\n')
+	bindingPath := filepath.Join(dir, frida.BindingFileName)
+	artifacts := []output.FileArtifact{
+		{Path: *outPath, Data: metaBytes, Perm: 0o644},
+		{Path: bindingPath, Data: bindingBytes, Perm: 0o644},
+	}
+	var script string
+	if *genScript {
+		script, err = frida.GenerateFridaScript(meta)
+		if err != nil {
+			return err
+		}
+		artifacts = append(artifacts, output.FileArtifact{Path: *scriptPath, Data: []byte(script), Perm: 0o644})
+	}
+	if err := output.PublishFileSet(artifacts); err != nil {
+		return fmt.Errorf("publish Frida export generation: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "Frida metadata exported: %s\n", *outPath)
@@ -82,19 +148,70 @@ func cmdFridaExport(args []string) error {
 	fmt.Fprintf(os.Stderr, "  Unresolved BLRs: %d\n", len(meta.UnresolvedBLRs))
 	fmt.Fprintf(os.Stderr, "  Dispatch entries: %d\n", len(meta.DispatchTable))
 	fmt.Fprintf(os.Stderr, "  String refs: %d\n", len(meta.StringRefs))
-	fmt.Fprintf(os.Stderr, "  FFI call sites: %d\n", len(meta.FFICallSites))
+	fmt.Fprintf(os.Stderr, "  Generation binding: %s\n", bindingPath)
 
 	if *genScript {
-		if *scriptPath == "" {
-			*scriptPath = filepath.Join(dir, "frida_hooks.js")
-		}
-		script := frida.GenerateFridaScriptFromMeta(*outPath)
-		if err := os.WriteFile(*scriptPath, []byte(script), 0o644); err != nil {
-			return fmt.Errorf("write frida script: %v", err)
-		}
 		fmt.Fprintf(os.Stderr, "  Frida script: %s\n", *scriptPath)
 		fmt.Fprintf(os.Stderr, "  Run: frida -H 127.0.0.1:8888 -f com.example.app -l %s\n", *scriptPath)
 	}
 
+	return nil
+}
+
+func validateFridaExportDestinations(libPath, dir, metadataPath, scriptPath string, genScript bool) error {
+	bindingPath := filepath.Join(dir, frida.BindingFileName)
+	protected := []string{
+		libPath,
+		bindingPath,
+		filepath.Join(dir, analysis.ProvenanceFileName),
+		filepath.Join(dir, "functions.jsonl"),
+		filepath.Join(dir, "call_edges.jsonl"),
+		filepath.Join(dir, "dispatch_table.jsonl"),
+		filepath.Join(dir, "string_refs.jsonl"),
+		filepath.Join(dir, "evidence.jsonl"),
+	}
+	allowedInStatic := map[string]string{
+		metadataPath: filepath.Join(dir, "frida_metadata.json"),
+	}
+	if genScript {
+		allowedInStatic[scriptPath] = filepath.Join(dir, "frida_hooks.js")
+	}
+	for _, dst := range []string{metadataPath, scriptPath} {
+		if dst == "" {
+			continue
+		}
+		for _, src := range protected {
+			same, err := output.SamePath(dst, src)
+			if err != nil {
+				return fmt.Errorf("compare Frida output/input paths: %w", err)
+			}
+			if same {
+				return fmt.Errorf("frida output %s aliases consumed input %s", dst, src)
+			}
+		}
+		inside, err := output.ContainsPath(dir, dst)
+		if err != nil {
+			return fmt.Errorf("compare Frida output/static generation paths: %w", err)
+		}
+		if inside {
+			allowed := allowedInStatic[dst]
+			same, err := output.SamePath(dst, allowed)
+			if err != nil {
+				return fmt.Errorf("compare Frida output/default paths: %w", err)
+			}
+			if !same {
+				return fmt.Errorf("custom Frida output %s must not overwrite files inside static generation %s", dst, dir)
+			}
+		}
+	}
+	if genScript {
+		same, err := output.SamePath(metadataPath, scriptPath)
+		if err != nil {
+			return fmt.Errorf("compare Frida metadata/script paths: %w", err)
+		}
+		if same {
+			return fmt.Errorf("frida metadata and script outputs must be different files")
+		}
+	}
 	return nil
 }

@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"os"
+	"unsafe"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
@@ -86,7 +87,7 @@ const (
 // Returns an error (not a guess) if ObjectStoreAOTFieldCount is 0
 // (unverified for this Dart version) or result.FillEnd is unset (0,
 // meaning ReadFill was never run).
-func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable) ([]DispatchTableEntry, error) {
+func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable, opts dartfmt.Options) ([]DispatchTableEntry, error) {
 
 	if result.FillEnd <= 0 {
 		return nil, fmt.Errorf("dispatch table: ReadFill must run first (FillEnd unset)")
@@ -114,6 +115,7 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 
 	s := dartfmt.NewStreamAt(data, result.FillEnd)
 	fillRefUnsigned := profile.FillRefUnsigned
+	maxSteps := opts.EffectiveMaxSteps()
 
 	// 0. The Roots prefix, from 3.13.0 on: VM bootstrap objects and the
 	// predefined class table, read before anything else. Zero on every
@@ -190,6 +192,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 		if err != nil {
 			return nil, fmt.Errorf("dispatch table: %s count: %w", name, err)
 		}
+		if n < 0 || n > int64(maxSteps) {
+			return nil, fmt.Errorf("dispatch table: %s count %d exceeds max_steps %d", name, n, maxSteps)
+		}
 		for i := int64(0); i < n; i++ {
 			if _, err := readRef(s, fillRefUnsigned); err != nil {
 				return nil, fmt.Errorf("dispatch table: %s entry %d/%d: %w", name, i, n, err)
@@ -205,12 +210,15 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	if length == 0 {
 		return nil, nil
 	}
-	// P5-3 (D-027): Cap length against data size to prevent OOM on
-	// malformed input. Each dispatch table entry requires at least 1
-	// byte in the encoded stream, so length can't exceed len(data)*8.
-	maxLen := int64(len(data)) * 8
-	if length > maxLen {
-		return nil, fmt.Errorf("dispatch table: length %d exceeds data bounds %d (corrupt snapshot?)", length, maxLen)
+	if length < 0 || length > int64(maxSteps) {
+		return nil, fmt.Errorf("dispatch table: length %d exceeds max_steps %d", length, maxSteps)
+	}
+	if opts.MaxBytes > 0 {
+		entrySize := int64(unsafe.Sizeof(DispatchTableEntry{}))
+		maxEntries := int64(opts.MaxBytes) / entrySize
+		if length > maxEntries {
+			return nil, fmt.Errorf("dispatch table: decoded output for %d entries exceeds max_bytes %d", length, opts.MaxBytes)
+		}
 	}
 	firstCodeID, err := s.ReadUnsigned()
 	if err != nil {
@@ -238,7 +246,7 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	var value DispatchTableEntry
 	repeatCount := int64(0)
 
-	entries := make([]DispatchTableEntry, 0, length)
+	entries := make([]DispatchTableEntry, 0, initialCaptureCap(length, s.Remaining()))
 	for i := int64(0); i < length; i++ {
 		if repeatCount > 0 {
 			e := value
@@ -266,6 +274,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 			// previous entry's value); repeatCount governs how many
 			// MORE entries after this one also get it.
 			repeatCount = encoded - 1
+			if repeatCount > length-i-1 {
+				return entries, fmt.Errorf("dispatch table: entry %d repeat count %d exceeds remaining %d entries", i, repeatCount, length-i-1)
+			}
 		default:
 			// code_index encoding is version-dependent:
 			// Dart >=2.16: code_index is 1-based (0=LazyCompile stub),

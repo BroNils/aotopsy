@@ -13,8 +13,16 @@ import (
 
 // buildClassHierarchy builds SuperClass + Subclasses + InstantiatedClasses.
 func buildClassHierarchy(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupData, dispatchEntries []cluster.DispatchTableEntry) {
-	// 1. Build class hierarchy for LCA.
-	ctx.SuperClass = BuildClassHierarchy(clResult.Classes, clResult.Types, pl.RefToNamed)
+	// 1. Build one hierarchy across isolate + VM snapshot objects. SuperTypeRefID
+	// can point into the VM snapshot; isolate-only input silently loses those
+	// edges even though BuildTypeContext already exposes VmClasses/VmTypes.
+	classes := make([]cluster.ClassInfo, 0, len(clResult.Classes)+len(pl.VmClasses))
+	classes = append(classes, clResult.Classes...)
+	classes = append(classes, pl.VmClasses...)
+	types := make([]cluster.TypeInfo, 0, len(clResult.Types)+len(pl.VmTypes))
+	types = append(types, clResult.Types...)
+	types = append(types, pl.VmTypes...)
+	ctx.SuperClass = BuildClassHierarchy(classes, types, pl.RefToNamed)
 
 	// 1b. Build inverse hierarchy (subclasses) for CHA.
 	for cid, parent := range ctx.SuperClass {
@@ -27,10 +35,9 @@ func buildClassHierarchy(ctx *TypeContext, clResult *cluster.Result, pl *PoolLoo
 		sort.Ints(ctx.Subclasses[parent])
 	}
 
-	// 1c. Populate InstantiatedClasses from class table.
-	for _, ci := range clResult.Classes {
-		ctx.InstantiatedClasses[int(ci.ClassID)] = true
-	}
+	// Do not prefill InstantiatedClasses from serialized Class metadata. RTA's
+	// contract is "classes observed instantiated"; actual Instance objects,
+	// allocation stubs and pool entries populate the set in their own builders.
 }
 
 // buildClassIDToName builds the classID → name map.
@@ -263,45 +270,61 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 		}
 	}
 
-	// Build MethodNameToSelectorOffsets: for each dispatch table entry
-	// that resolves to a named function, record the selector offset at
-	// which that function's name appears. The selector offset for a slot
-	// key = entry.Index - kOriginElement is derived from the class ID:
-	// slot = cid + selector_offset - kOriginElement, so
-	// selector_offset = slot - cid + kOriginElement. But we don't know
-	// the CID from the entry alone. Instead, we scan all entries and for
-	// each named entry, compute the set of selector offsets that would
-	// reach it from any class. A simpler approach: for each named entry
-	// at slot key, the selector offsets that reach it are
-	// {key - cid + kOriginElement : cid in InstantiatedClasses}. But
-	// that's O(entries * classes). Instead, we use the fact that all
-	// entries for the same selector share the same selector_offset
-	// relative to their class: selector = key - (cid - kOriginElement).
-	// So for a named entry at slot key belonging to class cid,
-	// selector_offset = key - (cid - kOriginElement). We can get cid
-	// from the Code's owner class.
-	ctx.MethodNameToSelectorOffsets = make(map[string][]int)
-	// Build ClusterIndex → owner class CID map from the Code entries.
+	// Build MethodNameToSelectorImms. DispatchBySlot is keyed by
+	// `entry.Index-kOriginElement`, the register-relative slot index used by the
+	// generated call. For a receiver class cid, the generated selector immediate
+	// is therefore simply `key-cid`.
+	ctx.MethodNameToSelectorImms = make(map[string][]int)
+
+	classCIDByRef := make(map[int]int, len(clResult.Classes))
+	for i := range clResult.Classes {
+		classCIDByRef[clResult.Classes[i].RefID] = int(clResult.Classes[i].ClassID)
+	}
+	ownerClassCID := func(owner *cluster.NamedObject) (int, bool) {
+		if owner == nil || pl.CT == nil {
+			return 0, false
+		}
+		cur := owner
+		if cur.CID == pl.CT.Function {
+			if cur.OwnerRefID < 0 {
+				return 0, false
+			}
+			cur = pl.RefToNamed[cur.OwnerRefID]
+			if cur == nil {
+				return 0, false
+			}
+		}
+		if pl.CT.PatchClass != 0 && cur.CID == pl.CT.PatchClass {
+			if cur.OwnerRefID < 0 {
+				return 0, false
+			}
+			cur = pl.RefToNamed[cur.OwnerRefID]
+			if cur == nil {
+				return 0, false
+			}
+		}
+		if cur.CID != pl.CT.Class {
+			return 0, false
+		}
+		cid, ok := classCIDByRef[cur.RefID]
+		return cid, ok
+	}
+
+	// Build ClusterIndex → owner class CID. Prefer the Function→CodeIndex
+	// cross-reference: Code.OwnerRef is known to be unreliable on some real
+	// snapshots and can point at an unrelated non-owner object.
 	codeClusterToCID := make(map[int]int, len(clResult.Codes))
 	for i := range clResult.Codes {
 		c := &clResult.Codes[i]
-		if c.ClusterIndex >= 0 && c.OwnerRef >= 0 {
-			if ownerNo, ok := pl.RefToNamed[c.OwnerRef]; ok && ownerNo != nil {
-				// Resolve through PatchClass hop.
-				effectiveRef := c.OwnerRef
-				if pl.CT != nil && pl.CT.PatchClass != 0 && ownerNo.CID == pl.CT.PatchClass {
-					effectiveRef = ownerNo.OwnerRefID
-				}
-				if classNo, ok2 := pl.RefToNamed[effectiveRef]; ok2 && classNo != nil {
-					// Look up the class's ClassID from the Classes list.
-					for _, ci := range clResult.Classes {
-						if ci.RefID == effectiveRef {
-							codeClusterToCID[c.ClusterIndex] = int(ci.ClassID)
-							break
-						}
-					}
-				}
-			}
+		if c.ClusterIndex < 0 {
+			continue
+		}
+		owner := byCodeIndex[c.ClusterIndex]
+		if owner == nil && c.OwnerRef >= 0 {
+			owner = pl.RefToNamed[c.OwnerRef]
+		}
+		if cid, ok := ownerClassCID(owner); ok {
+			codeClusterToCID[c.ClusterIndex] = cid
 		}
 	}
 	for key, entry := range ctx.DispatchBySlot {
@@ -316,23 +339,22 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 		if !hasCID {
 			continue
 		}
-		// selector_offset = slot - (cid - kOriginElement) = key - cid + kOriginElement
-		selectorOffset := key - cid + kOriginElement
-		ctx.MethodNameToSelectorOffsets[name] = append(ctx.MethodNameToSelectorOffsets[name], selectorOffset)
+		selectorImm := key - cid
+		ctx.MethodNameToSelectorImms[name] = append(ctx.MethodNameToSelectorImms[name], selectorImm)
 	}
-	// Deduplicate selector offsets per name (a method may appear at the
+	// Deduplicate selector immediates per name (a method may appear at the
 	// same selector from multiple classes).
-	for name, offsets := range ctx.MethodNameToSelectorOffsets {
+	for name, imms := range ctx.MethodNameToSelectorImms {
 		seen := map[int]bool{}
 		var dedup []int
-		for _, off := range offsets {
-			if !seen[off] {
-				seen[off] = true
-				dedup = append(dedup, off)
+		for _, imm := range imms {
+			if !seen[imm] {
+				seen[imm] = true
+				dedup = append(dedup, imm)
 			}
 		}
 		sort.Ints(dedup)
-		ctx.MethodNameToSelectorOffsets[name] = dedup
+		ctx.MethodNameToSelectorImms[name] = dedup
 	}
 }
 

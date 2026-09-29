@@ -18,9 +18,12 @@ import (
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/sdk/ -run DartNative
 
-// sdkNativeNamespaces returns every native namespace the SDK declares at
-// a tag: the part before the first underscore of each entry in
-// BOOTSTRAP_NATIVE_LIST, BOOTSTRAP_FFI_NATIVE_LIST and io_natives.cc.
+// sdkNativeNamespaces returns every native namespace the SDK declares at a
+// tag. Historical SDKs (including 2.12.0) keep Ffi_* entries directly inside
+// BOOTSTRAP_NATIVE_LIST; newer SDKs split some entries into
+// BOOTSTRAP_FFI_NATIVE_LIST. The gate follows the declarations that actually
+// exist at each exact tag instead of imposing the current header shape on old
+// releases.
 func sdkNativeNamespaces(t *testing.T, tag string) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
@@ -31,30 +34,20 @@ func sdkNativeNamespaces(t *testing.T, tag string) map[string]bool {
 		}
 	}
 
-	bn, err := sdktest.GHFileAtTag("runtime/vm/bootstrap_natives.h", tag)
+	bn, err := sdktest.SDKFileAtTag("runtime/vm/bootstrap_natives.h", tag)
 	if err != nil {
-		t.Skipf("fetch bootstrap_natives.h@%s: %v", tag, err)
+		t.Fatalf("verify bootstrap_natives.h@%s: %v", tag, err)
 	}
-	macros := cmacro.ParseMacros(bn)
-	for _, list := range []string{"BOOTSTRAP_NATIVE_LIST", "BOOTSTRAP_FFI_NATIVE_LIST"} {
-		names, err := cmacro.Expand(macros, list)
-		if err != nil {
-			t.Fatalf("expand %s@%s: %v", list, tag, err)
-		}
-		for _, n := range names {
-			add(n)
-		}
+	for _, n := range expandDeclaredNativeLists(t, bn, tag,
+		"BOOTSTRAP_NATIVE_LIST", "BOOTSTRAP_FFI_NATIVE_LIST") {
+		add(n)
 	}
 
-	io, err := sdktest.GHFileAtTag("runtime/bin/io_natives.cc", tag)
+	io, err := sdktest.SDKFileAtTag("runtime/bin/io_natives.cc", tag)
 	if err != nil {
-		t.Skipf("fetch io_natives.cc@%s: %v", tag, err)
+		t.Fatalf("verify io_natives.cc@%s: %v", tag, err)
 	}
-	ioNames, err := cmacro.Expand(cmacro.ParseMacros(io), "IO_NATIVE_LIST")
-	if err != nil {
-		t.Fatalf("expand IO_NATIVE_LIST@%s: %v", tag, err)
-	}
-	for _, n := range ioNames {
+	for _, n := range expandDeclaredNativeLists(t, io, tag, "IO_NATIVE_LIST") {
 		add(n)
 	}
 
@@ -127,11 +120,14 @@ func TestDartNativeCategoryIsExact(t *testing.T) {
 	// the namespace is a prefix up to the first underscore, not a
 	// substring anywhere.
 	for _, n := range []string{
-		"MySocket_Connect",     // namespace is MySocket
-		"reopenFile_something", // namespace is reopenFile
-		"Socket",               // no underscore at all
-		"Socket_",              // no member
-		"_Socket_Connect",      // empty namespace
+		"MySocket_Connect",          // namespace is MySocket
+		"reopenFile_something",      // namespace is reopenFile
+		"Socket_NotARealNative",     // real namespace, fabricated member
+		"File_DefinitelyNotSDK",     // real namespace, fabricated member
+		"Ffi_CustomApplicationHook", // real namespace, fabricated member
+		"Socket",                    // no underscore at all
+		"Socket_",                   // no member
+		"_Socket_Connect",           // empty namespace
 	} {
 		if cat, ok := DartNativeCategory(n); ok {
 			t.Errorf("DartNativeCategory(%q) = %q, want no match", n, cat)
@@ -144,5 +140,77 @@ func TestDartNativeCategoryIsExact(t *testing.T) {
 		if cat, ok := DartNativeCategory(n); ok {
 			t.Errorf("DartNativeCategory(%q) = %q, want no match: it appears in every program", n, cat)
 		}
+	}
+}
+
+func TestKnownNativeMembershipIsSDKBacked(t *testing.T) {
+	sdktest.SkipIfNoSDKTools(t)
+	seen := map[string]bool{}
+	// This is a provenance coverage set, not a version sample: every committed
+	// known native must occur in at least one exact tag below. If a future table
+	// update needs a name that only exists at another supported release, add that
+	// exact release here. Missing membership is always an error.
+	tags := []string{"2.12.0", "2.17.6", "3.12.2", "3.13.0"}
+	for _, tag := range tags {
+		bn, err := sdktest.SDKFileAtTag("runtime/vm/bootstrap_natives.h", tag)
+		if err != nil {
+			t.Fatalf("verify bootstrap natives @%s: %v", tag, err)
+		}
+		ioSrc, err := sdktest.SDKFileAtTag("runtime/bin/io_natives.cc", tag)
+		if err != nil {
+			t.Fatalf("verify io natives @%s: %v", tag, err)
+		}
+		for _, name := range expandDeclaredNativeLists(t, bn, tag,
+			"BOOTSTRAP_NATIVE_LIST", "BOOTSTRAP_FFI_NATIVE_LIST") {
+			seen[name] = true
+		}
+		for _, name := range expandDeclaredNativeLists(t, ioSrc, tag, "IO_NATIVE_LIST") {
+			seen[name] = true
+		}
+	}
+	for name := range dartNativeKnown {
+		if seen[name] {
+			continue
+		}
+		t.Errorf("known native %s is absent from every exact SDK provenance tag (%v)", name, tags)
+	}
+}
+
+// expandDeclaredNativeLists requires the first macro and expands each optional
+// macro only when that exact SDK header declares it. This is deliberately not
+// "ignore any missing macro": the canonical list must exist, while known
+// version-evolution splits are optional.
+func expandDeclaredNativeLists(t *testing.T, body, tag, required string, optional ...string) []string {
+	t.Helper()
+	macros := cmacro.ParseMacros(body)
+	names, err := cmacro.Expand(macros, required)
+	if err != nil {
+		t.Fatalf("expand required %s@%s: %v", required, tag, err)
+	}
+	for _, list := range optional {
+		if _, ok := macros[list]; !ok {
+			continue
+		}
+		more, err := cmacro.Expand(macros, list)
+		if err != nil {
+			t.Fatalf("expand optional %s@%s: %v", list, tag, err)
+		}
+		names = append(names, more...)
+	}
+	return names
+}
+
+func TestExpandDeclaredNativeListsHandlesHistoricalFFISplit(t *testing.T) {
+	inline := "#define BOOTSTRAP_NATIVE_LIST(V) V(Object_toString, 1) V(Ffi_dl_open, 1)\n"
+	split := "#define BOOTSTRAP_NATIVE_LIST(V) V(Object_toString, 1)\n" +
+		"#define BOOTSTRAP_FFI_NATIVE_LIST(V) V(Ffi_dl_open, 1)\n"
+	for name, src := range map[string]string{"inline": inline, "split": split} {
+		t.Run(name, func(t *testing.T) {
+			got := expandDeclaredNativeLists(t, src, "fixture",
+				"BOOTSTRAP_NATIVE_LIST", "BOOTSTRAP_FFI_NATIVE_LIST")
+			if len(got) != 2 || got[0] != "Object_toString" || got[1] != "Ffi_dl_open" {
+				t.Fatalf("got %v, want [Object_toString Ffi_dl_open]", got)
+			}
+		})
 	}
 }

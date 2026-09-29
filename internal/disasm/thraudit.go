@@ -29,6 +29,33 @@ func ExtractTHRAccesses(insts []Inst, fields map[int]string) []THRAccess {
 	for _, inst := range insts {
 		raw := inst.Raw
 
+		// LDP X64, X64 [X26, #imm]. Dart's ARM64 inline allocator loads the
+		// adjacent Thread.top / Thread.end words with this pair form. Record
+		// each word separately so audit output retains the real field offset and
+		// destination register for both reads.
+		if base, dst1, dst2, off, ok := arm64.LDP64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
+			_, resolved1 := fields[off]
+			result = append(result, THRAccess{
+				PC:        inst.Addr,
+				InsnText:  inst.Text,
+				THROffset: off,
+				DstReg:    dst1,
+				Width:     8,
+				Resolved:  resolved1,
+			})
+			secondOff := off + 8
+			_, resolved2 := fields[secondOff]
+			result = append(result, THRAccess{
+				PC:        inst.Addr,
+				InsnText:  inst.Text,
+				THROffset: secondOff,
+				DstReg:    dst2,
+				Width:     8,
+				Resolved:  resolved2,
+			})
+			continue
+		}
+
 		// LDR X64 [X26, #imm]
 		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
 			dst := int(raw & 0x1F)
@@ -119,6 +146,7 @@ func BuildAuditRecords(accesses []THRAccess, allInsts []Inst, sample, dartVersio
 		rec := thraudit.THRAuditRecord{
 			Sample:      sample,
 			DartVersion: dartVersion,
+			Arch:        thraudit.ArchARM64,
 			PC:          fmt.Sprintf("0x%x", a.PC),
 			Insn:        a.InsnText,
 			THROffset:   fmt.Sprintf("0x%x", a.THROffset),

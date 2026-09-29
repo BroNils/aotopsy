@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strxref"
 )
@@ -23,13 +24,18 @@ func cmdStrings(args []string) error {
 	names := fs.Bool("names", false, "extract and display named objects (Function, Class, Library, Script)")
 	find := fs.String("find", "", "only show strings containing this substring (case-insensitive)")
 	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) load it from the object pool")
-	xrefMaxScan := fs.Int("xref-max-scan", 0, "cap how many functions --xref scans (0 = scan all)")
+	xrefMaxScan := fs.Int("xref-max-scan", 0, fmt.Sprintf("cap how many functions --xref scans (0 = safe default %d)", strxref.DefaultMaxScan))
+	xrefMaxRefs := fs.Int("xref-max-refs", 0, fmt.Sprintf("cap retained --xref matches (0 = safe default %d)", strxref.DefaultMaxRefs))
+	xrefUnbounded := fs.Bool("xref-unbounded", false, "allow --xref to scan an unbounded number of functions (retained matches remain capped)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
+	}
+	if *which != "vm" && *which != "isolate" && *which != "both" {
+		return fmt.Errorf("invalid --which %q (want vm, isolate, or both)", *which)
 	}
 	if *xref && *find == "" {
 		return fmt.Errorf("--xref requires --find")
@@ -50,7 +56,7 @@ func cmdStrings(args []string) error {
 		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
 	}
 	if info.Version != nil && !info.Version.Supported {
-		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
+		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
 	}
 
 	type target struct {
@@ -59,20 +65,34 @@ func cmdStrings(args []string) error {
 		snapshotSize int64
 	}
 	var targets []target
-	switch {
-	case *names:
-		targets = []target{
-			{"VM", info.VmData.Data, info.VmHeader.TotalSize},
-			{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+	if info.UnifiedSnapshot {
+		if *which == "vm" {
+			return fmt.Errorf("--which vm is unavailable: this Dart version has a unified snapshot")
 		}
-	case *which == "vm":
-		targets = []target{{"VM", info.VmData.Data, info.VmHeader.TotalSize}}
-	case *which == "isolate":
-		targets = []target{{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize}}
-	default:
-		targets = []target{
-			{"VM", info.VmData.Data, info.VmHeader.TotalSize},
-			{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+		h := info.PrimaryHeader()
+		if h == nil {
+			return fmt.Errorf("unified snapshot has no parsed header")
+		}
+		targets = []target{{"Unified", info.IsolateData.Data, h.TotalSize}}
+	} else {
+		if info.VmHeader == nil || info.IsolateHeader == nil {
+			return fmt.Errorf("legacy snapshot is missing VM or isolate header")
+		}
+		switch {
+		case *names:
+			targets = []target{
+				{"VM", info.VmData.Data, info.VmHeader.TotalSize},
+				{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+			}
+		case *which == "vm":
+			targets = []target{{"VM", info.VmData.Data, info.VmHeader.TotalSize}}
+		case *which == "isolate":
+			targets = []target{{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize}}
+		case *which == "both":
+			targets = []target{
+				{"VM", info.VmData.Data, info.VmHeader.TotalSize},
+				{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+			}
 		}
 	}
 
@@ -101,7 +121,7 @@ func cmdStrings(args []string) error {
 			continue
 		}
 
-		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize); err != nil {
+		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: fill error: %v\n", t.name, err)
 			continue
 		}
@@ -229,7 +249,13 @@ func cmdStrings(args []string) error {
 
 		refSet := make(map[int]bool, len(matchedRefIDs))
 		for _, r := range matchedRefIDs {
-			refSet[r] = true
+			if provenPoolStringRef(ctx.Pool, r) {
+				refSet[r] = true
+			}
+		}
+		if len(refSet) == 0 {
+			fmt.Fprintf(os.Stderr, "--xref: matched text has no CID-proven String object in the app/VM pool; refusing numeric RefID collision\n")
+			return nil
 		}
 		poolIndices := ctx.PoolIndicesForRefIDs(refSet)
 		if len(poolIndices) == 0 {
@@ -237,12 +263,45 @@ func cmdStrings(args []string) error {
 			return nil
 		}
 
-		refs, scanned := strxref.FindPoolReferences(ctx, poolIndices, strxref.Options{MaxScan: *xrefMaxScan})
-		fmt.Fprintf(os.Stderr, "--xref: scanned %d function(s), found %d reference(s)\n\n", scanned, len(refs))
-		for _, r := range refs {
+		res, err := strxref.FindPoolReferences(ctx, poolIndices, strxref.Options{
+			MaxScan:        *xrefMaxScan,
+			AllowUnbounded: *xrefUnbounded,
+			MaxRefs:        *xrefMaxRefs,
+		})
+		if err != nil {
+			return fmt.Errorf("--xref: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "--xref: attempted %d function(s), scanned %d, found %d reference(s)\n\n", res.Attempted, res.Scanned, len(res.References))
+		for _, r := range res.References {
 			fmt.Printf("  used in: %s @ 0x%x (pool load @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
+		}
+		if res.ScanLimitReached {
+			return fmt.Errorf("--xref: incomplete result: function scan cap reached; raise --xref-max-scan or use --xref-unbounded")
+		}
+		if res.ReferenceLimitReached {
+			return fmt.Errorf("--xref: incomplete result: reference cap reached; raise --xref-max-refs")
 		}
 	}
 
 	return nil
+}
+
+func provenPoolStringRef(pl *naming.PoolLookups, ref int) bool {
+	if pl == nil || pl.CT == nil {
+		return false
+	}
+	isStringCID := func(cid int) bool {
+		return (pl.CT.OneByteString != 0 && cid == pl.CT.OneByteString) ||
+			(pl.CT.TwoByteString != 0 && cid == pl.CT.TwoByteString) ||
+			(pl.CT.String != 0 && cid == pl.CT.String)
+	}
+	if cid, ok := pl.RefCID[ref]; ok {
+		return isStringCID(cid)
+	}
+	if ref < pl.BaseObjLimit {
+		if cid, ok := pl.VmRefCID[ref]; ok {
+			return isStringCID(cid)
+		}
+	}
+	return false
 }

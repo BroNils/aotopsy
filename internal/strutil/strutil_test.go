@@ -1,6 +1,10 @@
 package strutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
@@ -31,6 +35,21 @@ func TestSanitizeFilename_Truncation(t *testing.T) {
 	got := SanitizeFilename(long)
 	if len(got) > 200 {
 		t.Errorf("SanitizeFilename should truncate to 200 chars, got %d", len(got))
+	}
+}
+
+func TestSanitizeFilename_TruncationKeepsValidUTF8AndUniqueness(t *testing.T) {
+	prefix := strings.Repeat("界", 80)
+	a := SanitizeFilename(prefix + "_first")
+	b := SanitizeFilename(prefix + "_second")
+	if !utf8.ValidString(a) || !utf8.ValidString(b) {
+		t.Fatalf("truncation produced invalid UTF-8: %q / %q", a, b)
+	}
+	if len(a) > 200 || len(b) > 200 {
+		t.Fatalf("truncation exceeded 200 bytes: %d / %d", len(a), len(b))
+	}
+	if a == b {
+		t.Fatalf("distinct long names collided after truncation: %q", a)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/output"
 	"aotopsy/internal/typetrack"
 )
@@ -48,7 +49,9 @@ const (
 	ConfStaticInferred Confidence = "static_inferred"
 	// ConfPolymorphic: a set of candidates, not one target.
 	ConfPolymorphic Confidence = "polymorphic"
-	// ConfStub: resolved to a VM stub through the Thread table.
+	// ConfStub: resolved through callable stub provenance (for example a
+	// Thread entry-point field or a named pool Code/TTS target), rather than
+	// inferred from receiver/dispatch-table types.
 	ConfStub Confidence = "stub"
 	// ConfUnknown: the site was seen and not resolved. Distinct from
 	// absent -- an unresolved call is a finding.
@@ -94,6 +97,18 @@ type Collector struct {
 // NewCollector creates an empty evidence collector.
 func NewCollector() *Collector {
 	return &Collector{}
+}
+
+// NewCollectorFromRecords creates a collector from previously written static
+// evidence so runtime import can enrich the same records rather than copying a
+// stale evidence.jsonl beside enriched call edges.
+func NewCollectorFromRecords(records []Evidence) *Collector {
+	out := make([]Evidence, len(records))
+	copy(out, records)
+	for i := range out {
+		out[i].Confidence = normalizeConfidence(string(out[i].Confidence))
+	}
+	return &Collector{records: out}
 }
 
 // FromCallEdges collects evidence from call_edges.jsonl records.
@@ -157,20 +172,24 @@ func (c *Collector) FromCallEdges(edges []disasm.CallEdgeRecord) {
 }
 
 // FromBLRResolutions collects evidence from typetrack BLR resolution records.
-func (c *Collector) FromBLRResolutions(funcName string, resols []typetrack.BlrResolution) {
+func (c *Collector) FromBLRResolutions(funcName string, resols []typetrack.BlrResolution, isARM64 bool) {
 	for _, r := range resols {
+		confidence := normalizeConfidence(r.Confidence)
+		// typetrack's "exact" means an indirect dispatch-table slot was
+		// resolved with a known receiver class. That is strong static evidence,
+		// but the target is not encoded in the BLR/CALL instruction itself, which
+		// is the contract of ConfExact in this package.
+		if confidence == ConfExact {
+			confidence = ConfStaticInferred
+		}
 		ev := Evidence{
 			PC:       fmt.Sprintf("0x%x", r.PC),
 			Function: funcName,
 			Kind:     "dispatch",
 			// typetrack supplies a bare string; anything it does not
 			// recognise becomes unknown rather than passing through.
-			Confidence: normalizeConfidence(r.Confidence),
+			Confidence: confidence,
 			Rule:       "typetrack.BLRResolution",
-			SDKRef: &SDKReference{
-				File:   "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc",
-				Symbol: "EmitDispatchTableCall",
-			},
 		}
 		if r.Confidence == "" {
 			ev.Confidence = ConfUnknown
@@ -185,6 +204,16 @@ func (c *Collector) FromBLRResolutions(funcName string, resols []typetrack.BlrRe
 				ev.Inputs = map[string]any{}
 			}
 			ev.Inputs["slot_index"] = r.SlotIndex
+		}
+		// Only dispatch-derived resolutions cite EmitDispatchTableCall. Stub
+		// resolutions can come from THR runtime entries, pool Code objects,
+		// UnlinkedCall or TTS and must not cite an unrelated ARM64 dispatch rule.
+		if ev.Confidence == ConfExact || ev.Confidence == ConfStaticInferred || ev.Confidence == ConfPolymorphic {
+			sdkFile := "runtime/vm/compiler/backend/flow_graph_compiler_x64.cc"
+			if isARM64 {
+				sdkFile = "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc"
+			}
+			ev.SDKRef = &SDKReference{File: sdkFile, Symbol: "EmitDispatchTableCall"}
 		}
 		c.records = append(c.records, ev)
 	}
@@ -231,11 +260,16 @@ func (c *Collector) FromFieldAccesses(funcName string, accesses []typetrack.Fiel
 // Matching on the raw string was a silent failure: our own records are
 // written as "0x%x" by some collectors and copied verbatim from
 // call_edges.jsonl by others, while a runtime resolution arrives from
-// whatever the Frida script emitted. "0x1000", "0X1000" and "4096" are
-// the same address and compared unequal, so a mismatch looked exactly
-// like "runtime never observed this PC".
-func parsePCUint(pc string) uint64 {
+// whatever the Frida script emitted. Equivalent spellings such as "0x1000",
+// "0X1000" and "1000" are the same address and compared unequal, so a
+// mismatch looked exactly like "runtime never observed this PC". Bare address
+// strings are interpreted as hexadecimal below, matching every producer in
+// this repository.
+func parsePCUint(pc string) (uint64, bool) {
 	pc = strings.TrimSpace(pc)
+	if pc == "" {
+		return 0, false
+	}
 	neg := false
 	if strings.HasPrefix(pc, "-") {
 		neg, pc = true, pc[1:]
@@ -255,36 +289,153 @@ func parsePCUint(pc string) uint64 {
 	}
 	v, err := strconv.ParseUint(pc, base, 64)
 	if err != nil || neg {
-		return 0
+		return 0, false
 	}
-	return v
+	return v, true
 }
 
-// candidateTargets reads Result["targets"], which survives a JSON round
-// trip as []any and arrives in-process as []string.
-func candidateTargets(v any) []string {
+// candidateTargets reads Result["targets"], which survives a JSON round trip
+// as []any and arrives in-process as []string. The bool reports whether the
+// serialized candidate list is well-formed. Keeping that bit matters for
+// runtime comparison: silently dropping a malformed element and then treating
+// the shortened list as complete would turn bad input into a false conflict.
+func candidateTargets(v any) ([]string, bool) {
 	switch t := v.(type) {
 	case []string:
-		return t
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			if s, ok := e.(string); ok {
-				out = append(out, s)
-			}
+		if len(t) == 0 {
+			return nil, false
 		}
-		return out
+		seen := make(map[string]struct{}, len(t))
+		for _, s := range t {
+			if strings.TrimSpace(s) == "" {
+				return t, false
+			}
+			if _, duplicate := seen[s]; duplicate {
+				return t, false
+			}
+			seen[s] = struct{}{}
+		}
+		return t, true
+	case []any:
+		if len(t) == 0 {
+			return nil, false
+		}
+		out := make([]string, 0, len(t))
+		wellFormed := true
+		seen := make(map[string]struct{}, len(t))
+		for _, e := range t {
+			s, ok := e.(string)
+			if !ok || strings.TrimSpace(s) == "" {
+				wellFormed = false
+				continue
+			}
+			if _, duplicate := seen[s]; duplicate {
+				wellFormed = false
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+		return out, wellFormed
 	}
-	return nil
+	return nil, false
+}
+
+func candidateCount(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, n >= 0
+	case int8:
+		return int(n), n >= 0
+	case int16:
+		return int(n), n >= 0
+	case int32:
+		return int(n), n >= 0
+	case int64:
+		return int(n), n >= 0 && int64(int(n)) == n
+	case uint:
+		return int(n), uint(int(n)) == n
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), uint32(int(n)) == n
+	case uint64:
+		return int(n), uint64(int(n)) == n
+	case float64:
+		i := int(n)
+		return i, n >= 0 && float64(i) == n
+	case json.Number:
+		i, err := strconv.ParseInt(string(n), 10, 64)
+		if err != nil || i < 0 || int64(int(i)) != i {
+			return 0, false
+		}
+		return int(i), true
+	default:
+		return 0, false
+	}
+}
+
+// candidateListComplete reports whether a serialized polymorphic list is known
+// to enumerate every candidate. TargetNames is deliberately capped by
+// typetrack; absence from a truncated list is not evidence of contradiction.
+func candidateListComplete(result map[string]any, listed int, wellFormed bool) bool {
+	if result == nil || !wellFormed {
+		return false
+	}
+	n, ok := candidateCount(result["candidate_count"])
+	// typetrack's candidate_count is the number of distinct candidates before
+	// its serialized TargetNames list is capped. Equality is therefore the only
+	// state that proves the list complete. n > listed is truncation; n < listed
+	// is malformed input and must be conservative too.
+	return ok && n == listed
 }
 
 // runtimeByPC indexes runtime resolutions by numeric PC.
-func runtimeByPC(resolutions []RuntimeResolution) map[uint64]string {
-	out := make(map[uint64]string, len(resolutions))
+func runtimeByPC(resolutions []RuntimeResolution) map[uint64][]RuntimeResolution {
+	out := make(map[uint64][]RuntimeResolution, len(resolutions))
+	seen := make(map[string]bool, len(resolutions))
 	for _, r := range resolutions {
-		out[parsePCUint(r.PC)] = r.TargetName
+		pc, ok := parsePCUint(r.PC)
+		if !ok || r.TargetName == "" {
+			continue
+		}
+		key := fmt.Sprintf("%x\x00%s\x00%s", pc, r.Function, r.TargetName)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out[pc] = append(out[pc], r)
 	}
 	return out
+}
+
+func runtimeTargetsForRecord(rec Evidence, byPC map[uint64][]RuntimeResolution) []string {
+	pc, ok := parsePCUint(rec.PC)
+	if !ok {
+		return nil
+	}
+	set := map[string]struct{}{}
+	for _, r := range byPC[pc] {
+		if r.Function != "" && rec.Function != "" && r.Function != rec.Function {
+			continue
+		}
+		set[r.TargetName] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func runtimeComparableRecord(rec Evidence) bool {
+	// RuntimeResolution is produced by Frida's indirect-call probes. Signal
+	// findings and field accesses are static evidence with no corresponding
+	// runtime resolution event, even when they happen to share a PC with a call.
+	return rec.Kind == "call" || rec.Kind == "dispatch"
 }
 
 // Records returns all collected evidence, sorted numerically by PC.
@@ -296,7 +447,14 @@ func (c *Collector) Records() []Evidence {
 	// ties broken by insertion order would make the file differ between
 	// runs of the same binary.
 	sort.Slice(out, func(i, j int) bool {
-		pi, pj := parsePCUint(out[i].PC), parsePCUint(out[j].PC)
+		pi, iok := parsePCUint(out[i].PC)
+		pj, jok := parsePCUint(out[j].PC)
+		if iok != jok {
+			return iok // valid addresses sort before malformed ones
+		}
+		if !iok && out[i].PC != out[j].PC {
+			return out[i].PC < out[j].PC
+		}
 		if pi != pj {
 			return pi < pj
 		}
@@ -317,18 +475,8 @@ func (c *Collector) WriteJSONL(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	for _, r := range records {
-		if err := enc.Encode(r); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := jsonutil.WriteJSONLFile(path, records)
+	return err
 }
 
 // RuntimeResolution is one runtime-observed dispatch resolution from Frida.
@@ -351,21 +499,70 @@ func (c *Collector) MergeRuntime(resolutions []RuntimeResolution) {
 
 	for i := range c.records {
 		rec := &c.records[i]
-		if rtTarget, ok := rtByPC[parsePCUint(rec.PC)]; ok {
-			if rec.Result == nil {
-				rec.Result = map[string]any{}
+		if !runtimeComparableRecord(*rec) {
+			continue
+		}
+		rtTargets := runtimeTargetsForRecord(*rec, rtByPC)
+		if len(rtTargets) == 0 {
+			continue
+		}
+		if rec.Result == nil {
+			rec.Result = map[string]any{}
+		}
+		if len(rtTargets) == 1 {
+			rec.Result["runtime_target"] = rtTargets[0]
+		} else {
+			rec.Result["runtime_targets"] = rtTargets
+		}
+
+		if staticTarget, _ := rec.Result["target"].(string); staticTarget != "" {
+			allMatch := true
+			for _, rt := range rtTargets {
+				if rt != staticTarget {
+					allMatch = false
+					break
+				}
 			}
-			rec.Result["runtime_target"] = rtTarget
-			// Upgrade confidence: exact/stub/static_inferred → runtime_confirmed.
-			// polymorphic stays polymorphic (runtime confirmed ONE of many).
-			// unknown → runtime_confirmed (runtime observed what static couldn't).
-			switch rec.Confidence {
-			case ConfExact, ConfStub, ConfStaticInferred, ConfUnknown:
+			if allMatch && (rec.Confidence == ConfExact || rec.Confidence == ConfStaticInferred) {
 				rec.Confidence = ConfRuntimeConfirmed
-			case ConfPolymorphic:
-				// Keep polymorphic but note runtime confirmed one candidate.
-				rec.Result["runtime_confirmed_candidate"] = rtTarget
+			} else if !allMatch {
+				rec.Result["runtime_conflict"] = true
 			}
+			continue
+		}
+
+		if rawCandidates, present := rec.Result["targets"]; present {
+			cands, wellFormed := candidateTargets(rawCandidates)
+			allowed := make(map[string]bool, len(cands))
+			for _, cand := range cands {
+				allowed[cand] = true
+			}
+			var confirmed []string
+			conflict := false
+			for _, rt := range rtTargets {
+				if allowed[rt] {
+					confirmed = append(confirmed, rt)
+				} else {
+					conflict = true
+				}
+			}
+			if len(confirmed) > 0 {
+				rec.Result["runtime_confirmed_candidates"] = confirmed
+			}
+			if conflict {
+				if candidateListComplete(rec.Result, len(cands), wellFormed) {
+					rec.Result["runtime_conflict"] = true
+				} else {
+					rec.Result["runtime_indeterminate"] = true
+				}
+			}
+			continue
+		}
+
+		// No static target/candidate set exists. Runtime supplied information
+		// that static analysis genuinely did not have.
+		if rec.Confidence == ConfUnknown {
+			rec.Confidence = ConfRuntimeConfirmed
 		}
 	}
 }
@@ -373,75 +570,129 @@ func (c *Collector) MergeRuntime(resolutions []RuntimeResolution) {
 // CoverageReport summarizes how many static predictions were confirmed,
 // contradicted, or left unobserved by runtime evidence.
 type CoverageReport struct {
-	StaticOnly       int `json:"static_only"`
-	RuntimeOnly      int `json:"runtime_only"`
-	BothMatch        int `json:"both_match"`
-	BothConflict     int `json:"both_conflict"`
-	RuntimeConfirmed int `json:"runtime_confirmed"`
-	TotalStatic      int `json:"total_static"`
-	TotalRuntime     int `json:"total_runtime"`
+	StaticOnly        int `json:"static_only"`
+	RuntimeOnly       int `json:"runtime_only"`
+	BothMatch         int `json:"both_match"`
+	BothConflict      int `json:"both_conflict"`
+	BothIndeterminate int `json:"both_indeterminate"`
+	RuntimeConfirmed  int `json:"runtime_confirmed"`
+	TotalStatic       int `json:"total_static"`
+	TotalRuntime      int `json:"total_runtime"`
+	InvalidRuntime    int `json:"invalid_runtime"`
 }
 
 // Coverage computes a summary of static vs runtime evidence overlap.
 func (c *Collector) Coverage(resolutions []RuntimeResolution) CoverageReport {
-	rep := CoverageReport{TotalStatic: len(c.records), TotalRuntime: len(resolutions)}
+	type siteKey struct {
+		pc       uint64
+		function string
+	}
+	rep := CoverageReport{}
 	rtByPC := runtimeByPC(resolutions)
-	seenPCs := make(map[uint64]bool)
+	runtimeSites := make(map[siteKey]bool)
+	for _, r := range resolutions {
+		pc, ok := parsePCUint(r.PC)
+		if !ok || r.TargetName == "" {
+			rep.InvalidRuntime++
+			continue
+		}
+		runtimeSites[siteKey{pc: pc, function: r.Function}] = true
+	}
+	rep.TotalRuntime = len(runtimeSites)
+
+	staticSites := make(map[siteKey][]Evidence)
 	for _, rec := range c.records {
-		pc := parsePCUint(rec.PC)
-		rtTarget, ok := rtByPC[pc]
-		if !ok {
+		if !runtimeComparableRecord(rec) {
+			continue
+		}
+		pc, validPC := parsePCUint(rec.PC)
+		if !validPC {
+			rep.StaticOnly++
+			rep.TotalStatic++
+			continue
+		}
+		key := siteKey{pc: pc, function: rec.Function}
+		staticSites[key] = append(staticSites[key], rec)
+	}
+	rep.TotalStatic += len(staticSites)
+
+	seenRuntimeSites := make(map[siteKey]bool)
+	for key, records := range staticSites {
+		representative := Evidence{PC: fmt.Sprintf("0x%x", key.pc), Function: key.function}
+		rtTargets := runtimeTargetsForRecord(representative, rtByPC)
+		if len(rtTargets) == 0 {
 			rep.StaticOnly++
 			continue
 		}
-		seenPCs[pc] = true
-
-		// A polymorphic record predicts a SET of targets, in
-		// Result["targets"]. Reading only Result["target"] left that set
-		// invisible, so the record fell through to "runtime confirmed" --
-		// counted as agreement even when the runtime target was not among
-		// the candidates the analysis proposed. That is precisely the
-		// case the report exists to surface.
-		if staticTarget, _ := rec.Result["target"].(string); staticTarget != "" {
-			if staticTarget == rtTarget {
-				rep.BothMatch++
-			} else {
-				rep.BothConflict++
+		for rtKey := range runtimeSites {
+			if rtKey.pc != key.pc {
+				continue
 			}
-			continue
+			if key.function == "" || rtKey.function == "" || rtKey.function == key.function {
+				seenRuntimeSites[rtKey] = true
+			}
 		}
-		if cands := candidateTargets(rec.Result["targets"]); len(cands) > 0 {
-			matched := false
-			for _, cand := range cands {
-				if cand == rtTarget {
-					matched = true
-					break
+
+		predicted := make(map[string]bool)
+		hasPrediction := false
+		complete := true
+		for _, rec := range records {
+			if staticTarget, _ := rec.Result["target"].(string); staticTarget != "" {
+				predicted[staticTarget] = true
+				hasPrediction = true
+			}
+			if rawCandidates, present := rec.Result["targets"]; present {
+				cands, wellFormed := candidateTargets(rawCandidates)
+				hasPrediction = true
+				for _, cand := range cands {
+					predicted[cand] = true
+				}
+				if !candidateListComplete(rec.Result, len(cands), wellFormed) {
+					complete = false
 				}
 			}
-			if matched {
-				rep.BothMatch++
-			} else {
-				rep.BothConflict++
-			}
+		}
+		if !hasPrediction {
+			rep.RuntimeConfirmed++
 			continue
 		}
-		// No static prediction at all: runtime saw something we did not.
-		rep.RuntimeConfirmed++
+		allMatch := true
+		for _, rtTarget := range rtTargets {
+			if !predicted[rtTarget] {
+				allMatch = false
+				break
+			}
+		}
+		switch {
+		case allMatch:
+			rep.BothMatch++
+		case !complete:
+			rep.BothIndeterminate++
+		default:
+			rep.BothConflict++
+		}
 	}
-	rep.RuntimeOnly = len(resolutions) - len(seenPCs)
+	for key := range runtimeSites {
+		if !seenRuntimeSites[key] {
+			rep.RuntimeOnly++
+		}
+	}
 	return rep
 }
 
 // classifyEdgeConfidence maps a CallEdgeRecord's fields to a confidence.
 func classifyEdgeConfidence(e disasm.CallEdgeRecord) Confidence {
+	if edgeViaIsStub(e) {
+		return ConfStub
+	}
 	if e.Target != "" {
-		return ConfExact
+		if e.Kind == "bl" || e.Kind == "call" {
+			return ConfExact
+		}
+		return ConfStaticInferred
 	}
 	if len(e.Targets) > 0 {
 		return ConfPolymorphic
-	}
-	if e.Via != "" {
-		return ConfStub
 	}
 	return ConfUnknown
 }
@@ -452,10 +703,46 @@ func edgeRule(e disasm.CallEdgeRecord) string {
 	case "bl", "call":
 		return "direct_call"
 	case "blr", "call_indirect":
+		if edgeViaIsStub(e) {
+			return "indirect_call_via_" + e.Via
+		}
+		if e.Target != "" {
+			return "indirect_call_static_inferred"
+		}
 		if e.Via != "" {
 			return "indirect_call_via_" + e.Via
 		}
 		return "indirect_call_unresolved"
 	}
 	return "unknown"
+}
+
+func edgeViaIsStub(e disasm.CallEdgeRecord) bool {
+	if e.Kind != "blr" && e.Kind != "call_indirect" {
+		return false
+	}
+	via := strings.TrimSpace(e.Via)
+	if via == "" || via == "dispatch_table" || via == disasm.ObjectFieldVia || strings.HasPrefix(via, disasm.ObjectFieldVia+"+") || strings.HasPrefix(via, disasm.ObjectFieldVia+"-") {
+		return false
+	}
+	lower := strings.ToLower(via)
+	if strings.HasPrefix(lower, "pp[") {
+		closeBracket := strings.IndexByte(via, ']')
+		if closeBracket < 0 {
+			return false
+		}
+		display := strings.TrimSpace(via[closeBracket+1:])
+		// Pool provenance is callable only when it carries the same kind of
+		// resolved display accepted by analysis.resolveViaPoolDisplay. A bare
+		// slot, a String display, or an object placeholder names no callee.
+		return display != "" && !strings.HasPrefix(display, "<") && !strings.HasPrefix(display, `"`)
+	}
+	if strings.HasPrefix(via, "THR.") {
+		field := strings.ToLower(strings.TrimPrefix(via, "THR."))
+		// THR is a provenance namespace for every Thread field, including
+		// ordinary data such as dispatch_table_array and stack_limit. Only
+		// entry-point fields establish a callable stub by themselves.
+		return field == "stub" || strings.HasSuffix(field, "_entry_point") || strings.HasSuffix(field, "_ep")
+	}
+	return strings.Contains(lower, "typetestingstub") || strings.Contains(lower, "type testing stub")
 }

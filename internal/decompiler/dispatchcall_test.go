@@ -111,6 +111,7 @@ func TestX64DispatchCallRecovery(t *testing.T) {
 		want   int
 	}{
 		{"[rax+8*rcx+0x200a8]", 0x200a8/8 + origin},
+		{"[rax+8*rcx-0x80]", origin - 0x80/8},
 		{"[rax+8*rcx]", origin},
 	} {
 		fir := dispatchFIR("", []struct {
@@ -138,5 +139,31 @@ func TestX64DispatchCallRecovery(t *testing.T) {
 		if fir.Blocks[0].Instrs[0].IsDispatchCall {
 			t.Errorf("%s claimed as a dispatch call", target)
 		}
+	}
+}
+
+func TestX64DispatchCallRecoveryFromDecodedNegativeDisplacement(t *testing.T) {
+	// ff 54 c8 80 = call qword ptr [rax+rcx*8-0x80], a real GDT shape seen in
+	// the Dart 3.12.2 x64 corpus. Decode it through the same x86asm path the
+	// production lifter uses so this also pins the target-string spelling.
+	insts, err := DecodeX86Range([]byte{0xff, 0x54, 0xc8, 0x80}, 0x1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, ok := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchX86)
+	if !ok {
+		t.Fatal("missing x86 calling convention")
+	}
+	fir := BuildX86IR("dispatch", insts, cc)
+	annotateDispatchCalls(fir)
+	if len(fir.Blocks) != 1 || len(fir.Blocks[0].Instrs) != 1 {
+		t.Fatalf("unexpected IR shape: %+v", fir.Blocks)
+	}
+	got := fir.Blocks[0].Instrs[0]
+	if !got.IsDispatchCall {
+		t.Fatalf("decoded target %q was not recognised as a dispatch call", got.Target)
+	}
+	if want := sdk.DispatchTableOriginElement(false) - 0x80/8; got.DispatchSelector != want {
+		t.Fatalf("selector = %d, want %d (target %q)", got.DispatchSelector, want, got.Target)
 	}
 }

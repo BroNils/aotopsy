@@ -47,10 +47,44 @@ func poolOperandDispExpr(fir *FuncIR, s *LiftState, disp int64) string {
 	}
 	if s != nil && s.Pool != nil {
 		if display, found := s.Pool(idx); found {
-			return display
+			return dartPoolDisplay(display)
 		}
 	}
 	return fmt.Sprintf("pool[%d]", idx)
+}
+
+// dartPoolDisplay converts naming's Go-quoted string display into valid Dart
+// source spelling. Go's %q leaves '$' untouched, while Dart treats an
+// unescaped '$' inside a quoted string as interpolation syntax. Every '$' in a
+// pool String is literal runtime data, so make sure it has an odd run of
+// preceding backslashes. Non-string pool displays are left untouched.
+func dartPoolDisplay(display string) string {
+	if len(display) < 2 {
+		return display
+	}
+	quote := display[0]
+	if (quote != '"' && quote != '\'') || display[len(display)-1] != quote {
+		return display
+	}
+	return display[:1] + escapeDartLiteralDollars(display[1:len(display)-1]) + display[len(display)-1:]
+}
+
+func escapeDartLiteralDollars(s string) string {
+	var b strings.Builder
+	backslashes := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '$' && backslashes%2 == 0 {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+		if c == '\\' {
+			backslashes++
+		} else {
+			backslashes = 0
+		}
+	}
+	return b.String()
 }
 
 // parsePPOffset extracts the byte offset from a "(PP + N)", "(x27 + N)", or "PP+N" expression.

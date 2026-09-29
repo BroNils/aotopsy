@@ -30,10 +30,15 @@ func dartfmtOptionsDefault() dartfmt.Options {
 // be repeated 8 times, and one missed copy was a real, previously-
 // unnoticed gap that left pool entries as opaque "<vm:NNN>" placeholders.
 type SnapshotContext struct {
-	EF          *elfx.File
-	Info        *snapshot.Info
-	Result      *cluster.Result // isolate snapshot cluster result
-	VMResult    *cluster.Result // VM snapshot cluster result (nil if no VM snapshot)
+	EF       *elfx.File
+	Info     *snapshot.Info
+	Result   *cluster.Result // isolate snapshot cluster result
+	VMResult *cluster.Result // VM snapshot cluster result (nil if no VM snapshot)
+	// VMError records why a present legacy VM snapshot could not be parsed in
+	// best-effort mode. Callers whose semantic identity depends on VM base
+	// objects (funcdiff, evidence-quality gates) must fail closed instead of
+	// silently treating the missing VM names as removals/renames.
+	VMError     error
 	Table       *cluster.InstructionsTable
 	Ranges      []cluster.CodeRange
 	Pool        *naming.PoolLookups
@@ -48,6 +53,26 @@ type SnapshotContext struct {
 	CodeOff uint64
 
 	IsARM64 bool
+}
+
+// RequireCompleteVM rejects a legacy snapshot whose isolate half parsed but
+// whose VM-isolate half did not. LoadSnapshot deliberately preserves that
+// partial state in best-effort mode for low-level diagnostics, but semantic
+// consumers (pipeline/decompiler/FFI/name resolution) cannot safely publish it:
+// VM base objects participate in pool naming, call resolution and capability
+// recovery, so treating a parse failure as an empty VM snapshot manufactures
+// removals and unresolved names.
+//
+// Unified snapshots have no separate VM image and therefore never carry a
+// VMError here.
+func (sc *SnapshotContext) RequireCompleteVM() error {
+	if sc == nil {
+		return fmt.Errorf("snapshot context is nil")
+	}
+	if sc.VMError != nil {
+		return fmt.Errorf("legacy VM snapshot incomplete: %w", sc.VMError)
+	}
+	return nil
 }
 
 // Image returns a CodeImage providing unified function slicing.
@@ -89,7 +114,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 	if info.Version != nil && !info.Version.Supported {
 		_ = ef.Close()
 		return nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)",
-			info.Version.DartVersion, info.VmHeader.SnapshotHash)
+			info.Version.DartVersion, info.SnapshotHash())
 	}
 
 	// Isolate snapshot: cluster scan + fill.
@@ -115,7 +140,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 	if info.IsolateHeader != nil {
 		isoSize = info.IsolateHeader.TotalSize
 	}
-	if err := cluster.ReadFill(data, result, info.Version, false, isoSize); err != nil {
+	if err := cluster.ReadFill(data, result, info.Version, false, isoSize, opts); err != nil {
 		_ = ef.Close()
 		return nil, fmt.Errorf("fill: %w", err)
 	}
@@ -142,29 +167,79 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 	}
 
 	// Code region.
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
+	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 	if err != nil {
 		_ = ef.Close()
 		return nil, fmt.Errorf("code region: %w", err)
 	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // bounded snapshot payload offsets
+	codeEndOffset, err := CheckedCodeEndOffset(codeOff, payloadLen)
+	if err != nil {
+		_ = ef.Close()
+		return nil, fmt.Errorf("code region extent: %w", err)
+	}
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
 	codeVA := info.IsolateInstructions.VA + codeOff
+	// A CodeRange is semantic input to every later stage: disassembly,
+	// type inference, fingerprints, decompilation and FFI tracing all assume the
+	// declared function body exists in full. Historically CodeImage.Slice clamps
+	// a range at the image end for low-level/debug consumers, which meant a bad
+	// range could otherwise turn into a plausible partial function here. Validate
+	// the invariant once at the loader boundary so all semantic consumers see an
+	// all-or-nothing image. Corpus measurement: 877,374 non-zero ranges across all
+	// 93 registered samples, zero truncations and zero zero-sized ranges.
+	codeImage := cluster.CodeImage{Code: code, CodeVA: codeVA, CodeOff: codeOff}
+	for i, r := range ranges {
+		if r.Size == 0 {
+			_ = ef.Close()
+			return nil, fmt.Errorf("code range %d ref=%d pc=0x%x has zero size", i, r.RefID, r.PCOffset)
+		}
+		if _, _, ok := codeImage.SliceExact(r); !ok {
+			_ = ef.Close()
+			return nil, fmt.Errorf("code range %d ref=%d pc=0x%x size=%d falls outside instructions image", i, r.RefID, r.PCOffset, r.Size)
+		}
+	}
 
-	// VM snapshot: cluster scan + fill (best-effort, nil if absent).
+	// VM snapshot: cluster scan + fill. Unified 3.13+ snapshots deliberately
+	// have no separate VM snapshot; every legacy snapshot does. In best-effort
+	// mode preserve any legacy VM incompleteness in VMError so identity-sensitive
+	// callers can fail closed without forcing that policy on every caller.
 	var vmResult *cluster.Result
-	if vmData := info.VmData.Data; len(vmData) >= 64 && info.VmHeader != nil {
-		if vmStart, err := snapshot.FindClusterDataStart(vmData); err == nil {
-			if vmRes, err := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts); err == nil {
-				_ = cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize)
-				vmResult = vmRes
+	var vmErr error
+	if !info.UnifiedSnapshot {
+		vmData := info.VmData.Data
+		switch {
+		case info.VmHeader == nil:
+			vmErr = fmt.Errorf("VM snapshot header unavailable")
+		case len(vmData) < 64:
+			vmErr = fmt.Errorf("VM snapshot data too short (%d bytes)", len(vmData))
+		default:
+			vmStart, startErr := snapshot.FindClusterDataStart(vmData)
+			if startErr != nil {
+				vmErr = fmt.Errorf("VM cluster start: %w", startErr)
+			} else {
+				vmRes, scanErr := cluster.ScanClusters(vmData, vmStart, info.Version, true, opts)
+				if scanErr != nil {
+					vmErr = fmt.Errorf("VM scan: %w", scanErr)
+				} else if fillErr := cluster.ReadFill(vmData, vmRes, info.Version, true, info.VmHeader.TotalSize, opts); fillErr != nil {
+					vmErr = fmt.Errorf("VM fill: %w", fillErr)
+				} else {
+					vmResult = vmRes
+				}
 			}
+		}
+		if vmErr != nil && opts.Mode == dartfmt.ModeStrict {
+			_ = ef.Close()
+			return nil, vmErr
 		}
 	}
 
 	// Pool lookups + display.
+	firstEntryWithCode := -1
+	if table != nil {
+		firstEntryWithCode = int(table.FirstEntryWithCode)
+	}
 	pl := naming.BuildPoolLookups(result, info.Version.CIDs, vmResult,
-		info.Version.CodeIndexOneBased, info.Version.DartVersion)
+		info.Version.CodeIndexOneBased, firstEntryWithCode, info.Version.DartVersion)
 	poolDisplay := naming.ResolvePoolDisplay(result.Pool, pl)
 
 	return &SnapshotContext{
@@ -172,6 +247,7 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		Info:        info,
 		Result:      result,
 		VMResult:    vmResult,
+		VMError:     vmErr,
 		Table:       table,
 		Ranges:      ranges,
 		Pool:        pl,
@@ -221,7 +297,7 @@ func LoadSnapshotIsolate(libPath string, opts dartfmt.Options) (*elfx.File, *sna
 	if info.Version != nil && !info.Version.Supported {
 		_ = ef.Close()
 		return nil, nil, nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)",
-			info.Version.DartVersion, info.VmHeader.SnapshotHash)
+			info.Version.DartVersion, info.SnapshotHash())
 	}
 	data := info.IsolateData.Data
 	if len(data) < 64 {
@@ -242,7 +318,7 @@ func LoadSnapshotIsolate(libPath string, opts dartfmt.Options) (*elfx.File, *sna
 	if info.IsolateHeader != nil {
 		isoSize = info.IsolateHeader.TotalSize
 	}
-	if err := cluster.ReadFill(data, result, info.Version, false, isoSize); err != nil {
+	if err := cluster.ReadFill(data, result, info.Version, false, isoSize, opts); err != nil {
 		_ = ef.Close()
 		return nil, nil, nil, fmt.Errorf("fill: %w", err)
 	}

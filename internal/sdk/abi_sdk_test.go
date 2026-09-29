@@ -22,7 +22,7 @@ import (
 // abiTags are the versions to check. The ABI structs move rarely, so a
 // spread across the supported range is enough to catch a change; every
 // one of them is checked in full.
-var abiTags = []string{"2.17.6", "3.0.5", "3.6.2", "3.9.2", "3.12.2", "3.13.0"}
+var abiTags = []string{"2.12.0", "3.0.5", "3.4.3", "3.9.2", "3.12.2", "3.13.0"}
 
 // regNumber maps an SDK register spelling to its encoding number.
 var regNumber = map[string]int{
@@ -81,6 +81,8 @@ func sdkABI(src, structName string) (map[string]int, error) {
 
 func TestRegisterABIMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
+	expected := map[string]bool{}
+	verified := map[string]bool{}
 
 	for _, tag := range abiTags {
 		t.Run(tag, func(t *testing.T) {
@@ -92,18 +94,26 @@ func TestRegisterABIMatchSDK(t *testing.T) {
 				{"arm64", "runtime/vm/constants_arm64.h", true},
 				{"x64", "runtime/vm/constants_x64.h", false},
 			} {
-				src, err := sdktest.GHFileAtTag(arch.header, tag)
+				src, err := sdktest.SDKFileAtTag(arch.header, tag)
 				if err != nil {
-					t.Skipf("fetch %s@%s: %v", arch.header, tag, err)
+					t.Fatalf("verify %s@%s: %v", arch.header, tag, err)
 				}
 
 				check := func(structName string, want map[string]int) {
+					for field := range want {
+						expected[arch.name+"/"+structName+"."+field] = true
+					}
+					if !strings.Contains(src, "struct "+structName+" {") {
+						t.Logf("%s/%s: struct %s absent at this tag", tag, arch.name, structName)
+						return
+					}
 					got, err := sdkABI(src, structName)
 					if err != nil {
 						t.Errorf("%s/%s: %v", tag, arch.name, err)
 						return
 					}
 					for field, w := range want {
+						key := arch.name + "/" + structName + "." + field
 						g, ok := got[field]
 						if !ok {
 							// The ABI structs gained fields over time --
@@ -115,6 +125,7 @@ func TestRegisterABIMatchSDK(t *testing.T) {
 								tag, arch.name, structName, field)
 							continue
 						}
+						verified[key] = true
 						if g != w {
 							t.Errorf("%s/%s %s.%s = R%d in the SDK, committed R%d\n"+
 								"  A wrong register number does not fail, it reads a different\n"+
@@ -161,6 +172,11 @@ func TestRegisterABIMatchSDK(t *testing.T) {
 				check("DispatchTableNullErrorABI", map[string]int{"kClassIdReg": wantCid})
 			}
 		})
+	}
+	for key := range expected {
+		if !verified[key] {
+			t.Errorf("committed ABI field %s was absent from every exact SDK probe %v", key, abiTags)
+		}
 	}
 }
 

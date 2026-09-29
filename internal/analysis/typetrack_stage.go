@@ -2,7 +2,6 @@ package analysis
 
 import (
 	"aotopsy/internal/arch/x86"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,9 +13,12 @@ import (
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
 	"aotopsy/internal/vmtables"
@@ -33,7 +35,10 @@ import (
 //  3. Re-disassembles all functions and runs type inference.
 //  4. Rewrites call_edges.jsonl with resolved BLR targets.
 //
-// Non-fatal: if anything fails, BLR edges remain unresolved (as before).
+// A failure is fatal to the staged generation. Publishing the disassembly
+// while silently leaving BLR edges unresolved makes every downstream xref,
+// signal, and evidence artifact look complete while carrying degraded call
+// semantics.
 func RunTypeInferenceStage(
 	opts *Opts,
 	isARM64 bool,
@@ -48,24 +53,38 @@ func RunTypeInferenceStage(
 	thrFields map[int]string,
 	vmResult *cluster.Result,
 ) (*TypeInferenceOutput, error) {
-	if info == nil || info.Version == nil {
-		return nil, nil
+	if opts == nil {
+		return nil, fmt.Errorf("type inference options unavailable")
+	}
+	if info == nil {
+		return nil, fmt.Errorf("snapshot info unavailable")
+	}
+	if info.Version == nil {
+		return nil, fmt.Errorf("snapshot version profile unavailable")
+	}
+	if clResult == nil {
+		return nil, fmt.Errorf("cluster result unavailable")
+	}
+	if pl == nil {
+		return nil, fmt.Errorf("pool lookups unavailable")
+	}
+	if info.Version.CIDs == nil {
+		return nil, fmt.Errorf("dart %s has no CID profile", info.Version.DartVersion)
 	}
 	if info.Version.ObjectStoreAOTFieldCount <= 0 {
-		return nil, nil
+		return nil, fmt.Errorf("dart %s has no verified Full AOT ObjectStore field count", info.Version.DartVersion)
 	}
 	// TARGET 3: For Dart 2.x (no InstructionsTable), still run typetrack
 	// using dispatch table entries from TextOffset fallback.
 	if table == nil && !info.Version.CodeTextOffsetDelta {
-		return nil, nil
+		return nil, fmt.Errorf("dart %s has neither InstructionsTable nor verified text-offset code locator", info.Version.DartVersion)
 	}
 
 	opts.logf("  type inference: starting...\n")
 
 	bd, tctx, interResult, err := runTypeInference(opts.OutDir, clResult, pl, ranges, code, codeOff, codeVA, info, table, isARM64, thrFields, vmResult)
 	if err != nil {
-		opts.logf("  type inference: %v (BLR edges remain unresolved)\n", err)
-		return nil, nil // non-fatal
+		return nil, fmt.Errorf("run type inference: %w", err)
 	}
 
 	// Report the three claims separately. "resolved N/M" alone hid the
@@ -87,6 +106,7 @@ func RunTypeInferenceStage(
 	out := &TypeInferenceOutput{Inter: interResult}
 	if tctx != nil {
 		out.ClassIDToName = tctx.ClassIDToName
+		out.SelectorTargets = buildSelectorTargets(tctx)
 	}
 
 	if err := typetrack.WriteTypeInferenceReport(opts.OutDir, bd, tctx); err != nil {
@@ -107,6 +127,37 @@ func RunTypeInferenceStage(
 type TypeInferenceOutput struct {
 	Inter         *typetrack.InterResult
 	ClassIDToName map[int]string
+	// SelectorTargets is keyed by the actual selector immediate used by
+	// EmitDispatchTableCall, not by an absolute dispatch-table entry index.
+	SelectorTargets map[int][]string
+}
+
+func buildSelectorTargets(ctx *typetrack.TypeContext) map[int][]string {
+	if ctx == nil {
+		return nil
+	}
+	sets := make(map[int]map[string]struct{})
+	for name, imms := range ctx.MethodNameToSelectorImms {
+		if name == "" {
+			continue
+		}
+		for _, imm := range imms {
+			if sets[imm] == nil {
+				sets[imm] = make(map[string]struct{})
+			}
+			sets[imm][name] = struct{}{}
+		}
+	}
+	out := make(map[int][]string, len(sets))
+	for imm, names := range sets {
+		targets := make([]string, 0, len(names))
+		for name := range names {
+			targets = append(targets, name)
+		}
+		sort.Strings(targets)
+		out[imm] = targets
+	}
+	return out
 }
 
 // runTypeInference is the core logic, separated from RunTypeInferenceStage
@@ -186,16 +237,17 @@ func runTypeInference(
 	// ParseDispatchTable reads from the roots section, which is in the
 	// snapshot DATA region (info.IsolateData.Data), not the instructions
 	// region. result.FillEnd is the byte offset within this data.
-	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table)
+	dispatchEntries, err := cluster.ParseDispatchTable(info.IsolateData.Data, clResult, info.Version, table, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
 		return BLRBreakdown{}, nil, nil, fmt.Errorf("parse dispatch table: %w", err)
 	}
-	if len(dispatchEntries) == 0 {
-		return BLRBreakdown{}, nil, nil, nil
-	}
 
 	// 2. Build TypeContext.
-	byCodeIndex := naming.CodeIndexToFunc(clResult, info.Version.CIDs, info.Version.CodeIndexOneBased)
+	firstEntryWithCode := -1
+	if table != nil {
+		firstEntryWithCode = int(table.FirstEntryWithCode)
+	}
+	byCodeIndex := naming.CodeIndexToFunc(clResult, info.Version.CIDs, info.Version.CodeIndexOneBased, firstEntryWithCode)
 
 	// Build CodeRefToName map from CodeNames.
 	codeRefToName := make(map[int]string, len(pl.CodeNames))
@@ -329,17 +381,7 @@ func runTypeInference(
 	// When a Type object is loaded from the pool and its
 	// type_test_stub_entry_point_ (offset 7 from tagged) is called via BLR,
 	// the type tracker needs the stub name to resolve the call.
-	poolTTSNames := make(map[int]string)
-	if len(pl.TypeNames) > 0 {
-		for _, pe := range clResult.Pool {
-			if pe.Kind != cluster.PoolTagged {
-				continue
-			}
-			if name := naming.TypeTestingStubName(pl.TypeNames, pe.RefID); name != "" {
-				poolTTSNames[pe.Index] = name
-			}
-		}
-	}
+	poolTTSNames := naming.BuildTTSCallTargets(clResult.Pool, pl)
 
 	poolData := &typetrack.PoolLookupData{
 		RefToStr:             pl.RefToStr,
@@ -366,11 +408,16 @@ func runTypeInference(
 		kOriginElement = 16
 	}
 
-	// Get allocation stub offsets from ThreadStubOffsets (arch-independent).
-	allocStubOffsets := vmtables.ThreadStubOffsets(info.Version.DartVersion, isARM64)
+	// Get allocation stub offsets from the exact snapshot profile. Pointer
+	// compression changes the Thread layout on supported 64-bit targets.
+	var allocStubOffsets map[int64]string
+	if target, ok := vmtables.TargetProfileFromVersion(info.Version, isARM64); ok {
+		allocStubOffsets = vmtables.ThreadStubOffsets(target)
+	}
 
 	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets,
 		buildAllocationStubCIDs(clResult, pl, ranges, codeVA, codeOff))
+	registerCC, hasRegisterCC := sdk.DartRegisterCallingConvention(info.Version.DartVersion, isARM64)
 
 	// Build class name → class ID lookup from ClassIDToName.
 	// ClassIDToName is built from ClassInfo.ClassID (Dart runtime CID).
@@ -401,7 +448,9 @@ func runTypeInference(
 	}
 
 	// Write dispatch table for debugging.
-	_ = typetrack.WriteDispatchTable(outDir, dispatchEntries, ctx)
+	if err := typetrack.WriteDispatchTable(outDir, dispatchEntries, ctx); err != nil {
+		return BLRBreakdown{}, nil, nil, fmt.Errorf("write dispatch table: %w", err)
+	}
 
 	// 3. Re-disassemble all functions and collect instruction lists.
 	var funcInstsARM64 typetrack.FuncInstsARM64
@@ -412,9 +461,6 @@ func runTypeInference(
 		funcInstsX86 = make(map[string][]x86.Decoded, len(ranges))
 	}
 	// DartCallingConvention (kCpuRegistersForArgs) first appears in
-	// constants_arm64.h at 3.4.3; before it, every argument including the
-	// receiver is passed on the stack.
-	receiverOnStack := !snapshot.VersionAtLeast(info.Version.DartVersion, "3.4.3")
 	// One source for the ClassIdTag layout: snapshot.ClassIdTagLayout, which
 	// is also what fill_strings.go reads and what the SDK drift gate checks.
 	ctx.SetClassIDTagLayout(snapshot.ClassIdTagLayout(info.Version.DartVersion))
@@ -425,9 +471,27 @@ func runTypeInference(
 		start, end uint64
 		name       string
 	}
-	var funcRanges []funcRange
-
 	codeImage := NewCodeImage(code, codeVA, codeOff, pl, nil)
+	// Build the complete target-address index BEFORE extracting any call edges.
+	// The old single pass appended each range immediately before disassembling it,
+	// so a direct call could resolve only to the current or an EARLIER function.
+	// Forward calls were silently absent from blEdges. That was already an
+	// interprocedural blind spot; once register-CC evidence was attached to those
+	// edges it also starved later callees of argument-location evidence and caused
+	// a large BLR-resolution regression.
+	funcRanges := make([]funcRange, 0, len(ranges))
+	for i := range ranges {
+		fs, ok := codeImage.Slice(ranges[i])
+		if !ok {
+			continue
+		}
+		funcRanges = append(funcRanges, funcRange{
+			start: fs.VA,
+			end:   fs.VA + uint64(ranges[i].Size),
+			name:  fs.Name,
+		})
+	}
+
 	for i := range ranges {
 		r := &ranges[i]
 		fs, ok := codeImage.Slice(*r)
@@ -437,9 +501,24 @@ func runTypeInference(
 		funcVA := fs.VA
 		name := fs.Name
 		ownerName := fs.Owner
+		var codeName naming.CodeNameInfo
+		if r.RefID >= 0 {
+			codeName = pl.CodeNames[r.RefID]
+			ctx.FuncMayUseRegisterCC[name] = codeName.MayUseRegisterCC
+			ctx.FuncMustUseStackCC[name] = codeName.MustUseStackCC
+		}
+		// For 3.4.3+ an SDK register table exists globally but a specific
+		// Function may still be forced to the stack. Only the definitive
+		// snapshot-negative cases use stack recovery here. Ordinary eligible
+		// functions are left unseeded until RunInterprocedural sees independent
+		// multi-call-site register-setup evidence.
+		receiverDefinitelyOnStack := codeName.MustUseStackCC
+		legacyStaticReceiverSlot := receiverDefinitelyOnStack &&
+			!snapshot.VersionAtLeast(info.Version.DartVersion, sdk.FirstRegisterCallingConventionVersion)
 
-		// Map function name → owner class ID for instance method receiver init.
-		if ownerName != "" {
+		// Map INSTANCE function name → owner class ID for receiver init. A static
+		// method is class-owned too, so OwnerName alone is not receiver evidence.
+		if ownerName != "" && codeName.ReceiverKnown && codeName.HasImplicitReceiver {
 			if cid, ok := classNameToID[ownerName]; ok && cid >= 0 {
 				ctx.FuncOwnerClass[name] = cid
 				// Before Dart 3.4.3 there is no register calling convention:
@@ -455,8 +534,8 @@ func runTypeInference(
 				// static slot and the old formula recorded one no load could
 				// match -- a dead seed rather than a wrong one, but still a
 				// claim with nothing behind it.
-				if receiverOnStack && r.RefID >= 0 {
-					ci := pl.CodeNames[r.RefID]
+				if legacyStaticReceiverSlot && r.RefID >= 0 {
+					ci := codeName
 					if slot, ok := cluster.ReceiverFrameSlot(
 						ci.FixedParamsWithReceiver, ci.OptionalParams,
 						ci.IsSuspendable, 8,
@@ -467,7 +546,6 @@ func runTypeInference(
 			}
 		}
 
-		funcRanges = append(funcRanges, funcRange{start: funcVA, end: funcVA + uint64(r.Size), name: name})
 		funcCode := fs.Code
 
 		if isARM64 {
@@ -475,10 +553,26 @@ func runTypeInference(
 				BaseAddr: funcVA,
 			})
 			funcInstsARM64[name] = insts
+			if _, isInstance := ctx.FuncOwnerClass[name]; hasRegisterCC && codeName.MayUseRegisterCC && isInstance {
+				fir := decompiler.BuildARM64IR(name, info.Version.DartVersion, insts, registerCC)
+				for _, pos := range decompiler.LiveInArgIndices(fir) {
+					if pos == 0 {
+						ctx.FuncReceiverInRegister[name] = true
+						break
+					}
+				}
+			}
 
-			// Pre-3.4.3 receiver-slot recovery from CODE when arity was absent
-			// from the snapshot (2.14..3.3.0). See receiver_recovery.go.
-			if receiverOnStack {
+			// Recover an actual stack receiver not only for metadata-proven stack
+			// functions, but also for modern MAY-register functions whose receiver
+			// register is not live-in. This catches the precompiler-only
+			// must_use_stack_calling_convention bit that full AOT snapshots omit;
+			// the recovery itself is a positive machine-code proof (FP load plus
+			// owner-field use), not a guess from the missing metadata.
+			_, isInstance := ctx.FuncOwnerClass[name]
+			recoverStackReceiver := receiverDefinitelyOnStack ||
+				(hasRegisterCC && codeName.MayUseRegisterCC && isInstance && !ctx.FuncReceiverInRegister[name])
+			if recoverStackReceiver {
 				if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 					if _, set := ctx.FuncReceiverStackSlot[name]; !set {
 						if slot, ok := typetrack.RecoverReceiverStackSlotARM64(insts, ownerCID, ctx); ok {
@@ -494,6 +588,7 @@ func runTypeInference(
 				}
 			}
 
+			argMasks := disasm.DirectCallArgMasksARM64(insts)
 			// Collect BL edges for inter-procedural propagation.
 			for _, inst := range insts {
 				if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
@@ -506,8 +601,9 @@ func runTypeInference(
 					}
 					if calleeName != "" {
 						blEdges[name] = append(blEdges[name], typetrack.BLEdge{
-							Callee: calleeName,
-							CallPC: inst.Addr,
+							Callee:  calleeName,
+							CallPC:  inst.Addr,
+							ArgMask: argMasks[inst.Addr],
 						})
 					}
 				}
@@ -515,9 +611,21 @@ func runTypeInference(
 		} else {
 			insts := typetrack.DecodeX86Function(funcCode, funcVA)
 			funcInstsX86[name] = insts
+			if _, isInstance := ctx.FuncOwnerClass[name]; hasRegisterCC && codeName.MayUseRegisterCC && isInstance {
+				fir := decompiler.BuildX86IR(name, insts, registerCC)
+				for _, pos := range decompiler.LiveInArgIndices(fir) {
+					if pos == 0 {
+						ctx.FuncReceiverInRegister[name] = true
+						break
+					}
+				}
+			}
 
-			// Pre-3.4.3 receiver-slot recovery from CODE (x86_64). See above.
-			if receiverOnStack {
+			// Same positive stack-receiver recovery on x86_64.
+			_, isInstance := ctx.FuncOwnerClass[name]
+			recoverStackReceiver := receiverDefinitelyOnStack ||
+				(hasRegisterCC && codeName.MayUseRegisterCC && isInstance && !ctx.FuncReceiverInRegister[name])
+			if recoverStackReceiver {
 				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
 					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 						if slot, ok := typetrack.RecoverReceiverStackSlotX86(insts, ownerCID, ctx); ok {
@@ -527,10 +635,11 @@ func runTypeInference(
 				}
 			}
 
+			argMasks := disasm.DirectCallArgMasksX86(insts)
 			// Collect CALL rel32 edges for inter-procedural propagation.
 			for _, inst := range insts {
 				if inst.Inst.Op == x86asm.CALL {
-					if target, ok := x86CallRelTarget(inst); ok {
+					if target, ok := x86.RelTarget(inst.Inst, inst.VA, inst.Len); ok {
 						calleeName := ""
 						for _, fr := range funcRanges {
 							if target >= fr.start && target < fr.end {
@@ -540,8 +649,9 @@ func runTypeInference(
 						}
 						if calleeName != "" {
 							blEdges[name] = append(blEdges[name], typetrack.BLEdge{
-								Callee: calleeName,
-								CallPC: inst.VA,
+								Callee:  calleeName,
+								CallPC:  inst.VA,
+								ArgMask: argMasks[inst.VA],
 							})
 						}
 					}
@@ -571,7 +681,12 @@ func runTypeInference(
 	interResult := typetrack.RunInterprocedural(ctx, funcInstsARM64, funcInstsX86, blEdges, maxIter, isARM64, blTargetToName)
 
 	// 5. Rewrite call_edges.jsonl with resolved BLR targets.
-	bd, err := rewriteCallEdges(outDir, interResult, naming.BuildTTSCallTargets(clResult.Pool, pl))
+	bd, err := rewriteCallEdges(
+		outDir,
+		interResult,
+		naming.BuildTTSCallTargets(clResult.Pool, pl),
+		buildThreadCallableTargets(thrFields, allocStubOffsets),
+	)
 	if err != nil {
 		return bd, ctx, interResult, fmt.Errorf("rewrite call_edges: %w", err)
 	}
@@ -710,10 +825,15 @@ type BLRBreakdown = typetrack.BLRBreakdown
 // rewriteCallEdges reads call_edges.jsonl, fills in what the
 // inter-procedural analysis recovered for each indirect call site, writes it
 // back, and returns the breakdown.
-func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPoolIndex map[int]string) (BLRBreakdown, error) {
+func rewriteCallEdges(
+	outDir string,
+	interResult *typetrack.InterResult,
+	ttsByPoolIndex map[int]string,
+	thrStubTargets map[string]string,
+) (BLRBreakdown, error) {
 	var bd BLRBreakdown
 	edgesPath := filepath.Join(outDir, "call_edges.jsonl")
-	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](edgesPath)
+	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](edgesPath, jsonutil.StandardLimits)
 	if err != nil {
 		return bd, fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
@@ -767,14 +887,14 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 			e.Target = name
 			bd.Stub++
 		} else if strings.HasPrefix(e.Via, "THR.") {
-			// Fallback: resolve THR stub calls from via annotation.
-			// via format: "THR.stub_name" or "THR.stub_name_ep"
-			stubName := strings.TrimPrefix(e.Via, "THR.")
-			// Remove _ep suffix if present
-			stubName = strings.TrimSuffix(stubName, "_ep")
-			// Remove _entry_point suffix if present
-			stubName = strings.TrimSuffix(stubName, "_entry_point")
-			if stubName != "" {
+			// A Thread-relative provenance names a FIELD, not necessarily a
+			// callable. The same SDK table contains data such as
+			// dispatch_table_array and field_table_values alongside cached VM stub
+			// entry points. Resolve only the exact field names whose offsets are in
+			// the independently-derived ThreadStubOffsets table; treating every
+			// THR field as a stub fabricates call targets from data pointers.
+			fieldName := strings.TrimPrefix(e.Via, "THR.")
+			if stubName := thrStubTargets[fieldName]; stubName != "" {
 				e.Target = stubName
 				bd.Stub++
 			} else {
@@ -803,21 +923,74 @@ func rewriteCallEdges(outDir string, interResult *typetrack.InterResult, ttsByPo
 		// Via, and inflated the resolved-BLR count. Removed.
 	}
 
-	// Write back.
-	f, err := os.Create(edgesPath)
-	if err != nil {
-		return bd, fmt.Errorf("create call_edges.jsonl: %w", err)
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	for _, e := range edges {
-		if err := enc.Encode(e); err != nil {
-			return bd, fmt.Errorf("encode call_edge: %w", err)
-		}
+	// Publish transactionally. A direct os.Create + encoder loop can truncate
+	// the previous generation before an encode/write failure is known.
+	if _, err := jsonutil.WriteJSONLFile(edgesPath, edges); err != nil {
+		return bd, fmt.Errorf("write call_edges.jsonl: %w", err)
 	}
 
 	return bd, nil
+}
+
+// buildThreadCallableTargets joins the SDK-derived Thread field table with the
+// subset of Thread fields that are callable targets.
+//
+// ThreadStubOffsets supplies canonical names for cached VM-stub entry points.
+// THRFields itself also carries runtime/leaf-runtime entry points and cached
+// function entry points as literal "*_entry_point" fields: extract_thr writes
+// those names from runtime_offsets_extracted.h plus the SDK runtime-entry lists
+// and drift-gates them against the exact SDK source.  A few cached CodePtr
+// stubs are stored as "*_stub" rather than an entry-point scalar; keep only the
+// exact callable fields proven by CACHED_VM_STUBS_LIST.  Write-barrier wrapper
+// slots are likewise callable entry points and are named explicitly by the
+// extracted write_barrier_wrappers_thread_offset range.
+//
+// Crucially, ordinary Thread data fields such as dispatch_table_array and
+// field_table_values never enter this map. Treating every named THR load as a
+// callee previously fabricated thousands of resolved indirect calls to data.
+// The result is keyed by the raw Thread field name because that is what
+// disassembly provenance stores in CallEdge.Via.
+func buildThreadCallableTargets(thrFields map[int]string, stubOffsets map[int64]string) map[string]string {
+	if len(thrFields) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(stubOffsets)+32)
+	for off, stubName := range stubOffsets {
+		if stubName == "" {
+			continue
+		}
+		if fieldName := thrFields[int(off)]; fieldName != "" {
+			out[fieldName] = stubName
+		}
+	}
+	for _, fieldName := range thrFields {
+		if fieldName == "" {
+			continue
+		}
+		// Prefer the canonical VM-stub name supplied above when the same field
+		// is represented in ThreadStubOffsets.
+		if _, exists := out[fieldName]; exists {
+			continue
+		}
+		if target, ok := strings.CutSuffix(fieldName, "_entry_point"); ok && target != "" {
+			out[fieldName] = target
+			continue
+		}
+		switch fieldName {
+		case "enter_safepoint_stub":
+			out[fieldName] = "EnterSafepoint"
+		case "exit_safepoint_stub":
+			out[fieldName] = "ExitSafepoint"
+		default:
+			if strings.HasPrefix(fieldName, "wb_wrapper_R") {
+				out[fieldName] = fieldName
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display
@@ -873,17 +1046,4 @@ func resolveViaPoolDisplay(via string) string {
 		return ""
 	}
 	return rest
-}
-
-// x86CallRelTarget returns the absolute target of a CALL rel32 instruction.
-func x86CallRelTarget(d x86.Decoded) (uint64, bool) {
-	for _, arg := range d.Inst.Args {
-		if arg == nil {
-			continue
-		}
-		if rel, ok := arg.(x86asm.Rel); ok {
-			return d.VA + uint64(d.Len) + uint64(int64(rel)), true
-		}
-	}
-	return 0, false
 }

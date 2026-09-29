@@ -13,7 +13,6 @@ import (
 
 // cmdIDA handles "aotopsy ida <libapp.so>" — full pipeline + IDA decompilation.
 func cmdIDA(args []string) error {
-	args = reorderPositionalArg(args)
 	fs := flag.NewFlagSet("ida", flag.ExitOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	all := fs.Bool("all", false, "decompile ALL functions")
@@ -27,7 +26,7 @@ func cmdIDA(args []string) error {
 	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -47,22 +46,34 @@ func cmdIDA(args []string) error {
 		}
 	}
 
-	if *outDir == "" {
+	if *from != "" && *outDir == "" {
+		*outDir = *from
+	} else if *outDir == "" {
 		*outDir = defaultOutDir(libPath)
+	}
+	if *from != "" {
+		if _, err := analysis.VerifyProvenanceBinary(*from, absLibPath); err != nil {
+			return fmt.Errorf("verify IDA --from provenance: %w", err)
+		}
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
 	var pipeResult *analysis.Result
 	if *from != "" {
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true, "")
+		var err error
+		pipeResult, err = analysis.Run(analysis.Opts{
+			FromDir:   *from,
+			OutDir:    *outDir,
+			Signal:    true,
+			SignalK:   2,
+			Meta:      analysis.MetaRequired,
+			DecompAll: *all,
+			Quiet:     quiet,
+			Log:       os.Stderr,
+		})
 		if err != nil {
-			return fmt.Errorf("signal: %w", err)
+			return err
 		}
-		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
-		if err != nil {
-			return fmt.Errorf("meta: %w", err)
-		}
-		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
 		pipeResult, err = analysis.Run(analysis.Opts{
@@ -70,13 +81,16 @@ func cmdIDA(args []string) error {
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,
 			Signal:    true,
-			Meta:      true,
+			Meta:      analysis.MetaRequired,
 			DecompAll: *all,
 			Quiet:     quiet,
 		})
 		if err != nil {
 			return err
 		}
+	}
+	if _, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, absLibPath); err != nil {
+		return fmt.Errorf("verify IDA binary provenance: %w", err)
 	}
 
 	metaPath := pipeResult.MetaPath

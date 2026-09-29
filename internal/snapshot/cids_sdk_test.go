@@ -37,7 +37,7 @@ import (
 // assumed. Assuming it is how a table silently gains a constant offset
 // across an entire tail.
 func cidEnum(tag string) (map[string]int, int, error) {
-	src, err := sdktest.GHFileAtTag("runtime/vm/class_id.h", tag)
+	src, err := sdktest.SDKFileAtTag("runtime/vm/class_id.h", tag)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -101,8 +101,8 @@ func cidEnum(tag string) (map[string]int, int, error) {
 			name, arg, isCall := splitCall(tok)
 			if !isCall {
 				// A bare object-like list macro (3.13's CLASS_ID_LIST).
-				if body, ok := macros[name]; ok && strings.Contains(body, "(") {
-					if err := walk(body, depth+1); err != nil {
+				if macro, ok := macros[name]; ok && strings.Contains(macro.Body, "(") {
+					if err := walk(macro.Body, depth+1); err != nil {
 						return err
 					}
 				}
@@ -121,7 +121,10 @@ func cidEnum(tag string) (map[string]int, int, error) {
 			if _, ok := macros[name]; ok && strings.HasPrefix(name, "CLASS_LIST") {
 				tmpl, ok := templates[arg]
 				if !ok {
-					tmpl, ok = macros[arg]
+					macro, found := macros[arg]
+					if found {
+						tmpl, ok = macro.Body, true
+					}
 				}
 				if !ok {
 					return cidError("no template " + arg + " for " + name + " at " + tag)
@@ -296,21 +299,27 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 
 			v := reflect.ValueOf(*c.table)
 			ty := v.Type()
-			checked, skipped := 0, 0
+			checked, absent := 0, 0
 			for i := 0; i < ty.NumField(); i++ {
 				f := ty.Field(i)
 				if f.Type.Kind() != reflect.Int {
 					continue
 				}
 				got := int(v.Field(i).Int())
-				if got == 0 {
-					skipped++ // recorded as absent for this version
-					continue
-				}
 				if f.Name == "TypedDataCidStride" {
 					continue // checked above, against the macro template
 				}
 				want, ok := lookupCID(enum, f.Name)
+				if got == 0 {
+					if !cidRecordedZeroIsValid(c.tag, f.Name, want, ok) {
+						t.Errorf("%s: field %s is recorded as 0, but class_id.h@%s defines it as CID %d and no no-cluster exception applies\n"+
+							"  Zero is not a wildcard: dropping a mapped CID silently disables its cluster reader.",
+							c.tag, f.Name, c.tag, want)
+						continue
+					}
+					absent++
+					continue
+				}
 				if !ok {
 					t.Errorf("%s: field %s = %d, but no matching class in class_id.h@%s\n"+
 						"  Either the field names a class that does not exist at this version\n"+
@@ -329,8 +338,40 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 			if checked < 30 {
 				t.Errorf("%s: only %d fields checked; the mapping is not covering the table", c.tag, checked)
 			}
-			t.Logf("%s: %d fields verified, %d recorded absent", c.tag, checked, skipped)
+			t.Logf("%s: %d non-zero fields verified, %d zero fields verified unsupported", c.tag, checked, absent)
 		})
+	}
+}
+
+func cidRecordedZeroIsValid(tag, field string, sdkCID int, found bool) bool {
+	if !found || sdkCID == 0 {
+		return true
+	}
+	// These classes existed in class_id.h before they acquired snapshot
+	// serialization clusters. Their CID alone is therefore insufficient evidence
+	// that CIDTable should map them. app_snapshot.cc gains all three cluster
+	// handlers in 3.13.0; exact older release tags are immutable.
+	if !VersionAtLeast(tag, "3.13.0") {
+		switch field {
+		case "LocalVarDescriptors", "ApiError", "UnwindError":
+			return true
+		}
+	}
+	return false
+}
+
+func TestCIDRecordedAbsentRequiresSDKAbsence(t *testing.T) {
+	if cidRecordedZeroIsValid("3.12.2", "Function", 17, true) {
+		t.Fatal("zero-valued CID accepted even though the SDK defines the class")
+	}
+	if !cidRecordedZeroIsValid("3.12.2", "Record", 0, false) {
+		t.Fatal("zero-valued CID rejected for a class absent from the SDK")
+	}
+	if !cidRecordedZeroIsValid("3.12.2", "LocalVarDescriptors", 27, true) {
+		t.Fatal("pre-3.13 class with no snapshot cluster was rejected")
+	}
+	if cidRecordedZeroIsValid("3.13.0", "LocalVarDescriptors", 27, true) {
+		t.Fatal("3.13 LocalVarDescriptors zero accepted after its snapshot cluster was added")
 	}
 }
 

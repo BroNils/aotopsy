@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/render"
 	"aotopsy/internal/strutil"
 )
@@ -63,14 +65,22 @@ func cmdRender(args []string) error {
 	}
 
 	// Read functions.jsonl.
-	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(*inDir, "functions.jsonl"))
+	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(*inDir, "functions.jsonl"), jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read functions.jsonl: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "read %d functions\n", len(funcs))
+	index, err := jsonutil.ReadJSONL[strutil.DisasmIndexEntry](filepath.Join(*inDir, "index.jsonl"), jsonutil.StandardLimits)
+	if err != nil {
+		return fmt.Errorf("read index.jsonl: %w", err)
+	}
+	artifactFiles, err := analysis.DisasmArtifactFiles(funcs, index)
+	if err != nil {
+		return err
+	}
 
 	// Read call_edges.jsonl.
-	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(*inDir, "call_edges.jsonl"))
+	edges, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](filepath.Join(*inDir, "call_edges.jsonl"), jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
@@ -80,18 +90,25 @@ func cmdRender(args []string) error {
 	unresTHRPath := filepath.Join(*inDir, "unresolved_thr.jsonl")
 	var unresTHR []disasm.UnresolvedTHRRecord
 	if _, err := os.Stat(unresTHRPath); err == nil {
-		unresTHR, err = jsonutil.ReadJSONL[disasm.UnresolvedTHRRecord](unresTHRPath)
+		unresTHR, err = jsonutil.ReadJSONL[disasm.UnresolvedTHRRecord](unresTHRPath, jsonutil.StandardLimits)
 		if err != nil {
 			return fmt.Errorf("read unresolved_thr.jsonl: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "read %d unresolved THR records\n", len(unresTHR))
 	}
 
-	// Create render output directory.
-	renderDir := filepath.Join(*inDir, "render")
-	if err := os.MkdirAll(renderDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir render: %w", err)
+	finalRenderDir := filepath.Join(*inDir, "render")
+	tx, err := output.BeginDirTransaction(finalRenderDir)
+	if err != nil {
+		return fmt.Errorf("begin render generation: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	renderDir := tx.StageDir()
 
 	// Compute stats.
 	stats := render.ComputeStats(funcs, edges)
@@ -162,7 +179,15 @@ func cmdRender(args []string) error {
 
 	// Generate per-function CFGs if --cfg and asm directory exists.
 	var cfgFuncs int
+	cfgLinks := make(map[string]string)
 	if *cfgFlag {
+		prov, ok, err := analysis.ReadProvenance(*inDir)
+		if err != nil {
+			return fmt.Errorf("read provenance for CFG architecture: %w", err)
+		}
+		if !ok || (prov.Arch != "arm64" && prov.Arch != "x64") {
+			return fmt.Errorf("--cfg requires provenance.json with arch arm64 or x64")
+		}
 		if _, err := os.Stat(*asmDir); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: --cfg requires asm directory at %s\n", *asmDir)
 		} else {
@@ -170,7 +195,7 @@ func cmdRender(args []string) error {
 			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir cfg: %w", err)
 			}
-			cfgFuncs, err = generateCFGs(funcs, edges, reachable, *asmDir, cfgDir, !*noDot)
+			cfgFuncs, cfgLinks, err = generateCFGs(funcs, edges, reachable, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
 			if err != nil {
 				return fmt.Errorf("generate CFGs: %w", err)
 			}
@@ -180,23 +205,24 @@ func cmdRender(args []string) error {
 
 	// Generate index.html.
 	htmlPath := filepath.Join(renderDir, "index.html")
-	htmlFile, err := os.Create(htmlPath)
-	if err != nil {
-		return fmt.Errorf("create index.html: %w", err)
-	}
-	render.WriteIndexHTML(htmlFile, stats, unresTHR, *title,
-		hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG,
-		entryPoints, len(reachable), cfgFuncs)
-	if err := htmlFile.Close(); err != nil {
-		return fmt.Errorf("close index.html: %w", err)
+	if err := output.WriteAtomic(htmlPath, 0o644, func(w io.Writer) error {
+		return render.WriteIndexHTML(w, stats, unresTHR, *title,
+			hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG,
+			entryPoints, len(reachable), cfgFuncs, cfgLinks)
+	}); err != nil {
+		return fmt.Errorf("write index.html: %w", err)
 	}
 	fi, _ := os.Stat(htmlPath)
 	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", htmlPath, fi.Size())
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish render generation: %w", err)
+	}
+	committed = true
 
 	return nil
 }
 
-func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, asmDir, cfgDir string, genSVG bool) (int, error) {
+func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, artifactFiles map[string]string, asmDir, cfgDir, arch string, genSVG bool) (int, map[string]string, error) {
 	// Call edges bucketed by caller, so each CFG can be drawn with the
 	// callees of that function rather than of the whole binary.
 	edgesByFunc := make(map[string][]disasm.CallEdgeRecord, len(funcs))
@@ -204,6 +230,7 @@ func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reac
 		edgesByFunc[e.FromFunc] = append(edgesByFunc[e.FromFunc], e)
 	}
 	count := 0
+	cfgLinks := make(map[string]string)
 	for _, f := range funcs {
 		if !reachable[f.Name] {
 			continue
@@ -212,46 +239,66 @@ func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reac
 			continue
 		}
 
-		safeName := strutil.SanitizeFilename(f.Name)
-		binPath := filepath.Join(asmDir, safeName+".bin")
-		data, err := os.ReadFile(binPath)
-		if err != nil {
-			continue
+		txtRel, ok := artifactFiles[f.Name]
+		if !ok {
+			return count, cfgLinks, fmt.Errorf("no canonical disassembly artifact for %q", f.Name)
 		}
-		if len(data) < 4 {
+		data, err := analysis.ReadFunctionBin(asmDir, txtRel, f.Size)
+		if err != nil {
+			return count, cfgLinks, fmt.Errorf("read function bytes for %s: %w", f.Name, err)
+		}
+		if len(data) == 0 {
 			continue
 		}
 
 		pc, err := strconv.ParseUint(strings.TrimPrefix(f.PC, "0x"), 16, 64)
 		if err != nil {
-			continue
+			return count, cfgLinks, fmt.Errorf("parse function pc %q for %s: %w", f.PC, f.Name, err)
 		}
 
-		insts := decodeRawInsts(data, pc)
-		if len(insts) == 0 {
-			continue
+		var cfg disasm.FuncCFG
+		switch arch {
+		case "arm64":
+			if len(data)%4 != 0 {
+				return count, cfgLinks, fmt.Errorf("ARM64 function %s has non-word byte length %d", f.Name, len(data))
+			}
+			insts := decodeRawInsts(data, pc)
+			cfg = disasm.BuildCFG(f.Name, insts)
+		case "x64":
+			cfg = disasm.BuildX86CFG(f.Name, data, pc)
+		default:
+			return count, cfgLinks, fmt.Errorf("unsupported CFG architecture %q", arch)
 		}
-
-		cfg := disasm.BuildCFG(f.Name, insts)
 		if len(cfg.Blocks) == 0 {
 			continue
 		}
 
 		dot := render.CFGDOT(cfg, edgesByFunc[f.Name], render.NASA)
-		dotPath := filepath.Join(cfgDir, safeName+".dot")
+		underAsm, err := filepath.Rel("asm", txtRel)
+		if err != nil || underAsm == "." || underAsm == ".." || strings.HasPrefix(underAsm, ".."+string(filepath.Separator)) {
+			return count, cfgLinks, fmt.Errorf("canonical artifact %q escapes asm root", txtRel)
+		}
+		dotRel := strings.TrimSuffix(underAsm, filepath.Ext(underAsm)) + ".dot"
+		dotPath := filepath.Join(cfgDir, dotRel)
+		if err := os.MkdirAll(filepath.Dir(dotPath), 0o755); err != nil {
+			return count, cfgLinks, fmt.Errorf("mkdir CFG path for %s: %w", f.Name, err)
+		}
 		if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
-			return count, fmt.Errorf("write %s: %w", dotPath, err)
+			return count, cfgLinks, fmt.Errorf("write %s: %w", dotPath, err)
 		}
 
 		if genSVG {
-			svgPath := filepath.Join(cfgDir, safeName+".svg")
+			svgPath := strings.TrimSuffix(dotPath, filepath.Ext(dotPath)) + ".svg"
 			if err := runDot(dotPath, svgPath, "svg"); err != nil {
 				fmt.Fprintf(os.Stderr, "  warning: CFG SVG failed for %s: %v\n", f.Name, err)
+			} else {
+				svgRel := strings.TrimSuffix(dotRel, filepath.Ext(dotRel)) + ".svg"
+				cfgLinks[f.Name] = filepath.ToSlash(filepath.Join("cfg", svgRel))
 			}
 		}
 		count++
 	}
-	return count, nil
+	return count, cfgLinks, nil
 }
 
 func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {

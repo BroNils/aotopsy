@@ -25,6 +25,9 @@ func cmdClusters(args []string) error {
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
 	}
+	if *which != "vm" && *which != "isolate" && *which != "both" {
+		return fmt.Errorf("invalid --which %q (want vm, isolate, or both)", *which)
+	}
 
 	opts := dartfmt.Options{
 		Mode:     dartfmt.ModeBestEffort,
@@ -42,7 +45,7 @@ func cmdClusters(args []string) error {
 			info.Version.DartVersion, info.Version.HeaderFields, info.Version.Tags)
 	}
 	if info.Version != nil && !info.Version.Supported {
-		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
+		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
 	}
 
 	type target struct {
@@ -50,15 +53,22 @@ func cmdClusters(args []string) error {
 		data []byte
 	}
 	var targets []target
-	switch *which {
-	case "vm":
-		targets = []target{{"VM", info.VmData.Data}}
-	case "isolate":
-		targets = []target{{"Isolate", info.IsolateData.Data}}
-	default:
-		targets = []target{
-			{"VM", info.VmData.Data},
-			{"Isolate", info.IsolateData.Data},
+	if info.UnifiedSnapshot {
+		if *which == "vm" {
+			return fmt.Errorf("--which vm is unavailable: this Dart version has a unified snapshot")
+		}
+		targets = []target{{"Unified", info.IsolateData.Data}}
+	} else {
+		switch *which {
+		case "vm":
+			targets = []target{{"VM", info.VmData.Data}}
+		case "isolate":
+			targets = []target{{"Isolate", info.IsolateData.Data}}
+		case "both":
+			targets = []target{
+				{"VM", info.VmData.Data},
+				{"Isolate", info.IsolateData.Data},
+			}
 		}
 	}
 
