@@ -25,6 +25,7 @@ func cmdExportDart(args []string) error {
 	appOnly := fs.Bool("app-only", false, "export only user app code (skip dart:* and package:flutter* libraries)")
 	filterSubstr := fs.String("filter", "", "filter to classes or methods matching this substring")
 	maxFuncs := fs.Int("max", 500, "max methods/functions to decompile (0 = unlimited)")
+	strict := fs.Bool("strict", false, "abort on the first function that cannot be decompiled (default: skip it and list it in "+analysis.DecompileFailuresFile+")")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -148,6 +149,7 @@ func cmdExportDart(args []string) error {
 
 	exportedMethods := 0
 	exportedClasses := make(map[string]bool)
+	failures := analysis.FailureLog{Strict: *strict}
 
 	for _, r := range ranges {
 		if *maxFuncs > 0 && exportedMethods >= *maxFuncs {
@@ -189,15 +191,28 @@ func cmdExportDart(args []string) error {
 			continue
 		}
 
-		fir, err := ctx.FuncIRFor(r)
+		fir, art, err := func() (fir *decompiler.FuncIR, art decompiler.Artifact, err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					err = fmt.Errorf("panic: %v", rec)
+				}
+			}()
+			fir, err = ctx.FuncIRFor(r)
+			if err != nil {
+				return nil, art, fmt.Errorf("build IR: %w", err)
+			}
+			if fir == nil {
+				return nil, art, fmt.Errorf("build IR: no IR produced")
+			}
+			return fir, decompiler.EmitPseudocode(fir, symbolLookup, poolLookup), nil
+		}()
 		if err != nil {
-			return fmt.Errorf("build IR for %s @ 0x%x: %w", funcName, funcVA, err)
+			// One broken function must not discard the rest of the export.
+			if ferr := failures.Record(funcVA, r.RefID, funcName, err); ferr != nil {
+				return ferr
+			}
+			continue
 		}
-		if fir == nil {
-			return fmt.Errorf("build IR for %s @ 0x%x: no IR produced", funcName, funcVA)
-		}
-
-		art := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
 		body := strutil.SanitizeDartBody(art.Source)
 
 		if idx := strings.Index(body, "{"); idx >= 0 {
@@ -257,6 +272,9 @@ func cmdExportDart(args []string) error {
 			return fmt.Errorf("writing library %s: %w", fullPath, err)
 		}
 		totalFiles++
+	}
+	if err := failures.Finish(stageOutDir, os.Stderr); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("publish export-dart generation: %w", err)
