@@ -853,8 +853,17 @@ func TestRunFromExistingFailurePreservesPreviousDestination(t *testing.T) {
 	if err := os.WriteFile(sentinel, []byte("previous generation"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(Opts{FromDir: src, OutDir: dst, Signal: true, Quiet: true}); err == nil {
+	// Without the marker the transaction would refuse the destination before
+	// the signal stage ran, and this test would pass for the wrong reason.
+	if err := os.WriteFile(filepath.Join(dst, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Run(Opts{FromDir: src, OutDir: dst, Signal: true, Quiet: true})
+	if err == nil {
 		t.Fatal("expected signal regeneration to fail")
+	}
+	if strings.Contains(err.Error(), output.GenerationMarker) {
+		t.Fatalf("failed on the ownership guard, not the signal stage: %v", err)
 	}
 	b, err := os.ReadFile(sentinel)
 	if err != nil {
@@ -874,6 +883,9 @@ func TestOutputTransactionCommitReplacesWholeGeneration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(target, "stale.txt"), []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(target, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	tx, err := output.BeginDirTransaction(target)
 	if err != nil {
 		t.Fatal(err)
@@ -890,6 +902,30 @@ func TestOutputTransactionCommitReplacesWholeGeneration(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(target, "fresh.txt")); err != nil || string(b) != "fresh" {
 		t.Fatalf("fresh generation missing: %q, %v", b, err)
+	}
+}
+
+// A directory generation is replaced wholesale, so `--out` at a directory that
+// holds someone's own files must be refused before any analysis or deletion.
+func TestRunRefusesForeignOutputDirectory(t *testing.T) {
+	lib := filepath.Join(t.TempDir(), "libapp.so")
+	if err := os.WriteFile(lib, []byte("not-an-elf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	precious := filepath.Join(out, "notes.txt")
+	if err := os.WriteFile(precious, []byte("irreplaceable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Run(Opts{LibPath: lib, OutDir: out, Quiet: true})
+	if err == nil || !strings.Contains(err.Error(), output.GenerationMarker) {
+		t.Fatalf("Run did not refuse a foreign directory with the marker explanation: %v", err)
+	}
+	if b, readErr := os.ReadFile(precious); readErr != nil || string(b) != "irreplaceable" {
+		t.Fatalf("user data destroyed by --out: %q, %v", b, readErr)
 	}
 }
 

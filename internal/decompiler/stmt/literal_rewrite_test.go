@@ -2,7 +2,9 @@ package stmt
 
 import (
 	"reflect"
+	"regexp"
 	"testing"
+	"time"
 )
 
 func TestInlineSingleUseTempsIgnoresStringLiteralIdentifiers(t *testing.T) {
@@ -112,5 +114,33 @@ func TestIdentifierHelpersRewriteOnlyInterpolationCode(t *testing.T) {
 	}
 	if ReferencesIdent(`print("literal t0 / \$t0");`, "t0") {
 		t.Fatal("literal or escaped-dollar text was treated as executable identifier use")
+	}
+}
+
+// A regexp that can match the empty string used to leave pos in place and spin
+// forever. The helper is generic, so it must terminate for any pattern and
+// leave the text untouched when nothing real matched.
+func TestReplaceRegexpMatchesOutsideStringsTerminatesOnEmptyMatch(t *testing.T) {
+	re := regexp.MustCompile(`x*`)
+	rewrite := func(m string) string { return "<" + m + ">" }
+
+	done := make(chan string, 1)
+	go func() { done <- replaceRegexpMatchesOutsideStrings(`abc`, re, rewrite) }()
+	select {
+	case got := <-done:
+		if got != "abc" {
+			t.Fatalf("empty matches altered the text: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replaceRegexpMatchesOutsideStrings did not terminate on an empty match")
+	}
+}
+
+func TestReplaceRegexpMatchesOutsideStringsKeepsRealMatchesAndTrailingText(t *testing.T) {
+	re := regexp.MustCompile(`foo\(\)`)
+	got := replaceRegexpMatchesOutsideStrings(`a foo() "foo()" b foo() tail`, re, func(string) string { return "BAR" })
+	want := `a BAR "foo()" b BAR tail`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

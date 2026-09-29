@@ -3,6 +3,7 @@ package symbolmap
 import (
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	archarm64 "aotopsy/internal/arch/arm64"
@@ -54,7 +55,12 @@ func TestArchAuditARM64ScannerKeepsFourByteAlignmentAcrossBudgetBoundary(t *test
 }
 
 func TestArchAuditCorpusARM64ChunksStayInstructionAligned(t *testing.T) {
+	// No samples/ at all is a legitimate state (fresh clone, CI) and skips; a
+	// populated but incomplete corpus is drift and fails.
 	if err := samplecorpus.RequireCompleteCorpus(); err != nil {
+		if errors.Is(err, samplecorpus.ErrNoCorpus) {
+			t.Skip("no samples/ directory in this checkout")
+		}
 		t.Fatal(err)
 	}
 	type totals struct {

@@ -10,6 +10,7 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 )
 
@@ -67,6 +68,27 @@ func TestFingerprintCommandsRejectDestructiveAliasesAndSurplusArgs(t *testing.T)
 	}
 }
 
+// Every command that takes exactly one libapp.so must reject a second
+// positional instead of silently analysing only the first and dropping the
+// rest; ghidra already did, ida/run/meta/signal used `< 1`.
+func TestSingleLibraryCommandsRejectSurplusPositionals(t *testing.T) {
+	cmds := map[string]func([]string) error{
+		"run":    cmdRun,
+		"meta":   cmdMeta,
+		"signal": cmdSignalPipeline,
+		"ida":    cmdIDA,
+		"ghidra": cmdGhidra,
+	}
+	for name, fn := range cmds {
+		t.Run(name, func(t *testing.T) {
+			err := fn([]string{"libapp.so", "surplus.so"})
+			if err == nil || !strings.Contains(err.Error(), "usage:") {
+				t.Fatalf("surplus positional was not rejected with a usage error: %v", err)
+			}
+		})
+	}
+}
+
 func TestFridaExportRejectsSurplusPositionalsBeforeIO(t *testing.T) {
 	if err := cmdFridaExport([]string{"surplus"}); err == nil {
 		t.Fatal("frida-export accepted surplus positional arguments")
@@ -88,6 +110,10 @@ func TestFindLibappBatchReportsArchiveErrorsAndReplacesGeneration(t *testing.T) 
 	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Only a directory an earlier aotopsy run published may be replaced.
+	if err := os.WriteFile(filepath.Join(outDir, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := cmdFindLibappBatch([]string{"--dir", inDir, "--out", outDir})
 	if err == nil {
@@ -105,6 +131,31 @@ func TestFindLibappBatchReportsArchiveErrorsAndReplacesGeneration(t *testing.T) 
 	}
 	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
 		t.Fatalf("stale prior-generation artifact survived batch replacement: %v", statErr)
+	}
+}
+
+// --out pointing at a directory that holds someone else's files must fail
+// without deleting them: a directory generation is replaced wholesale.
+func TestFindLibappBatchRefusesToReplaceForeignDirectory(t *testing.T) {
+	inDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(inDir, "bad.zip"), []byte("not a zip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	precious := filepath.Join(outDir, "main.go")
+	if err := os.WriteFile(precious, []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := cmdFindLibappBatch([]string{"--dir", inDir, "--out", outDir})
+	if err == nil || !strings.Contains(err.Error(), output.GenerationMarker) {
+		t.Fatalf("foreign directory was not refused with the marker explanation: %v", err)
+	}
+	if b, readErr := os.ReadFile(precious); readErr != nil || string(b) != "package main" {
+		t.Fatalf("user file was destroyed by --out: %q, %v", b, readErr)
 	}
 }
 

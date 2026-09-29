@@ -5,21 +5,39 @@ set -euo pipefail
 OUT="${1:-COVERAGE.md}"
 ROWS="${COVROWS_FILE:-}"
 TMP=""
+LOG=""
+trap '[ -n "$TMP" ] && rm -f "$TMP"; [ -n "$LOG" ] && rm -f "$LOG"; true' EXIT
+census_status=0
 if [ -z "$ROWS" ]; then
   TMP="$(mktemp)"; ROWS="$TMP"
+  LOG="$(mktemp)"
   echo "Parsing every corpus sample present locally (this is heavy)..." >&2
-  AOTOPSY_COVERAGE=1 go test ./internal/analysis/ -run TestCoverageCensus -count=1 -timeout 30m -v 2>&1 \
-    | grep -oE "COVROW	.*" | sed 's/^COVROW	//' | sort > "$ROWS"
-  # The row carries the sample's file name so `sort -u` dedupes repeated log
-  # lines without collapsing distinct builds. It used to end at the function
-  # counts, so two builds of the same version/arch that recovered the same
-  # number of functions -- which the -gt- twins do, being the same binary
-  # content -- became one row, and the headline under-reported the corpus by
-  # however many such pairs existed.
+  # A failing census (FAIL rows) makes `go test` exit non-zero, and a log with
+  # no COVROW line makes grep exit 1. Under pipefail either would kill the
+  # script before the checks below can say WHY, so capture both explicitly.
+  AOTOPSY_COVERAGE=1 go test ./internal/analysis/ -run TestCoverageCensus -count=1 -timeout 30m -v >"$LOG" 2>&1 || census_status=$?
+  { grep -oE $'COVROW\t.*' "$LOG" || true; } | sed $'s/^COVROW\t//' | sort > "$ROWS"
+  # The row carries the sample's file name, so a repeated log line is a
+  # duplicate the filename check below rejects, while two distinct builds that
+  # recovered the same function counts (the -gt- twins are the same binary
+  # content) stay two rows. Rows used to end at the function counts and
+  # `sort -u` merged such pairs, under-reporting the corpus.
 fi
-trap '[ -n "$TMP" ] && rm -f "$TMP"' EXIT
 
-expected=93
+# The corpus manifest is the single source of the expected sample count; do not
+# repeat the number here.
+expected="$(grep -c . internal/samplecorpus/corpus_manifest.txt)"
+total="$(wc -l < "$ROWS" | tr -d ' ')"
+if grep -q $'\tFAIL\t' "$ROWS"; then
+  echo "coverage census contains FAIL rows; refusing to publish" >&2
+  grep $'\tFAIL\t' "$ROWS" >&2
+  exit 1
+fi
+if [ "$census_status" -ne 0 ]; then
+  echo "coverage census exited with status $census_status; refusing to publish" >&2
+  [ -n "$LOG" ] && tail -n 40 "$LOG" >&2
+  exit 1
+fi
 if [ "$total" -ne "$expected" ]; then
   echo "coverage census produced $total rows; expected exactly $expected" >&2
   exit 1
@@ -28,15 +46,10 @@ if [ "$(cut -f6 "$ROWS" | sort -u | wc -l | tr -d ' ')" -ne "$expected" ]; then
   echo "coverage census contains duplicate or missing sample filenames" >&2
   exit 1
 fi
-if grep -q $'\tFAIL\t' "$ROWS"; then
-  echo "coverage census contains FAIL rows; refusing to publish" >&2
-  grep $'\tFAIL\t' "$ROWS" >&2
-  exit 1
-fi
 
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 gen_date="$(date -u +%Y-%m-%d)"
-fails="$(grep -c '	FAIL	' "$ROWS" || true)"
+fails="$(grep -c $'\tFAIL\t' "$ROWS" || true)"
 versions="$(cut -f1 "$ROWS" | sort -uV | wc -l | tr -d ' ')"
 
 {

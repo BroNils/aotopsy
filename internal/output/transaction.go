@@ -18,6 +18,13 @@ const (
 	tempNameAttempts     = 128
 	dirStagePrefix       = ".aotopsy-dir-stage-"
 	dirBackupPrefix      = ".aotopsy-dir-previous-"
+
+	// GenerationMarker is written into every directory generation this package
+	// publishes. Commit replaces the WHOLE previous directory, so it may only
+	// do that to a directory it can prove an earlier aotopsy run produced (or
+	// that is empty); otherwise `--out ~/projects/app` would delete the user's
+	// files.
+	GenerationMarker = ".aotopsy-generation"
 )
 
 // DirTransaction publishes a complete artifact generation with one directory
@@ -89,6 +96,9 @@ func BeginDirTransaction(target string) (*DirTransaction, error) {
 			return fail(fmt.Errorf("output directory %q changed while being pinned", tx.target))
 		}
 		tx.targetInfo = pinned
+		if err := requireReplaceableGeneration(tx.targetRoot, tx.target); err != nil {
+			return fail(err)
+		}
 	}
 
 	stageName, err := makeTempDirInRoot(parentRoot, dirStagePrefix)
@@ -108,6 +118,52 @@ func BeginDirTransaction(target string) (*DirTransaction, error) {
 		return fail(fmt.Errorf("stat pinned output staging directory: %w", err))
 	}
 	return tx, nil
+}
+
+// requireReplaceableGeneration refuses to let a transaction replace a
+// directory that is neither empty nor a previous aotopsy generation.
+func requireReplaceableGeneration(root *os.Root, display string) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open output directory %q: %w", display, err)
+	}
+	names, err := dir.Readdirnames(1)
+	_ = dir.Close()
+	if errors.Is(err, io.EOF) || (err == nil && len(names) == 0) {
+		return nil // empty: nothing to lose
+	}
+	if err != nil {
+		return fmt.Errorf("read output directory %q: %w", display, err)
+	}
+	info, err := root.Lstat(GenerationMarker)
+	if err == nil && info.Mode().IsRegular() {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s in %q: %w", GenerationMarker, display, err)
+	}
+	return fmt.Errorf("output directory %q is not empty and was not produced by aotopsy (no %s marker); "+
+		"refusing to replace it -- choose a new or empty directory, or delete it yourself", display, GenerationMarker)
+}
+
+// stampGeneration writes the ownership marker into the unpublished stage.
+func (tx *DirTransaction) stampGeneration() error {
+	f, err := tx.stageRoot.OpenFile(GenerationMarker, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", GenerationMarker, err)
+	}
+	if _, err := io.WriteString(f, "aotopsy output generation\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", GenerationMarker, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync %s: %w", GenerationMarker, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", GenerationMarker, err)
+	}
+	return nil
 }
 
 func (tx *DirTransaction) StageDir() string {
@@ -137,6 +193,9 @@ func (tx *DirTransaction) Abort() {
 func (tx *DirTransaction) Commit() error {
 	if tx == nil || tx.stageName == "" || tx.parentRoot == nil || tx.stageRoot == nil {
 		return fmt.Errorf("output transaction is not active")
+	}
+	if err := tx.stampGeneration(); err != nil {
+		return err
 	}
 
 	stageInfo, err := tx.stageRoot.Stat(".")

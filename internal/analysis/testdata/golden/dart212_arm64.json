@@ -5,7 +5,7 @@
   "func_count": 7714,
   "class_count": 1575,
   "lines": {
-    "address_callers_xref.jsonl": 4148,
+    "address_callers_xref.jsonl": 4146,
     "aotopsy.r2": 7714,
     "call_edges.jsonl": 40502,
     "classes.jsonl": 1575,
@@ -13,9 +13,9 @@
     "dart_meta.json": 736,
     "deobfuscate_map.jsonl": 3,
     "dispatch_table.jsonl": 18929,
-    "evidence.jsonl": 61152,
+    "evidence.jsonl": 60447,
     "exception_handlers.jsonl": 114,
-    "field_accessor_xref.jsonl": 3456,
+    "field_accessor_xref.jsonl": 3435,
     "function_fingerprints.jsonl": 7714,
     "functions.jsonl": 7714,
     "index.jsonl": 7714,
@@ -34,17 +34,17 @@
     "unresolved_thr.jsonl": 0
   },
   "sha256": {
-    "address_callers_xref.jsonl": "6bb4427e4ceb86dabdf17f034445f1e8702d743bb21eaa4ed09268f643ee99de",
+    "address_callers_xref.jsonl": "85bd30aca700e5c3d4da8f7e6d8be4bf358177199369c5bb05cd42e496c825b9",
     "aotopsy.r2": "9ddff2591388fbd5e2d078ac45d69b1bb6751f363d523f792f504c24410be5ed",
-    "call_edges.jsonl": "5164a25a6d72d28718aba0439dac1f4fdecd8a34770faafdbb8e11d185326886",
+    "call_edges.jsonl": "077bf964b89b2c2ea8f1d958846e17c04b3e04bcc70cda9d567fbea4efd85d90",
     "classes.jsonl": "bc901c6c66e8e150aed51ed4b25ed982017a8b0fb0c2ff4dc6215bb9e137ef77",
     "closure_data.jsonl": "47cb4f22a8448c023e4c5dcaa2dcfdf1fca6dfb73f0e05e1469c145619bec382",
     "dart_meta.json": "81dc5a0b827e6cb0e9bad7755d4614c674d97a1ac40d111fb93646c782fdece4",
     "deobfuscate_map.jsonl": "136000c8bf2ceb72afe11d0b4777c116ad7c8ff9341f9d5f12ea76665f4a40b5",
     "dispatch_table.jsonl": "06e8a1d5213fa7ec3cae99a359cf5d66fca796f0dc86c35de5e7d6a075ef1690",
-    "evidence.jsonl": "20f644dfde61db04c160b6e2f743f912dfa179586adc598b1d0b09a32ac85a52",
+    "evidence.jsonl": "71d72095d38ef5512f2994a83f4aed2a986b1fe10a3d0b0a708c47caf0604c77",
     "exception_handlers.jsonl": "e08679de8774eae2bf7946a3ccb39aaf3e1183269b8f93b4231d358f46c86abf",
-    "field_accessor_xref.jsonl": "208bd9744144051747c231b6ff04d5699f2d3d3b87cb0044a2e31b28fb848729",
+    "field_accessor_xref.jsonl": "f22812e8bb7c700766f85505af1697070d8065ada4f6024964f11bb213deace5",
     "function_fingerprints.jsonl": "2ccb73e0ec8fc207ac65a45275a6a45e82f9a4a00caa61cc10115bd996bcbe45",
     "functions.jsonl": "e7a99a646658bf6c2adf2e3085a42a6f48eeea05e1aef0eb07f87ae123ec5345",
     "index.jsonl": "dc533cdde258663004c0dca063adf8123ade6ec5d40dda2c6217a4d59b449e32",
@@ -59,7 +59,7 @@
     "string_refs.jsonl": "269e96f54bdf717496a69180145836b7353cb9d5dac98e21f4a7fc82a9076295",
     "string_value_xref.jsonl": "367d5b735d83bf9b0ba5693317af92a78d962dd0a072568d6f95c5bb3c908beb",
     "type_arguments.jsonl": "3ff12ffbf53f894fc11c43c488aff94a8e8fdc3325187e4974e826baa40d2ad4",
-    "typetrack_report.json": "7fdeeb5f2879ceec4b485cae7986328e54fdb791ef753e55859ba2cded67c338",
+    "typetrack_report.json": "cc60a209bdc1b8b3008d1fc75f66407fc465728453c51ccacf9f9b6f1bf06671",
     "unresolved_thr.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }

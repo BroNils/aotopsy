@@ -29,7 +29,7 @@ func cmdIDA(args []string) error {
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy ida <libapp.so> [flags]")
 	}
 

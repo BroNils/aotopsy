@@ -40,12 +40,17 @@ func TestBLRResolutionRate(t *testing.T) {
 	}
 	// Monomorphic is a confidence-classification counter, not a coverage
 	// counter: a more honest resolver can move a site from monomorphic to
-	// polymorphic without losing any target information. That happened here:
-	// against the exact same 3.9.2 GT binary, HEAD had 1244 mono / 2262 poly /
-	// 130 stub / 1718 unresolved (67.9% resolved), while the audited pipeline
-	// has 1036 / 2726 / 103 / 1490 (72.2% resolved). A mono-only floor therefore
-	// failed on an improvement. Guard total resolved coverage instead, while
-	// keeping monomorphic non-zero so the single-callee path cannot silently die.
+	// polymorphic without losing any target information, so a mono-only floor
+	// fails on an improvement. Guard total REAL target resolution
+	// (monomorphic + polymorphic) instead, while keeping monomorphic non-zero
+	// so the single-callee path cannot silently die.
+	//
+	// Stub calls are deliberately NOT counted as resolved. They are VM runtime
+	// stubs, not a Dart function recovered from the snapshot, and adding them
+	// inflates the figure exactly the way AGENTS-local warns about
+	// (resolved_blr vs blr.monomorphic). Measured on this fixture:
+	// mono 931 + poly 2683 = 3614 of 5355 (67.5%); with the 242 stub calls the
+	// inflated figure would read 72%.
 	total := report.BLR.Total
 	classified := report.BLR.Monomorphic + report.BLR.Polymorphic + report.BLR.Stub + report.BLR.Unresolved
 	if classified != total {
@@ -54,10 +59,10 @@ func TestBLRResolutionRate(t *testing.T) {
 	if report.BLR.Monomorphic == 0 {
 		t.Error("BLR monomorphic count is 0 -- single-callee resolution path is dead")
 	}
-	resolved := report.BLR.Monomorphic + report.BLR.Polymorphic + report.BLR.Stub
+	resolved := report.BLR.Monomorphic + report.BLR.Polymorphic
 	rate := resolved * 100 / total
-	// HEAD on the exact same GT fixture resolves 67.9%; keep a conservative
-	// 65% floor so a real coverage collapse fails without rewarding guesses.
+	// 65% sits below the measured 67.5% so noise cannot fail it, and a real
+	// coverage collapse does, without rewarding stub calls or guesses.
 	const minResolvedRate = 65
 	if rate < minResolvedRate {
 		t.Errorf("BLR resolved rate = %d%% (%d/%d), minimum %d%%",
