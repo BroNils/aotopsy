@@ -110,8 +110,10 @@ Usage:
 	fmt.Fprintf(os.Stderr, "  aotopsy _debug <cmd>                        Internal commands\n")
 	fmt.Fprintf(os.Stderr, `
 Flags:
-  --out <dir>         Output directory (default: <basename>.aotopsy/)
-  --quiet, -q         Suppress verbose output (verbose is default)
+  --out <dir>         Output directory (default: <basename>.aotopsy/). It is
+                      replaced as a whole, so an existing one must be empty or
+                      a previous aotopsy output (it carries .aotopsy-generation)
+  --quiet, -q        Suppress verbose output (verbose is default)
   --strict            Fail on structural errors
   --all               Include all functions (not just signal)
   --from <dir>        Reuse existing disasm output

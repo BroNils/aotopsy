@@ -9,6 +9,14 @@ type FuncRecord struct {
 	Name       string `json:"name"`
 	Owner      string `json:"owner,omitempty"`
 	ParamCount int    `json:"param_count,omitempty"`
+
+	// Reflutter* fields are populated only by reflutter-import in a merged
+	// artifact directory. Static analysis never sets them, so the ordinary
+	// functions.jsonl schema stays byte-for-byte unchanged, while the strict
+	// jsonutil readers can still load the merged file.
+	ReflutterName    string `json:"reflutter_name,omitempty"`
+	ReflutterClass   string `json:"reflutter_class,omitempty"`
+	ReflutterLibrary string `json:"reflutter_library,omitempty"`
 }
 
 // CallEdgeRecord is one line in call_edges.jsonl.

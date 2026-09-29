@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+// markGeneration makes dir look like a directory an earlier aotopsy run
+// published, which is the only kind of non-empty directory a transaction may
+// replace.
+func markGeneration(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, GenerationMarker), []byte("test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestContainsPathAndSamePath(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "nested", "file.so")
@@ -156,6 +166,7 @@ func TestDirTransactionCommitReplacesExistingGeneration(t *testing.T) {
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	markGeneration(t, target)
 	if err := os.WriteFile(filepath.Join(target, "old.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +209,7 @@ func TestDirTransactionCommitSupportsRelativeExistingTarget(t *testing.T) {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	markGeneration(t, target)
 	if err := os.WriteFile(filepath.Join(target, "old.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +279,7 @@ func TestDirTransactionReplaceExistingOnWorkingTreeFilesystem(t *testing.T) {
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	markGeneration(t, target)
 	if err := os.WriteFile(filepath.Join(target, "old.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -447,5 +460,112 @@ func TestCloneTreeRejectsSymlinkRoot(t *testing.T) {
 	}
 	if err := CloneTree(alias, t.TempDir()); err == nil {
 		t.Fatal("CloneTree accepted a symlink root")
+	}
+}
+
+// Commit replaces the whole previous directory. Pointing --out at a directory
+// that holds someone's own files must therefore be refused, not silently wiped.
+func TestBeginDirTransactionRefusesNonEmptyDirectoryNotProducedByAotopsy(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "my-project")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	precious := filepath.Join(target, "notes.txt")
+	if err := os.WriteFile(precious, []byte("irreplaceable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := BeginDirTransaction(target)
+	if err == nil {
+		tx.Abort()
+		t.Fatal("transaction accepted a non-empty directory aotopsy did not produce")
+	}
+	if !strings.Contains(err.Error(), GenerationMarker) {
+		t.Fatalf("refusal does not name the marker: %v", err)
+	}
+	if b, err := os.ReadFile(precious); err != nil || string(b) != "irreplaceable" {
+		t.Fatalf("refused transaction touched user data: %q, %v", b, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".aotopsy-") {
+			t.Fatalf("refused transaction left %s behind", e.Name())
+		}
+	}
+}
+
+func TestBeginDirTransactionAcceptsEmptyExistingDirectory(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "out")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := BeginDirTransaction(target)
+	if err != nil {
+		t.Fatalf("empty directory was refused: %v", err)
+	}
+	tx.Abort()
+}
+
+// A marker that is not a regular file (a symlink to somewhere, or a directory)
+// proves nothing about who produced the directory.
+func TestBeginDirTransactionRejectsForgedMarker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation may require elevated privileges")
+	}
+	for _, kind := range []string{"symlink", "dir"} {
+		t.Run(kind, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "out")
+			if err := os.Mkdir(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(target, GenerationMarker)
+			switch kind {
+			case "symlink":
+				real := filepath.Join(filepath.Dir(target), "real-marker")
+				if err := os.WriteFile(real, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(real, marker); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+			case "dir":
+				if err := os.Mkdir(marker, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tx, err := BeginDirTransaction(target); err == nil {
+				tx.Abort()
+				t.Fatalf("a %s marker was accepted as proof of ownership", kind)
+			}
+		})
+	}
+}
+
+// Every published generation carries the marker, so an aotopsy output
+// directory can be regenerated in place while a foreign one cannot.
+func TestDirTransactionCommitStampsMarkerAndAllowsRegeneration(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "out")
+	for round := 1; round <= 2; round++ {
+		tx, err := BeginDirTransaction(target)
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		if err := os.WriteFile(filepath.Join(tx.StageDir(), "gen.txt"), []byte{byte('0' + round)}, 0o600); err != nil {
+			tx.Abort()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			tx.Abort()
+			t.Fatalf("round %d commit: %v", round, err)
+		}
+		info, err := os.Lstat(filepath.Join(target, GenerationMarker))
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("round %d: published generation lacks a regular %s: %v", round, GenerationMarker, err)
+		}
+		if b, err := os.ReadFile(filepath.Join(target, "gen.txt")); err != nil || string(b) != string([]byte{byte('0' + round)}) {
+			t.Fatalf("round %d: generation content = %q, %v", round, b, err)
+		}
 	}
 }

@@ -78,7 +78,7 @@ func cmdSignalPipeline(args []string) error {
 		return nil
 	}
 
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy signal <libapp.so> [flags]")
 	}
 

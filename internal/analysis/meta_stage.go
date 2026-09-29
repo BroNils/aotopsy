@@ -14,6 +14,20 @@ import (
 	"aotopsy/internal/strutil"
 )
 
+// dartMetaFile is the subset of dart_meta.json (strutil.WriteDartMeta) the meta
+// stage consumes. It is decoded with DisallowUnknownFields, so it must list
+// every key the writer can emit.
+type dartMetaFile struct {
+	Architecture       string `json:"arch"`
+	DartVersion        string `json:"dart_version"`
+	CompressedPointers bool   `json:"compressed_pointers"`
+	PointerSize        int    `json:"pointer_size"`
+	THRFields          []struct {
+		Offset int    `json:"offset"`
+		Name   string `json:"name"`
+	} `json:"thr_fields"`
+}
+
 // RunMetaStage reads existing disassembly artifacts from inDir and writes
 // flutter_meta.json under outDir. signal_graph.json, when present, is read from
 // outDir because a preceding RunSignalStage may have regenerated it there.
@@ -87,26 +101,7 @@ func RunMetaStage(inDir, outDir, targetArch string, decompAll bool, quiet bool, 
 	var compressedPointers bool
 	var thrFields []strutil.FlutterMetaTHRField
 	dmPath := filepath.Join(inDir, "dart_meta.json")
-	var dm struct {
-		Architecture       string `json:"arch"`
-		DartVersion        string `json:"dart_version"`
-		CompressedPointers bool   `json:"compressed_pointers"`
-		PointerSize        int    `json:"pointer_size"`
-		THRFields          []struct {
-			Offset int    `json:"offset"`
-			Name   string `json:"name"`
-		} `json:"thr_fields"`
-	}
-	dm, err = readJSONBounded[struct {
-		Architecture       string `json:"arch"`
-		DartVersion        string `json:"dart_version"`
-		CompressedPointers bool   `json:"compressed_pointers"`
-		PointerSize        int    `json:"pointer_size"`
-		THRFields          []struct {
-			Offset int    `json:"offset"`
-			Name   string `json:"name"`
-		} `json:"thr_fields"`
-	}](dmPath, maxMetadataArtifactBytes)
+	dm, err := readJSONBounded[dartMetaFile](dmPath, maxMetadataArtifactBytes)
 	if err != nil {
 		return "", fmt.Errorf("read dart_meta.json: %w", err)
 	}

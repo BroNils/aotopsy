@@ -112,8 +112,8 @@ func probeSOFile(f *zip.File, pathLabel string, work *archiveWorkBudget) (*FindC
 	// Try ELF + snapshot extract (symbol-based detection).
 	ef, err := elfx.Open(tmpPath)
 	if err != nil {
-		// Not a valid ARM64 ELF — check for magic without loading the entire
-		// expanded candidate into memory.
+		// Not a loadable ELF (any architecture) — check for magic without
+		// loading the entire expanded candidate into memory.
 		if hasSnapshotMagicInFile(tmpPath) {
 			c.Hit = "magic"
 		}

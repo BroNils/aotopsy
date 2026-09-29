@@ -92,13 +92,6 @@ func IsBR(raw uint32) (rn int, ok bool) {
 	return int((raw >> 5) & 0x1F), true
 }
 
-// CondBranch detects ARM64 conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
-// Returns the branch target address (excluding fall-through) and true, or ok=false
-// if not a conditional branch.
-// Note: historical Dart B.AL (cond=14) is unconditional despite using the
-// B.cond encoding, so it returns ok=false here. B.NV (cond=15) is reserved for
-// branches in the Dart-supported ISA/codegen contract and also returns false.
-
 // BCondKind classifies the condition field of a B.cond encoding. ARM's
 // architectural condition code 0b1111 (NV) is not a valid branch condition;
 // Dart only used it internally as a far-branch sentinel and rewrote that guard
@@ -157,6 +150,12 @@ func IsReservedBCond(raw uint32) bool {
 	return raw&0xFF00001F == 0x5400000F
 }
 
+// CondBranch detects ARM64 conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
+// Returns the branch target address (excluding fall-through) and true, or ok=false
+// if not a conditional branch.
+// Note: historical Dart B.AL (cond=14) is unconditional despite using the
+// B.cond encoding, so it returns ok=false here. B.NV (cond=15) is reserved for
+// branches in the Dart-supported ISA/codegen contract and also returns false.
 func CondBranch(raw uint32, pc uint64) (target uint64, ok bool) {
 	if target, _, kind, bok := BCond(raw, pc); bok {
 		if kind == BCondConditional {

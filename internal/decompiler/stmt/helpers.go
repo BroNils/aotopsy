@@ -307,6 +307,15 @@ func replaceRegexpMatchesOutsideStrings(text string, re *regexp.Regexp, rewrite 
 		}
 		start, end := pos+loc[0], pos+loc[1]
 		b.WriteString(text[pos:start])
+		if end == start {
+			// An empty match would leave pos where it was and loop forever.
+			// Copy one byte through unchanged and move on.
+			if start < len(text) {
+				b.WriteByte(text[start])
+			}
+			pos = start + 1
+			continue
+		}
 		match := text[start:end]
 		if isCodePosition(text, start) {
 			b.WriteString(rewrite(match))
@@ -314,9 +323,6 @@ func replaceRegexpMatchesOutsideStrings(text string, re *regexp.Regexp, rewrite 
 			b.WriteString(match)
 		}
 		pos = end
-	}
-	if pos == len(text) {
-		return b.String()
 	}
 	return b.String()
 }
