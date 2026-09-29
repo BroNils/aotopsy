@@ -1,12 +1,14 @@
 package signal
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 )
 
 // TaintFinding represents a potential source→sink data flow.
@@ -148,80 +150,45 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 			return nil
 		}
 		if len(findings) >= maxTaintFindings {
-			return fmt.Errorf("taint analysis finding budget exceeded (%d)", maxTaintFindings)
+			return fmt.Errorf("%w: more than %d findings", errTaintBudget, maxTaintFindings)
 		}
 		seenFlows[key] = true
 		findings = append(findings, f)
 		return nil
 	}
 
-	// Pattern 1: same-function taint (source and sink in same function)
-	for fn, sourceSet := range funcSources {
-		sinks, ok := funcSinks[fn]
-		if !ok {
-			continue
-		}
-		for _, src := range sortedSet(sourceSet) {
-			for _, sink := range sortedSet(sinks) {
-				if err := addFinding(TaintFinding{
-					Source:     src,
-					Sink:       sink,
-					SourceFn:   fn,
-					SinkFn:     fn,
-					FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
-					Confidence: "low",
-				}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// Pattern 2: cross-function taint (source function calls sink function)
-	for srcFn, sourceSet := range funcSources {
-		callees := callerCallees[srcFn]
-		if callees == nil {
-			continue
-		}
-		for sinkFn := range callees {
-			sinkSet, ok := funcSinks[sinkFn]
+	walk := func() error {
+		// Pattern 1: same-function taint (source and sink in same function)
+		for _, fn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[fn]
+			sinks, ok := funcSinks[fn]
 			if !ok {
 				continue
 			}
 			for _, src := range sortedSet(sourceSet) {
-				for _, sink := range sortedSet(sinkSet) {
+				for _, sink := range sortedSet(sinks) {
 					if err := addFinding(TaintFinding{
 						Source:     src,
 						Sink:       sink,
-						SourceFn:   srcFn,
-						SinkFn:     sinkFn,
+						SourceFn:   fn,
+						SinkFn:     fn,
 						FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
-						Confidence: "medium",
+						Confidence: "low",
 					}); err != nil {
 						return err
 					}
 				}
 			}
 		}
-	}
 
-	// Pattern 3: 2-hop taint (source → intermediate → sink)
-	traversedLinks := 0
-	for srcFn, sourceSet := range funcSources {
-		callees1 := callerCallees[srcFn]
-		if callees1 == nil {
-			continue
-		}
-		for midFn := range callees1 {
-			callees2 := callerCallees[midFn]
-			if callees2 == nil {
+		// Pattern 2: cross-function taint (source function calls sink function)
+		for _, srcFn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[srcFn]
+			callees := callerCallees[srcFn]
+			if callees == nil {
 				continue
 			}
-			for sinkFn := range callees2 {
-				traversedLinks++
-				if traversedLinks > maxTaintTraversalLinks {
-					return fmt.Errorf("taint analysis traversal budget exceeded (%d links)", maxTaintTraversalLinks)
-				}
+			for _, sinkFn := range sortedKeys(callees) {
 				sinkSet, ok := funcSinks[sinkFn]
 				if !ok {
 					continue
@@ -233,8 +200,8 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 							Sink:       sink,
 							SourceFn:   srcFn,
 							SinkFn:     sinkFn,
-							FlowType:   fmt.Sprintf("%s_to_%s_via_callgraph", src, sink),
-							Confidence: "low",
+							FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
+							Confidence: "medium",
 						}); err != nil {
 							return err
 						}
@@ -242,7 +209,60 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 				}
 			}
 		}
+
+		// Pattern 3: 2-hop taint (source → intermediate → sink)
+		traversedLinks := 0
+		for _, srcFn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[srcFn]
+			callees1 := callerCallees[srcFn]
+			if callees1 == nil {
+				continue
+			}
+			for _, midFn := range sortedKeys(callees1) {
+				callees2 := callerCallees[midFn]
+				if callees2 == nil {
+					continue
+				}
+				for _, sinkFn := range sortedKeys(callees2) {
+					traversedLinks++
+					if traversedLinks > maxTaintTraversalLinks {
+						return fmt.Errorf("%w: more than %d call-graph links", errTaintBudget, maxTaintTraversalLinks)
+					}
+					sinkSet, ok := funcSinks[sinkFn]
+					if !ok {
+						continue
+					}
+					for _, src := range sortedSet(sourceSet) {
+						for _, sink := range sortedSet(sinkSet) {
+							if err := addFinding(TaintFinding{
+								Source:     src,
+								Sink:       sink,
+								SourceFn:   srcFn,
+								SinkFn:     sinkFn,
+								FlowType:   fmt.Sprintf("%s_to_%s_via_callgraph", src, sink),
+								Confidence: "low",
+							}); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil
 	}
+	var summary TaintSummary
+	if err := walk(); err != nil {
+		if !errors.Is(err, errTaintBudget) {
+			return err
+		}
+		// The budget bounds a hostile graph, but this stage is advisory: keep
+		// what was found (deterministic, thanks to the sorted walk) and say so
+		// explicitly instead of failing the whole analysis.
+		summary.Truncated = true
+		summary.Reason = err.Error()
+	}
+	summary.Findings = len(findings)
 
 	// Findings are discovered by iterating maps, so sort before writing:
 	// otherwise the same binary produces a differently-ordered file on every
@@ -263,7 +283,32 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 		}
 		return a.FlowType < b.FlowType
 	})
-	return writeSignalJSONL(filepath.Join(outDir, "taint_findings.jsonl"), findings)
+	if err := writeSignalJSONL(filepath.Join(outDir, "taint_findings.jsonl"), findings); err != nil {
+		return err
+	}
+	return jsonutil.WriteJSONFile(filepath.Join(outDir, TaintSummaryFile), summary)
+}
+
+// TaintSummaryFile states whether taint_findings.jsonl is complete. It is
+// written on every run so a stale "truncated" verdict cannot outlive a rerun.
+const TaintSummaryFile = "taint_summary.json"
+
+// TaintSummary is the completeness verdict for taint_findings.jsonl.
+type TaintSummary struct {
+	Findings  int    `json:"findings"`
+	Truncated bool   `json:"truncated"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+var errTaintBudget = errors.New("taint budget exceeded")
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // YaraFinding represents a YARA-style rule match.

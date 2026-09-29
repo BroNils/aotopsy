@@ -54,6 +54,9 @@ type DecompLoopDeps struct {
 	IsARM64              bool
 	GenFridaStalker      bool
 	GenFridaStalkerMin   int
+	// Strict aborts on the first function that cannot be decompiled instead of
+	// recording it in DecompileFailuresFile and continuing.
+	Strict bool
 }
 
 // RunDecompileLoop implements --all: iterate every matching
@@ -130,6 +133,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 	}
 
 	emitted := 0
+	failures := FailureLog{Strict: d.Strict}
 	var agg decompiler.Stats
 	var fridaHooks []frida.FridaHook
 	var fridaProbes []frida.FridaProbe
@@ -193,7 +197,11 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			}
 			return nil
 		}(); err != nil {
-			return fmt.Errorf("decompile range pc=0x%x ref=%d: %w", r.PCOffset, r.RefID, err)
+			funcVA, _ := im.FuncVA(r)
+			if ferr := failures.Record(funcVA, r.RefID, d.SymbolNames[funcVA], err); ferr != nil {
+				return ferr
+			}
+			continue
 		}
 
 		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
@@ -215,6 +223,9 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 	fmt.Fprintf(os.Stderr, "emitted %d functions to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
 		emitted, d.CombinedPath, time.Since(d.StartTime).Round(time.Second), d.SkipFuncs, d.SkipFuncs+emitted, totalMatching)
 	PrintAggregateStats(agg)
+	if err := failures.Finish(d.OutDir, os.Stderr); err != nil {
+		return err
+	}
 	if d.GenFrida {
 		if err := FinalizeFridaOutput(d.GenFridaOut, d.OutDir, d.Libapp, d.IsARM64, fridaHooks, fridaProbes, fridaProbesDropped,
 			frida.FridaOptions{Stalker: d.GenFridaStalker, StalkerMinCalls: d.GenFridaStalkerMin}); err != nil {

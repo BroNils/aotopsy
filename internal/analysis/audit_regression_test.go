@@ -434,6 +434,10 @@ func TestRunGraphPublishesOneFreshGeneration(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Only a directory an earlier aotopsy run published may be replaced.
+	if err := os.WriteFile(filepath.Join(outDir, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := RunGraph(sample312X64(t), outDir, "isolate", 0); err != nil {
 		t.Fatalf("RunGraph: %v", err)

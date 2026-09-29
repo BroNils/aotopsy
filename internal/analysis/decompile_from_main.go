@@ -41,6 +41,9 @@ type FromMainDeps struct {
 	FridaOpts                 frida.FridaOptions
 	LibPath                   string
 	OutDir                    string
+	// Strict aborts on the first function that cannot be decompiled instead of
+	// recording it in DecompileFailuresFile and continuing.
+	Strict bool
 }
 
 // RunFromMain implements --from-main: a BFS over the real call graph
@@ -121,6 +124,7 @@ func RunFromMain(d FromMainDeps) error {
 	classTouched := 0
 	queue := []uint64{mainVA}
 	emitted, frameworkSkipped, unknownLibrary := 0, 0, 0
+	failures := FailureLog{Strict: d.Strict}
 	var agg decompiler.Stats
 	var fridaHooks []frida.FridaHook
 	var fridaProbes []frida.FridaProbe
@@ -211,7 +215,10 @@ func RunFromMain(d FromMainDeps) error {
 			}
 			return nil
 		}(); err != nil {
-			return fmt.Errorf("--from-main: decompile 0x%x ref=%d: %w", va, r.RefID, err)
+			if ferr := failures.Record(va, r.RefID, d.SymbolNames[va], err); ferr != nil {
+				return fmt.Errorf("--from-main: %w", ferr)
+			}
+			continue
 		}
 
 		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
@@ -233,6 +240,9 @@ func RunFromMain(d FromMainDeps) error {
 	fmt.Fprintf(os.Stderr, "emitted %d functions (%d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
 		emitted, frameworkSkipped, unknownLibrary, classTouched, d.CombinedPath, time.Since(d.StartTime).Round(time.Second))
 	PrintAggregateStats(agg)
+	if err := failures.Finish(d.OutDir, os.Stderr); err != nil {
+		return err
+	}
 	if d.GenFrida {
 		if err := FinalizeFridaOutput(d.GenFridaOut, d.OutDir, d.LibPath, d.IsARM64, fridaHooks, fridaProbes, fridaProbesDropped, d.FridaOpts); err != nil {
 			return err

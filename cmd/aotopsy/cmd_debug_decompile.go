@@ -32,6 +32,7 @@ func cmdDecompileNative(args []string) error {
 	skipFuncs := fs.Int("skip", 0, "skip this many matching functions before starting to emit")
 	maxStepsFlag := fs.Int("max-steps", 0, "override the per-function emitter step budget")
 	filterSubstr := fs.String("filter", "", "modifier for --all ONLY: restricts --all to functions whose name contains this substring")
+	strict := fs.Bool("strict", false, "abort on the first function that cannot be decompiled (default: skip it and list it in "+analysis.DecompileFailuresFile+")")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -135,6 +136,7 @@ func cmdDecompileNative(args []string) error {
 			FridaOpts:                 frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
 			LibPath:                   *libapp,
 			OutDir:                    *outDir,
+			Strict:                    *strict,
 		})
 	}
 
@@ -160,5 +162,6 @@ func cmdDecompileNative(args []string) error {
 		IsARM64:              deps.IsARM64,
 		GenFridaStalker:      *genFridaStalker,
 		GenFridaStalkerMin:   *genFridaStalkerMin,
+		Strict:               *strict,
 	})
 }
