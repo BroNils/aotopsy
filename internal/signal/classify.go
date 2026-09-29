@@ -54,7 +54,8 @@ const (
 	// CatAsync marks a function that enters, suspends at, or completes an
 	// async body -- structural evidence that survives obfuscation, since
 	// the async stubs are reached through the Thread table by address.
-	CatAsync = "async"
+	CatAsync     = "async"
+	CatGenerator = "generator" // sync*/async* generator suspension machinery
 
 	CatMethodChannel = "method_channel" // Flutter MethodChannel("name")
 	CatPlugin        = "plugin"         // Flutter plugin package names
@@ -485,19 +486,32 @@ const (
 // CategorySeverity returns the severity level for a category.
 func CategorySeverity(cat string) string {
 	switch cat {
-	case CatEncryption, CatAuth, CatSIM, CatSMS, CatContacts, CatCloaking, CatDataCollect, CatWebView, CatBlockchain, CatGambling:
+	case CatEncryption, CatAuth, CatSIM, CatSMS, CatContacts, CatCloaking, CatDataCollect,
+		CatWebView, CatBlockchain, CatGambling, CatRooting, CatAntiAnalysis,
+		CatAccessibility, CatFraud, CatCovertChannel:
 		return SeverityHigh
-	case CatURL, CatHost, CatBase64Key, CatLocation, CatDeviceInfo, CatCamera, CatAttribution:
+	case CatURL, CatHost, CatBase64Key, CatLocation, CatDeviceInfo, CatCamera,
+		CatAttribution, CatSSLPinning, CatDynamicLoad, CatDRMBypass, CatObfuscation:
 		return SeverityMedium
-	case CatNet, CatFileExt, CatTHR, CatAsync:
+	case CatNet, CatFileExt, CatTHR, CatAsync, CatGenerator, CatIPC, CatCryptoConst,
+		CatMethodChannel, CatPlugin:
 		return SeverityLow
-	// The native-capability categories (tls, process, isolate, vm_service,
-	// compression, ffi) fall through to Low deliberately. Assigning them a
-	// severity is a judgement about what a capability means, and none of
-	// them has been measured against real findings yet; guessing here
-	// would put an opinion into every report.
 	default:
 		return SeverityLow
+	}
+}
+
+// CategorySARIFLevel is the single severity mapping used by both the signal
+// JSON surfaces and SARIF. Keeping this translation here prevents the two
+// report formats from silently disagreeing about the same category.
+func CategorySARIFLevel(cat string) string {
+	switch CategorySeverity(cat) {
+	case SeverityHigh:
+		return "error"
+	case SeverityMedium:
+		return "warning"
+	default:
+		return "note"
 	}
 }
 

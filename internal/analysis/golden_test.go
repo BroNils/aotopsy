@@ -5,13 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-
-	"aotopsy/internal/samplecorpus"
 )
 
 // Golden output tests.
@@ -57,19 +56,38 @@ import (
 // snapshot, the disassembly, or type inference belongs here; files carrying
 // absolute paths or timings do not.
 var goldenFiles = []string{
+	"dart_meta.json",
 	"functions.jsonl",
 	"call_edges.jsonl",
 	"string_refs.jsonl",
 	"index.jsonl",
 	"unresolved_thr.jsonl",
 	"classes.jsonl",
+	"scripts.jsonl",
+	"loading_units.jsonl",
+	"kpi.jsonl",
+	"instances.jsonl",
+	"contexts.jsonl",
+	"type_arguments.jsonl",
+	"exception_handlers.jsonl",
+	"stack_maps.jsonl",
+	"icdata.jsonl",
+	"closure_data.jsonl",
+	"library_functions.jsonl",
+	"ffi_bridges.jsonl",
 	"dispatch_table.jsonl",
 	"field_accessor_xref.jsonl",
 	"address_callers_xref.jsonl",
 	"string_value_xref.jsonl",
+	"selector_dispatch_xref.jsonl",
 	"pool_immediates.jsonl",
 	"typetrack_report.json",
+	"function_fingerprints.jsonl",
+	"evidence.jsonl",
+	"platform_channels.jsonl",
+	"deobfuscate_map.jsonl",
 	"native_capabilities.jsonl",
+	"aotopsy.r2",
 }
 
 // signal.dot and signal_cfg.dot are NOT here, and cannot be: this harness runs
@@ -116,18 +134,7 @@ func TestGoldenPipelineOutput(t *testing.T) {
 }
 
 func runGolden(t *testing.T, sample, name string) {
-	libPath := samplecorpus.Path(sample)
-	if libPath == "" {
-		// No corpus at all (fresh clone, CI): nothing to check against.
-		// Corpus present but this sample absent: the record and the corpus
-		// disagree, and that must fail. See samplecorpus.Available.
-		if !samplecorpus.Available() {
-			t.Skipf("no samples/ directory in this checkout; golden record for %s cannot be checked", name)
-		}
-		t.Fatalf("corpus sample %s is missing from samples/; the golden record for %s cannot be checked.\n"+
-			"  Restore the sample rather than deleting the record: an unrunnable golden is\n"+
-			"  how this gate spent months reporting ok while checking nothing.", sample, name)
-	}
+	libPath := corpusSample(t, sample)
 	inputHash, err := fileSHA256(libPath)
 	if err != nil {
 		t.Fatalf("cannot read %s: %v", libPath, err)
@@ -263,13 +270,7 @@ func runGolden(t *testing.T, sample, name string) {
 // reproducible: map iteration order leaking into a JSONL file would make them
 // fail at random and train everyone to re-record instead of investigating.
 func TestGoldenOutputIsDeterministic(t *testing.T) {
-	libPath := samplecorpus.Path("dart-3.9.2-arm64.so")
-	if libPath == "" {
-		if !samplecorpus.Available() {
-			t.Skip("no samples/ directory in this checkout; determinism is unchecked")
-		}
-		t.Fatal("corpus sample dart-3.9.2-arm64.so is missing from samples/; determinism is unchecked without it")
-	}
+	libPath := corpusSample(t, "dart-3.9.2-arm64.so")
 	sums := make([]map[string]string, 2)
 	for run := 0; run < 2; run++ {
 		outDir := t.TempDir()
@@ -286,19 +287,46 @@ func TestGoldenOutputIsDeterministic(t *testing.T) {
 			sums[run][f] = hex.EncodeToString(sum[:])
 		}
 	}
-	for f, a := range sums[0] {
-		if b := sums[1][f]; a != b {
-			t.Errorf("%s differs between two runs of the same binary (%s vs %s) -- "+
-				"something in the pipeline depends on map iteration order", f, a, b)
+	for _, diff := range deterministicOutputDiffs(sums[0], sums[1], goldenFiles) {
+		t.Error(diff)
+	}
+}
+
+func deterministicOutputDiffs(a, b map[string]string, files []string) []string {
+	var diffs []string
+	for _, f := range files {
+		av, aok := a[f]
+		bv, bok := b[f]
+		if aok != bok {
+			diffs = append(diffs, fmt.Sprintf("%s presence differs between two runs of the same binary (run0=%v run1=%v)", f, aok, bok))
+			continue
 		}
+		if aok && av != bv {
+			diffs = append(diffs, fmt.Sprintf("%s differs between two runs of the same binary (%s vs %s) -- something in the pipeline depends on map iteration order", f, av, bv))
+		}
+	}
+	return diffs
+}
+
+func TestDeterministicOutputDiffsChecksPresenceBothDirections(t *testing.T) {
+	files := []string{"only_first", "only_second", "changed", "same"}
+	a := map[string]string{"only_first": "a", "changed": "a", "same": "x"}
+	b := map[string]string{"only_second": "b", "changed": "b", "same": "x"}
+	diffs := deterministicOutputDiffs(a, b, files)
+	if len(diffs) != 3 {
+		t.Fatalf("got %d diffs, want 3: %v", len(diffs), diffs)
 	}
 }
 
 func fileSHA256(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum), nil
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }

@@ -19,6 +19,7 @@ package x86
 
 import (
 	"aotopsy/internal/sdk"
+	"math"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -76,19 +77,32 @@ func CanonReg(r x86asm.Reg) int {
 // because each caller wraps x86asm.Inst in its own type and the previous
 // copies differed only in which wrapper they unpacked.
 //
-// The arithmetic is deliberately signed. The copies split between
-// `uint64(int64(addr)+int64(length)+int64(rel))` and
-// `addr + uint64(length) + uint64(int64(rel))`; those agree for negative rel
-// only because two's-complement addition wraps, which is true but is not
-// something a reader should have to re-derive.
+// Arithmetic is checked. Malformed ELF inputs can place executable sections
+// near MaxUint64; letting a rel32 wrap there turns an invalid target into a
+// plausible small address and can create a false exact symbol match.
 func RelTarget(inst x86asm.Inst, addr uint64, length int) (uint64, bool) {
+	if length < 0 || addr > math.MaxUint64-uint64(length) {
+		return 0, false
+	}
+	base := addr + uint64(length)
 	for _, arg := range inst.Args {
 		if arg == nil {
 			continue
 		}
 		if rel, ok := arg.(x86asm.Rel); ok {
-			//nolint:gosec // rel is a decoded rel8/rel32; the sum is an address by construction
-			return uint64(int64(addr) + int64(length) + int64(rel)), true
+			v := int64(rel)
+			if v >= 0 {
+				uv := uint64(v)
+				if base > math.MaxUint64-uv {
+					return 0, false
+				}
+				return base + uv, true
+			}
+			mag := uint64(-(v + 1)) + 1
+			if mag > base {
+				return 0, false
+			}
+			return base - mag, true
 		}
 	}
 	return 0, false
@@ -105,10 +119,29 @@ func IsCondJump(op x86asm.Op) bool {
 	switch op {
 	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
 		x86asm.JE, x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
-		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS:
+		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JS, x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE:
 		return true
 	}
 	return false
+}
+
+// IsSemanticBarrier reports architectural traps after which ordinary static
+// fallthrough is not valid. Decoder failures live on Decoded.Bad and remain the
+// caller's responsibility.
+func IsSemanticBarrier(inst x86asm.Inst) bool {
+	switch inst.Op {
+	case x86asm.UD2, x86asm.HLT:
+		return true
+	case x86asm.INT:
+		// x86asm does not expose a distinct INT3 opcode. 0xCC decodes as
+		// INT $0x3, while Dart's x86 constants define int3 as exactly 0xCC.
+		// Other software interrupts are not Dart AOT break fillers, so keep the
+		// barrier classification specific to vector 3.
+		imm, ok := inst.Args[0].(x86asm.Imm)
+		return ok && imm == 3
+	default:
+		return false
+	}
 }
 
 // EqualitySuccessor returns which successor edge of a two-way branch
@@ -135,14 +168,62 @@ func EqualitySuccessor(op x86asm.Op, numSuccs int) int {
 	return sdk.SuccUnknown
 }
 
-// DstRegsOfInst returns the canonical register indices (0..15) modified by inst.
-// Returns nil for instructions that do not modify GP registers (e.g. CMP, TEST, PUSH, jumps).
+// DstRegsOfInst returns the canonical register indices (0..15) modified by inst,
+// including implicit GPR effects such as RSP updates by PUSH/POP/CALL/RET.
+// Returns nil only when no GPR family is modified (e.g. CMP, TEST, jumps).
 func DstRegsOfInst(inst x86asm.Inst) []int {
 	switch inst.Op {
-	case x86asm.CMP, x86asm.TEST, x86asm.PUSH, x86asm.JMP:
+	case x86asm.CMP, x86asm.TEST, x86asm.BT, x86asm.JMP:
 		return nil
-	case x86asm.DIV, x86asm.IDIV:
-		// DIV/IDIV implicitly modifies RAX (0) and RDX (2)
+	case x86asm.PUSH, x86asm.CALL, x86asm.RET:
+		return []int{4} // implicit RSP update
+	case x86asm.POP:
+		return appendUniqueReg(writtenRegisterArgs(inst, 0), 4)
+	case x86asm.DIV, x86asm.IDIV, x86asm.MUL:
+		// The byte forms use AX as the entire implicit result/dividend and
+		// therefore modify only the RAX family. Wider forms use RDX:RAX.
+		// The explicit operand is a source, not a destination.
+		return implicitMulDivWrites(inst)
+	case x86asm.IMUL:
+		// x86 has both one-operand IMUL (implicit RDX:RAX destination) and
+		// two/three-operand forms whose first operand is the explicit dest.
+		if inst.Args[1] == nil {
+			return implicitMulDivWrites(inst)
+		}
+	case x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE:
+		// LOOP-family branches decrement the address-size count register. All
+		// widths canonicalize to RCX=1 for our provenance/type state.
+		return []int{1}
+	case x86asm.MOVSB, x86asm.MOVSW, x86asm.MOVSD, x86asm.MOVSQ:
+		// String moves implicitly advance/retreat RSI and RDI. A live REP/REPN
+		// prefix also decrements RCX as the repetition counter. x86asm keeps
+		// ignored/overridden prefixes in the Prefix array, so only an effective
+		// low-byte F2/F3 counts here.
+		regs := []int{6, 7}
+		for _, p := range inst.Prefix {
+			if p&x86asm.PrefixIgnored != 0 {
+				continue
+			}
+			low := p & 0xFF
+			if low == x86asm.PrefixREP || low == x86asm.PrefixREPN {
+				regs = append(regs, 1)
+				break
+			}
+		}
+		return regs
+	case x86asm.CWD, x86asm.CDQ, x86asm.CQO:
+		// Sign-extension into the implicit high half of the dividend.
+		return []int{2}
+	case x86asm.XCHG, x86asm.XADD:
+		return writtenRegisterArgs(inst, 0, 1)
+	case x86asm.BTC, x86asm.BTR, x86asm.BTS:
+		return writtenRegisterArgs(inst, 0)
+	case x86asm.CMPXCHG:
+		// CMPXCHG may define the destination and always may replace RAX with
+		// the observed value on the compare-fail path.
+		return appendUniqueReg(writtenRegisterArgs(inst, 0), 0)
+	case x86asm.CMPXCHG8B, x86asm.CMPXCHG16B:
+		// On failure the loaded memory value is returned in EDX:EAX/RDX:RAX.
 		return []int{0, 2}
 	}
 	if IsCondJump(inst.Op) {
@@ -150,11 +231,86 @@ func DstRegsOfInst(inst x86asm.Inst) []int {
 	}
 	if len(inst.Args) >= 1 {
 		if r, ok := inst.Args[0].(x86asm.Reg); ok {
-			canon := CanonReg(r)
+			canon := writtenRegFamily(r)
 			if canon >= 0 {
 				return []int{canon}
 			}
 		}
 	}
 	return nil
+}
+
+func implicitMulDivWrites(inst x86asm.Inst) []int {
+	if implicitMulDivByteOperand(inst) {
+		return []int{0}
+	}
+	return []int{0, 2}
+}
+
+func implicitMulDivByteOperand(inst x86asm.Inst) bool {
+	if _, ok := inst.Args[0].(x86asm.Mem); ok {
+		return inst.MemBytes == 1
+	}
+	r, ok := inst.Args[0].(x86asm.Reg)
+	if !ok {
+		return false
+	}
+	switch r {
+	case x86asm.AL, x86asm.CL, x86asm.DL, x86asm.BL,
+		x86asm.AH, x86asm.CH, x86asm.DH, x86asm.BH,
+		x86asm.SPB, x86asm.BPB, x86asm.SIB, x86asm.DIB,
+		x86asm.R8B, x86asm.R9B, x86asm.R10B, x86asm.R11B,
+		x86asm.R12B, x86asm.R13B, x86asm.R14B, x86asm.R15B:
+		return true
+	}
+	return false
+}
+
+func writtenRegisterArgs(inst x86asm.Inst, positions ...int) []int {
+	var out []int
+	for _, pos := range positions {
+		if pos < 0 || pos >= len(inst.Args) {
+			continue
+		}
+		r, ok := inst.Args[pos].(x86asm.Reg)
+		if !ok {
+			continue
+		}
+		if idx := writtenRegFamily(r); idx >= 0 {
+			out = appendUniqueReg(out, idx)
+		}
+	}
+	return out
+}
+
+// writtenRegFamily maps a register write to the 64-bit GPR state slot that it
+// invalidates. Unlike CanonReg, it deliberately accepts AH/CH/DH/BH: those
+// high-byte writes do not carry a whole-register value that can be propagated,
+// but they do mutate the corresponding parent register and therefore must kill
+// any stale type/provenance fact for it.
+func writtenRegFamily(r x86asm.Reg) int {
+	switch r {
+	case x86asm.AH:
+		return 0
+	case x86asm.CH:
+		return 1
+	case x86asm.DH:
+		return 2
+	case x86asm.BH:
+		return 3
+	default:
+		return CanonReg(r)
+	}
+}
+
+func appendUniqueReg(regs []int, reg int) []int {
+	if reg < 0 {
+		return regs
+	}
+	for _, existing := range regs {
+		if existing == reg {
+			return regs
+		}
+	}
+	return append(regs, reg)
 }

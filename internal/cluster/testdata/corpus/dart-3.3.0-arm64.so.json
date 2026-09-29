@@ -7,7 +7,7 @@
   "isolate_clusters": 321,
   "has_instructions_table": true,
   "strings": 8991,
-  "named": 11199,
+  "named": 11386,
   "codes": 7920,
   "instr_table_length": 7920,
   "instr_table_first_entry_with_code": 0,

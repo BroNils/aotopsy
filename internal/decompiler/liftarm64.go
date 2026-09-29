@@ -15,23 +15,21 @@ import (
 // them into the FuncIR; the constants themselves are shared with disasm,
 // typetrack, and signal.
 
-// arm64ArgRegs is the SDK-verified Dart calling-convention argument
-// register set (constants_arm64.h DartCallingConvention::kCpuRegistersForArgs
-// = {R1, R2, R3, R5, R6, R7}), NOT the C ABI x0–x7. The previous x0–x7 list
-// included R0 (kClassIdReg) and R4 (ARGS_DESC_REG), which are NOT argument
-// registers — declaring them as args leaked confident-wrong parameter names.
-var arm64ArgRegs = sdk.DartArgRegNames(sdk.ArchARM64)
-
 // BuildARM64IR lifts a disassembled ARM64 function (as produced by
 // aotopsy's existing internal/disasm.Disassemble+BuildCFG) into the
-// arch-neutral FuncIR the pseudocode emitter consumes.
-func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
+// arch-neutral FuncIR the pseudocode emitter consumes. cc is deliberately a
+// per-function input: a global SDK register table does not prove that this
+// particular Function uses it.
+func BuildARM64IR(name, dartVersion string, insts []disasm.Inst, cc sdk.RegisterCallingConvention) *FuncIR {
 	if len(insts) == 0 {
-		return newFuncIR(name, 0)
+		fir := newFuncIR(name, 0)
+		fir.DartVersion = dartVersion
+		return fir
 	}
 	cfg := disasm.BuildCFG(name, insts)
 	fir := newFuncIR(name, insts[0].Addr)
-	fir.ArgRegs = arm64ArgRegs
+	fir.DartVersion = dartVersion
+	fir.ArgRegs = append([]string(nil), cc.GPRNames...)
 	fir.FrameReg = sdk.ARM64FrameRegStr
 	fir.ReturnReg = sdk.ARM64ReturnRegStr
 	fir.LinkReg = sdk.ARM64LinkRegStr
@@ -40,12 +38,12 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
 	fir.ThreadReg = sdk.ARM64ThreadRegStr
 	fir.NullReg = sdk.ARM64NullRegStr
-	fir.HeapBitsReg = sdk.ARM64HeapBitsStr
+	fir.HeapBitsReg, fir.HeapBaseReg, fir.BarrierMaskReg = sdk.ARM64HeapRegisterRoles(dartVersion)
 	fir.StackReg = sdk.ARM64StackRegStr
 	fir.CodeReg = sdk.ARM64CodeRegStr
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
-	fir.FpuArgRegs = sdk.ARM64FpuArgRegNames()
-	fir.FpuReturnReg = sdk.ARM64FpuReturnRegName
+	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
+	fir.FpuReturnReg = cc.FPUReturn
 	fir.TypeTestABIRegs = sdk.TypeTestRegNames(true)
 
 	for _, bb := range cfg.Blocks {
@@ -76,6 +74,11 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 	mnemonic := strings.ToLower(inst.Mnemonic)
 	src := strings.ToLower(inst.Text)
 	ir := Instr{Addr: inst.Addr, Src: src, PoolIndex: -1}
+	for _, reg := range arm64.DstRegsOfInst(inst.Raw) {
+		if name := sdk.ARM64RegName(reg); name != "" {
+			ir.DefRegs = append(ir.DefRegs, name)
+		}
+	}
 
 	// Resolve against the base BEFORE this instruction updates the map:
 	// `add x2, x27, #0x4000; ldr x2, [x2, #8]` reuses the same register,
@@ -127,7 +130,9 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 		ir.Op = OpBranch
 		ir.Target = fmt.Sprintf("0x%x", bi.Target)
 		ir.CondKind = "cmp"
-		ir.CondOp = arm64CondOp(strings.ToLower(firstOperandToken(inst.Operands)))
+		cc := strings.ToLower(firstOperandToken(inst.Operands))
+		ir.CondOp = arm64CondOp(cc)
+		ir.CondUnsigned = arm64CondUnsigned(cc)
 	case mnemonic == "br":
 		// P6: br xN — indirect branch (jump table, tail call, or computed goto).
 		// Mark as OpJump with the register as target so the emitter can
@@ -219,6 +224,14 @@ func arm64CondOp(cc string) string {
 	// (renders as a placeholder "/* cond */" via the emitter's existing
 	// "no CondOp match" fallback) rather than emitting a wrong operator.
 	return "?"
+}
+
+func arm64CondUnsigned(cc string) bool {
+	switch cc {
+	case "lo", "cc", "ls", "hi", "hs", "cs":
+		return true
+	}
+	return false
 }
 
 // firstOperandToken extracts the first comma-separated token from an
@@ -343,7 +356,12 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			old := s.lookupReg(dst)
-			s.setReg(dst, fmt.Sprintf("(%s | (%s << %s))", old, imm, shift))
+			expr := fmt.Sprintf("((%s & ~(0xffff << %s)) | ((%s & 0xffff) << %s))", old, shift, imm, shift)
+			// A W-register write zero-extends into the corresponding X register.
+			if strings.HasPrefix(dst, "w") {
+				expr = fmt.Sprintf("(%s & 0xffffffff)", expr)
+			}
+			s.setReg(dst, expr)
 		}
 		return "", false, true
 	case "ubfx":
@@ -384,6 +402,7 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			rhs, ok := shiftedOperand(fir, s, ops, 1)
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), negateExpr(rhs)}
 			s.HasCmp = ok
+			s.CmpBits = cmpBitWidthFromOperand(ops[0])
 		}
 		return "", false, true
 	case "str", "stur":
@@ -453,10 +472,11 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			dst := strings.ToLower(ops[0])
 			src1 := operandExpr(fir, s, ops[1])
 			src2 := operandExpr(fir, s, ops[2])
-			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[3])))
+			cc := strings.ToLower(strings.TrimSpace(ops[3]))
+			condOp := arm64CondOp(cc)
 			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[3]))
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, arm64CondUnsigned(cc)); ok {
+				condStr = rendered
 			}
 			var elseExpr string
 			switch mnemonic {
@@ -475,10 +495,11 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 	case "cset", "csetm":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[1])))
+			cc := strings.ToLower(strings.TrimSpace(ops[1]))
+			condOp := arm64CondOp(cc)
 			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[1]))
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, arm64CondUnsigned(cc)); ok {
+				condStr = rendered
 			}
 			if mnemonic == "cset" {
 				s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))

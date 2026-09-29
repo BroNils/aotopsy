@@ -36,7 +36,7 @@ func TestResolvePoolDisplay_FieldOwnerQualification(t *testing.T) {
 		refNameOrphan  = 45
 	)
 
-	ct := &snapshot.CIDTable{Field: fieldCID, Class: classCID}
+	ct := &snapshot.CIDTable{Field: fieldCID, Class: classCID, OneByteString: 300}
 
 	classWja := &cluster.NamedObject{CID: classCID, RefID: refClassWja, NameRefID: refNameClassWja, OwnerRefID: -1}
 	classYja := &cluster.NamedObject{CID: classCID, RefID: refClassYja, NameRefID: refNameClassYja, OwnerRefID: -1}
@@ -129,6 +129,97 @@ func TestResolvePoolDisplay_FieldOwnerQualification(t *testing.T) {
 	}
 }
 
+func TestResolvePoolDisplayRejectsVMStringCollisionOnNonStringObject(t *testing.T) {
+	ct := &snapshot.CIDTable{Class: 100, OneByteString: 200, TwoByteString: 201, String: 202}
+	pl := &PoolLookups{
+		VmRefToStr:   map[int]string{7: "looks_callable"},
+		VmRefCID:     map[int]int{7: 100},
+		VmRefToNamed: map[int]*cluster.NamedObject{},
+		RefToStr:     map[int]string{},
+		RefToNamed:   map[int]*cluster.NamedObject{},
+		RefCID:       map[int]int{},
+		CT:           ct,
+		BaseObjLimit: 64,
+	}
+	got := ResolvePoolDisplay([]cluster.PoolEntry{{Index: 1, Kind: cluster.PoolTagged, RefID: 7}}, pl)
+	if got[1] == "looks_callable" {
+		t.Fatal("non-string VM object collision leaked bare VmRefToStr text")
+	}
+	if got[1] != "<vm:Class>" {
+		t.Fatalf("collision display = %q, want typed placeholder", got[1])
+	}
+}
+
+func TestResolvePoolDisplayZeroStringCIDDoesNotMatchUnknownCID(t *testing.T) {
+	ct := &snapshot.CIDTable{}
+	pl := &PoolLookups{
+		RefToStr:     map[int]string{9: "not-proven-string"},
+		RefCID:       map[int]int{9: 0},
+		RefToNamed:   map[int]*cluster.NamedObject{},
+		VmRefToStr:   map[int]string{},
+		VmRefCID:     map[int]int{},
+		VmRefToNamed: map[int]*cluster.NamedObject{},
+		CT:           ct,
+	}
+	got := ResolvePoolDisplay([]cluster.PoolEntry{{Index: 2, Kind: cluster.PoolTagged, RefID: 9}}, pl)
+	if got[2] == `"not-proven-string"` {
+		t.Fatal("zero-valued CID table falsely classified cid 0 as String")
+	}
+}
+
+func TestIsolateNameAndOwnerDoNotCrossIntoHighVMRefs(t *testing.T) {
+	ct := &snapshot.CIDTable{Class: 4, Field: 10, OneByteString: 20}
+	vmClass := &cluster.NamedObject{CID: ct.Class, RefID: 100, NameRefID: 8, OwnerRefID: -1}
+	appField := &cluster.NamedObject{CID: ct.Field, RefID: 200, NameRefID: 101, OwnerRefID: 100}
+	pl := &PoolLookups{
+		CT:           ct,
+		BaseObjLimit: 50,
+		RefToStr:     map[int]string{},
+		RefToNamed:   map[int]*cluster.NamedObject{appField.RefID: appField},
+		RefCID:       map[int]int{},
+		VmRefToStr:   map[int]string{8: "VMBaseClass", 101: "WrongHighName", 100: "WrongHighString"},
+		VmRefToNamed: map[int]*cluster.NamedObject{vmClass.RefID: vmClass},
+		VmRefCID:     map[int]int{100: ct.OneByteString, 101: ct.OneByteString},
+	}
+
+	if got := pl.resolveIsolateName(appField); got != "" {
+		t.Fatalf("high isolate NameRef crossed into VM namespace: %q", got)
+	}
+	if got := pl.ResolveOwnerName(appField); got != "" {
+		t.Fatalf("high isolate OwnerRef crossed into VM namespace: %q", got)
+	}
+	got := ResolvePoolDisplay([]cluster.PoolEntry{{Index: 1, Kind: cluster.PoolTagged, RefID: 100}}, pl)
+	if got[1] != "<ref:100>" {
+		t.Fatalf("high pool ref crossed into VM namespace: %q", got[1])
+	}
+
+	// Even if the app metadata proves the high ref is a String, a missing app
+	// payload must not be filled from the unrelated VM string at the same ref.
+	pl.RefCID[101] = ct.OneByteString
+	got = ResolvePoolDisplay([]cluster.PoolEntry{{Index: 2, Kind: cluster.PoolTagged, RefID: 101}}, pl)
+	if got[2] != "<String>" {
+		t.Fatalf("high app String borrowed colliding VM payload: %q", got[2])
+	}
+}
+
+func TestIsolateOwnerMayUseVMBaseObjectPrefix(t *testing.T) {
+	ct := &snapshot.CIDTable{Class: 4, Field: 10, OneByteString: 20}
+	vmClass := &cluster.NamedObject{CID: ct.Class, RefID: 20, NameRefID: 8, OwnerRefID: -1}
+	appField := &cluster.NamedObject{CID: ct.Field, RefID: 200, NameRefID: 201, OwnerRefID: vmClass.RefID}
+	pl := &PoolLookups{
+		CT:           ct,
+		BaseObjLimit: 50,
+		RefToStr:     map[int]string{201: "field"},
+		RefToNamed:   map[int]*cluster.NamedObject{appField.RefID: appField},
+		VmRefToStr:   map[int]string{8: "VMBaseClass"},
+		VmRefToNamed: map[int]*cluster.NamedObject{vmClass.RefID: vmClass},
+		VmRefCID:     map[int]int{8: ct.OneByteString},
+	}
+	if got := pl.ResolveOwnerName(appField); got != "VMBaseClass" {
+		t.Fatalf("base-object VM owner fallback = %q, want VMBaseClass", got)
+	}
+}
+
 // TestResolveCodeOwner_PrefersCodeIndexOverBogusOwnerRef is a regression
 // test for the real Dart 3.7.0 x86_64 bug: ~5.4% of functions carry a
 // bogus shared Code.OwnerRef that resolves to CID 61 (Mint), never a
@@ -152,7 +243,7 @@ func TestResolveCodeOwner_PrefersCodeIndexOverBogusOwnerRef(t *testing.T) {
 	result := &cluster.Result{
 		Named: []cluster.NamedObject{*realFn, *bogusMint},
 	}
-	byCodeIndex := CodeIndexToFunc(result, ct, false)
+	byCodeIndex := CodeIndexToFunc(result, ct, false, -1)
 
 	refToNamed := map[int]*cluster.NamedObject{
 		realFnRef: realFn,
@@ -160,7 +251,7 @@ func TestResolveCodeOwner_PrefersCodeIndexOverBogusOwnerRef(t *testing.T) {
 	}
 
 	ce := cluster.CodeEntry{RefID: 1, OwnerRef: bogusRef, ClusterIndex: clusterIdx}
-	owner, ok := ResolveCodeOwner(ce, refToNamed, byCodeIndex)
+	owner, ok := ResolveCodeOwner(ce, refToNamed, byCodeIndex, ct)
 	if !ok {
 		t.Fatal("expected ResolveCodeOwner to resolve via CodeIndex cross-reference")
 	}
@@ -176,14 +267,55 @@ func TestResolveCodeOwner_PrefersCodeIndexOverBogusOwnerRef(t *testing.T) {
 // regression.
 func TestResolveCodeOwner_FallsBackToOwnerRefWhenNoCodeIndexMatch(t *testing.T) {
 	const ownerRef = 55
-	owner := &cluster.NamedObject{CID: 6, RefID: ownerRef}
+	ct := &snapshot.CIDTable{Function: 6, Class: 4}
+	owner := &cluster.NamedObject{CID: ct.Function, RefID: ownerRef}
 	refToNamed := map[int]*cluster.NamedObject{ownerRef: owner}
 
 	ce := cluster.CodeEntry{RefID: 1, OwnerRef: ownerRef, ClusterIndex: -1}
-	got, ok := ResolveCodeOwner(ce, refToNamed, map[int]*cluster.NamedObject{})
+	got, ok := ResolveCodeOwner(ce, refToNamed, map[int]*cluster.NamedObject{}, ct)
 	if !ok || got.RefID != ownerRef {
 		t.Fatalf("expected fallback to OwnerRef=%d, got %+v ok=%v", ownerRef, got, ok)
 	}
+}
+
+func TestResolveCodeOwner_FallbackRejectsIllegalOwnerCID(t *testing.T) {
+	ct := &snapshot.CIDTable{Class: 4, PatchClass: 5, Function: 6, Field: 10, Type: 46}
+	cases := []struct {
+		name string
+		cid  int
+		want bool
+	}{
+		{"function", ct.Function, true},
+		{"class", ct.Class, true},
+		{"patch class", ct.PatchClass, false},
+		{"field", ct.Field, false},
+		{"type", ct.Type, false}, // AbstractType/TTS owners use the Type naming path.
+		{"arbitrary", 999, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := &cluster.NamedObject{CID: tc.cid, RefID: 55}
+			ce := cluster.CodeEntry{RefID: 1, OwnerRef: owner.RefID, ClusterIndex: -1}
+			got, ok := ResolveCodeOwner(ce, map[int]*cluster.NamedObject{owner.RefID: owner}, nil, ct)
+			if ok != tc.want {
+				t.Fatalf("ResolveCodeOwner cid=%d ok=%v, want %v (owner=%+v)", tc.cid, ok, tc.want, got)
+			}
+		})
+	}
+
+	t.Run("nil CID table refuses fallback", func(t *testing.T) {
+		owner := &cluster.NamedObject{CID: 6, RefID: 55}
+		if got, ok := ResolveCodeOwner(cluster.CodeEntry{OwnerRef: 55, ClusterIndex: -1}, map[int]*cluster.NamedObject{55: owner}, nil, nil); ok || got != nil {
+			t.Fatalf("nil CID table accepted fallback owner: %+v", got)
+		}
+	})
+
+	t.Run("zero CID table does not classify unknown as legal", func(t *testing.T) {
+		owner := &cluster.NamedObject{CID: 0, RefID: 55}
+		if got, ok := ResolveCodeOwner(cluster.CodeEntry{OwnerRef: 55, ClusterIndex: -1}, map[int]*cluster.NamedObject{55: owner}, nil, &snapshot.CIDTable{}); ok || got != nil {
+			t.Fatalf("zero-valued CID table accepted unknown owner: %+v", got)
+		}
+	})
 }
 
 // TestCodeIndexToFunc_AmbiguousIndexDropped verifies that if more than
@@ -199,9 +331,36 @@ func TestCodeIndexToFunc_AmbiguousIndexDropped(t *testing.T) {
 			{CID: funcCID, RefID: 2, CodeIndex: 3}, // collides with ref=1
 		},
 	}
-	m := CodeIndexToFunc(result, ct, false)
+	m := CodeIndexToFunc(result, ct, false, -1)
 	if _, ok := m[3]; ok {
 		t.Error("expected ambiguous CodeIndex 3 to be dropped, not mapped to either candidate")
+	}
+}
+
+func TestCodeIndexToFunc_SubtractsFirstEntryWithCode(t *testing.T) {
+	const funcCID = 6
+	ct := &snapshot.CIDTable{Function: funcCID}
+	result := &cluster.Result{Named: []cluster.NamedObject{
+		{CID: funcCID, RefID: 101, CodeIndex: 91013}, // slot 91013 -> cluster index 0
+		{CID: funcCID, RefID: 102, CodeIndex: 91014}, // slot 91014 -> cluster index 1
+	}}
+	m := CodeIndexToFunc(result, ct, true, 91012)
+	if got := m[0]; got == nil || got.RefID != 101 {
+		t.Fatalf("cluster index 0 = %+v, want Function ref 101", got)
+	}
+	if got := m[1]; got == nil || got.RefID != 102 {
+		t.Fatalf("cluster index 1 = %+v, want Function ref 102", got)
+	}
+	if _, ok := m[91012]; ok {
+		t.Fatal("one-based InstructionsTable slot leaked into Code-cluster index map")
+	}
+}
+
+func TestCodeIndexToFunc_OneBasedWithoutFECDisablesMapping(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 6}
+	result := &cluster.Result{Named: []cluster.NamedObject{{CID: 6, RefID: 1, CodeIndex: 42}}}
+	if got := CodeIndexToFunc(result, ct, true, -1); len(got) != 0 {
+		t.Fatalf("one-based mapping without FEC = %v, want disabled", got)
 	}
 }
 

@@ -21,8 +21,9 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		topLevelOffset = 1 << 16
 	}
 
-	named := make([]NamedObject, 0, count)
-	classes := make([]ClassInfo, 0, count)
+	capHint := initialCaptureCap(cm.Count, s.Remaining())
+	named := make([]NamedObject, 0, capHint)
+	classes := make([]ClassInfo, 0, capHint)
 	ref := cm.StartRef
 
 	// super_type's ref index within the ReadFromTo range. Confirmed against
@@ -50,13 +51,16 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 	//   invocation_dispatcher_cache(14), allocation_stub(15)
 	const superTypeIdxV13 = 9
 	const libraryIdxV13 = 7
+	const typeParamsIdxV13 = 8
 	const superTypeIdxV2 = 10 // v2.10 and v2.13
 	const libraryIdxV2 = 8    // v2.10 and v2.13
+	const typeParamsIdxV2 = 9 // v2.10 and v2.13
 
 	for i := 0; i < count; i++ {
 		var nameRef = -1
 		superTypeRef := -1
 		libraryRef := -1
+		typeParamsRef := -1
 
 		// ReadFromTo: 13 refs.
 		for j := 0; j < spec.NumRefs; j++ {
@@ -81,6 +85,11 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			} else if (spec.NumRefs == 15 || spec.NumRefs == 16) && j == libraryIdxV2 {
 				libraryRef = int(r)
 			}
+			if spec.NumRefs == 13 && j == typeParamsIdxV13 {
+				typeParamsRef = int(r)
+			} else if (spec.NumRefs == 15 || spec.NumRefs == 16) && j == typeParamsIdxV2 {
+				typeParamsRef = int(r)
+			}
 		}
 
 		// ReadCid (class_id) — Read<int32_t> = ReadTagged32.
@@ -104,11 +113,11 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			return named, classes, fmt.Errorf("obj %d/%d type_args_offset: %w", i, count, err)
 		}
 		// Read<int16_t>(num_type_arguments) — Read16 marker 192.
-		if _, err := s.ReadTagged32(); err != nil {
+		if _, err := s.ReadTagged16(); err != nil {
 			return named, classes, fmt.Errorf("obj %d/%d num_type_args: %w", i, count, err)
 		}
 		// Read<uint16_t>(num_native_fields) — Read16 marker 192.
-		if _, err := s.ReadTagged32(); err != nil {
+		if _, err := s.ReadTagged16(); err != nil {
 			return named, classes, fmt.Errorf("obj %d/%d num_native_fields: %w", i, count, err)
 		}
 		// v2.10/v2.13: ReadTokenPosition(token_pos) + ReadTokenPosition(end_token_pos).
@@ -138,12 +147,12 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		isTopLevel := int64(int32(classID)) >= topLevelOffset
 		var unboxed uint64
 		if isPredefined || !isTopLevel {
-			v, err := s.ReadUnsigned()
+			v, err := s.ReadUnsigned64()
 			if err != nil {
 				return named, classes, fmt.Errorf("obj %d/%d bitmap: %w", i, count, err)
 			}
 			if !isPredefined {
-				unboxed = uint64(v)
+				unboxed = v
 			}
 		}
 
@@ -154,14 +163,15 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			OwnerRefID: -1,
 		})
 		classes = append(classes, ClassInfo{
-			RefID:          ref,
-			NameRefID:      nameRef,
-			ClassID:        int32(classID),
-			InstanceSize:   int32(instanceSize),
-			NextFieldOff:   int32(nextFieldOff),
-			TypeArgsOff:    int32(typeArgsOff),
-			SuperTypeRefID: superTypeRef,
-			LibraryRefID:   libraryRef,
+			RefID:           ref,
+			NameRefID:       nameRef,
+			ClassID:         int32(classID),
+			InstanceSize:    int32(instanceSize),
+			NextFieldOff:    int32(nextFieldOff),
+			TypeArgsOff:     int32(typeArgsOff),
+			SuperTypeRefID:  superTypeRef,
+			LibraryRefID:    libraryRef,
+			TypeParamsRefID: typeParamsRef,
 
 			UnboxedFieldBitmap: unboxed,
 		})
@@ -180,8 +190,9 @@ func readFillField(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		return nil, nil, nil
 	}
 
-	named := make([]NamedObject, 0, count)
-	fields := make([]FieldInfo, 0, count)
+	capHint := initialCaptureCap(cm.Count, s.Remaining())
+	named := make([]NamedObject, 0, capHint)
+	fields := make([]FieldInfo, 0, capHint)
 	ref := cm.StartRef
 
 	for i := 0; i < count; i++ {

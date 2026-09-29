@@ -11,6 +11,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 	"aotopsy/internal/strutil"
 )
 
@@ -30,11 +31,17 @@ func cmdExportDart(args []string) error {
 	}
 
 	posArgs := fs.Args()
-	if *libapp == "" && len(posArgs) > 0 {
-		*libapp = posArgs[0]
+	consumed := 0
+	if *libapp == "" && consumed < len(posArgs) {
+		*libapp = posArgs[consumed]
+		consumed++
 	}
-	if *outDir == "" && len(posArgs) > 1 {
-		*outDir = posArgs[1]
+	if *outDir == "" && consumed < len(posArgs) {
+		*outDir = posArgs[consumed]
+		consumed++
+	}
+	if consumed != len(posArgs) {
+		return fmt.Errorf("unexpected positional arguments: %v", posArgs[consumed:])
 	}
 
 	if *libapp == "" {
@@ -44,8 +51,12 @@ func cmdExportDart(args []string) error {
 		*outDir = "decompiled_dart"
 	}
 
-	if err := os.MkdirAll(*outDir, 0755); err != nil {
-		return fmt.Errorf("creating output directory: %w", err)
+	contains, err := output.ContainsPath(*outDir, *libapp)
+	if err != nil {
+		return fmt.Errorf("compare export/source paths: %w", err)
+	}
+	if contains {
+		return fmt.Errorf("export-dart output directory %s contains source binary %s", *outDir, *libapp)
 	}
 
 	ctx, err := analysis.LoadContext(*libapp)
@@ -53,6 +64,17 @@ func cmdExportDart(args []string) error {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return fmt.Errorf("begin export-dart generation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stageOutDir := tx.StageDir()
 
 	result := ctx.Result
 	pl := ctx.Pool
@@ -70,7 +92,11 @@ func cmdExportDart(args []string) error {
 	// fully-enriched Context.FuncIRFor -- export-dart no longer builds its own
 	// (previously partial) FuncIR builder, so its output matches decompile-native.
 	ctEarly := info.Version.CIDs
-	paramTypeByCodeIndex := naming.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased)
+	firstEntryWithCode := -1
+	if ctx.InstrTable != nil {
+		firstEntryWithCode = int(ctx.InstrTable.FirstEntryWithCode)
+	}
+	paramTypeByCodeIndex := naming.CodeIndexToFunc(result, ctEarly, info.Version.CodeIndexOneBased, firstEntryWithCode)
 	effectiveOwnerClassRef := func(funcObj *cluster.NamedObject) int {
 		effectiveClass := funcObj.OwnerRefID
 		if ctEarly != nil && ctEarly.PatchClass != 0 {
@@ -83,7 +109,7 @@ func cmdExportDart(args []string) error {
 	libResolver := analysis.NewLibraryResolver(result, pl)
 	codeRefToLibURL := make(map[int]string, len(result.Codes))
 	for _, ce := range result.Codes {
-		owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex)
+		owner, ok := naming.ResolveCodeOwner(ce, pl.RefToNamed, paramTypeByCodeIndex, ctEarly)
 		if !ok || owner == nil {
 			continue
 		}
@@ -164,8 +190,11 @@ func cmdExportDart(args []string) error {
 		}
 
 		fir, err := ctx.FuncIRFor(r)
-		if err != nil || fir == nil {
-			continue
+		if err != nil {
+			return fmt.Errorf("build IR for %s @ 0x%x: %w", funcName, funcVA, err)
+		}
+		if fir == nil {
+			return fmt.Errorf("build IR for %s @ 0x%x: no IR produced", funcName, funcVA)
 		}
 
 		art := decompiler.EmitPseudocode(fir, symbolLookup, poolLookup)
@@ -217,18 +246,22 @@ func cmdExportDart(args []string) error {
 		}
 
 		relPath := strutil.SanitizeLibraryPath(url)
-		fullPath := filepath.Join(*outDir, relPath)
+		fullPath := filepath.Join(stageOutDir, relPath)
 
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return fmt.Errorf("creating directory for %s: %w", fullPath, err)
 		}
 
 		content := decompiler.SynthesizeLibrary(lib)
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		if err := output.WriteFileAtomic(fullPath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("writing library %s: %w", fullPath, err)
 		}
 		totalFiles++
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish export-dart generation: %w", err)
+	}
+	committed = true
 
 	fmt.Printf("[export-dart] Successfully exported %d methods across %d classes into %d .dart files under %s/\n",
 		exportedMethods, len(exportedClasses), totalFiles, *outDir)

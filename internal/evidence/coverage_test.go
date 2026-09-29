@@ -88,6 +88,41 @@ func TestCoverageReadsCandidatesAfterJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCoverageMissingCandidateCountIsConservative(t *testing.T) {
+	c := NewCollectorFromRecords([]Evidence{{
+		PC: "0x2000", Function: "f", Kind: "dispatch", Confidence: ConfPolymorphic,
+		Result: map[string]any{"targets": []any{"A.run", "B.run"}},
+	}})
+	rep := c.Coverage([]RuntimeResolution{{PC: "0x2000", Function: "f", TargetName: "Z.run"}})
+	if rep.BothIndeterminate != 1 || rep.BothConflict != 0 {
+		t.Fatalf("unknown candidate completeness should be indeterminate: %+v", rep)
+	}
+}
+
+func TestCoverageMalformedCandidateListIsConservative(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets any
+		count   any
+	}{
+		{name: "non-string element", targets: []any{"A.run", float64(7)}, count: 1},
+		{name: "duplicate target", targets: []any{"A.run", "A.run"}, count: 2},
+		{name: "empty list", targets: []any{}, count: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCollectorFromRecords([]Evidence{{
+				PC: "0x2000", Function: "f", Kind: "dispatch", Confidence: ConfPolymorphic,
+				Result: map[string]any{"targets": tt.targets, "candidate_count": tt.count},
+			}})
+			rep := c.Coverage([]RuntimeResolution{{PC: "0x2000", Function: "f", TargetName: "Z.run"}})
+			if rep.BothIndeterminate != 1 || rep.BothConflict != 0 {
+				t.Fatalf("malformed candidate list should be indeterminate: %+v", rep)
+			}
+		})
+	}
+}
+
 func TestConfidenceNormalization(t *testing.T) {
 	for _, s := range []string{"exact", "static_inferred", "polymorphic", "stub",
 		"unknown", "runtime_confirmed"} {

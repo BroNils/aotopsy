@@ -34,7 +34,7 @@ func TestTypeRefsAfterArgumentsMatchesSDK(t *testing.T) {
 	reVisitTo := regexp.MustCompile(`VISIT_TO\((?:\w+,\s*)?(\w+?)_?\)`)
 
 	for _, v := range snapshot.SupportedVersions() {
-		src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", v)
+		src, err := sdktest.SDKFileAtTag("runtime/vm/raw_object.h", v)
 		if err != nil {
 			t.Fatalf("%s: fetch raw_object.h: %v", v, err)
 		}

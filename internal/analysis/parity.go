@@ -1,8 +1,10 @@
 package analysis
 
 import (
+	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +14,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 )
 
 // ParityRow is one row of the parity report.
@@ -58,22 +61,26 @@ func RunParity(samplesDir, outDir string) error {
 			hash, row.DartVersion, row.Status, row.Strings, row.Named, row.Codes, row.CodeMap)
 	}
 
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	// Write parity.csv.
+	// Encode both managed artifacts completely before publishing either one.
+	// A failed CSV flush or Markdown write therefore cannot leave a mixed
+	// generation where parity.csv and parity_summary.md describe different runs.
 	csvPath := filepath.Join(outDir, "parity.csv")
-	if err := writeParityCSV(csvPath, rows); err != nil {
-		return err
+	var csvBuf bytes.Buffer
+	if err := writeParityCSV(&csvBuf, rows); err != nil {
+		return fmt.Errorf("encode %s: %w", csvPath, err)
+	}
+	summaryPath := filepath.Join(outDir, "parity_summary.md")
+	var summaryBuf bytes.Buffer
+	if err := writeParitySummary(&summaryBuf, rows); err != nil {
+		return fmt.Errorf("encode %s: %w", summaryPath, err)
+	}
+	if err := output.PublishFileSet([]output.FileArtifact{
+		{Path: csvPath, Data: csvBuf.Bytes(), Perm: 0o644},
+		{Path: summaryPath, Data: summaryBuf.Bytes(), Perm: 0o644},
+	}); err != nil {
+		return fmt.Errorf("publish parity reports: %w", err)
 	}
 	_, _ = fmt.Fprintf(os.Stderr, "\nWrote %s (%d rows)\n", csvPath, len(rows))
-
-	// Write summary.
-	summaryPath := filepath.Join(outDir, "parity_summary.md")
-	if err := writeParitySummary(summaryPath, rows); err != nil {
-		return err
-	}
 	_, _ = fmt.Fprintf(os.Stderr, "Wrote %s\n", summaryPath)
 
 	return nil
@@ -104,6 +111,16 @@ func runParitySample(libpath, hash string, opts dartfmt.Options) ParityRow {
 	row.Strings = len(result.Strings)
 	row.Named = len(result.Named)
 	row.Codes = len(result.Codes)
+	firstEntryWithCode := -1
+	if info.Version.CodeIndexOneBased {
+		table, tableErr := cluster.ParseInstructionsTable(info.IsolateData.Data, &result.Header, info.Version, info.IsolateHeader)
+		if tableErr != nil {
+			row.Status = "EXTRACT_FAIL"
+			row.Error = fmt.Sprintf("instructions table: %v", tableErr)
+			return row
+		}
+		firstEntryWithCode = int(table.FirstEntryWithCode)
+	}
 
 	// Count code→function mappings. Resolved via naming.ResolveCodeOwner
 	// rather than trusting ce.OwnerRef directly.
@@ -111,9 +128,9 @@ func runParitySample(libpath, hash string, opts dartfmt.Options) ParityRow {
 	for i := range result.Named {
 		refToNamed[result.Named[i].RefID] = &result.Named[i]
 	}
-	byCodeIndex := naming.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased)
+	byCodeIndex := naming.CodeIndexToFunc(result, info.Version.CIDs, info.Version.CodeIndexOneBased, firstEntryWithCode)
 	for _, ce := range result.Codes {
-		if _, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex); ok {
+		if _, ok := naming.ResolveCodeOwner(ce, refToNamed, byCodeIndex, info.Version.CIDs); ok {
 			row.CodeMap++
 		}
 	}
@@ -122,15 +139,8 @@ func runParitySample(libpath, hash string, opts dartfmt.Options) ParityRow {
 	return row
 }
 
-func writeParityCSV(path string, rows []ParityRow) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	w := csv.NewWriter(f)
-	defer w.Flush()
+func writeParityCSV(dst io.Writer, rows []ParityRow) error {
+	w := csv.NewWriter(dst)
 
 	header := []string{"sample_hash", "dart_version", "status", "clusters", "strings", "named", "codes", "code_map", "error"}
 	if err := w.Write(header); err != nil {
@@ -153,15 +163,18 @@ func writeParityCSV(path string, rows []ParityRow) error {
 			return err
 		}
 	}
-	return nil
+	w.Flush()
+	return w.Error()
 }
 
-func writeParitySummary(path string, rows []ParityRow) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
+func writeParitySummary(dst io.Writer, rows []ParityRow) error {
+	var writeErr error
+	writef := func(format string, args ...any) {
+		if writeErr != nil {
+			return
+		}
+		_, writeErr = fmt.Fprintf(dst, format, args...)
 	}
-	defer func() { _ = f.Close() }()
 
 	// Count by status.
 	statusCounts := make(map[string]int)
@@ -181,19 +194,19 @@ func writeParitySummary(path string, rows []ParityRow) error {
 		totalCodeMap += r.CodeMap
 	}
 
-	_, _ = fmt.Fprintf(f, "# Parity Report\n\n")
-	_, _ = fmt.Fprintf(f, "Total samples: %d\n\n", len(rows))
+	writef("# Parity Report\n\n")
+	writef("Total samples: %d\n\n", len(rows))
 
-	_, _ = fmt.Fprintf(f, "## Status\n\n")
-	_, _ = fmt.Fprintf(f, "| Status | Count |\n|--------|-------|\n")
+	writef("## Status\n\n")
+	writef("| Status | Count |\n|--------|-------|\n")
 	for _, st := range []string{"OK", "UNSUPPORTED", "EXTRACT_FAIL", "ALLOC_FAIL", "FILL_FAIL"} {
 		if c, ok := statusCounts[st]; ok {
-			_, _ = fmt.Fprintf(f, "| %s | %d |\n", st, c)
+			writef("| %s | %d |\n", st, c)
 		}
 	}
 
-	_, _ = fmt.Fprintf(f, "\n## Version Coverage\n\n")
-	_, _ = fmt.Fprintf(f, "| Version | Samples | Status |\n|---------|---------|--------|\n")
+	writef("\n## Version Coverage\n\n")
+	writef("| Version | Samples | Status |\n|---------|---------|--------|\n")
 	var versions []string
 	for v := range versionCounts {
 		versions = append(versions, v)
@@ -207,15 +220,15 @@ func writeParitySummary(path string, rows []ParityRow) error {
 				break
 			}
 		}
-		_, _ = fmt.Fprintf(f, "| %s | %d | %s |\n", v, versionCounts[v], supported)
+		writef("| %s | %d | %s |\n", v, versionCounts[v], supported)
 	}
 
-	_, _ = fmt.Fprintf(f, "\n## Totals (OK samples only)\n\n")
-	_, _ = fmt.Fprintf(f, "| Metric | Total |\n|--------|-------|\n")
-	_, _ = fmt.Fprintf(f, "| Strings | %d |\n", totalStrings)
-	_, _ = fmt.Fprintf(f, "| Named objects | %d |\n", totalNamed)
-	_, _ = fmt.Fprintf(f, "| Code entries | %d |\n", totalCodes)
-	_, _ = fmt.Fprintf(f, "| Code→function maps | %d |\n", totalCodeMap)
+	writef("\n## Totals (OK samples only)\n\n")
+	writef("| Metric | Total |\n|--------|-------|\n")
+	writef("| Strings | %d |\n", totalStrings)
+	writef("| Named objects | %d |\n", totalNamed)
+	writef("| Code entries | %d |\n", totalCodes)
+	writef("| Code→function maps | %d |\n", totalCodeMap)
 
 	// List failed samples.
 	var failed []ParityRow
@@ -225,15 +238,15 @@ func writeParitySummary(path string, rows []ParityRow) error {
 		}
 	}
 	if len(failed) > 0 {
-		_, _ = fmt.Fprintf(f, "\n## Failures\n\n")
-		_, _ = fmt.Fprintf(f, "| Hash | Version | Status | Error |\n|------|---------|--------|-------|\n")
+		writef("\n## Failures\n\n")
+		writef("| Hash | Version | Status | Error |\n|------|---------|--------|-------|\n")
 		for _, r := range failed {
 			errMsg := r.Error
 			if len(errMsg) > 80 {
 				errMsg = errMsg[:80] + "..."
 			}
 			errMsg = strings.ReplaceAll(errMsg, "|", "\\|")
-			_, _ = fmt.Fprintf(f, "| %s | %s | %s | %s |\n", r.SampleHash, r.DartVersion, r.Status, errMsg)
+			writef("| %s | %s | %s | %s |\n", r.SampleHash, r.DartVersion, r.Status, errMsg)
 		}
 	}
 
@@ -245,12 +258,12 @@ func writeParitySummary(path string, rows []ParityRow) error {
 		}
 	}
 	if len(unsupported) > 0 {
-		_, _ = fmt.Fprintf(f, "\n## Unsupported Versions\n\n")
-		_, _ = fmt.Fprintf(f, "| Hash | Version |\n|------|--------|\n")
+		writef("\n## Unsupported Versions\n\n")
+		writef("| Hash | Version |\n|------|--------|\n")
 		for _, r := range unsupported {
-			_, _ = fmt.Fprintf(f, "| %s | %s |\n", r.SampleHash, r.DartVersion)
+			writef("| %s | %s |\n", r.SampleHash, r.DartVersion)
 		}
 	}
 
-	return nil
+	return writeErr
 }

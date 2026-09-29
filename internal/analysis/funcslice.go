@@ -45,7 +45,21 @@ func (im CodeImage) Slice(r cluster.CodeRange) (FuncSlice, bool) {
 	if !ok {
 		return FuncSlice{}, false
 	}
+	return im.namedSlice(r, funcCode, funcVA), true
+}
 
+// SliceExact is Slice without truncation tolerance. It is required for
+// identity-bearing artifacts such as function fingerprints: hashing a prefix
+// of a declared function must never produce a valid-looking identity.
+func (im CodeImage) SliceExact(r cluster.CodeRange) (FuncSlice, bool) {
+	funcCode, funcVA, ok := im.CodeImage.SliceExact(r)
+	if !ok {
+		return FuncSlice{}, false
+	}
+	return im.namedSlice(r, funcCode, funcVA), true
+}
+
+func (im CodeImage) namedSlice(r cluster.CodeRange, funcCode []byte, funcVA uint64) FuncSlice {
 	var funcName string
 	var owner string
 	if r.RefID >= 0 && im.Pool != nil {
@@ -67,7 +81,7 @@ func (im CodeImage) Slice(r cluster.CodeRange) (FuncSlice, bool) {
 		VA:    funcVA,
 		Name:  funcName,
 		Owner: owner,
-	}, true
+	}
 }
 
 // Each iterates through ranges up to limit (or all if limit <= 0),

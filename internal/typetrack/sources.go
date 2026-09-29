@@ -12,6 +12,11 @@ import (
 // It is built once from cluster.Result + PoolLookups and reused across
 // all functions during intra-procedural and inter-procedural analysis.
 type TypeContext struct {
+	// DartVersion is required for calling-convention decisions. Register
+	// parameters do not exist before 3.4.3; leaving version outside the type
+	// context made inter-procedural propagation silently assume a modern ABI for
+	// every supported snapshot.
+	DartVersion string
 	// funcParamTypes[funcRefID] = list of parameter ClassIDs (or -1 if unknown).
 	// Index 0 = 'this' receiver for instance methods.
 	FuncParamTypes map[int][]int
@@ -61,24 +66,35 @@ type TypeContext struct {
 	FuncIsInstance map[int]bool
 
 	// FuncOwnerClass maps function name → owner class ID.
-	// Used to initialize X0 = KnownClass(ownerClassID) for instance methods.
+	// It contains INSTANCE methods only; class-owned static methods are excluded.
+	// Used to initialize the receiver when its location is independently proven.
 	FuncOwnerClass map[string]int
+	// FuncMayUseRegisterCC is a conservative per-function eligibility gate from
+	// snapshot metadata. True does not prove register arguments (precompiler
+	// unboxing metadata can still force the stack); RunInterprocedural further
+	// requires independent multi-call-site register-setup evidence.
+	FuncMayUseRegisterCC map[string]bool
+	// FuncMustUseStackCC is true where the SDK rule is definitive (pre-3.4.3,
+	// generic, closure/tear-off, FFI trampoline). Unknown kinds keep both flags
+	// false rather than being guessed.
+	FuncMustUseStackCC map[string]bool
+	// FuncReceiverInRegister is callee-side machine-code evidence that the SDK
+	// convention's receiver register is live on function entry. This is separate
+	// from call-site masks because virtual methods can have zero direct callers --
+	// exactly the methods whose receiver type matters for BLR resolution.
+	FuncReceiverInRegister map[string]bool
 
 	// FuncReceiverStackSlot maps a function name to the FP-relative byte offset
 	// its receiver arrives at, for the Dart versions that pass arguments on the
 	// stack rather than in registers.
 	//
 	// Before Dart 3.4.3 there is no DartCallingConvention: arguments, receiver
-	// included, come in on the caller's stack. The prologue then loads them into
-	// registers, so seeding the receiver REGISTER at entry buys nothing -- the
-	// very next `ldr x0, [x29, #N]` overwrites it with Top, and every field load
-	// off that receiver is then untyped. Measured on identical Dart source: the
-	// base register at a field load was KnownClass 1.5% of the time on 2.17.6
-	// and 44% on 3.4.3, and FieldValueClass was called 9860 times against
-	// 307594.
-	//
-	// Empty on 3.4.3 and later, where kCpuRegistersForArgs exists and the
-	// receiver really is in R0.
+	// included, come in on the caller's stack. From 3.4.3 onward the register
+	// table exists, but Function::MaxNumberOfParametersInRegisters still forces
+	// generics, closures/tear-offs, FFI trampolines and several generated kinds
+	// to the stack; precompiler unboxing metadata can force further functions.
+	// This map therefore remains meaningful on modern binaries too, but is only
+	// populated where stack calling is proved or recovered from actual code.
 	FuncReceiverStackSlot map[string]int
 
 	// ReceiverLoadAtPC types the destination of an
@@ -90,7 +106,7 @@ type TypeContext struct {
 	// entry seed would be overwritten by the load itself. See
 	// RecoverArgsDescReceiverARM64.
 	//
-	// Empty on 3.4.3 and later, where the receiver arrives in R0.
+	// It can be populated on modern stack-called functions as well.
 	ReceiverLoadAtPC map[uint64]ReceiverLoad
 
 	// ClassIDTagPos and ClassIDTagSize are the ClassIdTag bitfield's position
@@ -176,14 +192,14 @@ type TypeContext struct {
 	// UnlinkedCall.target_name gives the method name being called.
 	PoolUnlinkedCallNames map[int]string
 
-	// MethodNameToSelectorOffsets maps method name → list of selector
-	// offsets where that method appears in the dispatch table. Built from
+	// MethodNameToSelectorImms maps method name → selector immediates
+	// (`selector_offset - kOriginElement`) where that method appears in the dispatch table. Built from
 	// DispatchBySlot + DispatchCodeIndexToName in buildDispatchTables.
 	// Used by resolveBLR to resolve UnlinkedCall BLR sites: when the BLR
 	// register carries an UnlinkedCall with target_name "foo", we look up
-	// "foo" here to find the selector offset(s), then call selectorCandidates
+	// "foo" here to find the selector immediate(s), then call selectorCandidates
 	// to enumerate all class implementations of that selector.
-	MethodNameToSelectorOffsets map[string][]int
+	MethodNameToSelectorImms map[string][]int
 
 	// PoolClosureFunctionNames maps PP index → function name for Closure
 	// objects in the pool. Built from Closure.SignatureRefID (which captures
@@ -514,6 +530,7 @@ func BuildTypeContext(
 	allocationStubCID map[uint64]int,
 ) *TypeContext {
 	ctx := &TypeContext{
+		DartVersion:             "",
 		FuncParamTypes:          make(map[int][]int),
 		FieldTypes:              make(map[int]int),
 		FieldByOwnerOffset:      make(map[int]map[int32]int),
@@ -528,6 +545,9 @@ func BuildTypeContext(
 		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
+		FuncMayUseRegisterCC:    make(map[string]bool),
+		FuncMustUseStackCC:      make(map[string]bool),
+		FuncReceiverInRegister:  make(map[string]bool),
 		FuncReceiverStackSlot:   make(map[string]int),
 		ReceiverLoadAtPC:        make(map[uint64]ReceiverLoad),
 		FuncReturnType:          make(map[int]int),
@@ -553,6 +573,9 @@ func BuildTypeContext(
 		Subclasses:              make(map[int][]int),
 		SelectorCache:           make(map[int][]string),
 		SelectorMonomorphic:     make(map[int]string),
+	}
+	if profile != nil {
+		ctx.DartVersion = profile.DartVersion
 	}
 
 	// Adjust word size for compressed pointers.
@@ -670,7 +693,9 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 	// for any subclass — measured: 369 fields resolved, 89 declaring
 	// classes, but 0 hits because every receiver was a subclass.
 	cid := receiverCID
-	for cid >= 0 {
+	seen := make(map[int]bool)
+	for cid >= 0 && !seen[cid] {
+		seen[cid] = true
 		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
 			if fieldRefID, ok := fields[lookupOff]; ok {
 				if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
@@ -719,7 +744,9 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 func (ctx *TypeContext) OwnerHasFieldAt(ownerCID int, rawOff int32) bool {
 	lookupOff := rawOff + 1
 	cid := ownerCID
-	for cid >= 0 {
+	seen := make(map[int]bool)
+	for cid >= 0 && !seen[cid] {
+		seen[cid] = true
 		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
 			if _, ok := fields[lookupOff]; ok {
 				return true
@@ -791,12 +818,17 @@ func (ctx *TypeContext) AllSubclasses(classID int) []int {
 // This is the CHA consumer: when resolveBLR knows the receiver class
 // (LatticeKnownClass) and the selector offset is known (from a preceding
 // ADD/SUB), it can enumerate all possible targets instead of giving up.
-func (ctx *TypeContext) ResolveDispatchCHA(classID, selectorOffset int) []string {
-	slot := classID + selectorOffset - ctx.KOriginElement
+func (ctx *TypeContext) ResolveDispatchCHA(classID, selectorImm int) []string {
+	// Both quantities are already origin-relative: DispatchBySlot is keyed by
+	// `entry.Index-kOriginElement`, and selectorImm is exactly
+	// `selector_offset-kOriginElement` from the generated call. The lookup is
+	// therefore cid+imm. Subtracting the origin here again shifts ARM64 by 4096
+	// slots and x64 by 16.
+	slot := classID + selectorImm
 	var targets []string
 	seen := map[string]bool{}
 	for _, cid := range ctx.AllSubclasses(classID) {
-		s := cid + selectorOffset - ctx.KOriginElement
+		s := cid + selectorImm
 		if name, ok := ctx.ResolveDispatchTarget(s); ok && !seen[name] {
 			seen[name] = true
 			targets = append(targets, name)

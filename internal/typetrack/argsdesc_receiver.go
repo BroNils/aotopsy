@@ -74,7 +74,7 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 	// Registers holding FP + index*scale.
 	addrRegs := map[int]bool{}
 
-	bestDisp, bestReg := -1, -1
+	bestDisp, bestReg, bestAt := -1, -1, -1
 	var bestPC uint64
 
 	kill := func(rd int) {
@@ -91,15 +91,15 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 		if base, disp, ok := arm64.LDR64UnsignedOffset(raw); ok && addrRegs[base] {
 			rt := int(raw & 0x1F)
 			if disp > bestDisp {
-				bestDisp, bestReg, bestPC = disp, rt, insts[i].Addr
+				bestDisp, bestReg, bestAt, bestPC = disp, rt, i, insts[i].Addr
 			}
 			kill(rt)
 			continue
 		}
 		// ADD Xt, X29, Xi{, LSL #n}
-		if rd, rn, rm, ok := arm64.ADD64Register(raw); ok {
+		if rd, rn, rm, shift, _, ok := arm64.ADD64Register(raw); ok {
 			kill(rd)
-			if rn == sdk.ARM64FrameReg && indexRegs[rm] {
+			if shift == arm64.ShiftLSL && rn == sdk.ARM64FrameReg && indexRegs[rm] {
 				addrRegs[rd] = true
 			}
 			continue
@@ -140,7 +140,7 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 	if bestReg < 0 {
 		return 0, ReceiverLoad{}, false
 	}
-	if !arm64RegUsedAsOwnerFieldBase(insts, bestReg, ownerCID, ctx) {
+	if !arm64RegUsedAsOwnerFieldBaseAfter(insts, bestAt+1, bestReg, ownerCID, ctx) {
 		return 0, ReceiverLoad{}, false
 	}
 	return bestPC, ReceiverLoad{Reg: bestReg, ClassCID: ownerCID}, true

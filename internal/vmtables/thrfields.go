@@ -1,9 +1,5 @@
 package vmtables
 
-import (
-	"aotopsy/internal/snapshot"
-)
-
 // THR field name tables for ARM64.
 // Extracted from dartsdk/v*/runtime/vm/compiler/runtime_offsets_extracted.h
 //
@@ -20,63 +16,80 @@ import (
 // variant real binaries of that version actually use. Add more by running
 // tools/extract_thr.go with the appropriate flags.
 
-// THRFields returns the Thread offset→name map for a given Dart version string.
-// Returns nil if no table is available (annotations fall back to THR+0xNN).
-//
-// H-2/H-3 fix: now supports x86_64 for all versions with compressed pointers
-// (2.18+). x86_64 tables are in thrfieldsx86.go (auto-generated).
-// Dart 2.10–2.16 ARM64 tables (non-compressed pointers) extracted via
-// tools/extract_thr.go (M-4 fix).
-//
-// Compression-aware when a profile is supplied: 3.9.2 ships both a compressed
-// and a non-compressed table, and the non-compressed one is selected for
-// snapshots without the "compressed-pointers" feature.
-func THRFields(dartVersion string, isARM64 bool) map[int]string {
-	return THRFieldsWithProfile(dartVersion, isARM64, nil)
-}
+// THRFields returns the exact Thread offset -> name table for target. Every
+// layout dimension is mandatory. Unsupported tuples return nil rather than
+// falling back to a table with different pointer compression or build mode.
+func THRFields(target TargetProfile) map[int]string {
+	if !target.supportedProduct() {
+		return nil
+	}
 
-// THRFieldsWithProfile is the profile-aware version of THRFields.
-//
-// A nil profile means "assume PRODUCT + compressed", i.e. identical to the
-// pre-existing THRFields behaviour.
-//
-// BuildMode is deliberately NOT used to pick a table. Non-PRODUCT snapshots
-// have no shipped tables (see the note above thrV392_nocompress), and an
-// earlier revision selected empty maps for them, silently wiping out every
-// THR annotation. Falling through to the PRODUCT table keeps annotations —
-// with possibly-wrong offsets — and snapshot.Extract already emits a
-// diagnostic saying a non-PRODUCT snapshot is unsupported outright. A wrong
-// label the user is warned about beats no label at all.
-func THRFieldsWithProfile(dartVersion string, isARM64 bool, profile *snapshot.VersionProfile) map[int]string {
-	// Only pointer compression selects between shipped variants.
-	useNonCompressed := profile != nil && !profile.CompressedPointers
-
-	// 3.9.2 is the one version with both compression variants extracted.
-	if dartVersion == "3.9.2" && useNonCompressed {
-		if isARM64 {
-			return thrV392_nocompress
+	if target.Architecture == ArchitectureX64 {
+		if !target.CompressedPointers {
+			switch target.DartVersion {
+			case "2.10.0":
+				return thrV2100_x64_nocompress
+			case "2.12.0":
+				return thrV2120_x64_nocompress
+			case "2.13.0":
+				return thrV2130_x64_nocompress
+			case "2.14.0":
+				return thrV2140_x64_nocompress
+			case "2.15.0":
+				return thrV2150_x64_nocompress
+			case "2.16.0":
+				return thrV2160_x64_nocompress
+			case "2.17.6":
+				return thrV2176_x64_nocompress
+			case "3.9.2":
+				return thrV392_x64_nocompress
+			case "3.12.2":
+				return thrV3122_x64_nocompress
+			default:
+				return nil
+			}
 		}
-		return thrV392_x64_nocompress
+		return thrFieldsX64Compressed(target.DartVersion)
 	}
 
-	if !isARM64 {
-		return thrFieldsX64(dartVersion)
+	if !target.CompressedPointers {
+		switch target.DartVersion {
+		case "2.10.0":
+			return thrV2100
+		case "2.12.0":
+			return thrV2120
+		case "2.13.0":
+			return thrV2130
+		case "2.14.0":
+			return thrV2140
+		case "2.15.0":
+			return thrV2150
+		case "2.16.0":
+			return thrV2160
+		case "2.17.6":
+			return thrV2176_nocompress
+		case "3.9.2":
+			return thrV392_nocompress
+		default:
+			return nil
+		}
 	}
-	switch dartVersion {
+
+	switch target.DartVersion {
 	case "2.10.0":
-		return thrV2100
+		return nil
 	case "2.12.0":
-		return thrV2120
+		return nil
 	case "2.13.0":
-		return thrV2130
+		return nil
 	case "2.14.0":
-		return thrV2140
+		return nil
 	case "2.15.0":
-		return thrV2150
+		return nil
 	case "2.16.0":
-		return thrV2160
+		return nil
 	case "2.17.6":
-		return thrV217
+		return nil
 	case "2.18.0":
 		return thrV2180
 	case "2.19.0":
@@ -111,9 +124,12 @@ func THRFieldsWithProfile(dartVersion string, isARM64 bool, profile *snapshot.Ve
 	return nil
 }
 
-// v2.17.6: PRODUCT AOT + ARM64 + DART_COMPRESSED_POINTERS
-// Source: dartsdk/v2.17.6/runtime/vm/compiler/runtime_offsets_extracted.h:16818-17478
-var thrV217 = map[int]string{
+// v2.17.6: PRODUCT AOT + ARM64 + !DART_COMPRESSED_POINTERS.
+// Re-derived by tools/extract_thr.go from the exact 2.17.6 generated SDK
+// header. Keep the compression mode in the identifier: the compressed and
+// non-compressed Thread layouts are materially different later in the table.
+// Source: dartsdk/v2.17.6/runtime/vm/compiler/runtime_offsets_extracted.h
+var thrV2176_nocompress = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
 	0x40:  "write_barrier_mask",

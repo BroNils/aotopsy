@@ -4,14 +4,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
+
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/sdk"
+)
+
+const (
+	ArchARM64 = "arm64"
+	ArchX64   = "x64"
 )
 
 // THRAuditRecord is a JSONL output record for thr-audit.
 type THRAuditRecord struct {
 	Sample      string   `json:"sample"`
 	DartVersion string   `json:"dart_version"`
+	Arch        string   `json:"arch"`
 	PC          string   `json:"pc"`
 	Insn        string   `json:"insn"`
 	THROffset   string   `json:"thr_offset"`
@@ -43,36 +54,41 @@ type BandOffset struct {
 type BandResult struct {
 	Sample          string `json:"sample"`
 	DartVersion     string `json:"dart_version"`
+	Arch            string `json:"arch"`
 	TotalUnresolved int    `json:"total_unresolved"`
 	Bands           []Band `json:"bands"`
 }
 
 // ClusterBands groups unresolved THR audit records into bands.
 // Split threshold: gap > maxGap between consecutive unique offsets.
-func ClusterBands(records []THRAuditRecord, maxGap int) BandResult {
+func ClusterBands(records []THRAuditRecord, maxGap int) (BandResult, error) {
+	if maxGap < 0 {
+		return BandResult{}, fmt.Errorf("thraudit: max gap must be non-negative")
+	}
+	sample, dartVersion, arch, err := validateRecordSet(records)
+	if err != nil {
+		return BandResult{}, err
+	}
 	// Filter unresolved only.
 	var unresolved []THRAuditRecord
-	sample := ""
-	dartVersion := ""
 	for _, r := range records {
 		if r.Resolved {
 			continue
 		}
 		unresolved = append(unresolved, r)
-		if sample == "" {
-			sample = r.Sample
-			dartVersion = r.DartVersion
-		}
 	}
 
 	if len(unresolved) == 0 {
-		return BandResult{Sample: sample, DartVersion: dartVersion}
+		return BandResult{Sample: sample, DartVersion: dartVersion, Arch: arch}, nil
 	}
 
 	// Count frequency per offset.
 	freqMap := make(map[int]int)
 	for _, r := range unresolved {
-		off := parseTHROffset(r.THROffset)
+		off, err := parseTHROffset(r.THROffset)
+		if err != nil {
+			return BandResult{}, fmt.Errorf("thraudit: %s at %s: %w", r.FuncName, r.PC, err)
+		}
 		freqMap[off]++
 	}
 
@@ -91,8 +107,8 @@ func ClusterBands(records []THRAuditRecord, maxGap int) BandResult {
 	for i := 1; i <= len(offsets); i++ {
 		split := i == len(offsets)
 		if !split {
-			gap := offsets[i] - offsets[i-1]
-			if gap > maxGap {
+			gap := uint64(offsets[i]) - uint64(offsets[i-1])
+			if gap > uint64(maxGap) {
 				split = true
 			}
 		}
@@ -119,34 +135,52 @@ func ClusterBands(records []THRAuditRecord, maxGap int) BandResult {
 	return BandResult{
 		Sample:          sample,
 		DartVersion:     dartVersion,
+		Arch:            arch,
 		TotalUnresolved: len(unresolved),
 		Bands:           bands,
-	}
+	}, nil
 }
 
 // WriteBandsJSON writes the band result as JSON.
 func WriteBandsJSON(w io.Writer, br BandResult) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(br)
+	// Retained for streaming callers; durable file publication should use
+	// jsonutil.WriteJSONFile or output.WriteJSONFile.
+	b, err := marshalBands(br)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
 }
 
 // WriteBandsMD writes the band result as a markdown table.
-func WriteBandsMD(w io.Writer, br BandResult) {
-	_, _ = fmt.Fprintf(w, "# THR Unresolved Bands: %s (Dart %s)\n\n", br.Sample, br.DartVersion)
-	_, _ = fmt.Fprintf(w, "Total unresolved: %d\n\n", br.TotalUnresolved)
-
-	_, _ = fmt.Fprintln(w, "| Band | Range | Slots | Count | Top Offsets |")
-	_, _ = fmt.Fprintln(w, "|------|-------|-------|-------|-------------|")
+func WriteBandsMD(w io.Writer, br BandResult) error {
+	writef := func(format string, args ...any) error {
+		_, err := fmt.Fprintf(w, format, args...)
+		return err
+	}
+	if err := writef("# THR Unresolved Bands: %s (Dart %s, %s)\n\n", br.Sample, br.DartVersion, br.Arch); err != nil {
+		return err
+	}
+	if err := writef("Total unresolved: %d\n\n", br.TotalUnresolved); err != nil {
+		return err
+	}
+	if err := writef("| Band | Range | Slots | Count | Top Offsets |\n"); err != nil {
+		return err
+	}
+	if err := writef("|------|-------|-------|-------|-------------|\n"); err != nil {
+		return err
+	}
 
 	for _, b := range br.Bands {
 		slots := (b.MaxOff-b.MinOff)/8 + 1
 		topOffsets := topN(b.Offsets, 10)
-		_, _ = fmt.Fprintf(w, "| %d | 0x%03x–0x%03x | %d | %d | %s |\n",
-			b.ID, b.MinOff, b.MaxOff, slots, b.Count, topOffsets)
+		if err := writef("| %d | 0x%03x–0x%03x | %d | %d | %s |\n",
+			b.ID, b.MinOff, b.MaxOff, slots, b.Count, topOffsets); err != nil {
+			return err
+		}
 	}
-	_, _ = fmt.Fprintln(w)
+	return writef("\n")
 }
 
 // topN returns a formatted string of the top N offsets by frequency.
@@ -166,11 +200,17 @@ func topN(offsets []BandOffset, n int) string {
 	return strings.Join(parts, " ")
 }
 
-// parseTHROffset parses "0x2f0" to int.
-func parseTHROffset(s string) int {
-	var v int
-	_, _ = fmt.Sscanf(s, "0x%x", &v)
-	return v
+// parseTHROffset parses the canonical producer representation, e.g. "0x2f0".
+// It rejects signs, trailing junk and values that cannot fit the host int.
+func parseTHROffset(s string) (int, error) {
+	if len(s) < 3 || !strings.HasPrefix(s, "0x") {
+		return 0, fmt.Errorf("invalid THR offset %q", s)
+	}
+	v, err := strconv.ParseUint(s[2:], 16, 64)
+	if err != nil || v > uint64(math.MaxInt) {
+		return 0, fmt.Errorf("invalid THR offset %q", s)
+	}
+	return int(v), nil
 }
 
 // THRClass is a heuristic classification for an unresolved THR access.
@@ -194,17 +234,29 @@ type ClassifiedRecord struct {
 type ClassifySummary struct {
 	Sample      string           `json:"sample"`
 	DartVersion string           `json:"dart_version"`
+	Arch        string           `json:"arch"`
 	Total       int              `json:"total"`
 	Counts      map[THRClass]int `json:"counts"`
 }
 
 // ClassifyRecords classifies unresolved THR audit records using heuristics
 // on the surrounding instruction context.
-func ClassifyRecords(records []THRAuditRecord, bands BandResult) []ClassifiedRecord {
+func ClassifyRecords(records []THRAuditRecord, bands BandResult) ([]ClassifiedRecord, error) {
+	sample, version, arch, err := validateRecordSet(records)
+	if err != nil {
+		return nil, err
+	}
+	if sample != bands.Sample || version != bands.DartVersion || arch != bands.Arch {
+		return nil, fmt.Errorf("thraudit: band provenance %q/%q/%q does not match records %q/%q/%q",
+			bands.Sample, bands.DartVersion, bands.Arch, sample, version, arch)
+	}
 	// Build offset→bandID map.
 	offsetBand := make(map[int]int)
 	for _, b := range bands.Bands {
 		for _, bo := range b.Offsets {
+			if _, exists := offsetBand[bo.Offset]; exists {
+				return nil, fmt.Errorf("thraudit: duplicate offset 0x%x across bands", bo.Offset)
+			}
 			offsetBand[bo.Offset] = b.ID
 		}
 	}
@@ -214,8 +266,14 @@ func ClassifyRecords(records []THRAuditRecord, bands BandResult) []ClassifiedRec
 		if r.Resolved {
 			continue
 		}
-		off := parseTHROffset(r.THROffset)
-		bandID := offsetBand[off]
+		off, err := parseTHROffset(r.THROffset)
+		if err != nil {
+			return nil, err
+		}
+		bandID, ok := offsetBand[off]
+		if !ok {
+			return nil, fmt.Errorf("thraudit: unresolved offset 0x%x has no band", off)
+		}
 
 		cls := ClassifyFromContext(r)
 
@@ -225,16 +283,28 @@ func ClassifyRecords(records []THRAuditRecord, bands BandResult) []ClassifiedRec
 			Class:          cls,
 		})
 	}
-	return result
+	return result, nil
 }
 
 // ClassifyFromContext applies heuristic rules to the instruction context.
 func ClassifyFromContext(r THRAuditRecord) THRClass {
-	// Rule 0: STR to THR → RUNTIME_ENTRYPOINT_ARRAY (vm_tag update pattern).
-	// Pattern: LDR X16, [X26, #entry] → STR X16, [X26, #vm_tag] → BLR X16
+	// A THR store is not, by itself, evidence of a runtime entrypoint. Thread
+	// contains many mutable fields (vm_tag, safepoint state, stack limits, etc.).
+	// The old unconditional rule mislabeled every unknown store.
 	if r.IsStore {
-		return ClassRuntimeEntrypoint
+		return ClassUnknown
 	}
+	switch r.Arch {
+	case ArchARM64:
+		return classifyARM64(r)
+	case ArchX64:
+		return classifyX64(r)
+	default:
+		return ClassUnknown
+	}
+}
+
+func classifyARM64(r THRAuditRecord) THRClass {
 
 	// Find the current instruction index in context.
 	curIdx := -1
@@ -279,45 +349,69 @@ func ClassifyFromContext(r THRAuditRecord) THRClass {
 		}
 	}
 
-	// Rule 4: LDR X30 → STP ..., [X15] → BL
-	// (load return address from THR, push to Dart stack, call).
-	if dstReg == "X30" && strings.Contains(next1, "STP") && strings.Contains(next1, "[X15") {
-		if strings.Contains(next2, "BL ") {
-			return ClassIsolateGroupPtr
-		}
-	}
-
-	// Rule 5: LDR X9 → BLR X10 (stack overflow check pattern).
+	// Rule 4: LDR X9 → BLR X10 (stack overflow check pattern).
 	// Context: LDR X10, [X26, #resolved] + LDR X9, [X26, #unresolved] → BLR X10
 	if dstReg == "X9" && containsBLR(next1, "X10") {
 		return ClassRuntimeEntrypoint
 	}
 
-	// Rule 6: LDR Xn → STUR/STR to object (not X26 base).
+	// Rule 5: LDR Xn → STUR/STR to object (not X26 base).
 	// Value stored into an object field → OBJECTSTORE_OR_CACHE.
 	if dstReg != "" && isStoreToObject(next1, dstReg) {
 		return ClassObjectStoreCache
 	}
 
-	// Rule 7: LDR Xn → CMP Wn/Xn (type CID check or sentinel comparison).
+	// Rule 6: LDR Xn → CMP Wn/Xn (type CID check or sentinel comparison).
 	// The loaded value is a cached constant used for type checks.
 	if dstReg != "" && isCMPwithReg(next1, dstReg) {
 		return ClassObjectStoreCache
 	}
 
-	// Rule 8: LDR X0 → LDR X0, [X0, #imm] (pointer chase through THR).
+	// Rule 7: LDR X0 → LDR X0, [X0, #imm] (pointer chase through THR).
 	// Loads a struct pointer from THR, then dereferences a field.
 	if dstReg != "" && isDerefSameReg(next1, dstReg) {
 		return ClassIsolateGroupPtr
 	}
 
-	// Rule 9: LDR Xn → B (unconditional branch).
+	// Rule 8: LDR Xn → B (unconditional branch).
 	// Load cached constant from THR in a conditional path, then branch past alternative.
 	if strings.Contains(next1, "B .+") && !strings.Contains(next1, "BL ") && !strings.Contains(next1, "BLR ") {
 		return ClassObjectStoreCache
 	}
 
 	return ClassUnknown
+}
+
+// classifyX64 deliberately implements only architecture-correct evidence. A
+// direct THR load immediately consumed by CALL/JMP through the same canonical
+// destination register is strong runtime-entrypoint evidence. Other uses stay
+// UNKNOWN rather than borrowing ARM64 X26/X15 text heuristics.
+func classifyX64(r THRAuditRecord) THRClass {
+	if r.DstReg < 0 || r.DstReg > 15 {
+		return ClassUnknown
+	}
+	curIdx := currentContextIndex(r.Context)
+	if curIdx < 0 || curIdx+1 >= len(r.Context) {
+		return ClassUnknown
+	}
+	reg := strings.ToUpper(sdk.X86RegName(r.DstReg))
+	if reg == "" {
+		return ClassUnknown
+	}
+	next := strings.ToUpper(strings.TrimPrefix(r.Context[curIdx+1], "  "))
+	if containsRegOperand(next, "CALL "+reg) || containsRegOperand(next, "JMP "+reg) {
+		return ClassRuntimeEntrypoint
+	}
+	return ClassUnknown
+}
+
+func currentContextIndex(context []string) int {
+	for i, line := range context {
+		if strings.HasPrefix(line, "> ") {
+			return i
+		}
+	}
+	return -1
 }
 
 // extractDstReg extracts the destination register from an LDR instruction text.
@@ -430,21 +524,56 @@ func Summarize(records []ClassifiedRecord) ClassifySummary {
 	return ClassifySummary{
 		Sample:      records[0].Sample,
 		DartVersion: records[0].DartVersion,
+		Arch:        records[0].Arch,
 		Total:       len(records),
 		Counts:      counts,
 	}
 }
 
-// ReadAuditRecords reads THRAuditRecord JSONL from a reader.
-func ReadAuditRecords(r io.Reader) ([]THRAuditRecord, error) {
-	dec := json.NewDecoder(r)
-	var records []THRAuditRecord
-	for dec.More() {
-		var rec THRAuditRecord
-		if err := dec.Decode(&rec); err != nil {
-			return records, fmt.Errorf("decode: %w", err)
-		}
-		records = append(records, rec)
+// ReadAuditRecords reads strict, bounded JSONL. Unknown/duplicate/missing keys,
+// blank lines and oversized inputs are rejected by jsonutil before records are
+// handed to the classifier.
+func ReadAuditRecords(path string, limits jsonutil.Limits) ([]THRAuditRecord, error) {
+	records, err := jsonutil.ReadJSONL[THRAuditRecord](path, limits)
+	if err != nil {
+		return nil, err
+	}
+	if _, _, _, err := validateRecordSet(records); err != nil {
+		return nil, err
 	}
 	return records, nil
+}
+
+func validateRecordSet(records []THRAuditRecord) (sample, version, arch string, err error) {
+	for i, r := range records {
+		if r.Sample == "" || r.DartVersion == "" {
+			return "", "", "", fmt.Errorf("thraudit: record %d missing sample/version provenance", i)
+		}
+		if r.Arch != ArchARM64 && r.Arch != ArchX64 {
+			return "", "", "", fmt.Errorf("thraudit: record %d has unsupported architecture %q", i, r.Arch)
+		}
+		if _, err := parseTHROffset(r.THROffset); err != nil {
+			return "", "", "", fmt.Errorf("thraudit: record %d: %w", i, err)
+		}
+		if i == 0 {
+			sample, version, arch = r.Sample, r.DartVersion, r.Arch
+			continue
+		}
+		if r.Sample != sample || r.DartVersion != version || r.Arch != arch {
+			return "", "", "", fmt.Errorf("thraudit: mixed provenance at record %d: got %q/%q/%q, want %q/%q/%q",
+				i, r.Sample, r.DartVersion, r.Arch, sample, version, arch)
+		}
+	}
+	return sample, version, arch, nil
+}
+
+func marshalBands(br BandResult) ([]byte, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(br); err != nil {
+		return nil, err
+	}
+	return []byte(b.String()), nil
 }

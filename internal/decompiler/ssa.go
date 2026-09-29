@@ -45,6 +45,7 @@ func applyBlockToState(fir *FuncIR, s *LiftState, blk *Block, pool PoolLookup) {
 			// A call result is opaque to a pre-emission pass (its rendered value
 			// is an emission-time temp), so the return register becomes unknown.
 			s.clobberReg(fir.ReturnReg)
+			s.clearCmp()
 		case OpLoadPool:
 			applyLoadPoolState(s, ins, pool)
 		case OpBranch, OpJump, OpReturn:
@@ -64,7 +65,7 @@ func applyLoadPoolState(s *LiftState, ins Instr, pool PoolLookup) {
 	dst := ins.Target
 	if pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := pool(ins.PoolIndex); ok {
-			s.setReg(dst, disp)
+			s.setReg(dst, dartPoolDisplay(disp))
 			return
 		}
 	}
@@ -100,6 +101,12 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	}
 	if fir.HeapBitsReg != "" {
 		s.setReg(fir.HeapBitsReg, sdk.SymHeapBits)
+	}
+	if fir.HeapBaseReg != "" {
+		s.setReg(fir.HeapBaseReg, sdk.SymHeapBase)
+	}
+	if fir.BarrierMaskReg != "" {
+		s.setReg(fir.BarrierMaskReg, sdk.SymBarrierMask)
 	}
 	if fir.CodeReg != "" {
 		s.setReg(fir.CodeReg, sdk.SymCode)
@@ -238,7 +245,7 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 			}
 			out := in.Clone()
 			applyBlockToState(fir, out, blk, pool)
-			if exit[bi] == nil || !regsEqual(exit[bi].Regs, out.Regs) {
+			if exit[bi] == nil || !liftStatesEqual(exit[bi], out) {
 				exit[bi] = out
 				entry[bi] = in
 				changed = true
@@ -251,6 +258,24 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 		}
 	}
 	return entry, exit
+}
+
+func liftStatesEqual(a, b *LiftState) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !regsEqual(a.Regs, b.Regs) || len(a.RegClass) != len(b.RegClass) {
+		return false
+	}
+	for reg, cid := range a.RegClass {
+		if b.RegClass[reg] != cid {
+			return false
+		}
+	}
+	if a.HasCmp != b.HasCmp {
+		return false
+	}
+	return !a.HasCmp || (a.LastCmp == b.LastCmp && a.CmpBits == b.CmpBits)
 }
 
 // rawRegTokenRe matches a bare physical-register token (ARM64 w/x, x86 named +

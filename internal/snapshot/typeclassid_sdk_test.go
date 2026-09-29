@@ -36,7 +36,7 @@ func TestTypeClassIdIsRefMatchesSDK(t *testing.T) {
 		if p == nil {
 			continue
 		}
-		src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", v)
+		src, err := sdktest.SDKFileAtTag("runtime/vm/raw_object.h", v)
 		if err != nil {
 			t.Fatalf("%s: fetch raw_object.h: %v", v, err)
 		}

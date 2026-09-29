@@ -1,7 +1,6 @@
 package compare
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 )
@@ -45,22 +44,18 @@ import (
 // version/arch matching to prevent false positives from different
 // SDK versions.
 type CrossSampleDictionary struct {
-	// version is the Dart SDK version this dictionary was built from.
-	version string
-	// arch is "arm64" or "x64".
-	arch string
 	// dict is the underlying hash → name mapping.
 	dict *FunctionDictionary
 }
 
 // NewCrossSampleDictionary creates a new dictionary for a specific
 // Dart version and architecture.
-func NewCrossSampleDictionary(dartVersion, arch string) *CrossSampleDictionary {
-	return &CrossSampleDictionary{
-		version: dartVersion,
-		arch:    arch,
-		dict:    NewFunctionDictionary(),
+func NewCrossSampleDictionary(dartVersion, arch string) (*CrossSampleDictionary, error) {
+	dict, err := NewFunctionDictionary(dartVersion, arch)
+	if err != nil {
+		return nil, err
 	}
+	return &CrossSampleDictionary{dict: dict}, nil
 }
 
 // SeedFromNamedFunctions adds named functions from a sample to the
@@ -129,66 +124,31 @@ func (d *CrossSampleDictionary) ApplyToUnnamedFunctions(
 }
 
 // Version returns the Dart SDK version this dictionary was built for.
-func (d *CrossSampleDictionary) Version() string { return d.version }
+func (d *CrossSampleDictionary) Version() string { return d.dict.DartVersion() }
 
 // Arch returns the architecture this dictionary was built for.
-func (d *CrossSampleDictionary) Arch() string { return d.arch }
+func (d *CrossSampleDictionary) Arch() string { return d.dict.Arch() }
 
 // SeedCount returns the number of named entries in the dictionary.
 func (d *CrossSampleDictionary) SeedCount() int { return d.dict.NamedCount() }
 
-// Export serializes the dictionary to a text format for persistence.
-// The first line is a header with version and arch; subsequent lines
-// are "hash size name owner" entries.
+// Export serializes the dictionary with a version/arch header followed by the
+// same lossless JSONL entries as FunctionDictionary.Export.
 func (d *CrossSampleDictionary) Export() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# version=%s arch=%s\n", d.version, d.arch)
-	b.WriteString(d.dict.Export())
-	return b.String()
+	text, err := d.dict.Export()
+	if err != nil {
+		return ""
+	}
+	return text
 }
 
-// ImportCrossSample loads a cross-sample dictionary from the text
-// format produced by Export. Returns nil if the version/arch header
-// is missing or malformed.
-func ImportCrossSample(text string) *CrossSampleDictionary {
-	lines := strings.Split(text, "\n")
-	if len(lines) == 0 {
-		return nil
+// ImportCrossSample loads the cross-sample format produced by Export.
+func ImportCrossSample(text string) (*CrossSampleDictionary, error) {
+	entries, err := ImportDictionary(strings.NewReader(text), int64(len(text)))
+	if err != nil {
+		return nil, err
 	}
-	// Parse header.
-	header := strings.TrimSpace(lines[0])
-	if !strings.HasPrefix(header, "# version=") {
-		return nil
-	}
-	var version, arch string
-	for _, field := range strings.Fields(header) {
-		if strings.HasPrefix(field, "version=") {
-			version = strings.TrimPrefix(field, "version=")
-		}
-		if strings.HasPrefix(field, "arch=") {
-			arch = strings.TrimPrefix(field, "arch=")
-		}
-	}
-	if version == "" || arch == "" {
-		return nil
-	}
-	d := NewCrossSampleDictionary(version, arch)
-	// Parse entries (skip header line).
-	for _, line := range lines[1:] {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		var hash string
-		var size int
-		var name, owner string
-		n, err := fmt.Sscanf(line, "%s %d %s %s", &hash, &size, &name, &owner)
-		if err != nil || n < 3 {
-			continue
-		}
-		d.dict.entries[hash] = FunctionFingerprint{Hash: hash, Size: size, FuncName: name, Owner: owner}
-	}
-	return d
+	return &CrossSampleDictionary{dict: entries}, nil
 }
 
 // isUnnamedFunction reports whether a function name is a placeholder

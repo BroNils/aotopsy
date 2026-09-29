@@ -2,8 +2,18 @@ package sdk
 
 import "testing"
 
-func TestDartArgRegisters(t *testing.T) {
-	arm := DartArgRegisters(ArchARM64)
+func TestDartRegisterCallingConventionStartsAt343(t *testing.T) {
+	for _, v := range []string{"", "2.10.0", "3.3.0"} {
+		if _, ok := DartRegisterCallingConvention(v, ArchARM64); ok {
+			t.Fatalf("%s: register calling convention reported before %s", v, FirstRegisterCallingConventionVersion)
+		}
+	}
+
+	armCC, ok := DartRegisterCallingConvention("3.4.3", ArchARM64)
+	if !ok {
+		t.Fatal("3.4.3 ARM64: register calling convention missing")
+	}
+	arm := armCC.GPR
 	if len(arm) != 6 {
 		t.Fatalf("ARM64: want 6 arg registers, got %d", len(arm))
 	}
@@ -17,7 +27,11 @@ func TestDartArgRegisters(t *testing.T) {
 		}
 	}
 
-	x64 := DartArgRegisters(ArchX86)
+	x64CC, ok := DartRegisterCallingConvention("3.4.3", ArchX86)
+	if !ok {
+		t.Fatal("3.4.3 x86_64: register calling convention missing")
+	}
+	x64 := x64CC.GPR
 	if len(x64) != 6 {
 		t.Fatalf("x86_64: want 6 arg registers, got %d", len(x64))
 	}
@@ -29,12 +43,14 @@ func TestDartArgRegisters(t *testing.T) {
 	}
 }
 
-func TestDartArgRegNames(t *testing.T) {
-	arm := DartArgRegNames(ArchARM64)
+func TestDartRegisterCallingConventionNames(t *testing.T) {
+	armCC, _ := DartRegisterCallingConvention("3.12.2", ArchARM64)
+	arm := armCC.GPRNames
 	if arm[0] != "x1" {
 		t.Errorf("ARM64 arg0 name = %q, want x1", arm[0])
 	}
-	x64 := DartArgRegNames(ArchX86)
+	x64CC, _ := DartRegisterCallingConvention("3.12.2", ArchX86)
+	x64 := x64CC.GPRNames
 	if x64[0] != "rdi" {
 		t.Errorf("x86_64 arg0 name = %q, want rdi", x64[0])
 	}
@@ -43,10 +59,50 @@ func TestDartArgRegNames(t *testing.T) {
 	}
 }
 
+func TestAsyncStubClassificationRequiresExactSDKLeaf(t *testing.T) {
+	for _, name := range []string{
+		"InitAsyncStub", "_SuspendState._initAsync", "_SuspendState._await",
+		"ReturnAsyncNotFutureStub", "YieldAsyncStarStub",
+	} {
+		if !IsAsyncStubName(name) {
+			t.Errorf("IsAsyncStubName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{
+		"InitSyncStarStub", "SuspendSyncStarAtYieldStub", "resume_stub",
+		"MyInitAsyncCache", "ReturnAsyncHandler", "foo._initAsyncLater",
+		"_SuspendStateHelper._awaiting", "userYieldAsyncStarThing",
+	} {
+		if IsAsyncStubName(name) {
+			t.Errorf("IsAsyncStubName(%q) = true for ordinary application symbol", name)
+		}
+	}
+}
+
+func TestSuspendableStubRolesKeepGeneratorKindsDistinct(t *testing.T) {
+	cases := map[string]StubRole{
+		"InitAsyncStub":                                        StubRoleAsyncInit,
+		"YieldAsyncStarStub":                                   StubRoleAsyncStarYield,
+		"_SuspendState._returnAsyncStar":                       StubRoleAsyncStarReturn,
+		"InitSyncStarStub":                                     StubRoleSyncStarInit,
+		"SuspendSyncStarAtYieldStub":                           StubRoleSyncStarSuspend,
+		"suspend_state_suspend_sync_star_at_start_entry_point": StubRoleSyncStarSuspend,
+		"resume_stub":                                          StubRoleSuspendResume,
+	}
+	for name, want := range cases {
+		if got := ClassifyStubRole(name); got != want {
+			t.Errorf("ClassifyStubRole(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestIsWriteBarrierCond(t *testing.T) {
 	cases := map[string]bool{
 		"(x17 & HEAP_BITS >> 32) == 0":      true,
+		"(x17 & BARRIER_MASK) == 0":         true,
 		"(v & THR.write_barrier_mask) == 0": true,
+		"(obj + (HEAP_BITS << 32)) != null": false,
+		"HEAP_BITS != 0":                    false,
 		"x8 != null":                        false,
 		"THR.stack_limit < SP":              false,
 		"":                                  false,
@@ -106,15 +162,43 @@ func TestARM64RegName(t *testing.T) {
 	}
 }
 
-func TestIsARM64PointerDecompression(t *testing.T) {
-	if !IsARM64PointerDecompression("x28", "lsl #32") {
-		t.Error("x28 lsl #32 should be decompression")
+func TestARM64HeapRegisterRolesFollowSDKBoundary(t *testing.T) {
+	tests := []struct {
+		version                     string
+		heapBits, heapBase, barrier string
+	}{
+		{"2.12.0", "", "", ARM64HeapBitsStr},
+		{"2.13.0", "", ARM64HeapBaseLegacyStr, ARM64HeapBitsStr},
+		{"2.14.0", ARM64HeapBitsStr, "", ""},
+		{"3.13.0", ARM64HeapBitsStr, "", ""},
 	}
-	if IsARM64PointerDecompression("x28", "lsl #16") {
+	for _, tt := range tests {
+		heapBits, heapBase, barrier := ARM64HeapRegisterRoles(tt.version)
+		if heapBits != tt.heapBits || heapBase != tt.heapBase || barrier != tt.barrier {
+			t.Errorf("%s roles = (%q,%q,%q), want (%q,%q,%q)",
+				tt.version, heapBits, heapBase, barrier, tt.heapBits, tt.heapBase, tt.barrier)
+		}
+	}
+}
+
+func TestIsARM64PointerDecompression(t *testing.T) {
+	if !IsARM64PointerDecompression("2.13.0", "x23", "") {
+		t.Error("Dart 2.13 x23 should be HEAP_BASE decompression")
+	}
+	if IsARM64PointerDecompression("2.13.0", "x28", "lsl #32") {
+		t.Error("Dart 2.13 must not use the later HEAP_BITS decompression form")
+	}
+	if !IsARM64PointerDecompression("2.14.0", "x28", "lsl #32") {
+		t.Error("Dart 2.14 x28 lsl #32 should be HEAP_BITS decompression")
+	}
+	if IsARM64PointerDecompression("2.14.0", "x28", "lsl #16") {
 		t.Error("x28 lsl #16 is NOT decompression")
 	}
-	if IsARM64PointerDecompression("x27", "lsl #32") {
+	if IsARM64PointerDecompression("3.12.2", "x27", "lsl #32") {
 		t.Error("x27 is not HEAP_BITS")
+	}
+	if IsARM64PointerDecompression("2.12.0", "x23", "") {
+		t.Error("Dart 2.12 has no pinned HEAP_BASE decompression register")
 	}
 }
 

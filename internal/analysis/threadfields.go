@@ -1,9 +1,6 @@
 package analysis
 
-import (
-	"aotopsy/internal/snapshot"
-	"aotopsy/internal/vmtables"
-)
+import "aotopsy/internal/vmtables"
 
 // ThreadFieldOffsets adapts vmtables's Thread field table (keyed by int) to the
 // int64 keys the decompiler's memory-displacement handling uses.
@@ -18,8 +15,8 @@ import (
 // Context.FuncIRFor did exactly that: it set ThreadStubOffsets and not this,
 // which left the ffitrace and --from-main paths with a nil table. Only
 // cmd/aotopsy's decompile-native path populated it.
-func ThreadFieldOffsets(dartVersion string, isARM64 bool, profile *snapshot.VersionProfile) map[int64]string {
-	src := vmtables.THRFieldsWithProfile(dartVersion, isARM64, profile)
+func ThreadFieldOffsets(target vmtables.TargetProfile) map[int64]string {
+	src := vmtables.THRFields(target)
 	if len(src) == 0 {
 		return nil
 	}

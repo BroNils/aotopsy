@@ -29,6 +29,9 @@ func NewStream(data []byte) *Stream {
 
 // NewStreamAt creates a stream starting at offset within data.
 func NewStreamAt(data []byte, offset int) *Stream {
+	if offset < 0 {
+		offset = 0
+	}
 	if offset > len(data) {
 		offset = len(data)
 	}
@@ -40,6 +43,9 @@ func (s *Stream) Position() int { return s.pos }
 
 // SetPosition sets the read position.
 func (s *Stream) SetPosition(pos int) {
+	if pos < 0 {
+		pos = 0
+	}
 	if pos > s.end {
 		pos = s.end
 	}
@@ -61,7 +67,13 @@ func (s *Stream) ReadByte() (byte, error) {
 
 // ReadBytes reads n bytes into a new slice.
 func (s *Stream) ReadBytes(n int) ([]byte, error) {
-	if s.pos+n > s.end {
+	// Use subtraction instead of s.pos+n so an attacker-controlled n cannot
+	// overflow int and turn an out-of-bounds request into a negative index or
+	// enormous allocation. Negative lengths are malformed input, never a seek.
+	if n < 0 {
+		return nil, ErrStreamOverrun
+	}
+	if n > s.end-s.pos {
 		return nil, ErrStreamEOF
 	}
 	out := make([]byte, n)
@@ -133,7 +145,56 @@ const (
 // If byte > 127: it's the last byte; value contribution = byte - 128.
 // If byte <= 127: it's a data byte; 7 bits contribute to the value.
 func (s *Stream) ReadUnsigned() (int64, error) {
-	return s.readVarint(endUnsignedByteMarker, 63)
+	// intptr_t is signed. The largest valid unsigned value the VM stores in
+	// this API is therefore MaxInt64, whose final 7-bit group starts at bit 56.
+	// A tenth group starting at bit 63 would set the sign bit and turn an
+	// attacker-controlled length/offset negative after an apparently successful
+	// read.
+	return s.readVarint(endUnsignedByteMarker, 56, 0, 127)
+}
+
+// ReadUnsigned64 reads the SDK's ReadUnsigned<uint64_t>() encoding. It is
+// deliberately separate from ReadUnsigned: the latter models intptr_t and must
+// reject bit 63, while Dart uses the uint64_t form for unboxed-field bitmaps
+// where that bit is valid data.
+//
+// A uint64_t value can use nine 7-bit continuation groups (bits 0..62) and a
+// tenth TERMINAL group at bit 63. Only terminal contributions 0 or 1 fit that
+// final position; accepting 2..127 would silently truncate attacker-controlled
+// high bits just like C++ unsigned shifting beyond the logical field width.
+func (s *Stream) ReadUnsigned64() (uint64, error) {
+	b, err := s.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	if b > maxUnsignedDataPerByte {
+		return uint64(b - endUnsignedByteMarker), nil
+	}
+
+	var r uint64
+	var shift uint
+	for {
+		r |= uint64(b) << shift
+		// A continuation group beginning at bit 63 would claim seven more data
+		// bits when only one bit remains in uint64. The valid bit-63 group must
+		// be terminal and is handled after the next read below.
+		if shift >= 63 {
+			return 0, ErrStreamOverrun
+		}
+		shift += dataBitsPerByte
+		b, err = s.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if b > maxUnsignedDataPerByte {
+			contrib := uint64(b - endUnsignedByteMarker)
+			if shift > 63 || (shift == 63 && contrib > 1) {
+				return 0, ErrStreamOverrun
+			}
+			r |= contrib << shift
+			return r, nil
+		}
+	}
 }
 
 // readVarint decodes the SDK's variable-length integer encoding: data
@@ -152,7 +213,7 @@ func (s *Stream) ReadUnsigned() (int64, error) {
 // can be dropped by widening everything to int64 and truncating at the
 // end: a 32-bit read of an oversized value must fail, not silently keep
 // its low bits.
-func (s *Stream) readVarint(endMarker int64, maxShift uint) (int64, error) {
+func (s *Stream) readVarint(endMarker int64, maxShift uint, finalMin, finalMax int64) (int64, error) {
 	b, err := s.ReadByte()
 	if err != nil {
 		return 0, err
@@ -165,19 +226,35 @@ func (s *Stream) readVarint(endMarker int64, maxShift uint) (int64, error) {
 	var shift uint
 	for {
 		r |= int64(b) << shift
+		if shift >= maxShift {
+			return 0, ErrStreamOverrun
+		}
 		shift += dataBitsPerByte
 		b, err = s.ReadByte()
 		if err != nil {
 			return 0, err
 		}
 		if b > maxUnsignedDataPerByte {
-			r |= (int64(b) - endMarker) << shift
+			contrib := int64(b) - endMarker
+			if shift > maxShift || (shift == maxShift && (contrib < finalMin || contrib > finalMax)) {
+				return 0, ErrStreamOverrun
+			}
+			r |= contrib << shift
 			return r, nil
 		}
-		if shift >= maxShift {
-			return 0, ErrStreamOverrun
-		}
 	}
+}
+
+// ReadTagged16 reads a Dart-encoded 16-bit scalar using the same signed marker
+// scheme as ReadTagged32. The VM has a dedicated Read16 path whose final group
+// starts at bit 14; accepting the 4th/5th bytes of a 32-bit read would consume
+// bytes belonging to the next field on malformed input.
+func (s *Stream) ReadTagged16() (uint16, error) {
+	v, err := s.readVarint(int64(endByteMarker), 14, -2, 1)
+	if err != nil {
+		return 0, err
+	}
+	return uint16(v), nil
 }
 
 // ReadTagged32 reads a Dart-encoded uint32 using the signed variable-length
@@ -186,7 +263,7 @@ func (s *Stream) readVarint(endMarker int64, maxShift uint) (int64, error) {
 // Same structure as ReadUnsigned but the terminator byte subtracts 192 instead
 // of 128, giving a 7-bit signed range (-64..63) for the final contribution.
 func (s *Stream) ReadTagged32() (uint32, error) {
-	v, err := s.readVarint(int64(endByteMarker), 28)
+	v, err := s.readVarint(int64(endByteMarker), 28, -8, 7)
 	if err != nil {
 		return 0, err
 	}
@@ -196,7 +273,7 @@ func (s *Stream) ReadTagged32() (uint32, error) {
 // ReadTagged64 reads a Dart-encoded int64 using the signed variable-length
 // encoding (kEndByteMarker = 192). Used for Read<int64_t> (e.g. Mint values).
 func (s *Stream) ReadTagged64() (int64, error) {
-	return s.readVarint(int64(endByteMarker), 63)
+	return s.readVarint(int64(endByteMarker), 63, -1, 0)
 }
 
 // ReadDouble reads a float64 by reading a Tagged64 and bit-casting to float64 (runtime/vm/datastream.h Read<double>).
@@ -218,7 +295,7 @@ func (s *Stream) ReadDouble() (float64, error) {
 // Final result = accumulated + 128.
 func (s *Stream) ReadRefId() (int64, error) {
 	var result int64
-	for i := 0; i < 5; i++ { // max 4 stages + safety
+	for i := 0; i < 4; i++ { // SDK ReadRefId is bounded to four encoded bytes
 		if s.pos >= s.end {
 			return 0, ErrStreamEOF
 		}
@@ -263,7 +340,10 @@ func (s *Stream) Align(alignment int) {
 
 // Skip advances the position by n bytes.
 func (s *Stream) Skip(n int) error {
-	if s.pos+n > s.end {
+	if n < 0 {
+		return ErrStreamOverrun
+	}
+	if n > s.end-s.pos {
 		return ErrStreamEOF
 	}
 	s.pos += n

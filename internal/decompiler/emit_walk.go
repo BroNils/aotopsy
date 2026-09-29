@@ -128,7 +128,10 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 
 	e.active[id] = true
 	e.visits[id]++
+	prevBlock := e.currentBlock
+	e.currentBlock = id
 	defer delete(e.active, id)
+	defer func() { e.currentBlock = prevBlock }()
 
 	// Real try/catch structuring.
 	//
@@ -354,6 +357,23 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		e.stats.UnresolvedCF++
 		return
 	}
+	if e.currentBlock >= 0 && id < len(e.fir.Blocks) {
+		if e.emittedEdges == nil {
+			e.emittedEdges = make(map[uint64]bool)
+		}
+		key := uint64(uint32(e.currentBlock))<<32 | uint64(uint32(id))
+		e.emittedEdges[key] = true
+	}
+	// A source-level try may only contain blocks whose full extents were proven
+	// protected by buildBlockTryIndex. Do not let the recursive CFG walk inline a
+	// successor outside the currently open region before the try brace closes.
+	if e.curTryRegion != 0 {
+		want := e.curTryRegion - 1
+		if got, ok := e.blockTryRegion[id]; !ok || got != want {
+			e.emit(indent, "goto block_%d;", id)
+			return
+		}
+	}
 	if e.active[id] {
 		// Back-edge: emit continue; (inside while loop if loop header was emitted)
 		e.emit(indent, "continue;")
@@ -518,7 +538,12 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 		e.stats.UnresolvedCF++
 		return
 	}
-	if !e.omittedSet[id] && len(e.omitted) < maxHelpers {
+	if !e.omittedSet[id] && len(e.omitted) >= maxHelpers {
+		e.emit(indent, "// unresolved block_%d: helper budget exhausted", id)
+		e.stats.UnresolvedCF++
+		return
+	}
+	if !e.omittedSet[id] {
 		e.omittedSet[id] = true
 		e.omitted = append(e.omitted, id)
 		// Capture live register state at extraction point for helper.
@@ -632,10 +657,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
 	switch ins.CondKind {
 	case "cmp":
-		if !e.state.HasCmp || ins.CondOp == "?" {
-			return "", false
-		}
-		return fmt.Sprintf("%s %s %s", e.state.LastCmp[0], ins.CondOp, e.state.LastCmp[1]), true
+		return rememberedCmpCondition(e.state, ins.CondOp, ins.CondUnsigned)
 	case "eqz":
 		return e.state.lookupReg(ins.CondReg) + " == 0", true
 	case "nez":

@@ -21,7 +21,8 @@ func FuzzParseInstructionsSection(f *testing.F) {
 	f.Add([]byte{}, uint64(0))
 	f.Add(make([]byte, 128), uint64(0))
 	f.Add(make([]byte, 16), uint64(1<<40))
+	f.Add(make([]byte, 64), ^uint64(0)-20)
 	f.Fuzz(func(t *testing.T, data []byte, offset uint64) {
-		_, _ = ParseInstructionsSection(data, offset)
+		_, _ = ParseInstructionsSection(data, offset, instructionsSectionFields)
 	})
 }

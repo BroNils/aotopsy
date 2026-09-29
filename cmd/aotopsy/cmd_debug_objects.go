@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/sdk"
 )
 
 type poolRecord struct {
@@ -64,7 +65,7 @@ func cmdObjects(args []string) error {
 		for _, pe := range result.Pool {
 			rec := poolRecord{
 				Index:  pe.Index,
-				Offset: fmt.Sprintf("0x%x", (pe.Index+2)*8),
+				Offset: fmt.Sprintf("0x%x", objectPoolByteOffset(pe.Index, sc.IsARM64)),
 				Kind:   poolKindString(pe.Kind),
 			}
 			if d, ok := poolDisplay[pe.Index]; ok {
@@ -82,7 +83,7 @@ func cmdObjects(args []string) error {
 		}
 	} else {
 		for _, pe := range result.Pool {
-			offset := (pe.Index + 2) * 8
+			offset := objectPoolByteOffset(pe.Index, sc.IsARM64)
 			display := poolDisplay[pe.Index]
 			switch pe.Kind {
 			case cluster.PoolTagged:
@@ -102,6 +103,14 @@ func cmdObjects(args []string) error {
 	}
 
 	return nil
+}
+
+func objectPoolByteOffset(index int, arm64 bool) int {
+	offset := sdk.PoolElementsStartOffset + index*sdk.PoolElementSize
+	if !arm64 {
+		offset -= sdk.HeapObjectTag
+	}
+	return offset
 }
 
 func poolKindString(k cluster.PoolEntryKind) string {

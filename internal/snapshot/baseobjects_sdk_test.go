@@ -23,45 +23,32 @@ import (
 //	AOTOPSY_TEST_SDK=1 go test ./internal/snapshot/ -run BaseObjectNamesMatchSDK
 func TestBaseObjectNamesMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
-	// One tag per layout is enough to catch drift in that layout's row, and
-	// the boundary tags catch a range that has silently moved.
-	probes := []struct {
-		tag                string
-		wantMajor, wantMin int
-	}{
-		{"2.12.0", 2, 12},
-		{"2.18.0", 2, 18},
-		{"2.19.0", 2, 19},
-		{"3.0.0", 3, 0},
-		{"3.1.0", 3, 1},
-		{"3.2.0", 3, 2},
-		{"3.4.0", 3, 4},
-		{"3.5.0", 3, 5},
-		{"3.9.2", 3, 9},
-		{"3.12.2", 3, 12},
-		{"3.13.0", 3, 13},
-	}
-	for _, p := range probes {
-		t.Run(p.tag, func(t *testing.T) {
-			sdk, err := sdkBaseObjectNames(p.tag)
+	checked := 0
+	for _, tag := range SupportedVersions() {
+		got := BaseObjectNames(tag)
+		if got == nil {
+			continue
+		}
+		checked++
+		t.Run(tag, func(t *testing.T) {
+			sdk, err := sdkBaseObjectNames(tag)
 			if err != nil {
-				t.Fatalf("could not read AddBaseObjects from the SDK at %s: %v", p.tag, err)
-			}
-			got := BaseObjectNames(p.tag)
-			if got == nil {
-				t.Fatalf("no table row covers %s, but the SDK has one: %q", p.tag, sdk)
+				t.Fatalf("could not read AddBaseObjects from the SDK at %s: %v", tag, err)
 			}
 			if len(sdk) < len(got) {
-				t.Fatalf("SDK at %s lists %d base objects, the table claims %d", p.tag, len(sdk), len(got))
+				t.Fatalf("SDK at %s lists %d base objects, the table claims %d", tag, len(sdk), len(got))
 			}
 			for i := range got {
 				if got[i] != sdk[i] {
 					t.Errorf("ref %d at %s: table says %q, SDK says %q\nfull SDK list: %q",
-						i+1, p.tag, got[i], sdk[i], sdk[:len(got)])
+						i+1, tag, got[i], sdk[i], sdk[:len(got)])
 					break
 				}
 			}
 		})
+	}
+	if checked == 0 {
+		t.Fatal("base-object drift gate verified zero supported versions")
 	}
 }
 
@@ -116,7 +103,7 @@ func sdkBaseObjectNames(tag string) ([]string, error) {
 	// The function moved file in 2.13; try both names.
 	var lastErr error
 	for _, path := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
-		src, err := sdktest.GHFileAtTag(path, tag)
+		src, err := sdktest.SDKFileAtTag(path, tag)
 		if err != nil {
 			lastErr = err
 			continue

@@ -39,6 +39,7 @@ func TestX86ClassCheckSequenceTypesTheComparedRegister(t *testing.T) {
 		x86Inst(0x114, x86asm.RET),                         // branch target
 	}
 	ctx := &TypeContext{}
+	ctx.SetClassIDTagLayout(12, 20)
 	var entry [31]TypeLattice
 	for i := range entry {
 		entry[i] = Top()

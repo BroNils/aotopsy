@@ -52,7 +52,7 @@ func clusterOnly(t *testing.T, libPath string) *cluster.Result {
 	if info.IsolateHeader != nil {
 		snapshotSize = info.IsolateHeader.TotalSize
 	}
-	if err := cluster.ReadFill(data, res, info.Version, false, snapshotSize); err != nil {
+	if err := cluster.ReadFill(data, res, info.Version, false, snapshotSize, dartfmt.Options{}); err != nil {
 		t.Fatalf("read fill: %v", err)
 	}
 	return res

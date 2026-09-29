@@ -41,7 +41,7 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 	if numRefs == 0 {
 		numRefs = 6 // default: owner, exception_handlers, pc_descriptors, catch_entry, inlined_id_to_function, code_source_map
 	}
-	codes := make([]CodeEntry, 0, cm.Count)
+	codes := make([]CodeEntry, 0, initialCaptureCap(cm.Count, s.Remaining()))
 	ref := cm.StartRef
 	instrIdx := instrIdxBase
 	discardedCount := 0

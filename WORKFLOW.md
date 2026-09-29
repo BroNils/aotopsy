@@ -168,7 +168,7 @@ Three situations where `decompile-native` alone can't answer the question:
 
 ```bash
 aotopsy _debug decompile-native --lib libapp.so --func 0x1b7e54 --gen-frida --gen-frida-out hooks.js
-frida -U -f com.example.app -l hooks.js --no-pause
+frida -U -f com.example.app -l hooks.js
 ```
 
 For hardened/anti-tamper targets, prefer attach over spawn. See `FRIDA.md` for safety details.

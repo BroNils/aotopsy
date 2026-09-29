@@ -121,6 +121,7 @@ func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int)
 	}
 
 	return thraudit.THRAuditRecord{
+		Arch:      thraudit.ArchARM64,
 		THROffset: fmt.Sprintf("0x%x", byteOff),
 		Insn:      insts[idx].Text,
 		IsStore:   isStore,
@@ -163,6 +164,8 @@ type PeepholeState struct {
 	addDestReg int  // destination register from ADD (for liveness tracking)
 	addImm     int  // immediate from ADD (for combined offset)
 	addValid   bool // true if prev was ADD Xd, X27, #imm
+	lastAddr   uint64
+	haveAddr   bool
 }
 
 // NewPeepholeState creates a peephole annotator for ADD+LDR PP patterns.
@@ -174,6 +177,8 @@ func NewPeepholeState(pool map[int]string) *PeepholeState {
 func (p *PeepholeState) Reset() {
 	p.addValid = false
 	p.addDestReg = -1
+	p.lastAddr = 0
+	p.haveAddr = false
 }
 
 // Annotate checks for ADD Xd, X27, #upper followed by LDR Xt, [Xd, #lower].
@@ -182,6 +187,17 @@ func (p *PeepholeState) Reset() {
 // Fase 7 PART B: if an instruction between ADD and LDR defines the ADD's
 // destination register, the ADD result is killed and no annotation is made.
 func (p *PeepholeState) Annotate(inst Inst) string {
+	// Format(), block-effect precomputation and the final CFG pass may replay
+	// the same annotator over the function. A stateful pending ADD from the end
+	// of the previous pass must never annotate an earlier instruction in the
+	// next pass. Detect that address rewind locally so callers cannot forget a
+	// Reset between semantic passes.
+	if p.haveAddr && inst.Addr < p.lastAddr {
+		p.Reset()
+	}
+	p.lastAddr = inst.Addr
+	p.haveAddr = true
+
 	result := ""
 
 	// First, check if current is LDR Xt, [Xd, #lower] matching a pending ADD.

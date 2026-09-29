@@ -43,7 +43,11 @@ type CallEdge struct {
 // from internal/arm64.
 
 var arm64ArgRegCanon = func() [6]int {
-	r := sdk.DartArgRegisters(sdk.ArchARM64)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.FirstRegisterCallingConventionVersion, sdk.ArchARM64)
+	if !ok {
+		panic("sdk: ARM64 register calling convention missing at first supported version")
+	}
+	r := cc.GPR
 	var arr [6]int
 	copy(arr[:], r)
 	return arr
@@ -72,16 +76,19 @@ const maxArgSetupBack = 12
 // instruction) counting how many argument registers were freshly defined in
 // the immediate lead-up to this specific call.
 func inferCallArgCountLocal(insts []Inst, callIdx int) int {
-	return popcount8(inferCallArgRegMaskLocal(insts, callIdx))
+	return popcount8(inferCallArgRegMaskLocal(insts, callIdx, 0))
 }
 
 // inferCallArgRegMaskLocal is inferCallArgCountLocal's underlying primitive:
 // same backward scan, but returns WHICH of the 6 argument registers were
 // touched (bit i set = arm64ArgRegCanon[i] touched) rather than just a count.
 // Uses 0-based argument position indexing matching inferX86CallArgRegMaskLocal.
-func inferCallArgRegMaskLocal(insts []Inst, callIdx int) uint8 {
+func inferCallArgRegMaskLocal(insts []Inst, callIdx, blockStart int) uint8 {
 	var mask uint8
-	for i, steps := callIdx-1, 0; i >= 0 && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
+	if blockStart < 0 {
+		blockStart = 0
+	}
+	for i, steps := callIdx-1, 0; i >= blockStart && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
 		in := insts[i]
 		if _, ok := arm64.BL(in.Raw, in.Addr); ok {
 			break
@@ -136,13 +143,13 @@ const ObjectFieldVia = "object_field"
 // register's provenance is known, the loaded value inherits it rather than
 // becoming anonymous.
 //
-// Displacements covered:
-//
-//	Compressed (Dart 2.18+): 0x3 (normal), 0xb (monomorphic), 0x7 (unchecked), 0xf (mono unchecked)
-//	Uncompressed (Dart 2.10–2.17): 0x7 (normal), 0x17 (monomorphic), 0xf (unchecked), 0x1f (mono unchecked)
+// AOT Code objects keep these entry-point uwords at word-sized offsets even
+// when heap pointers are compressed. The 0x3/0xb displacements belong to a
+// compressed-pointer layout assumption that is not the AOT Code layout and
+// caused arbitrary object fields to inherit Code provenance.
 func IsCodeEntryPointDisp(off int) bool {
 	switch off {
-	case 0x3, 0x7, 0xb, 0xf, 0x17, 0x1f:
+	case 0x7, 0xf, 0x17, 0x1f:
 		return true
 	default:
 		return false

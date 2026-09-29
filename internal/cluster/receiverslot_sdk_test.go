@@ -49,7 +49,7 @@ func TestKindTagModifierPositionMatchesSDK(t *testing.T) {
 	}
 
 	for _, v := range versions {
-		src, err := sdktest.GHFileAtTag("runtime/vm/object.h", v)
+		src, err := sdktest.SDKFileAtTag("runtime/vm/object.h", v)
 		if err != nil {
 			t.Fatalf("%s: fetch object.h: %v", v, err)
 		}

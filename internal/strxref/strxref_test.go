@@ -1,6 +1,7 @@
 package strxref
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"aotopsy/internal/analysis"
@@ -31,15 +32,18 @@ func TestFindPoolReferences_FindsMatchingLoad(t *testing.T) {
 		SymbolNames: map[uint64]string{0x1000: "test_fn"},
 	}
 
-	refs, scanned := FindPoolReferences(ctx, []int{1}, Options{})
-	if scanned != 1 {
-		t.Fatalf("expected 1 function scanned, got %d", scanned)
+	res, err := FindPoolReferences(ctx, []int{1}, Options{})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
 	}
-	if len(refs) != 1 {
-		t.Fatalf("expected 1 reference, got %d: %+v", len(refs), refs)
+	if res.Scanned != 1 || res.Attempted != 1 {
+		t.Fatalf("expected 1 function attempted/scanned, got attempted=%d scanned=%d", res.Attempted, res.Scanned)
 	}
-	if refs[0].FuncName != "test_fn" || refs[0].PoolIndex != 1 {
-		t.Errorf("unexpected reference: %+v", refs[0])
+	if len(res.References) != 1 {
+		t.Fatalf("expected 1 reference, got %d: %+v", len(res.References), res.References)
+	}
+	if res.References[0].FuncName != "test_fn" || res.References[0].PoolIndex != 1 {
+		t.Errorf("unexpected reference: %+v", res.References[0])
 	}
 }
 
@@ -61,21 +65,16 @@ func TestFindPoolReferences_NoMatchForUnrelatedIndex(t *testing.T) {
 		SymbolNames: map[uint64]string{0x1000: "test_fn"},
 	}
 
-	refs, _ := FindPoolReferences(ctx, []int{999}, Options{})
-	if len(refs) != 0 {
-		t.Errorf("expected 0 references for an untargeted pool index, got %d: %+v", len(refs), refs)
+	res, err := FindPoolReferences(ctx, []int{999}, Options{})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if len(res.References) != 0 {
+		t.Errorf("expected 0 references for an untargeted pool index, got %d: %+v", len(res.References), res.References)
 	}
 }
 
-// TestFindPoolReferences_DefaultIsUnbounded is a regression test for
-// the deliberate design choice documented in Options: unlike internal/
-// ffitrace, this package defaults to a FULL scan (MaxScan=0 means "no
-// cap"), justified by measuring FuncIR-only construction as cheap even
-// at real production scale (129k functions, 9.3s, flat memory). This
-// test proves the zero-value Options actually scans every eligible
-// function, using a function count well above ffitrace's own default
-// bound (500), so a regression back to a hidden cap would be caught.
-func TestFindPoolReferences_DefaultIsUnbounded(t *testing.T) {
+func TestFindPoolReferences_UnboundedOptInScansEverything(t *testing.T) {
 	const numFuncs = 600
 	code := make([]byte, 0, numFuncs*len(arm64Ret))
 	ranges := make([]cluster.CodeRange, 0, numFuncs)
@@ -95,9 +94,12 @@ func TestFindPoolReferences_DefaultIsUnbounded(t *testing.T) {
 		SymbolNames: symbolNames,
 	}
 
-	_, scanned := FindPoolReferences(ctx, []int{0}, Options{})
-	if scanned != numFuncs {
-		t.Fatalf("expected default (MaxScan=0) to scan all %d functions, scanned %d", numFuncs, scanned)
+	res, err := FindPoolReferences(ctx, []int{0}, Options{AllowUnbounded: true})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if res.Scanned != numFuncs || res.ScanLimitReached {
+		t.Fatalf("expected explicit unbounded scan of %d functions, got scanned=%d limited=%v", numFuncs, res.Scanned, res.ScanLimitReached)
 	}
 }
 
@@ -121,8 +123,91 @@ func TestFindPoolReferences_MaxScanNarrowsWhenSet(t *testing.T) {
 		Ranges:      ranges,
 	}
 
-	_, scanned := FindPoolReferences(ctx, []int{0}, Options{MaxScan: explicitMax})
-	if scanned != explicitMax {
-		t.Fatalf("expected explicit MaxScan=%d to be honored, scanned %d", explicitMax, scanned)
+	res, err := FindPoolReferences(ctx, []int{0}, Options{MaxScan: explicitMax})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if res.Scanned != explicitMax || !res.ScanLimitReached {
+		t.Fatalf("expected MaxScan=%d with explicit truncation, scanned=%d limited=%v", explicitMax, res.Scanned, res.ScanLimitReached)
+	}
+}
+
+func TestFindPoolReferencesEmptyTargetsDoesNoWork(t *testing.T) {
+	ctx := &analysis.AnalysisContext{Ranges: []cluster.CodeRange{{RefID: 1, PCOffset: 0, Size: 4}}}
+	res, err := FindPoolReferences(ctx, nil, Options{})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if res.Attempted != 0 || res.Scanned != 0 || len(res.References) != 0 {
+		t.Fatalf("empty targets did work: %+v", res)
+	}
+}
+
+func TestFindPoolReferencesX64DirectCompareOperand(t *testing.T) {
+	// 41 3b 47 3f = CMP EAX, [R15+0x3f]. x64 PP is tagged, so 0x3f
+	// maps to pool index (0x3f-(0x10-1))/8 = 6. This is the exact operand
+	// shape Dart's Assembler::CompareObject can emit without a MOV load.
+	code := []byte{0x41, 0x3b, 0x47, 0x3f, 0xc3} // ... ; RET
+	ctx := &analysis.AnalysisContext{
+		Code: code, CodeVA: 0x4000, IsARM64: false,
+		Ranges:      []cluster.CodeRange{{RefID: 1, PCOffset: 0, Size: uint32(len(code))}},
+		SymbolNames: map[uint64]string{0x4000: "cmp_pool"},
+	}
+	res, err := FindPoolReferences(ctx, []int{6}, Options{})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if len(res.References) != 1 || res.References[0].PoolIndex != 6 || res.References[0].InstrAddr != 0x4000 {
+		t.Fatalf("direct x64 PP compare = %+v, want one pool[6] ref", res.References)
+	}
+}
+
+func TestFindPoolReferencesARM64PairLoadReportsBothSlots(t *testing.T) {
+	// LDP X0, X1, [X27,#24]. Object-pool elements start at +16, so the
+	// pair references pool[1] and pool[2].
+	raw := uint32(0xA9400000 | (3 << 15) | (1 << 10) | (27 << 5))
+	code := make([]byte, 8)
+	binary.LittleEndian.PutUint32(code[:4], raw)
+	binary.LittleEndian.PutUint32(code[4:], 0xD65F03C0) // RET
+	ctx := &analysis.AnalysisContext{
+		Code: code, CodeVA: 0x5000, IsARM64: true,
+		Ranges:      []cluster.CodeRange{{RefID: 1, PCOffset: 0, Size: uint32(len(code))}},
+		SymbolNames: map[uint64]string{0x5000: "pair_pool"},
+	}
+	res, err := FindPoolReferences(ctx, []int{1, 2}, Options{})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if len(res.References) != 2 || res.References[0].PoolIndex != 1 || res.References[1].PoolIndex != 2 {
+		t.Fatalf("pair refs = %+v, want pool[1], pool[2]", res.References)
+	}
+}
+
+func TestFindPoolReferencesReferenceCapIsExplicit(t *testing.T) {
+	code := []byte{
+		0x60, 0x0F, 0x40, 0xF9, // pool[1]
+		0x61, 0x0F, 0x40, 0xF9, // pool[1]
+		0xC0, 0x03, 0x5F, 0xD6,
+	}
+	ctx := &analysis.AnalysisContext{
+		Code: code, CodeVA: 0x6000, IsARM64: true,
+		Ranges: []cluster.CodeRange{{RefID: 1, PCOffset: 0, Size: uint32(len(code))}},
+	}
+	res, err := FindPoolReferences(ctx, []int{1}, Options{MaxRefs: 1})
+	if err != nil {
+		t.Fatalf("FindPoolReferences: %v", err)
+	}
+	if len(res.References) != 1 || !res.ReferenceLimitReached {
+		t.Fatalf("reference cap not explicit: %+v", res)
+	}
+}
+
+func TestFindPoolReferencesRejectsMalformedX64(t *testing.T) {
+	ctx := &analysis.AnalysisContext{
+		Code: []byte{0xc4}, CodeVA: 0x7000, IsARM64: false, // truncated VEX prefix
+		Ranges: []cluster.CodeRange{{RefID: 1, PCOffset: 0, Size: 1}},
+	}
+	if _, err := FindPoolReferences(ctx, []int{1}, Options{}); err == nil {
+		t.Fatal("malformed x64 function accepted")
 	}
 }

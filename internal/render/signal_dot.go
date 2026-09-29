@@ -33,22 +33,29 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			stringRefs: f.StringRefs,
 		}
 	}
+	validEdges := validSignalEdges(g)
 
-	// Build BL and BLR adjacency.
-	fwd := make(map[string][]string)       // BL only
-	blrEdges := make(map[[2]string]string) // [from,to] → via label
-	for _, e := range g.Edges {
+	// Build complete adjacency. Indirect/polymorphic targets have already been
+	// expanded into SignalEdge records by signal.BuildSignalGraph, so traversal
+	// must not drop them here.
+	fwd := make(map[string][]signal.SignalEdge)
+	for _, e := range validEdges {
 		if e.To == "" {
 			continue
 		}
-		if e.Kind == "bl" || e.Kind == "call" {
-			fwd[e.From] = append(fwd[e.From], e.To)
-		} else if e.Kind == "blr" || e.Kind == "call_indirect" {
-			key := [2]string{e.From, e.To}
-			if _, ok := blrEdges[key]; !ok {
-				blrEdges[key] = e.Via
+		fwd[e.From] = append(fwd[e.From], e)
+	}
+	for from := range fwd {
+		sort.Slice(fwd[from], func(i, j int) bool {
+			a, b := fwd[from][i], fwd[from][j]
+			if a.To != b.To {
+				return a.To < b.To
 			}
-		}
+			if a.Kind != b.Kind {
+				return a.Kind < b.Kind
+			}
+			return a.Via < b.Via
+		})
 	}
 
 	// Find high+medium severity signal functions.
@@ -66,39 +73,52 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		}
 	}
 
-	// Build reverse adjacency to find true roots (no BL callers).
+	// Build reverse adjacency to find true roots (no direct OR indirect caller).
 	hasCaller := make(map[string]bool)
-	for _, e := range g.Edges {
-		if (e.Kind == "bl" || e.Kind == "call") && e.To != "" {
+	for _, e := range validEdges {
+		if e.To != "" {
 			hasCaller[e.To] = true
 		}
 	}
 
-	// Forward BFS from all root functions (no incoming BL edges).
+	// Forward BFS from explicit entry points when the producer supplied them.
+	// Older/manually constructed graphs may not carry that bit, so only then
+	// fall back to structural roots (functions with no incoming call edge).
+	// The visited set is the bound; an arbitrary depth cap silently hid
+	// legitimate paths in deep call chains.
 	parent := make(map[string]string) // child → parent
 	dist := make(map[string]int)
-	maxDist := 8
 
 	type bfsItem struct {
 		name string
 		d    int
 	}
-	var queue []bfsItem
+	var roots []string
 	for _, f := range g.Funcs {
-		if !hasCaller[f.Name] {
-			if _, ok := dist[f.Name]; !ok {
-				dist[f.Name] = 0
-				queue = append(queue, bfsItem{f.Name, 0})
+		if f.IsEntryPoint {
+			roots = append(roots, f.Name)
+		}
+	}
+	if len(roots) == 0 {
+		for _, f := range g.Funcs {
+			if !hasCaller[f.Name] {
+				roots = append(roots, f.Name)
 			}
+		}
+	}
+	sort.Strings(roots)
+	var queue []bfsItem
+	for _, root := range roots {
+		if _, ok := dist[root]; !ok {
+			dist[root] = 0
+			queue = append(queue, bfsItem{root, 0})
 		}
 	}
 	for len(queue) > 0 {
 		item := queue[0]
 		queue = queue[1:]
-		if item.d >= maxDist {
-			continue
-		}
-		for _, next := range fwd[item.name] {
+		for _, edge := range fwd[item.name] {
+			next := edge.To
 			if _, ok := dist[next]; !ok {
 				dist[next] = item.d + 1
 				parent[next] = item.name
@@ -109,11 +129,12 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 
 	// For each reachable signal function, trace back to the entry point.
 	pathNodes := make(map[string]bool)
-	pathEdges := make(map[[2]string]bool)
+	reachableSignals := 0
 	for name := range signalSet {
 		if _, ok := dist[name]; !ok {
 			continue // unreachable from any entry point
 		}
+		reachableSignals++
 		cur := name
 		for cur != "" {
 			pathNodes[cur] = true
@@ -121,17 +142,15 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			if !ok {
 				break // reached an entry point (no parent)
 			}
-			pathEdges[[2]string{p, cur}] = true
 			cur = p
 		}
 	}
 
-	// Also add direct edges between signal functions for intra-signal structure.
-	for _, e := range g.Edges {
-		if (e.Kind == "bl" || e.Kind == "call") && signalSet[e.From] && signalSet[e.To] {
+	// Also add every edge-connected signal function for intra-signal structure.
+	for _, e := range validEdges {
+		if e.To != "" && signalSet[e.From] && signalSet[e.To] {
 			pathNodes[e.From] = true
 			pathNodes[e.To] = true
-			pathEdges[[2]string{e.From, e.To}] = true
 		}
 	}
 
@@ -144,74 +163,43 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 
 	// If no paths found (signal funcs unreachable from entry points),
 	// just show signal funcs and their 1-hop neighbors.
-	if len(pathEdges) == 0 {
+	if reachableSignals == 0 {
 		for name := range signalSet {
 			pathNodes[name] = true
-			for _, callee := range fwd[name] {
-				pathNodes[callee] = true
-				pathEdges[[2]string{name, callee}] = true
+			for _, edge := range fwd[name] {
+				pathNodes[edge.To] = true
 			}
 		}
 	}
 
-	// Prune long chains: collapse intermediate nodes that are neither
-	// entry points nor signal functions and have exactly 1 in + 1 out edge.
-	for changed := true; changed; {
-		changed = false
-		// Sorted, not map order: this loop DELETES nodes and rewires edges,
-		// so the iteration order decides which chains collapse and the
-		// rendered graph differs run to run. See sortedSet.
-		for _, name := range sortedSet(pathNodes) {
-			fi := funcMap[name]
-			if fi == nil {
-				continue
-			}
-			if !hasCaller[name] || signalSet[name] || fi.role == "signal" {
-				continue
-			}
-			var ins, outs [][2]string
-			for e := range pathEdges {
-				if e[1] == name {
-					ins = append(ins, e)
-				}
-				if e[0] == name {
-					outs = append(outs, e)
-				}
-			}
-			if len(ins) == 1 && len(outs) == 1 {
-				from := ins[0][0]
-				to := outs[0][1]
-				delete(pathEdges, ins[0])
-				delete(pathEdges, outs[0])
-				pathEdges[[2]string{from, to}] = true
-				delete(pathNodes, name)
-				changed = true
-			}
+	// Render the exact induced edge set among selected nodes. Do not collapse
+	// context chains: doing so changes graph semantics and can turn an indirect
+	// path into a visually direct edge.
+	type pathEdge struct{ from, to, kind, via string }
+	seenEdges := make(map[pathEdge]bool)
+	var pathEdges []pathEdge
+	for _, e := range validEdges {
+		if e.To == "" || e.From == e.To || !pathNodes[e.From] || !pathNodes[e.To] {
+			continue
+		}
+		pe := pathEdge{e.From, e.To, e.Kind, e.Via}
+		if !seenEdges[pe] {
+			seenEdges[pe] = true
+			pathEdges = append(pathEdges, pe)
 		}
 	}
-
-	// Collect BLR edges between path nodes.
-	type blrEdge struct {
-		from, to, via string
-	}
-	var pathBLR []blrEdge
-	for key, via := range blrEdges {
-		if pathNodes[key[0]] && pathNodes[key[1]] && key[0] != key[1] {
-			// Skip if a BL edge already exists for this pair.
-			if !pathEdges[key] {
-				pathBLR = append(pathBLR, blrEdge{key[0], key[1], via})
-			}
+	sort.Slice(pathEdges, func(i, j int) bool {
+		a, b := pathEdges[i], pathEdges[j]
+		if a.from != b.from {
+			return a.from < b.from
 		}
-	}
-	// pathBLR is emitted in order at the bottom of this function.
-	sort.Slice(pathBLR, func(a, b int) bool {
-		if pathBLR[a].from != pathBLR[b].from {
-			return pathBLR[a].from < pathBLR[b].from
+		if a.to != b.to {
+			return a.to < b.to
 		}
-		if pathBLR[a].to != pathBLR[b].to {
-			return pathBLR[a].to < pathBLR[b].to
+		if a.kind != b.kind {
+			return a.kind < b.kind
 		}
-		return pathBLR[a].via < pathBLR[b].via
+		return a.via < b.via
 	})
 
 	// Collect string ref nodes for signal functions in the path.
@@ -234,18 +222,20 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		}
 		seen := make(map[string]bool)
 		count := 0
+		uniqueCount := 0
 		for _, sr := range fi.stringRefs {
-			if seen[sr.Value] || count >= maxStrPerFunc {
+			if seen[sr.Value] {
 				continue
 			}
 			seen[sr.Value] = true
+			uniqueCount++
+			if count >= maxStrPerFunc {
+				continue
+			}
 			count++
 			sid := fmt.Sprintf("str_%d", strIdx)
 			strIdx++
-			label := sr.Value
-			if len(label) > 60 {
-				label = label[:57] + "..."
-			}
+			label := truncLabel(sr.Value, 60)
 			cat := ""
 			if len(sr.Categories) > 0 {
 				cat = sr.Categories[0]
@@ -253,10 +243,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			strNodes = append(strNodes, strNode{id: sid, label: label, cat: cat})
 			strEdges[[2]string{dotID(name), sid}] = true
 		}
-		if len(fi.stringRefs) > maxStrPerFunc && count == maxStrPerFunc {
+		if uniqueCount > count {
 			sid := fmt.Sprintf("str_%d", strIdx)
 			strIdx++
-			more := len(fi.stringRefs) - maxStrPerFunc
+			more := uniqueCount - count
 			strNodes = append(strNodes, strNode{id: sid, label: fmt.Sprintf("+%d more", more)})
 			strEdges[[2]string{dotID(name), sid}] = true
 		}
@@ -309,13 +299,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 				attrs = `, fillcolor="#E3F2FD", color="#1565C0", penwidth=1.0`
 			}
 			if len(fi.categories) > 0 {
-				cats := strings.Join(fi.categories, ",")
-				if len(cats) > 30 {
-					cats = cats[:30] + "..."
-				}
+				cats := truncLabel(strings.Join(fi.categories, ","), 30)
 				label += "\\n" + cats
 			}
-		} else if !hasCaller[name] {
+		} else if fi != nil && (fi.isEntry || !hasCaller[name]) {
 			attrs = fmt.Sprintf(`, fillcolor="#E8F5E9", color="%s", penwidth=1.2`, t.EdgeTHR)
 		} else {
 			// Intermediate context node.
@@ -375,30 +362,24 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		b.WriteByte('\n')
 	}
 
-	// BL edges (direct calls).
-	for _, edge := range sortedPairs(pathEdges) {
-		fromID := dotID(edge[0])
-		toID := dotID(edge[1])
-		attrs := fmt.Sprintf("color=%q", t.EdgeDirect)
-		if signalSet[edge[1]] {
-			attrs = fmt.Sprintf("color=%q, penwidth=1.0", t.EdgeTHR)
-		}
-		fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
-	}
-
-	// BLR edges (indirect calls) — dashed.
-	for _, e := range pathBLR {
+	// Preserve direct vs indirect semantics in the selected subgraph.
+	for _, e := range pathEdges {
 		fromID := dotID(e.from)
 		toID := dotID(e.to)
-		via := e.via
-		if len(via) > 20 {
-			via = via[:20]
+		if e.kind == "blr" || e.kind == "call_indirect" {
+			via := truncLabel(e.via, 20)
+			attrs := fmt.Sprintf("style=dashed, color=%q, penwidth=0.5", t.EdgePP)
+			if via != "" {
+				attrs += fmt.Sprintf(", label=%q, fontsize=7, fontcolor=%q", via, t.ClusterLabel)
+			}
+			fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
+		} else {
+			attrs := fmt.Sprintf("color=%q", t.EdgeDirect)
+			if signalSet[e.to] {
+				attrs = fmt.Sprintf("color=%q, penwidth=1.0", t.EdgeTHR)
+			}
+			fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
 		}
-		attrs := fmt.Sprintf("style=dashed, color=%q, penwidth=0.5", t.EdgePP)
-		if via != "" {
-			attrs += fmt.Sprintf(", label=%q, fontsize=7, fontcolor=%q", via, t.ClusterLabel)
-		}
-		fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
 	}
 
 	// String ref edges — dotted, thin.
@@ -409,6 +390,28 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 
 	b.WriteString("}\n")
 	return b.String()
+}
+
+// validSignalEdges returns only graph edges whose endpoints exist in Funcs and
+// whose kind is one of the call kinds understood by the renderers. This keeps
+// malformed artifacts and provenance-only pseudo-targets from manufacturing
+// nodes or paths in rendered signal graphs.
+func validSignalEdges(g *signal.SignalGraph) []signal.SignalEdge {
+	if g == nil {
+		return nil
+	}
+	known := make(map[string]bool, len(g.Funcs))
+	for _, f := range g.Funcs {
+		known[f.Name] = true
+	}
+	out := make([]signal.SignalEdge, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		if !known[e.From] || !known[e.To] || !isSupportedCallKind(e.Kind) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // sortedSet returns a set's keys in a stable order.

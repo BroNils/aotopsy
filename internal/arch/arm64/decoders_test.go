@@ -1,6 +1,9 @@
 package arm64
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestBL(t *testing.T) {
 	raw := uint32(0x94000000 | (0x100 / 4))
@@ -81,6 +84,72 @@ func TestCondBranch(t *testing.T) {
 	rawTBNZ := uint32(0x37000000 | (8 << 5))
 	if target, ok := CondBranch(rawTBNZ, 0x1000); !ok || target != 0x1020 {
 		t.Fatalf("CondBranch(TBNZ) = (0x%x, %v), want (0x1020, true)", target, ok)
+	}
+}
+
+func TestBCondClassDistinguishesHistoricalALFromReservedNV(t *testing.T) {
+	if cond, kind, ok := BCondClass(0x5400004E); !ok || cond != 14 || kind != BCondAlways {
+		t.Fatalf("B.AL class = (%d,%d,%v), want (14,always,true)", cond, kind, ok)
+	}
+	if target, cond, kind, ok := BCond(0x5400004E, 0x1000); !ok || target != 0x1008 || cond != 14 || kind != BCondAlways {
+		t.Fatalf("B.AL decode = (%#x,%d,%d,%v), want (0x1008,14,always,true)", target, cond, kind, ok)
+	}
+	if cond, kind, ok := BCondClass(0x5400004F); !ok || cond != 15 || kind != BCondReserved {
+		t.Fatalf("B.NV class = (%d,%d,%v), want (15,reserved,true)", cond, kind, ok)
+	}
+	if target, _, kind, ok := BCond(0x5400004F, 0x1000); !ok || target != 0 || kind != BCondReserved {
+		t.Fatalf("B.NV decode = (%#x,%d,%v), want reserved/no target", target, kind, ok)
+	}
+	// Classification is preserved even if the target arithmetic cannot be
+	// represented in uint64; CFG consumers still need to terminate the block.
+	if _, kind, ok := BCondClass(0x5400002E); !ok || kind != BCondAlways {
+		t.Fatalf("overflowing B.AL lost opcode classification: kind=%d ok=%v", kind, ok)
+	}
+	if _, _, _, ok := BCond(0x5400002E, math.MaxUint64-3); ok {
+		t.Fatal("overflowing B.AL returned a representable target")
+	}
+}
+
+func TestImmediateAndPairAddressModes(t *testing.T) {
+	if m, ok := Store64Immediate(0xF81F8DE1); !ok || m.BaseReg != 15 || m.Reg != 1 || m.ByteOffset != -8 || m.Mode != AddressPreIndex {
+		t.Fatalf("STR pre-index decode = %+v ok=%v", m, ok)
+	}
+	if m, ok := Load64Immediate(0xF84085E0); !ok || m.BaseReg != 15 || m.Reg != 0 || m.ByteOffset != 8 || m.Mode != AddressPostIndex {
+		t.Fatalf("LDR post-index decode = %+v ok=%v", m, ok)
+	}
+	if m, ok := Load64Immediate(0xF8427002); !ok || m.BaseReg != 0 || m.Reg != 2 || m.ByteOffset != 39 || m.Mode != AddressOffset {
+		t.Fatalf("LDUR decode = %+v ok=%v", m, ok)
+	}
+	if m, ok := Load64Immediate(0xF9400BA0); !ok || m.BaseReg != 29 || m.Reg != 0 || m.ByteOffset != 16 || m.Mode != AddressOffset {
+		t.Fatalf("LDR unsigned-offset decode = %+v ok=%v", m, ok)
+	}
+
+	if p, ok := StorePair64(0xA9BF79FD); !ok || p.BaseReg != 15 || p.Reg1 != 29 || p.Reg2 != 30 || p.ByteOffset != -16 || p.Mode != PairPreIndex {
+		t.Fatalf("STP pre-index decode = %+v ok=%v", p, ok)
+	}
+	if p, ok := LoadPair64(0xA8C179FD); !ok || p.BaseReg != 15 || p.Reg1 != 29 || p.Reg2 != 30 || p.ByteOffset != 16 || p.Mode != PairPostIndex {
+		t.Fatalf("LDP post-index decode = %+v ok=%v", p, ok)
+	}
+	// STNP is non-temporal/no-writeback, not the post-index STP class.
+	if p, ok := StorePair64(0xA8000440); !ok || p.BaseReg != 2 || p.Reg1 != 0 || p.Reg2 != 1 || p.ByteOffset != 0 || p.Mode != PairNonTemporal {
+		t.Fatalf("STNP decode = %+v ok=%v", p, ok)
+	}
+}
+
+func TestBranchTargetsRejectAddressWraparound(t *testing.T) {
+	if target, ok := BL(0x94000001, math.MaxUint64-1); ok {
+		t.Fatalf("overflowing BL target resolved to %#x", target)
+	}
+	// B #-4: imm26 is all ones.
+	if target, ok := B(0x17FFFFFF, 0); ok {
+		t.Fatalf("underflowing B target resolved to %#x", target)
+	}
+	// B.EQ #+4 at the top of the address space.
+	if target, ok := CondBranch(0x54000020, math.MaxUint64-1); ok {
+		t.Fatalf("overflowing B.cond target resolved to %#x", target)
+	}
+	if target, ok := PCRelativeTarget(0, math.MinInt64); ok {
+		t.Fatalf("MinInt64 underflow resolved to %#x", target)
 	}
 }
 
@@ -190,8 +259,191 @@ func TestDstRegsOfInstLoadModes(t *testing.T) {
 	}
 	for _, l := range loads {
 		regs := DstRegsOfInst(l.raw)
-		if len(regs) != 1 || regs[0] != 1 {
-			t.Errorf("DstRegsOfInst(%s = %#08x) = %v, want [1]", l.name, l.raw, regs)
+		want := []int{1}
+		if l.raw == 0xF8408401 || l.raw == 0xF8408C01 {
+			want = []int{1, 0}
 		}
+		if len(regs) != len(want) {
+			t.Errorf("DstRegsOfInst(%s = %#08x) = %v, want %v", l.name, l.raw, regs, want)
+			continue
+		}
+		for i := range want {
+			if regs[i] != want[i] {
+				t.Errorf("DstRegsOfInst(%s = %#08x) = %v, want %v", l.name, l.raw, regs, want)
+				break
+			}
+		}
+	}
+}
+
+func TestDstRegsOfInstWritebackExclusiveAndFMOV(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  uint32
+		want []int
+	}{
+		{"LDR X0, [X1],#8", 0xF8408420, []int{0, 1}},
+		{"STR X4, [X5],#8", 0xF80084A4, []int{5}},
+		{"LDXR X12,[X13]", 0xC85F7DAC, []int{12}},
+		{"STXR W4,X2,[X3]", 0xC8047C62, []int{4}},
+		{"FMOV X0,D1", 0x9E660020, []int{0}},
+		{"BL", 0x94000000, []int{30}},
+		{"BLR X9", 0xD63F0120, []int{30}},
+	}
+	for _, tt := range tests {
+		got := DstRegsOfInst(tt.raw)
+		if len(got) != len(tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
+			continue
+		}
+		for i := range tt.want {
+			if got[i] != tt.want[i] {
+				t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
+				break
+			}
+		}
+	}
+}
+
+func TestAliasDecodersRejectTransformsAndMTE(t *testing.T) {
+	if _, _, _, _, ok := UBFX(0xD374CCA4); ok { // LSL X4,X5,#12
+		t.Fatal("UBFX accepted wrapping UBFM/LSL encoding")
+	}
+	if _, ok := MOVOrr(0xAA0307E2); ok { // ORR X2,XZR,X3,LSL #1
+		t.Fatal("MOVOrr accepted shifted ORR")
+	}
+	if _, _, _, ok := ADD64Immediate(0x91800360); ok { // ADDG X0,X27,#0,#0
+		t.Fatal("ADD64Immediate accepted MTE ADDG encoding")
+	}
+	// The exact aliases still match.
+	if rd, ok := MOVOrr(0xAA0303E2); !ok || rd != 2 { // MOV X2,X3
+		t.Fatalf("MOVOrr(real MOV) = (%d,%v), want (2,true)", rd, ok)
+	}
+	// UBFX X2,X1,#12,#20 => UBFM X2,X1,#12,#31.
+	if rd, rn, lsb, width, ok := UBFX(0xD34C7C22); !ok || rd != 2 || rn != 1 || lsb != 12 || width != 20 {
+		t.Fatalf("UBFX(real extract) = (%d,%d,%d,%d,%v), want (2,1,12,20,true)", rd, rn, lsb, width, ok)
+	}
+}
+
+func TestADD64RegisterPreservesShiftSemantics(t *testing.T) {
+	// ADD X0, X0, X28, LSR #7. This exact transformed HEAP_BITS operand used
+	// to be indistinguishable from a compressed-pointer decompression.
+	if rd, rn, rm, shift, amount, ok := ADD64Register(0x8B5C1C00); !ok ||
+		rd != 0 || rn != 0 || rm != 28 || shift != ShiftLSR || amount != 7 {
+		t.Fatalf("shifted ADD decode = (%d,%d,%d,%d,%d,%v), want (0,0,28,LSR,7,true)",
+			rd, rn, rm, shift, amount, ok)
+	}
+
+	// The Dart compressed-pointer shape is ADD X0,X1,X28,LSL #32.
+	rawDecompress := uint32(0x8B000000 | (28 << 16) | (32 << 10) | (1 << 5))
+	if rd, rn, rm, shift, amount, ok := ADD64Register(rawDecompress); !ok ||
+		rd != 0 || rn != 1 || rm != 28 || shift != ShiftLSL || amount != 32 {
+		t.Fatalf("decompress ADD decode = (%d,%d,%d,%d,%d,%v), want (0,1,28,LSL,32,true)",
+			rd, rn, rm, shift, amount, ok)
+	}
+}
+
+func TestUBFXRejectsReservedNZeroEncoding(t *testing.T) {
+	if _, _, _, _, ok := UBFX(0xD30C7C20); ok {
+		t.Fatal("UBFX accepted reserved 64-bit encoding with N=0")
+	}
+	if _, _, _, _, ok := UBFX(0xD34C7C20); !ok {
+		t.Fatal("UBFX rejected valid N=1 encoding")
+	}
+}
+
+func TestDstRegsOfInstAcquireLoadsAndLiteralClasses(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  uint32
+		want int
+	}{
+		{"LDAR X0,[X1]", 0xC8DFFC20, 0},
+		{"LDAR W0,[X1]", 0x88DFFC20, 0},
+		{"LDARB W2,[X3]", 0x08DFFC62, 2},
+		{"LDARH W4,[X5]", 0x48DFFCA4, 4},
+	} {
+		got := DstRegsOfInst(tt.raw)
+		if len(got) != 1 || got[0] != tt.want {
+			t.Errorf("%s: got %v, want [%d]", tt.name, got, tt.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		name string
+		raw  uint32
+	}{
+		{"PRFM literal", 0xD8000005},
+		{"LDR D3 literal", 0x5C000003},
+	} {
+		if got := DstRegsOfInst(tt.raw); len(got) != 0 {
+			t.Errorf("%s: reported GPR writes %v", tt.name, got)
+		}
+	}
+	if got := DstRegsOfInst(0x58000005); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("LDR X5 literal: got %v, want [5]", got)
+	}
+}
+
+func TestDstRegsOfInstDartGPRWriterFamilies(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  uint32
+		want int
+	}{
+		{"LDRSW register offset", 0xB8A07821, 1},
+		{"LDRSB register offset", 0x38A56822, 2},
+		{"LDRSH register offset", 0x78A26861, 1},
+		{"UMOV/VMOVX lane to GPR", 0x4E083C00, 0},
+		{"FCVTZS X0,D5", 0x9E7800A0, 0},
+		{"FCVTPS X1,D4", 0x9E680081, 1},
+		{"FCVTMS X2,D4", 0x9E700082, 2},
+		{"ADC X0,X1,X2", 0x9A020020, 0},
+		{"ADCS X0,X1,X2", 0xBA020020, 0},
+		{"SBC X0,X1,X2", 0xDA020020, 0},
+		{"SBCS X0,X1,X2", 0xFA020020, 0},
+		{"LDCLR X2,X0,[X1]", 0xF8221020, 0},
+		{"LDSET X2,X0,[X1]", 0xF8223020, 0},
+	}
+	for _, tt := range tests {
+		got := DstRegsOfInst(tt.raw)
+		if len(got) != 1 || got[0] != tt.want {
+			t.Errorf("%s: DstRegsOfInst(%#08x) = %v, want [%d]", tt.name, tt.raw, got, tt.want)
+		}
+	}
+}
+
+func TestDstRegsOfInstCMNDoesNotWriteSP(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  uint32
+	}{
+		// CMN is the ADDS alias with Rd=31 (WZR/XZR). Register 31 means SP in
+		// ordinary ADD/SUB, but flag-setting forms cannot write SP.
+		{"CMN X1,#5", 0xB100143F},
+		{"CMN W1,#5", 0x3100143F},
+		{"CMN X1,X2", 0xAB02003F},
+		{"CMN X1,W2,UXTW", 0xAB22403F},
+	}
+	for _, tt := range tests {
+		if got := DstRegsOfInst(tt.raw); len(got) != 0 {
+			t.Errorf("%s: DstRegsOfInst(%#08x) = %v, want no GPR destination", tt.name, tt.raw, got)
+		}
+	}
+
+	// A real ADDS destination still needs invalidation.
+	if got := DstRegsOfInst(0xB1001420); len(got) != 1 || got[0] != 0 { // ADDS X0,X1,#5
+		t.Fatalf("ADDS X0,X1,#5 writes = %v, want [0]", got)
+	}
+}
+
+func TestDstRegsOfInstOmitsArchitecturalSPAndZR(t *testing.T) {
+	// ADD SP,SP,#16: register encoding 31 means SP in add/sub immediate.
+	if got := DstRegsOfInst(0x910043FF); len(got) != 0 {
+		t.Fatalf("ADD SP,SP,#16 tracked destinations = %v, want none", got)
+	}
+	// ADD XZR,X1,X2: the same encoding 31 means ZR in add/sub shifted register.
+	if got := DstRegsOfInst(0x8B02003F); len(got) != 0 {
+		t.Fatalf("ADD XZR,X1,X2 tracked destinations = %v, want none", got)
 	}
 }

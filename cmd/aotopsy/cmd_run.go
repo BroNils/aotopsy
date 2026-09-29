@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -12,11 +13,6 @@ import (
 
 // cmdRun handles "aotopsy <libapp.so>" — full analysis.
 func cmdRun(args []string) error {
-	// Go's flag package stops at the first non-flag arg.
-	// If the first arg is a file path (not a flag), move it to the end
-	// so flags like --quiet after it are parsed correctly.
-	args = reorderPositionalArg(args)
-
 	fs := flag.NewFlagSet("aotopsy", flag.ExitOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
@@ -34,7 +30,7 @@ func cmdRun(args []string) error {
 	from := fs.String("from", "", "reuse existing disasm output directory")
 	decompile := fs.Bool("decompile", false, "write per-function Dart pseudocode to <out>/dart/ (large)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 
@@ -48,7 +44,7 @@ func cmdRun(args []string) error {
 			OutDir:    *outDir,
 			Signal:    true,
 			SignalK:   *signalK,
-			Meta:      true,
+			Meta:      analysis.MetaIfSupported,
 			DecompAll: *all,
 			Quiet:     quiet,
 		})
@@ -81,7 +77,7 @@ func cmdRun(args []string) error {
 		Strict:    *strict,
 		Signal:    true,
 		SignalK:   *signalK,
-		Meta:      true,
+		Meta:      analysis.MetaIfSupported,
 		DecompAll: *all,
 		Decompile: *decompile,
 		Quiet:     quiet,
@@ -95,29 +91,37 @@ func cmdRun(args []string) error {
 }
 
 func printSummary(result *analysis.Result) {
-	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("summary"))
-	fmt.Fprintf(os.Stderr, "  %s     %s\n", cli.MutedColor.S("output:"), cli.BlueColor.S(result.OutDir))
+	writeSummary(os.Stderr, result)
+}
+
+func writeSummary(w io.Writer, result *analysis.Result) {
+	fmt.Fprintf(w, "\n%s\n", cli.PinkColor.S("summary"))
+	fmt.Fprintf(w, "  %s     %s\n", cli.MutedColor.S("output:"), cli.BlueColor.S(result.OutDir))
 	if result.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "  %s       %s\n", cli.MutedColor.S("dart:"), cli.GoldColor.S(result.DartVersion))
+		fmt.Fprintf(w, "  %s       %s\n", cli.MutedColor.S("dart:"), cli.GoldColor.S(result.DartVersion))
 	}
-	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("ptr_size:"), cli.GoldColor.F("%d", result.PointerSize))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", cli.MutedColor.S("functions:"), cli.GoldColor.F("%d", result.FuncCount))
-	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("classes:"), cli.GoldColor.F("%d", result.ClassCount))
-	fmt.Fprintf(os.Stderr, "  %s    %s\n", cli.MutedColor.S("signal:"), cli.GoldColor.F("%d", result.SignalCount))
+	fmt.Fprintf(w, "  %s   %s\n", cli.MutedColor.S("ptr_size:"), cli.GoldColor.F("%d", result.PointerSize))
+	fmt.Fprintf(w, "  %s %s\n", cli.MutedColor.S("functions:"), cli.GoldColor.F("%d", result.FuncCount))
+	fmt.Fprintf(w, "  %s   %s\n", cli.MutedColor.S("classes:"), cli.GoldColor.F("%d", result.ClassCount))
+	fmt.Fprintf(w, "  %s    %s\n", cli.MutedColor.S("signal:"), cli.GoldColor.F("%d", result.SignalCount))
 	if result.MetaPath != "" {
-		fmt.Fprintf(os.Stderr, "  %s      %s\n", cli.MutedColor.S("meta:"), cli.BlueColor.S(result.MetaPath))
+		fmt.Fprintf(w, "  %s      %s\n", cli.MutedColor.S("meta:"), cli.BlueColor.S(result.MetaPath))
 	}
 	if result.DecompiledCount > 0 {
-		fmt.Fprintf(os.Stderr, "  %s %s functions\n", cli.MutedColor.S("pseudocode:"), cli.GoldColor.F("%d", result.DecompiledCount))
+		fmt.Fprintf(w, "  %s %s functions\n", cli.MutedColor.S("pseudocode:"), cli.GoldColor.F("%d", result.DecompiledCount))
 	}
 
 	// Follow-up commands.
 	absOut, _ := filepath.Abs(result.OutDir)
 	signalHTML := filepath.Join(absOut, "signal.html")
-	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("next"))
-	fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
-	if result.LibPath != "" {
-		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+result.LibPath+" --from "+absOut))
-		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ida "+result.LibPath+" --from "+absOut))
+	fmt.Fprintf(w, "\n%s\n", cli.PinkColor.S("next"))
+	if info, err := os.Stat(signalHTML); err == nil && info.Mode().IsRegular() {
+		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
+	}
+	if result.LibPath != "" && result.Arch == "arm64" {
+		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+result.LibPath+" --from "+absOut))
+		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ida "+result.LibPath+" --from "+absOut))
+	} else if result.LibPath != "" && result.Arch == "x64" {
+		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy _debug decompile-native --lib "+result.LibPath+" --from-main"))
 	}
 }

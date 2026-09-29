@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"math"
 
 	"aotopsy/internal/dartfmt"
 )
@@ -38,9 +39,40 @@ type CSMEntry struct {
 	// This is NOT a line number. Turning it into file:line needs the owning
 	// Script's line_starts table; see CodeSourceMapInfo.
 	TokenPos int32
-	// InlineStack holds indices into the Code's inlined_id_to_function array,
-	// outermost first. Empty means the PC is in the function itself.
-	InlineStack []int32
+	// inlineStack is a persistent stack node. Entries share unchanged stack
+	// state instead of copying the entire inline stack on every AdvancePC.
+	// Materialize it only through InlineStack(), where a consumer actually
+	// needs the IDs.
+	inlineStack *csmInlineFrame
+}
+
+type csmInlineFrame struct {
+	id     int32
+	parent *csmInlineFrame
+	depth  int
+}
+
+// InlineDepth returns the number of active inlined frames at this entry.
+func (e CSMEntry) InlineDepth() int {
+	if e.inlineStack == nil {
+		return 0
+	}
+	return e.inlineStack.depth
+}
+
+// InlineStack materializes the inlined-function IDs, outermost first.
+// DecodeCodeSourceMap itself retains only persistent linked stack nodes, so a
+// stream with a deep stack and many AdvancePC operations remains linear in the
+// number of operations instead of retaining O(entries*depth) copied slices.
+func (e CSMEntry) InlineStack() []int32 {
+	if e.inlineStack == nil {
+		return nil
+	}
+	out := make([]int32, e.inlineStack.depth)
+	for frame := e.inlineStack; frame != nil; frame = frame.parent {
+		out[frame.depth-1] = frame.id
+	}
+	return out
 }
 
 // CSMNoPosition marks "no token position recorded yet".
@@ -106,18 +138,16 @@ func DecodeCodeSourceMap(payload []byte) ([]CSMEntry, error) {
 	var entries []CSMEntry
 	var pc int64
 	tokenPos := CSMNoPosition
-	var stack []int32
+	var stack *csmInlineFrame
 	s := dartfmt.NewStreamAt(payload, 0)
 
 	// Record the state at the current PC. Called after every AdvancePC, since
 	// that is what delimits one PC range from the next.
 	record := func() {
-		cp := make([]int32, len(stack))
-		copy(cp, stack)
 		entries = append(entries, CSMEntry{
 			PCOffset:    uint32(pc),
 			TokenPos:    tokenPos,
-			InlineStack: cp,
+			inlineStack: stack,
 		})
 	}
 
@@ -139,18 +169,28 @@ func DecodeCodeSourceMap(payload []byte) ([]CSMEntry, error) {
 			if arg < 0 {
 				return entries, fmt.Errorf("code_source_map: negative pc advance %d", arg)
 			}
+			if int64(arg) > math.MaxUint32-pc {
+				return entries, fmt.Errorf("code_source_map: pc_offset exceeds uint32: current=%d advance=%d", pc, arg)
+			}
 			pc += int64(arg)
 			record()
 		case CSMPushFunction:
-			stack = append(stack, arg)
+			if arg < 0 {
+				return entries, fmt.Errorf("code_source_map: negative inline function id %d", arg)
+			}
+			depth := 1
+			if stack != nil {
+				depth = stack.depth + 1
+			}
+			stack = &csmInlineFrame{id: arg, parent: stack, depth: depth}
 		case CSMPopFunction:
-			if len(stack) == 0 {
+			if stack == nil {
 				// A pop without a matching push means the stream is not what we
 				// think it is; report rather than silently continuing with a
 				// bogus inline stack.
 				return entries, fmt.Errorf("code_source_map: pop with empty inline stack")
 			}
-			stack = stack[:len(stack)-1]
+			stack = stack.parent
 		case CSMNullCheck:
 			// Records which name was null-checked; carries no PC or position
 			// change, so nothing to track for our purposes.
@@ -175,5 +215,5 @@ func (c *CodeSourceMapInfo) InlineStackAt(pcOffset uint32) (stack []int32, token
 	if best < 0 {
 		return nil, CSMNoPosition, false
 	}
-	return c.Entries[best].InlineStack, c.Entries[best].TokenPos, true
+	return c.Entries[best].InlineStack(), c.Entries[best].TokenPos, true
 }

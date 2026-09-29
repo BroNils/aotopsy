@@ -32,6 +32,9 @@ func readFillObjectPool(s *dartfmt.Stream, cm *ClusterMeta, oldPoolFormat, poolT
 		if err != nil {
 			return nil, fmt.Errorf("pool %d/%d length: %w", i, cm.Count, err)
 		}
+		if err := validateFillLength(cm, i, length, "object_pool"); err != nil {
+			return nil, err
+		}
 		for j := int64(0); j < length; j++ {
 			entryBits, err := s.ReadByte()
 			if err != nil {

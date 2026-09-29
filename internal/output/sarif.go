@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"aotopsy/internal/signal"
 )
 
 // SARIF 2.1.0 types — subset sufficient for AOTopsy security findings.
@@ -46,7 +48,7 @@ type sarifArtifact struct {
 // artifact -- and which meant every finding in the report pointed at
 // "line 1" of a file that has no lines.
 type sarifAddress struct {
-	AbsoluteAddress int64  `json:"absoluteAddress"`
+	AbsoluteAddress uint64 `json:"absoluteAddress"`
 	Kind            string `json:"kind,omitempty"`
 	Name            string `json:"name,omitempty"`
 	FullyQualified  string `json:"fullyQualifiedName,omitempty"`
@@ -103,38 +105,21 @@ type sarifArtifactLocation struct {
 	Index *int   `json:"index,omitempty"`
 }
 
-// ruleLevel maps signal categories to SARIF severity levels.
-// Category strings are duplicated from signal/classify.go to keep output
-// independent of the signal package.
-var ruleLevel = map[string]string{
-	"rooting":        "error",
-	"anti_analysis":  "error",
-	"ssl_pinning":    "warning",
-	"accessibility":  "error",
-	"fraud":          "error",
-	"dynamic_load":   "warning",
-	"ipc":            "note",
-	"covert_channel": "error",
-	"drm_bypass":     "warning",
-	"obfuscation":    "warning",
-	"crypto_const":   "note",
-	"method_channel": "note",
-	"plugin":         "note",
-	"encryption":     "note",
-	"auth":           "note",
-	"net":            "note",
-	"base64":         "warning",
-	"sim":            "warning",
-	"sms":            "warning",
-	"contacts":       "warning",
-	"location":       "warning",
-	"device":         "warning",
-	"data":           "warning",
-	"camera":         "warning",
-	"webview":        "note",
-	"blockchain":     "note",
-	"gambling":       "note",
-	"attribution":    "note",
+// These are report-family categories rather than ClassifyString categories.
+// All ordinary signal-category severities come from signal.CategorySARIFLevel
+// so JSON and SARIF cannot drift independently.
+var reportOnlyRuleLevel = map[string]string{
+	"entropy":    "warning",
+	"taint":      "warning",
+	"yara":       "error",
+	"behavioral": "warning",
+}
+
+func sarifLevel(category string) string {
+	if level := reportOnlyRuleLevel[category]; level != "" {
+		return level
+	}
+	return signal.CategorySARIFLevel(category)
 }
 
 // ruleDescription maps categories to human-readable descriptions.
@@ -152,6 +137,13 @@ var ruleDescription = map[string]string{
 	"crypto_const":   "Known cryptographic algorithm constants detected",
 	"method_channel": "Flutter MethodChannel usage detected",
 	"plugin":         "Flutter plugin integration detected",
+	"url":            "URL reference detected",
+	"host":           "Network host or IP literal detected",
+	"file":           "File/path reference detected",
+	"cloaking":       "Conditional cloaking or redirect behavior detected",
+	"thr":            "Interesting Dart Thread/runtime call detected",
+	"async":          "Async/generator runtime behavior detected",
+	"generator":      "Generator suspension/runtime behavior detected",
 	"encryption":     "Encryption-related keyword detected",
 	"auth":           "Authentication-related keyword detected",
 	"net":            "Network communication detected",
@@ -167,6 +159,10 @@ var ruleDescription = map[string]string{
 	"blockchain":     "Blockchain or cryptocurrency wallet",
 	"gambling":       "Gambling or betting patterns",
 	"attribution":    "Install attribution or campaign tracking",
+	"entropy":        "High-entropy or packed/encrypted binary section detected",
+	"taint":          "Potential sensitive-data source-to-sink flow detected",
+	"yara":           "Malware-oriented rule matched recovered program evidence",
+	"behavioral":     "Suspicious call-graph behavioral pattern detected",
 }
 
 // SignalFinding is a single security finding from signal analysis.
@@ -175,73 +171,100 @@ type SignalFinding struct {
 	StringValue string `json:"string_value"`
 	Function    string `json:"function"`
 	PC          string `json:"pc"`
+	AddressKind string `json:"address_kind,omitempty"`
 }
 
-// describeArtifact builds the run.artifacts entry for the analysed
-// binary, hashing it so a report can be tied to the exact file.
-func describeArtifact(libPath string) sarifArtifact {
+// ArtifactIdentity is immutable provenance captured when the input was opened.
+// SARIF generation must never reopen a mutable source path and accidentally
+// describe replacement bytes that were not the bytes actually analysed.
+type ArtifactIdentity struct {
+	URI    string `json:"uri"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+const sarifFindingFingerprintKey = "aotopsyFinding/v2"
+
+func describeArtifact(identity ArtifactIdentity) sarifArtifact {
 	a := sarifArtifact{
 		Location: sarifArtifactLocation{URI: "libapp.so"},
 		Roles:    []string{"analysisTarget"},
 		MIMEType: "application/x-sharedlib",
 	}
-	if libPath == "" {
-		return a
+	if identity.URI != "" {
+		a.Location.URI = (&url.URL{Path: filepath.Base(identity.URI)}).EscapedPath()
 	}
-	a.Location.URI = filepath.Base(libPath)
-	fi, err := os.Stat(libPath)
-	if err != nil {
-		return a
+	if identity.Size > 0 {
+		a.Length = identity.Size
 	}
-	a.Length = fi.Size()
-	f, err := os.Open(libPath)
-	if err != nil {
-		return a
+	if identity.SHA256 != "" {
+		a.Hashes = map[string]string{"sha-256": strings.ToLower(identity.SHA256)}
 	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return a
-	}
-	a.Hashes = map[string]string{"sha-256": hex.EncodeToString(h.Sum(nil))}
 	return a
 }
 
 // parseAddress reads a "0x..." PC. Findings that carry no address at all
 // (binary-level ones like entropy or obfuscation) get no address object
 // rather than a fabricated zero.
-func parseAddress(pc string) (int64, bool) {
+func parseAddress(pc string) (uint64, bool) {
 	s := strings.TrimSpace(pc)
 	if s == "" {
 		return 0, false
 	}
-	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
-	v, err := strconv.ParseInt(s, 16, 64)
+	if !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+		return 0, false
+	}
+	s = s[2:]
+	v, err := strconv.ParseUint(s, 16, 64)
 	if err != nil {
 		return 0, false
 	}
 	return v, true
 }
 
+func validateArtifactIdentity(identity ArtifactIdentity) error {
+	if identity.Size < 0 {
+		return fmt.Errorf("sarif: artifact size must not be negative")
+	}
+	if identity.SHA256 == "" {
+		return nil
+	}
+	if len(identity.SHA256) != sha256.Size*2 {
+		return fmt.Errorf("sarif: artifact sha256 has %d hex characters, want %d", len(identity.SHA256), sha256.Size*2)
+	}
+	if _, err := hex.DecodeString(identity.SHA256); err != nil {
+		return fmt.Errorf("sarif: artifact sha256 is not hexadecimal: %w", err)
+	}
+	return nil
+}
+
 // WriteSARIF writes a SARIF 2.1.0 report from signal findings.
 //
-// libPath is the analysed binary; it names the artifact and supplies its
-// size and SHA-256 so a report can be tied to the exact file it came
-// from. Passing "" still writes a valid report, with the artifact
-// described only by the placeholder name.
-func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath string) error {
+// identity is captured provenance for the analysed binary. A zero identity
+// still yields a valid report with a placeholder artifact name.
+func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identity ArtifactIdentity) error {
+	if err := validateArtifactIdentity(identity); err != nil {
+		return err
+	}
+	for i, f := range findings {
+		if strings.TrimSpace(f.Category) == "" {
+			return fmt.Errorf("sarif: finding %d has empty category", i)
+		}
+		if strings.TrimSpace(f.PC) != "" {
+			if _, ok := parseAddress(f.PC); !ok {
+				return fmt.Errorf("sarif: finding %d has invalid address %q", i, f.PC)
+			}
+		}
+	}
 	// Build unique rules from findings
 	ruleSet := map[string]bool{}
-	var rules []sarifRule
+	rules := make([]sarifRule, 0)
 	for _, f := range findings {
 		if ruleSet[f.Category] {
 			continue
 		}
 		ruleSet[f.Category] = true
-		level := ruleLevel[f.Category]
-		if level == "" {
-			level = "note"
-		}
+		level := sarifLevel(f.Category)
 		desc := ruleDescription[f.Category]
 		if desc == "" {
 			desc = "Security finding: " + f.Category
@@ -256,16 +279,13 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath strin
 		})
 	}
 
-	artifact := describeArtifact(libPath)
+	artifact := describeArtifact(identity)
 	artifactIndex := 0
 
 	// Build results
-	var results []sarifResult
+	results := make([]sarifResult, 0)
 	for _, f := range findings {
-		level := ruleLevel[f.Category]
-		if level == "" {
-			level = "note"
-		}
+		level := sarifLevel(f.Category)
 		loc := sarifLocation{
 			PhysicalLocation: sarifPhysicalLocation{
 				ArtifactLocation: sarifArtifactLocation{
@@ -275,9 +295,13 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath strin
 			},
 		}
 		if addr, ok := parseAddress(f.PC); ok {
+			kind := f.AddressKind
+			if kind == "" {
+				kind = "instruction"
+			}
 			loc.PhysicalLocation.Address = &sarifAddress{
 				AbsoluteAddress: addr,
-				Kind:            "function",
+				Kind:            kind,
 				Name:            f.Function,
 			}
 		}
@@ -287,14 +311,8 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath strin
 			Message: sarifDescription{
 				Text: fmt.Sprintf("%s: %q in %s at %s", f.Category, f.StringValue, f.Function, f.PC),
 			},
-			Locations: []sarifLocation{loc},
-			PartialFingerprints: map[string]string{
-				// Function and PC alone collide for binary-level findings,
-				// which carry neither: every obfuscation finding hashed to
-				// ":". The category and the matched string disambiguate.
-				"aotopsyFindingV1": fmt.Sprintf("%s:%s:%s:%s",
-					f.Category, f.Function, f.PC, f.StringValue),
-			},
+			Locations:           []sarifLocation{loc},
+			PartialFingerprints: map[string]string{sarifFindingFingerprintKey: findingFingerprint(f)},
 		})
 	}
 
@@ -316,16 +334,32 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion, libPath strin
 	}
 
 	path := filepath.Join(dir, "aotopsy.sarif")
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("sarif: create %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
+	return WriteAtomic(path, 0o644, func(w io.Writer) error {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(log); err != nil {
+			return fmt.Errorf("sarif: encode: %w", err)
+		}
+		return nil
+	})
+}
 
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(log); err != nil {
-		return fmt.Errorf("sarif: encode: %w", err)
+func findingFingerprint(f SignalFinding) string {
+	// JSON's array framing is injective for strings, unlike colon joining where
+	// field-boundary shifts can map distinct findings to the same byte sequence.
+	pc := strings.TrimSpace(f.PC)
+	kind := f.AddressKind
+	if addr, ok := parseAddress(pc); ok {
+		pc = fmt.Sprintf("0x%x", addr)
+		if kind == "" {
+			kind = "instruction"
+		}
+	} else if pc == "" {
+		// AddressKind has no effect on the emitted SARIF when there is no
+		// address, so it must not perturb the identity of that result.
+		kind = ""
 	}
-	return nil
+	b, _ := json.Marshal([5]string{f.Category, f.Function, pc, f.StringValue, kind})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

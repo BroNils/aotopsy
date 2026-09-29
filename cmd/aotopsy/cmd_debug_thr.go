@@ -1,15 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/thraudit"
 )
@@ -57,11 +59,14 @@ func cmdTHRAudit(args []string) error {
 		ranges = cluster.MergeRanges(stubRanges, codeRanges)
 	}
 
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
+	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 	if err != nil {
 		return fmt.Errorf("code region: %w", err)
 	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen)
+	codeEndOffset, err := analysis.CheckedCodeEndOffset(codeOff, payloadLen)
+	if err != nil {
+		return err
+	}
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
 
 	codeVA := info.IsolateInstructions.VA + codeOff
@@ -70,6 +75,7 @@ func cmdTHRAudit(args []string) error {
 		Info:    info,
 		IsARM64: ef.IsARM64(),
 		Result:  result,
+		Table:   table,
 		Ranges:  ranges,
 		Code:    code,
 		CodeOff: codeOff,
@@ -91,36 +97,27 @@ func cmdTHRClassify(args []string) error {
 		return fmt.Errorf("--in and --out are required")
 	}
 
-	f, err := os.Open(*inputPath)
-	if err != nil {
-		return fmt.Errorf("open input: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	records, err := thraudit.ReadAuditRecords(f)
+	records, err := thraudit.ReadAuditRecords(*inputPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read records: %w", err)
 	}
 
-	bands := thraudit.ClusterBands(records, *maxGap)
-	classified := thraudit.ClassifyRecords(records, bands)
+	bands, err := thraudit.ClusterBands(records, *maxGap)
+	if err != nil {
+		return fmt.Errorf("cluster records: %w", err)
+	}
+	classified, err := thraudit.ClassifyRecords(records, bands)
+	if err != nil {
+		return fmt.Errorf("classify records: %w", err)
+	}
 
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	classPath := filepath.Join(*outDir, "classified.jsonl")
-	cf, err := os.Create(classPath)
-	if err != nil {
-		return fmt.Errorf("create classified: %w", err)
-	}
-	defer func() { _ = cf.Close() }()
-	enc := json.NewEncoder(cf)
-	enc.SetEscapeHTML(false)
-	for _, cr := range classified {
-		if err := enc.Encode(cr); err != nil {
-			return fmt.Errorf("write classified: %w", err)
-		}
+	if _, err := jsonutil.WriteJSONLFile(classPath, classified); err != nil {
+		return fmt.Errorf("write classified: %w", err)
 	}
 
 	summary := thraudit.Summarize(classified)
@@ -160,40 +157,31 @@ func cmdTHRCluster(args []string) error {
 		return fmt.Errorf("--in and --out are required")
 	}
 
-	f, err := os.Open(*inputPath)
-	if err != nil {
-		return fmt.Errorf("open input: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	records, err := thraudit.ReadAuditRecords(f)
+	records, err := thraudit.ReadAuditRecords(*inputPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read records: %w", err)
 	}
 
-	br := thraudit.ClusterBands(records, *maxGap)
+	br, err := thraudit.ClusterBands(records, *maxGap)
+	if err != nil {
+		return fmt.Errorf("cluster records: %w", err)
+	}
 
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	jsonPath := filepath.Join(*outDir, "bands.json")
-	jf, err := os.Create(jsonPath)
-	if err != nil {
-		return fmt.Errorf("create json: %w", err)
-	}
-	defer func() { _ = jf.Close() }()
-	if err := thraudit.WriteBandsJSON(jf, br); err != nil {
+	if err := output.WriteJSONFile(jsonPath, br); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 
 	mdPath := filepath.Join(*outDir, "bands.md")
-	mf, err := os.Create(mdPath)
-	if err != nil {
-		return fmt.Errorf("create md: %w", err)
+	if err := output.WriteAtomic(mdPath, 0o644, func(w io.Writer) error {
+		return thraudit.WriteBandsMD(w, br)
+	}); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
 	}
-	defer func() { _ = mf.Close() }()
-	thraudit.WriteBandsMD(mf, br)
 
 	fmt.Fprintf(os.Stderr, "%s: %d bands from %d unresolved accesses\n",
 		br.Sample, len(br.Bands), br.TotalUnresolved)

@@ -2,11 +2,12 @@ package signal
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+
+	"aotopsy/internal/jsonutil"
 )
 
 // EntropyFinding is a packed/encrypted section detection finding.
@@ -74,28 +75,87 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 		return findings, nil
 	}
 
-	// Read section header string table
+	// ELF64 section headers are 64 bytes. Accepting a smaller entry size lets the
+	// fixed-offset reads below spill into the next entry and turns malformed input
+	// into made-up sections.
+	if e_shentsize < 64 {
+		return nil, fmt.Errorf("malformed ELF: section header entry size %d < 64", e_shentsize)
+	}
+
+	// Checked arithmetic is mandatory here: all of these fields are attacker-
+	// controlled uint64s. Converting a wrapped offset to int before checking it
+	// was the root cause of a slice-bounds panic on e_shoff=MaxUint64-20.
+	checkedRange := func(off, size uint64) (int, int, bool) {
+		if off > uint64(len(data)) || size > uint64(len(data))-off {
+			return 0, 0, false
+		}
+		return int(off), int(off + size), true
+	}
+	sectionHeaderOffset := func(i uint16) (uint64, bool) {
+		stride := uint64(e_shentsize)
+		idx := uint64(i)
+		if idx != 0 && stride > ^uint64(0)/idx {
+			return 0, false
+		}
+		delta := idx * stride
+		if e_shoff > ^uint64(0)-delta {
+			return 0, false
+		}
+		return e_shoff + delta, true
+	}
+
+	// The whole table must fit, not merely whichever entries we happen to touch.
+	lastOff, ok := sectionHeaderOffset(e_shnum - 1)
+	if !ok {
+		return nil, fmt.Errorf("malformed ELF: section table offset overflow")
+	}
+	if _, _, ok := checkedRange(lastOff, uint64(e_shentsize)); !ok {
+		return nil, fmt.Errorf("malformed ELF: section table exceeds file")
+	}
+
+	// Read section header string table.
 	if int(e_shstrndx) >= int(e_shnum) {
-		return findings, nil
+		return nil, fmt.Errorf("malformed ELF: shstrndx %d >= section count %d", e_shstrndx, e_shnum)
 	}
-	shstrtabOff := e_shoff + uint64(e_shstrndx)*uint64(e_shentsize)
-	if int(shstrtabOff)+40 > len(data) {
-		return findings, nil
+	shstrtabOff, ok := sectionHeaderOffset(e_shstrndx)
+	if !ok {
+		return nil, fmt.Errorf("malformed ELF: string-table section offset overflow")
 	}
-	shstrtabShOff := binary.LittleEndian.Uint64(data[shstrtabOff+24 : shstrtabOff+32])
-	shstrtabSize := binary.LittleEndian.Uint64(data[shstrtabOff+32 : shstrtabOff+40])
+	shStart, _, ok := checkedRange(shstrtabOff, uint64(e_shentsize))
+	if !ok {
+		return nil, fmt.Errorf("malformed ELF: string-table section header out of bounds")
+	}
+	shstrtabShOff := binary.LittleEndian.Uint64(data[shStart+24 : shStart+32])
+	shstrtabSize := binary.LittleEndian.Uint64(data[shStart+32 : shStart+40])
+	shstrStart, shstrEnd, ok := checkedRange(shstrtabShOff, shstrtabSize)
+	if !ok {
+		return nil, fmt.Errorf("malformed ELF: section-name string table out of bounds")
+	}
+
+	// A valid ELF normally scans each file byte at most once across its sections.
+	// Permit one file's worth of overlap for unusual toolchains, but reject a
+	// hostile table that aliases the same giant byte range thousands of times.
+	maxEntropyBytes := uint64(len(data)) * 2
+	if len(data) > int(^uint(0)>>1)/2 { // defensive on theoretical huge slices
+		maxEntropyBytes = ^uint64(0)
+	}
+	var entropyBytes uint64
 
 	// Analyze each section
 	for i := uint16(0); i < e_shnum; i++ {
-		shOff := e_shoff + uint64(i)*uint64(e_shentsize)
-		if int(shOff)+40 > len(data) {
-			break
+		shOff, ok := sectionHeaderOffset(i)
+		if !ok {
+			return nil, fmt.Errorf("malformed ELF: section %d header offset overflow", i)
 		}
-		shName := binary.LittleEndian.Uint32(data[shOff : shOff+4])
-		shType := binary.LittleEndian.Uint32(data[shOff+4 : shOff+8])
-		shAddr := binary.LittleEndian.Uint64(data[shOff+16 : shOff+24])
-		shOffset := binary.LittleEndian.Uint64(data[shOff+24 : shOff+32])
-		shSize := binary.LittleEndian.Uint64(data[shOff+32 : shOff+40])
+		shStart, _, ok := checkedRange(shOff, uint64(e_shentsize))
+		if !ok {
+			return nil, fmt.Errorf("malformed ELF: section %d header out of bounds", i)
+		}
+		shName := binary.LittleEndian.Uint32(data[shStart : shStart+4])
+		shType := binary.LittleEndian.Uint32(data[shStart+4 : shStart+8])
+		shAddr := binary.LittleEndian.Uint64(data[shStart+16 : shStart+24])
+		shOffset := binary.LittleEndian.Uint64(data[shStart+24 : shStart+32])
+		shSize := binary.LittleEndian.Uint64(data[shStart+32 : shStart+40])
 
 		// Skip NOBITS sections (BSS)
 		if shType == 8 { // SHT_NOBITS
@@ -107,26 +167,28 @@ func AnalyzeEntropy(libPath string) ([]EntropyFinding, error) {
 
 		// Get section name
 		name := ""
-		if shstrtabShOff+uint64(shName) < shstrtabShOff+shstrtabSize && int(shstrtabShOff+uint64(shName)) < len(data) {
-			nameEnd := int(shstrtabShOff + uint64(shName))
-			for nameEnd < len(data) && data[nameEnd] != 0 && nameEnd < int(shstrtabShOff+shstrtabSize) {
+		if uint64(shName) < shstrtabSize {
+			nameStart := shstrStart + int(shName)
+			nameEnd := nameStart
+			for nameEnd < shstrEnd && data[nameEnd] != 0 {
 				nameEnd++
 			}
-			name = string(data[shstrtabShOff+uint64(shName) : nameEnd])
+			name = string(data[nameStart:nameEnd])
 		}
 		if name == "" {
 			name = fmt.Sprintf("section_%d", i)
 		}
 
 		// Compute entropy for this section
-		end := shOffset + shSize
-		if end > uint64(len(data)) {
-			end = uint64(len(data))
+		sectionStart, sectionEnd, ok := checkedRange(shOffset, shSize)
+		if !ok {
+			return nil, fmt.Errorf("malformed ELF: section %d range [0x%x,+0x%x) exceeds file", i, shOffset, shSize)
 		}
-		if shOffset >= end {
-			continue
+		if entropyBytes > maxEntropyBytes-shSize {
+			return nil, fmt.Errorf("malformed ELF: entropy scan budget exceeded (%d bytes > %d)", entropyBytes+shSize, maxEntropyBytes)
 		}
-		sectionData := data[shOffset:end]
+		entropyBytes += shSize
+		sectionData := data[sectionStart:sectionEnd]
 		entropy := ShannonEntropy(sectionData)
 
 		verdict := "normal"
@@ -158,21 +220,9 @@ func WriteEntropyFindings(outDir, libPath string) error {
 	if err != nil {
 		return err // surface the read/parse error instead of swallowing it
 	}
-	if len(findings) == 0 {
-		return nil
-	}
 	path := filepath.Join(outDir, "entropy_findings.jsonl")
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	for _, e := range findings {
-		if err := enc.Encode(e); err != nil {
-			return err
-		}
+	if _, err := jsonutil.WriteJSONLFile(path, findings); err != nil {
+		return fmt.Errorf("write entropy findings: %w", err)
 	}
 	return nil
 }

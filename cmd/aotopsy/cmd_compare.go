@@ -8,13 +8,14 @@ import (
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 )
 
 // cmdCompareBlutter compares aotopsy output against blutter output.
 // Usage: aotopsy compare-blutter <blutter_dir> <aotopsy_dir>
 func cmdCompareBlutter(args []string) error {
-	if len(args) < 2 {
+	if len(args) != 2 {
 		return fmt.Errorf("usage: aotopsy compare-blutter <blutter_dir> <aotopsy_dir>")
 	}
 	blutterDir := args[0]
@@ -28,8 +29,12 @@ func cmdCompareBlutter(args []string) error {
 
 	// Write full report as JSON.
 	reportPath := filepath.Join(aotopsyDir, "blutter_comparison.json")
-	data, _ := json.MarshalIndent(result, "", "  ")
-	if err := os.WriteFile(reportPath, data, 0o644); err != nil {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode report: %w", err)
+	}
+	data = append(data, '\n')
+	if err := output.WriteFileAtomic(reportPath, data, 0o644); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	fmt.Printf("\nFull report: %s\n", reportPath)

@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"aotopsy/internal/funcdiff"
 	"aotopsy/internal/symbolmap"
@@ -16,10 +15,10 @@ func cmdSymbolMap(args []string) error {
 	fs := flag.NewFlagSet("symbolmap", flag.ExitOnError)
 	strippedPath := fs.String("stripped", "", "path to the stripped libapp.so")
 	unstrippedPath := fs.String("unstripped", "", "path to an unstripped/debug build of the SAME libapp.so")
-	outDir := fs.String("out", "", "output directory for symbol_call_sites.tsv + symbol_target_summary.json + symbol_map_report.json (default: stdout summary only)")
+	outDir := fs.String("out", "", "output directory for symbolmap artifacts (default: stdout summary only)")
 	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest-symbol-below match (0 disables nearest matching)")
 	includeBranches := fs.Bool("include-branches", false, "also scan unconditional direct branches/jumps, not just calls")
-	requireExecMatch := fs.Bool("require-exec-match", false, "abort if exec section bytes differ between the two binaries")
+	importSymbols := fs.Bool("import-symbols", false, "import the full executable symbol table from the verified unstripped twin")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -30,7 +29,7 @@ func cmdSymbolMap(args []string) error {
 	rep, err := symbolmap.Compare(*strippedPath, *unstrippedPath, symbolmap.Options{
 		NearestMaxDistance: *nearestMaxDistance,
 		IncludeBranches:    *includeBranches,
-		RequireExecMatch:   *requireExecMatch,
+		ImportSymbols:      *importSymbols,
 	})
 	if err != nil {
 		return err
@@ -50,21 +49,10 @@ func cmdSymbolMap(args []string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("symbolmap: mkdir %s: %w", *outDir, err)
-	}
-	if err := symbolmap.WriteCallSitesTSV(filepath.Join(*outDir, "symbol_call_sites.tsv"), rep.CallSites); err != nil {
+	if err := symbolmap.WriteArtifacts(*outDir, rep); err != nil {
 		return err
 	}
-	targetsData, _ := json.MarshalIndent(rep.Targets, "", "  ")
-	if err := os.WriteFile(filepath.Join(*outDir, "symbol_target_summary.json"), targetsData, 0o644); err != nil {
-		return fmt.Errorf("symbolmap: write target summary: %w", err)
-	}
-	reportData, _ := json.MarshalIndent(rep, "", "  ")
-	if err := os.WriteFile(filepath.Join(*outDir, "symbol_map_report.json"), reportData, 0o644); err != nil {
-		return fmt.Errorf("symbolmap: write report: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "wrote %s/{symbol_call_sites.tsv,symbol_target_summary.json,symbol_map_report.json}\n", *outDir)
+	fmt.Fprintf(os.Stderr, "wrote symbolmap artifacts under %s\n", *outDir)
 	return nil
 }
 
@@ -73,7 +61,7 @@ func cmdFuncDiff(args []string) error {
 	fs := flag.NewFlagSet("funcdiff", flag.ExitOnError)
 	oldPath := fs.String("old", "", "path to the OLD build's libapp.so")
 	newPath := fs.String("new", "", "path to the NEW build's libapp.so")
-	topN := fs.Int("top", 200, "max added/removed entries to report each (0 = unlimited)")
+	topN := fs.Int("top", 200, "max added/removed/changed/indeterminate entries to report each (0 = unlimited)")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -87,8 +75,13 @@ func cmdFuncDiff(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "old: %d functions (%s)\nnew: %d functions (%s)\ncommon=%d added=%d removed=%d\n",
-		rep.OldCount, rep.OldVersion, rep.NewCount, rep.NewVersion, rep.CommonCount, rep.AddedTotal, rep.RemovedTotal)
+	fmt.Fprintf(os.Stderr, "old: %d functions (%s, %s)\nnew: %d functions (%s, %s)\ncommon=%d added=%d removed=%d changed=%d indeterminate=%d\n",
+		rep.OldCount, rep.OldVersion, rep.OldMachine,
+		rep.NewCount, rep.NewVersion, rep.NewMachine,
+		rep.CommonCount, rep.AddedTotal, rep.RemovedTotal, rep.ChangedTotal, rep.IndeterminateTotal)
+	if !rep.CodeComparable {
+		fmt.Fprintf(os.Stderr, "code comparison disabled: %s\n", rep.IncomparableReason)
+	}
 
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {

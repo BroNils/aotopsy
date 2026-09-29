@@ -67,9 +67,40 @@ func TestDirectCallKeepsItsArguments(t *testing.T) {
 	}
 }
 
+func TestIndirectCallTargetRegisterIsLiveIn(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ins  Instr
+		reg  string
+	}{
+		{"x86", Instr{Op: OpCall, Src: "call rdi", Target: "rdi"}, "rdi"},
+		{"arm64", Instr{Op: OpCall, Src: "blr x1", Target: "x1"}, "x1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reads, writes := inspectInstrRegUsage(tt.ins, "")
+			if !containsString(reads, tt.reg) {
+				t.Fatalf("reads = %v, want %s", reads, tt.reg)
+			}
+			if containsString(writes, tt.reg) {
+				t.Fatalf("writes = %v: indirect call target must not be a destination", writes)
+			}
+		})
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
 func firX64() *FuncIR {
+	cc, _ := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchX86)
 	return &FuncIR{
-		ArgRegs:   sdk.DartArgRegNames(sdk.ArchX86),
+		ArgRegs:   cc.GPRNames,
 		FrameReg:  "rbp",
 		ReturnReg: "rax",
 		StackReg:  "rsp",
@@ -77,8 +108,9 @@ func firX64() *FuncIR {
 }
 
 func firARM64() *FuncIR {
+	cc, _ := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchARM64)
 	return &FuncIR{
-		ArgRegs:   sdk.DartArgRegNames(sdk.ArchARM64),
+		ArgRegs:   cc.GPRNames,
 		FrameReg:  sdk.ARM64FrameRegStr,
 		ReturnReg: sdk.ARM64ReturnRegStr,
 		StackReg:  sdk.ARM64StackRegStr,

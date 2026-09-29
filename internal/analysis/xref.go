@@ -3,14 +3,14 @@ package analysis
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"sort"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 )
 
 // Cross-referencing JSONL outputs (gap-analysis §6).
@@ -49,7 +49,7 @@ type AddressCallersXref struct {
 }
 
 // writeXrefJSONL writes cross-referencing JSONL files.
-func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord, compressedPtrs bool) error {
+func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord, selectorTargets map[int][]string, compressedPtrs bool) error {
 	// 1. string_value_xref.jsonl — string value → functions
 	// Also build from pool string entries if stringRefs is empty.
 	stringFuncs := map[string]map[string]bool{}
@@ -73,15 +73,17 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 			if pe.Kind != cluster.PoolTagged {
 				continue
 			}
-			if pl.CT != nil && pl.RefCID != nil {
-				if cid, ok := pl.RefCID[pe.RefID]; ok {
-					isString := cid == pl.CT.OneByteString || cid == pl.CT.TwoByteString
-					if isString {
-						if s, ok := pl.RefToStr[pe.RefID]; ok {
-							poolStrings[pe.Index] = s
-						} else if s, ok := pl.VmRefToStr[pe.RefID]; ok {
-							poolStrings[pe.Index] = s
-						}
+			if pl.CT != nil {
+				cid, ok := pl.RefCID[pe.RefID]
+				if !ok {
+					cid, ok = pl.VmRefCID[pe.RefID]
+				}
+				isString := ok && (cid == pl.CT.String || cid == pl.CT.OneByteString || cid == pl.CT.TwoByteString)
+				if isString {
+					if s, ok := pl.RefToStr[pe.RefID]; ok {
+						poolStrings[pe.Index] = s
+					} else if s, ok := pl.VmRefToStr[pe.RefID]; ok {
+						poolStrings[pe.Index] = s
 					}
 				}
 			}
@@ -143,46 +145,24 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 		return fmt.Errorf("write address_callers_xref.jsonl: %w", err)
 	}
 
-	// 3. selector_dispatch_xref.jsonl — selector offset → targets
-	// Uses dispatch_table.jsonl if available (written by typetrack stage).
-	// The JSONL format uses string kind ("null", "code", "stub") and
-	// includes target/slot_info fields, so we use a matching reader struct.
-	dispatchPath := filepath.Join(outDir, "dispatch_table.jsonl")
-	type dtJSONL struct {
-		Index    int    `json:"index"`
-		Kind     string `json:"kind"`
-		Target   string `json:"target,omitempty"`
-		SlotInfo string `json:"slot_info,omitempty"`
-	}
-	if dtEntries, err := jsonutil.ReadJSONL[dtJSONL](dispatchPath); err == nil && len(dtEntries) > 0 {
-		selectorTargets := map[int][]string{}
-		for _, entry := range dtEntries {
-			if entry.Kind != "code" {
-				continue
-			}
-			name := entry.Target
-			if name == "" {
-				// Try to extract from slot_info: "code cluster_index=N"
-				name = entry.SlotInfo
-			}
-			if name == "" {
-				name = fmt.Sprintf("code_%d", entry.Index)
-			}
-			selectorTargets[entry.Index] = append(selectorTargets[entry.Index], name)
+	// 3. selector_dispatch_xref.jsonl — selector immediate → targets. The type
+	// inference stage owns this coordinate because deriving it requires both the
+	// dispatch slot and the target owner's class ID. dispatch_table.jsonl only
+	// carries the absolute entry index, so reparsing it here used to emit one row
+	// per slot while incorrectly labelling that index as a selector.
+	if err := writeJSONL(filepath.Join(outDir, "selector_dispatch_xref.jsonl"), func() []interface{} {
+		var out []interface{}
+		for selector, targets := range selectorTargets {
+			copyTargets := append([]string(nil), targets...)
+			sort.Strings(copyTargets)
+			out = append(out, SelectorDispatchXref{SelectorOffset: selector, Targets: copyTargets})
 		}
-		if err := writeJSONL(filepath.Join(outDir, "selector_dispatch_xref.jsonl"), func() []interface{} {
-			var out []interface{}
-			for slot, targets := range selectorTargets {
-				sort.Strings(targets)
-				out = append(out, SelectorDispatchXref{SelectorOffset: slot, Targets: targets})
-			}
-			sort.Slice(out, func(i, j int) bool {
-				return out[i].(SelectorDispatchXref).SelectorOffset < out[j].(SelectorDispatchXref).SelectorOffset
-			})
-			return out
-		}()); err != nil {
-			return fmt.Errorf("write selector_dispatch_xref.jsonl: %w", err)
-		}
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].(SelectorDispatchXref).SelectorOffset < out[j].(SelectorDispatchXref).SelectorOffset
+		})
+		return out
+	}()); err != nil {
+		return fmt.Errorf("write selector_dispatch_xref.jsonl: %w", err)
 	}
 
 	// 4. field_accessor_xref.jsonl is written by the type-inference stage
@@ -196,17 +176,14 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 }
 
 func writeJSONL(path string, entries []interface{}) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	for _, e := range entries {
-		if err := enc.Encode(e); err != nil {
-			return err
+	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		for _, e := range entries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }

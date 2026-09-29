@@ -2,8 +2,8 @@ package analysis
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
@@ -11,6 +11,12 @@ import (
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/snapshot"
 )
+
+// ErrInventoryNoLibapp distinguishes a valid archive that simply contains no
+// supported libapp.so from an archive that could not be inspected safely.
+// Batch inventory callers use this to report "no libapp" separately from
+// corrupt/oversized/unreadable archive errors.
+var ErrInventoryNoLibapp = errors.New("no libapp.so found")
 
 // InventoryRow is one row of the corpus inventory JSONL.
 type InventoryRow struct {
@@ -32,46 +38,49 @@ func InventoryExtractLibapp(zipPath string) (string, string, error) {
 		return "", "", fmt.Errorf("open zip: %w", err)
 	}
 	defer func() { _ = zr.Close() }()
+	work := &archiveWorkBudget{}
 
 	// Direct libapp.so — try both ABIs.
 	for _, abi := range []string{"arm64-v8a", "x86_64"} {
 		for _, f := range zr.File {
 			if f.Name == "lib/"+abi+"/libapp.so" {
-				path, err := inventoryExtractFile(f)
+				path, err := inventoryExtractFile(f, work)
 				return path, abi, err
 			}
 		}
 	}
 
 	// Nested APKs.
+	nestedCount := 0
 	for _, f := range zr.File {
 		if !strings.HasSuffix(f.Name, ".apk") {
 			continue
 		}
-		rc, err := f.Open()
-		if err != nil {
-			continue
+		nestedCount++
+		if nestedCount > maxNestedAPKCandidates {
+			return "", "", fmt.Errorf("more than %d nested APK candidates", maxNestedAPKCandidates)
 		}
-		tmp, err := os.CreateTemp("", "apk-*.apk")
+		tmpPath, _, _, err := extractZipEntryToTemp(f, "apk-*.apk", maxNestedAPKBytes, work)
 		if err != nil {
-			_ = rc.Close()
-			continue
+			return "", "", fmt.Errorf("extract nested APK %q: %w", f.Name, err)
 		}
-		_, _ = io.Copy(tmp, rc)
-		_ = rc.Close()
-		_ = tmp.Close()
 
-		inner, err := zip.OpenReader(tmp.Name())
+		inner, err := zip.OpenReader(tmpPath)
 		if err != nil {
-			_ = os.Remove(tmp.Name())
-			continue
+			_ = os.Remove(tmpPath)
+			return "", "", fmt.Errorf("open nested APK %q: %w", f.Name, err)
 		}
 
 		var found, foundABI string
 		for _, abi := range []string{"arm64-v8a", "x86_64"} {
 			for _, inf := range inner.File {
 				if inf.Name == "lib/"+abi+"/libapp.so" {
-					found, err = inventoryExtractFile(inf)
+					found, err = inventoryExtractFile(inf, work)
+					if err != nil {
+						_ = inner.Close()
+						_ = os.Remove(tmpPath)
+						return "", "", fmt.Errorf("extract nested %s libapp.so from %q: %w", abi, f.Name, err)
+					}
 					foundABI = abi
 					break
 				}
@@ -81,34 +90,19 @@ func InventoryExtractLibapp(zipPath string) (string, string, error) {
 			}
 		}
 		_ = inner.Close()
-		_ = os.Remove(tmp.Name())
+		_ = os.Remove(tmpPath)
 
 		if found != "" {
 			return found, foundABI, err
 		}
 	}
 
-	return "", "", fmt.Errorf("no libapp.so found (tried arm64-v8a and x86_64)")
+	return "", "", fmt.Errorf("%w (tried arm64-v8a and x86_64)", ErrInventoryNoLibapp)
 }
 
-func inventoryExtractFile(f *zip.File) (string, error) {
-	rc, err := f.Open()
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = rc.Close() }()
-
-	tmp, err := os.CreateTemp("", "libapp-*.so")
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(tmp, rc); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return "", err
-	}
-	_ = tmp.Close()
-	return tmp.Name(), nil
+func inventoryExtractFile(f *zip.File, work *archiveWorkBudget) (string, error) {
+	path, _, _, err := extractZipEntryToTemp(f, "libapp-*.so", maxLibappEntryBytes, work)
+	return path, err
 }
 
 // InventoryScanLibapp opens a libapp.so and extracts snapshot hash, Dart version, and features.
@@ -125,9 +119,9 @@ func InventoryScanLibapp(path string) (hash, dartVer, features string, err error
 		return "", "", "", fmt.Errorf("extract: %w", err)
 	}
 
-	if info.VmHeader != nil {
-		hash = info.VmHeader.SnapshotHash
-		features = info.VmHeader.Features
+	if h := info.PrimaryHeader(); h != nil {
+		hash = h.SnapshotHash
+		features = h.Features
 	}
 	if info.Version != nil {
 		dartVer = info.Version.DartVersion

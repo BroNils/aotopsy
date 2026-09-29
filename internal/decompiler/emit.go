@@ -3,6 +3,7 @@ package decompiler
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
@@ -35,6 +36,16 @@ type Artifact struct {
 	Source        string       `json:"source"`
 	Stats         Stats        `json:"stats"`
 	VisitedBlocks map[int]bool `json:"visited_blocks,omitempty"`
+	// EmittedEdges is the CFG edge set the emitter actually followed or
+	// represented. It is internal verification evidence, not a serialized output
+	// contract; VerifyCFG uses it to compare targets instead of merely comparing
+	// the number of `if` tokens in the rendered text.
+	EmittedEdges []CFGEdge `json:"-"`
+}
+
+type CFGEdge struct {
+	From int
+	To   int
 }
 
 const (
@@ -152,6 +163,10 @@ type emitter struct {
 	// subtree from a fresh visit map and re-emitted join blocks the main
 	// body had already shown.
 	emittedAnywhere map[int]bool
+	// emittedEdges is shared with helper sub-emitters, like emittedAnywhere.
+	// Key packs source/target block ids into one uint64.
+	emittedEdges map[uint64]bool
+	currentBlock int
 
 	// spillSeq numbers the `_tN` temporaries setReg materializes for
 	// expressions too large to keep inlining. Shared with helper sub-emitters
@@ -169,25 +184,45 @@ func (e *emitter) drainSpills(indent int) {
 	}
 }
 
-// buildBlockTryIndex assigns each block to the try region covering its start.
+// buildBlockTryIndex assigns a block to a try region only when the recovered
+// region proves the WHOLE block is protected. PcDescriptor ranges are sparse
+// evidence at exact PCs; they are not permission to widen a region to a block.
+// A region that starts/ends mid-block is therefore left unstructured rather
+// than fabricating a source-level try around unprotected instructions.
 //
-// Regions are block-aligned by SnapTryRegionsToBlocks, so a block is either
-// wholly inside a region or wholly outside it; testing StartVA is enough. When
-// regions overlap (nested trys that descriptors could not separate) the
-// innermost — smallest — one wins, which matches Dart semantics where the
-// nearest enclosing handler runs first.
+// Block ends are known exactly only when there is a following basic-block start.
+// The final block has no instruction-width metadata in FuncIR (x86 is variable
+// width), so it is intentionally not wrapped unless future IR carries an exact
+// exclusive end. Under-claiming here is honest; over-claiming changes semantics.
 func (e *emitter) buildBlockTryIndex() {
 	if len(e.fir.TryRegions) == 0 {
 		return
 	}
 	e.blockTryRegion = make(map[int]int, len(e.fir.Blocks))
+	type blockExtent struct {
+		id         int
+		start, end uint64
+	}
+	extents := make([]blockExtent, 0, len(e.fir.Blocks))
 	for bi := range e.fir.Blocks {
-		va := e.fir.Blocks[bi].StartVA
+		if len(e.fir.Blocks[bi].Instrs) == 0 {
+			continue
+		}
+		extents = append(extents, blockExtent{id: bi, start: e.fir.Blocks[bi].StartVA})
+	}
+	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
+	for i := 0; i+1 < len(extents); i++ {
+		extents[i].end = extents[i+1].start
+	}
+	for _, b := range extents {
+		if b.end == 0 || b.end <= b.start {
+			continue
+		}
 		best := -1
 		var bestSize uint64
 		for ri := range e.fir.TryRegions {
 			r := &e.fir.TryRegions[ri]
-			if va < r.StartVA || va >= r.EndVA {
+			if b.start < r.StartVA || b.end > r.EndVA {
 				continue
 			}
 			size := r.EndVA - r.StartVA
@@ -196,7 +231,7 @@ func (e *emitter) buildBlockTryIndex() {
 			}
 		}
 		if best >= 0 {
-			e.blockTryRegion[bi] = best
+			e.blockTryRegion[b.id] = best
 		}
 	}
 }
@@ -257,6 +292,8 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		phiDeclared: make(map[int]bool),
 
 		emittedAnywhere: make(map[int]bool),
+		emittedEdges:    make(map[uint64]bool),
+		currentBlock:    -1,
 		spillSeq:        new(int),
 	}
 	// One sequence per function, shared with every clone and helper
@@ -309,15 +346,15 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// aggregating cross-function call-site evidence -- NOT a positional
 	// arg0..argN-1 run necessarily starting at ArgRegs[0].
 	// When cross-site evidence is empty, we deduce arity from intraprocedural
-	// liveness (inferLiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
+	// liveness (LiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
 	argRegIdx := fir.ArgRegIndices
 	if len(argRegIdx) == 0 {
-		argRegIdx = inferLiveInArgIndices(fir)
+		argRegIdx = LiveInArgIndices(fir)
 	}
 	// Real per-parameter type names are only trusted when their count EXACTLY
 	// matches arity that was CONFIDENTLY resolved from cross-call-site evidence
 	// (fir.ArgRegIndices) -- NOT the intraprocedural-liveness heuristic
-	// (inferLiveInArgIndices) that fills argRegIdx when cross-site evidence is
+	// (LiveInArgIndices) that fills argRegIdx when cross-site evidence is
 	// empty. Trusting types on a heuristic arity (audit C1) leaks confident-wrong
 	// parameter types; the liveness count is good enough to stop declaring 8 fake
 	// args, but not to vouch for per-parameter TYPES. Gate stays on ArgRegIndices.
@@ -364,17 +401,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Type-testing stubs are entered with the TypeTestABI registers already
 	// holding their operands; see seedTypeTestABI.
 	seedTypeTestABI(fir, e.state)
-	// P7: Pre-scan for async stub calls to set IsAsync before the signature
-	// is emitted. The signature needs `async` prefix, but IsAsync is set
-	// during block walking which happens after the signature. A pre-scan
-	// of call targets is the clean solution.
+	// Pre-scan direct suspendable-function stub calls before emitting the
+	// signature. The shared SDK classifier distinguishes async, async*, and
+	// sync*; the block walk repeats the same classification for indirect THR
+	// calls discovered later.
 	//
-	// Two sources of async detection:
-	// 1. Direct BL calls to symbols containing "init_async"/"return_async"
-	// 2. THR stub calls (indirect BLR) — detected during walking, but
-	//    those set IsAsync AFTER the signature is emitted. To handle both,
-	//    we record the signature line index and patch it post-walk.
-	if !fir.IsAsync && e.symbols != nil {
+	// Direct calls can therefore select the right modifier up front; indirect
+	// calls still use the post-walk signature patch below.
+	if e.symbols != nil {
 		for bi := range fir.Blocks {
 			for _, ins := range fir.Blocks[bi].Instrs {
 				if ins.Op != OpCall {
@@ -382,56 +416,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 				}
 				if va, ok := parseHexVA(ins.Target); ok {
 					if name, ok2 := e.symbols(va); ok2 && name != "" {
-						// P7: Async detection via call targets.
-						// Direct BL to async stubs (rare in AOT — usually inlined).
-						//
-						// This carried the same loose `Contains(name,
-						// "init_async")` that was flagged in call.go, and was
-						// left untouched when that one was changed -- so the
-						// "fix" hardened the path that never fires and left
-						// the one that does. Both now share asyncStubRole.
-						if sdk.IsAsyncStubName(name) {
-							fir.IsAsync = true
-							break
-						}
-						// P7: Async detection via SuspendState runtime helpers.
-						// Functions that call _SuspendState._await, _SuspendState._resume,
-						// or _SuspendState._yieldAsyncStar are async/async* functions.
-						if strings.Contains(name, "_SuspendState") &&
-							(strings.Contains(name, "_await") ||
-								strings.Contains(name, "_resume") ||
-								strings.Contains(name, "_yield") ||
-								strings.Contains(name, "_handleException") ||
-								strings.Contains(name, "_initAsync") ||
-								strings.Contains(name, "_returnAsync")) {
-							fir.IsAsync = true
-							break
-						}
-						// P7: Async detection via Future method calls.
-						if strings.Contains(name, "Future.delayed") ||
-							strings.Contains(name, "Future._asyncComplete") ||
-							strings.Contains(name, "Future._thenAwait") {
-							fir.IsAsync = true
-							break
-						}
-						// Generator detection: sync* and async*
-						if strings.Contains(name, "InitSyncStar") || strings.Contains(name, "_initSyncStar") {
-							fir.IsSyncStar = true
-						}
-						if strings.Contains(name, "YieldAsyncStar") || strings.Contains(name, "_yieldAsyncStar") ||
-							strings.Contains(name, "SuspendSyncStarAtStart") || strings.Contains(name, "_suspendSyncStarAtStart") ||
-							strings.Contains(name, "SuspendSyncStarAtYield") || strings.Contains(name, "_suspendSyncStarAtYield") {
-							if strings.Contains(name, "Async") {
-								fir.IsAsyncStar = true
-							} else {
-								fir.IsSyncStar = true
-							}
-						}
+						markSuspendableStubRole(fir, sdk.ClassifyStubRole(name))
 					}
 				}
-			}
-			if fir.IsAsync {
-				break
 			}
 		}
 	}
@@ -449,18 +436,16 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if fir.EnclosingFunction != "" {
 		e.lines = append(e.lines, fmt.Sprintf("// closure declared in: %s", fir.EnclosingFunction))
 	}
-	// Most specific modifier wins. An async* body calls
-	// _SuspendState._yieldAsyncStar, which also matches the "_SuspendState +
-	// _yield" rule that sets IsAsync -- so testing IsAsync first labelled
-	// every async* function `async`. Same for sync*, whose Resume stub use
-	// matches the `_resume` rule.
-	asyncPrefix := ""
+	// Most specific modifier wins. async* intentionally also sets IsAsync for
+	// shared state-machine handling, while sync* remains a distinct non-async
+	// generator kind.
+	modifier := ""
 	if fir.IsAsyncStar {
-		asyncPrefix = "async* "
+		modifier = "async*"
 	} else if fir.IsSyncStar {
-		asyncPrefix = "sync* "
+		modifier = "sync*"
 	} else if fir.IsAsync {
-		asyncPrefix = "async "
+		modifier = "async"
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
 	// A1: Use LocalTypeHints for typed return when available, otherwise
@@ -477,19 +462,28 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if returnType == "dynamic" {
 		returnType = inferReturnTypeFromName(fir.Name)
 	}
-	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
+	baseSignature := fmt.Sprintf("%s %s(%s)", returnType, sig, strings.Join(argList, ", "))
+	modifierSuffix := ""
+	if modifier != "" {
+		modifierSuffix = " " + modifier
+	}
+	e.lines = append(e.lines, baseSignature+modifierSuffix+" {")
 	e.state.setReg(fir.ThreadReg, sdk.SymTHR)
 	e.state.setReg(fir.PoolReg, sdk.SymPP)
-	// SPREG (ARM64 x15 / x86 rsp) and HEAP_BITS (ARM64 x28) are reserved
-	// registers with fixed meanings, verified against constants_arm64.h
-	// (SPREG=R15, HEAP_BITS=R28). Seeding them by name keeps computed
-	// stack addresses and write-barrier-mask math from leaking raw register
-	// tokens into the pseudocode.
+	// SPREG and the versioned ARM64 heap/GC pinned registers have fixed VM
+	// meanings. Seeding them by name keeps stack addresses, pointer
+	// decompression, and write-barrier math from leaking raw register tokens.
 	if fir.StackReg != "" {
 		e.state.setReg(fir.StackReg, sdk.SymSP)
 	}
 	if fir.HeapBitsReg != "" {
 		e.state.setReg(fir.HeapBitsReg, sdk.SymHeapBits)
+	}
+	if fir.HeapBaseReg != "" {
+		e.state.setReg(fir.HeapBaseReg, sdk.SymHeapBase)
+	}
+	if fir.BarrierMaskReg != "" {
+		e.state.setReg(fir.BarrierMaskReg, sdk.SymBarrierMask)
 	}
 
 	// P7: Async state machine annotation. Dart compiles async functions
@@ -600,18 +594,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		modifier := ""
 		switch {
 		case fir.IsAsyncStar:
-			modifier = "async* "
+			modifier = "async*"
 		case fir.IsSyncStar:
-			modifier = "sync* "
+			modifier = "sync*"
 		case fir.IsAsync:
-			modifier = "async "
+			modifier = "async"
 		}
 		if modifier != "" {
-			line := e.lines[sigLineIdx]
-			if !strings.HasPrefix(line, "async ") && !strings.HasPrefix(line, "async* ") &&
-				!strings.HasPrefix(line, "sync* ") {
-				e.lines[sigLineIdx] = modifier + line
-			}
+			e.lines[sigLineIdx] = baseSignature + " " + modifier + " {"
 		}
 	}
 
@@ -659,12 +649,23 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			visited[id] = true
 		}
 	}
+	emittedEdges := make([]CFGEdge, 0, len(e.emittedEdges))
+	for key := range e.emittedEdges {
+		emittedEdges = append(emittedEdges, CFGEdge{From: int(uint32(key >> 32)), To: int(uint32(key))})
+	}
+	sort.Slice(emittedEdges, func(i, j int) bool {
+		if emittedEdges[i].From != emittedEdges[j].From {
+			return emittedEdges[i].From < emittedEdges[j].From
+		}
+		return emittedEdges[i].To < emittedEdges[j].To
+	})
 
 	return Artifact{
 		FunctionName:  fir.Name,
 		Source:        source,
 		Stats:         e.stats,
 		VisitedBlocks: visited,
+		EmittedEdges:  emittedEdges,
 	}
 }
 

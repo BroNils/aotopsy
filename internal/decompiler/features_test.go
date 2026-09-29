@@ -147,3 +147,20 @@ func TestFeatureFieldNamesSkipThreadPoolAndStack(t *testing.T) {
 		})
 	}
 }
+
+func TestFutureDelayedCallDoesNotImplyAsyncFunction(t *testing.T) {
+	fir := featureFuncIR("schedulesSomething", []Instr{
+		{Addr: 0x1000, Op: OpCall, Target: "0x2000"},
+		{Addr: 0x1004, Op: OpReturn, Src: "ret"},
+	})
+	art := EmitPseudocode(fir, func(va uint64) (string, bool) {
+		if va == 0x2000 {
+			return "Future.delayed", true
+		}
+		return "", false
+	}, nil)
+	first := strings.SplitN(art.Source, "\n", 2)[0]
+	if strings.Contains(first, " async") {
+		t.Fatalf("ordinary Future.delayed use falsely marked function async: %q", first)
+	}
+}

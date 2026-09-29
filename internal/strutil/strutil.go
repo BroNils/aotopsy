@@ -4,6 +4,8 @@
 package strutil
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -39,7 +41,17 @@ func SanitizeFilename(name string) string {
 	)
 	s := r.Replace(clean.String())
 	if len(s) > 200 {
-		s = s[:200]
+		// Keep long recovered names deterministic and distinct. Plain prefix
+		// truncation both cut multibyte UTF-8 in half and made two functions that
+		// differed only after byte 200 overwrite the same asm/bin file. Reserve a
+		// stable hash suffix and back up to a rune boundary.
+		sum := sha256.Sum256([]byte(s))
+		suffix := "_" + hex.EncodeToString(sum[:8])
+		cut := 200 - len(suffix)
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		s = s[:cut] + suffix
 	}
 	return s
 }

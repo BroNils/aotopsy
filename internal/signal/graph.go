@@ -115,16 +115,15 @@ func BuildSignalGraph(
 		if sdk.IsMundaneStub(thrName) {
 			continue
 		}
-		// IsMundaneStub keeps exactly two things: the async stubs, and
-		// names it does not recognise. Those are not the same finding --
-		// "this function suspends" is structural evidence that survives
-		// obfuscation, while "this calls a stub we cannot name" is a gap
-		// in our own tables. Filing both under "thr" made the largest
-		// category in the graph the least informative one.
+		// Recognized suspendable-function stubs carry source-level kind
+		// evidence; unknown names remain CatTHR as a table-coverage gap.
 		cat := CatTHR
 		switch sdk.ClassifyStubRole(thrName) {
 		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
 			cat = CatAsync
+		case sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn,
+			sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn:
+			cat = CatGenerator
 		}
 		// Mark the calling function as signal.
 		fs, ok := funcSignals[e.FromFunc]
@@ -257,40 +256,42 @@ func BuildSignalGraph(
 	})
 
 	// Include ALL BL/call edges (deduped), plus non-mundane BLR/
-	// call_indirect edges. H-1: x86_64 uses "call"/"call_indirect".
+	// call_indirect edges. Preserve every resolved polymorphic candidate rather
+	// than collapsing an indirect edge to its Via provenance label: renderers
+	// and browser traversal need the same semantic targets as context BFS.
+	// H-1: x86_64 uses "call"/"call_indirect".
 	var allEdges []SignalEdge
 	seen := make(map[string]bool)
 	for _, e := range edges {
-		var to string
-		if e.Kind == "bl" || e.Kind == "call" {
-			if e.Target == "" {
-				continue
-			}
-			to = e.Target
-		} else if e.Kind == "blr" || e.Kind == "call_indirect" {
-			if e.Via == "" {
-				continue
-			}
+		if e.Kind == "blr" || e.Kind == "call_indirect" {
 			// Skip mundane THR.
 			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
 				continue
 			}
-			to = e.Via
-		} else {
+		} else if e.Kind != "bl" && e.Kind != "call" {
 			continue
 		}
 
-		key := e.FromFunc + "|" + to + "|" + e.Kind
-		if seen[key] {
+		targets := e.ResolvedTargets()
+		if len(targets) == 0 {
 			continue
 		}
-		seen[key] = true
+		for _, to := range targets {
+			if to == "" {
+				continue
+			}
+			key := e.FromFunc + "|" + to + "|" + e.Kind
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 
-		se := SignalEdge{From: e.FromFunc, To: to, Kind: e.Kind}
-		if e.Kind == "blr" || e.Kind == "call_indirect" {
-			se.Via = e.Via
+			se := SignalEdge{From: e.FromFunc, To: to, Kind: e.Kind}
+			if e.Kind == "blr" || e.Kind == "call_indirect" {
+				se.Via = e.Via
+			}
+			allEdges = append(allEdges, se)
 		}
-		allEdges = append(allEdges, se)
 	}
 
 	return &SignalGraph{

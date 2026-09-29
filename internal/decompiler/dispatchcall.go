@@ -40,11 +40,14 @@ import (
 // inventing, so the offset is reported instead: it is a stable identifier, and
 // two call sites sharing one call the same selector.
 var (
-	// `[rax+8*rcx+0x200a8]`, `[rax+8*rcx]` -- the x86_64 shape. The index
+	// `[rax+8*rcx+0x200a8]`, `[rax+8*rcx-0x80]`, `[rax+8*rcx]` -- the x86_64
+	// shape. The displacement is signed because the GDT register points at a
+	// biased origin element; selectors below that origin use a negative offset.
+	// The index
 	// register is DispatchTableNullErrorABI::kClassIdReg and is not fixed by
 	// the SDK, so it is matched loosely; the table register is RAX by
 	// construction (`const Register table_reg = RAX`).
-	x64DispatchCallRe = regexp.MustCompile(`^\[rax\+8\*[a-z0-9]+(?:\+0x([0-9a-f]+))?\]$`)
+	x64DispatchCallRe = regexp.MustCompile(`^\[rax\+8\*[a-z0-9]+(?:([+-])0x([0-9a-f]+))?\]$`)
 	// `add x30, x0, #0x1234` / `sub x30, x0, #0x1234`, the instruction that
 	// computes LR before the ARM64 dispatch call.
 	arm64LRAddRe = regexp.MustCompile(`^(add|sub)\s+x30,\s*[a-z0-9]+,\s*#(?:0x([0-9a-f]+)|(\d+))`)
@@ -116,13 +119,22 @@ func annotateDispatchCalls(fir *FuncIR) {
 			}
 			if m := x64DispatchCallRe.FindStringSubmatch(ins.Target); m != nil {
 				disp := 0
-				if m[1] != "" {
-					if v, err := strconv.ParseInt(m[1], 16, 64); err == nil {
+				if m[2] != "" {
+					if v, err := strconv.ParseInt(m[2], 16, 64); err == nil {
 						disp = int(v)
+						if m[1] == "-" {
+							disp = -disp
+						}
 					}
 				}
 				// The x86_64 displacement is scaled by the word size; the
 				// ARM64 one is not (its Address is Scaled by the assembler).
+				// A genuine GDT displacement is word-aligned and cannot address
+				// before selector zero, even though the regex accepts the full
+				// signed addressing syntax.
+				if disp%8 != 0 || disp/8+origin < 0 {
+					continue
+				}
 				ins.IsDispatchCall = true
 				ins.DispatchSelector = disp/8 + origin
 			}

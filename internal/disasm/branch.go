@@ -36,16 +36,12 @@ func DecodeBranch(raw uint32, pc uint64) *branchInfo {
 		return &branchInfo{Target: target, Cond: true}
 	}
 
-	// B.AL (cond=14) / B.NV (cond=15) — unconditional despite using B.cond encoding
-	if raw&0xFF000010 == 0x54000000 {
-		if cond := raw & 0xF; cond == 14 || cond == 15 {
-			imm19 := (raw >> 5) & 0x7FFFF
-			offset := arm64.SignExtend(imm19, 19) * 4
-			return &branchInfo{Target: uint64(int64(pc) + int64(offset))}
-		}
+	// Dart <=2.14 emitted B.AL using the B.cond encoding. NV is deliberately
+	// not accepted here: exact SDK sources use it only as an internal far-branch
+	// sentinel which is rewritten to NOP, and from 2.15 assert it is not emitted.
+	if target, _, kind, ok := arm64.BCond(raw, pc); ok && kind == arm64.BCondAlways {
+		return &branchInfo{Target: target}
 	}
 
 	return nil
 }
-
-// signExtend is now shared from internal/arm64.SignExtend.

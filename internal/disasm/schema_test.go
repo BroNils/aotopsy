@@ -48,8 +48,8 @@ func TestJSONLSchema(t *testing.T) {
 	}{
 		{
 			artifact: "functions.jsonl",
-			value:    FuncRecord{PC: "0x1", Size: 1, Name: "n", Owner: "o", ParamCount: 1},
-			want:     []string{"name", "owner", "param_count", "pc", "size"},
+			value:    FuncRecord{PC: "0x1", PCOffset: 1, RefID: 7, Size: 1, Name: "n", Owner: "o", ParamCount: 1},
+			want:     []string{"name", "owner", "param_count", "pc", "pc_offset", "ref_id", "size"},
 		},
 		{
 			artifact: "call_edges.jsonl",
@@ -84,7 +84,7 @@ func TestJSONLSchema(t *testing.T) {
 // is a schema property too: a consumer written against a fully-populated
 // sample will not see these keys on a sparse record.
 func TestJSONLOmitEmpty(t *testing.T) {
-	if got := jsonKeys(t, FuncRecord{}); !slices.Equal(got, []string{"name", "pc", "size"}) {
+	if got := jsonKeys(t, FuncRecord{}); !slices.Equal(got, []string{"name", "pc", "pc_offset", "ref_id", "size"}) {
 		t.Errorf("empty FuncRecord keys = %v", got)
 	}
 	if got := jsonKeys(t, CallEdgeRecord{}); !slices.Equal(got, []string{"from_func", "from_pc", "kind"}) {

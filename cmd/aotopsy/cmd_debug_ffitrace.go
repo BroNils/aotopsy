@@ -11,7 +11,8 @@ import (
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
-// static detection of dart:ffi DynamicLibrary.open/lookup call sites.
+// static detection of dart:ffi DynamicLibrary.open/lookup call sites and
+// compiler-generated Dart-to-native FFI wrappers.
 func cmdFFITrace(args []string) error {
 	fs := flag.NewFlagSet("ffi-trace", flag.ExitOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
@@ -33,11 +34,19 @@ func cmdFFITrace(args []string) error {
 	defer func() { _ = ctx.Close() }()
 	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
-	findings, scanned := ffitrace.Trace(ctx, ffitrace.Options{
+	// Trace intentionally derives literal arguments from each outgoing call
+	// site's own stack/register setup. Do not run BuildArgRegMasks here: that
+	// whole-binary pass describes callees' incoming Dart calling conventions,
+	// costs far more than a bounded ffi-trace, and is not evidence for the
+	// arguments of the call site currently being inspected.
+	findings, scanned, err := ffitrace.Trace(ctx, ffitrace.Options{
 		MaxScan:        *maxScan,
 		AllowUnbounded: *allowUnbounded,
 		Filter:         *filter,
 	})
+	if err != nil {
+		return err
+	}
 
 	w := os.Stdout
 	if *out != "" {

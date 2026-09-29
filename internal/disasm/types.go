@@ -3,6 +3,8 @@ package disasm
 // FuncRecord is one line in functions.jsonl.
 type FuncRecord struct {
 	PC         string `json:"pc"`
+	PCOffset   uint32 `json:"pc_offset"`
+	RefID      int    `json:"ref_id"`
 	Size       int    `json:"size"`
 	Name       string `json:"name"`
 	Owner      string `json:"owner,omitempty"`
@@ -29,6 +31,19 @@ type CallEdgeRecord struct {
 	// capped, so Candidates can be larger than len(Targets).
 	Targets    []string `json:"targets,omitempty"`
 	Candidates int      `json:"candidates,omitempty"`
+
+	// Runtime* fields are populated only by frida-import in a merged artifact
+	// directory. Static analysis never sets them, so the ordinary published
+	// call_edges.jsonl schema remains byte-for-byte unchanged unless runtime
+	// evidence actually exists.
+	RuntimeResolved        bool     `json:"runtime_resolved,omitempty"`
+	RuntimeTargets         []string `json:"runtime_targets,omitempty"`
+	RuntimeClassIDs        []int    `json:"runtime_class_ids,omitempty"`
+	RuntimeObservations    int      `json:"runtime_observations,omitempty"`
+	RuntimeConfirmed       bool     `json:"runtime_confirmed,omitempty"`
+	RuntimeCallCount       int      `json:"runtime_call_count,omitempty"`
+	RuntimeTargetConfirmed bool     `json:"runtime_target_confirmed,omitempty"`
+	RuntimeTargetCount     int      `json:"runtime_target_count,omitempty"`
 }
 
 // UnresolvedTHRRecord is one line in unresolved_thr.jsonl.

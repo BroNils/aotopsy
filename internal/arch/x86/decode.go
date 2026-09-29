@@ -59,6 +59,9 @@ type Decoded struct {
 // dozen copies, each free to drift.
 func Walk(code []byte, baseVA uint64, fn func(Decoded) bool) {
 	for off := 0; off < len(code); {
+		if uint64(off) > ^uint64(0)-baseVA {
+			return
+		}
 		va := baseVA + uint64(off)
 		inst, err := x86asm.Decode(code[off:], 64)
 		if err != nil || inst.Len <= 0 {
@@ -100,4 +103,32 @@ func DecodeUntilBad(code []byte, baseVA uint64) []Decoded {
 		return true
 	})
 	return out
+}
+
+// SplitAtInstructionBoundary returns the largest prefix length <= max that
+// ends exactly on an x86 instruction boundary. data may include lookahead past
+// max; that lookahead is required to distinguish a genuinely truncated final
+// instruction from one that merely crosses a caller-imposed chunk budget.
+// Bad bytes follow Walk's recovery rule and each consume one byte.
+//
+// If no complete instruction fits before max, the result is 0. Production
+// callers use a budget much larger than x86's 15-byte architectural maximum,
+// so that case is only relevant to small synthetic inputs.
+func SplitAtInstructionBoundary(data []byte, max int) int {
+	if max <= 0 || len(data) == 0 {
+		return 0
+	}
+	if len(data) <= max {
+		return len(data)
+	}
+	split := 0
+	Walk(data, 0, func(d Decoded) bool {
+		end := int(d.VA) + d.Len
+		if end > max {
+			return false
+		}
+		split = end
+		return split < max
+	})
+	return split
 }

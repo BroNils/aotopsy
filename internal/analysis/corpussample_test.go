@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"errors"
 	"testing"
 
 	"aotopsy/internal/samplecorpus"
@@ -64,16 +65,27 @@ const (
 // nothing.
 func corpusSample(t *testing.T, name string) string {
 	t.Helper()
-	p := samplecorpus.Path(name)
-	if p == "" {
-		if !samplecorpus.Available() {
-			t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
-		}
-		t.Fatalf("corpus sample %s is missing from samples/.\n"+
-			"  Restore it rather than skipping: a regression test that cannot find its\n"+
-			"  input is not a passing test, and this suite spent months in that state.", name)
+	p, err := samplecorpus.RequireSample(name)
+	if errors.Is(err, samplecorpus.ErrNoCorpus) {
+		t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
+	}
+	if err != nil {
+		t.Fatalf("corpus sample %s cannot be used: %v\n"+
+			"  Restore/fix it rather than skipping: a regression test that cannot read its\n"+
+			"  input is not a passing test, and this suite spent months in that state.", name, err)
 	}
 	return p
+}
+
+func requireCompleteCorpus(t *testing.T) {
+	t.Helper()
+	err := samplecorpus.RequireCompleteCorpus()
+	if errors.Is(err, samplecorpus.ErrNoCorpus) {
+		t.Skip("no samples/ directory in this checkout")
+	}
+	if err != nil {
+		t.Fatalf("sample corpus is incomplete or inconsistent: %v", err)
+	}
 }
 
 func sampleARM64(t *testing.T) string    { return corpusSample(t, sampleARM64Name) }

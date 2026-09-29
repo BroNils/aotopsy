@@ -1,14 +1,15 @@
 package analysis
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 )
 
 // RunDecompileStage writes one .dart pseudocode file per function under
@@ -57,7 +58,13 @@ func RunDecompileStage(opts *Opts) (int, error) {
 			continue
 		}
 		fir, err := ctx.FuncIRFor(r)
-		if err != nil || fir == nil || len(fir.Blocks) == 0 {
+		if err != nil {
+			return written, fmt.Errorf("decompile pc=0x%x ref=%d: %w", r.PCOffset, r.RefID, err)
+		}
+		if fir == nil {
+			return written, fmt.Errorf("decompile pc=0x%x ref=%d: FuncIRFor returned nil IR without error", r.PCOffset, r.RefID)
+		}
+		if len(fir.Blocks) == 0 {
 			continue
 		}
 		art := decompiler.EmitPseudocode(fir, symLk, poolLk)
@@ -75,9 +82,9 @@ func RunDecompileStage(opts *Opts) (int, error) {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 		rel := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
-		path := filepath.Join(dartDir, rel+".dart")
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return written, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+		path, err := output.ArtifactPath(dartDir, rel+".dart")
+		if err != nil {
+			return written, fmt.Errorf("decompile artifact path: %w", err)
 		}
 		if err := writeDartFile(path, art.Source); err != nil {
 			return written, err
@@ -95,18 +102,8 @@ func RunDecompileStage(opts *Opts) (int, error) {
 }
 
 func writeDartFile(path, source string) error {
-	f, err := os.Create(path) //nolint:gosec // path is built from this run's own --out directory
-	if err != nil {
+	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, source)
 		return err
-	}
-	w := bufio.NewWriter(f)
-	if _, err := w.WriteString(source); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := w.Flush(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	})
 }

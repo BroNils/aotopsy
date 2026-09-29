@@ -7,13 +7,14 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/strutil"
 )
 
 // WriteIndexHTML writes a small HTML page summarizing the disasm output.
 func WriteIndexHTML(w io.Writer, stats CallgraphStats, unresTHR []disasm.UnresolvedTHRRecord, title string,
 	hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG bool,
-	entryPoints []string, reachableCount int, cfgCount int) {
+	entryPoints []string, reachableCount int, cfgCount int, cfgLinks map[string]string) error {
+	ew := &errorWriter{w: w}
+	w = ew
 
 	blrPct := 0.0
 	if stats.BLREdges > 0 {
@@ -115,7 +116,7 @@ a { color: #0B3D91; }
 	if hasCallgraphSVG {
 		links = append(links, `<a href="callgraph.svg">Function-level graph</a>`)
 	}
-	if cfgCount > 0 {
+	if len(cfgLinks) > 0 {
 		links = append(links, `<a href="cfg/">Per-function CFGs</a>`)
 	}
 	if len(links) == 0 {
@@ -133,7 +134,7 @@ a { color: #0B3D91; }
 	// Entry points.
 	if len(entryPoints) > 0 {
 		_, _ = fmt.Fprintln(w, "<h2>Entry Points</h2>")
-		_, _ = fmt.Fprintf(w, "<p>%d functions with no incoming BL edges (roots of the call tree):</p>\n", len(entryPoints))
+		_, _ = fmt.Fprintf(w, "<p>%d functions with no incoming resolved call edges (roots of the call tree):</p>\n", len(entryPoints))
 		_, _ = fmt.Fprintln(w, "<table>")
 		_, _ = fmt.Fprintln(w, "<tr><th>Function</th></tr>")
 		limit := 50
@@ -142,9 +143,8 @@ a { color: #0B3D91; }
 		}
 		for _, ep := range entryPoints[:limit] {
 			cfgLink := ""
-			if cfgCount > 0 {
-				safe := safeFuncNameHTML(ep)
-				cfgLink = fmt.Sprintf(` <a href="cfg/%s.svg" style="font-size:11px">[cfg]</a>`, safe)
+			if rel, ok := cfgLinks[ep]; ok {
+				cfgLink = fmt.Sprintf(" <a href=\"%s\" style=\"font-size:11px\">[cfg]</a>", htmlEscape(cfgLinkPath(rel)))
 			}
 			_, _ = fmt.Fprintf(w, "<tr><td class=\"ep\">%s%s</td></tr>\n", htmlEscape(ep), cfgLink)
 		}
@@ -165,7 +165,10 @@ a { color: #0B3D91; }
 		}
 		maxCount := stats.TopOwners[0].Count
 		for _, nc := range stats.TopOwners[:limit] {
-			barW := nc.Count * 120 / maxCount
+			barW := 2
+			if maxCount > 0 {
+				barW = nc.Count * 120 / maxCount
+			}
 			if barW < 2 {
 				barW = 2
 			}
@@ -240,6 +243,7 @@ a { color: #0B3D91; }
 	}
 
 	_, _ = fmt.Fprintln(w, "</body></html>")
+	return ew.err
 }
 
 func htmlEscape(s string) string {
@@ -250,11 +254,9 @@ func htmlEscape(s string) string {
 	return s
 }
 
-// safeFuncNameHTML converts a function name to a safe filename.
-// Must match sanitizeFilename in cmd/aotopsy/disasm.go.
-func safeFuncNameHTML(name string) string {
-	// P4-5: Use shared SanitizeFilename to match the canonical implementation.
-	// Previously this had its own replacer that didn't strip non-printable
-	// runes, causing broken asm links for names with special characters.
-	return strutil.SanitizeFilename(name)
+func cfgLinkPath(rel string) string {
+	for _, ch := range []byte{'%', '#'} {
+		rel = strings.ReplaceAll(rel, string(ch), fmt.Sprintf("%%%02X", ch))
+	}
+	return rel
 }

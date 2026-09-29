@@ -1,6 +1,7 @@
 package cmacro
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -96,5 +97,170 @@ func TestSplitTopLevel(t *testing.T) {
 	want := []string{"Type<A, B>", "name", "f(a, b)", "0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestNestedMacroFormalSubstitution(t *testing.T) {
+	src := `
+#define SUB(F) F(A) F(B)
+#define LIST(X) SUB(X)
+`
+	got, err := Expand(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"A", "B"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestWhitespaceInvocationAndQuotedParen(t *testing.T) {
+	src := `#define LIST(V) V (Name, "x)y")`
+	rows, err := ExpandRaw(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"Name", `"x)y"`}}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("got %q, want %q", rows, want)
+	}
+}
+
+func TestMalformedInvocationFailsInsteadOfPartialResult(t *testing.T) {
+	src := `#define LIST(V) V(A) V(B`
+	if rows, err := ExpandRaw(ParseMacros(src), "LIST"); err == nil {
+		t.Fatalf("unterminated invocation returned partial success: %q", rows)
+	}
+}
+
+func TestMissingNestedMacroFailsInsteadOfTruncatingList(t *testing.T) {
+	src := `#define LIST(V) V(A) MISSING(V) V(B)`
+	if rows, err := ExpandRaw(ParseMacros(src), "LIST"); err == nil {
+		t.Fatalf("missing nested macro returned partial success: %q", rows)
+	}
+}
+
+func TestFormalSubstitutionIsSimultaneous(t *testing.T) {
+	src := `
+#define PAIR(A, B) V(A, B)
+#define LIST(V) PAIR(B, A)
+`
+	rows, err := ExpandRaw(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"B", "A"}}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("sequential substitution corrupted arguments: got %q, want %q", rows, want)
+	}
+}
+
+func TestExpansionScannerIgnoresQuotedCallbackText(t *testing.T) {
+	src := `#define LIST(V) "V(Fake)" V(Real)`
+	got, err := Expand(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Real"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("quoted callback leaked into expansion: got %q, want %q", got, want)
+	}
+}
+
+func TestParseMacrosAcceptsPreprocessorWhitespaceAndPreservesTokenBoundary(t *testing.T) {
+	src := "  #  define LIST(V) V(A/**/B)\n"
+	got, err := Expand(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"A B"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("comment removal merged tokens: got %q, want %q", got, want)
+	}
+}
+
+func TestExpansionDepthIsBounded(t *testing.T) {
+	macros := Macros{}
+	for i := 0; i <= maxExpansionDepth+1; i++ {
+		name := fmt.Sprintf("M%d", i)
+		if i == maxExpansionDepth+1 {
+			macros[name] = Macro{Params: []string{"V"}, Body: "V(End)", FunctionLike: true}
+			continue
+		}
+		macros[name] = Macro{Params: []string{"V"}, Body: fmt.Sprintf("M%d(V)", i+1), FunctionLike: true}
+	}
+	if rows, err := ExpandRaw(macros, "M0"); err == nil {
+		t.Fatalf("over-depth expansion succeeded with %d rows", len(rows))
+	}
+}
+
+func TestZeroParameterFunctionLikeMacroStaysDistinctFromObjectLike(t *testing.T) {
+	src := `
+#define SUB() V(B)
+#define CALLED(V) SUB() V(A)
+#define BARE(V) SUB V(A)
+`
+	macros := ParseMacros(src)
+	if !macros["SUB"].FunctionLike {
+		t.Fatal("zero-parameter function-like macro lost its invocation form")
+	}
+	got, err := Expand(macros, "CALLED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"B", "A"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("SUB() expansion = %q, want %q", got, want)
+	}
+	got, err = Expand(macros, "BARE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"A"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("bare function-like SUB was expanded: got %q, want %q", got, want)
+	}
+}
+
+func TestObjectLikeMacroStillExpandsWhenFollowedByParens(t *testing.T) {
+	src := `
+#define OBJ V(B)
+#define LIST(V) OBJ() V(A)
+`
+	got, err := Expand(ParseMacros(src), "LIST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"B", "A"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("object-like OBJ() expansion = %q, want %q", got, want)
+	}
+}
+
+func TestSubstitutionHonorsByteBudgetBeforeAmplification(t *testing.T) {
+	// A repeated formal is the dangerous shape: one modest actual argument can
+	// be copied hundreds of times before the step/depth limits advance at all.
+	if _, err := substituteIdentifiers("X X X X", []string{"X"}, []string{"abcd"}, 12); err == nil {
+		t.Fatal("substitution exceeding byte budget succeeded")
+	}
+	got, err := substituteIdentifiers("X X", []string{"X"}, []string{"ab"}, 5)
+	if err != nil {
+		t.Fatalf("bounded substitution failed: %v", err)
+	}
+	if got != "ab ab" {
+		t.Fatalf("bounded substitution = %q, want %q", got, "ab ab")
+	}
+}
+
+func TestColumnRejectsShortRowAndNegativeIndex(t *testing.T) {
+	macros := ParseMacros(`#define LIST(V) V(A, B) V(C)`)
+	if _, err := Column(macros, "LIST", 1); err == nil {
+		t.Fatal("short row was silently skipped")
+	}
+	if _, err := Column(macros, "LIST", -1); err == nil {
+		t.Fatal("negative column index was accepted")
+	}
+}
+
+func TestSplitTopLevelDoesNotTreatOperatorsAsTemplates(t *testing.T) {
+	got := SplitTopLevel(`uword, mask, kOne >> 1, a < b, a<b, next, Type<A, B>, 0`)
+	want := []string{"uword", "mask", "kOne >> 1", "a < b", "a<b", "next", "Type<A, B>", "0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

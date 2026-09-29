@@ -28,10 +28,11 @@ func TestCodeSourceMapDecoded(t *testing.T) {
 	for _, csm := range res.CodeSourceMaps {
 		for _, e := range csm.Entries {
 			totalEntries++
-			if len(e.InlineStack) > 0 {
+			stack := e.InlineStack()
+			if len(stack) > 0 {
 				withInline++
-				if len(e.InlineStack) > maxDepth {
-					maxDepth = len(e.InlineStack)
+				if len(stack) > maxDepth {
+					maxDepth = len(stack)
 				}
 			}
 			if e.TokenPos != cluster.CSMNoPosition {
@@ -42,7 +43,7 @@ func TestCodeSourceMapDecoded(t *testing.T) {
 			}
 			// Inline stack entries index Code.inlined_id_to_function, so they
 			// must be non-negative.
-			for _, id := range e.InlineStack {
+			for _, id := range stack {
 				if id < 0 {
 					t.Fatalf("negative inline function id %d; ArgField sign "+
 						"extension is likely wrong", id)
@@ -81,9 +82,9 @@ func TestCodeSourceMapDecoded(t *testing.T) {
 		stack, _, ok := csm.InlineStackAt(target)
 		if !ok {
 			t.Errorf("InlineStackAt(0x%x) found nothing despite an entry there", target)
-		} else if len(stack) != len(csm.Entries[1].InlineStack) {
+		} else if len(stack) != csm.Entries[1].InlineDepth() {
 			t.Errorf("InlineStackAt depth %d != entry depth %d",
-				len(stack), len(csm.Entries[1].InlineStack))
+				len(stack), csm.Entries[1].InlineDepth())
 		}
 		// A PC before the first entry has no state.
 		if first := csm.Entries[0].PCOffset; first > 0 {
@@ -91,6 +92,42 @@ func TestCodeSourceMapDecoded(t *testing.T) {
 				t.Error("InlineStackAt resolved a PC before the first entry")
 			}
 		}
+	}
+}
+
+func TestDecodeAllStackMapsRejectsMalformedCapturedPayload(t *testing.T) {
+	// flags_and_size = 4 declares one byte of standalone payload. 0x80 starts
+	// an unsigned LEB128 PC delta but never terminates it. Before error
+	// propagation was wired through analysis this exact corruption was silently
+	// skipped and stack_maps.jsonl simply lost the affected Code object.
+	res := &cluster.Result{
+		CompressedStackMaps: []cluster.CompressedStackMapsInfo{{
+			RefID:   7,
+			Payload: []byte{4, 0, 0, 0, 0x80},
+		}},
+		Codes: []cluster.CodeEntry{{RefID: 9, CompressedStackMapsRef: 7}},
+	}
+	if _, err := DecodeAllStackMaps(res, nil); err == nil {
+		t.Fatal("malformed captured stack map was silently skipped")
+	}
+}
+
+func TestDart210CapturedStackMapsDecode(t *testing.T) {
+	// Dart 2.10.0 has a 12-byte target CSM header on 64-bit while 2.12-2.15
+	// use 16. This real-corpus gate catches treating that version boundary as a
+	// global +16 data offset, which previously broke 2,874 Code objects across
+	// the arm64/x64 2.10 samples after the broader CSM capture fix.
+	ctx, err := LoadContext(corpusSample(t, "dart-2.10.0-prenn-arm64.so"))
+	if err != nil {
+		t.Fatalf("load Dart 2.10 context: %v", err)
+	}
+	defer func() { _ = ctx.Close() }()
+	decoded, err := DecodeAllStackMaps(ctx.Result, ctx.InstrTable)
+	if err != nil {
+		t.Fatalf("decode Dart 2.10 stack maps: %v", err)
+	}
+	if len(decoded) == 0 {
+		t.Fatal("Dart 2.10 stack-map capture decoded no Code objects")
 	}
 }
 
@@ -158,12 +195,13 @@ func TestDecodeCodeSourceMapOps(t *testing.T) {
 		if entries[i].TokenPos != w.pos {
 			t.Errorf("entry %d token_pos = %d, want %d", i, entries[i].TokenPos, w.pos)
 		}
-		if len(entries[i].InlineStack) != w.depth {
-			t.Errorf("entry %d inline depth = %d, want %d", i, len(entries[i].InlineStack), w.depth)
+		if entries[i].InlineDepth() != w.depth {
+			t.Errorf("entry %d inline depth = %d, want %d", i, entries[i].InlineDepth(), w.depth)
 		}
 	}
-	if len(entries[1].InlineStack) == 1 && entries[1].InlineStack[0] != 7 {
-		t.Errorf("inline id = %d, want 7", entries[1].InlineStack[0])
+	stack := entries[1].InlineStack()
+	if len(stack) == 1 && stack[0] != 7 {
+		t.Errorf("inline id = %d, want 7", stack[0])
 	}
 
 	// No position set before the first ChangePosition.

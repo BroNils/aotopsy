@@ -7,9 +7,10 @@ import (
 )
 
 func ttsFixture() (*PoolLookups, []cluster.PoolEntry) {
-	// TypeNames holds the BARE type name; the stub spelling is derived.
-	pl := &PoolLookups{TypeNames: map[int]string{
-		4242: "RenderBox",
+	// Exact indirect-call targets come only from TypeTestingStubNames. TypeNames
+	// is deliberately approximate and must never be promoted into a call target.
+	pl := &PoolLookups{TypeTestingStubNames: map[int]string{
+		4242: "TypeTestingStub_RenderBox",
 	}}
 	pool := []cluster.PoolEntry{
 		{Index: 6963, Kind: cluster.PoolTagged, RefID: 4242}, // the Type
@@ -33,6 +34,9 @@ func TestTTSCallResolvesAPoolTypeToItsStub(t *testing.T) {
 	// The annotation is not always carrying a display suffix.
 	if got := TtsCallTarget("pp[6963]", byIdx); got != "TypeTestingStub_RenderBox" {
 		t.Errorf("bare pool annotation should resolve too, got %q", got)
+	}
+	if got := TtsCallTarget("PP[6963] <Type>", byIdx); got != "TypeTestingStub_RenderBox" {
+		t.Errorf("ARM64 uppercase PP annotation should resolve too, got %q", got)
 	}
 }
 

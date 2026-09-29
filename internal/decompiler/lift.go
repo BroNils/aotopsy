@@ -29,6 +29,7 @@ type LiftState struct {
 	RegClass map[string]int
 	LastCmp  [2]string
 	HasCmp   bool
+	CmpBits  int // operand width for integer comparison; 0 when unknown/non-integer
 	// Pool resolves an object-pool index to its display text. Set by the
 	// emitter, which is the only layer that has the deserialized pool; nil
 	// in unit tests that lift instructions in isolation, in which case a
@@ -93,7 +94,7 @@ func newLiftState(nullReg string) *LiftState {
 func (s *LiftState) Clone() *LiftState {
 	// spillSeq is carried before the copy loop below: it decides whether an
 	// over-long value survives the clone as a name or is dropped.
-	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, Pool: s.Pool, spillSeq: s.spillSeq}
+	c := &LiftState{Regs: make(map[string]string, len(s.Regs)), Locals: s.Locals, RegClass: make(map[string]int, len(s.RegClass)), LastCmp: s.LastCmp, HasCmp: s.HasCmp, CmpBits: s.CmpBits, Pool: s.Pool, spillSeq: s.spillSeq}
 	for k, v := range s.Regs {
 		c.setReg(k, v)
 	}
@@ -103,43 +104,19 @@ func (s *LiftState) Clone() *LiftState {
 	return c
 }
 
-// MergeJoin merges two branch states (taken and fallthrough) into a
-// single state for use after the if/else join point. This is the
-// dataflow join that was missing — the old code restored the
-// pre-branch state, losing every register write inside either branch.
-//
-// Merge rules:
-//   - Register present in both with the same value: keep it.
-//   - Register present in both with different values: keep the
-//     pre-branch value (conservative). A text-based emitter cannot
-//     emit phi nodes inside branches because it doesn't know the
-//     phi assignments until after both branches complete. Creating
-//     an undeclared temp (tN) would produce undefined-variable
-//     references in the output. The conservative merge is strictly
-//     better than the old behavior (restore pre-branch for ALL
-//     registers) because it still keeps branch-specific values for
-//     registers that only one branch wrote.
-//   - Register present in only one branch: keep that branch's value
-//     (the other branch didn't write it, so the pre-branch value
-//     would be stale anyway).
-//   - Register present in neither: keep the pre-branch value.
+// MergeJoin merges two branch states (taken and fallthrough) into the state at
+// their join. A value survives only when BOTH paths prove the same value. Any
+// disagreement is unknown and is deliberately dropped; resurrecting the
+// pre-branch value, or arbitrarily choosing one branch, fabricates a value that
+// is not true on every path. Real phi materialization belongs in the SSA pass.
 func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 	merged := &LiftState{
-		Regs:    make(map[string]string, len(s.Regs)),
-		Locals:  s.Locals, // Locals is shared by reference (frame-global)
-		LastCmp: s.LastCmp,
-		HasCmp:  s.HasCmp,
-		Pool:    s.Pool,
+		Regs:     make(map[string]string),
+		Locals:   s.Locals, // Locals is shared by reference (frame-global)
+		Pool:     s.Pool,
+		spillSeq: s.spillSeq,
 	}
-	// Start with pre-branch state as the base.
-	for k, v := range s.Regs {
-		merged.setReg(k, v)
-	}
-	// Collect all register names from all three states.
-	allRegs := make(map[string]bool)
-	for k := range s.Regs {
-		allRegs[k] = true
-	}
+	allRegs := make(map[string]bool, len(taken.Regs)+len(fall.Regs))
 	for k := range taken.Regs {
 		allRegs[k] = true
 	}
@@ -147,43 +124,17 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 		allRegs[k] = true
 	}
 	for reg := range allRegs {
-		preVal, preExists := s.Regs[reg]
 		takenVal, takenExists := taken.Regs[reg]
 		fallVal, fallExists := fall.Regs[reg]
-
-		switch {
-		case takenExists && fallExists && takenVal == fallVal:
-			// Same value in both branches — keep it.
+		if takenExists && fallExists && takenVal == fallVal {
 			merged.setReg(reg, takenVal)
-		case takenExists && fallExists && takenVal != fallVal:
-			// Different values — keep pre-branch value (conservative).
-			// Cannot create phi temp in a text-based emitter without
-			// producing undefined-variable references.
-			if preExists {
-				merged.setReg(reg, preVal)
-			} else {
-				// No pre-branch value; pick taken (arbitrary but stable).
-				merged.setReg(reg, takenVal)
-			}
-		case takenExists && !fallExists:
-			// Only taken branch wrote it.
-			if takenVal != preVal || !preExists {
-				merged.setReg(reg, takenVal)
-			}
-		case !takenExists && fallExists:
-			// Only fall branch wrote it.
-			if fallVal != preVal || !preExists {
-				merged.setReg(reg, fallVal)
-			}
-		case !takenExists && !fallExists && preExists:
-			// Neither branch wrote it — keep pre-branch value.
-			merged.setReg(reg, preVal)
 		}
 	}
 	// LastCmp: if both branches agree, keep it; otherwise clear.
-	if taken.HasCmp && fall.HasCmp && taken.LastCmp == fall.LastCmp {
+	if taken.HasCmp && fall.HasCmp && taken.LastCmp == fall.LastCmp && taken.CmpBits == fall.CmpBits {
 		merged.LastCmp = taken.LastCmp
 		merged.HasCmp = true
+		merged.CmpBits = taken.CmpBits
 	} else {
 		merged.HasCmp = false
 	}
@@ -197,6 +148,98 @@ func (s *LiftState) MergeJoin(taken, fall *LiftState) *LiftState {
 		}
 	}
 	return merged
+}
+
+func (s *LiftState) clearCmp() {
+	s.HasCmp = false
+	s.LastCmp = [2]string{}
+	s.CmpBits = 0
+}
+
+func cmpBitWidthFromOperand(op string) int {
+	op = strings.ToLower(strings.TrimSpace(op))
+	op = strings.Trim(op, "[](),")
+	if strings.HasPrefix(op, "xmm") ||
+		(len(op) > 1 && (op[0] == 'd' || op[0] == 's') && isAllDigits(op[1:])) {
+		return 0
+	}
+	if (strings.HasPrefix(op, "x") || strings.HasPrefix(op, "w")) && len(op) > 1 {
+		if op == "xzr" || op == "sp" || op[0] == 'x' {
+			return 64
+		}
+		if op == "wzr" || op[0] == 'w' {
+			return 32
+		}
+	}
+	switch op {
+	case "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+		"r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15":
+		return 64
+	case "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+		"r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d":
+		return 32
+	case "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
+		"r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w":
+		return 16
+	case "al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl",
+		"r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b":
+		return 8
+	}
+	return 0
+}
+
+func rememberedCmpCondition(s *LiftState, op string, unsigned bool) (string, bool) {
+	if s == nil || !s.HasCmp || op == "?" {
+		return "", false
+	}
+	if !unsigned || op == "==" || op == "!=" {
+		return fmt.Sprintf("%s %s %s", s.LastCmp[0], op, s.LastCmp[1]), true
+	}
+	mask := ""
+	switch s.CmpBits {
+	case 8:
+		mask = "0xff"
+	case 16:
+		mask = "0xffff"
+	case 32:
+		mask = "0xffffffff"
+	case 64:
+		mask = "0xffffffffffffffff"
+	default:
+		// Unknown width is not enough evidence to choose unsigned semantics.
+		return "", false
+	}
+	return fmt.Sprintf("((%s) & %s) %s ((%s) & %s)", s.LastCmp[0], mask, op, s.LastCmp[1], mask), true
+}
+
+// instructionClobbersCmp reports instructions whose architectural flag writes
+// invalidate a previously remembered comparison. On ARM64 plain ADD/SUB do not
+// set NZCV; their S-suffixed forms do. On x86 the ordinary integer ALU writes
+// EFLAGS. Calls are handled separately because the callee may clobber flags.
+func instructionClobbersCmp(fir *FuncIR, mnemonic string) bool {
+	mnemonic = strings.ToLower(strings.TrimSpace(mnemonic))
+	// Fresh compare/test instructions replace LastCmp in their handlers.
+	switch mnemonic {
+	case "cmp", "cmn", "tst", "test", "fcmp", "fcmpe", "comisd", "comiss", "ucomisd", "ucomiss":
+		return false
+	}
+	// ARM64 condition-setting integer aliases.
+	switch mnemonic {
+	case "adds", "subs", "ands", "bics", "adcs", "sbcs", "negs":
+		return true
+	}
+	if fir == nil || fir.ThreadReg != sdk.X86ThreadRegStr {
+		return false
+	}
+	// x86 integer instructions that write status flags. MOV/LEA/loads/stores do
+	// not appear here; preserving a comparison across them is valid.
+	switch mnemonic {
+	case "add", "adc", "sub", "sbb", "and", "or", "xor", "inc", "dec", "neg",
+		"shl", "sal", "shr", "sar", "rol", "ror", "imul", "mul", "div", "idiv",
+		"bt", "btc", "btr", "bts":
+		return true
+	}
+	return false
 }
 
 // clearWrittenRegClasses drops the tracked class of every register an
@@ -568,18 +611,15 @@ func localName(off int64) string {
 // Both architectures emit it from the same place in dart-lang/sdk, inside
 // `#if defined(DART_COMPRESSED_POINTERS)`:
 //
-//	ARM64  assembler_arm64.h  add(dst, dst, Operand(HEAP_BITS, LSL, 32))
+//	ARM64  2.13: add(dst, dst, Operand(HEAP_BASE))
+//	ARM64  2.14+: add(dst, dst, Operand(HEAP_BITS, LSL, 32))
 //	x86_64 assembler_x64.cc   movl(dest, slot);
 //	                          addq(dest, Address(THR, heap_base_offset()))
 //
-// On ARM64 that is `ADD Xd, Xn, X28, LSL #32`. HEAP_BITS holds
-// `write_barrier_mask << 32 | heap_base >> 32` (constants_arm64.h), so
-// shifting it left by 32 drops the mask off the top and leaves
-// `(heap_base >> 32) << 32`, which IS heap_base -- pointer_tagging.h's
-// kHeapBaseMask = ~(4GB-1) makes the heap 4GB-aligned, so the low bits it
-// clears are already zero. The register is reserved
-// (kReservedCpuRegisters includes HEAP_BITS) and its only other use shifts
-// RIGHT by 32 to recover the write-barrier mask, so a left shift by 32 is
+// On Dart 2.13 ARM64, HEAP_BASE is a dedicated reserved register. On 2.14+
+// HEAP_BITS holds `write_barrier_mask << 32 | heap_base >> 32`; shifting it
+// left by 32 drops the mask and recovers the 4GB-aligned heap base. In both
+// eras the source register is reserved, so the version-specific ADD shape is
 // unambiguous.
 //
 // On x86_64 it is an add of THR.heap_base, which P-5's Thread field naming
@@ -596,9 +636,10 @@ func isPointerDecompression(fir *FuncIR, mnemonic, srcTok, shiftTok string) bool
 	if mnemonic != "add" {
 		return false
 	}
-	// ARM64: the heap-bits register shifted left by 32.
-	if fir.HeapBitsReg != "" && strings.ToLower(strings.TrimSpace(srcTok)) == fir.HeapBitsReg {
-		return sdk.IsARM64PointerDecompression(srcTok, shiftTok)
+	// ARM64: versioned reserved-register form. Dart 2.13 uses HEAP_BASE (x23)
+	// without a shift; 2.14+ uses HEAP_BITS (x28) shifted left by 32.
+	if sdk.IsARM64PointerDecompression(fir.DartVersion, srcTok, shiftTok) {
+		return true
 	}
 	// x86_64: an add of the Thread's heap_base field.
 	if fir.ThreadFieldNames != nil {
@@ -708,6 +749,9 @@ func fieldExpr(base string, off int64, resolver func(int64, int64) string) strin
 func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool) {
 	mnemonic, ops := splitOperands(ins.Src)
 	mnemonic = normalizeMnemonic(mnemonic)
+	if instructionClobbersCmp(fir, mnemonic) {
+		s.clearCmp()
+	}
 
 	// SIMD&FP first: shared across both architectures, and its mnemonics
 	// do not overlap the integer ones below.
@@ -856,22 +900,23 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			}
 			s.setReg(dst, fmt.Sprintf("(%s >> %s)", lhs, operandExpr(fir, s, ops[idx])))
 		}
-	// The three flag-setting compares. dart-lang/sdk's
-	// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
-	// in terms of the operation whose flags it takes:
-	//
-	//	cmp(rn, o) -> subs(ZR, rn, o)   flags from rn - o   =>  rn == o
-	//	cmn(rn, o) -> adds(ZR, rn, o)   flags from rn + o   =>  rn == -o
-	//	tst(rn, o) -> ands(ZR, rn, o)   flags from rn & o   =>  (rn & o) == 0
-	//
-	// `o` is a shifted-register Operand, which is why a third token can be
-	// present. Dropping it, or conflating cmn with cmp, states a condition
-	// the binary does not test.
+		// The three flag-setting compares. dart-lang/sdk's
+		// runtime/vm/compiler/assembler/assembler_arm64.h at 3.9.2 defines each
+		// in terms of the operation whose flags it takes:
+		//
+		//	cmp(rn, o) -> subs(ZR, rn, o)   flags from rn - o   =>  rn == o
+		//	cmn(rn, o) -> adds(ZR, rn, o)   flags from rn + o   =>  rn == -o
+		//	tst(rn, o) -> ands(ZR, rn, o)   flags from rn & o   =>  (rn & o) == 0
+		//
+		// `o` is a shifted-register Operand, which is why a third token can be
+		// present. Dropping it, or conflating cmn with cmp, states a condition
+		// the binary does not test.
 	case "cmp":
 		if len(ops) >= 2 {
 			rhs, ok := shiftedOperand(fir, s, ops, 1)
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), rhs}
 			s.HasCmp = ok
+			s.CmpBits = cmpBitWidthFromOperand(ops[0])
 		}
 	case "test", "tst":
 		// The condition is `(a & b) == 0`, not `a == 0`. Storing [a, "0"]
@@ -897,6 +942,7 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 				s.LastCmp = [2]string{fmt.Sprintf("(%s & %s)", lhs, rhs), "0"}
 			}
 			s.HasCmp = ok
+			s.CmpBits = cmpBitWidthFromOperand(ops[0])
 		}
 	// P3-feasible-1: Unary operations — common in Dart AOT compiled code.
 	case "mvn", "not":

@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"fmt"
 	"sort"
 
 	"aotopsy/internal/cluster"
@@ -24,8 +25,11 @@ import (
 // This lives in one function on purpose. It has two callers -- the decompiler
 // enrichment path and the stack_maps.jsonl writer -- and a decoder that two
 // callers reimplement is a decoder that two callers disagree about.
-func DecodeAllStackMaps(result *cluster.Result, table *cluster.InstructionsTable) map[int][]cluster.StackMapEntry {
+func DecodeAllStackMaps(result *cluster.Result, table *cluster.InstructionsTable) (map[int][]cluster.StackMapEntry, error) {
 	out := make(map[int][]cluster.StackMapEntry)
+	if result == nil {
+		return out, nil
+	}
 
 	csmByRef := make(map[int]*cluster.CompressedStackMapsInfo, len(result.CompressedStackMaps))
 	var globalTablePayload []byte
@@ -48,7 +52,10 @@ func DecodeAllStackMaps(result *cluster.Result, table *cluster.InstructionsTable
 			continue
 		}
 		entries, err := cluster.DecodeCompressedStackMaps(csm.Payload, globalTablePayload)
-		if err != nil || len(entries) == 0 {
+		if err != nil {
+			return nil, fmt.Errorf("code ref %d compressed stack maps ref %d: %w", ce.RefID, ce.CompressedStackMapsRef, err)
+		}
+		if len(entries) == 0 {
 			continue
 		}
 		out[ce.RefID] = entries
@@ -64,13 +71,16 @@ func DecodeAllStackMaps(result *cluster.Result, table *cluster.InstructionsTable
 				continue
 			}
 			entries, err := table.StackMapsAt(first + ce.ClusterIndex)
-			if err != nil || len(entries) == 0 {
+			if err != nil {
+				return nil, fmt.Errorf("code ref %d instructions-table entry %d: %w", ce.RefID, first+ce.ClusterIndex, err)
+			}
+			if len(entries) == 0 {
 				continue
 			}
 			out[ce.RefID] = entries
 		}
 	}
-	return out
+	return out, nil
 }
 
 // StackMapRecord is one Code object's GC stack maps in stack_maps.jsonl.

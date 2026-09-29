@@ -17,6 +17,8 @@
 // (Dart 2.10–3.13): register roles have not changed.
 package sdk
 
+import "aotopsy/internal/snapshot"
+
 // ArchARM64 is the architecture selector used throughout the package.
 const (
 	ArchARM64 = true
@@ -35,21 +37,41 @@ const (
 const (
 	// ARM64 register numbers (0-based, as used by the hardware and the SDK's
 	// R0–R30 enum).
-	ARM64PP        = 27 // PP   = R27 — object pool pointer
-	ARM64THR       = 26 // THR  = R26 — thread pointer
-	ARM64DT        = 21 // dispatch table register (X21, used by typetrack)
-	ARM64HeapBits  = 28 // HEAP_BITS = R28 (Dart 2.14+: write_barrier_mask<<32 | heap_base>>32; Dart 2.10–2.13: BARRIER_MASK = R28)
-	ARM64CodeReg   = 24 // CODE_REG  = R24 — current Code object
-	ARM64ArgsDesc  = 4  // ARGS_DESC_REG = R4 — arguments descriptor
-	ARM64SPReg     = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
-	ARM64NullReg   = 22 // NULL_REG = R22 — caches Object::null() (ARM64-only)
-	ARM64FrameReg  = 29 // FPREG = R29 — frame pointer
-	ARM64LinkReg   = 30 // LR    = R30 — link register
-	ARM64ReturnReg = 0  // R0 — return value
+	ARM64PP             = 27 // PP   = R27 — object pool pointer
+	ARM64THR            = 26 // THR  = R26 — thread pointer
+	ARM64DT             = 21 // dispatch table register (X21, used by typetrack)
+	ARM64HeapBaseLegacy = 23 // HEAP_BASE = R23 through Dart 2.13 compressed-pointer builds
+	ARM64HeapBits       = 28 // HEAP_BITS = R28 (Dart 2.14+: write_barrier_mask<<32 | heap_base>>32; Dart 2.10–2.13: BARRIER_MASK = R28)
+	ARM64CodeReg        = 24 // CODE_REG  = R24 — current Code object
+	ARM64ArgsDesc       = 4  // ARGS_DESC_REG = R4 — arguments descriptor
+	ARM64SPReg          = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
+	ARM64NullReg        = 22 // NULL_REG = R22 — caches Object::null() (ARM64-only)
+	ARM64FrameReg       = 29 // FPREG = R29 — frame pointer
+	ARM64LinkReg        = 30 // LR    = R30 — link register
+	ARM64ReturnReg      = 0  // R0 — return value
 )
 
 // ARM64BarrierMask is the alias for R28 in Dart 2.10.0–2.13.0 before HEAP_BITS.
 const ARM64BarrierMask = ARM64HeapBits
+
+// ARM64HeapRegisterRoles returns the versioned pinned-register roles used by
+// generated ARM64 code. Dart <=2.13 keeps the write-barrier mask in R28;
+// compressed-pointer builds at 2.13 additionally keep HEAP_BASE in R23. Dart
+// 2.14 replaces both with HEAP_BITS in R28, packing the barrier mask and heap
+// base high bits into one register.
+func ARM64HeapRegisterRoles(dartVersion string) (heapBitsReg, heapBaseReg, barrierMaskReg string) {
+	if dartVersion == "" || !snapshot.VersionAtLeast(dartVersion, "2.10.0") {
+		return "", "", ""
+	}
+	if snapshot.VersionAtLeast(dartVersion, "2.14.0") {
+		return ARM64HeapBitsStr, "", ""
+	}
+	heapBaseReg = ""
+	if snapshot.VersionAtLeast(dartVersion, "2.13.0") {
+		heapBaseReg = ARM64HeapBaseLegacyStr
+	}
+	return "", heapBaseReg, ARM64HeapBitsStr
+}
 
 // ARM64RegName maps a register number to the lowercase string name the
 // decompiler uses in pseudocode (e.g. 27 → "x27").
@@ -91,16 +113,17 @@ var xName = [...]string{
 
 // ARM64 register string names (for the decompiler's string-rewriting model).
 const (
-	ARM64PoolRegStr   = "x27"
-	ARM64ThreadRegStr = "x26"
-	ARM64HeapBitsStr  = "x28"
-	ARM64CodeRegStr   = "x24"
-	ARM64ArgsDescStr  = "x4"
-	ARM64StackRegStr  = "x15"
-	ARM64NullRegStr   = "x22"
-	ARM64FrameRegStr  = "x29"
-	ARM64LinkRegStr   = "x30"
-	ARM64ReturnRegStr = "x0"
+	ARM64PoolRegStr        = "x27"
+	ARM64ThreadRegStr      = "x26"
+	ARM64HeapBaseLegacyStr = "x23"
+	ARM64HeapBitsStr       = "x28"
+	ARM64CodeRegStr        = "x24"
+	ARM64ArgsDescStr       = "x4"
+	ARM64StackRegStr       = "x15"
+	ARM64NullRegStr        = "x22"
+	ARM64FrameRegStr       = "x29"
+	ARM64LinkRegStr        = "x30"
+	ARM64ReturnRegStr      = "x0"
 )
 
 // ── x86_64 register roles ─────────────────────────────────────────────
@@ -138,39 +161,71 @@ const (
 // decompiler emits in pseudocode; other layers use them for annotation.
 
 const (
-	SymTHR      = "THR"
-	SymPP       = "PP"
-	SymSP       = "SP"
-	SymHeapBits = "HEAP_BITS"
-	SymCode     = "CODE"
-	SymArgsDesc = "argsDesc"
+	SymTHR         = "THR"
+	SymPP          = "PP"
+	SymSP          = "SP"
+	SymHeapBits    = "HEAP_BITS"
+	SymHeapBase    = "HEAP_BASE"
+	SymBarrierMask = "BARRIER_MASK"
+	SymCode        = "CODE"
+	SymArgsDesc    = "argsDesc"
 )
 
-// ── Dart calling-convention argument registers ────────────────────────
+// ── Dart register calling convention ──────────────────────────────────
 //
-// Source: runtime/vm/constants_arm64.h @3.12.2:
-//   DartCallingConvention::kCpuRegistersForArgs[] = {R1, R2, R3, R5, R6, R7}
-// Source: runtime/vm/constants_x64.h @3.12.2 and @3.9.2:
-//   DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
+// Dart did NOT always pass AOT Dart parameters in registers. The
+// DartCallingConvention tables first appear at 3.4.3; <=3.3.0 passes Dart
+// parameters on the stack. Treating the register table as timeless caused
+// every consumer (decompiler, typetrack, call-edge arity inference and Frida)
+// to invent register arguments for old binaries.
 //
-// This is Dart's OWN convention, not the platform C ABI. The decompiler
-// previously used x0–x7 / rdi–r9 (C ABI), which includes R0 (kClassIdReg)
-// and R4 (ARGS_DESC_REG) — registers that are NOT argument registers in
-// Dart's convention. typetrack had the correct list; this makes it shared.
+// Exact source:
 //
-// On x86_64 before 3.x, DartCallingConvention does not exist and arguments
-// are passed on the stack — see AGENTS-local.md. The list below is still
-// the correct set for 3.x; callers that handle 2.x x86_64 must check
-// separately.
+//	3.3.0 runtime/vm/constants_{arm64,x64}.h: no DartCallingConvention
+//	3.4.3 runtime/vm/constants_arm64.h:
+//	    kCpuRegistersForArgs = {R1,R2,R3,R5,R6,R7}
+//	    kFpuRegistersForArgs = {V0,V1,V2,V3,V4,V5}
+//	3.4.3 runtime/vm/constants_x64.h:
+//	    kCpuRegistersForArgs = {RDI,RSI,RDX,RBX,R8,R9}
+//	    kFpuRegistersForArgs = {XMM1,XMM2,XMM3,XMM4,XMM5,XMM6}
+//
+// Function::MaxNumberOfParametersInRegisters adds a SECOND, per-function
+// gate: generics and several Function::Kind values always use the stack, and
+// precompiler-only unboxing metadata can force the stack as well. The latter
+// metadata lives in KernelProgramInfo/kernel metadata and is not serialized in
+// a full AOT snapshot, so this type describes only the architecture/version
+// register layout. Callers must still establish that a particular function
+// actually uses it before assigning source parameters to these registers.
+const FirstRegisterCallingConventionVersion = "3.4.3"
 
-// DartArgRegisters returns the canonical register indices Dart AOT passes
-// arguments in, parameter 0 first.
-func DartArgRegisters(isARM64 bool) []int {
-	if isARM64 {
-		return []int{1, 2, 3, 5, 6, 7}
+type RegisterCallingConvention struct {
+	GPR       []int
+	GPRNames  []string
+	FPUName   []string
+	FPUReturn string
+}
+
+// DartRegisterCallingConvention returns the SDK register layout for versions
+// where that calling convention exists. ok=false means Dart parameters are
+// stack-passed by construction (<=3.3.0 or an unknown/empty version).
+func DartRegisterCallingConvention(dartVersion string, isARM64 bool) (cc RegisterCallingConvention, ok bool) {
+	if dartVersion == "" || !snapshot.VersionAtLeast(dartVersion, FirstRegisterCallingConventionVersion) {
+		return RegisterCallingConvention{}, false
 	}
-	// RDI=7, RSI=6, RDX=2, RBX=3, R8=8, R9=9.
-	return []int{7, 6, 2, 3, 8, 9}
+	if isARM64 {
+		return RegisterCallingConvention{
+			GPR:       []int{1, 2, 3, 5, 6, 7},
+			GPRNames:  []string{"x1", "x2", "x3", "x5", "x6", "x7"},
+			FPUName:   []string{"v0", "v1", "v2", "v3", "v4", "v5"},
+			FPUReturn: "v0",
+		}, true
+	}
+	return RegisterCallingConvention{
+		GPR:       []int{7, 6, 2, 3, 8, 9},
+		GPRNames:  []string{"rdi", "rsi", "rdx", "rbx", "r8", "r9"},
+		FPUName:   []string{"xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6"},
+		FPUReturn: "xmm0",
+	}, true
 }
 
 // DispatchTableOriginElement is DispatchTable::kOriginElement, the element the
@@ -218,16 +273,6 @@ func DispatchTableOriginElement(isARM64 bool) int {
 // built for both: x86_64 emitted 1.7-1.8x ARM64's placeholder tokens.
 const ICDataArgRegIndex = 3
 
-// DartArgRegNames returns the string names of the Dart calling-convention
-// argument registers, parameter 0 first — for the decompiler's pseudocode
-// display.
-func DartArgRegNames(isARM64 bool) []string {
-	if isARM64 {
-		return []string{"x1", "x2", "x3", "x5", "x6", "x7"}
-	}
-	return []string{"rdi", "rsi", "rdx", "rbx", "r8", "r9"}
-}
-
 // ── Object layout constants ───────────────────────────────────────────
 //
 // Source: runtime/vm/raw_object.h, runtime/vm/pointer_tagging.h,
@@ -250,21 +295,10 @@ const (
 	//   kUnchecked:            field offset 16 -> displacement 0xf (15)
 	//   kMonomorphicUnchecked: field offset 32 -> displacement 0x1f (31)
 	//
-	// Compressed mode (Dart 2.18+ / 3.x, compressed_ptr = 4, word_size = 8):
-	//   kNormal:               field offset  4 -> displacement 0x3 (3)
-	//   kMonomorphic:          field offset 12 -> displacement 0xb (11)
-	//   kUnchecked:            field offset  8 -> displacement 0x7 (7)
-	//   kMonomorphicUnchecked: field offset 16 -> displacement 0xf (15)
-
 	CodeEntryPointDispUncompressed            = 0x7
 	CodeMonomorphicEntryPointDispUncompressed = 0x17
 	CodeUncheckedEntryPointDispUncompressed   = 0xf
 	CodeMonomorphicUncheckedDispUncompressed  = 0x1f
-
-	CodeEntryPointDispCompressed            = 0x3
-	CodeMonomorphicEntryPointDispCompressed = 0xb
-	CodeUncheckedEntryPointDispCompressed   = 0x7
-	CodeMonomorphicUncheckedDispCompressed  = 0xf
 )
 
 // ── Pool index layout constants ───────────────────────────────────────
@@ -348,39 +382,3 @@ const (
 	GPR RegisterClass = iota
 	FPU
 )
-
-// ARM64FpuArgRegNames returns the FPU argument register names (V0-V5) in
-// parameter order, for the decompiler's pseudocode display.
-func ARM64FpuArgRegNames() []string {
-	return []string{"v0", "v1", "v2", "v3", "v4", "v5"}
-}
-
-// ARM64FpuReturnRegName is the FPU return register name for ARM64.
-const ARM64FpuReturnRegName = "v0"
-
-// X86FpuArgRegNames returns the FPU argument register names (XMM1-XMM6) in
-// parameter order, for the decompiler's pseudocode display.
-func X86FpuArgRegNames() []string {
-	return []string{"xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6"}
-}
-
-// X86FpuReturnRegName is the FPU return register name for x86_64.
-const X86FpuReturnRegName = "xmm0"
-
-// DartFpuArgRegNames returns the FPU argument register names for the
-// selected architecture.
-func DartFpuArgRegNames(isARM64 bool) []string {
-	if isARM64 {
-		return ARM64FpuArgRegNames()
-	}
-	return X86FpuArgRegNames()
-}
-
-// FpuReturnRegName returns the FPU return register name for the selected
-// architecture.
-func FpuReturnRegName(isARM64 bool) string {
-	if isARM64 {
-		return ARM64FpuReturnRegName
-	}
-	return X86FpuReturnRegName
-}

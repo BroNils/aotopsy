@@ -50,6 +50,17 @@ func TestReadSLEB128(t *testing.T) {
 	if _, _, err := readSLEB128(nil, 0); err == nil {
 		t.Error("empty input did not error")
 	}
+	tooLong := append([]byte(nil), make([]byte, 10)...)
+	for i := range tooLong {
+		tooLong[i] = 0x80
+	}
+	tooLong = append(tooLong, 0x00)
+	if _, _, err := readSLEB128(tooLong, 0); err == nil {
+		t.Error("11-byte int64 SLEB128 did not error")
+	}
+	if _, _, err := readSLEB128Bits([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x00}, 0, 32); err == nil {
+		t.Error("6-byte int32 SLEB128 did not error")
+	}
 }
 
 // TestDecodeKindAndMetadata pins the bit layout of
@@ -145,6 +156,12 @@ func TestDecodePcDescriptors(t *testing.T) {
 	// A record missing its delta must be reported, not silently dropped.
 	if _, err := DecodePcDescriptors([]byte{enc(1, 0)}); err == nil {
 		t.Error("truncated record did not error")
+	}
+	// A large positive delta must not wrap through uint32 into a plausible PC.
+	// 2^32 as canonical SLEB128: four zero data groups followed by 0x10.
+	oversizedDelta := []byte{enc(1, -1), 0x80, 0x80, 0x80, 0x80, 0x10}
+	if _, err := DecodePcDescriptors(oversizedDelta); err == nil {
+		t.Error("pc offset beyond uint32 was accepted")
 	}
 }
 

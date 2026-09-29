@@ -72,6 +72,17 @@ func TestFuncSlice(t *testing.T) {
 		t.Errorf("expected out of bounds range to fail")
 	}
 
+	// A range that starts in-bounds but extends beyond the image is accepted
+	// by the listing-oriented clamped Slice, but must be rejected by SliceExact
+	// because identity-bearing consumers cannot hash a truncated prefix.
+	rTruncated := cluster.CodeRange{PCOffset: 0x104, Size: 8, RefID: -1}
+	if fs, ok := im.Slice(rTruncated); !ok || len(fs.Code) != 4 {
+		t.Fatalf("expected clamped Slice to expose 4-byte prefix, got len=%d ok=%v", len(fs.Code), ok)
+	}
+	if _, ok := im.SliceExact(rTruncated); ok {
+		t.Fatal("SliceExact accepted a truncated function range")
+	}
+
 	// Nil Code image (metadata-only)
 	imNil := NewCodeImage(nil, codeVA, codeOff, pool, nil)
 	fsNil, ok := imNil.Slice(r1)

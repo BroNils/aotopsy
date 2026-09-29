@@ -1,11 +1,45 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
 )
+
+// readFillCompressedStackMaps reads the dedicated CompressedStackMaps fill
+// format used when the object is not emitted through ROData. Unlike the other
+// inline-byte objects, its leading unsigned is semantically part of the object:
+// flags_and_size contains both the two table flags and the payload byte count.
+// Keep that uint32 header in front of the raw bytes because
+// DecodeCompressedStackMaps consumes the in-memory object payload shape.
+func readFillCompressedStackMaps(s *dartfmt.Stream, cm *ClusterMeta, lengthShift uint) ([][]byte, error) {
+	payloads := make([][]byte, 0, initialCaptureCap(cm.Count, s.Remaining()))
+	for i := int64(0); i < cm.Count; i++ {
+		raw, err := s.ReadUnsigned()
+		if err != nil {
+			return payloads, fmt.Errorf("compressed_stack_maps %d/%d flags_and_size: %w", i, cm.Count, err)
+		}
+		if raw < 0 || raw > math.MaxUint32 {
+			return payloads, fmt.Errorf("compressed_stack_maps %d/%d flags_and_size %d out of uint32 range", i, cm.Count, raw)
+		}
+		length := raw >> lengthShift
+		if length < 0 || length > int64(s.Remaining()) {
+			return payloads, fmt.Errorf("compressed_stack_maps %d/%d data length %d exceeds remaining %d", i, cm.Count, length, s.Remaining())
+		}
+		buf, err := s.ReadBytes(int(length))
+		if err != nil {
+			return payloads, fmt.Errorf("compressed_stack_maps %d/%d data (%d bytes): %w", i, cm.Count, length, err)
+		}
+		p := make([]byte, 4+len(buf))
+		binary.LittleEndian.PutUint32(p[:4], uint32(raw))
+		copy(p[4:], buf)
+		payloads = append(payloads, p)
+	}
+	return payloads, nil
+}
 
 // skipFillInlineBytes skips clusters that store inline byte data.
 // Per object: ReadUnsigned(length) + ReadBytes(length).
@@ -32,7 +66,7 @@ func skipFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, lengthShift uint) e
 func readFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, capture bool, lengthShift uint) ([][]byte, error) {
 	var payloads [][]byte
 	if capture {
-		payloads = make([][]byte, 0, cm.Count)
+		payloads = make([][]byte, 0, initialCaptureCap(cm.Count, s.Remaining()))
 	}
 	for i := int64(0); i < cm.Count; i++ {
 		raw, err := s.ReadUnsigned()
@@ -50,11 +84,9 @@ func readFillInlineBytes(s *dartfmt.Stream, cm *ClusterMeta, capture bool, lengt
 		if err != nil {
 			return payloads, fmt.Errorf("inline_bytes %d/%d data (%d bytes): %w", i, cm.Count, length, err)
 		}
-		// Copy: ReadBytes may alias the underlying snapshot buffer, and these
-		// payloads outlive the parse.
-		cp := make([]byte, len(buf))
-		copy(cp, buf)
-		payloads = append(payloads, cp)
+		// ReadBytes already returns an owned copy; retaining it does not pin the
+		// snapshot buffer and copying it again only doubles peak memory.
+		payloads = append(payloads, buf)
 	}
 	return payloads, nil
 }
@@ -82,12 +114,15 @@ func skipFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, pro
 // dead OldArrayFill branch + readFillArrayOld for it; no SDK version actually
 // used that format, so both were removed.)
 func readFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) ([]ArrayInfo, error) {
-	arrays := make([]ArrayInfo, 0, cm.Count)
+	arrays := make([]ArrayInfo, 0, initialCaptureCap(cm.Count, s.Remaining()))
 	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return arrays, fmt.Errorf("array %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "array"); err != nil {
+			return arrays, err
 		}
 		// v2.10: Read<bool>(is_canonical) after length.
 		if profile.PreCanonicalSplit {
@@ -100,7 +135,7 @@ func readFillArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, pro
 		if err != nil {
 			return arrays, fmt.Errorf("array %d type_args: %w", i, err)
 		}
-		elems := make([]int, 0, length)
+		elems := make([]int, 0, initialCaptureCap(length, s.Remaining()))
 		for j := int64(0); j < length; j++ {
 			r, err := readRef(s, fillRefUnsigned)
 			if err != nil {
@@ -121,6 +156,9 @@ func skipFillWeakArray(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool)
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return fmt.Errorf("weak_array %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "weak_array"); err != nil {
+			return err
 		}
 		for j := int64(0); j < length; j++ {
 			if _, err := readRef(s, fillRefUnsigned); err != nil {
@@ -152,10 +190,17 @@ func readFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable
 		if err != nil {
 			return fmt.Errorf("typed_data %d/%d length: %w", i, cm.Count, err)
 		}
+		if err := validateFillLength(cm, i, length, "typed_data"); err != nil {
+			return err
+		}
 		if preCanonicalSplit {
 			if _, err := s.ReadByte(); err != nil {
 				return fmt.Errorf("typed_data %d is_canonical: %w", i, err)
 			}
+		}
+		if length < 0 || elemSize <= 0 || length > int64(s.Remaining()/elemSize) {
+			return fmt.Errorf("typed_data %d/%d byte length out of range: length=%d elem_size=%d remaining=%d",
+				i, cm.Count, length, elemSize, s.Remaining())
 		}
 		nbytes := int(length) * elemSize
 		if keep && out != nil && nbytes > 0 {
@@ -163,12 +208,8 @@ func readFillTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable
 			if err != nil {
 				return fmt.Errorf("typed_data %d/%d data (%d bytes): %w", i, cm.Count, nbytes, err)
 			}
-			// Copy: the stream's buffer is the whole snapshot image, and a
-			// sub-slice of it would pin the entire file for the lifetime of
-			// the Result.
-			b := make([]byte, len(payload))
-			copy(b, payload)
-			out[ref+int(i)] = b
+			// ReadBytes already returns an owned copy; store it directly.
+			out[ref+int(i)] = payload
 		} else if err := s.Skip(nbytes); err != nil {
 			return fmt.Errorf("typed_data %d/%d data (%d bytes): %w", i, cm.Count, nbytes, err)
 		}
@@ -194,6 +235,9 @@ func readFillExceptionHandlers(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsign
 		if !fillRefUnsigned {
 			length = raw >> 1
 		}
+		if err := validateFillLength(cm, i, length, "exception_handlers"); err != nil {
+			return result, err
+		}
 		handledTypesRef, err := readRef(s, fillRefUnsigned)
 		if err != nil {
 			return result, fmt.Errorf("exc_handlers %d handled_types: %w", i, err)
@@ -207,7 +251,7 @@ func readFillExceptionHandlers(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsign
 			if err != nil {
 				return result, fmt.Errorf("exc_handlers %d handler %d pc: %w", i, j, err)
 			}
-			outerTry, err := s.ReadTagged32()
+			outerTry, err := s.ReadTagged16()
 			if err != nil {
 				return result, fmt.Errorf("exc_handlers %d handler %d try_idx: %w", i, j, err)
 			}
@@ -246,6 +290,9 @@ func readFillContext(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) (
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return result, fmt.Errorf("context %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "context"); err != nil {
+			return result, err
 		}
 		parentRef, err := readRef(s, fillRefUnsigned)
 		if err != nil {
@@ -287,6 +334,9 @@ func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned b
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return result, fmt.Errorf("type_args %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "type_args"); err != nil {
+			return result, err
 		}
 		if profile.PreCanonicalSplit {
 			if _, err := s.ReadByte(); err != nil {
@@ -374,6 +424,9 @@ func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bo
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return fmt.Errorf("context_scope %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "context_scope"); err != nil {
+			return err
 		}
 		// Read<bool>(is_implicit) = ReadByte.
 		if _, err := s.ReadByte(); err != nil {

@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/decompiler/stmt"
 )
 
 // IdentStats tracks how often each identifier appears in the emitted
@@ -166,7 +168,7 @@ func CollectIdentStats(source string) map[string]*IdentStats {
 	}
 
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(stmt.CodeOutsideStrings(line))
 		if strings.HasPrefix(trimmed, "//") {
 			continue
 		}
@@ -231,32 +233,5 @@ func CollectIdentStats(source string) map[string]*IdentStats {
 // the decompiler package (which calls ApplyIdentReclassification) and
 // this package (which used to call replaceIdentToken in naming.go).
 func ReplaceIdentToken(text, old, newName string) string {
-	if old == "" {
-		return text
-	}
-	var b strings.Builder
-	i := 0
-	for {
-		idx := strings.Index(text[i:], old)
-		if idx < 0 {
-			b.WriteString(text[i:])
-			break
-		}
-		start := i + idx
-		end := start + len(old)
-		beforeOK := start == 0 || !isIdentChar(text[start-1])
-		afterOK := end == len(text) || !isIdentChar(text[end])
-		b.WriteString(text[i:start])
-		if beforeOK && afterOK {
-			b.WriteString(newName)
-		} else {
-			b.WriteString(old)
-		}
-		i = end
-	}
-	return b.String()
-}
-
-func isIdentChar(c byte) bool {
-	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	return stmt.ReplaceIdent(text, old, newName)
 }

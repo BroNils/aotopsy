@@ -111,14 +111,16 @@ func RunFromMain(d FromMainDeps) error {
 	}
 	fmt.Fprintf(os.Stderr, "--from-main: entry point at 0x%x\n", mainVA)
 
-	runtime.GOMAXPROCS(2)
-	debug.SetMemoryLimit(1536 << 20)
+	oldProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(oldProcs)
+	oldLimit := debug.SetMemoryLimit(1536 << 20)
+	defer debug.SetMemoryLimit(oldLimit)
 
 	visited := make(map[uint64]bool)
 	touchedClasses := make(map[int]bool)
 	classTouched := 0
 	queue := []uint64{mainVA}
-	emitted, skipped, frameworkSkipped, unknownLibrary := 0, 0, 0, 0
+	emitted, frameworkSkipped, unknownLibrary := 0, 0, 0
 	var agg decompiler.Stats
 	var fridaHooks []frida.FridaHook
 	var fridaProbes []frida.FridaProbe
@@ -154,18 +156,16 @@ func RunFromMain(d FromMainDeps) error {
 			fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s (library=%q)\n", va, r.Size, d.SymbolNames[va], url)
 		}
 
-		func() {
+		if err := func() (err error) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					skipped++
-					fmt.Fprintf(os.Stderr, "warning: recovered panic decompiling 0x%x: %v\n", va, rec)
+					err = fmt.Errorf("panic: %v", rec)
 				}
 			}()
 
 			fir, err := d.BuildFuncIR(r)
 			if err != nil {
-				skipped++
-				return
+				return err
 			}
 			art := decompiler.EmitPseudocode(fir, d.SymbolLookup, d.PoolLookup)
 			_, _ = fmt.Fprintf(d.W, "// === %s (PCOffset=0x%x) ===\n%s\n\n", art.FunctionName, r.PCOffset, art.Source)
@@ -209,7 +209,10 @@ func RunFromMain(d FromMainDeps) error {
 					}
 				}
 			}
-		}()
+			return nil
+		}(); err != nil {
+			return fmt.Errorf("--from-main: decompile 0x%x ref=%d: %w", va, r.RefID, err)
+		}
 
 		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
 			if err := d.W.Flush(); err != nil {
@@ -219,22 +222,19 @@ func RunFromMain(d FromMainDeps) error {
 			debug.FreeOSMemory()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			fmt.Fprintf(os.Stderr, "progress: %d emitted, %d skipped, %d framework-skipped, heap=%dMiB, elapsed=%s\n",
-				emitted, skipped, frameworkSkipped, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
+			fmt.Fprintf(os.Stderr, "progress: %d emitted, %d framework-skipped, heap=%dMiB, elapsed=%s\n",
+				emitted, frameworkSkipped, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
 		}
 	}
 	if err := d.W.Flush(); err != nil {
 		return fmt.Errorf("final flush %s: %w", d.CombinedPath, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "emitted %d functions (skipped %d, %d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
-		emitted, skipped, frameworkSkipped, unknownLibrary, classTouched, d.CombinedPath, time.Since(d.StartTime).Round(time.Second))
+	fmt.Fprintf(os.Stderr, "emitted %d functions (%d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
+		emitted, frameworkSkipped, unknownLibrary, classTouched, d.CombinedPath, time.Since(d.StartTime).Round(time.Second))
 	PrintAggregateStats(agg)
 	if d.GenFrida {
-		if fridaProbesDropped > 0 {
-			fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes)\n", fridaProbesDropped, frida.MaxFridaProbes)
-		}
-		if err := frida.WriteFridaScript(d.GenFridaOut, d.OutDir, d.LibPath, d.IsARM64, fridaHooks, fridaProbes, d.FridaOpts); err != nil {
+		if err := FinalizeFridaOutput(d.GenFridaOut, d.OutDir, d.LibPath, d.IsARM64, fridaHooks, fridaProbes, fridaProbesDropped, d.FridaOpts); err != nil {
 			return err
 		}
 	}
@@ -274,7 +274,7 @@ func FindCallerOfAmongAppCode(
 		}
 		fir, err := buildFuncIR(r)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("build IR for caller candidate 0x%x: %w", va, err)
 		}
 		for _, callee := range callTargetsOf(fir) {
 			if callee == targetVA {

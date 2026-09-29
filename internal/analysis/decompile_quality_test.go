@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/samplecorpus"
 )
 
 // TestDecompileQualityCorpus is the corpus-wide decompiler quality gate that the
@@ -34,10 +33,7 @@ func TestDecompileQualityCorpus(t *testing.T) {
 	covered := 0
 
 	for _, name := range targets {
-		path := samplecorpus.Path(name)
-		if path == "" {
-			continue
-		}
+		path := corpusSample(t, name)
 		covered++
 		ctx, err := LoadContext(path)
 		if err != nil {

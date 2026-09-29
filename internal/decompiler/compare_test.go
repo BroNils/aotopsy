@@ -1,6 +1,7 @@
 package decompiler
 
 import (
+	"strings"
 	"testing"
 
 	"aotopsy/internal/sdk"
@@ -116,12 +117,20 @@ func TestX86TestUsesBothOperands(t *testing.T) {
 //	assembler_arm64.h  add(dst, dst, Operand(HEAP_BITS, LSL, 32))
 //	assembler_x64.cc   movl(dest, slot); addq(dest, Address(THR, heap_base_offset()))
 func TestPointerDecompressionIsElided(t *testing.T) {
-	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+	arm := &FuncIR{DartVersion: "3.12.2", FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
 		NullReg: sdk.ARM64NullRegStr, HeapBitsReg: sdk.ARM64HeapBitsStr}
 	s := newLiftState(arm.NullReg)
 	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #32"})
 	if got := s.lookupReg("x0"); got != "x1" {
 		t.Errorf("ARM64 decompression should render as the operand alone, got %q", got)
+	}
+
+	legacy := &FuncIR{DartVersion: "2.13.0", FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+		NullReg: sdk.ARM64NullRegStr, HeapBaseReg: sdk.ARM64HeapBaseLegacyStr, BarrierMaskReg: sdk.ARM64HeapBitsStr}
+	sLegacy := newLiftState(legacy.NullReg)
+	ApplyOther(legacy, sLegacy, Instr{Src: "add x0, x1, x23"})
+	if got := sLegacy.lookupReg("x0"); got != "x1" {
+		t.Errorf("Dart 2.13 HEAP_BASE decompression should render as the operand alone, got %q", got)
 	}
 
 	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr,
@@ -137,7 +146,7 @@ func TestPointerDecompressionIsElided(t *testing.T) {
 // A shift that is not by 32, or a Thread field that is not heap_base, is
 // ordinary arithmetic and must survive.
 func TestNonDecompressionAddsSurvive(t *testing.T) {
-	arm := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
+	arm := &FuncIR{DartVersion: "3.12.2", FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr,
 		NullReg: sdk.ARM64NullRegStr, HeapBitsReg: sdk.ARM64HeapBitsStr}
 	s := newLiftState(arm.NullReg)
 	ApplyOther(arm, s, Instr{Src: "add x0, x1, x28, lsl #16"})
@@ -148,6 +157,12 @@ func TestNonDecompressionAddsSurvive(t *testing.T) {
 	if got := s.lookupReg("x2"); got == "x1" {
 		t.Errorf("only the heap-bits register marks decompression, got %q", got)
 	}
+	legacy := &FuncIR{DartVersion: "2.13.0", ThreadReg: sdk.ARM64ThreadRegStr}
+	sLegacy := newLiftState("")
+	ApplyOther(legacy, sLegacy, Instr{Src: "add x3, x1, x28"})
+	if got := sLegacy.lookupReg("x3"); got == "x1" {
+		t.Errorf("Dart 2.13 x28 is BARRIER_MASK, not decompression: %q", got)
+	}
 
 	x64 := &FuncIR{FrameReg: sdk.X86FrameRegStr, PoolReg: sdk.X86PoolRegStr, ThreadReg: sdk.X86ThreadRegStr,
 		ThreadFieldNames: map[int64]string{0x68: "heap_base", 0x70: "stack_limit"}}
@@ -156,6 +171,59 @@ func TestNonDecompressionAddsSurvive(t *testing.T) {
 	ApplyOther(x64, sx, Instr{Src: "add rax, [r14+0x70]"})
 	if got := sx.lookupReg("rax"); got == "obj" {
 		t.Errorf("adding a non-heap_base Thread field is real arithmetic, got %q", got)
+	}
+}
+
+func TestFlagClobberInvalidatesRememberedComparison(t *testing.T) {
+	x64 := &FuncIR{ThreadReg: sdk.X86ThreadRegStr}
+	s := newLiftState("")
+	ApplyOther(x64, s, Instr{Src: "cmp rax, rbx"})
+	if !s.HasCmp {
+		t.Fatal("cmp did not establish comparison state")
+	}
+	ApplyOther(x64, s, Instr{Src: "add rcx, 1"})
+	if s.HasCmp {
+		t.Fatal("x86 ADD left stale comparison state live")
+	}
+
+	arm := &FuncIR{ThreadReg: sdk.ARM64ThreadRegStr}
+	sa := newLiftState("")
+	ApplyOther(arm, sa, Instr{Src: "cmp x0, x1"})
+	ApplyOther(arm, sa, Instr{Src: "add x2, x2, #1"})
+	if !sa.HasCmp {
+		t.Fatal("plain ARM64 ADD incorrectly clobbered NZCV comparison state")
+	}
+	ApplyOther(arm, sa, Instr{Src: "adds x2, x2, #1"})
+	if sa.HasCmp {
+		t.Fatal("ARM64 ADDS left stale comparison state live")
+	}
+}
+
+func TestMOVKReplacesSelectedHalfword(t *testing.T) {
+	fir := &FuncIR{ThreadReg: sdk.ARM64ThreadRegStr}
+	tests := []struct {
+		dst, src string
+		wantBits string
+	}{
+		{"x0", "movk x0, #0x1234", "~(0xffff << 0)"},
+		{"x0", "movk x0, #0x1234, lsl #16", "~(0xffff << 16)"},
+		{"x0", "movk x0, #0x1234, lsl #32", "~(0xffff << 32)"},
+		{"x0", "movk x0, #0x1234, lsl #48", "~(0xffff << 48)"},
+	}
+	for _, tt := range tests {
+		s := newLiftState("")
+		s.setReg(tt.dst, "old")
+		ApplyOther(fir, s, Instr{Src: tt.src})
+		got := s.lookupReg(tt.dst)
+		if !strings.Contains(got, tt.wantBits) || !strings.Contains(got, "& 0xffff") {
+			t.Errorf("%s -> %q, expected replacement mask", tt.src, got)
+		}
+	}
+	s := newLiftState("")
+	s.setReg("w0", "old")
+	ApplyOther(fir, s, Instr{Src: "movk w0, #0xabcd, lsl #16"})
+	if got := s.lookupReg("x0"); !strings.Contains(got, "& 0xffffffff") {
+		t.Fatalf("W-register MOVK did not zero-extend to 32 bits: %q", got)
 	}
 }
 

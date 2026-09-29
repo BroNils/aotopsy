@@ -269,6 +269,7 @@ func TestCrossVersionDifferential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping heavy cross-version differential in short mode")
 	}
+	requireCompleteCorpus(t)
 	sets := samplecorpus.SourceSets()
 	if len(sets) == 0 {
 		t.Skip("no source set with two or more members in samplecorpus.Registry")
@@ -284,11 +285,7 @@ func TestCrossVersionDifferential(t *testing.T) {
 		t.Run(setName, func(t *testing.T) {
 			measured := make([]*sampleMetrics, 0, len(sets[setName]))
 			for _, s := range sets[setName] {
-				path := samplecorpus.Path(s.FileName())
-				if path == "" {
-					t.Logf("skipping %s: %s", s.FileName(), samplecorpus.MissingMessage(s))
-					continue
-				}
+				path := corpusSample(t, s.FileName())
 				if s.ProfileIncomplete != "" {
 					t.Logf("skipping %s: %s", s.FileName(), s.ProfileIncomplete)
 					continue

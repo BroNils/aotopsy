@@ -17,11 +17,11 @@ func TestBuildFfiBridges(t *testing.T) {
 				CSignatureRef:     202,
 				CallbackTargetRef: 203,
 				CallbackID:        7,
-				FfiFunctionKind:   cluster.FfiKindCallback,
+				CallbackKindRaw:   4,
 			},
 			{
 				RefID:           102,
-				FfiFunctionKind: cluster.FfiKindSync,
+				CallbackKindRaw: 0,
 			},
 		},
 	}
@@ -39,8 +39,8 @@ func TestBuildFfiBridges(t *testing.T) {
 		t.Fatalf("expected 2 FfiBridgeRecords, got %d", len(records))
 	}
 
-	if records[0].Kind != "callback" {
-		t.Errorf("expected kind 'callback', got %q", records[0].Kind)
+	if records[0].CallbackKindRaw != 4 {
+		t.Errorf("expected raw callback kind 4, got %d", records[0].CallbackKindRaw)
 	}
 	if records[0].CallbackID != 7 {
 		t.Errorf("expected callback_id 7, got %d", records[0].CallbackID)
@@ -52,8 +52,8 @@ func TestBuildFfiBridges(t *testing.T) {
 		t.Errorf("unexpected callback target: %q", records[0].CallbackTarget)
 	}
 
-	if records[1].Kind != "sync" {
-		t.Errorf("expected kind 'sync', got %q", records[1].Kind)
+	if records[1].CallbackKindRaw != 0 {
+		t.Errorf("expected raw callback kind 0, got %d", records[1].CallbackKindRaw)
 	}
 }
 
@@ -85,9 +85,17 @@ func TestBuildPlatformChannels(t *testing.T) {
 			FromFunc: "package:my_app/main.dart::launchURL",
 			Target:   "package:flutter/services.dart::MethodChannel.invokeMethod",
 		},
+		{
+			FromFunc: "package:my_app/pay.dart::sendPayment",
+			Target:   "package:flutter/services.dart::BasicMessageChannel.send",
+		},
+	}
+	stringRefs := []disasm.StringRefRecord{
+		{Func: "package:my_app/main.dart::launchURL", Value: "plugins.flutter.io/url_launcher"},
+		{Func: "package:my_app/pay.dart::sendPayment", Value: "com.example.app/payments"},
 	}
 
-	channels := BuildPlatformChannels(cl, pl, edges)
+	channels := BuildPlatformChannels(cl, pl, edges, stringRefs)
 	if len(channels) != 2 {
 		t.Fatalf("expected 2 platform channels, got %d", len(channels))
 	}
@@ -96,8 +104,11 @@ func TestBuildPlatformChannels(t *testing.T) {
 	for _, ch := range channels {
 		if ch.ChannelName == "plugins.flutter.io/url_launcher" {
 			foundURL = true
-			if ch.ChannelType != "method_channel" {
-				t.Errorf("expected method_channel, got %q", ch.ChannelType)
+			if len(ch.ChannelTypes) != 1 || ch.ChannelTypes[0] != "method_channel" {
+				t.Errorf("expected method_channel, got %q", ch.ChannelTypes)
+			}
+			if len(ch.CallSites) != 1 || ch.CallSites[0] != "package:my_app/main.dart::launchURL" {
+				t.Errorf("unexpected callsites: %q", ch.CallSites)
 			}
 		}
 	}
@@ -115,13 +126,24 @@ func TestBuildDeobfuscationMap(t *testing.T) {
 				ClassID:        100,
 				SuperTypeRefID: 20,
 			},
+			{
+				RefID:       2,
+				NameRefID:   12,
+				ClassID:     200,
+				TypeArgsOff: cluster.NoTypeArguments,
+			},
 		},
+		Types: []cluster.TypeInfo{{RefID: 20, ClassID: 200}},
 	}
 
 	pl := &naming.PoolLookups{
 		RefToStr: map[int]string{
 			10: "a",
-			20: "ChangeNotifier",
+			12: "ChangeNotifier",
+		},
+		RefToNamed: map[int]*cluster.NamedObject{
+			1: {RefID: 1, NameRefID: 10},
+			2: {RefID: 2, NameRefID: 12},
 		},
 	}
 
@@ -152,5 +174,49 @@ func TestBuildDeobfuscationMap(t *testing.T) {
 	}
 	if rec.Confidence < 0.9 {
 		t.Errorf("expected confidence >= 0.9, got %f", rec.Confidence)
+	}
+}
+
+func TestBuildDeobfuscationMapDoesNotInventRoleWithoutEvidence(t *testing.T) {
+	cl := &cluster.Result{Classes: []cluster.ClassInfo{{RefID: 1, NameRefID: 10, ClassID: 100}}}
+	pl := &naming.PoolLookups{RefToStr: map[int]string{10: "a"}}
+
+	records := BuildDeobfuscationMap(cl, pl, nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 deobfuscated record, got %d", len(records))
+	}
+	if got := records[0].PredictedRole; got != "Unknown" {
+		t.Fatalf("predicted role without evidence = %q, want Unknown", got)
+	}
+	if got := records[0].Confidence; got != 0 {
+		t.Fatalf("confidence without evidence = %f, want 0", got)
+	}
+	if len(records[0].Clues) != 0 {
+		t.Fatalf("unexpected clues without evidence: %v", records[0].Clues)
+	}
+}
+
+func TestBuildDeobfuscationMapRejectsAmbiguousOwnerStringEvidence(t *testing.T) {
+	cl := &cluster.Result{Classes: []cluster.ClassInfo{
+		{RefID: 1, NameRefID: 10, ClassID: 100},
+		{RefID: 2, NameRefID: 11, ClassID: 200},
+	}}
+	pl := &naming.PoolLookups{RefToStr: map[int]string{10: "a", 11: "a"}}
+	stringRefs := []disasm.StringRefRecord{{
+		Func:  "a.login",
+		Value: "https://api.example.com/v1/auth/login",
+	}}
+
+	records := BuildDeobfuscationMap(cl, pl, stringRefs)
+	if len(records) != 2 {
+		t.Fatalf("expected 2 deobfuscated records, got %d", len(records))
+	}
+	for _, rec := range records {
+		if rec.PredictedRole != "Unknown" || rec.Confidence != 0 {
+			t.Fatalf("ambiguous owner %q class %d received foreign evidence: %+v", rec.ObfuscatedName, rec.ClassID, rec)
+		}
+		if len(rec.Clues) != 0 {
+			t.Fatalf("ambiguous owner class %d received clues: %v", rec.ClassID, rec.Clues)
+		}
 	}
 }

@@ -3,7 +3,6 @@ package typetrack
 import (
 	"aotopsy/internal/arch/x86"
 	"sort"
-	"strings"
 
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
@@ -39,7 +38,11 @@ const (
 // killing RBX (leaving stale type info after calls that could propagate
 // incorrect types).
 var x86ArgRegCanon = func() [6]int {
-	r := sdk.DartArgRegisters(sdk.ArchX86)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.FirstRegisterCallingConventionVersion, sdk.ArchX86)
+	if !ok {
+		panic("sdk: x86_64 register calling convention missing at first supported version")
+	}
+	r := cc.GPR
 	var arr [6]int
 	copy(arr[:], r)
 	return arr
@@ -75,6 +78,9 @@ func AnalyzeFunctionX86(
 	// We store it keyed by the CALL's address.
 	for i := 0; i < len(insts); i++ {
 		inst := insts[i]
+		if inst.Bad {
+			continue
+		}
 		if inst.Inst.Op != x86asm.CALL {
 			continue
 		}
@@ -153,8 +159,16 @@ func AnalyzeFunctionX86(
 		var cmpReg, cmpImm int
 		var hasCmp bool
 		for _, inst := range blk.insts {
+			if inst.Bad {
+				hasCmp = false
+				transferInstructionX86(&state, inst, nil, ctx, result, lca, stackTypes)
+				prevInst = nil
+				continue
+			}
 			if r, imm, ok := isX86CmpRegImm(inst); ok {
 				cmpReg, cmpImm, hasCmp = r, imm, true
+			} else if hasCmp && !x86PreservesCompareFlags(inst.Inst.Op) {
+				hasCmp = false
 			}
 			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
 			prevInst = &inst
@@ -232,6 +246,22 @@ func AnalyzeFunctionX86(
 	return result
 }
 
+// x86PreservesCompareFlags is intentionally small. Any operation not proven
+// flag-transparent invalidates a prior CMP before JE/JNE narrowing. This makes
+// CMP; TEST; JE correct and is safer than trying to maintain an incomplete
+// model of every x86 EFLAGS writer.
+func x86PreservesCompareFlags(op x86asm.Op) bool {
+	if x86.IsCondJump(op) || op == x86asm.JMP || op == x86asm.RET {
+		return true
+	}
+	switch op {
+	case x86asm.MOV, x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD,
+		x86asm.LEA, x86asm.NOP, x86asm.PUSH, x86asm.POP, x86asm.XCHG:
+		return true
+	}
+	return false
+}
+
 // x86BasicBlock is a straight-line sequence of x86_64 instructions with successors.
 type x86BasicBlock struct {
 	insts      []x86.Decoded
@@ -258,6 +288,12 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 
 	leaders := map[int]bool{0: true}
 	for i, d := range insts {
+		if d.Bad || x86.IsSemanticBarrier(d.Inst) {
+			if i+1 < len(insts) {
+				leaders[i+1] = true
+			}
+			continue
+		}
 		isBranch := false
 		switch d.Inst.Op {
 		case x86asm.RET:
@@ -307,6 +343,11 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 			continue
 		}
 		last := blk.insts[len(blk.insts)-1]
+		if last.Bad || x86.IsSemanticBarrier(last.Inst) {
+			// A failed decode or architectural trap is not an instruction we can
+			// safely execute through.
+			continue
+		}
 		switch last.Inst.Op {
 		case x86asm.RET:
 			// terminal
@@ -661,7 +702,7 @@ func handleX86LEA(tc *transferCtxX86) bool {
 // unlocked 11550 field hits.
 func handleX86Bitwise(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
-	if (ins.Op == x86asm.SHR || ins.Op == x86asm.AND) && len(ins.Args) >= 2 {
+	if ins.Op == x86asm.SHR && len(ins.Args) >= 2 {
 		dstReg, dstOK := ins.Args[0].(x86asm.Reg)
 		if !dstOK {
 			return false
@@ -670,20 +711,29 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 		if dstIdx < 0 || dstIdx >= 31 {
 			return false
 		}
-		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			srcIdx := x86.CanonReg(srcReg)
-			if srcIdx >= 0 && srcIdx < 31 {
-				if tc.state[srcIdx].Kind == LatticeKnownClass {
-					tc.state[dstIdx] = tc.state[srcIdx]
-					tc.ctx.UBFXHits++
-					return true
-				}
-				if tc.state[srcIdx].Kind == LatticeBottom {
-					tc.state[dstIdx] = Bottom()
-					tc.ctx.UBFXHits++
-					return true
-				}
-			}
+		// Only the exact LoadClassId lowering may preserve the class-id
+		// abstraction through SHR.  Modern x64 Dart emits:
+		//
+		//   movl result, FieldAddress(object, tags_offset)
+		//   shrl result, kClassIdTagPos
+		//
+		// A generic SHR (or AND) is merely integer arithmetic.  Preserving a
+		// KnownClass/Bottom fact through arbitrary bitwise operations turns an
+		// object/type fact into a confidently wrong dispatch receiver.  Require
+		// both the SDK-defined shift and the immediately preceding header load.
+		shift, shiftOK := ins.Args[1].(x86asm.Imm)
+		if !shiftOK || int(shift) != tc.ctx.ClassIDTagPos || !x86PrevLoadsHeaderInto(tc.prevInst, dstIdx) {
+			tc.state[dstIdx] = Top()
+			return true
+		}
+		if tc.state[dstIdx].Kind == LatticeKnownClass {
+			tc.ctx.UBFXHits++
+			return true
+		}
+		if tc.state[dstIdx].Kind == LatticeBottom {
+			tc.state[dstIdx] = Bottom()
+			tc.ctx.UBFXHits++
+			return true
 		}
 		tc.state[dstIdx] = Top()
 		return true
@@ -691,15 +741,38 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 	return false
 }
 
+func x86PrevLoadsHeaderInto(prev *x86.Decoded, dstIdx int) bool {
+	if prev == nil || prev.Bad || prev.Inst.Op != x86asm.MOV || len(prev.Inst.Args) < 2 {
+		return false
+	}
+	dst, ok := prev.Inst.Args[0].(x86asm.Reg)
+	if !ok || x86.CanonReg(dst) != dstIdx {
+		return false
+	}
+	mem, ok := prev.Inst.Args[1].(x86asm.Mem)
+	if !ok {
+		return false
+	}
+	return mem.Disp == -1 && x86.CanonReg(mem.Base) >= 0
+}
+
 // handleX86Call handles dispatch calls, allocation stubs, and direct calls.
 func handleX86Call(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.CALL && len(ins.Args) >= 1 {
-		callTarget := uint64(0)
-		if rel, ok := ins.Args[0].(x86asm.Rel); ok {
-			callTarget = tc.inst.VA + uint64(tc.inst.Len) + uint64(int64(rel))
+		// Apply architectural implicit writes even though CALL has a dedicated
+		// semantic handler and therefore bypasses the generic write-set path.
+		// In particular every CALL updates RSP.
+		for _, dst := range x86.DstRegsOfInst(ins) {
+			if dst >= 0 && dst < len(tc.state) {
+				tc.state[dst] = Top()
+			}
 		}
-		if callTarget != 0 {
+		callTarget, hasDirectTarget := x86.RelTarget(ins, tc.inst.VA, tc.inst.Len)
+		if _, ok := ins.Args[0].(x86asm.Rel); !ok {
+			hasDirectTarget = false
+		}
+		if hasDirectTarget {
 			if tc.result.BLCallSiteTypes == nil {
 				tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 			}
@@ -750,8 +823,12 @@ func handleX86Call(tc *transferCtxX86) bool {
 			return true
 		}
 		// CALL rel32 — direct call (allocation stub or regular function).
-		if rel, ok := ins.Args[0].(x86asm.Rel); ok {
-			callTarget = tc.inst.VA + uint64(tc.inst.Len) + uint64(int64(rel))
+		if _, ok := ins.Args[0].(x86asm.Rel); ok {
+			if !hasDirectTarget {
+				tc.state[x86RegRAX] = Top()
+				killX86ArgRegs(tc.state)
+				return true
+			}
 			// A call to a per-class allocation stub returns an instance of
 			// that class, exactly, from Code.owner. This replaces a rule that
 			// copied RDI's class into RAX whenever the callee's name started
@@ -766,11 +843,15 @@ func handleX86Call(tc *transferCtxX86) bool {
 				return true
 			}
 			if calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[callTarget]; hasFull {
-				for r := 0; r < 31; r++ {
-					if calleeAllExit[r].Kind != LatticeTop {
-						tc.state[r] = calleeAllExit[r]
+				// The full exit array can know nothing about RAX even when snapshot
+				// metadata provides a concrete return type. Keep that stronger seed.
+				ret := calleeAllExit[x86RegRAX]
+				if ret.Kind == LatticeTop {
+					if seeded, ok := tc.ctx.CalleeExitTypes[callTarget]; ok && seeded.Kind != LatticeTop {
+						ret = seeded
 					}
 				}
+				tc.state[x86RegRAX] = ret
 			} else if calleeExit, hasExit := tc.ctx.CalleeExitTypes[callTarget]; hasExit {
 				tc.state[x86RegRAX] = calleeExit
 			} else {
@@ -783,7 +864,6 @@ func handleX86Call(tc *transferCtxX86) bool {
 		if reg, ok := ins.Args[0].(x86asm.Reg); ok {
 			regIdx := x86.CanonReg(reg)
 			if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
-				sn := tc.state[regIdx].StubName
 				// No allocation case here. An indirect call through a THR
 				// stub slot reaches the GENERIC AllocateObject stub, which
 				// allocates whatever the tags word says -- there is no
@@ -791,26 +871,7 @@ func handleX86Call(tc *transferCtxX86) bool {
 				// not hold the class in a register. The rule that used to sit
 				// here copied RDI's class into RAX, which the ABI does not
 				// support; see AllocationStubCID.
-				if strings.HasPrefix(sn, "UnlinkedCall:") {
-					methodName := sn[len("UnlinkedCall:"):]
-					if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-						res := BlrResolution{PC: tc.inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
-						var allTargets []string
-						for _, selOff := range selectorOffsets {
-							allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
-						}
-						applySelectorCandidates(&res, allTargets)
-						if res.Polymorphic {
-							res.Confidence = "polymorphic"
-						}
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
-					} else {
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-							PC: tc.inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
-							Confidence: "stub",
-						})
-					}
-				}
+				appendKnownStubResolution(tc.state[regIdx], tc.inst.VA, regIdx, tc.ctx, tc.result)
 			}
 		}
 		tc.state[x86RegRAX] = Top()
@@ -843,6 +904,17 @@ func transferInstructionX86(
 	lca func(int, int) int,
 	stackTypes map[int]TypeLattice,
 ) {
+	clearFieldAccessAtPC(result, inst.VA)
+	if inst.Bad || x86.IsSemanticBarrier(inst.Inst) {
+		for i := range state {
+			state[i] = Top()
+		}
+		for k := range stackTypes {
+			delete(stackTypes, k)
+		}
+		return
+	}
+
 	tc := &transferCtxX86{
 		state:      state,
 		inst:       inst,
@@ -923,7 +995,7 @@ func resolveX86Dispatch(
 			}
 		}
 	}
-	result.BLRResolutions = append(result.BLRResolutions, res)
+	recordBLRResolution(result, res)
 }
 
 // resolveX86DispatchSelectorOffset resolves a dispatch table call using
@@ -951,7 +1023,7 @@ func resolveX86DispatchSelectorOffset(
 	if res.Polymorphic {
 		res.Confidence = "polymorphic"
 	}
-	result.BLRResolutions = append(result.BLRResolutions, res)
+	recordBLRResolution(result, res)
 }
 
 // killX86ArgRegs kills all Dart calling-convention argument registers

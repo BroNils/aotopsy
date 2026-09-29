@@ -15,13 +15,6 @@ import (
 // x86_64 Dart AOT reserved-register roles are now defined in internal/sdk,
 // verified against runtime/vm/constants_x64.h @3.12.2.
 
-// x86ArgRegs is the SDK-verified Dart calling-convention argument register
-// set (constants_x64.h DartCallingConvention::kCpuRegistersForArgs =
-// {RDI, RSI, RDX, RBX, R8, R9}), NOT the C ABI {RDI, RSI, RDX, RCX, R8, R9}.
-// The previous list had RCX instead of RBX — RCX is kClassIdReg, not an
-// argument register.
-var x86ArgRegs = sdk.DartArgRegNames(sdk.ArchX86)
-
 // DecodeX86Range decodes every instruction in the ENTIRE given byte range
 // starting at baseVA, stopping only at a decode error or end of data --
 // matching internal/disasm.Disassemble's ARM64 convention exactly.
@@ -37,8 +30,18 @@ var x86ArgRegs = sdk.DartArgRegNames(sdk.ArchX86)
 // first return to be silently missing, making the recursive call/branch
 // resolve as "unresolved branch target" even though the bytes were right
 // there in the CodeRange the caller already sized correctly.
-func DecodeX86Range(data []byte, baseVA uint64) []x86.Decoded {
-	return x86.DecodeUntilBad(data, baseVA)
+func DecodeX86Range(data []byte, baseVA uint64) ([]x86.Decoded, error) {
+	var out []x86.Decoded
+	var decodeErr error
+	x86.Walk(data, baseVA, func(d x86.Decoded) bool {
+		if d.Bad {
+			decodeErr = fmt.Errorf("x86 decode failed at 0x%x inside declared CodeRange", d.VA)
+			return false
+		}
+		out = append(out, d)
+		return true
+	})
+	return out, decodeErr
 }
 
 // BuildX86IR lifts a decoded x86_64 instruction range into FuncIR, using
@@ -46,12 +49,12 @@ func DecodeX86Range(data []byte, baseVA uint64) []x86.Decoded {
 // internal/disasm.BuildCFG (kept as a local, simpler implementation since
 // x86 instructions are variable-length and carry structured Args, unlike
 // ARM64's fixed 4-byte raw-encoding approach).
-func BuildX86IR(name string, insts []x86.Decoded) *FuncIR {
+func BuildX86IR(name string, insts []x86.Decoded, cc sdk.RegisterCallingConvention) *FuncIR {
 	if len(insts) == 0 {
 		return newFuncIR(name, 0)
 	}
 	fir := newFuncIR(name, insts[0].VA)
-	fir.ArgRegs = x86ArgRegs
+	fir.ArgRegs = append([]string(nil), cc.GPRNames...)
 	fir.FrameReg = sdk.X86FrameRegStr
 	fir.ReturnReg = sdk.X86ReturnRegStr
 	fir.PoolReg = sdk.X86PoolRegStr
@@ -62,8 +65,8 @@ func BuildX86IR(name string, insts []x86.Decoded) *FuncIR {
 	fir.StackReg = sdk.X86StackRegStr
 	fir.CodeReg = sdk.X86CodeRegStr
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
-	fir.FpuArgRegs = sdk.X86FpuArgRegNames()
-	fir.FpuReturnReg = sdk.X86FpuReturnRegName
+	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
+	fir.FpuReturnReg = cc.FPUReturn
 	fir.TypeTestABIRegs = sdk.TypeTestRegNames(false)
 
 	funcStart := insts[0].VA
@@ -225,9 +228,22 @@ func x86CondOp(op x86asm.Op) string {
 	return "?"
 }
 
+func x86CondUnsigned(op x86asm.Op) bool {
+	switch op {
+	case x86asm.JB, x86asm.JBE, x86asm.JA, x86asm.JAE:
+		return true
+	}
+	return false
+}
+
 func liftX86Instr(in x86.Decoded, k branchKind, tgt uint64, hasTgt bool, prev *x86.Decoded) Instr {
 	src := strings.ToLower(x86.InstText(in.Inst))
 	ir := Instr{Addr: in.VA, Src: src, PoolIndex: -1}
+	for _, reg := range x86.DstRegsOfInst(in.Inst) {
+		if name := sdk.X86RegName(reg); name != "" {
+			ir.DefRegs = append(ir.DefRegs, name)
+		}
+	}
 
 	switch {
 	case k == branchRet:
@@ -248,6 +264,7 @@ func liftX86Instr(in x86.Decoded, k branchKind, tgt uint64, hasTgt bool, prev *x
 	case k == branchCond:
 		ir.Op = OpBranch
 		ir.CondOp = x86CondOp(in.Inst.Op)
+		ir.CondUnsigned = x86CondUnsigned(in.Inst.Op)
 		if hasTgt {
 			ir.Target = fmt.Sprintf("0x%x", tgt)
 		}
@@ -542,8 +559,8 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 			suf := strings.TrimPrefix(mnemonic, "cmov")
 			condOp := x86CondOpFromSuffix(suf)
 			condStr := fmt.Sprintf("/* %s */", suf)
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, x86SuffixUnsigned(suf)); ok {
+				condStr = rendered
 			}
 			old := s.lookupReg(dst)
 			if old == "" {
@@ -560,8 +577,8 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 			suf := strings.TrimPrefix(mnemonic, "set")
 			condOp := x86CondOpFromSuffix(suf)
 			condStr := fmt.Sprintf("/* %s */", suf)
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, x86SuffixUnsigned(suf)); ok {
+				condStr = rendered
 			}
 			s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))
 		}
@@ -587,4 +604,12 @@ func x86CondOpFromSuffix(suf string) string {
 		return ">="
 	}
 	return "?"
+}
+
+func x86SuffixUnsigned(suf string) bool {
+	switch suf {
+	case "b", "c", "nae", "be", "na", "a", "nbe", "ae", "nb", "nc":
+		return true
+	}
+	return false
 }

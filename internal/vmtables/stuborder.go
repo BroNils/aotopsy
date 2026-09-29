@@ -18,15 +18,11 @@ package vmtables
 // wrong. It survived because the only check ever applied was "index 0 is a
 // small function", which is equally true of UnknownDartCode at the other end.
 //
-// The 9 extra Code objects the old comment called "almost certainly
-// VM_TYPE_TESTING_STUB_CODE_LIST's 9 entries ... position not pinned down"
-// are exactly that, and their position IS pinned down now: in emission order
-// they sit immediately after the Subtype*TestCache group. On 3.12.2 that is
-// between VM_STUB_CODE_LIST's `Subtype7TestCache` (index 96) and
-// `CallClosureNoSuchMethod` (97), which puts them at ELF indices 68..76
-// counting up from the lowest address -- exactly where the symbol table has
-// them. Every supported version's list ends its subtype-test group with
-// `Subtype7TestCache`, so the anchor is structural rather than a magic index.
+// For SDKs that expose VM_TYPE_TESTING_STUB_CODE_LIST separately, those 9
+// entries sit immediately after the Subtype*TestCache group. Dart 2.10 is
+// older: it inlines the same 9 stubs directly after Subtype6TestCache. That
+// historical difference is normalized at the VMStubNames boundary, so every
+// consumer below sees the exact SDK emission order and never composes lists.
 //
 //	164 VM_STUB_CODE_LIST (incl. the PROBE_POINT_STUBS_LIST expansion)
 //	  9 VM_TYPE_TESTING_STUB_CODE_LIST
@@ -66,22 +62,19 @@ func VMStubNamesInImageOrder(dartVersion string) []string {
 	if list == nil {
 		return nil
 	}
-	composed := composeVMStubEmissionOrder(list)
 	// The image is laid out in reverse of emission order.
-	out := make([]string, len(composed))
-	for i, n := range composed {
-		out[len(composed)-1-i] = n
+	out := make([]string, len(list))
+	for i, n := range list {
+		out[len(list)-1-i] = n
 	}
 	return out
 }
 
 // VMStubNamesInClusterOrder returns the stub names in the order their Code
 // objects appear in the VM snapshot's Code cluster (creation/emission order),
-// including the 9 type-testing stubs inserted after the subtype-test-cache
-// group. This matches vmResult.Codes[i] ordering, which is the order Code
-// objects were serialized into the cluster — the same as the order they were
-// allocated by StubCode::Init (VM_STUB_CODE_LIST order with TTS after
-// Subtype7TestCache).
+// including type-testing stubs exactly where the SDK emits them. This matches
+// vmResult.Codes[i] ordering, which is the order Code objects were serialized
+// into the cluster — the same as StubCode::Init emission order.
 //
 // Use this (NOT VMStubNamesInImageOrder) when zipping against vmResult.Codes
 // directly, as BuildPoolLookups does for pool-display naming. The image-order
@@ -92,7 +85,7 @@ func VMStubNamesInClusterOrder(dartVersion string) []string {
 	if list == nil {
 		return nil
 	}
-	return composeVMStubEmissionOrder(list)
+	return list
 }
 
 // composeVMStubEmissionOrder inserts the type-testing stubs after the

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"time"
 
 	"aotopsy/internal/analysis"
@@ -97,9 +95,6 @@ func cmdDecompileNative(args []string) error {
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", *outDir, err)
 	}
-
-	runtime.GOMAXPROCS(2)
-	debug.SetMemoryLimit(1536 << 20)
 
 	combinedPath := filepath.Join(*outDir, "combined.dart")
 	outFile, err := os.Create(combinedPath)

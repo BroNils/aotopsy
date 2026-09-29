@@ -43,29 +43,52 @@ const receiverSlotFloor = 16 // 2 * 8: first parameter slot above saved FP/LR
 // RecoverReceiverStackSlotARM64 returns the receiver's frame slot, validated by
 // a field access off the loaded register that the owner class declares.
 func RecoverReceiverStackSlotARM64(insts []disasm.Inst, ownerCID int, ctx *TypeContext) (int, bool) {
-	bestSlot, bestReg := -1, -1
+	type candidate struct {
+		slot int
+		reg  int
+		at   int
+	}
+	var candidates []candidate
 	for i := range insts {
 		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(insts[i].Raw); ok && baseReg == sdk.ARM64FrameReg {
-			if byteOff >= receiverSlotFloor && byteOff > bestSlot {
-				bestSlot = byteOff
-				bestReg = int(insts[i].Raw & 0x1F) // Rt
+			if byteOff >= receiverSlotFloor {
+				candidates = append(candidates, candidate{slot: byteOff, reg: int(insts[i].Raw & 0x1F), at: i})
 			}
 		}
 	}
-	if bestSlot < 0 || bestReg < 0 {
-		return 0, false
+	// The receiver is the highest candidate slot whose loaded value is actually
+	// consumed as an owner-field base BEFORE that register is redefined. Looking
+	// globally admitted a field access before the candidate load or after a
+	// clobber, fabricating a receiver relationship that never existed.
+	for best := receiverSlotFloor - 1; ; {
+		bestIdx := -1
+		for i := range candidates {
+			if candidates[i].slot > best {
+				best = candidates[i].slot
+				bestIdx = i
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		c := candidates[bestIdx]
+		if arm64RegUsedAsOwnerFieldBaseAfter(insts, c.at+1, c.reg, ownerCID, ctx) {
+			return c.slot, true
+		}
+		candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
+		best = receiverSlotFloor - 1
 	}
-	if !arm64RegUsedAsOwnerFieldBase(insts, bestReg, ownerCID, ctx) {
-		return 0, false
-	}
-	return bestSlot, true
+	return 0, false
 }
 
 // arm64RegUsedAsOwnerFieldBase reports whether reg is used as the base of a
 // field load `[reg, #off]` at an offset the owner class declares. Covers the
 // 64-bit, 32-bit and 16-bit (character) load forms the field-load handlers use.
-func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *TypeContext) bool {
-	for i := range insts {
+func arm64RegUsedAsOwnerFieldBaseAfter(insts []disasm.Inst, start, reg, ownerCID int, ctx *TypeContext) bool {
+	for i := start; i < len(insts); i++ {
+		if insts[i].Bad {
+			return false
+		}
 		raw := insts[i].Raw
 		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(off)) {
 			return true
@@ -82,6 +105,14 @@ func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *T
 		if base, _, imm9, ok := arm64.LDURH(raw); ok && base == reg && ctx.OwnerHasFieldAt(ownerCID, int32(imm9)) {
 			return true
 		}
+		for _, dst := range arm64.DstRegsOfInst(raw) {
+			if dst == reg {
+				return false
+			}
+		}
+		if arm64RecoveryBarrier(raw, insts[i].Addr) {
+			return false
+		}
 	}
 	return false
 }
@@ -89,8 +120,12 @@ func arm64RegUsedAsOwnerFieldBase(insts []disasm.Inst, reg, ownerCID int, ctx *T
 // RecoverReceiverStackSlotX86 is the x86_64 counterpart: the highest positive
 // [RBP+disp] load, validated by an owner-field access off the loaded register.
 func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeContext) (int, bool) {
-	bestSlot := -1
-	var bestReg x86asm.Reg
+	type candidate struct {
+		slot int
+		reg  x86asm.Reg
+		at   int
+	}
+	var candidates []candidate
 	for i := range insts {
 		in := insts[i].Inst
 		if in.Op != x86asm.MOV || len(in.Args) < 2 {
@@ -101,37 +136,70 @@ func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeCon
 		if !dok || !mok || x86.CanonReg(mem.Base) != 5 || mem.Index != 0 {
 			continue
 		}
-		if off := int(mem.Disp); off >= receiverSlotFloor && off > bestSlot {
-			bestSlot = off
-			bestReg = dst
+		if off := int(mem.Disp); off >= receiverSlotFloor {
+			candidates = append(candidates, candidate{slot: off, reg: dst, at: i})
 		}
 	}
-	if bestSlot < 0 {
-		return 0, false
+	for len(candidates) > 0 {
+		bestIdx := 0
+		for i := 1; i < len(candidates); i++ {
+			if candidates[i].slot > candidates[bestIdx].slot {
+				bestIdx = i
+			}
+		}
+		c := candidates[bestIdx]
+		if x86RegUsedAsOwnerFieldBaseAfter(insts, c.at+1, c.reg, ownerCID, ctx) {
+			return c.slot, true
+		}
+		candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
 	}
-	if !x86RegUsedAsOwnerFieldBase(insts, bestReg, ownerCID, ctx) {
-		return 0, false
-	}
-	return bestSlot, true
+	return 0, false
 }
 
-func x86RegUsedAsOwnerFieldBase(insts []x86.Decoded, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
+func x86RegUsedAsOwnerFieldBaseAfter(insts []x86.Decoded, start int, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
 	rc := x86.CanonReg(reg)
-	for i := range insts {
+	for i := start; i < len(insts); i++ {
+		if insts[i].Bad {
+			return false
+		}
 		in := insts[i].Inst
-		if in.Op != x86asm.MOV || len(in.Args) < 2 {
-			continue
+		if in.Op == x86asm.MOV && len(in.Args) >= 2 {
+			if mem, ok := in.Args[1].(x86asm.Mem); ok && mem.Index == 0 && x86.CanonReg(mem.Base) == rc && ctx.OwnerHasFieldAt(ownerCID, int32(mem.Disp)) {
+				return true
+			}
 		}
-		mem, ok := in.Args[1].(x86asm.Mem)
-		if !ok || mem.Index != 0 {
-			continue
+		for _, dst := range x86.DstRegsOfInst(in) {
+			if dst == rc {
+				return false
+			}
 		}
-		if x86.CanonReg(mem.Base) != rc {
-			continue
-		}
-		if ctx.OwnerHasFieldAt(ownerCID, int32(mem.Disp)) {
-			return true
+		if x86RecoveryBarrier(in.Op) {
+			return false
 		}
 	}
 	return false
+}
+
+func arm64RecoveryBarrier(raw uint32, pc uint64) bool {
+	if arm64.IsRet(raw) {
+		return true
+	}
+	if _, ok := arm64.BL(raw, pc); ok {
+		return true
+	}
+	if _, ok := arm64.BLR(raw); ok {
+		return true
+	}
+	if _, ok := arm64.IsBR(raw); ok {
+		return true
+	}
+	if _, ok := arm64.B(raw, pc); ok {
+		return true
+	}
+	_, ok := arm64.CondBranch(raw, pc)
+	return ok
+}
+
+func x86RecoveryBarrier(op x86asm.Op) bool {
+	return op == x86asm.CALL || op == x86asm.JMP || op == x86asm.RET || x86.IsCondJump(op)
 }

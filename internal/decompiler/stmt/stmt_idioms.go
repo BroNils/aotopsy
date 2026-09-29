@@ -163,7 +163,7 @@ func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 			}
 
 			if interpolateCallRe.MatchString(line.Text) {
-				newText := interpolateCallRe.ReplaceAllStringFunc(line.Text, func(match string) string {
+				newText := replaceRegexpMatchesOutsideStrings(line.Text, interpolateCallRe, func(match string) string {
 					m := interpolateCallRe.FindStringSubmatch(match)
 					if len(m) < 2 {
 						return match
@@ -201,9 +201,15 @@ func formatStringInterpolation(argsText string) string {
 		p = strings.TrimSpace(p)
 		if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
 			inner := p[1 : len(p)-1]
+			// Pool strings arrive Go-quoted. `$` is not escaped by Go's %q,
+			// but it starts interpolation in a Dart double-quoted string. This
+			// branch represents literal runtime data, so preserve dollars as data;
+			// the expression branches below deliberately emit interpolation syntax.
+			inner = escapeLiteralDollars(inner)
 			sb.WriteString(inner)
 		} else if len(p) >= 2 && strings.HasPrefix(p, `'`) && strings.HasSuffix(p, `'`) {
 			inner := p[1 : len(p)-1]
+			inner = escapeLiteralDollars(inner)
 			sb.WriteString(inner)
 		} else if isSimpleIdent(p) {
 			sb.WriteString("$")
@@ -216,6 +222,24 @@ func formatStringInterpolation(argsText string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+func escapeLiteralDollars(s string) string {
+	var b strings.Builder
+	backslashes := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '$' && backslashes%2 == 0 {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+		if c == '\\' {
+			backslashes++
+		} else {
+			backslashes = 0
+		}
+	}
+	return b.String()
 }
 
 func splitInterpolationParts(s string) []string {
@@ -382,7 +406,7 @@ func NullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 
 			text := line.Text
 			if strings.Contains(text, "?") && strings.Contains(text, "null") {
-				text = ternaryNotNullRe.ReplaceAllStringFunc(text, func(match string) string {
+				text = replaceRegexpMatchesOutsideStrings(text, ternaryNotNullRe, func(match string) string {
 					m := ternaryNotNullRe.FindStringSubmatch(match)
 					if len(m) < 4 {
 						return match
@@ -408,7 +432,7 @@ func NullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 					return match
 				})
 
-				text = ternaryEqualsNullRe.ReplaceAllStringFunc(text, func(match string) string {
+				text = replaceRegexpMatchesOutsideStrings(text, ternaryEqualsNullRe, func(match string) string {
 					m := ternaryEqualsNullRe.FindStringSubmatch(match)
 					if len(m) < 4 {
 						return match

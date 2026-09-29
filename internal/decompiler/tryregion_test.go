@@ -1,6 +1,9 @@
 package decompiler
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func blk(id int, start uint64, addrs ...uint64) Block {
 	b := Block{ID: id, StartVA: start}
@@ -10,12 +13,7 @@ func blk(id int, start uint64, addrs ...uint64) Block {
 	return b
 }
 
-// TestSnapTryRegionsToBlocks pins the widening rule: a try region grows out to
-// whole basic blocks, because a block has a single entry so any block holding an
-// in-try pc is entirely in-try. Raw PcDescriptor ranges are otherwise
-// single-instruction lower bounds.
-func TestSnapTryRegionsToBlocks(t *testing.T) {
-	// Three contiguous 4-instruction blocks at 0x100, 0x110, 0x120.
+func TestBuildBlockTryIndexRequiresWholeBlockProof(t *testing.T) {
 	fir := &FuncIR{
 		Blocks: []Block{
 			blk(0, 0x100, 0x100, 0x104, 0x108, 0x10c),
@@ -23,45 +21,43 @@ func TestSnapTryRegionsToBlocks(t *testing.T) {
 			blk(2, 0x120, 0x120, 0x124, 0x128, 0x12c),
 		},
 	}
-	// A one-instruction region in the middle of block 1.
+	// Sparse PcDescriptor evidence in the middle of block 1 must NOT widen to
+	// claim the whole block.
 	fir.TryRegions = []TryRegionEntry{{StartVA: 0x118, EndVA: 0x11c, TryIndex: 0}}
-
-	if n := fir.SnapTryRegionsToBlocks(); n != 1 {
-		t.Errorf("widened %d regions, want 1", n)
-	}
-	got := fir.TryRegions[0]
-	// Block 1 spans [0x110, 0x120): its end comes from the next block's start,
-	// which recovers the final instruction's width.
-	if got.StartVA != 0x110 || got.EndVA != 0x120 {
-		t.Errorf("region = [0x%x, 0x%x), want [0x110, 0x120)", got.StartVA, got.EndVA)
+	e := &emitter{fir: fir}
+	e.buildBlockTryIndex()
+	if _, ok := e.blockTryRegion[1]; ok {
+		t.Fatal("mid-block try evidence was widened to the whole block")
 	}
 
-	// A region already spanning two blocks must cover both, not just one.
-	//
-	// The end is 0x12d, not 0x130: block 2 is the LAST block, so there is no
-	// following block whose StartVA would reveal the final instruction's width,
-	// and instruction width is not known here (x86_64 is variable length). The
-	// implementation falls back to lastAddr+1, which under-claims the tail by a
-	// few bytes rather than over-claiming coverage.
-	fir.TryRegions = []TryRegionEntry{{StartVA: 0x118, EndVA: 0x124, TryIndex: 0}}
-	fir.SnapTryRegionsToBlocks()
-	got = fir.TryRegions[0]
-	if got.StartVA != 0x110 || got.EndVA != 0x12d {
-		t.Errorf("two-block region = [0x%x, 0x%x), want [0x110, 0x12d)", got.StartVA, got.EndVA)
-	}
-
-	// Already block-aligned: nothing should change and nothing should be counted.
+	// Exact [block1.start, block2.start) evidence may structure block 1.
 	fir.TryRegions = []TryRegionEntry{{StartVA: 0x110, EndVA: 0x120, TryIndex: 0}}
-	if n := fir.SnapTryRegionsToBlocks(); n != 0 {
-		t.Errorf("aligned region reported %d widenings, want 0", n)
+	e = &emitter{fir: fir}
+	e.buildBlockTryIndex()
+	if got, ok := e.blockTryRegion[1]; !ok || got != 0 {
+		t.Fatalf("exact protected block was not indexed: got=%d ok=%v", got, ok)
 	}
+}
 
-	// Degenerate inputs must not panic.
-	(&FuncIR{}).SnapTryRegionsToBlocks()
-	(&FuncIR{Blocks: []Block{blk(0, 0x100, 0x100)}}).SnapTryRegionsToBlocks()
-	empty := &FuncIR{TryRegions: []TryRegionEntry{{StartVA: 1, EndVA: 2}}}
-	if n := empty.SnapTryRegionsToBlocks(); n != 0 {
-		t.Errorf("no blocks reported %d widenings, want 0", n)
+func TestTryEmissionDoesNotInlineSuccessorOutsideRegion(t *testing.T) {
+	fir := &FuncIR{
+		Name:    "f",
+		EntryVA: 0x100,
+		Blocks: []Block{
+			{ID: 0, StartVA: 0x100, Instrs: []Instr{{Addr: 0x100, Op: OpOther, Src: "mov x0, #1"}}, Succs: []Succ{{BlockID: 1}}},
+			{ID: 1, StartVA: 0x110, Instrs: []Instr{{Addr: 0x110, Op: OpReturn, Src: "ret"}}},
+		},
+		TryRegions: []TryRegionEntry{{StartVA: 0x100, EndVA: 0x110, TryIndex: 0, HandlerVA: 0x999}},
+	}
+	fir.ComputePreds()
+	e := &emitter{fir: fir, state: newLiftState(""), active: map[int]bool{}, visits: map[int]int{}, omittedSet: map[int]bool{}, emittedAnywhere: map[int]bool{}, tryOpened: map[int]bool{}, handlerBlocks: map[int]bool{}}
+	e.buildBlockTryIndex()
+	e.emitBlock(0, 0, 0)
+	src := strings.Join(e.lines, "\n")
+	closeIdx := strings.Index(src, "} catch")
+	gotoIdx := strings.Index(src, "goto block_1;")
+	if closeIdx < 0 || gotoIdx < 0 || gotoIdx > closeIdx {
+		t.Fatalf("outside successor escaped try boundary handling:\n%s", src)
 	}
 }
 

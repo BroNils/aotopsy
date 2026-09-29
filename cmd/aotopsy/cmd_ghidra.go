@@ -13,7 +13,6 @@ import (
 
 // cmdGhidra handles "aotopsy ghidra <libapp.so>" — full pipeline + Ghidra decompilation.
 func cmdGhidra(args []string) error {
-	args = reorderPositionalArg(args)
 	fs := flag.NewFlagSet("ghidra", flag.ExitOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	ghidraHome := fs.String("ghidra-home", "", "Ghidra installation directory")
@@ -29,10 +28,10 @@ func cmdGhidra(args []string) error {
 	projectDir := fs.String("projects", "scratch/ghidra-projects", "Ghidra project directory")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy ghidra <libapp.so> [flags]")
 	}
 
@@ -49,23 +48,34 @@ func cmdGhidra(args []string) error {
 		}
 	}
 
-	if *outDir == "" {
+	if *from != "" && *outDir == "" {
+		*outDir = *from
+	} else if *outDir == "" {
 		*outDir = defaultOutDir(libPath)
+	}
+	if *from != "" {
+		if _, err := analysis.VerifyProvenanceBinary(*from, absLibPath); err != nil {
+			return fmt.Errorf("verify Ghidra --from provenance: %w", err)
+		}
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
 	var pipeResult *analysis.Result
 	if *from != "" {
-		// Reuse existing output: just regenerate signal + meta.
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true, "")
+		var err error
+		pipeResult, err = analysis.Run(analysis.Opts{
+			FromDir:   *from,
+			OutDir:    *outDir,
+			Signal:    true,
+			SignalK:   2,
+			Meta:      analysis.MetaRequired,
+			DecompAll: *all,
+			Quiet:     quiet,
+			Log:       os.Stderr,
+		})
 		if err != nil {
-			return fmt.Errorf("signal: %w", err)
+			return err
 		}
-		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
-		if err != nil {
-			return fmt.Errorf("meta: %w", err)
-		}
-		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
 		pipeResult, err = analysis.Run(analysis.Opts{
@@ -73,13 +83,17 @@ func cmdGhidra(args []string) error {
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,
 			Signal:    true,
-			Meta:      true,
+			Meta:      analysis.MetaRequired,
 			DecompAll: *all,
 			Quiet:     quiet,
 		})
 		if err != nil {
 			return err
 		}
+	}
+	prov, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, absLibPath)
+	if err != nil {
+		return fmt.Errorf("verify Ghidra binary provenance: %w", err)
 	}
 
 	metaPath := pipeResult.MetaPath
@@ -113,7 +127,10 @@ func cmdGhidra(args []string) error {
 	absMetaPath, _ := filepath.Abs(metaPath)
 	absDecompDir, _ := filepath.Abs(decompDir)
 
-	projectName := analysis.SanitizeProjectName(filepath.Base(filepath.Dir(pipeResult.OutDir)))
+	projectName, err := analysis.GhidraProjectName(prov.SourceName, prov.SHA256)
+	if err != nil {
+		return fmt.Errorf("derive Ghidra project identity: %w", err)
+	}
 
 	absProjDir := analysis.SanitizeGhidraPath(*projectDir)
 	if err := os.MkdirAll(absProjDir, 0o755); err != nil {
@@ -167,9 +184,9 @@ func cmdGhidra(args []string) error {
 // scriptPath is the artifact copy made by the caller, so the directory the
 // user is told to add in the Script Manager is the same one headless mode uses.
 func launchGhidraGUI(ghidraHome, libPath, outDir, scriptPath string) error {
-	ghidraRun := filepath.Join(ghidraHome, "ghidraRun")
-	if _, err := os.Stat(ghidraRun); err != nil {
-		return fmt.Errorf("ghidraRun not found at %s", ghidraRun)
+	ghidraRun, err := analysis.FindGhidraGUI(ghidraHome)
+	if err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "\nLaunching Ghidra GUI...\n")

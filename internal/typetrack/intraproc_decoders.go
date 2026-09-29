@@ -36,21 +36,10 @@ func recordFieldStore(ctx *TypeContext, receiverCID int, byteOffset int32, value
 	}
 }
 
-// recordAllocationSite records an allocation site for allocation site tracking.
-func recordAllocationSite(ctx *TypeContext, callPC uint64, classID int) {
-	if ctx.AllocationSites == nil {
-		return
-	}
-	ctx.AllocationSites[callPC] = classID
-	if ctx.InstantiatedClasses != nil {
-		ctx.InstantiatedClasses[classID] = true
-	}
-}
-
 // isCondBranch detects conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
 // Returns the list of target addresses (branch target only — fall-through is
-// implied by the caller). Returns false for B.AL (cond=14) and B.NV (cond=15)
-// because those are unconditional despite using the B.cond encoding.
+// implied by the caller). Returns false for historical B.AL (cond=14), which
+// is unconditional, and B.NV (cond=15), which is reserved for real code.
 func isCondBranch(raw uint32, pc uint64) ([]uint64, bool) {
 	if target, ok := arm64.CondBranch(raw, pc); ok {
 		return []uint64{target}, true

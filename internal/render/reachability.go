@@ -8,19 +8,51 @@ import (
 	"aotopsy/internal/disasm"
 )
 
+// concreteCallTargets returns function targets backed by call-resolution
+// evidence. Via is intentionally excluded: it can be a provenance label such
+// as "dispatch_table" or "object_field+0x30", not a function name.
+func concreteCallTargets(e disasm.CallEdgeRecord) []string {
+	if e.Target != "" {
+		if isRawCallAddress(e.Target) {
+			return nil
+		}
+		return []string{e.Target}
+	}
+	if len(e.Targets) > 0 {
+		return e.Targets
+	}
+	return nil
+}
+
+func isRawCallAddress(s string) bool {
+	if len(s) <= 2 || (s[:2] != "0x" && s[:2] != "0X") {
+		return false
+	}
+	for _, r := range s[2:] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 // FindEntryPoints returns functions that have no incoming BL or resolved BLR edges.
 // Runtime stubs (sub_*) are excluded since they're callees, not true entry points.
 func FindEntryPoints(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) []string {
+	funcSet := make(map[string]bool, len(funcs))
+	for _, f := range funcs {
+		funcSet[f.Name] = true
+	}
 	// Collect all named BL and resolved BLR targets, including the candidate
 	// callees of polymorphic sites: a function that is only ever reached
 	// through virtual dispatch is not an entry point, and treating it as one
 	// makes the entry list mostly noise.
 	blTargets := make(map[string]bool)
 	for _, e := range edges {
-		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
+		if !funcSet[e.FromFunc] || !isSupportedCallKind(e.Kind) {
 			continue
 		}
-		for _, t := range e.ResolvedTargets() {
+		for _, t := range concreteCallTargets(e) {
 			blTargets[t] = true
 		}
 	}
@@ -54,10 +86,10 @@ func ReachableSet(entryPoints []string, edges []disasm.CallEdgeRecord) map[strin
 	// it were one callee, so it reached nothing and added a junk node.)
 	adj := make(map[string][]string)
 	for _, e := range edges {
-		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
+		if !isSupportedCallKind(e.Kind) {
 			continue
 		}
-		adj[e.FromFunc] = append(adj[e.FromFunc], e.ResolvedTargets()...)
+		adj[e.FromFunc] = append(adj[e.FromFunc], concreteCallTargets(e)...)
 	}
 
 	reachable := make(map[string]bool)
@@ -83,7 +115,8 @@ func ReachableSet(entryPoints []string, edges []disasm.CallEdgeRecord) map[strin
 }
 
 // ReachabilityDOT renders a callgraph filtered to the reachable set.
-// Entry points are highlighted. Only BL edges between reachable functions are shown.
+// Entry points are highlighted. Direct and resolved indirect edges preserve
+// their provenance styling.
 func ReachabilityDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, entryPoints []string, title string, t Theme) string {
 	entrySet := make(map[string]bool, len(entryPoints))
 	for _, ep := range entryPoints {
@@ -96,23 +129,23 @@ func ReachabilityDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, r
 		funcOwner[f.Name] = f.Owner
 	}
 
-	// Deduplicate BL, resolved BLR, and polymorphic-candidate edges within
-	// the reachable set (same over-approximation as ReachableSet).
-	type edgeKey struct{ from, to string }
+	// Deduplicate direct, resolved indirect, and polymorphic-candidate edges
+	// within the reachable set while retaining how each edge was resolved.
+	type edgeKey struct{ from, to, prov string }
 	edgeCount := make(map[edgeKey]int)
-	addEdge := func(from, to string) {
+	addEdge := func(from, to, prov string) {
 		if to == "" || !reachable[from] || !reachable[to] {
 			return
 		}
-		edgeCount[edgeKey{from, to}]++
+		edgeCount[edgeKey{from, to, prov}]++
 	}
 	for _, e := range edges {
-		if e.Kind != "bl" && e.Kind != "call" && e.Kind != "blr" && e.Kind != "call_indirect" {
+		if !isSupportedCallKind(e.Kind) {
 			continue
 		}
-		addEdge(e.FromFunc, e.Target)
-		for _, t := range e.Targets {
-			addEdge(e.FromFunc, t)
+		prov := ClassifyEdgeProv(e)
+		for _, target := range concreteCallTargets(e) {
+			addEdge(e.FromFunc, target, prov)
 		}
 	}
 
@@ -168,7 +201,13 @@ func ReachabilityDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, r
 	}
 
 	// Clustered nodes.
-	for owner, names := range ownerFuncs {
+	owners := make([]string, 0, len(ownerFuncs))
+	for owner := range ownerFuncs {
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		names := ownerFuncs[owner]
 		if len(names) < 2 {
 			noOwner = append(noOwner, names...)
 			continue
@@ -192,10 +231,28 @@ func ReachabilityDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, r
 	b.WriteByte('\n')
 
 	// Edges.
+	type edgeEntry struct {
+		key   edgeKey
+		count int
+	}
+	edgesSorted := make([]edgeEntry, 0, len(edgeCount))
 	for k, count := range edgeCount {
+		edgesSorted = append(edgesSorted, edgeEntry{k, count})
+	}
+	sort.Slice(edgesSorted, func(i, j int) bool {
+		if edgesSorted[i].key.from != edgesSorted[j].key.from {
+			return edgesSorted[i].key.from < edgesSorted[j].key.from
+		}
+		if edgesSorted[i].key.to != edgesSorted[j].key.to {
+			return edgesSorted[i].key.to < edgesSorted[j].key.to
+		}
+		return edgesSorted[i].key.prov < edgesSorted[j].key.prov
+	})
+	for _, edge := range edgesSorted {
+		k, count := edge.key, edge.count
 		fromID := dotID(k.from)
 		toID := dotID(k.to)
-		attrs := fmt.Sprintf("color=%q", t.EdgeDirect)
+		attrs := fmt.Sprintf("color=%q, style=%q", edgeColor(k.prov, t), edgeStyle(k.prov))
 		if count > 1 {
 			attrs += fmt.Sprintf(", penwidth=%.1f", 0.5+float64(count)*0.1)
 		}

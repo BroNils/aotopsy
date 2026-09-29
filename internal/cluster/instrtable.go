@@ -3,6 +3,7 @@ package cluster
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 
 	"aotopsy/internal/snapshot"
@@ -107,12 +108,18 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 	// Length + 4 -- i.e. TotalSize is the SDK's length(), and it is what must
 	// be rounded up. A previous change swapped these on the opposite reading
 	// of the same code and placed the data image `align` bytes too low.
-	diStart := roundUp(isoHeader.TotalSize, align)
-	tableObjOff := diStart + hdr.InstructionTableDataOffset
+	diStart, ok := roundUpChecked(isoHeader.TotalSize, align)
+	if !ok {
+		return nil, fmt.Errorf("instrtable: invalid data image start size=%d align=%d", isoHeader.TotalSize, align)
+	}
+	tableObjOff, ok := checkedAddInt64(diStart, hdr.InstructionTableDataOffset)
+	if !ok || tableObjOff < 0 {
+		return nil, fmt.Errorf("instrtable: table offset overflow data_image=%d relative=%d", diStart, hdr.InstructionTableDataOffset)
+	}
 
 	// Minimum: oneByteStringHeader + Data header + 0 entries
-	minSize := tableObjOff + oneByteStringHeaderSize + instrTableDataHeaderSize
-	if int64(len(data)) < minSize {
+	minSize, ok := checkedAddInt64(tableObjOff, oneByteStringHeaderSize+instrTableDataHeaderSize)
+	if !ok || minSize > int64(len(data)) {
 		return nil, fmt.Errorf("instrtable: data too short for table at offset %d (need %d, have %d)",
 			tableObjOff, minSize, len(data))
 	}
@@ -134,10 +141,9 @@ func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionP
 
 	// Read DataEntry array.
 	entriesOff := payloadOff + instrTableDataHeaderSize
-	entryBytes := int(length) * 8
-	if entriesOff+entryBytes > len(data) {
+	if entriesOff < 0 || entriesOff > len(data) || uint64(length) > uint64((len(data)-entriesOff)/8) {
 		return nil, fmt.Errorf("instrtable: data too short for %d entries (need %d, have %d)",
-			length, entriesOff+entryBytes, len(data))
+			length, uint64(entriesOff)+uint64(length)*8, len(data))
 	}
 
 	entries := make([]InstrTableEntry, length)
@@ -374,4 +380,21 @@ func ResolveCodeRangesFromTextOffset(codes []CodeEntry) []CodeRange {
 
 func roundUp(v, align int64) int64 {
 	return (v + align - 1) &^ (align - 1)
+}
+
+func roundUpChecked(v, align int64) (int64, bool) {
+	if v < 0 || align <= 0 || align&(align-1) != 0 || v > math.MaxInt64-(align-1) {
+		return 0, false
+	}
+	return roundUp(v, align), true
+}
+
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b {
+		return 0, false
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return 0, false
+	}
+	return a + b, true
 }

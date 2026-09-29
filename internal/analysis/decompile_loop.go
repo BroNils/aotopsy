@@ -62,6 +62,11 @@ type DecompLoopDeps struct {
 // standalone functions directly, and periodically GC + report
 // progress. Writes one combined.dart file.
 func RunDecompileLoop(d DecompLoopDeps) error {
+	oldProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(oldProcs)
+	oldLimit := debug.SetMemoryLimit(1536 << 20)
+	defer debug.SetMemoryLimit(oldLimit)
+
 	if d.GcEveryN <= 0 {
 		d.GcEveryN = 100
 	}
@@ -125,7 +130,6 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 	}
 
 	emitted := 0
-	skipped := 0
 	var agg decompiler.Stats
 	var fridaHooks []frida.FridaHook
 	var fridaProbes []frida.FridaProbe
@@ -147,18 +151,16 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			}
 		}
 
-		func() {
+		if err := func() (err error) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					skipped++
-					fmt.Fprintf(os.Stderr, "warning: recovered panic decompiling range (PCOffset=0x%x): %v\n", r.PCOffset, rec)
+					err = fmt.Errorf("panic: %v", rec)
 				}
 			}()
 
 			fir, art, err := d.DecompileRangeWithIR(r)
 			if err != nil {
-				skipped++
-				return
+				return err
 			}
 			ownerName := mr.Owner
 			if ownerName != "" {
@@ -189,7 +191,10 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 					fridaProbes = append(fridaProbes, p)
 				}
 			}
-		}()
+			return nil
+		}(); err != nil {
+			return fmt.Errorf("decompile range pc=0x%x ref=%d: %w", r.PCOffset, r.RefID, err)
+		}
 
 		if emitted > 0 && d.GcEveryN > 0 && emitted%d.GcEveryN == 0 {
 			if err := d.W.Flush(); err != nil {
@@ -199,16 +204,16 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			debug.FreeOSMemory()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			fmt.Fprintf(os.Stderr, "progress: %d emitted, %d skipped, heap=%dMiB, elapsed=%s\n",
-				emitted, skipped, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
+			fmt.Fprintf(os.Stderr, "progress: %d emitted, heap=%dMiB, elapsed=%s\n",
+				emitted, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
 		}
 	}
 	flushClass()
 	if err := d.W.Flush(); err != nil {
 		return fmt.Errorf("final flush %s: %w", d.CombinedPath, err)
 	}
-	fmt.Fprintf(os.Stderr, "emitted %d functions (skipped %d) to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
-		emitted, skipped, d.CombinedPath, time.Since(d.StartTime).Round(time.Second), d.SkipFuncs, d.SkipFuncs+emitted+skipped, totalMatching)
+	fmt.Fprintf(os.Stderr, "emitted %d functions to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
+		emitted, d.CombinedPath, time.Since(d.StartTime).Round(time.Second), d.SkipFuncs, d.SkipFuncs+emitted, totalMatching)
 	PrintAggregateStats(agg)
 	if d.GenFrida {
 		if err := FinalizeFridaOutput(d.GenFridaOut, d.OutDir, d.Libapp, d.IsARM64, fridaHooks, fridaProbes, fridaProbesDropped,

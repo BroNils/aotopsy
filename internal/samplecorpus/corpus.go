@@ -19,10 +19,10 @@
 //
 // # The fix
 //
-// A sample's name states its Dart version and architecture, and Extract
-// reads the binary so callers can check it against its own name (see
-// VersionMismatch). A mislabelled fixture now fails immediately, saying
-// which version it claims and which it actually is,
+// A sample's name states its Dart version and architecture, and ValidateSample
+// checks both claims against the binary. A mislabelled fixture now fails
+// immediately, saying which version or architecture it claims and what the
+// binary actually contains,
 // instead of surfacing as a wall of mismatched counts pointing at innocent
 // parsing code.
 //
@@ -35,17 +35,36 @@
 package samplecorpus
 
 import (
+	"debug/elf"
+	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/snapshot"
 )
 
-// Extract opens a sample and parses its snapshot headers. It is the one
-// operation every caller needs before it can check a sample against its name.
+var (
+	ErrNoCorpus      = errors.New("samplecorpus: no samples directory in this checkout")
+	ErrSampleMissing = errors.New("samplecorpus: required sample missing")
+)
+
+const ExpectedSampleCount = 93
+
+// corpusManifest is intentionally independent from Registry. It is the public
+// corpus contract used by completeness gates, so deleting a Registry row cannot
+// make a 92-sample run redefine itself as complete.
+//
+//go:embed corpus_manifest.txt
+var corpusManifest string
+
+// Extract opens a sample and parses its snapshot headers. It is the lightweight
+// version-only helper; ValidateSample additionally checks registry identity.
 //
 // The ELF handle is closed before returning: callers that need the mapped
 // data open the file themselves. This exists to answer "what version is
@@ -65,7 +84,7 @@ type Sample struct {
 	// file. A file reporting anything else is a mislabelled fixture; see
 	// VersionMismatch.
 	DartVersion string
-	// Arch is "arm64" or "x64", part of the filename only.
+	// Arch is "arm64" or "x64" and must match the ELF machine.
 	Arch string
 	// Note records where the binary came from, for whoever has to
 	// reconstruct the corpus on a new machine.
@@ -183,12 +202,9 @@ const comparesamplePreNNBD = "compare_sample_prenn"
 // snapshot's end found the true offset immediately, and identically on both
 // architectures -- which is itself the tell that it was a fixed structural
 // miss rather than per-object drift.
-// Registry is every sample the test suite knows about, present or not.
-//
-// An entry whose file is absent is a documented hole, not an oversight:
-// tests needing it skip with a message naming the version (MissingMessage).
-// That is deliberately different from the old behaviour, where a missing
-// sample was quietly replaced by whatever binary shared its name.
+// Registry is the complete sample inventory. A checkout with no samples/
+// directory may skip corpus-driven tests, but once samples/ exists every
+// registry entry is required; a missing member is corpus drift, not a hole.
 var Registry = []Sample{
 	{DartVersion: "2.12.0", Arch: "arm64", Note: "dart212_sample, Flutter 2.x toy app"},
 
@@ -350,9 +366,9 @@ var Registry = []Sample{
 	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
 }
 
-// SourceSets groups the registry by SourceSet, dropping samples that belong to
-// none and sets with fewer than two members -- a set of one has nothing to be
-// differential against.
+// SourceSets groups the registry by SourceSet. Singleton sets are retained: a
+// singleton is a registry invariant failure, not something callers may silently
+// erase before deciding whether a differential has enough members.
 func SourceSets() map[string][]Sample {
 	bySet := map[string][]Sample{}
 	for _, s := range Registry {
@@ -361,71 +377,241 @@ func SourceSets() map[string][]Sample {
 		}
 		bySet[s.SourceSet] = append(bySet[s.SourceSet], s)
 	}
-	for name, members := range bySet {
-		if len(members) < 2 {
-			delete(bySet, name)
-		}
-	}
 	return bySet
 }
 
-// Path locates a sample by walking up from the working directory to a
-// samples/ directory. It returns "" when the sample is not present, which
-// callers turn into a skip.
-func Path(fileName string) string {
+// ExpectedFiles returns the independent corpus manifest in stable order.
+func ExpectedFiles() []string {
+	lines := strings.Split(strings.TrimSpace(corpusManifest), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// CorpusRoot returns the nearest samples/ directory walking upward from the
+// current working directory. Once a samples/ entry is encountered it is the
+// authoritative root: an incomplete nested corpus must never fall through to a
+// convenient ancestor corpus.
+func CorpusRoot() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("samplecorpus: getwd: %w", err)
 	}
 	for {
-		p := filepath.Join(dir, "samples", fileName)
-		if _, err := os.Stat(p); err == nil {
-			return p
+		root := filepath.Join(dir, "samples")
+		resolvedRoot, fi, statErr := statCorpusPath(root)
+		if statErr == nil {
+			if !fi.IsDir() {
+				return "", fmt.Errorf("samplecorpus: %s exists but is not a directory", root)
+			}
+			return resolvedRoot, nil
+		}
+		if errors.Is(statErr, os.ErrNotExist) {
+			// A dangling symlink (including a WSL-created LX symlink on
+			// Windows) is still a samples/ entry. Treating it as absent would
+			// let an incomplete nested corpus fall through to an ancestor.
+			if _, lstatErr := os.Lstat(root); lstatErr == nil {
+				return "", fmt.Errorf("samplecorpus: %s exists but its target is unavailable: %w", root, statErr)
+			} else if !errors.Is(lstatErr, os.ErrNotExist) {
+				return "", fmt.Errorf("samplecorpus: lstat %s: %w", root, lstatErr)
+			}
+		} else {
+			return "", fmt.Errorf("samplecorpus: stat %s: %w", root, statErr)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return ""
+			return "", ErrNoCorpus
 		}
 		dir = parent
 	}
 }
 
-// Available reports whether a samples/ directory exists at all, which is
-// a different question from whether one particular sample is in it.
-//
-// The distinction is the whole point. samples/ is gitignored -- the
-// binaries are large and some come from real apps -- so a fresh clone and
-// every CI runner legitimately has no corpus, and a sample-driven test
-// there has nothing to assert against and must skip. But on a machine
-// that HAS a corpus, a missing sample means the corpus has drifted from
-// the registry, and skipping is how roughly 25 test functions spent
-// months reporting ok while running nothing.
-//
-// So: no corpus at all -> skip; corpus present but this sample absent ->
-// fail. Collapsing those two into one silent skip is the bug that
-// binding the suite to the registry was meant to fix; collapsing them
-// into one hard failure is what broke CI when it was.
-func Available() bool {
-	dir, err := os.Getwd()
-	if err != nil {
-		return false
+func validateSampleName(fileName string) error {
+	if fileName == "" || fileName == "." || fileName == ".." || filepath.IsAbs(fileName) ||
+		filepath.Base(fileName) != fileName || strings.ContainsAny(fileName, `/\`) {
+		return fmt.Errorf("samplecorpus: unsafe sample name %q", fileName)
 	}
-	for {
-		if fi, err := os.Stat(filepath.Join(dir, "samples")); err == nil && fi.IsDir() {
-			return true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		dir = parent
-	}
+	return nil
 }
 
-// MissingMessage is what a test prints when it skips for a missing sample.
+// RequireSample resolves one corpus member from the authoritative nearest root.
+// ErrNoCorpus means a fresh checkout may skip the whole corpus gate;
+// ErrSampleMissing means a populated corpus is incomplete and must fail.
+func RequireSample(fileName string) (string, error) {
+	if err := validateSampleName(fileName); err != nil {
+		return "", err
+	}
+	root, err := CorpusRoot()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(root, fileName)
+	resolved, fi, err := statCorpusPath(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: %s", ErrSampleMissing, fileName)
+		}
+		return "", fmt.Errorf("samplecorpus: stat %s: %w", p, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("samplecorpus: %s is not a regular file", p)
+	}
+	return resolved, nil
+}
+
+// ValidateRegistry checks the in-code registry against the independent corpus
+// manifest and the snapshot profiles. This is intentionally runnable without
+// local sample binaries.
+func ValidateRegistry() error {
+	expected := ExpectedFiles()
+	if len(expected) != ExpectedSampleCount {
+		return fmt.Errorf("samplecorpus: manifest has %d entries, want %d", len(expected), ExpectedSampleCount)
+	}
+	manifestSet := make(map[string]struct{}, len(expected))
+	sortedExpected := append([]string(nil), expected...)
+	sort.Strings(sortedExpected)
+	for i, name := range expected {
+		if err := validateSampleName(name); err != nil {
+			return fmt.Errorf("samplecorpus: manifest entry %d: %w", i, err)
+		}
+		if _, dup := manifestSet[name]; dup {
+			return fmt.Errorf("samplecorpus: duplicate manifest entry %q", name)
+		}
+		manifestSet[name] = struct{}{}
+		if name != sortedExpected[i] {
+			return fmt.Errorf("samplecorpus: corpus_manifest.txt is not sorted")
+		}
+	}
+
+	supported := make(map[string]struct{})
+	for _, v := range snapshot.SupportedVersions() {
+		supported[v] = struct{}{}
+	}
+	registrySet := make(map[string]struct{}, len(Registry))
+	sourceCounts := make(map[string]int)
+	for _, s := range Registry {
+		name := s.FileName()
+		if _, dup := registrySet[name]; dup {
+			return fmt.Errorf("samplecorpus: duplicate Registry filename %q", name)
+		}
+		registrySet[name] = struct{}{}
+		if _, ok := manifestSet[name]; !ok {
+			return fmt.Errorf("samplecorpus: Registry entry %q is absent from manifest", name)
+		}
+		if s.Arch != "arm64" && s.Arch != "x64" {
+			return fmt.Errorf("samplecorpus: %s has unsupported architecture %q", name, s.Arch)
+		}
+		if _, ok := supported[s.DartVersion]; !ok {
+			return fmt.Errorf("samplecorpus: %s uses unsupported Dart version %s", name, s.DartVersion)
+		}
+		if s.SourceSet != "" {
+			sourceCounts[s.SourceSet]++
+		}
+	}
+	if len(registrySet) != len(manifestSet) {
+		for _, name := range expected {
+			if _, ok := registrySet[name]; !ok {
+				return fmt.Errorf("samplecorpus: manifest entry %q is absent from Registry", name)
+			}
+		}
+		return fmt.Errorf("samplecorpus: Registry/manifest size mismatch: %d vs %d", len(registrySet), len(manifestSet))
+	}
+	for name, count := range sourceCounts {
+		if count < 2 {
+			return fmt.Errorf("samplecorpus: source set %q has only %d member", name, count)
+		}
+	}
+	return nil
+}
+
+// RequireCompleteCorpus verifies the populated samples/ tree is exactly the
+// independent manifest. A fresh checkout returns ErrNoCorpus; a populated but
+// partial or extra corpus is an error.
+func RequireCompleteCorpus() error {
+	if err := ValidateRegistry(); err != nil {
+		return err
+	}
+	root, err := CorpusRoot()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("samplecorpus: read %s: %w", root, err)
+	}
+	disk := make(map[string]struct{})
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".so") {
+			disk[entry.Name()] = struct{}{}
+		}
+	}
+	expected := ExpectedFiles()
+	if len(disk) != len(expected) {
+		return fmt.Errorf("samplecorpus: samples/ has %d .so entries, want %d", len(disk), len(expected))
+	}
+	for _, name := range expected {
+		if _, ok := disk[name]; !ok {
+			return fmt.Errorf("%w: %s", ErrSampleMissing, name)
+		}
+		if _, err := RequireSample(name); err != nil {
+			return err
+		}
+	}
+	for name := range disk {
+		found := false
+		for _, want := range expected {
+			if name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("samplecorpus: unregistered sample %s present in samples/", name)
+		}
+	}
+	return nil
+}
+
+// ValidateSample checks both architecture and snapshot-version identity against
+// the registry metadata. Callers may use the returned snapshot info directly.
+func ValidateSample(path string, s Sample) (*snapshot.Info, error) {
+	ef, err := elfx.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = ef.Close() }()
+	wantMachine := elf.EM_AARCH64
+	if s.Arch == "x64" {
+		wantMachine = elf.EM_X86_64
+	} else if s.Arch != "arm64" {
+		return nil, fmt.Errorf("samplecorpus: unsupported architecture %q for %s", s.Arch, s.FileName())
+	}
+	if ef.ELF.Machine != wantMachine {
+		return nil, fmt.Errorf("samplecorpus: %s claims %s but ELF machine is %s", s.FileName(), s.Arch, ef.ELF.Machine)
+	}
+	info, err := snapshot.Extract(ef, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
+	if err != nil {
+		return nil, err
+	}
+	got := ""
+	if info != nil && info.Version != nil {
+		got = info.Version.DartVersion
+	}
+	if got != s.DartVersion {
+		return nil, errors.New(VersionMismatch(s, got))
+	}
+	return info, nil
+}
+
+// MissingMessage is what a test prints when the whole corpus is unavailable.
 func MissingMessage(s Sample) string {
-	return fmt.Sprintf("sample %s not present (Dart %s %s: %s) -- "+
-		"place or symlink it under samples/", s.FileName(), s.DartVersion, s.Arch, s.Note)
+	return fmt.Sprintf("no samples/ corpus in this checkout; %s cannot be resolved "+
+		"(Dart %s %s: %s)", s.FileName(), s.DartVersion, s.Arch, s.Note)
 }
 
 // VersionMismatch builds the error text for a sample that is not the version
@@ -438,8 +624,7 @@ func VersionMismatch(s Sample, got string) string {
 	return fmt.Sprintf(
 		"samples/%s is Dart %s, not %s.\n"+
 			"  The filename is the contract: this file must be a Dart %s %s build.\n"+
-			"  Point it at the right binary, or remove it so the test skips instead of\n"+
-			"  testing the wrong thing. (%s)",
+			"  Restore or relink the correct binary; a populated corpus must stay complete. (%s)",
 		s.FileName(), got, s.DartVersion, s.DartVersion, s.Arch, s.Note)
 }
 
