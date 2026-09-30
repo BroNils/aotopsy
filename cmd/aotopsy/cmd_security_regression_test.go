@@ -3,12 +3,14 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
@@ -285,6 +287,45 @@ func TestRunSummaryDoesNotRecommendARM64OnlyToolsForX64(t *testing.T) {
 	}
 	if !strings.Contains(got, "decompile-native") {
 		t.Fatalf("x64 run summary omitted supported native decompiler: %s", got)
+	}
+}
+
+func TestSummaryUsesDestinationWriterModeAndSanitizesDynamicText(t *testing.T) {
+	// A generic non-terminal destination decides its own color capability and
+	// must receive plain text even if dynamic values contain terminal controls.
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+
+	var out bytes.Buffer
+	writeSummary(&out, &analysis.Result{
+		OutDir:      "unsafe\nFORGED\x1b[2J",
+		LibPath:     "lib\tapp.so\x1b]0;title\a",
+		Arch:        "x64",
+		DartVersion: "3.12.2\u202eabc",
+	})
+	got := out.String()
+	if strings.Contains(got, "\x1b[") || strings.Contains(got, "\x1b]") {
+		t.Fatalf("non-terminal summary received ANSI/control sequence: %q", got)
+	}
+	if strings.Contains(got, "\nFORGED") || strings.Contains(got, "\u202e") {
+		t.Fatalf("summary allowed dynamic text to spoof terminal layout: %q", got)
+	}
+}
+
+func TestDotDiagnosticsAreSanitizedBeforeTerminalOutput(t *testing.T) {
+	var out bytes.Buffer
+	logger := cli.NewLogger(&out, false)
+	warnDotFailure(logger,
+		"CFG\u202eforged",
+		errors.New("failed\nFORGED"),
+		"\x1b[2Jstderr\nMORE\u202e",
+		"")
+	got := out.String()
+	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, '\u202e') || strings.Contains(got, "\nFORGED") {
+		t.Fatalf("Graphviz diagnostic escaped terminal sanitizer: %q", got)
+	}
+	if !strings.Contains(got, "CFGforged") || !strings.Contains(got, "failed FORGED") || !strings.Contains(got, "stderr MORE") {
+		t.Fatalf("Graphviz diagnostic lost printable content: %q", got)
 	}
 }
 

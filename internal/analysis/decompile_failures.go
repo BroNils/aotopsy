@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/jsonutil"
 )
 
@@ -58,7 +59,7 @@ func (l *FailureLog) Finish(dir string, w io.Writer) error {
 		}
 	}
 	if len(l.items) > 0 {
-		fmt.Fprintf(w, "WARNING: %d function(s) could not be decompiled and were skipped (see %s; use --strict to fail instead)\n",
+		cli.NewLogger(w, false).Warn("%d function(s) could not be decompiled and were skipped (see %s; use --strict to fail instead)",
 			len(l.items), DecompileFailuresFile)
 	}
 	return nil

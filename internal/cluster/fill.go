@@ -412,7 +412,7 @@ type ScriptInfo struct {
 type LoadingUnitInfo struct {
 	RefID     int
 	ParentRef int   // ref ID of parent loading unit (-1 if root)
-	UnitID    int32 // loading unit ID
+	UnitID    int64 // loading unit ID; serialized as intptr_t from Dart 3.5+
 }
 
 // KernelProgramInfoRef holds a KernelProgramInfo object's refs.
@@ -679,6 +679,12 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 // and named objects. It processes ALL clusters in alloc order.
 // snapshotSize is the TotalSize from the snapshot header (needed for ROData string extraction).
 func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, snapshotSize int64, opts dartfmt.Options) error {
+	if result == nil {
+		return fmt.Errorf("fill: nil cluster result")
+	}
+	if !result.AllocComplete {
+		return fmt.Errorf("fill: alloc phase incomplete; refusing to treat offset %d as fill start", result.FillStart)
+	}
 	if result.FillStart <= 0 || result.FillStart >= len(data) {
 		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
 	}
@@ -695,6 +701,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 	}
 	ct := profile.CIDs
 	fillRefUnsigned := profile.FillRefUnsigned
+	maxSteps := opts.EffectiveMaxSteps()
 	instrIdx := 0 // running instructions_index_ across Code clusters
 
 	if debugFill {
@@ -849,7 +856,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			instrIdx += int(cm.MainCount)
 
 		case FillObjectPool:
-			pool, err := readFillObjectPool(s, cm, profile.OldPoolFormat, profile.PoolTypeSwapped, fillRefUnsigned)
+			pool, err := readFillObjectPool(s, cm, profile, fillRefUnsigned)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (ObjectPool): %w", i, err)
 			}
@@ -873,6 +880,31 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 			if err := readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, result.Int32Arrays); err != nil {
 				return fmt.Errorf("fill: cluster %d (TypedData CID %d): %w", i, cm.CID, err)
+			}
+
+		case FillExternalTypedData:
+			if err := skipFillExternalTypedData(s, cm, profile.CIDs); err != nil {
+				return fmt.Errorf("fill: cluster %d (ExternalTypedData CID %d): %w", i, cm.CID, err)
+			}
+
+		case FillSimd128:
+			if err := skipFillSimd128(s, cm); err != nil {
+				return fmt.Errorf("fill: cluster %d (SIMD CID %d): %w", i, cm.CID, err)
+			}
+
+		case FillDeltaEncodedTypedData:
+			if err := skipFillDeltaEncodedTypedData(s, cm, maxSteps); err != nil {
+				return fmt.Errorf("fill: cluster %d (DeltaEncodedTypedData CID %d): %w", i, cm.CID, err)
+			}
+
+		case FillLocalVarDescriptors:
+			if err := skipFillLocalVarDescriptors(s, cm, fillRefUnsigned, maxSteps); err != nil {
+				return fmt.Errorf("fill: cluster %d (LocalVarDescriptors CID %d): %w", i, cm.CID, err)
+			}
+
+		case FillLegacyMap:
+			if err := skipFillLegacyMap(s, cm, fillRefUnsigned, spec.LeadingBool, maxSteps); err != nil {
+				return fmt.Errorf("fill: cluster %d (legacy Map CID %d): %w", i, cm.CID, err)
 			}
 
 		case FillExceptionHandlers:
@@ -920,12 +952,12 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.Instances = append(result.Instances, instInfos...)
 
 		case FillRecord:
-			if err := skipFillRecord(s, cm, fillRefUnsigned); err != nil {
+			if err := skipFillRecord(s, cm, fillRefUnsigned, profile); err != nil {
 				return fmt.Errorf("fill: cluster %d (Record): %w", i, err)
 			}
 
 		case FillContextScope:
-			if err := skipFillContextScope(s, cm, fillRefUnsigned); err != nil {
+			if err := skipFillContextScope(s, cm, fillRefUnsigned, profile); err != nil {
 				return fmt.Errorf("fill: cluster %d (ContextScope): %w", i, err)
 			}
 
@@ -1125,6 +1157,20 @@ func estimateFillCaptureBytes(result *Result, profile *snapshot.VersionProfile) 
 					return 0, err
 				}
 			}
+		case FillRefs:
+			if spec.VarLenRefs {
+				sum, err := sumLengths(cm, 0)
+				if err != nil {
+					return 0, err
+				}
+				n, err := mul(sum, 8)
+				if err != nil {
+					return 0, err
+				}
+				if err := add(n); err != nil {
+					return 0, err
+				}
+			}
 		}
 	}
 	return total, nil
@@ -1196,7 +1242,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		*instrIdx += int(cm.MainCount)
 		return err
 	case FillObjectPool:
-		_, err := readFillObjectPool(s, cm, profile.OldPoolFormat, profile.PoolTypeSwapped, fillRefUnsigned)
+		_, err := readFillObjectPool(s, cm, profile, fillRefUnsigned)
 		return err
 	case FillArray:
 		return skipFillArray(s, cm, fillRefUnsigned, profile)
@@ -1206,6 +1252,16 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		// Skip-only path (used to step over a cluster whose contents are not
 		// wanted): pass no sink, so nothing is captured.
 		return readFillTypedData(s, cm, profile.CIDs, profile.PreCanonicalSplit, nil)
+	case FillExternalTypedData:
+		return skipFillExternalTypedData(s, cm, profile.CIDs)
+	case FillSimd128:
+		return skipFillSimd128(s, cm)
+	case FillDeltaEncodedTypedData:
+		return skipFillDeltaEncodedTypedData(s, cm, dartfmt.DefaultMaxSteps)
+	case FillLocalVarDescriptors:
+		return skipFillLocalVarDescriptors(s, cm, fillRefUnsigned, dartfmt.DefaultMaxSteps)
+	case FillLegacyMap:
+		return skipFillLegacyMap(s, cm, fillRefUnsigned, spec.LeadingBool, dartfmt.DefaultMaxSteps)
 	case FillExceptionHandlers:
 		_, err := readFillExceptionHandlers(s, cm, fillRefUnsigned)
 		return err
@@ -1228,9 +1284,9 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		_, err := readFillInstance(s, cm, profile, classUnboxedBitmaps(result))
 		return err
 	case FillRecord:
-		return skipFillRecord(s, cm, fillRefUnsigned)
+		return skipFillRecord(s, cm, fillRefUnsigned, profile)
 	case FillContextScope:
-		return skipFillContextScope(s, cm, fillRefUnsigned)
+		return skipFillContextScope(s, cm, fillRefUnsigned, profile)
 	default:
 		return fmt.Errorf("unknown fill kind %d", spec.Kind)
 	}

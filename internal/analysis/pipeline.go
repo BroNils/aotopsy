@@ -178,6 +178,32 @@ func (o *Opts) stagef(name string, format string, args ...interface{}) {
 	cli.NewLogger(o.log(), o.Quiet).Stage(name, format, args...)
 }
 
+func (o *Opts) warnf(format string, args ...interface{}) {
+	cli.NewLogger(o.log(), o.Quiet).Warn(format, args...)
+}
+
+const maxReportedPipelineDiagnostics = 8
+
+func (o *Opts) reportDiagnostics(result *Result, source string, diags []dartfmt.Diag) {
+	if len(diags) == 0 {
+		return
+	}
+	limit := len(diags)
+	if limit > maxReportedPipelineDiagnostics {
+		limit = maxReportedPipelineDiagnostics
+	}
+	for _, d := range diags[:limit] {
+		msg := fmt.Sprintf("%s diagnostic: %s", source, d.String())
+		result.Diags = append(result.Diags, msg)
+		o.warnf("%s", msg)
+	}
+	if omitted := len(diags) - limit; omitted > 0 {
+		msg := fmt.Sprintf("%s diagnostics: %d additional issue(s) suppressed", source, omitted)
+		result.Diags = append(result.Diags, msg)
+		o.warnf("%s", msg)
+	}
+}
+
 // Run executes the full analysis pipeline. A fresh binary analysis is written
 // into a sibling staging directory and published only after every requested
 // stage succeeds, so a failed rerun cannot corrupt an existing generation.
@@ -319,6 +345,11 @@ func runPipeline(opts Opts) (*Result, error) {
 	ef := sc.EF
 	info := sc.Info
 	clResult := sc.Result
+	opts.reportDiagnostics(result, "snapshot", info.Diags)
+	opts.reportDiagnostics(result, "isolate cluster", clResult.Diags)
+	if sc.VMResult != nil {
+		opts.reportDiagnostics(result, "VM cluster", sc.VMResult.Diags)
+	}
 	table := sc.Table
 	ranges := sc.Ranges
 	// --limit is a population boundary for every per-function semantic stage,
@@ -344,7 +375,7 @@ func runPipeline(opts Opts) (*Result, error) {
 	rawFuncSyms, symErr := ef.FuncSymbols()
 	elfFuncSyms, symWarning := prepareOptionalFuncSymbols(rawFuncSyms, symErr, ranges, codeVA, codeOff)
 	if symWarning != "" {
-		opts.logf("  warning: %s\n", symWarning)
+		opts.warnf("%s", symWarning)
 	}
 	pl := sc.Pool
 	poolDisplay := sc.PoolDisplay
@@ -416,9 +447,9 @@ func runPipeline(opts Opts) (*Result, error) {
 			// Say it out loud. Without this line, "0 code source maps" and
 			// "most functions named stub_<hex>" look like the analyser
 			// failing, when they are what the binary was built to be.
-			opts.logf("  %sbuild:%s dwarf stack traces (--split-debug-info/--obfuscate): "+
-				"%d code source maps, %d discarded Code objects -- inline attribution unavailable\n",
-				cli.Gold, cli.Reset, build.CodeSourceMaps, build.DiscardedCodes)
+			opts.warnf("dwarf stack traces (--split-debug-info/--obfuscate): "+
+				"%d code source maps, %d discarded Code objects -- inline attribution unavailable",
+				build.CodeSourceMaps, build.DiscardedCodes)
 		}
 	}
 
@@ -949,7 +980,7 @@ func runMetaForTarget(opts *Opts, result *Result, inDir, outDir, arch string, ar
 		if err := os.Remove(filepath.Join(outDir, "flutter_meta.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove stale flutter_meta.json: %w", err)
 		}
-		opts.logf("  %swarning:%s flutter_meta.json generation skipped: %s\n", cli.Muted, cli.Reset, unsupportedReason)
+		opts.warnf("flutter_meta.json generation skipped: %s", unsupportedReason)
 		return nil
 	}
 

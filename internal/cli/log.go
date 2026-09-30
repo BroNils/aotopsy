@@ -9,11 +9,13 @@ import (
 	"strings"
 )
 
-// Logger provides structured, formatted logging to a designated writer.
+// Logger provides structured, formatted diagnostic logging to a designated
+// writer. Writes are intentionally best-effort: a broken stderr/diagnostic
+// sink must not change analysis correctness or artifact generation.
 type Logger struct {
 	w     io.Writer
 	quiet bool
-	color bool
+	mode  ColorMode
 }
 
 // NewLogger creates a new Logger writing to w with color awareness.
@@ -25,14 +27,16 @@ func NewLogger(w io.Writer, quiet bool) *Logger {
 	// plain text unless the user explicitly forces ANSI. This prevents logs
 	// written to bytes.Buffer, files wrapped in bufio.Writer, sockets, etc. from
 	// inheriting terminal escapes merely because they are not *os.File.
-	color := IsColorForced() && !IsColorDisabled()
+	mode := ColorNone
 	if f, ok := w.(*os.File); ok {
-		color = DetectColorMode(f) != ColorNone
+		mode = DetectColorMode(f)
+	} else if IsColorForced() && !IsColorDisabled() {
+		mode = DetectColorMode(nil)
 	}
 	return &Logger{
 		w:     w,
 		quiet: quiet,
-		color: color,
+		mode:  mode,
 	}
 }
 
@@ -48,8 +52,8 @@ func (l *Logger) Stage(name string, format string, args ...any) {
 	if !l.quiet {
 		name = SafeLine(name)
 		detail := l.format(format, args...)
-		if l.color {
-			_, _ = fmt.Fprintf(l.w, "\n%s%s%s %s\n", Pink, name, Reset, detail)
+		if l.mode != ColorNone {
+			_, _ = fmt.Fprintf(l.w, "\n%s%s%s %s\n", Pink.ansi(l.mode), name, Reset.ansi(l.mode), detail)
 		} else {
 			_, _ = fmt.Fprintf(l.w, "\n%s %s\n", name, detail)
 		}
@@ -59,8 +63,8 @@ func (l *Logger) Stage(name string, format string, args ...any) {
 // Warn logs a formatted warning message.
 func (l *Logger) Warn(format string, args ...any) {
 	msg := l.format(format, args...)
-	if l.color {
-		_, _ = fmt.Fprintf(l.w, "  %swarning:%s %s\n", Gold, Reset, msg)
+	if l.mode != ColorNone {
+		_, _ = fmt.Fprintf(l.w, "  %swarning:%s %s\n", Gold.ansi(l.mode), Reset.ansi(l.mode), msg)
 	} else {
 		_, _ = fmt.Fprintf(l.w, "  warning: %s\n", msg)
 	}
@@ -71,8 +75,8 @@ func (l *Logger) KV(key string, val any) {
 	if !l.quiet {
 		key = SafeLine(key)
 		value := l.format("%v", val)
-		if l.color {
-			_, _ = fmt.Fprintf(l.w, "  %s%-12s%s %s\n", Muted, key+":", Reset, value)
+		if l.mode != ColorNone {
+			_, _ = fmt.Fprintf(l.w, "  %s%-12s%s %s\n", Muted.ansi(l.mode), key+":", Reset.ansi(l.mode), value)
 		} else {
 			_, _ = fmt.Fprintf(l.w, "  %-12s %s\n", key+":", value)
 		}
@@ -88,25 +92,33 @@ func (l *Logger) format(format string, args ...any) string {
 	starArgs, runeArgs := formatSpecialArgIndexes(format)
 	for i, arg := range args {
 		if _, usedByStar := starArgs[i]; usedByStar {
-			if _, usedAsRune := runeArgs[i]; usedAsRune {
-				// A format may reuse the same explicit argument for '*' and %c,
-				// for example %[1]*[1]c. It must stay a concrete int for fmt's
-				// width handling, so neutralize the two controls that the final
-				// sanitizer deliberately preserves as format-owned whitespace.
-				if value, ok := arg.(int); ok && (value == '\n' || value == '\t') {
+			// fmt requires a valid dynamic width/precision operand to have the
+			// concrete type int. Keep those operands concrete, but remember that
+			// an explicit format may reuse the same argument as a visible %c.
+			// In that case terminal controls must be neutralized before fmt sees
+			// the value because wrapping it would make the '*' operand invalid.
+			if value, ok := arg.(int); ok {
+				if _, usedAsRune := runeArgs[i]; usedAsRune && SafeLine(string(rune(value))) != string(rune(value)) {
 					safeArgs[i] = int(' ')
-					continue
+				} else {
+					safeArgs[i] = arg
 				}
+				continue
 			}
-			// fmt requires dynamic width/precision operands to have the concrete
-			// type int. Wrapping one in safeFormatArg turns an otherwise valid
-			// directive into %!(BADWIDTH) / %!(BADPREC), so leave those operands
-			// untouched. They control layout and are not rendered as text.
-			safeArgs[i] = arg
+
+			// A non-int '*' operand is already invalid to fmt and will produce
+			// BADWIDTH/BADPREC. It may still be reused by an indexed visible
+			// directive, so sanitize it normally instead of granting it the
+			// exemption reserved for a valid width operand.
+			if shouldSanitizeFormatArg(arg) {
+				safeArgs[i] = safeFormatArg{value: arg}
+			} else {
+				safeArgs[i] = arg
+			}
 			continue
 		}
-		if _, trusted := arg.(trustedStyle); trusted {
-			safeArgs[i] = arg
+		if style, trusted := arg.(style); trusted {
+			safeArgs[i] = style.ansi(l.mode)
 			continue
 		}
 		_, usedAsRune := runeArgs[i]
@@ -116,7 +128,7 @@ func (l *Logger) format(format string, args ...any) string {
 			safeArgs[i] = arg
 		}
 	}
-	return sanitizeTerminalText(fmt.Sprintf(format, safeArgs...), l.color)
+	return sanitizeTerminalText(fmt.Sprintf(format, safeArgs...), l.mode != ColorNone)
 }
 
 // formatSpecialArgIndexes returns zero-based argument indexes consumed by '*'
@@ -377,16 +389,4 @@ func isSafeSGR(params string) bool {
 		}
 	}
 	return true
-}
-
-// MakeLogf returns a closure that writes to log only when !quiet.
-func MakeLogf(quiet bool, log io.Writer) func(string, ...any) {
-	l := NewLogger(log, quiet)
-	return l.Printf
-}
-
-// MakeStagef returns a closure that writes a stage header to log only when !quiet.
-func MakeStagef(quiet bool, log io.Writer) func(string, string, ...any) {
-	l := NewLogger(log, quiet)
-	return l.Stage
 }

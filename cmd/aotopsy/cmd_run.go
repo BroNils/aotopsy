@@ -95,33 +95,37 @@ func printSummary(result *analysis.Result) {
 }
 
 func writeSummary(w io.Writer, result *analysis.Result) {
-	fmt.Fprintf(w, "\n%s\n", cli.PinkColor.S("summary"))
-	fmt.Fprintf(w, "  %s     %s\n", cli.MutedColor.S("output:"), cli.BlueColor.S(result.OutDir))
+	logger := cli.NewLogger(w, false)
+	logger.Printf("\n%s%s%s\n", cli.Pink, "summary", cli.Reset)
+	logger.Printf("  %soutput:%s     %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.OutDir, cli.Reset)
 	if result.DartVersion != "" {
-		fmt.Fprintf(w, "  %s       %s\n", cli.MutedColor.S("dart:"), cli.GoldColor.S(result.DartVersion))
+		logger.Printf("  %sdart:%s       %s%s%s\n", cli.Muted, cli.Reset, cli.Gold, result.DartVersion, cli.Reset)
 	}
-	fmt.Fprintf(w, "  %s   %s\n", cli.MutedColor.S("ptr_size:"), cli.GoldColor.F("%d", result.PointerSize))
-	fmt.Fprintf(w, "  %s %s\n", cli.MutedColor.S("functions:"), cli.GoldColor.F("%d", result.FuncCount))
-	fmt.Fprintf(w, "  %s   %s\n", cli.MutedColor.S("classes:"), cli.GoldColor.F("%d", result.ClassCount))
-	fmt.Fprintf(w, "  %s    %s\n", cli.MutedColor.S("signal:"), cli.GoldColor.F("%d", result.SignalCount))
+	logger.Printf("  %sptr_size:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.PointerSize, cli.Reset)
+	logger.Printf("  %sfunctions:%s %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.FuncCount, cli.Reset)
+	logger.Printf("  %sclasses:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.ClassCount, cli.Reset)
+	logger.Printf("  %ssignal:%s    %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.SignalCount, cli.Reset)
 	if result.MetaPath != "" {
-		fmt.Fprintf(w, "  %s      %s\n", cli.MutedColor.S("meta:"), cli.BlueColor.S(result.MetaPath))
+		logger.Printf("  %smeta:%s      %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.MetaPath, cli.Reset)
 	}
 	if result.DecompiledCount > 0 {
-		fmt.Fprintf(w, "  %s %s functions\n", cli.MutedColor.S("pseudocode:"), cli.GoldColor.F("%d", result.DecompiledCount))
+		logger.Printf("  %spseudocode:%s %s%d%s functions\n", cli.Muted, cli.Reset, cli.Gold, result.DecompiledCount, cli.Reset)
 	}
 
 	// Follow-up commands.
-	absOut, _ := filepath.Abs(result.OutDir)
+	absOut := result.OutDir
+	if resolved, err := filepath.Abs(result.OutDir); err == nil {
+		absOut = resolved
+	}
 	signalHTML := filepath.Join(absOut, "signal.html")
-	fmt.Fprintf(w, "\n%s\n", cli.PinkColor.S("next"))
+	logger.Printf("\n%s%s%s\n", cli.Pink, "next", cli.Reset)
 	if info, err := os.Stat(signalHTML); err == nil && info.Mode().IsRegular() {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
+		logger.Printf("  %s%s%s\n", cli.White, "open "+signalHTML, cli.Reset)
 	}
 	if result.LibPath != "" && result.Arch == "arm64" {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+result.LibPath+" --from "+absOut))
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ida "+result.LibPath+" --from "+absOut))
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ghidra "+result.LibPath+" --from "+absOut, cli.Reset)
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ida "+result.LibPath+" --from "+absOut, cli.Reset)
 	} else if result.LibPath != "" && result.Arch == "x64" {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy _debug decompile-native --lib "+result.LibPath+" --from-main"))
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy _debug decompile-native --lib "+result.LibPath+" --from-main", cli.Reset)
 	}
 }

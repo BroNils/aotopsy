@@ -16,9 +16,11 @@ import (
 // Ref 0 = owner (Function/Closure/FfiTrampolineData).
 // instrIdxBase is the running instructions_index_ counter from previous Code clusters.
 //
-// stateBitsAfterRef: 0 = no state_bits in fill (v2.10, v2.14+).
-// N>0 = state_bits is read after first N refs (v2.13: N=1). DiscardedBit (bit 3)
-// of state_bits determines whether remaining refs are skipped.
+// stateBitsAfterRef: 0 = no interleaved state_bits in fill (v2.10, v2.12,
+// v2.14+). v2.10 instead uses stateBitsAtEnd; v2.12 also has state_bits at
+// the end but the profile routes it through stateBitsAtEnd. N>0 means
+// state_bits is read after first N refs (v2.13: N=1). DiscardedBit (bit 3) of
+// state_bits determines whether remaining refs are skipped.
 func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fillRefUnsigned bool, instrIdxBase int, codeNumRefs int, textOffsetDelta bool, stateBitsAfterRef int, stateBitsAtEnd bool, hasIndexRefs bool) ([]CodeEntry, error) {
 	// Dart 3.13.0+: the Code cluster's ReadFill opens with two ReadRefId
 	// values before the per-Code loop --
@@ -124,7 +126,7 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 			// In v2.13, stateBitsAfterRef=1: ref 0 is compressed_stackmaps_
 			// (moved before state_bits so the discarded bit can be checked
 			// before reading the remaining refs). Verified against SDK
-			// clustered_snapshot.cc @2.12.0: compressed_stackmaps_ is the
+			// clustered_snapshot.cc @2.13.0: compressed_stackmaps_ is the
 			// ref immediately before state_bits in the 2.13 interleaved layout.
 			for j := 0; j < stateBitsAfterRef; j++ {
 				r, err := readRef(s, fillRefUnsigned)

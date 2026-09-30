@@ -112,11 +112,15 @@ func printSignalSummary(sig *analysis.SignalResult, outDir, libPath, arch string
 }
 
 func writeSignalSummary(w io.Writer, sig *analysis.SignalResult, outDir, libPath, arch string) {
-	absOut, _ := filepath.Abs(outDir)
+	absOut := outDir
+	if resolved, err := filepath.Abs(outDir); err == nil {
+		absOut = resolved
+	}
 	signalHTML := filepath.Join(absOut, "signal.html")
+	logger := cli.NewLogger(w, false)
 
-	fmt.Fprintf(w, "\n%s  %s functions\n",
-		cli.PinkColor.S("signal complete"), cli.GoldColor.F("%d", sig.SignalCount))
+	logger.Printf("\n%s%s%s  %s%d%s functions\n",
+		cli.Pink, "signal complete", cli.Reset, cli.Gold, sig.SignalCount, cli.Reset)
 	for _, artifact := range []struct {
 		name string
 		desc string
@@ -127,21 +131,21 @@ func writeSignalSummary(w io.Writer, sig *analysis.SignalResult, outDir, libPath
 	} {
 		path := filepath.Join(absOut, artifact.name)
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-			fmt.Fprintf(w, "  %s  %s\n", cli.BlueColor.S(artifact.name), artifact.desc)
+			logger.Printf("  %s%s%s  %s\n", cli.Blue, artifact.name, cli.Reset, artifact.desc)
 		}
 	}
 
-	fmt.Fprintf(w, "\n%s\n", cli.PinkColor.S("next"))
+	logger.Printf("\n%s%s%s\n", cli.Pink, "next", cli.Reset)
 	if info, err := os.Stat(signalHTML); err == nil && info.Mode().IsRegular() {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
+		logger.Printf("  %s%s%s\n", cli.White, "open "+signalHTML, cli.Reset)
 	}
 	if libPath != "" && arch == "arm64" {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+libPath+" --from "+absOut))
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ida "+libPath+" --from "+absOut))
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ghidra "+libPath+" --from "+absOut, cli.Reset)
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ida "+libPath+" --from "+absOut, cli.Reset)
 	} else if libPath != "" && arch == "x64" {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy _debug decompile-native --lib "+libPath+" --from-main"))
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy _debug decompile-native --lib "+libPath+" --from-main", cli.Reset)
 	} else if libPath == "" && arch == "arm64" {
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ghidra <libapp.so> --from "+absOut))
-		fmt.Fprintf(w, "  %s\n", cli.WhiteColor.S("aotopsy ida <libapp.so> --from "+absOut))
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ghidra <libapp.so> --from "+absOut, cli.Reset)
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ida <libapp.so> --from "+absOut, cli.Reset)
 	}
 }

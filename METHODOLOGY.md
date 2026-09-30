@@ -106,8 +106,9 @@ numbers come only from builds where an independent ground truth exists.
 - The `BENCHROW` rows in `TestSymtabDifferential` — `BENCHMARK.md`.
 
 Ground-truth SDK facts (register roles, offsets, cluster layouts) are verified the
-same way throughout: Grep MCP to locate, then `gh api repos/dart-lang/sdk/…@<tag>`
-to read the exact version — never from memory.
+same way throughout: grep and read the local `~/dev/dartsdk-research/<version>/`
+tree for the exact version — never from memory. Grep MCP + `gh api …@<tag>` are a
+fallback for versions the local trees lack.
 
 ## Limits of this method (honestly)
 - Ground-truth twins are real builds we **cannot redistribute**, so the accuracy

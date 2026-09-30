@@ -40,8 +40,9 @@ func RunMetaStage(inDir, outDir, targetArch string, decompAll bool, quiet bool, 
 	if log == nil {
 		log = os.Stderr
 	}
-	logf := cli.MakeLogf(quiet, log)
-	stagef := cli.MakeStagef(quiet, log)
+	logger := cli.NewLogger(log, quiet)
+	logf := logger.Printf
+	stagef := logger.Stage
 
 	if outDir == "" {
 		outDir = inDir

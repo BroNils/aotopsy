@@ -94,6 +94,11 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d is_canonical: %w", i, count, err)
 			}
 		}
+		for si, op := range spec.LeadingScalars {
+			if err := skipScalar(s, op); err != nil {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d leading scalar %d: %w", i, count, si, err)
+			}
+		}
 
 		var nameRef, ownerRef, sigRef, paramTypesRef, fieldTypeRef, typeParamsRef, resultTypeRef, namedParamNamesRef int
 		nameRef = -1
@@ -118,8 +123,15 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			if err != nil {
 				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d varlen length: %w", i, count, err)
 			}
-			if n < 0 || int(n) > 1<<20 {
-				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d varlen length %d out of range", i, count, n)
+			if err := validateFillLength(cm, int64(i), n, "varlen refs"); err != nil {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
+			}
+			if n < 0 || n > int64(s.Remaining()) {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d varlen length %d exceeds remaining %d", i, count, n, s.Remaining())
+			}
+			maxInt := int64(^uint(0) >> 1)
+			if n > maxInt-int64(numRefs) {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d ref count overflow: fixed=%d variable=%d", i, count, numRefs, n)
 			}
 			numRefs += int(n)
 		}
@@ -227,7 +239,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 			case isLoadingUnit:
-				if err := readLoadingUnitScalar(s, &ss, i, count); err != nil {
+				if err := readLoadingUnitScalar(s, &ss, i, count, op); err != nil {
 					return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, err
 				}
 			case isFfiTrampoline:
@@ -314,12 +326,19 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 			})
 		}
 		if isClosureData && len(allRefs) >= 2 {
-			// ClosureData refs in AOT: parent_function(0), closure(1).
-			// context_scope_ is null in AOT (not read from stream).
+			// Full AOT omits context_scope. Closure is index 1 from 2.12 onward;
+			// 2.10 still carries signature_type between parent_function and closure.
+			closureIdx := 1
+			if profile != nil && !snapshot.VersionAtLeast(profile.DartVersion, "2.12.0") {
+				closureIdx = 2
+			}
+			if closureIdx >= len(allRefs) {
+				return named, funcTypes, fields, types, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closures, ffiTrampolineInfos, fmt.Errorf("obj %d/%d ClosureData missing closure ref index %d", i, count, closureIdx)
+			}
 			cd := ClosureDataInfo{
 				RefID:             ref,
 				ParentFunctionRef: allRefs[0],
-				ClosureRef:        allRefs[1],
+				ClosureRef:        allRefs[closureIdx],
 			}
 			closureDataInfos = append(closureDataInfos, cd)
 		}

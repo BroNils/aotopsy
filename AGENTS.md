@@ -249,8 +249,8 @@ baseline noise, not your edit's fault, and **do not** run `gofmt -w` to
 - **Do not settle for "approximate" or "good enough"** when a real fix is
   achievable. The kHeapObjectTag off-by-one fix seemed trivial but unlocked
   11550 field hits from 11.
-- **Root cause analysis must be deep.** Use gh search + gh api to the SDK
-  source to verify every assumption. Do not guess. Example:
+- **Root cause analysis must be deep.** Grep/Read the local SDK tree
+  (`~/dev/dartsdk-research/<version>/`) to verify every assumption. Do not guess. Example:
   ObjectStoreAOTFieldCount was wrong because it only counted RW fields,
   when there are also CW, FW, LAZY_CORE, LAZY_FFI, etc.
 - **"Data limitation" is not the end of research.** If BLR is low, find
@@ -386,9 +386,19 @@ explicitly in the tool, not silently tolerated.
 
 ## Source of Truth: SDK Verification
 
-Two-step technique for verifying against Dart SDK source:
+**Local first.** The source of truth is `~/dev/dartsdk-research/<exact-version>/`
+(one plain directory per Dart SDK version, no `.git`; the directory name is the
+version). Use `grep -rn` (`rg` is not installed on every host) and `Read` directly on
+`runtime/...` — it covers every version, has no rate limits, and is what
+`internal/sdktest` already resolves first.
 
-1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`).
+Grep MCP and `gh api` are a **fallback only**: use them when the version you need is
+missing from the local trees, or when the user names them explicitly. Never reach for
+them first. Never rely on training memory.
+
+Fallback technique (two steps):
+
+1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`). Searches `main` only.
    - Use ONLY `query` + `repo` (e.g. `repo: "dart-lang/sdk"`). Do **NOT** pass `path` —
      leaving it off returns wider results across the whole repo and surfaces more
      knowledge (related call sites, other files, cross-arch counterparts) you would

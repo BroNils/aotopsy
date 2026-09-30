@@ -390,14 +390,33 @@ func readFillTypeArguments(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned b
 //
 // The comment restored here drops a contradictory first line that said
 // ReadRef(shape); the shape is ReadUnsigned, per the SDK above.
-func skipFillRecord(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
+func skipFillRecord(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) error {
 	for i := int64(0); i < cm.Count; i++ {
-		// Fill reads shape from stream; num_fields decoded from lower 16 bits.
-		shape, err := s.ReadUnsigned()
+		raw, err := s.ReadUnsigned()
 		if err != nil {
-			return fmt.Errorf("record %d/%d shape: %w", i, cm.Count, err)
+			return fmt.Errorf("record %d/%d shape/num_fields: %w", i, cm.Count, err)
 		}
-		numFields := shape & 0xFFFF
+
+		// Dart 2.19 is the first supported SDK with Record and uses a one-release
+		// legacy shape: fill writes num_fields, then a separate field_names ref,
+		// then one ref per field. Dart 3.0.5 replaces num_fields+field_names with
+		// the packed RecordShape scalar and stores names in that shape, so only the
+		// field refs follow. Treating 2.19's num_fields as a RecordShape leaves the
+		// field_names ref unread and shifts every subsequent fill record.
+		numFields := raw
+		legacy219 := profile != nil && profile.DartVersion == "2.19.0"
+		if !legacy219 {
+			// RecordShape::NumFieldsBitField is the low 16 bits in 3.0+.
+			numFields = raw & 0xFFFF
+		}
+		if err := validateFillLength(cm, i, numFields, "record"); err != nil {
+			return err
+		}
+		if legacy219 {
+			if _, err := readRef(s, fillRefUnsigned); err != nil {
+				return fmt.Errorf("record %d field_names: %w", i, err)
+			}
+		}
 		for j := int64(0); j < numFields; j++ {
 			if _, err := readRef(s, fillRefUnsigned); err != nil {
 				return fmt.Errorf("record %d field %d/%d: %w", i, j, numFields, err)
@@ -410,16 +429,11 @@ func skipFillRecord(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) er
 // skipFillContextScope skips ContextScope fill.
 // Per object: ReadUnsigned(length) + ReadByte(is_implicit) + ReadFromTo(scope, length).
 // ReadFromTo reads all pointer fields per variable entry as ReadRef.
-//
-// ContextScope is non-AOT only (context_scope_ is null in AOT ClosureData),
-// so this cluster should not appear in an AOT PRODUCT snapshot at all; it is
-// handled for completeness.
-func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool) error {
-	// ContextScope shouldn't appear in AOT. If it does, we'll attempt to skip
-	// using the known structure: ReadUnsigned(length) + ReadByte(is_implicit) +
-	// then ReadFromTo which reads pointer fields per variable.
-	// Each variable in ContextScope has ~7 pointer fields.
-	const refsPerVariable = 7
+func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, profile *snapshot.VersionProfile) error {
+	refsPerVariable := contextScopeRefsPerVariable(profile)
+	if refsPerVariable <= 0 {
+		return fmt.Errorf("context_scope: unsupported variable layout for Dart %q", profile.DartVersion)
+	}
 	for i := int64(0); i < cm.Count; i++ {
 		length, err := s.ReadUnsigned()
 		if err != nil {
@@ -432,12 +446,209 @@ func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bo
 		if _, err := s.ReadByte(); err != nil {
 			return fmt.Errorf("context_scope %d is_implicit: %w", i, err)
 		}
-		// ReadFromTo reads all pointer fields for this scope.
-		// Each variable entry has ~7 pointer fields.
+		// WriteFromTo(scope, length) walks exactly the pointer-storage slots of
+		// VariableDesc. The count changed twice: 8 through 2.19, 9 in 3.0/3.1
+		// (kernel_offset added), then 10 from 3.2.5 (the type/value union split
+		// into independent type and cid fields).
+		if length > math.MaxInt64/int64(refsPerVariable) {
+			return fmt.Errorf("context_scope %d ref count overflow: length=%d refs_per_variable=%d", i, length, refsPerVariable)
+		}
 		totalRefs := int64(refsPerVariable) * length
+		if totalRefs > int64(s.Remaining()) {
+			return fmt.Errorf("context_scope %d needs at least %d ref bytes, only %d remain", i, totalRefs, s.Remaining())
+		}
 		for j := int64(0); j < totalRefs; j++ {
 			if _, err := readRef(s, fillRefUnsigned); err != nil {
 				return fmt.Errorf("context_scope %d ref %d/%d: %w", i, j, totalRefs, err)
+			}
+		}
+	}
+	return nil
+}
+
+func contextScopeRefsPerVariable(profile *snapshot.VersionProfile) int {
+	if profile == nil || profile.DartVersion == "" {
+		return 0
+	}
+	switch {
+	case snapshot.VersionAtLeast(profile.DartVersion, "3.2.5"):
+		return 10
+	case snapshot.VersionAtLeast(profile.DartVersion, "3.0.5"):
+		return 9
+	default:
+		return 8
+	}
+}
+
+// skipFillExternalTypedData mirrors ExternalTypedDataDeserializationCluster:
+// ReadUnsigned(length), align to kDataSerializationAlignment (8 on every
+// supported SDK), then advance length*element_size bytes. No object refs are
+// present in this fill shape.
+func skipFillExternalTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable) error {
+	const dataAlignment = 8
+	elementSize := typedDataElementSize(cm.CID, ct)
+	if elementSize <= 0 {
+		return fmt.Errorf("external_typed_data CID %d has invalid element size %d", cm.CID, elementSize)
+	}
+	maxInt := int64(^uint(0) >> 1)
+	for i := int64(0); i < cm.Count; i++ {
+		length, err := s.ReadUnsigned()
+		if err != nil {
+			return fmt.Errorf("external_typed_data %d/%d length: %w", i, cm.Count, err)
+		}
+		if length < 0 || length > maxInt/int64(elementSize) {
+			return fmt.Errorf("external_typed_data %d/%d byte length overflow: length=%d element_size=%d", i, cm.Count, length, elementSize)
+		}
+		pad := (dataAlignment - s.Position()%dataAlignment) % dataAlignment
+		if pad > s.Remaining() {
+			return fmt.Errorf("external_typed_data %d/%d alignment needs %d bytes, only %d remain", i, cm.Count, pad, s.Remaining())
+		}
+		s.Align(dataAlignment)
+		byteLen := length * int64(elementSize)
+		if byteLen > int64(s.Remaining()) {
+			return fmt.Errorf("external_typed_data %d/%d payload %d bytes exceeds remaining %d", i, cm.Count, byteLen, s.Remaining())
+		}
+		if err := s.Skip(int(byteLen)); err != nil {
+			return fmt.Errorf("external_typed_data %d/%d payload: %w", i, cm.Count, err)
+		}
+	}
+	return nil
+}
+
+func skipFillSimd128(s *dartfmt.Stream, cm *ClusterMeta) error {
+	const payloadSize = 16
+	for i := int64(0); i < cm.Count; i++ {
+		if s.Remaining() < payloadSize {
+			return fmt.Errorf("simd128 %d/%d needs %d bytes, only %d remain", i, cm.Count, payloadSize, s.Remaining())
+		}
+		if err := s.Skip(payloadSize); err != nil {
+			return fmt.Errorf("simd128 %d/%d payload: %w", i, cm.Count, err)
+		}
+	}
+	return nil
+}
+
+// skipFillDeltaEncodedTypedData mirrors DeltaEncodedTypedDataDeserializationCluster.
+// Alloc stores length_in_bytes; fill stores (element_count<<1 | cid_flag), where
+// flag 0 means Uint16 and 1 means Uint32, followed by one unsigned delta per
+// element. The byte length encoded by both phases must agree.
+func skipFillDeltaEncodedTypedData(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) error {
+	for i := int64(0); i < cm.Count; i++ {
+		encoded, err := s.ReadUnsigned()
+		if err != nil {
+			return fmt.Errorf("delta_typed_data %d/%d encoded_length: %w", i, cm.Count, err)
+		}
+		if encoded < 0 {
+			return fmt.Errorf("delta_typed_data %d/%d negative encoded length %d", i, cm.Count, encoded)
+		}
+		length := encoded >> 1
+		elementSize := int64(2)
+		if encoded&1 != 0 {
+			elementSize = 4
+		}
+		if length > int64(maxSteps) {
+			return fmt.Errorf("delta_typed_data %d/%d element count %d exceeds max_steps %d", i, cm.Count, length, maxSteps)
+		}
+		if length > math.MaxInt64/elementSize {
+			return fmt.Errorf("delta_typed_data %d/%d byte length overflow: length=%d element_size=%d", i, cm.Count, length, elementSize)
+		}
+		if err := validateFillLength(cm, i, length*elementSize, "delta_typed_data"); err != nil {
+			return err
+		}
+		if length > int64(s.Remaining()) {
+			return fmt.Errorf("delta_typed_data %d/%d needs at least %d delta bytes, only %d remain", i, cm.Count, length, s.Remaining())
+		}
+		for j := int64(0); j < length; j++ {
+			if _, err := s.ReadUnsigned(); err != nil {
+				return fmt.Errorf("delta_typed_data %d/%d delta %d/%d: %w", i, cm.Count, j, length, err)
+			}
+		}
+	}
+	return nil
+}
+
+// skipFillLocalVarDescriptors mirrors Dart 3.13's exact descriptor layout.
+// ReadFromTo(desc, length) reads one name ref per entry; each VarInfo then
+// carries index_kind, three token positions and scope_id.
+func skipFillLocalVarDescriptors(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bool, maxSteps int) error {
+	for i := int64(0); i < cm.Count; i++ {
+		length, err := s.ReadUnsigned()
+		if err != nil {
+			return fmt.Errorf("local_var_descriptors %d/%d length: %w", i, cm.Count, err)
+		}
+		if err := validateFillLength(cm, i, length, "local_var_descriptors"); err != nil {
+			return err
+		}
+		if length < 0 || length > int64(maxSteps) {
+			return fmt.Errorf("local_var_descriptors %d/%d length %d exceeds max_steps %d", i, cm.Count, length, maxSteps)
+		}
+		if length > int64(s.Remaining()) {
+			return fmt.Errorf("local_var_descriptors %d/%d needs at least %d name-ref bytes, only %d remain", i, cm.Count, length, s.Remaining())
+		}
+		for j := int64(0); j < length; j++ {
+			if _, err := readRef(s, fillRefUnsigned); err != nil {
+				return fmt.Errorf("local_var_descriptors %d/%d name %d/%d: %w", i, cm.Count, j, length, err)
+			}
+		}
+		for j := int64(0); j < length; j++ {
+			if _, err := s.ReadTagged32(); err != nil {
+				return fmt.Errorf("local_var_descriptors %d/%d entry %d index_kind: %w", i, cm.Count, j, err)
+			}
+			for k := 0; k < 3; k++ {
+				if _, err := s.ReadTagged32(); err != nil {
+					return fmt.Errorf("local_var_descriptors %d/%d entry %d token_pos %d: %w", i, cm.Count, j, k, err)
+				}
+			}
+			if _, err := s.ReadTagged64(); err != nil {
+				return fmt.Errorf("local_var_descriptors %d/%d entry %d scope_id: %w", i, cm.Count, j, err)
+			}
+		}
+	}
+	return nil
+}
+
+// skipFillLegacyMap mirrors LinkedHashMapDeserializationCluster through Dart
+// 2.13. The compact format serializes only live entries rather than the backing
+// table fields used by the 2.14+ ReadFromTo layout:
+//
+//	[2.10 only] Read<bool>(is_canonical)
+//	ReadRef(type_arguments)
+//	Read<int32_t>(pairs)
+//	pairs * (ReadRef(key), ReadRef(value))
+//
+// `pairs` is untrusted and controls a parser loop, so cap it with MaxSteps and
+// reject impossible minimum byte counts before entering the loop.
+func skipFillLegacyMap(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned, leadingBool bool, maxSteps int) error {
+	for i := int64(0); i < cm.Count; i++ {
+		if leadingBool {
+			if _, err := s.ReadByte(); err != nil {
+				return fmt.Errorf("legacy_map %d/%d is_canonical: %w", i, cm.Count, err)
+			}
+		}
+		if _, err := readRef(s, fillRefUnsigned); err != nil {
+			return fmt.Errorf("legacy_map %d/%d type_arguments: %w", i, cm.Count, err)
+		}
+		pairs32, err := s.ReadTagged32()
+		if err != nil {
+			return fmt.Errorf("legacy_map %d/%d pairs: %w", i, cm.Count, err)
+		}
+		pairs := int64(int32(pairs32))
+		if pairs < 0 || pairs > int64(maxSteps) {
+			return fmt.Errorf("legacy_map %d/%d pair count %d exceeds max_steps %d", i, cm.Count, pairs, maxSteps)
+		}
+		if pairs > math.MaxInt64/2 {
+			return fmt.Errorf("legacy_map %d/%d ref count overflow: pairs=%d", i, cm.Count, pairs)
+		}
+		refs := pairs * 2
+		// Every encoded ref consumes at least one byte, irrespective of the
+		// version's ref encoding. This rejects obviously truncated huge counts
+		// without relying on a guessed average varint width.
+		if refs > int64(s.Remaining()) {
+			return fmt.Errorf("legacy_map %d/%d needs at least %d ref bytes, only %d remain", i, cm.Count, refs, s.Remaining())
+		}
+		for j := int64(0); j < refs; j++ {
+			if _, err := readRef(s, fillRefUnsigned); err != nil {
+				return fmt.Errorf("legacy_map %d/%d entry ref %d/%d: %w", i, cm.Count, j, refs, err)
 			}
 		}
 	}

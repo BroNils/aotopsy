@@ -37,7 +37,7 @@ const RefNull = cluster.RefNull
 type LoadingUnitRecord struct {
 	RefID     int   `json:"ref_id"`
 	ParentRef int   `json:"parent_ref,omitempty"`
-	UnitID    int32 `json:"unit_id,omitempty"`
+	UnitID    int64 `json:"unit_id,omitempty"`
 	// IsRoot is true when parent_ is null, i.e. this is the base unit whose
 	// Code objects live in the snapshot we just parsed.
 	IsRoot bool `json:"is_root,omitempty"`
@@ -70,7 +70,7 @@ type LoadingUnitRecord struct {
 type LoadingUnitPartition struct {
 	// RootUnitID is the id of the unit this snapshot defines, or 0 if no
 	// LoadingUnit cluster was present.
-	RootUnitID int32
+	RootUnitID int64
 	// UnitCount is the number of LoadingUnit objects described in this
 	// snapshot (including non-root ones, which are metadata-only here).
 	UnitCount int
@@ -110,7 +110,7 @@ func PartitionCodesByLoadingUnit(result *cluster.Result) *LoadingUnitPartition {
 // UnitOf reports which bucket a Code ref belongs to: the root unit id when the
 // Code is defined in this snapshot, or 0 with deferred=true when it is defined
 // in another unit. found is false for a ref that is not a Code at all.
-func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int32, deferred, found bool) {
+func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int64, deferred, found bool) {
 	for _, r := range p.MainCodeRefs {
 		if r == codeRef {
 			return p.RootUnitID, false, true

@@ -117,21 +117,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	fillRefUnsigned := profile.FillRefUnsigned
 	maxSteps := opts.EffectiveMaxSteps()
 
-	// 0. The Roots prefix, from 3.13.0 on: VM bootstrap objects and the
-	// predefined class table, read before anything else. Zero on every
-	// earlier version. See snapshot.VersionProfile.RootsPrefixRefCount for
-	// the SDK derivation and for what breaks when it is skipped.
-	for i := 0; i < profile.RootsPrefixRefCount; i++ {
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
-			return nil, fmt.Errorf("dispatch table: roots prefix ref %d/%d: %w", i, profile.RootsPrefixRefCount, err)
-		}
-	}
-
-	// 1. ObjectStore fields -- kept, indexed by their position in the
-	// serialized range (ObjectStore::from() through to_snapshot(kFullAOT)).
-	// ReadObjectStoreRefs reads the same prefix on its own for callers that
-	// need the names before type tracking runs; the two must stay identical,
-	// which is why this loop fills the same slice rather than a private one.
+	// 0-1. Roots prefix (3.13.0+) plus ObjectStore fields. The exact same walk
+	// is used by ReadObjectStoreRefs for early name resolution; centralizing it
+	// prevents those two consumers from drifting on a future roots-layout change.
 	//
 	// These used to be read and thrown away, on the grounds that the
 	// dispatch table only needs the stream advanced. But 89 of these fields
@@ -141,16 +129,8 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// every one of them falls through to `sub_<pcOffset>`. Measured on
 	// dart-3.9.2-gt-arm64: 85 of 8049 ranges unnamed, and all 85 are
 	// `_iso_stub_*` in the ELF symbol table.
-	osRefs := make([]int, 0, profile.ObjectStoreAOTFieldCount)
-	for i := 0; i < profile.ObjectStoreAOTFieldCount; i++ {
-		r, err := readRef(s, fillRefUnsigned)
-		if err != nil {
-			return nil, fmt.Errorf("dispatch table: object_store field %d/%d: %w", i, profile.ObjectStoreAOTFieldCount, err)
-		}
-		osRefs = append(osRefs, int(r))
-	}
-	if result.ObjectStoreRefs == nil {
-		result.ObjectStoreRefs = osRefs
+	if err := readObjectStoreRefsFromStream(s, result, profile); err != nil {
+		return nil, fmt.Errorf("dispatch table: %w", err)
 	}
 
 	// 2. initial_field_table, 3. shared_initial_field_table.
