@@ -249,7 +249,7 @@ baseline noise, not your edit's fault, and **do not** run `gofmt -w` to
 - **Do not settle for "approximate" or "good enough"** when a real fix is
   achievable. The kHeapObjectTag off-by-one fix seemed trivial but unlocked
   11550 field hits from 11.
-- **Root cause analysis must be deep.** Grep/Read the local SDK tree
+- **Root cause analysis must be deep.** Grep the local SDK tree
   (`~/dev/dartsdk-research/<version>/`) to verify every assumption. Do not guess. Example:
   ObjectStoreAOTFieldCount was wrong because it only counted RW fields,
   when there are also CW, FW, LAZY_CORE, LAZY_FFI, etc.
@@ -388,8 +388,10 @@ explicitly in the tool, not silently tolerated.
 
 **Local first.** The source of truth is `~/dev/dartsdk-research/<exact-version>/`
 (one plain directory per Dart SDK version, no `.git`; the directory name is the
-version). Use `grep -rn` (`rg` is not installed on every host) and `Read` directly on
-`runtime/...` — it covers every version, has no rate limits, and is what
+version). Read it **only with `grep`** — `grep -n -B3 -A20 'pattern' <tree>/runtime/vm/<file>`
+for one version, `grep -rln` to locate the file, a `for v in ...; do grep ...; done` loop
+across versions (`rg` is not installed on every host); do not open SDK files with `Read`,
+`cat`, `sed` or `awk`. It covers every version, has no rate limits, and is what
 `internal/sdktest` already resolves first.
 
 Grep MCP and `gh api` are a **fallback only**: use them when the version you need is
