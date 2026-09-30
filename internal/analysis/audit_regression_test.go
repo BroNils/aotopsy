@@ -1183,10 +1183,16 @@ func TestDecompileRuntimeLimitsAreRestored(t *testing.T) {
 	}
 }
 
-func TestBatchDecompilePropagatesFunctionBuildFailures(t *testing.T) {
+// TestStrictBatchDecompilePropagatesFunctionBuildFailures pins the --strict
+// contract: the first function that cannot be built aborts the batch and the
+// cause stays reachable through errors.Is. Without Strict a failing function is
+// skipped and listed instead; that default is covered by
+// decompile_failures_test.go.
+func TestStrictBatchDecompilePropagatesFunctionBuildFailures(t *testing.T) {
 	wantErr := errors.New("synthetic IR failure")
 	r := cluster.CodeRange{RefID: 1, PCOffset: 0, Size: 4}
 	if err := RunDecompileLoop(DecompLoopDeps{
+		Strict:      true,
 		Ranges:      []cluster.CodeRange{r},
 		CodeVA:      0x1000,
 		SymbolNames: map[uint64]string{0x1000: "f"},
@@ -1201,6 +1207,7 @@ func TestBatchDecompilePropagatesFunctionBuildFailures(t *testing.T) {
 	}
 
 	if err := RunFromMain(FromMainDeps{
+		Strict:       true,
 		Ranges:       []cluster.CodeRange{r},
 		CodeVA:       0x1000,
 		SymbolNames:  map[uint64]string{0x1000: "main"},
