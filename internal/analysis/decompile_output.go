@@ -3,9 +3,9 @@ package analysis
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
 )
@@ -51,7 +51,7 @@ func EmitSingleFuncFrida(libPath string, isARM64 bool, fir *decompiler.FuncIR, a
 // (--all / --from-main) run.
 func FinalizeFridaOutput(genFridaOut, outDir, libPath string, isARM64 bool, hooks []frida.FridaHook, probes []frida.FridaProbe, probesDropped int, opts frida.FridaOptions) error {
 	if probesDropped > 0 {
-		fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", probesDropped, frida.MaxFridaProbes)
+		cli.Errf("--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", probesDropped, frida.MaxFridaProbes)
 	}
 	return frida.WriteFridaScript(genFridaOut, outDir, libPath, isARM64, hooks, probes, opts)
 }
@@ -59,5 +59,5 @@ func FinalizeFridaOutput(genFridaOut, outDir, libPath string, isARM64 bool, hook
 // PrintAggregateStats marshals and prints the aggregate stats to stderr.
 func PrintAggregateStats(agg decompiler.Stats) {
 	statsData, _ := json.MarshalIndent(agg, "", "  ")
-	fmt.Fprintf(os.Stderr, "aggregate stats: %s\n", statsData)
+	cli.Errf("aggregate stats: %s\n", statsData)
 }

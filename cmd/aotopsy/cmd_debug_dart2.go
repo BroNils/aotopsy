@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+
+	"aotopsy/internal/cli"
 )
 
 type dart2Bucket struct {
@@ -94,7 +96,7 @@ func cmdDart2Buckets(args []string) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "dart2-buckets: %d hashes, %d total samples\n", len(sorted), func() int {
+	cli.Errf("dart2-buckets: %d hashes, %d total samples\n", len(sorted), func() int {
 		n := 0
 		for _, b := range sorted {
 			n += b.Count

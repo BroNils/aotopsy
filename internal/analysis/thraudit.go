@@ -3,8 +3,8 @@ package analysis
 import (
 	"fmt"
 	"math"
-	"os"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
@@ -46,7 +46,7 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 	if data.Info.Version != nil {
 		dartVersion = data.Info.Version.DartVersion
 	}
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", dartVersion)
+	cli.Errf("Dart SDK version: %s\n", dartVersion)
 
 	// Build name lookup.
 	refToStr := make(map[int]string)
@@ -187,9 +187,9 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 	}
 	committed = true
 
-	fmt.Fprintf(os.Stderr, "THR accesses: %d total, %d resolved, %d unresolved\n",
+	cli.Errf("THR accesses: %d total, %d resolved, %d unresolved\n",
 		totalAccesses, resolvedCount, unresolvedCount)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", outPath)
+	cli.Errf("wrote %s\n", outPath)
 
 	return nil
 }

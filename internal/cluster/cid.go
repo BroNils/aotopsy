@@ -160,8 +160,46 @@ const (
 	AllocUnknown                              // unrecognized CID
 )
 
+// notSerializedInFullAOT reports CIDs that never own a cluster in a Full-AOT
+// snapshot, in any supported SDK. A cluster under one of them is malformed and
+// must fail closed in both alloc and fill: predefined CIDs do not take the
+// generic InstanceSerializationCluster path, and guessing a shape would shift
+// every following tag or fill boundary while looking plausible.
+//
+//   - Runtime-only / cache / meta predefined classes have no case in
+//     Serializer::NewClusterForClass (Capability, ReceivePort, SendPort,
+//     SuspendState, WeakReference, FutureOr, UserTag, TransferableTypedData,
+//     SingleTargetCache, MonomorphicSmiableCall, CallSiteData, Sentinel).
+//   - KernelProgramInfo is explicitly not written into Full-AOT snapshots, and
+//     its dormant deserializer layout changes across releases.
+//   - Mutable Set is UNREACHABLE from its introduction onward.
+//   - TypedData, TypedDataView and ExternalTypedData are abstract base CIDs;
+//     NewClusterForClass only handles the concrete stride family (3.13 also
+//     lists all three in IsAbsentCid).
+//
+// Every field is guarded on non-zero: a CID absent from an older table is 0 and
+// would otherwise claim cid 0.
+func notSerializedInFullAOT(cid int, ct *snapshot.CIDTable) bool {
+	for _, c := range [...]int{
+		ct.KernelProgramInfo,
+		ct.Capability, ct.ReceivePort, ct.SendPort, ct.SuspendState,
+		ct.WeakReference, ct.FutureOr, ct.UserTag, ct.TransferableTypedData,
+		ct.SingleTargetCache, ct.MonomorphicSmiableCall, ct.CallSiteData,
+		ct.Sentinel, ct.Set,
+		ct.TypedData, ct.TypedDataView, ct.ExternalTypedData,
+	} {
+		if c != 0 && cid == c {
+			return true
+		}
+	}
+	return false
+}
+
 // ClassifyAlloc determines the alloc kind for a CID given a CID table.
 func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
+	if notSerializedInFullAOT(cid, ct) {
+		return AllocUnknown
+	}
 	// LocalVarDescriptors, new in Dart 3.13.0. Its ReadAlloc is byte-for-byte
 	// the same shape as CompressedStackMaps' -- count = ReadUnsigned(), then
 	// one ReadUnsigned(length) per object -- so it takes the same path.
@@ -217,21 +255,10 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 		if ct.ConstMap != 0 {
 			return AllocSimple
 		}
-	case ct.Set:
-		// Mutable set is UNREACHABLE from its introduction onward.
-		if ct.Set != 0 {
-			return AllocUnknown
-		}
 	case ct.ConstSet:
 		if ct.ConstSet != 0 {
 			return AllocSimple
 		}
-	case ct.TypedData, ct.TypedDataView, ct.ExternalTypedData:
-		// These are abstract/base CIDs, not the concrete typed-data family.
-		// NewClusterForClass has no switch case for them in any supported SDK;
-		// 3.13 also lists all three in IsAbsentCid. Concrete internal/view/
-		// external CIDs are handled by the stride family below.
-		return AllocUnknown
 	case ct.GrowableObjectArray:
 		return AllocSimple
 	}
@@ -269,28 +296,6 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 	}
 	if ct.UnwindError != 0 {
 		simples = append(simples, ct.UnwindError)
-	}
-	// Every supported SDK states next to KernelProgramInfoDeserializationCluster
-	// that KernelProgramInfo objects are not written into full AOT snapshots.
-	// Its dormant deserializer layout also changes across releases, so accepting
-	// a forged KPI cluster with a guessed/simple shape is a silent-desync risk.
-	if ct.KernelProgramInfo != 0 && cid == ct.KernelProgramInfo {
-		return AllocUnknown
-	}
-	// These predefined runtime-only/cache/meta CIDs have no serialization case
-	// in Serializer::NewClusterForClass in any supported Full-AOT SDK. Because
-	// predefined CIDs do not take the generic InstanceSerializationCluster path,
-	// a cluster under any of them is malformed and must fail closed.
-	runtimeOnly := []int{
-		ct.Capability, ct.ReceivePort, ct.SendPort, ct.SuspendState,
-		ct.WeakReference, ct.FutureOr, ct.UserTag, ct.TransferableTypedData,
-		ct.SingleTargetCache, ct.MonomorphicSmiableCall, ct.CallSiteData,
-		ct.Sentinel,
-	}
-	for _, c := range runtimeOnly {
-		if c != 0 && cid == c {
-			return AllocUnknown
-		}
 	}
 	if ct.TypeRef != 0 {
 		simples = append(simples, ct.TypeRef)

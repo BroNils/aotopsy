@@ -49,13 +49,12 @@ func readJSONL(t *testing.T, path string) []map[string]any {
 	return out
 }
 
-// TestCaptured_AbsentInAOT pins the fact that ICData, Context and
-// KernelProgramInfo never appear in an AOT snapshot, so their files are never
-// written. Analysis features must not be built on them -- an earlier revision
+// TestCaptured_AbsentInAOT pins the fact that ICData and Context never appear
+// in an AOT snapshot, so their files are never written. Analysis features must not be built on them -- an earlier revision
 // wired BLR call resolution to ICData and it resolved exactly zero call sites.
 func TestCaptured_AbsentInAOT(t *testing.T) {
 	outDir := runCaptureFixture(t)
-	for _, name := range []string{"icdata.jsonl", "contexts.jsonl", "kpi.jsonl"} {
+	for _, name := range []string{"icdata.jsonl", "contexts.jsonl"} {
 		if recs := readJSONL(t, filepath.Join(outDir, name)); len(recs) != 0 {
 			t.Errorf("%s: got %d records, want 0 (not serialized in AOT). If this "+
 				"ever fires legitimately, the capture code is unverified against a "+

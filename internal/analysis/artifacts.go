@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"aotopsy/internal/cli"
 )
 
 // CopyGhidraArtifacts copies Ghidra scripts into outDir/ghidra/ and returns
@@ -37,7 +39,7 @@ func CopyGhidraArtifacts(outDir string) (string, error) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "copied Ghidra scripts → %s\n", ghidraDir)
+	cli.Errf("copied Ghidra scripts → %s\n", ghidraDir)
 	return ghidraDir, nil
 }
 
@@ -66,6 +68,6 @@ func CopyIDAArtifacts(outDir string) (string, error) {
 		return "", fmt.Errorf("write ida script: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "copied IDA script → %s\n", idaDir)
+	cli.Errf("copied IDA script → %s\n", idaDir)
 	return dst, nil
 }

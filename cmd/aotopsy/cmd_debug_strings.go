@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
@@ -53,7 +53,7 @@ func cmdStrings(args []string) error {
 	defer func() { _ = ef.Close() }()
 
 	if info.Version != nil && info.Version.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 	}
 	if info.Version != nil && !info.Version.Supported {
 		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
@@ -104,25 +104,25 @@ func cmdStrings(args []string) error {
 
 	for _, t := range targets {
 		if len(t.data) < 64 {
-			fmt.Fprintf(os.Stderr, "%s: data too short (%d bytes)\n", t.name, len(t.data))
+			cli.Errf("%s: data too short (%d bytes)\n", t.name, len(t.data))
 			continue
 		}
 
 		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", t.name, err)
+			cli.Errf("%s: %v\n", t.name, err)
 			continue
 		}
 
 		isVM := t.name == "VM"
 		result, err := cluster.ScanClusters(t.data, clusterStart, info.Version, isVM, opts)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: scan error: %v\n", t.name, err)
+			cli.Errf("%s: scan error: %v\n", t.name, err)
 			continue
 		}
 
 		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: fill error: %v\n", t.name, err)
+			cli.Errf("%s: fill error: %v\n", t.name, err)
 			continue
 		}
 
@@ -236,10 +236,10 @@ func cmdStrings(args []string) error {
 
 	if *xref {
 		if len(matchedRefIDs) == 0 {
-			fmt.Fprintf(os.Stderr, "\n--xref: no strings matched %q, nothing to cross-reference\n", *find)
+			cli.Errf("\n--xref: no strings matched %q, nothing to cross-reference\n", *find)
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
+		cli.Errf("\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
 
 		ctx, err := analysis.LoadContext(*libapp)
 		if err != nil {
@@ -254,12 +254,12 @@ func cmdStrings(args []string) error {
 			}
 		}
 		if len(refSet) == 0 {
-			fmt.Fprintf(os.Stderr, "--xref: matched text has no CID-proven String object in the app/VM pool; refusing numeric RefID collision\n")
+			cli.Errf("--xref: matched text has no CID-proven String object in the app/VM pool; refusing numeric RefID collision\n")
 			return nil
 		}
 		poolIndices := ctx.PoolIndicesForRefIDs(refSet)
 		if len(poolIndices) == 0 {
-			fmt.Fprintf(os.Stderr, "--xref: matched string(s) aren't referenced by any object-pool slot in the app isolate (may only appear in the VM-isolate table, which functions can't directly index into the same way)\n")
+			cli.Errf("--xref: matched string(s) aren't referenced by any object-pool slot in the app isolate (may only appear in the VM-isolate table, which functions can't directly index into the same way)\n")
 			return nil
 		}
 
@@ -271,7 +271,7 @@ func cmdStrings(args []string) error {
 		if err != nil {
 			return fmt.Errorf("--xref: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "--xref: attempted %d function(s), scanned %d, found %d reference(s)\n\n", res.Attempted, res.Scanned, len(res.References))
+		cli.Errf("--xref: attempted %d function(s), scanned %d, found %d reference(s)\n\n", res.Attempted, res.Scanned, len(res.References))
 		for _, r := range res.References {
 			fmt.Printf("  used in: %s @ 0x%x (pool load @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
 		}

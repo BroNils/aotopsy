@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
@@ -58,7 +59,7 @@ func cmdDecompileNative(args []string) error {
 
 	if *findSubstr != "" {
 		hits := analysis.FindFunctionsByName(deps.SymbolNames, deps.SymbolSizes, *findSubstr)
-		fmt.Fprintf(os.Stderr, "%d match(es) for %q among %d functions\n", hits, *findSubstr, len(deps.SymbolNames))
+		cli.Errf("%d match(es) for %q among %d functions\n", hits, *findSubstr, len(deps.SymbolNames))
 		return nil
 	}
 
@@ -80,7 +81,7 @@ func cmdDecompileNative(args []string) error {
 		}
 		fmt.Println(art.Source)
 		statsData, _ := json.MarshalIndent(art.Stats, "", "  ")
-		fmt.Fprintf(os.Stderr, "stats: %s\n", statsData)
+		cli.Errf("stats: %s\n", statsData)
 		if *genFrida {
 			if err := analysis.EmitSingleFuncFrida(*libapp, deps.IsARM64, fir, art, targetVA, *genFridaOut,
 				frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin}); err != nil {

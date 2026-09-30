@@ -51,7 +51,7 @@ func cmdMeta(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", cli.SafeLine(result.MetaPath))
+		cli.Errf("wrote %s\n", result.MetaPath)
 		return nil
 	}
 
@@ -93,6 +93,6 @@ func cmdMeta(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s\n", cli.SafeLine(result.MetaPath))
+	cli.Errf("wrote %s\n", result.MetaPath)
 	return nil
 }

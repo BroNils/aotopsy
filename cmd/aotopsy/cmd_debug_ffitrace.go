@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/ffitrace"
 )
 
@@ -32,7 +33,7 @@ func cmdFFITrace(args []string) error {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
+	cli.Errf("Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
 	// Trace intentionally derives literal arguments from each outgoing call
 	// site's own stack/register setup. Do not run BuildArgRegMasks here: that
@@ -74,7 +75,7 @@ func cmdFFITrace(args []string) error {
 			nativeCalls++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "ffi-trace: scanned %d function(s), %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
+	cli.Errf("ffi-trace: scanned %d function(s), %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
 		scanned, dynCalls, resolved, nativeCalls, len(findings))
 	return nil
 }

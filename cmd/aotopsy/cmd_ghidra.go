@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/elfx"
 )
 
@@ -115,7 +116,7 @@ func cmdGhidra(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "ghidra: %s\n", ghHome)
+	cli.Errf("ghidra: %s\n", ghHome)
 
 	// Step 4: Handle --gui (launch interactive Ghidra).
 	if *gui {
@@ -138,13 +139,13 @@ func cmdGhidra(args []string) error {
 	}
 
 	if *all {
-		fmt.Fprintf(os.Stderr, "running Ghidra headless analysis (decompiling ALL functions)...\n")
+		cli.Errf("running Ghidra headless analysis (decompiling ALL functions)...\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "running Ghidra headless analysis (signal functions only, use --all for everything)...\n")
+		cli.Errf("running Ghidra headless analysis (signal functions only, use --all for everything)...\n")
 	}
-	fmt.Fprintf(os.Stderr, "  project: %s/%s\n", absProjDir, projectName)
-	fmt.Fprintf(os.Stderr, "  import: %s\n", absLibPath)
-	fmt.Fprintf(os.Stderr, "  decompile output: %s\n", absDecompDir)
+	cli.Errf("  project: %s/%s\n", absProjDir, projectName)
+	cli.Errf("  import: %s\n", absLibPath)
+	cli.Errf("  decompile output: %s\n", absDecompDir)
 
 	ghidraArgs := []string{
 		absProjDir,
@@ -175,7 +176,7 @@ func cmdGhidra(args []string) error {
 	}
 
 	cCount := analysis.CountDecompiledFiles(absDecompDir)
-	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
+	cli.Errf("decompiled %d functions → %s\n", cCount, absDecompDir)
 
 	return nil
 }
@@ -189,13 +190,13 @@ func launchGhidraGUI(ghidraHome, libPath, outDir, scriptPath string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\nLaunching Ghidra GUI...\n")
-	fmt.Fprintf(os.Stderr, "  1. Import: %s\n", libPath)
-	fmt.Fprintf(os.Stderr, "  2. Open Script Manager (Window → Script Manager)\n")
-	fmt.Fprintf(os.Stderr, "  3. Add script directory: %s\n", scriptPath)
-	fmt.Fprintf(os.Stderr, "  4. Run aotopsy_prescript.py first, then aotopsy_apply.py\n")
-	fmt.Fprintf(os.Stderr, "     (or pass flutter_meta.json path as script argument)\n")
-	fmt.Fprintf(os.Stderr, "  Meta: %s/flutter_meta.json\n\n", outDir)
+	cli.Errf("\nLaunching Ghidra GUI...\n")
+	cli.Errf("  1. Import: %s\n", libPath)
+	cli.Errf("  2. Open Script Manager (Window → Script Manager)\n")
+	cli.Errf("  3. Add script directory: %s\n", scriptPath)
+	cli.Errf("  4. Run aotopsy_prescript.py first, then aotopsy_apply.py\n")
+	cli.Errf("     (or pass flutter_meta.json path as script argument)\n")
+	cli.Errf("  Meta: %s/flutter_meta.json\n\n", outDir)
 
 	env := os.Environ()
 	if os.Getenv("JAVA_HOME") == "" {

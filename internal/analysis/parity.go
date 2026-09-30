@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
@@ -57,7 +58,7 @@ func RunParity(samplesDir, outDir string) error {
 	for _, hash := range hashes {
 		row := runParitySample(filepath.Join(samplesDir, hash, "libapp.so"), hash, opts)
 		rows = append(rows, row)
-		_, _ = fmt.Fprintf(os.Stderr, "%-34s %-8s %-12s strings=%-6d named=%-6d codes=%-6d codemap=%-6d\n",
+		cli.Errf("%-34s %-8s %-12s strings=%-6d named=%-6d codes=%-6d codemap=%-6d\n",
 			hash, row.DartVersion, row.Status, row.Strings, row.Named, row.Codes, row.CodeMap)
 	}
 
@@ -80,8 +81,8 @@ func RunParity(samplesDir, outDir string) error {
 	}); err != nil {
 		return fmt.Errorf("publish parity reports: %w", err)
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "\nWrote %s (%d rows)\n", csvPath, len(rows))
-	_, _ = fmt.Fprintf(os.Stderr, "Wrote %s\n", summaryPath)
+	cli.Errf("\nWrote %s (%d rows)\n", csvPath, len(rows))
+	cli.Errf("Wrote %s\n", summaryPath)
 
 	return nil
 }

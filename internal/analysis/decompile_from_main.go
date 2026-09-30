@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
@@ -112,7 +113,7 @@ func RunFromMain(d FromMainDeps) error {
 			return fmt.Errorf("%s", msg)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "--from-main: entry point at 0x%x\n", mainVA)
+	cli.Errf("--from-main: entry point at 0x%x\n", mainVA)
 
 	oldProcs := runtime.GOMAXPROCS(2)
 	defer runtime.GOMAXPROCS(oldProcs)
@@ -132,7 +133,7 @@ func RunFromMain(d FromMainDeps) error {
 
 	for len(queue) > 0 {
 		if d.MaxFuncs > 0 && emitted >= d.MaxFuncs {
-			fmt.Fprintf(os.Stderr, "--from-main: reached --max %d before the reachability walk was exhausted (%d functions still queued) -- output is a valid but incomplete prefix\n", d.MaxFuncs, len(queue))
+			cli.Errf("--from-main: reached --max %d before the reachability walk was exhausted (%d functions still queued) -- output is a valid but incomplete prefix\n", d.MaxFuncs, len(queue))
 			break
 		}
 		va := queue[0]
@@ -157,7 +158,7 @@ func RunFromMain(d FromMainDeps) error {
 		}
 
 		if d.DebugTrace {
-			fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s (library=%q)\n", va, r.Size, d.SymbolNames[va], url)
+			cli.Errf("trace: about to decompile 0x%x size=%d %s (library=%q)\n", va, r.Size, d.SymbolNames[va], url)
 		}
 
 		if err := func() (err error) {
@@ -229,7 +230,7 @@ func RunFromMain(d FromMainDeps) error {
 			debug.FreeOSMemory()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			fmt.Fprintf(os.Stderr, "progress: %d emitted, %d framework-skipped, heap=%dMiB, elapsed=%s\n",
+			cli.Errf("progress: %d emitted, %d framework-skipped, heap=%dMiB, elapsed=%s\n",
 				emitted, frameworkSkipped, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
 		}
 	}
@@ -237,7 +238,7 @@ func RunFromMain(d FromMainDeps) error {
 		return fmt.Errorf("final flush %s: %w", d.CombinedPath, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "emitted %d functions (%d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
+	cli.Errf("emitted %d functions (%d framework-excluded, %d unknown-library-but-included, %d app-code classes touched via object-pool references) to %s in %s\n",
 		emitted, frameworkSkipped, unknownLibrary, classTouched, d.CombinedPath, time.Since(d.StartTime).Round(time.Second))
 	PrintAggregateStats(agg)
 	if err := failures.Finish(d.OutDir, os.Stderr); err != nil {

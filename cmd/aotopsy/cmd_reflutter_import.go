@@ -2,10 +2,9 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 )
 
 func cmdReflutterImport(args []string) error {
@@ -28,9 +27,9 @@ func cmdReflutterImport(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "reFlutter import complete: %s\n", result.OutputDir)
-	fmt.Fprintf(os.Stderr, "  Libraries: %d\n", result.Libraries)
-	fmt.Fprintf(os.Stderr, "  Functions: %d\n", result.Functions)
-	fmt.Fprintf(os.Stderr, "  Classes with fields: %d\n", result.ClassesFields)
+	cli.Errf("reFlutter import complete: %s\n", result.OutputDir)
+	cli.Errf("  Libraries: %d\n", result.Libraries)
+	cli.Errf("  Functions: %d\n", result.Functions)
+	cli.Errf("  Classes with fields: %d\n", result.ClassesFields)
 	return nil
 }

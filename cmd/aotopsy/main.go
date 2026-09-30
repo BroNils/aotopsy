@@ -43,7 +43,7 @@ func main() {
 			err = c.Run(rest)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
+			cli.Errf("error: %s\n", err)
 			os.Exit(1)
 		}
 		return
@@ -53,7 +53,7 @@ func main() {
 	if resolvePositionalLib(cmd) != "" {
 		err := cmdRun(os.Args[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
+			cli.Errf("error: %s\n", err)
 			os.Exit(1)
 		}
 		return
@@ -63,13 +63,13 @@ func main() {
 	if strings.HasPrefix(cmd, "-") {
 		err := cmdRun(os.Args[1:])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %s\n", cli.SafeLine(err.Error()))
+			cli.Errf("error: %s\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "unknown command: %s\n", cli.SafeLine(cmd))
+	cli.Errf("unknown command: %s\n", cmd)
 	printPrimaryUsage()
 	os.Exit(1)
 }

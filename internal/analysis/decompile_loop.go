@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
@@ -95,7 +96,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 		}
 	}
 	if d.SkipFuncs >= totalMatching {
-		fmt.Fprintf(os.Stderr, "--skip %d >= %d total matching functions -- nothing to do, this shard is past the end\n", d.SkipFuncs, totalMatching)
+		cli.Errf("--skip %d >= %d total matching functions -- nothing to do, this shard is past the end\n", d.SkipFuncs, totalMatching)
 		return nil
 	}
 
@@ -151,7 +152,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 
 		if d.DebugTrace {
 			if funcVA, ok := im.FuncVA(r); ok {
-				fmt.Fprintf(os.Stderr, "trace: about to decompile 0x%x size=%d %s\n", funcVA, r.Size, d.SymbolNames[funcVA])
+				cli.Errf("trace: about to decompile 0x%x size=%d %s\n", funcVA, r.Size, d.SymbolNames[funcVA])
 			}
 		}
 
@@ -212,7 +213,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 			debug.FreeOSMemory()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			fmt.Fprintf(os.Stderr, "progress: %d emitted, heap=%dMiB, elapsed=%s\n",
+			cli.Errf("progress: %d emitted, heap=%dMiB, elapsed=%s\n",
 				emitted, m.HeapAlloc/1024/1024, time.Since(d.StartTime).Round(time.Second))
 		}
 	}
@@ -220,7 +221,7 @@ func RunDecompileLoop(d DecompLoopDeps) error {
 	if err := d.W.Flush(); err != nil {
 		return fmt.Errorf("final flush %s: %w", d.CombinedPath, err)
 	}
-	fmt.Fprintf(os.Stderr, "emitted %d functions to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
+	cli.Errf("emitted %d functions to %s in %s -- shard covered matched-index [%d, %d) of %d total matching functions in this binary\n",
 		emitted, d.CombinedPath, time.Since(d.StartTime).Round(time.Second), d.SkipFuncs, d.SkipFuncs+emitted, totalMatching)
 	PrintAggregateStats(agg)
 	if err := failures.Finish(d.OutDir, os.Stderr); err != nil {

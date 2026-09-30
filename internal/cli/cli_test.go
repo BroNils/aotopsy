@@ -440,3 +440,46 @@ func TestLoggerSanitizesInvalidStarOperandReusedAsVisibleValue(t *testing.T) {
 		t.Fatalf("sanitization lost printable reused argument content: %q", got)
 	}
 }
+
+func TestIsTerminalFileIsFalseForClosedAndNilFiles(t *testing.T) {
+	if isTerminalFile(nil) {
+		t.Fatal("nil file classified as a terminal")
+	}
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if isTerminalFile(f) {
+		t.Fatal("closed file classified as a terminal")
+	}
+}
+
+func TestErrfSanitizesUntrustedArgumentsOnCurrentStderr(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	orig := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = orig }()
+
+	Errf("symbol %s at 0x%x\n", "evil\nFORGED\x1b[2J‮text", 0x10)
+
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, '‮') {
+		t.Fatalf("Errf let untrusted text forge terminal output: %q", got)
+	}
+	if !strings.Contains(got, "symbol evil FORGEDtext at 0x10") {
+		t.Fatalf("Errf lost printable content: %q", got)
+	}
+}

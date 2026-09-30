@@ -415,21 +415,6 @@ type LoadingUnitInfo struct {
 	UnitID    int64 // loading unit ID; serialized as intptr_t from Dart 3.5+
 }
 
-// KernelProgramInfoRef holds a KernelProgramInfo object's refs.
-// KPI contains references to the kernel binary (dill) data, which
-// could theoretically enable Dart source reconstruction.
-// Note: KPI is NOT serialized in AOT PRODUCT snapshots — this will
-// always be empty for AOT binaries.
-type KernelProgramInfoRef struct {
-	RefID              int
-	KernelComponentRef int // ref ID of kernel component
-	StringOffsetsRef   int // ref ID of string offsets
-	StringDataRef      int // ref ID of string data
-	CanonicalNamesRef  int // ref ID of canonical names
-	ConstantsRef       int // ref ID of constants
-	ConstantsTableRef  int // ref ID of constants table
-}
-
 // ClosureDataInfo holds a ClosureData object's refs.
 // In AOT, ClosureData has: parent_function (ref 0), closure (ref 1),
 // and packed_fields (scalar). context_scope_ is null in AOT.
@@ -741,7 +726,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 			result.Strings = append(result.Strings, strings...)
 
-		case FillNone, FillSentinel, FillInstructionsTable:
+		case FillNone:
 			// No fill data to read.
 
 		case FillROData:
@@ -824,7 +809,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, kpiRefs, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
+			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
@@ -835,7 +820,6 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.ICData = append(result.ICData, icDataInfos...)
 			result.Scripts = append(result.Scripts, scriptInfos...)
 			result.LoadingUnits = append(result.LoadingUnits, loadingUnitInfos...)
-			result.KernelProgramInfo = append(result.KernelProgramInfo, kpiRefs...)
 			result.ClosureData = append(result.ClosureData, closureDataInfos...)
 			result.TypeParameters = append(result.TypeParameters, typeParamInfos...)
 			result.Closures = append(result.Closures, closureInfos...)
@@ -1228,12 +1212,12 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 		if result != nil {
 			result.Strings = append(result.Strings, strings...)
 		}
-	case FillNone, FillSentinel, FillROData, FillInstructionsTable:
+	case FillNone, FillROData:
 		// No fill data.
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
-		_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
+		_, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)

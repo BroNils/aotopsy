@@ -3,10 +3,10 @@ package frida
 import (
 	"aotopsy/internal/arch/x86"
 	"fmt"
-	"os"
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
@@ -188,7 +188,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 				rt.kill(sdk.X86ReturnReg)
 				rt.tick()
 				if maxHits > 0 && hits >= maxHits {
-					fmt.Fprintf(os.Stderr, "stopping at --max=%d indirect-call hits\n", maxHits)
+					cli.Errf("stopping at --max=%d indirect-call hits\n", maxHits)
 					maxHitReached = true
 					return false
 				}

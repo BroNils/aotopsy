@@ -84,12 +84,6 @@ const (
 	// FillContextScope is custom: per-scope variable-length data.
 	FillContextScope
 
-	// FillSentinel has no fill data.
-	FillSentinel
-
-	// FillInstructionsTable has no fill data (handled in alloc/image).
-	FillInstructionsTable
-
 	// FillClass is custom: per-object conditional bitmap read.
 	FillClass
 
@@ -700,11 +694,6 @@ func specWeakProperty() FillSpec {
 	return FillSpec{Kind: FillRefs, NumRefs: 2, NameIdx: -1, OwnerIdx: -1}
 }
 
-func specWeakReference() FillSpec {
-	// ReadFromTo = 2 refs (target, type_arguments). No scalars in AOT.
-	return FillSpec{Kind: FillRefs, NumRefs: 2, NameIdx: -1, OwnerIdx: -1}
-}
-
 func specLibraryPrefix() FillSpec {
 	// AOT: to_snapshot(kFullAOT) = &imports_. ReadFromTo = 2 refs (name, imports).
 	// importer NOT serialized in AOT.
@@ -760,29 +749,6 @@ func specMegamorphicCache() FillSpec {
 	}
 }
 
-func specSingleTargetCache() FillSpec {
-	// ReadFromTo: target = 1 ref.
-	// Read<uword>(lower_limit) + Read<uword>(upper_limit). uword = 8 bytes on arm64.
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 1,
-		Scalars: []ScalarOp{OpTagged64, OpTagged64},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
-func specKernelProgramInfo() FillSpec {
-	// ReadFromTo only. to_snapshot → &constants_table_.
-	// Fields: kernel_component, string_offsets, string_data, canonical_names,
-	//         metadata_payloads, metadata_mappings, scripts, constants, constants_table = 9 refs.
-	// No scalars (ReadFill only does ReadFromTo).
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 9,
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
 func specFfiTrampolineData(dartVersion string) FillSpec {
 	// ReadFromTo: signature_type, c_signature, callback_target, callback_exceptional_return = 4 refs.
 	// <=2.18: ReadUnsigned(callback_id) only. No ffi_function_kind.
@@ -815,17 +781,6 @@ func specTypeParameters() FillSpec {
 	return FillSpec{Kind: FillRefs, NumRefs: 4, NameIdx: -1, OwnerIdx: -1}
 }
 
-func specMonomorphicSmiableCall() FillSpec {
-	// Read<uword>(expected_cid) + Read<uword>(entry_point).
-	// No refs in fill. uword = 8 bytes on arm64 → Read64(marker 192).
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 0,
-		Scalars: []ScalarOp{OpTagged64, OpTagged64},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
 func specTypedDataView() FillSpec {
 	// ReadFromTo: typed_data, offset_in_bytes, length = 3 refs. No scalars.
 	return FillSpec{Kind: FillRefs, NumRefs: 3, NameIdx: -1, OwnerIdx: -1}
@@ -841,53 +796,12 @@ func specStackTrace() FillSpec {
 	return FillSpec{Kind: FillRefs, NumRefs: 3, NameIdx: -1, OwnerIdx: -1}
 }
 
-func specSendPort() FillSpec {
-	// SendPort: ReadRef(id) + ReadUnsigned(origin_id).
-	// Actually: no ReadFromTo, custom: Read<Dart_Port>(id) + Read<Dart_Port>(origin_id) = 2 × ReadTagged64.
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 0,
-		Scalars: []ScalarOp{OpTagged64, OpTagged64},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
-func specCapability() FillSpec {
-	// Read<uint64_t>(id) = ReadTagged64.
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 0,
-		Scalars: []ScalarOp{OpTagged64},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
-func specReceivePort() FillSpec {
-	// AOT: ReadRef(send_port) + Read<Dart_Port>(id) = 1 ref + Tagged64.
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 1,
-		Scalars: []ScalarOp{OpTagged64},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
-func specSuspendState() FillSpec {
-	// AOT: ReadFromTo = 2 refs (then_callback, error_callback).
-	// Read<int32_t>(frame_size).
-	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 2,
-		Scalars: []ScalarOp{OpTagged32},
-		NameIdx: -1, OwnerIdx: -1,
-	}
-}
-
-func specTransferableTypedData() FillSpec {
-	// TransferableTypedData is runtime-only for the supported Full-AOT snapshot
-	// factories: Serializer::NewClusterForClass has no case for its predefined
-	// CID and returns nullptr. Treating a forged cluster as zero-fill would move
-	// every later fill boundary while looking superficially valid.
+// specUnsupported is the fill spec of every CID that Serializer::NewClusterForClass
+// never serializes into a Full-AOT snapshot (runtime-only, cache, KernelProgramInfo,
+// abstract typed-data bases, mutable Map/Set ...). A cluster under such a CID is
+// malformed; guessing a shape would move every later fill boundary while looking
+// superficially valid, so it fails closed.
+func specUnsupported() FillSpec {
 	return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 }
 
@@ -909,22 +823,6 @@ func specParameterTypeCheck() FillSpec {
 	}
 }
 
-func specUserTag() FillSpec {
-	// ReadFromTo = 1 ref (label). Read<uword>(tag). uword = 8 bytes on arm64.
-	return FillSpec{
-		Kind:     FillRefs,
-		NumRefs:  1,
-		Scalars:  []ScalarOp{OpTagged64},
-		NameIdx:  0, // label
-		OwnerIdx: -1,
-	}
-}
-
-func specFutureOr() FillSpec {
-	// ReadFromTo = 2 refs (type_test_stub, type_arguments). No scalars.
-	return FillSpec{Kind: FillRefs, NumRefs: 2, NameIdx: -1, OwnerIdx: -1}
-}
-
 func specWeakSerializationReference(dartVersion string) FillSpec {
 	// 2.10/2.12 Full AOT canonicalize WSRs by target class and serialize only
 	// that target CID in fill (`WriteCid` / `ReadCid`, i.e. tagged int32).
@@ -943,6 +841,8 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	fillRefUnsigned := profile.FillRefUnsigned
 	preV32 := profile.PreV32Format
 	switch {
+	case notSerializedInFullAOT(cid, ct):
+		return specUnsupported()
 	case cid == ct.Function:
 		return specFunction(fillRefUnsigned, profile.FuncNumRefs, functionRefLayoutFor(profile.DartVersion))
 	case cid == ct.Class:
@@ -1014,19 +914,15 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		if !snapshot.VersionAtLeast(profile.DartVersion, "2.14.0") {
 			return FillSpec{Kind: FillLegacyMap, NameIdx: -1, OwnerIdx: -1, LeadingBool: profile.PreCanonicalSplit}
 		}
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+		return specUnsupported()
 	case ct.ConstMap != 0 && cid == ct.ConstMap:
 		return specMap()
-	case ct.Set != 0 && cid == ct.Set:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case ct.ConstSet != 0 && cid == ct.ConstSet:
 		return specSet()
 	case cid == ct.RegExp:
 		return specRegExp(profile.DartVersion)
 	case cid == ct.WeakProperty:
 		return specWeakProperty()
-	case ct.WeakReference != 0 && cid == ct.WeakReference:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case cid == ct.LibraryPrefix:
 		return specLibraryPrefix()
 	case cid == ct.LanguageError:
@@ -1037,17 +933,6 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		return specICData()
 	case cid == ct.MegamorphicCache:
 		return specMegamorphicCache()
-	case cid == ct.SingleTargetCache:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.MonomorphicSmiableCall != 0 && cid == ct.MonomorphicSmiableCall:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.CallSiteData != 0 && cid == ct.CallSiteData:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case cid == ct.KernelProgramInfo:
-		// KernelProgramInfo is explicitly excluded from Full AOT in every
-		// supported SDK. Its dormant snapshot layout changed across releases;
-		// fail closed rather than consume a forged cluster with a non-AOT shape.
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case ct.FfiTrampolineData != 0 && cid == ct.FfiTrampolineData:
 		return specFfiTrampolineData(profile.DartVersion)
 	case ct.SignatureData != 0 && cid == ct.SignatureData:
@@ -1058,36 +943,10 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		return specParameterTypeCheck()
 	case ct.TypeParameters != 0 && cid == ct.TypeParameters:
 		return specTypeParameters()
-	case cid == ct.TypedDataView:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case cid == ct.ExternalTypedData:
-		// Abstract base CID is absent from Full-AOT roots and should not have
-		// a cluster of its own. Keep the exact concrete-family handling below;
-		// a base-CID cluster is malformed input rather than an ExternalTypedData
-		// payload with a guessed shape.
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case cid == ct.StackTrace:
 		return specStackTrace()
-	case cid == ct.SendPort:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.Capability != 0 && cid == ct.Capability:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.ReceivePort != 0 && cid == ct.ReceivePort:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.SuspendState != 0 && cid == ct.SuspendState:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.TransferableTypedData != 0 && cid == ct.TransferableTypedData:
-		return specTransferableTypedData()
-	case ct.UserTag != 0 && cid == ct.UserTag:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
-	case ct.FutureOr != 0 && cid == ct.FutureOr:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case ct.WeakSerializationReference != 0 && cid == ct.WeakSerializationReference:
 		return specWeakSerializationReference(profile.DartVersion)
-	case ct.Sentinel != 0 && cid == ct.Sentinel:
-		// Sentinel is supplied as a VM/root object and has no Full-AOT
-		// serialization-cluster case in the supported SDKs.
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 
 	// Special fill formats (not FillRefs)
 	case cid == ct.String, cid == ct.OneByteString, cid == ct.TwoByteString:
@@ -1106,7 +965,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		if !snapshot.VersionAtLeast(profile.DartVersion, "3.4.3") {
 			// These CIDs existed earlier, but NewClusterForClass had no SIMD case
 			// through 3.3.0, so a Full-AOT cluster under them is invalid.
-			return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+			return specUnsupported()
 		}
 		return FillSpec{Kind: FillSimd128, NameIdx: -1, OwnerIdx: -1}
 	case cid == ct.Code:
@@ -1147,8 +1006,6 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		return FillSpec{Kind: FillRefs, NumRefs: 1, Scalars: []ScalarOp{OpBool}, NameIdx: -1, OwnerIdx: -1}
 	case ct.LocalVarDescriptors != 0 && cid == ct.LocalVarDescriptors:
 		return FillSpec{Kind: FillLocalVarDescriptors, NameIdx: -1, OwnerIdx: -1}
-	case cid == ct.TypedData:
-		return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
 	case ct.Record != 0 && cid == ct.Record:
 		return FillSpec{Kind: FillRecord, NameIdx: -1, OwnerIdx: -1}
 	}
@@ -1175,7 +1032,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 			// Full-AOT cluster factory does not route those through the ordinary
 			// view/external clusters. Refuse a synthetic cluster instead of
 			// consuming it with the wrong shape.
-			return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+			return specUnsupported()
 		}
 	}
 	if ct.ByteDataViewCid != 0 && cid == ct.ByteDataViewCid {
@@ -1192,7 +1049,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	// DeltaEncodedTypedData (NativePointer CID).
 	if ct.NativePointerCid != 0 && cid == ct.NativePointerCid {
 		if !snapshot.VersionAtLeast(profile.DartVersion, "2.19.0") {
-			return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+			return specUnsupported()
 		}
 		return FillSpec{Kind: FillDeltaEncodedTypedData, NameIdx: -1, OwnerIdx: -1}
 	}
@@ -1210,7 +1067,7 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 		return FillSpec{Kind: FillInstance, NameIdx: -1, OwnerIdx: -1}
 	}
 
-	return FillSpec{Kind: FillUnknown, NameIdx: -1, OwnerIdx: -1}
+	return specUnsupported()
 }
 
 // typeClassIDShift returns where type_class_id starts in UntaggedType's packed

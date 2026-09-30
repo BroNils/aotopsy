@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/frida"
 	"aotopsy/internal/output"
 )
@@ -49,7 +49,7 @@ func cmdFridaExport(args []string) error {
 			SignalK:  2,
 			MaxSteps: 100000,
 		}
-		fmt.Fprintf(os.Stderr, "Running full analysis...\n")
+		cli.Errf("Running full analysis...\n")
 		_, err := analysis.Run(opts)
 		if err != nil {
 			return fmt.Errorf("pipeline failed: %w", err)
@@ -143,16 +143,16 @@ func cmdFridaExport(args []string) error {
 		return fmt.Errorf("publish Frida export generation: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Frida metadata exported: %s\n", *outPath)
-	fmt.Fprintf(os.Stderr, "  Functions: %d\n", len(meta.Functions))
-	fmt.Fprintf(os.Stderr, "  Unresolved BLRs: %d\n", len(meta.UnresolvedBLRs))
-	fmt.Fprintf(os.Stderr, "  Dispatch entries: %d\n", len(meta.DispatchTable))
-	fmt.Fprintf(os.Stderr, "  String refs: %d\n", len(meta.StringRefs))
-	fmt.Fprintf(os.Stderr, "  Generation binding: %s\n", bindingPath)
+	cli.Errf("Frida metadata exported: %s\n", *outPath)
+	cli.Errf("  Functions: %d\n", len(meta.Functions))
+	cli.Errf("  Unresolved BLRs: %d\n", len(meta.UnresolvedBLRs))
+	cli.Errf("  Dispatch entries: %d\n", len(meta.DispatchTable))
+	cli.Errf("  String refs: %d\n", len(meta.StringRefs))
+	cli.Errf("  Generation binding: %s\n", bindingPath)
 
 	if *genScript {
-		fmt.Fprintf(os.Stderr, "  Frida script: %s\n", *scriptPath)
-		fmt.Fprintf(os.Stderr, "  Run: frida -H 127.0.0.1:8888 -f com.example.app -l %s\n", *scriptPath)
+		cli.Errf("  Frida script: %s\n", *scriptPath)
+		cli.Errf("  Run: frida -H 127.0.0.1:8888 -f com.example.app -l %s\n", *scriptPath)
 	}
 
 	return nil

@@ -130,7 +130,7 @@ func TestDart210ConcreteTypedDataViewReadsCanonicalByte(t *testing.T) {
 	data = append(data, 0x5a)
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-	if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := s.ReadByte()
@@ -270,7 +270,7 @@ func TestDart210LegacyClustersUseExactFillOrder(t *testing.T) {
 		data = append(data, 0x5a)
 		s := dartfmt.NewStream(data)
 		cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-		if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+		if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 			t.Fatal(err)
 		}
 		marker, err := s.ReadByte()
@@ -295,7 +295,7 @@ func TestDart210LegacyClustersUseExactFillOrder(t *testing.T) {
 		data = append(data, 0x5a)
 		s := dartfmt.NewStream(data)
 		cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-		if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+		if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 			t.Fatal(err)
 		}
 		marker, err := s.ReadByte()
@@ -337,7 +337,7 @@ func TestClosureDataLayoutAcrossLegacyBoundaries(t *testing.T) {
 			data = append(data, 0x5a)
 			s := dartfmt.NewStream(data)
 			cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 100}
-			_, _, _, _, _, _, _, _, cds, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
+			_, _, _, _, _, _, _, cds, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -559,7 +559,7 @@ func TestRegExpFlagsWidthChangesAt312(t *testing.T) {
 	data = append(data, 0x5a)
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: profile.CIDs.RegExp, Count: 1, StartRef: 1}
-	if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, profile.FillRefUnsigned, profile); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, profile.FillRefUnsigned, profile); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := s.ReadByte()
@@ -671,7 +671,7 @@ func TestClosureVarLenFillMustMatchAllocLength(t *testing.T) {
 	// Fill claims one tail ref while alloc declared two. Reject before reading
 	// the fixed/tail refs, otherwise all later objects shift by one ref.
 	s := dartfmt.NewStream(encUnsigned(1))
-	_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
+	_, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
 	if err == nil || !strings.Contains(err.Error(), "differs from alloc length") {
 		t.Fatalf("Closure mismatched length error = %v", err)
 	}

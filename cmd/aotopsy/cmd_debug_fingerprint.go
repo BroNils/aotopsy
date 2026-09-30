@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/fingerprint"
 )
 
@@ -40,6 +41,6 @@ func cmdFingerprint(args []string) error {
 	if err := os.WriteFile(*out, data, 0o644); err != nil {
 		return fmt.Errorf("fingerprint: write %s: %w", *out, err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
+	cli.Errf("wrote %s\n", *out)
 	return nil
 }

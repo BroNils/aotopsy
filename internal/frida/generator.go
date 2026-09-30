@@ -2,10 +2,10 @@ package frida
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/output"
 )
@@ -288,7 +288,7 @@ Process.enumerateThreads().forEach(function (thread) {
 // uninteresting, result.
 func WriteFridaScript(outPath, outDir, libPath string, isARM64 bool, hooks []FridaHook, probes []FridaProbe, opts FridaOptions) error {
 	if len(hooks) == 0 && len(probes) == 0 {
-		fmt.Fprintln(os.Stderr, "--gen-frida: no functions were decompiled, nothing to hook -- skipping script generation")
+		cli.Errf("--gen-frida: no functions were decompiled, nothing to hook -- skipping script generation\n")
 		return nil
 	}
 	if outPath == "" {
@@ -317,7 +317,7 @@ func WriteFridaScript(outPath, outDir, libPath string, isARM64 bool, hooks []Fri
 	if err := output.WriteFileAtomic(outPath, []byte(script), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
-	fmt.Fprintf(os.Stderr, "Frida script (%d function hooks, %d indirect-call probes) written to %s\n", len(hooks), len(probes), outPath)
+	cli.Errf("Frida script (%d function hooks, %d indirect-call probes) written to %s\n", len(hooks), len(probes), outPath)
 	return nil
 }
 

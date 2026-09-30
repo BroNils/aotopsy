@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"aotopsy/internal/cli"
 )
 
 // cmdSDKCheck runs all SDK verification gates (THR, ObjectStore, stubs, roots)
@@ -45,16 +47,16 @@ func cmdSDKCheck(args []string) error {
 	tool := filepath.Join(root, "tools", "extract_thr.go")
 
 	runCheck := func(name, checkFlag string) {
-		fmt.Fprintf(os.Stderr, "=== %s ===\n", name)
+		cli.Errf("=== %s ===\n", name)
 		cmd := exec.Command("go", "run", tool, checkFlag)
 		cmd.Dir = root
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "FAIL: %s\n", name)
+			cli.Errf("FAIL: %s\n", name)
 			failed = true
 		} else {
-			fmt.Fprintf(os.Stderr, "PASS: %s\n\n", name)
+			cli.Errf("PASS: %s\n\n", name)
 		}
 	}
 
@@ -83,7 +85,7 @@ func cmdSDKCheck(args []string) error {
 	if failed {
 		return fmt.Errorf("one or more SDK checks failed")
 	}
-	fmt.Fprintf(os.Stderr, "All SDK checks passed.\n")
+	cli.Errf("All SDK checks passed.\n")
 	return nil
 }
 

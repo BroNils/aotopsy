@@ -189,7 +189,6 @@ type Result struct {
 	ICData            []ICDataInfo           // ICData call-site→class→target mappings (empty in AOT — JIT-only)
 	Scripts           []ScriptInfo           // Script URLs + line/col metadata
 	LoadingUnits      []LoadingUnitInfo      // Loading unit / deferred library metadata
-	KernelProgramInfo []KernelProgramInfoRef // KernelProgramInfo refs (empty in AOT — not serialized)
 
 	// ClosureData: alternative to Context for closure resolution in AOT.
 	// ClosureData objects ARE serialized in AOT (unlike Context objects).
