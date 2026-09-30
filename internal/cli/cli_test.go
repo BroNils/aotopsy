@@ -469,14 +469,15 @@ func TestErrfSanitizesUntrustedArgumentsOnCurrentStderr(t *testing.T) {
 	os.Stderr = f
 	defer func() { os.Stderr = orig }()
 
-	Errf("symbol %s at 0x%x\n", "evil\nFORGED\x1b[2J‮text", 0x10)
+	const rlo = rune(0x202e) // right-to-left override, built from the code point on purpose
+	Errf("symbol %s at 0x%x\n", "evil\nFORGED\x1b[2J"+string(rlo)+"text", 0x10)
 
 	data, err := os.ReadFile(f.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(data)
-	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, '‮') {
+	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, rlo) {
 		t.Fatalf("Errf let untrusted text forge terminal output: %q", got)
 	}
 	if !strings.Contains(got, "symbol evil FORGEDtext at 0x10") {
