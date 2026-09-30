@@ -91,6 +91,43 @@ func TestExternalTypedDataUsesLengthAlignmentAndRawPayload(t *testing.T) {
 	}
 }
 
+func TestExternalTypedDataRejectsPaddingPastTheInput(t *testing.T) {
+	profile := snapshot.ProfileForVersion("3.12.2")
+	ct := profile.CIDs
+	cid := ct.TypedDataInt8ArrayCid + 2
+	// length=3 leaves the stream at offset 1, so 7 padding bytes are needed
+	// before the payload; only 3 bytes exist. Align must fail, not clamp to the
+	// end and let a truncated blob look like an empty payload.
+	data := append(encUnsigned(3), 0, 0, 0)
+	err := skipFillExternalTypedData(dartfmt.NewStream(data), &ClusterMeta{CID: cid, Count: 1}, ct)
+	if err == nil || !strings.Contains(err.Error(), "alignment") {
+		t.Fatalf("padding past the input error = %v", err)
+	}
+}
+
+// A stream start outside the data is malformed input. It used to be clamped, so
+// a negative or oversized offset silently became "parse from byte 0 / from EOF".
+func TestStreamStartOffsetsAreValidated(t *testing.T) {
+	profile := snapshot.ProfileForVersion("3.9.2")
+	data := make([]byte, 64)
+
+	if _, err := ScanClusters(data, -1, profile, false, dartfmt.Options{}); err == nil {
+		t.Fatal("ScanClusters accepted a negative cluster start")
+	}
+	if _, err := ScanClusters(data, len(data), profile, false, dartfmt.Options{}); err == nil {
+		t.Fatal("ScanClusters accepted a cluster start at the end of the data")
+	}
+
+	res := &Result{FillEnd: len(data) + 1}
+	err := ReadObjectStoreRefs(data, res, profile)
+	if err == nil || !strings.Contains(err.Error(), "stream start") {
+		t.Fatalf("ReadObjectStoreRefs with FillEnd past the data error = %v", err)
+	}
+	if res.ObjectStoreRefs != nil {
+		t.Fatal("rejected ReadObjectStoreRefs still recorded refs")
+	}
+}
+
 func TestByteDataViewUsesTypedDataViewClusterShape(t *testing.T) {
 	for _, version := range []string{"2.10.0", "3.2.5", "3.12.2", "3.13.0"} {
 		t.Run(version, func(t *testing.T) {

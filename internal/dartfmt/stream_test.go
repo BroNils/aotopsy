@@ -1,6 +1,7 @@
 package dartfmt
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 )
@@ -563,6 +564,32 @@ func TestReadSLEB128MalformedIsBounded(t *testing.T) {
 	// extension and must fail rather than truncate to MinInt32.
 	if _, err := NewStream([]byte{0x80, 0x80, 0x80, 0x80, 0x08}).ReadSLEB128(32); !errors.Is(err, ErrStreamOverrun) {
 		t.Fatalf("non-canonical overflowing int32 SLEB128 error = %v, want ErrStreamOverrun", err)
+	}
+}
+
+// 64-bit values may use at most ten bytes. The eleventh belongs to the next
+// field and must stay unread; the cluster package's former readSLEB128 test
+// pinned this for int64 and the move to dartfmt only kept the 32-bit form.
+func TestLEB128SixtyFourBitValuesStopAtTenBytes(t *testing.T) {
+	overlong := append(bytes.Repeat([]byte{0x80}, 10), 0xaa)
+
+	s := NewStream(overlong)
+	if _, err := s.ReadSLEB128(64); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("11-byte SLEB128(64) error = %v, want ErrStreamOverrun", err)
+	}
+	if s.Position() != 10 {
+		t.Fatalf("SLEB128(64) consumed %d bytes, want 10", s.Position())
+	}
+
+	s = NewStream(overlong)
+	if _, err := s.ReadULEB128(64); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("11-byte ULEB128(64) error = %v, want ErrStreamOverrun", err)
+	}
+	if s.Position() != 10 {
+		t.Fatalf("ULEB128(64) consumed %d bytes, want 10", s.Position())
+	}
+	if b, err := s.ReadByte(); err != nil || b != 0xaa {
+		t.Fatalf("next field = %#x, %v; want 0xaa", b, err)
 	}
 }
 

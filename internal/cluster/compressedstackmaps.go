@@ -172,6 +172,10 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 
 	// Prepare global table data if referenced.
 	var gtData []byte
+	// One stream over the whole table, repositioned per entry: the entries are
+	// random-access offsets into it, and a fresh stream per entry costs an
+	// allocation for every stack map of the app.
+	var gtStream *dartfmt.Stream
 	if usesTableBit {
 		if len(globalTable) < 4 {
 			return nil, fmt.Errorf("compressed stack maps: table-referencing payload has no valid global table header")
@@ -182,6 +186,7 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 			return nil, fmt.Errorf("compressed stack maps: global table length %d exceeds available %d", gtLen, len(globalTable)-4)
 		}
 		gtData = globalTable[4 : 4+int(gtLen)]
+		gtStream = dartfmt.NewStream(gtData)
 	}
 
 	var entries []StackMapEntry
@@ -207,8 +212,7 @@ func DecodeCompressedStackMaps(payload, globalTable []byte) ([]StackMapEntry, er
 			if gtOffset >= uint64(len(gtData)) {
 				return entries, fmt.Errorf("compressed stack maps: global table offset %d outside %d-byte table", gtOffset, len(gtData))
 			}
-			gtStream, err := dartfmt.NewStreamAt(gtData, int(gtOffset))
-			if err != nil {
+			if err := gtStream.SetPosition(int(gtOffset)); err != nil {
 				return entries, fmt.Errorf("compressed stack maps: global table stream at %d: %w", gtOffset, err)
 			}
 			e, err := readCSMBitmapBody(gtStream)

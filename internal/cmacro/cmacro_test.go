@@ -379,6 +379,22 @@ func TestParseMacrosRejectsUnbalancedConditionalDirectives(t *testing.T) {
 	}
 }
 
+// A different redefinition with no #undef between the two must be ambiguous at
+// top level too, not only inside a conditional or an include guard. The
+// "reset by #undef" test compared a missing map entry (empty string) with the
+// empty top-level context, so it held for every macro that was never undefined
+// and the last body silently won.
+func TestTopLevelRedefinitionWithoutUndefIsAmbiguous(t *testing.T) {
+	src := "#define LIST(V) V(A)\n#define LIST(V) V(B)\n"
+	macros := mustParseMacros(t, src)
+	if !macros["LIST"].Ambiguous {
+		t.Fatal("different top-level redefinition without #undef was not marked ambiguous")
+	}
+	if got, err := Expand(macros, "LIST"); err == nil {
+		t.Fatalf("ambiguous top-level redefinition expanded to %q", got)
+	}
+}
+
 func TestIdenticalRedefinitionIsNotAmbiguous(t *testing.T) {
 	src := "#define LIST(V) V(A)\n#define LIST(V) V(A)\n"
 	got, err := Expand(mustParseMacros(t, src), "LIST")

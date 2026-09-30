@@ -153,7 +153,11 @@ func ParseMacros(src string) (Macros, error) {
 		}
 		ctx := contextKey()
 		if prev, exists := out[name]; exists {
-			resetByUndef := lastUndefContext[name] == ctx && lastDefinitionContext[name] == ctx
+			// Presence matters, not just equality: a name that was never
+			// #undef'd has no entry, and the empty string that lookup yields
+			// equals the empty top-level context.
+			undefCtx, wasUndefined := lastUndefContext[name]
+			resetByUndef := wasUndefined && undefCtx == ctx && lastDefinitionContext[name] == ctx
 			if !resetByUndef {
 				next.Ambiguous = prev.Ambiguous || !sameMacroDefinition(prev, next)
 			}

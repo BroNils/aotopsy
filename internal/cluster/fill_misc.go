@@ -499,10 +499,8 @@ func skipFillExternalTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.
 		if length < 0 || length > maxInt/int64(elementSize) {
 			return fmt.Errorf("external_typed_data %d/%d byte length overflow: length=%d element_size=%d", i, cm.Count, length, elementSize)
 		}
-		pad := (dataAlignment - s.Position()%dataAlignment) % dataAlignment
-		if pad > s.Remaining() {
-			return fmt.Errorf("external_typed_data %d/%d alignment needs %d bytes, only %d remain", i, cm.Count, pad, s.Remaining())
-		}
+		// Align rejects padding that runs past the input, so no separate
+		// bounds pre-check is needed (ExternalTypedData uses the default offset).
 		if err := s.Align(dataAlignment, 0); err != nil {
 			return fmt.Errorf("external_typed_data %d/%d alignment: %w", i, cm.Count, err)
 		}
