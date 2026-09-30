@@ -199,64 +199,23 @@ func TestApplyLocalTypeHints(t *testing.T) {
 	}
 }
 
-// --- A1: inferReturnTypeFromName tests ---
-
-func TestInferReturnTypeFromName(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"toString", "String"},
-		{"toStringDeep", "String"},
-		{"hashCode", "int"},
-		{"length", "int"},
-		{"isEmpty", "bool"},
-		{"isNotEmpty", "bool"},
-		{"contains", "bool"},
-		{"startsWith", "bool"},
-		{"endsWith", "bool"},
-		{"forEach", "void"},
-		{"add", "void"},
-		{"clear", "void"},
-		{"sort", "void"},
-		{"map", "Iterable"},
-		{"where", "Iterable"},
-		{"join", "String"},
-		{"any", "bool"},
-		{"every", "bool"},
-		{"indexOf", "int"},
-		{"compareTo", "int"},
-		{"sublist", "List"},
-		{"toList", "List"},
-		{"runtimeType", "Type"},
-		{"set:foo", "void"},
-		{"get:foo", "dynamic"},
-		{"isFinite", "bool"},
-		{"isEven", "bool"},
-		{"hasNext", "bool"},
-		{"canFly", "bool"},
-		{"toList", "List"},
-		{"toSet", "Set"},
-		{"toInt", "int"},
-		{"toDouble", "double"},
-		{"toBool", "bool"},
-		{"asString", "String"},
-		{"asInt", "int"},
-		{"operator ==", "bool"},
-		{"operator !=", "bool"},
-		{"operator <", "bool"},
-		{"operator >=", "bool"},
-		{"operator ~/", "int"},
-		{"operator ~", "int"},
-		{"sub_b0", "dynamic"},
-		{"_throwNew@0150898", "dynamic"},
-		{"Foo.bar@3099033", "dynamic"},
-	}
-	for _, tt := range tests {
-		got := inferReturnTypeFromName(tt.name)
-		if got != tt.want {
-			t.Errorf("inferReturnTypeFromName(%q) = %q, want %q", tt.name, got, tt.want)
+// A function name is not type metadata. Application code can legally declare
+// `int clear()` or `String isReady()`, so familiar SDK spellings must stay
+// dynamic unless serialized signature enrichment supplied an exact type.
+func TestReturnTypeIsNeverInferredFromName(t *testing.T) {
+	for _, name := range []string{"toString", "hashCode", "isEmpty", "clear", "operator =="} {
+		fir := simpleRetFir(nil, nil)
+		fir.Name = name
+		got := EmitPseudocode(fir, nil, nil).Source
+		if !strings.HasPrefix(got, "dynamic ") {
+			t.Errorf("%q fabricated a return type:\n%s", name, got)
 		}
+	}
+	fir := simpleRetFir(nil, nil)
+	fir.Name = "clear"
+	fir.ReturnType = "String"
+	if got := EmitPseudocode(fir, nil, nil).Source; !strings.HasPrefix(got, "String clear(") {
+		t.Errorf("serialized return type was not honored:\n%s", got)
 	}
 }
 

@@ -85,10 +85,11 @@ func (s *LiftState) clobberReg(reg string) {
 	s.clearRegClass(reg)
 }
 
-// seedEntryState builds the register state at the function's entry block: the
-// reserved registers with their fixed meanings and arg0..argN, matching what the
-// emitter seeds before the walk.
-func seedEntryState(fir *FuncIR) *LiftState {
+// seedPinnedState builds only the register facts that remain valid independent
+// of how control reached a block. This is the safe seed for predecessorless
+// non-entry/orphan blocks: source parameters, CODE_REG and ARGS_DESC_REG are
+// entry-ABI facts and must not be invented there.
+func seedPinnedState(fir *FuncIR) *LiftState {
 	s := newLiftState(fir.NullReg)
 	if fir.ThreadReg != "" {
 		s.setReg(fir.ThreadReg, sdk.SymTHR)
@@ -108,6 +109,14 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	if fir.BarrierMaskReg != "" {
 		s.setReg(fir.BarrierMaskReg, sdk.SymBarrierMask)
 	}
+	return s
+}
+
+// seedEntryState extends seedPinnedState with facts that are true specifically
+// at the function entry ABI: CODE/argsDesc plus the candidate Dart GPR/FPU
+// parameter slots and type-test ABI operands.
+func seedEntryState(fir *FuncIR) *LiftState {
+	s := seedPinnedState(fir)
 	if fir.CodeReg != "" {
 		s.setReg(fir.CodeReg, sdk.SymCode)
 	}
@@ -117,23 +126,12 @@ func seedEntryState(fir *FuncIR) *LiftState {
 	for ri := 0; ri < len(fir.ArgRegs); ri++ {
 		s.setReg(fir.ArgRegs[ri], fmt.Sprintf("arg%d", ri))
 	}
-	// Floating-point arguments, on the same footing as the integer ones.
-	//
-	// FpuArgRegs and FpuReturnReg were populated by both lifters and read
-	// by nothing at all -- ABI facts written down and never used. The
-	// consequence was visible in the output: a function reading a double
-	// parameter it never wrote printed the raw register, which is where
-	// the remaining v0/v1 (ARM64) and xmm0/xmm1 (x86_64) leaks came from.
-	//
-	// The index is the position in Dart's FP argument sequence, not the
-	// source parameter position: `foo(double a, int b)` passes a in V0 and
-	// b in R1, so a is fparg0 AND arg0. Naming it fparg0 states exactly
-	// what is known -- which FP argument slot this is -- without claiming
-	// a source-level position that would need the parameter types to
-	// establish.
-	for ri := 0; ri < len(fir.FpuArgRegs); ri++ {
-		s.setReg(fir.FpuArgRegs[ri], fmt.Sprintf("fparg%d", ri))
-	}
+	// Do not seed FPU argument registers with invented `fpargN` identifiers.
+	// ComputeCallingConvention allocates GPR and FPU locations from each logical
+	// parameter's Representation, and the exact unboxing representation is not
+	// always serialized in Full AOT. FPU-bank position therefore does not prove a
+	// source parameter position/name. Leaving it raw is an explicit unresolved
+	// fact instead of emitting an undeclared pseudo-parameter.
 	seedTypeTestABI(fir, s)
 	return s
 }
@@ -203,10 +201,12 @@ func joinStates(states []*LiftState) *LiftState {
 	// handle the same field, not a decision.
 	out.HasCmp = base.HasCmp
 	out.LastCmp = base.LastCmp
+	out.CmpBits = base.CmpBits
 	for _, s := range states[1:] {
-		if !s.HasCmp || s.LastCmp != out.LastCmp {
+		if !s.HasCmp || s.LastCmp != out.LastCmp || s.CmpBits != out.CmpBits {
 			out.HasCmp = false
 			out.LastCmp = [2]string{}
+			out.CmpBits = 0
 			break
 		}
 	}
@@ -221,10 +221,19 @@ func joinStates(states []*LiftState) *LiftState {
 // entry feeds seedFromFixpoint (fill unknown live-ins); exit feeds
 // computeLoopPhis (detect loop-carried registers by comparing a header's entry
 // predecessors against its back-edge predecessors).
-func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
+func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState, converged bool) {
 	n := len(fir.Blocks)
+	if n == 0 {
+		return nil, nil, true
+	}
 	entry = make([]*LiftState, n)
 	exit = make([]*LiftState, n)
+	entryID, hasEntry := fir.entryBlockID()
+	if !hasEntry {
+		// Without a real entry block, there is no sound place to inject ABI
+		// parameters. Disable SSA enrichment rather than assuming slice index 0.
+		return nil, nil, false
+	}
 
 	for round := 0; round < ssaMaxFixpointRounds; round++ {
 		changed := false
@@ -232,8 +241,13 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 			blk := &fir.Blocks[bi]
 			var in *LiftState
 			preds := blk.Preds
-			if bi == 0 || len(preds) == 0 {
+			if bi == entryID {
 				in = seedEntryState(fir)
+			} else if len(preds) == 0 {
+				// A predecessorless non-entry block is not another function entry.
+				// Seeding arg0/CODE/argsDesc here fabricates values for unreachable
+				// slow paths and data islands that happen to decode as blocks.
+				in = seedPinnedState(fir)
 			} else {
 				pe := make([]*LiftState, 0, len(preds))
 				for _, p := range preds {
@@ -243,6 +257,7 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 				}
 				in = joinStates(pe)
 			}
+			in.Pool = pool
 			out := in.Clone()
 			applyBlockToState(fir, out, blk, pool)
 			if exit[bi] == nil || !liftStatesEqual(exit[bi], out) {
@@ -254,10 +269,16 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState) {
 			}
 		}
 		if !changed {
-			break
+			return entry, exit, true
 		}
 	}
-	return entry, exit
+	// A partial fixpoint is unsafe to consume: joinStates intentionally ignores
+	// predecessors whose exit state is still nil, so an intermediate round can
+	// temporarily claim a value is common to all *known* predecessors even when
+	// a not-yet-propagated path disagrees. If the bounded analysis does not
+	// converge, disable SSA enrichment rather than leaking that transient claim
+	// into emitted pseudocode.
+	return nil, nil, false
 }
 
 func liftStatesEqual(a, b *LiftState) bool {

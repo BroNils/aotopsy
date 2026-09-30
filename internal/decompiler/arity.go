@@ -51,10 +51,17 @@ func LiveInArgIndices(fir *FuncIR) []int {
 			aliasMap["edx"] = i
 			aliasMap["dx"] = i
 			aliasMap["dl"] = i
+			aliasMap["dh"] = i
+		case "rbx":
+			aliasMap["ebx"] = i
+			aliasMap["bx"] = i
+			aliasMap["bl"] = i
+			aliasMap["bh"] = i
 		case "rcx":
 			aliasMap["ecx"] = i
 			aliasMap["cx"] = i
 			aliasMap["cl"] = i
+			aliasMap["ch"] = i
 		case "r8":
 			aliasMap["r8d"] = i
 			aliasMap["r8w"] = i
@@ -366,7 +373,8 @@ func isRegisterToken(tok string) bool {
 		"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
 		"r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
 		"ax", "bx", "cx", "dx", "si", "di", "bp",
-		"al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl",
+		"al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "bpl", "spl",
+		"r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
 		"r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b":
 		return true
 	}

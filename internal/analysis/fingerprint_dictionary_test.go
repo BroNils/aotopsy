@@ -13,7 +13,7 @@ import (
 	"aotopsy/internal/naming"
 )
 
-func TestApplyFingerprintDictionaryPropagatesDerivedNaming(t *testing.T) {
+func TestFingerprintDictionaryCandidatesDoNotMutateSemanticNaming(t *testing.T) {
 	code := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	ranges := []cluster.CodeRange{
 		{PCOffset: 0x100, Size: 4, RefID: 10},
@@ -38,39 +38,27 @@ func TestApplyFingerprintDictionaryPropagatesDerivedNaming(t *testing.T) {
 	dict.Add(comparepkg.ComputeFingerprint(code[4:8], "wrongReplacement", "Owner"))
 	dict.Add(comparepkg.ComputeFingerprint(code[8:], "missingCodeNameRecovered", "RecoveredOwner"))
 
-	n, err := applyFingerprintDictionary(pl, ranges, code, 0x100, 0x1000, dict)
+	n, err := countFingerprintDictionaryCandidates(pl, ranges, code, 0x100, 0x1000, dict)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
-		t.Fatalf("recovered = %d, want 2", n)
+		t.Fatalf("candidates = %d, want 2", n)
 	}
-	if got := pl.CodeNames[10].FuncName; got != "recovered" {
-		t.Fatalf("unnamed function = %q, want recovered", got)
+	if got := pl.CodeNames[10].FuncName; got != "" {
+		t.Fatalf("heuristic fingerprint mutated unnamed semantic name: %q", got)
 	}
 	if got := pl.CodeNames[11].FuncName; got != "alreadyKnown" {
 		t.Fatalf("known function was overwritten: %q", got)
 	}
-	if got := pl.CodeNames[12]; got.FuncName != "missingCodeNameRecovered" || got.OwnerName != "RecoveredOwner" {
-		t.Fatalf("missing CodeNames entry was not created: %+v", got)
+	if got := pl.CodeNames[12]; got.FuncName != "" || got.OwnerName != "" {
+		t.Fatalf("heuristic fingerprint created authoritative target metadata: %+v", got)
 	}
-	if got := pl.CodeRefDisplay[10]; got != "Owner.recovered" {
-		t.Fatalf("CodeRefDisplay was not refreshed: %q", got)
+	if got := pl.CodeRefDisplay[10]; got != "" {
+		t.Fatalf("heuristic fingerprint mutated CodeRefDisplay: %q", got)
 	}
-	if got := pl.CodeRefDisplay[12]; got != "RecoveredOwner.missingCodeNameRecovered" {
-		t.Fatalf("new CodeRefDisplay = %q", got)
-	}
-	display := naming.ResolvePoolDisplay([]cluster.PoolEntry{
-		{Index: 1, Kind: cluster.PoolTagged, RefID: 10},
-		{Index: 2, Kind: cluster.PoolTagged, RefID: 12},
-	}, pl)
-	if display[1] != "Owner.recovered" || display[2] != "RecoveredOwner.missingCodeNameRecovered" {
-		t.Fatalf("pool display did not observe transferred names: %+v", display)
-	}
-	// The ordinary naming helpers now observe the recovered raw semantic name;
-	// every artifact can qualify it at the target binary's own PC.
-	if got := pl.CodeNames[10].Qualified(ranges[0].PCOffset); got != "Owner.recovered_100" {
-		t.Fatalf("qualified recovered name = %q", got)
+	if _, exists := pl.CodeRefDisplay[12]; exists {
+		t.Fatalf("heuristic fingerprint created CodeRefDisplay for unknown target")
 	}
 }
 
@@ -84,7 +72,7 @@ func TestApplyFingerprintDictionaryRejectsOwnerContradiction(t *testing.T) {
 		t.Fatal(err)
 	}
 	dict.Add(comparepkg.ComputeFingerprint(code, "name", "DifferentOwner"))
-	n, err := applyFingerprintDictionary(pl, []cluster.CodeRange{{PCOffset: 0x100, Size: 4, RefID: 10}}, code, 0x100, 0x1000, dict)
+	n, err := countFingerprintDictionaryCandidates(pl, []cluster.CodeRange{{PCOffset: 0x100, Size: 4, RefID: 10}}, code, 0x100, 0x1000, dict)
 	if err != nil {
 		t.Fatal(err)
 	}

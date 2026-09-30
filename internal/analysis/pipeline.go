@@ -46,9 +46,10 @@ type Opts struct {
 	Decompile   bool      // emit per-function Dart pseudocode into <out>/dart/
 	Quiet       bool      // suppress verbose output (verbose is default)
 	Log         io.Writer // stderr by default
-	// FingerprintDictionary, when non-nil, is applied to unnamed Code objects
-	// before any output artifact is emitted. The dictionary is exact-version
-	// and exact-architecture pinned; a mismatch aborts the staged generation.
+	// FingerprintDictionary, when non-nil, is used only to count heuristic
+	// bytes-only name candidates. It never mutates semantic naming: instruction
+	// bytes do not include object-pool semantics, so a hash match is not ground
+	// truth even when version/architecture match exactly.
 	FingerprintDictionary *comparepkg.FunctionDictionary
 }
 
@@ -388,17 +389,11 @@ func runPipeline(opts Opts) (*Result, error) {
 		if err := opts.FingerprintDictionary.ValidateTarget(dartVersion, arch); err != nil {
 			return nil, err
 		}
-		recovered, err := applyFingerprintDictionary(pl, ranges, code, codeOff, codeVA, opts.FingerprintDictionary)
+		candidates, err := countFingerprintDictionaryCandidates(pl, ranges, code, codeOff, codeVA, opts.FingerprintDictionary)
 		if err != nil {
-			return nil, fmt.Errorf("apply fingerprint dictionary: %w", err)
+			return nil, fmt.Errorf("compare fingerprint dictionary: %w", err)
 		}
-		// CodeRefDisplay and PoolDisplay are derived naming surfaces. The
-		// snapshot loader built them before dictionary injection, so recompute the
-		// pool view now or PP-loaded Code objects would keep stale placeholders
-		// even while functions.jsonl uses the transferred name.
-		poolDisplay = naming.ResolvePoolDisplay(clResult.Pool, pl)
-		sc.PoolDisplay = poolDisplay
-		opts.logf("  %sfingerprint names:%s %d recovered\n", cli.Muted, cli.Reset, recovered)
+		opts.logf("  %sfingerprint candidates:%s %d heuristic matches (not applied as names)\n", cli.Muted, cli.Reset, candidates)
 	}
 
 	if info.Version != nil && info.Version.DartVersion != "" {

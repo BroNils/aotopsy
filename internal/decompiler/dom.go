@@ -48,6 +48,10 @@ func dominators(fir *FuncIR) []int {
 		return idom
 	}
 
+	entry, ok := fir.entryBlockID()
+	if !ok {
+		return idom
+	}
 	order := reversePostOrder(fir)
 	// rpoNum[b] is b's position in RPO; unreachable blocks keep -1 and are
 	// skipped entirely, since "dominated by the entry" is meaningless for a
@@ -60,7 +64,6 @@ func dominators(fir *FuncIR) []int {
 		rpoNum[b] = i
 	}
 
-	entry := 0
 	idom[entry] = entry
 
 	// intersect walks two blocks up the dominator tree until they meet. Both
@@ -104,12 +107,16 @@ func dominators(fir *FuncIR) []int {
 	return idom
 }
 
-// reversePostOrder returns the reachable blocks in reverse post-order from
-// block 0, which is the entry: FuncIR is built by splitting the function's
-// instruction stream at branch targets, so the lowest-addressed block is the
-// one control starts in.
+// reversePostOrder returns the reachable blocks in reverse post-order from the
+// block named by FuncIR.EntryVA. Production lifters normally make it block 0,
+// but exported/malformed FuncIR values must not silently change the entry merely
+// because slice order differs.
 func reversePostOrder(fir *FuncIR) []int {
 	n := len(fir.Blocks)
+	entry, ok := fir.entryBlockID()
+	if n == 0 || !ok {
+		return nil
+	}
 	visited := make([]bool, n)
 	post := make([]int, 0, n)
 
@@ -117,8 +124,8 @@ func reversePostOrder(fir *FuncIR) []int {
 	// bounded only by block count, and the emitter already has one recursion
 	// depth limit too many.
 	type frame struct{ id, next int }
-	stack := []frame{{0, 0}}
-	visited[0] = true
+	stack := []frame{{entry, 0}}
+	visited[entry] = true
 	for len(stack) > 0 {
 		top := &stack[len(stack)-1]
 		succs := fir.Blocks[top.id].Succs

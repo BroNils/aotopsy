@@ -83,6 +83,28 @@ func TestGeneratorModifierPrecedence(t *testing.T) {
 	}
 }
 
+func TestSerializedSuspendModifierIsNotOverriddenByStubPattern(t *testing.T) {
+	fir := newFuncIR("ordinary", 0x1000)
+	fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.SuspendModifierKnown = true // exact FunctionModifierNone
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
+		{Addr: 0x1000, Op: OpCall, Target: "0x2000", Src: "bl 0x2000"},
+		{Addr: 0x1004, Op: OpReturn, Src: "ret"},
+	}})
+	symbols := func(va uint64) (string, bool) {
+		if va == 0x2000 {
+			return "AwaitStub", true
+		}
+		return "", false
+	}
+	src := EmitPseudocode(fir, symbols, nil).Source
+	sig := strings.SplitN(src, "\n", 2)[0]
+	if strings.Contains(sig, " async") || strings.Contains(sig, " sync*") || strings.Contains(sig, " async*") {
+		t.Fatalf("stub pattern overrode exact FunctionModifierNone: %q", sig)
+	}
+}
+
 func TestGeneratorStubsSetGeneratorModifierWithoutAwait(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -121,5 +143,49 @@ func TestGeneratorStubsSetGeneratorModifierWithoutAwait(t *testing.T) {
 				t.Fatalf("generator runtime call was discarded instead of preserved:\n%s", src)
 			}
 		})
+	}
+}
+
+func TestAsyncOrdinaryZeroComparisonIsNotFabricatedStateSwitch(t *testing.T) {
+	fir := newFuncIR("asyncPredicate", 0x1000)
+	fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.IsAsync = true
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
+		{Addr: 0x1000, Op: OpOther, Src: "mov x0, #1"},
+		{Addr: 0x1004, Op: OpBranch, CondKind: "eqz", CondReg: "x0"},
+	}, Succs: []Succ{{BlockID: 1, Cond: "T"}, {BlockID: 2, Cond: "F"}}})
+	fir.addBlock(Block{ID: 1, StartVA: 0x1010, Instrs: []Instr{
+		{Addr: 0x1010, Op: OpOther, Src: "mov x0, #2"},
+		{Addr: 0x1014, Op: OpReturn, Src: "ret"},
+	}})
+	fir.addBlock(Block{ID: 2, StartVA: 0x1020, Instrs: []Instr{
+		{Addr: 0x1020, Op: OpOther, Src: "mov x0, #3"},
+		{Addr: 0x1024, Op: OpReturn, Src: "ret"},
+	}})
+	fir.ComputePreds()
+
+	src := EmitPseudocode(fir, nil, nil).Source
+	if strings.Contains(src, "async state machine dispatch") || strings.Contains(src, "switch (") {
+		t.Fatalf("ordinary async comparison was fabricated into a state dispatcher:\n%s", src)
+	}
+	if !strings.Contains(src, "if (") {
+		t.Fatalf("ordinary branch disappeared instead of remaining a branch:\n%s", src)
+	}
+}
+
+func TestMalformedSuccessorDoesNotPanicOrIndexPastBlocks(t *testing.T) {
+	fir := newFuncIR("bad_cfg", 0x1000)
+	fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
+	fir.addBlock(Block{
+		ID:      0,
+		StartVA: 0x1000,
+		Instrs:  []Instr{{Addr: 0x1000, Op: OpOther, Src: "nop"}},
+		Succs:   []Succ{{BlockID: 99, Cond: ""}},
+	})
+
+	art := EmitPseudocode(fir, nil, nil)
+	if art.Stats.UnresolvedCF == 0 {
+		t.Fatalf("out-of-range successor was not reported unresolved:\n%s", art.Source)
 	}
 }

@@ -521,8 +521,9 @@ func (s *LiftState) lookupReg(tok string) string {
 	if isZeroReg(tok) {
 		return "0"
 	}
-	tok = canonReg(tok)
-	if v, ok := s.Regs[tok]; ok {
+	viewTok := tok
+	key := canonReg(tok)
+	if v, ok := s.Regs[key]; ok {
 		if v == ffiCallTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
 			// Internal-only markers (see applyStore / the ldr/mov
 			// THR-stub-offset check in ApplyOther) -- must never leak into
@@ -532,11 +533,11 @@ func (s *LiftState) lookupReg(tok string) string {
 			// the one indirect-call target emitIndirectCall specifically
 			// checks for (which reads s.Regs directly, bypassing this
 			// filter, since it needs the real marker).
-			return tok
+			return key
 		}
-		return v
+		return readRegView(viewTok, v)
 	}
-	return tok
+	return readRegView(viewTok, key)
 }
 
 func isZeroReg(tok string) bool {

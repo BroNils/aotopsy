@@ -1,6 +1,7 @@
 package decompiler
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -336,7 +337,6 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 		{"movsxd", "movsxd x0, x1", "x0", "(int64)(x1)"},
 		{"movsx", "movsx x0, x1", "x0", "(int)(x1)"},
 		{"cmove", "cmove rax, rbx", "rax", "(/* e */ ? rbx : rax)"},
-		{"sete", "sete al", "al", "(/* e */ ? 1 : 0)"},
 	}
 
 	for _, tt := range tests {
@@ -349,6 +349,22 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 				t.Errorf("ApplyOther(%q): Regs[%s] = %q, want %q", tt.src, tt.reg, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSetccByteWritePreservesX86UpperBits(t *testing.T) {
+	fir := newFuncIR("test_setcc", 0x1000)
+	s := newLiftState("")
+	s.setReg("rax", "old64")
+	ApplyOther(fir, s, Instr{Src: "sete al"})
+
+	low := s.lookupReg("al")
+	if !strings.Contains(low, "? 1 : 0") || !strings.Contains(low, "0xff") {
+		t.Fatalf("AL after SETE = %q, want low-byte conditional value", low)
+	}
+	full := s.lookupReg("rax")
+	if !strings.Contains(full, "old64") || !strings.Contains(full, "0xffffffffffffff00") {
+		t.Fatalf("RAX after SETE lost preserved upper bits: %q", full)
 	}
 }
 
@@ -375,5 +391,65 @@ func TestCallNameDoesNotDiscardReturnValue(t *testing.T) {
 	}
 	if got := e.state.lookupReg(fir.ReturnReg); got != "t1" {
 		t.Fatalf("return register = %q, want t1", got)
+	}
+}
+
+func TestAwaitStubUsesSuspendABIArgumentRegister(t *testing.T) {
+	tests := []struct {
+		name      string
+		returnReg string
+		argRegs   []string
+		stub      string
+	}{
+		{"arm64", sdk.ARM64ReturnRegStr, arm64ArgRegs, "AwaitStub"},
+		{"x64", sdk.X86ReturnRegStr, x86ArgRegs, "AwaitWithTypeCheckStub"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fir := newFuncIR("caller", 0x1000)
+			fir.ReturnReg = tt.returnReg
+			fir.ArgRegs = tt.argRegs
+			e := &emitter{
+				fir:   fir,
+				state: newLiftState(""),
+				symbols: func(va uint64) (string, bool) {
+					if va == 0x2000 {
+						return tt.stub, true
+					}
+					return "", false
+				},
+			}
+			e.state.setReg(tt.returnReg, "futureValue")
+			for i, reg := range tt.argRegs {
+				e.state.setReg(reg, fmt.Sprintf("wrongArg%d", i))
+			}
+
+			e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+			if len(e.lines) != 1 || e.lines[0] != "final t1 = await futureValue;" {
+				t.Fatalf("Await stub used generic Dart args instead of SuspendStubABI argument: %v", e.lines)
+			}
+		})
+	}
+}
+
+func TestReturnAsyncCallIsNotFabricatedAsSourceReturn(t *testing.T) {
+	fir := newFuncIR("caller", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ArgRegs = arm64ArgRegs
+	e := &emitter{
+		fir:   fir,
+		state: newLiftState(""),
+		symbols: func(va uint64) (string, bool) {
+			if va == 0x2000 {
+				return "ReturnAsyncStub", true
+			}
+			return "", false
+		},
+	}
+	e.state.setReg(fir.ReturnReg, "resultValue")
+
+	e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+	if len(e.lines) != 1 || strings.HasPrefix(strings.TrimSpace(e.lines[0]), "return ") {
+		t.Fatalf("a CALL to ReturnAsyncStub was fabricated into a source return: %v", e.lines)
 	}
 }

@@ -128,7 +128,11 @@ func inferTypeFromRHS(rhs string) string {
 
 	// Set or Map literals
 	if strings.HasPrefix(rhs, "{") && strings.HasSuffix(rhs, "}") {
-		if strings.Contains(rhs, ":") {
+		// `{}` is the empty Map literal in Dart; an empty Set requires a type
+		// argument such as `<int>{}`. For non-empty collections, only a colon at
+		// this collection's top level proves a map entry. A colon inside a string,
+		// nested collection, or ternary expression must not turn a Set into a Map.
+		if rhs == "{}" || hasTopLevelMapColon(rhs[1:len(rhs)-1]) {
 			return "Map"
 		}
 		return "Set"
@@ -146,4 +150,58 @@ func inferTypeFromRHS(rhs string) string {
 	}
 
 	return ""
+}
+
+func hasTopLevelMapColon(body string) bool {
+	depth := 0
+	ternaryDepth := 0
+	var quote byte
+	escaped := false
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case '?':
+			if depth != 0 {
+				continue
+			}
+			// `??`, `?.` and `?[` are not ternary operators.
+			if (i+1 < len(body) && (body[i+1] == '?' || body[i+1] == '.' || body[i+1] == '[')) ||
+				(i > 0 && body[i-1] == '?') {
+				continue
+			}
+			ternaryDepth++
+		case ':':
+			if depth != 0 {
+				continue
+			}
+			if ternaryDepth > 0 {
+				ternaryDepth--
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }

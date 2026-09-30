@@ -2,6 +2,7 @@ package naming
 
 import (
 	"fmt"
+	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/sdk"
@@ -486,6 +487,34 @@ func (l *PoolLookups) StringForRef(ref int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ExactTypeName returns a Dart-source type name only when the snapshot data is
+// sufficient to reconstruct the complete type identity. It deliberately does
+// not fall back to TypeNames: that map is display-oriented and may omit generic
+// arguments, which is acceptable for an object-pool annotation but would turn a
+// function signature into a confident false claim.
+//
+// Ordinary Type objects reuse the exact-or-empty type-testing-stub namer. The
+// two VM-isolate singleton types that have no TypeInfo in the older snapshot
+// layouts (dynamic and void) are recognized from the SDK-versioned base-object
+// table. Anything else stays unknown and callers should render `dynamic`.
+func (l *PoolLookups) ExactTypeName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	if stub := l.TypeTestingStubNames[ref]; strings.HasPrefix(stub, "TypeTestingStub_") {
+		return strings.TrimPrefix(stub, "TypeTestingStub_")
+	}
+	if ref >= 1 && ref <= len(l.BaseObjectNames) {
+		switch l.BaseObjectNames[ref-1] {
+		case "<dynamic type>":
+			return "dynamic"
+		case "<void type>":
+			return "void"
+		}
+	}
+	return ""
 }
 
 // isStringCID reports whether a CID is one of the String subclasses.

@@ -174,3 +174,22 @@ func TestDominatorsEmptyAndSingleBlock(t *testing.T) {
 		t.Errorf("single block produced headers: %v", headers)
 	}
 }
+
+func TestDominatorsUseEntryVARatherThanSliceIndex(t *testing.T) {
+	fir := newFuncIR("nonzero_entry", 0x200)
+	fir.addBlock(domBlk(0, 0x100)) // unreachable block appears first in storage
+	fir.addBlock(domBlk(1, 0x200, 2))
+	fir.addBlock(domBlk(2, 0x210))
+	fir.ComputePreds()
+	idom := dominators(fir)
+	if idom[0] != -1 || idom[1] != 1 || idom[2] != 1 {
+		t.Fatalf("idom=%v, want [-1 1 1] from EntryVA block 1", idom)
+	}
+}
+
+func TestBlockByVAFallsBackWhenIndexMapMissing(t *testing.T) {
+	fir := &FuncIR{EntryVA: 0x200, Blocks: []Block{{StartVA: 0x100}, {StartVA: 0x200}}}
+	if id, ok := fir.BlockByVA(0x200); !ok || id != 1 {
+		t.Fatalf("BlockByVA direct FuncIR = (%d,%v), want (1,true)", id, ok)
+	}
+}

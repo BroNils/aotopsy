@@ -36,3 +36,26 @@ func TestReadFunctionScalarCapturesVersionedKindTagFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestFunctionModifierDecodesExactSDKValues(t *testing.T) {
+	tests := []struct {
+		raw  uint32
+		want FunctionModifier
+	}{
+		{0 << 14, FunctionModifierNone},
+		{1 << 14, FunctionModifierAsync},
+		{2 << 14, FunctionModifierSyncStar},
+		{3 << 14, FunctionModifierAsyncStar},
+	}
+	for _, tt := range tests {
+		if got := decodeFunctionModifier(tt.raw); got != tt.want {
+			t.Errorf("decodeFunctionModifier(%#x) = %v, want %v", tt.raw, got, tt.want)
+		}
+	}
+
+	// Neighbouring kind/flag bits must not contaminate the modifier field.
+	raw := uint32(3<<14) | 0x1f | (1 << 24)
+	if got := decodeFunctionModifier(raw); got != FunctionModifierAsyncStar {
+		t.Fatalf("modifier with neighbouring bits = %v, want async*", got)
+	}
+}

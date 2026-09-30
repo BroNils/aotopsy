@@ -192,6 +192,17 @@ func parseHexVA(target string) (uint64, bool) {
 // machinery, but only the first two are async Dart functions and only the
 // ordinary async Await stub corresponds to an `await` expression.
 func markSuspendableStubRole(fir *FuncIR, role sdk.StubRole) bool {
+	if fir.SuspendModifierKnown {
+		switch role {
+		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn,
+			sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn,
+			sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn,
+			sdk.StubRoleSuspendResume:
+			return true
+		default:
+			return false
+		}
+	}
 	switch role {
 	case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
 		fir.IsAsync = true
@@ -210,30 +221,37 @@ func markSuspendableStubRole(fir *FuncIR, role sdk.StubRole) bool {
 	}
 }
 
-// emitAsyncStubSemantics handles only the ordinary async stubs whose source
-// meaning is established: init, await, and return. Generator stubs still mark
+// emitAsyncStubSemantics handles only ordinary async stub calls whose source
+// meaning is established: init and await. Generator stubs still mark
 // async*/sync* above, but fall through to a normal call so we do not fabricate
-// an `await`, `yield`, or `return` from runtime suspension bookkeeping.
+// an `await` or `yield` from runtime suspension bookkeeping. ReturnAsync also
+// falls through: normal DartReturn lowering TAIL-JUMPS to that stub rather than
+// calling it, so seeing it as a call is not proof of a source `return`.
 func (e *emitter) emitAsyncStubSemantics(role sdk.StubRole, tmpName, argsText string, indent int) (handled, bound bool) {
 	markSuspendableStubRole(e.fir, role)
+	// Exact FunctionModifierNone/sync* metadata contradicts an async source
+	// interpretation. Keep the low-level call visible rather than rewriting it
+	// into `await` on the strength of a symbol alone.
+	if e.fir.SuspendModifierKnown && !e.fir.IsAsync {
+		return false, false
+	}
 	switch role {
 	case sdk.StubRoleAsyncInit:
 		e.emit(indent, "// async function entry (InitAsync stub)")
 		return true, false
 	case sdk.StubRoleAsyncAwait:
-		if argsText != "" {
-			e.emit(indent, "final %s = await %s;", tmpName, argsText)
-		} else {
-			e.emit(indent, "final %s = await;", tmpName)
+		// SuspendStubABI::kArgumentReg is R0 on ARM64 and RAX on x64 in
+		// every compact-suspendable release (2.18+), i.e. the ordinary Dart
+		// return register. It is NOT a Dart parameter register: from 3.4.3 the
+		// latter are R1... / RDI..., so using generic argsText here reads the
+		// wrong machine value. AwaitWithTypeCheck has an additional type-args
+		// register, but the source `await` operand is still kArgumentReg.
+		awaited := e.state.lookupReg(e.fir.ReturnReg)
+		if awaited == "" {
+			awaited = e.fir.ReturnReg
 		}
+		e.emit(indent, "final %s = await %s;", tmpName, awaited)
 		return true, true
-	case sdk.StubRoleAsyncReturn:
-		if argsText != "" {
-			e.emit(indent, "return %s;", argsText)
-		} else {
-			e.emit(indent, "return %s;", tmpName)
-		}
-		return true, false
 	default:
 		return false, false
 	}

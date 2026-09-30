@@ -5,10 +5,81 @@ import (
 	"testing"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/typetrack"
 )
+
+func TestEnrichSignatureUsesSerializedResultTypeNotFunctionName(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 6}
+	owners := map[int]*cluster.NamedObject{
+		100: {CID: ct.Function, RefID: 100, ResultTypeRefID: 300},
+		101: {CID: ct.Function, RefID: 101, ResultTypeRefID: 300, SignatureRefID: 201},
+	}
+	pl := &naming.PoolLookups{
+		CT:         ct,
+		RefToNamed: owners,
+		TypeTestingStubNames: map[int]string{
+			300: "TypeTestingStub_String",
+			301: "TypeTestingStub_int",
+		},
+	}
+	resolver := naming.NewTypeParamResolver(&cluster.Result{}, pl)
+	ctx := &AnalysisContext{
+		Pool: pl,
+		Enrichment: &DecompileEnrichment{
+			TypeParams: resolver,
+			ParamFuncTypeByRef: map[int]*cluster.FuncTypeInfo{
+				201: {RefID: 201, ResultTypeRefID: 301},
+			},
+		},
+	}
+
+	legacy := &decompiler.FuncIR{Name: "clear"}
+	ctx.enrichSignatureAndAsync(legacy, cluster.CodeRange{RefID: 1, OwnerRef: 100, Index: -1})
+	if legacy.ReturnType != "String" {
+		t.Fatalf("direct Function.result_type = %q, want String", legacy.ReturnType)
+	}
+
+	modern := &decompiler.FuncIR{Name: "isReady"}
+	ctx.enrichSignatureAndAsync(modern, cluster.CodeRange{RefID: 2, OwnerRef: 101, Index: -1})
+	if modern.ReturnType != "int" {
+		t.Fatalf("FunctionType.result_type = %q, want int", modern.ReturnType)
+	}
+}
+
+func TestEnrichSignatureUsesSerializedFunctionModifier(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 6}
+	owners := map[int]*cluster.NamedObject{
+		100: {CID: ct.Function, RefID: 100, HasKindTag: true, FuncModifier: cluster.FunctionModifierAsync},
+		101: {CID: ct.Function, RefID: 101, HasKindTag: true, FuncModifier: cluster.FunctionModifierSyncStar},
+		102: {CID: ct.Function, RefID: 102, HasKindTag: true, FuncModifier: cluster.FunctionModifierAsyncStar},
+		103: {CID: ct.Function, RefID: 103, HasKindTag: true, FuncModifier: cluster.FunctionModifierNone},
+	}
+	ctx := &AnalysisContext{
+		Pool:       &naming.PoolLookups{CT: ct, RefToNamed: owners},
+		Enrichment: &DecompileEnrichment{},
+	}
+
+	tests := []struct {
+		ref                            int
+		wantAsync, wantSync, wantAStar bool
+	}{
+		{100, true, false, false},
+		{101, false, true, false},
+		{102, true, false, true},
+		{103, false, false, false},
+	}
+	for _, tt := range tests {
+		fir := &decompiler.FuncIR{}
+		ctx.enrichSignatureAndAsync(fir, cluster.CodeRange{OwnerRef: tt.ref, Index: -1})
+		if fir.IsAsync != tt.wantAsync || fir.IsSyncStar != tt.wantSync || fir.IsAsyncStar != tt.wantAStar {
+			t.Errorf("modifier owner %d => async=%v sync*=%v async*=%v, want %v/%v/%v",
+				tt.ref, fir.IsAsync, fir.IsSyncStar, fir.IsAsyncStar, tt.wantAsync, tt.wantSync, tt.wantAStar)
+		}
+	}
+}
 
 func TestBuildClassLayoutsExcludesCompressedObjectHeader(t *testing.T) {
 	result := &cluster.Result{Classes: []cluster.ClassInfo{{

@@ -27,6 +27,7 @@ type scalarState struct {
 	isNative      bool
 	isExternal    bool
 	isSuspendable bool
+	funcModifier  FunctionModifier
 	hasKindTag    bool
 	funcKind      FunctionKind
 	// Field
@@ -154,7 +155,8 @@ func readFunctionScalar(s *dartfmt.Stream, si int, numScalars int, state *scalar
 
 func captureFunctionKindTag(kindTag uint32, state *scalarState, profile *snapshot.VersionProfile) {
 	state.funcKind = decodeFunctionKind(kindTag, profile)
-	state.isSuspendable = kindTag&kindTagModifierMask != 0
+	state.funcModifier = decodeFunctionModifier(kindTag)
+	state.isSuspendable = state.funcModifier != FunctionModifierNone
 	if flags, ok := functionKindTagFlagLayoutFor(profile); ok {
 		state.isStatic = kindTag&(uint32(1)<<flags.staticBit) != 0
 		state.isNative = kindTag&(uint32(1)<<flags.nativeBit) != 0
