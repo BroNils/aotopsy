@@ -193,6 +193,60 @@ func TestReadTaggedWidthsRejectOversizedFinalGroup(t *testing.T) {
 	}
 }
 
+func TestReadTaggedSignedWidthBoundariesAndFollowingByte(t *testing.T) {
+	t.Run("int16", func(t *testing.T) {
+		for _, tc := range []struct {
+			buf  []byte
+			want uint16
+		}{
+			{[]byte{0x7f, 0x7f, 0xc1}, 0x7fff},
+			{[]byte{0x00, 0x00, 0xbe}, 0x8000},
+		} {
+			s := NewStream(append(append([]byte(nil), tc.buf...), 0xaa))
+			got, err := s.ReadTagged16()
+			if err != nil || got != tc.want {
+				t.Fatalf("ReadTagged16(%x) = %#x, %v; want %#x", tc.buf, got, err, tc.want)
+			}
+			if s.Position() != len(tc.buf) {
+				t.Fatalf("position = %d, want %d", s.Position(), len(tc.buf))
+			}
+			b, err := s.ReadByte()
+			if err != nil || b != 0xaa {
+				t.Fatalf("following marker = %#x, %v", b, err)
+			}
+		}
+	})
+
+	t.Run("int32", func(t *testing.T) {
+		for _, tc := range []struct {
+			buf  []byte
+			want uint32
+		}{
+			{[]byte{0x7f, 0x7f, 0x7f, 0x7f, 0xc7}, 0x7fffffff},
+			{[]byte{0x00, 0x00, 0x00, 0x00, 0xb8}, 0x80000000},
+		} {
+			got, err := NewStream(tc.buf).ReadTagged32()
+			if err != nil || got != tc.want {
+				t.Fatalf("ReadTagged32(%x) = %#x, %v; want %#x", tc.buf, got, err, tc.want)
+			}
+		}
+	})
+
+	t.Run("int64", func(t *testing.T) {
+		max := append(make([]byte, 9), byte(0xc0))
+		for i := 0; i < 9; i++ {
+			max[i] = 0x7f
+		}
+		if got, err := NewStream(max).ReadTagged64(); err != nil || got != int64(^uint64(0)>>1) {
+			t.Fatalf("ReadTagged64(max) = %d, %v", got, err)
+		}
+		min := append(make([]byte, 9), byte(0xbf))
+		if got, err := NewStream(min).ReadTagged64(); err != nil || got != -1<<63 {
+			t.Fatalf("ReadTagged64(min) = %d, %v", got, err)
+		}
+	})
+}
+
 func TestReadTagged64_SingleByte(t *testing.T) {
 	tests := []struct {
 		in   byte
@@ -286,7 +340,10 @@ func TestReadCString(t *testing.T) {
 }
 
 func TestStreamPosition(t *testing.T) {
-	s := NewStreamAt([]byte{0, 0, 0, 0, 128}, 3)
+	s, err := NewStreamAt([]byte{0, 0, 0, 0, 128}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if s.Position() != 3 {
 		t.Errorf("position = %d, want 3", s.Position())
 	}
@@ -315,18 +372,22 @@ func TestReadDouble(t *testing.T) {
 }
 
 func TestStreamRejectsNegativeLengthsAndPositions(t *testing.T) {
-	s := NewStreamAt([]byte{0x7f}, -1)
-	if s.Position() != 0 {
-		t.Fatalf("negative constructor offset was not clamped: %d", s.Position())
+	if _, err := NewStreamAt([]byte{0x7f}, -1); err == nil {
+		t.Fatal("negative constructor offset was accepted")
 	}
-	if _, err := s.ReadByte(); err != nil {
-		t.Fatalf("read after negative constructor offset: %v", err)
+	if _, err := NewStreamAt([]byte{0x7f}, 2); err == nil {
+		t.Fatal("constructor offset past end was accepted")
 	}
 
-	s = NewStream([]byte{1, 2, 3})
-	s.SetPosition(-100)
+	s := NewStream([]byte{1, 2, 3})
+	if err := s.SetPosition(-100); err == nil {
+		t.Fatal("negative SetPosition was accepted")
+	}
 	if s.Position() != 0 {
-		t.Fatalf("negative SetPosition was not clamped: %d", s.Position())
+		t.Fatalf("rejected SetPosition changed position to %d", s.Position())
+	}
+	if err := s.SetPosition(4); err == nil {
+		t.Fatal("SetPosition past end was accepted")
 	}
 	if _, err := s.ReadBytes(-1); !errors.Is(err, ErrStreamOverrun) {
 		t.Fatalf("ReadBytes(-1) error = %v, want ErrStreamOverrun", err)
@@ -340,12 +401,207 @@ func TestStreamRejectsNegativeLengthsAndPositions(t *testing.T) {
 
 	// Addition-based bounds checks overflow for this request when pos > 0.
 	// The stream must reject it before any allocation or slice expression.
-	s = NewStreamAt([]byte{1, 2, 3}, 1)
+	s, err := NewStreamAt([]byte{1, 2, 3}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	maxInt := int(^uint(0) >> 1)
 	if _, err := s.ReadBytes(maxInt); !errors.Is(err, ErrStreamEOF) {
 		t.Fatalf("ReadBytes(MaxInt) error = %v, want ErrStreamEOF", err)
 	}
 	if err := s.Skip(maxInt); !errors.Is(err, ErrStreamEOF) {
 		t.Fatalf("Skip(MaxInt) error = %v, want ErrStreamEOF", err)
+	}
+}
+
+func TestReadSLEB128ExactDartEncodingAndPosition(t *testing.T) {
+	cases := []struct {
+		name string
+		buf  []byte
+		bits int
+		want int64
+	}{
+		{"zero", []byte{0x00}, 64, 0},
+		{"one", []byte{0x01}, 64, 1},
+		{"63", []byte{0x3f}, 64, 63},
+		{"minus one", []byte{0x7f}, 64, -1},
+		{"minus 64", []byte{0x40}, 64, -64},
+		{"64", []byte{0xc0, 0x00}, 64, 64},
+		{"minus 65", []byte{0xbf, 0x7f}, 64, -65},
+		{"128", []byte{0x80, 0x01}, 64, 128},
+		{"minus 128", []byte{0x80, 0x7f}, 64, -128},
+		{"1000", []byte{0xe8, 0x07}, 64, 1000},
+		{"minus 1000", []byte{0x98, 0x78}, 64, -1000},
+		{"large", []byte{0xd6, 0xe8, 0xc8, 0x00}, 32, 0x123456},
+		{"negative three byte", []byte{0xd6, 0xe8, 0x48}, 32, -904106},
+		{"max int32", []byte{0xff, 0xff, 0xff, 0xff, 0x07}, 32, 1<<31 - 1},
+		{"min int32", []byte{0x80, 0x80, 0x80, 0x80, 0x78}, 32, -1 << 31},
+		{"max int64", []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}, 64, 1<<63 - 1},
+		{"min int64", []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f}, 64, -1 << 63},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStream(append(append([]byte(nil), tc.buf...), 0xaa))
+			got, err := s.ReadSLEB128(tc.bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ReadSLEB128 = %d, want %d", got, tc.want)
+			}
+			if s.Position() != len(tc.buf) {
+				t.Fatalf("position = %d, want %d", s.Position(), len(tc.buf))
+			}
+			marker, err := s.ReadByte()
+			if err != nil || marker != 0xaa {
+				t.Fatalf("following marker = %#x, %v; want 0xaa", marker, err)
+			}
+		})
+	}
+}
+
+func TestReadULEB128ExactDartEncodingAndPosition(t *testing.T) {
+	cases := []struct {
+		name string
+		buf  []byte
+		bits int
+		want uint64
+	}{
+		{"zero", []byte{0x00}, 64, 0},
+		{"127", []byte{0x7f}, 64, 127},
+		{"128", []byte{0x80, 0x01}, 64, 128},
+		{"624485", []byte{0xe5, 0x8e, 0x26}, 64, 624485},
+		{"max uint32", []byte{0xff, 0xff, 0xff, 0xff, 0x0f}, 32, 1<<32 - 1},
+		{"max uint64", []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}, 64, ^uint64(0)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStream(append(append([]byte(nil), tc.buf...), 0xaa))
+			got, err := s.ReadULEB128(tc.bits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ReadULEB128 = %d, want %d", got, tc.want)
+			}
+			if s.Position() != len(tc.buf) {
+				t.Fatalf("position = %d, want %d", s.Position(), len(tc.buf))
+			}
+			marker, err := s.ReadByte()
+			if err != nil || marker != 0xaa {
+				t.Fatalf("following marker = %#x, %v; want 0xaa", marker, err)
+			}
+		})
+	}
+}
+
+func TestReadULEB128MalformedIsBounded(t *testing.T) {
+	s := NewStream([]byte{0x80})
+	if _, err := s.ReadULEB128(64); !errors.Is(err, ErrStreamEOF) {
+		t.Fatalf("truncated ULEB128 error = %v, want ErrStreamEOF", err)
+	}
+	if s.Position() != 1 {
+		t.Fatalf("truncated ULEB128 position = %d, want 1", s.Position())
+	}
+
+	// uint32 has at most five bytes. The fifth may carry only four payload bits,
+	// and an overlong continuation must not consume the next field.
+	s = NewStream([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0xaa})
+	if _, err := s.ReadULEB128(32); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("overlong ULEB128 error = %v, want ErrStreamOverrun", err)
+	}
+	if s.Position() != 5 {
+		t.Fatalf("overlong ULEB128 consumed %d bytes, want 5", s.Position())
+	}
+	marker, err := s.ReadByte()
+	if err != nil || marker != 0xaa {
+		t.Fatalf("following marker = %#x, %v; want 0xaa", marker, err)
+	}
+
+	if _, err := NewStream([]byte{0xff, 0xff, 0xff, 0xff, 0x10}).ReadULEB128(32); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("overflowing final uint32 ULEB128 group error = %v, want ErrStreamOverrun", err)
+	}
+	if _, err := NewStream([]byte{0}).ReadULEB128(0); err == nil {
+		t.Fatal("zero-width ULEB128 was accepted")
+	}
+	if _, err := NewStream([]byte{0}).ReadULEB128(65); err == nil {
+		t.Fatal("65-bit ULEB128 was accepted")
+	}
+}
+
+func TestReadSLEB128MalformedIsBounded(t *testing.T) {
+	s := NewStream([]byte{0x80})
+	if _, err := s.ReadSLEB128(64); !errors.Is(err, ErrStreamEOF) {
+		t.Fatalf("truncated SLEB128 error = %v, want ErrStreamEOF", err)
+	}
+	if s.Position() != 1 {
+		t.Fatalf("truncated SLEB128 position = %d, want 1", s.Position())
+	}
+
+	// A 32-bit SLEB128 may consume at most five bytes. The sixth byte belongs
+	// to the next field and must remain unread when the fifth still continues.
+	s = NewStream([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0xaa})
+	if _, err := s.ReadSLEB128(32); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("overlong SLEB128 error = %v, want ErrStreamOverrun", err)
+	}
+	if s.Position() != 5 {
+		t.Fatalf("overlong SLEB128 consumed %d bytes, want 5", s.Position())
+	}
+	marker, err := s.ReadByte()
+	if err != nil || marker != 0xaa {
+		t.Fatalf("following marker = %#x, %v; want 0xaa", marker, err)
+	}
+
+	if _, err := NewStream([]byte{0}).ReadSLEB128(0); err == nil {
+		t.Fatal("zero-width SLEB128 was accepted")
+	}
+	if _, err := NewStream([]byte{0}).ReadSLEB128(65); err == nil {
+		t.Fatal("65-bit SLEB128 was accepted")
+	}
+	// Five bytes are allowed for int32, but the final byte may only carry the
+	// four signed bits that fit at bit 28. This terminal lacks the required sign
+	// extension and must fail rather than truncate to MinInt32.
+	if _, err := NewStream([]byte{0x80, 0x80, 0x80, 0x80, 0x08}).ReadSLEB128(32); !errors.Is(err, ErrStreamOverrun) {
+		t.Fatalf("non-canonical overflowing int32 SLEB128 error = %v, want ErrStreamOverrun", err)
+	}
+}
+
+func TestAlignMatchesDartOffsetSemanticsAndFailsWithoutMoving(t *testing.T) {
+	s, err := NewStreamAt(make([]byte, 32), 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Utils::RoundUp(6, 8, 3) == 13: 13+3 is divisible by 8.
+	if err := s.Align(8, 3); err != nil {
+		t.Fatal(err)
+	}
+	if s.Position() != 13 {
+		t.Fatalf("aligned position = %d, want 13", s.Position())
+	}
+
+	for _, tc := range []struct {
+		alignment int
+		offset    int
+	}{
+		{0, 0}, {3, 0}, {8, -1}, {8, 8},
+	} {
+		before := s.Position()
+		if err := s.Align(tc.alignment, tc.offset); err == nil {
+			t.Fatalf("Align(%d,%d) succeeded", tc.alignment, tc.offset)
+		}
+		if s.Position() != before {
+			t.Fatalf("failed Align(%d,%d) moved from %d to %d", tc.alignment, tc.offset, before, s.Position())
+		}
+	}
+
+	short, err := NewStreamAt(make([]byte, 10), 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := short.Align(8, 0); !errors.Is(err, ErrStreamEOF) {
+		t.Fatalf("truncated Align error = %v, want ErrStreamEOF", err)
+	}
+	if short.Position() != 9 {
+		t.Fatalf("truncated Align moved to %d, want 9", short.Position())
 	}
 }

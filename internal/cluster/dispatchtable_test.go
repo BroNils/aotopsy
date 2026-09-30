@@ -45,7 +45,7 @@ func encTagged64(v int64) []byte {
 func TestEncodersRoundTripRealReader(t *testing.T) {
 	unsignedCases := []int64{0, 1, 63, 127, 128, 200, 1000, 1 << 20}
 	for _, v := range unsignedCases {
-		s := dartfmt.NewStreamAt(encUnsigned(v), 0)
+		s := dartfmt.NewStream(encUnsigned(v))
 		got, err := s.ReadUnsigned()
 		if err != nil || got != v {
 			t.Errorf("encUnsigned(%d) round-trip: got=%d err=%v", v, got, err)
@@ -53,7 +53,7 @@ func TestEncodersRoundTripRealReader(t *testing.T) {
 	}
 	tagged64Cases := []int64{0, 1, -1, 63, -64, 64, -65, 1000, -1000, 73, -2, 67}
 	for _, v := range tagged64Cases {
-		s := dartfmt.NewStreamAt(encTagged64(v), 0)
+		s := dartfmt.NewStream(encTagged64(v))
 		got, err := s.ReadTagged64()
 		if err != nil || got != v {
 			t.Errorf("encTagged64(%d) round-trip: got=%d err=%v", v, got, err)

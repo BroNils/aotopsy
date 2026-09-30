@@ -563,7 +563,10 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 	if result.FillStart <= 0 || result.FillStart >= len(data) {
 		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
 	}
-	s := dartfmt.NewStreamAt(data, result.FillStart)
+	s, err := dartfmt.NewStreamAt(data, result.FillStart)
+	if err != nil {
+		return fmt.Errorf("fill: debug stream start: %w", err)
+	}
 	fillRefUnsigned := profile.FillRefUnsigned
 	instrIdx := 0
 	// Keep the minimal fill state needed by later clusters. In particular,
@@ -674,7 +677,10 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
 	}
 
-	s := dartfmt.NewStreamAt(data, result.FillStart)
+	s, err := dartfmt.NewStreamAt(data, result.FillStart)
+	if err != nil {
+		return fmt.Errorf("fill: stream start: %w", err)
+	}
 	if opts.MaxBytes > 0 {
 		est, err := estimateFillCaptureBytes(result, profile)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
 )
 
@@ -25,8 +26,6 @@ import (
 func TestObjectStoreStubFieldsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	fieldRe := regexp.MustCompile(`^\s*(R_|RW|CW|FW|ARW_RELAXED|ARW_AR|LAZY_[A-Z]+)\(\s*[\w:]+\s*,\s*(\w+)\s*\)`)
-
 	for version, want := range objectStoreStubFields {
 		src, err := sdktest.SDKFileAtTag("runtime/vm/object_store.h", version)
 		if err != nil {
@@ -38,35 +37,20 @@ func TestObjectStoreStubFieldsMatchSDK(t *testing.T) {
 		} else if i := strings.Index(src, "class ObjectStore :"); i >= 0 {
 			body = src[i:]
 		}
-		macroList := func(macro string) []string {
-			i := strings.Index(src, "#define "+macro)
-			if i < 0 {
-				return nil
-			}
-			var names []string
-			for _, ln := range strings.Split(src[i:], "\n")[1:] {
-				if m := fieldRe.FindStringSubmatch(ln); m != nil {
-					names = append(names, m[2])
-				}
-				if !strings.HasSuffix(strings.TrimSpace(ln), "\\") {
-					break
-				}
-			}
-			return names
+		macros, err := cmacro.ParseMacros(src)
+		if err != nil {
+			t.Fatalf("%s: parse object_store.h macros: %v", version, err)
 		}
-		declRe := regexp.MustCompile(`(?s)#define DECLARE_OBJECT_STORE_FIELD.*?\n((?:[^\n]*_FIELD_LIST\([^\n]*\n)+)`)
-		var order []string
-		if m := declRe.FindStringSubmatch(body); m != nil {
-			for _, mm := range regexp.MustCompile(`([A-Z_0-9]+_FIELD_LIST)\(`).FindAllStringSubmatch(m[1], -1) {
-				order = append(order, mm[1])
+		rows, err := cmacro.ExpandRawAllCallbacks(macros, "OBJECT_STORE_FIELD_LIST")
+		if err != nil {
+			t.Fatalf("%s: expand OBJECT_STORE_FIELD_LIST: %v", version, err)
+		}
+		names := make([]string, 0, len(rows))
+		for i, row := range rows {
+			if len(row) != 2 {
+				t.Fatalf("%s: OBJECT_STORE_FIELD_LIST row %d has %d columns, want 2", version, i, len(row))
 			}
-		}
-		if len(order) == 0 {
-			order = []string{"OBJECT_STORE_FIELD_LIST"}
-		}
-		var names []string
-		for _, macro := range order {
-			names = append(names, macroList(macro)...)
+			names = append(names, strings.TrimSpace(row[1]))
 		}
 		fromRe := regexp.MustCompile(`ObjectPtr\* from\(\)\s*\{\s*return[^&]*&(\w+)_\)`)
 		aotRe := regexp.MustCompile(`kFullAOT:\s*\n?\s*return[^&]*&(\w+)_\)`)

@@ -46,13 +46,13 @@ func TestObjectStoreFieldsUsesSharedSDKFetcherCache(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const src = `#define OBJECT_STORE_FIELD_LIST(V) \
+	const src = `#define OBJECT_STORE_FIELD_LIST(R_, RW) \
   RW(Object, object_class) \
   RW(Code, slow_tts_stub)
 
 class ObjectStore {
 #define DECLARE_OBJECT_STORE_FIELD(type, name) type name##_
-  OBJECT_STORE_FIELD_LIST(DECLARE_OBJECT_STORE_FIELD)
+  OBJECT_STORE_FIELD_LIST(DECLARE_OBJECT_STORE_FIELD, DECLARE_OBJECT_STORE_FIELD)
 
   ObjectPtr* from() { return reinterpret_cast<ObjectPtr*>(&object_class_); }
   ObjectPtr* to_snapshot(Snapshot::Kind kind) {

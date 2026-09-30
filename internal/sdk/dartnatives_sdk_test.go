@@ -182,7 +182,10 @@ func TestKnownNativeMembershipIsSDKBacked(t *testing.T) {
 // version-evolution splits are optional.
 func expandDeclaredNativeLists(t *testing.T, body, tag, required string, optional ...string) []string {
 	t.Helper()
-	macros := cmacro.ParseMacros(body)
+	macros, err := cmacro.ParseMacros(body)
+	if err != nil {
+		t.Fatalf("parse native macros@%s: %v", tag, err)
+	}
 	names, err := cmacro.Expand(macros, required)
 	if err != nil {
 		t.Fatalf("expand required %s@%s: %v", required, tag, err)

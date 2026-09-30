@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 
+	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
 )
 
@@ -79,62 +80,6 @@ type PcDescriptorsInfo struct {
 	Entries []PcDescriptorEntry
 }
 
-// readSLEB128 decodes one signed LEB128 value starting at buf[pos].
-//
-// Dart writes these with ReadStream::ReadSLEB128 (runtime/vm/datastream.h):
-// 7 payload bits per byte, low byte first, high bit set means "more bytes
-// follow", and the final byte's bit 6 is the sign bit which must be extended.
-func readSLEB128(buf []byte, pos int) (val int64, next int, err error) {
-	return readSLEB128Bits(buf, pos, 64)
-}
-
-func readSLEB128Bits(buf []byte, pos, bits int) (val int64, next int, err error) {
-	const (
-		moreBit = 0x80
-		signBit = 0x40
-		maskLow = 0x7f
-	)
-	if bits <= 0 || bits > 64 {
-		return 0, pos, fmt.Errorf("sleb128: invalid width %d", bits)
-	}
-	maxBytes := (bits + 6) / 7
-	var shift uint
-	var b byte
-	for i := 0; i < maxBytes; i++ {
-		if pos >= len(buf) {
-			return 0, pos, fmt.Errorf("sleb128: truncated at %d", pos)
-		}
-		b = buf[pos]
-		pos++
-		payload := uint64(b & maskLow)
-		remaining := bits - int(shift)
-		if remaining < 7 {
-			lowMask := uint64(1<<remaining) - 1
-			low := payload & lowMask
-			high := payload &^ lowMask
-			signSet := low&(1<<uint(remaining-1)) != 0
-			if (!signSet && high != 0) || (signSet && high != uint64(maskLow)&^lowMask) {
-				return 0, pos, fmt.Errorf("sleb128: value overflows %d-bit width", bits)
-			}
-			payload = low
-		}
-		val |= int64(payload << shift)
-		shift += 7
-		if b&moreBit == 0 {
-			if shift < uint(bits) && b&signBit != 0 {
-				val |= -1 << shift
-			} else if bits < 64 && b&signBit != 0 {
-				val |= ^int64((uint64(1) << uint(bits)) - 1)
-			}
-			return val, pos, nil
-		}
-		if i == maxBytes-1 {
-			return 0, pos, fmt.Errorf("sleb128: value too long for %d-bit width at %d", bits, pos)
-		}
-	}
-	return 0, pos, fmt.Errorf("sleb128: unterminated value")
-}
-
 // decodeKindAndMetadata splits the packed first field of a descriptor.
 //
 // Bit layout from UntaggedPcDescriptors::KindAndMetadata. kLastKind == kOther
@@ -164,19 +109,19 @@ func decodeKindAndMetadata(kam int64) (kind PcDescriptorKind, tryIndex, yieldInd
 // there would desync the whole stream.
 func DecodePcDescriptors(payload []byte) ([]PcDescriptorEntry, error) {
 	var entries []PcDescriptorEntry
-	pos := 0
+	s := dartfmt.NewStream(payload)
 	var pc int64
-	for pos < len(payload) {
-		kam, next, err := readSLEB128Bits(payload, pos, 32)
+	for s.Remaining() > 0 {
+		kamPos := s.Position()
+		kam, err := s.ReadSLEB128(32)
 		if err != nil {
-			return entries, fmt.Errorf("pc_descriptors: kind_and_metadata: %w", err)
+			return entries, fmt.Errorf("pc_descriptors: kind_and_metadata at %d: %w", kamPos, err)
 		}
-		pos = next
-		delta, next, err := readSLEB128(payload, pos)
+		deltaPos := s.Position()
+		delta, err := s.ReadSLEB128(64)
 		if err != nil {
-			return entries, fmt.Errorf("pc_descriptors: pc_offset delta: %w", err)
+			return entries, fmt.Errorf("pc_descriptors: pc_offset delta at %d: %w", deltaPos, err)
 		}
-		pos = next
 		if (delta > 0 && pc > math.MaxInt64-delta) || (delta < 0 && pc < math.MinInt64-delta) {
 			return entries, fmt.Errorf("pc_descriptors: pc_offset arithmetic overflow")
 		}

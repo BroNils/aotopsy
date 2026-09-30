@@ -113,7 +113,10 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 		// This will be done after reading first_code_id below.
 	}
 
-	s := dartfmt.NewStreamAt(data, result.FillEnd)
+	s, err := dartfmt.NewStreamAt(data, result.FillEnd)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch table: stream start: %w", err)
+	}
 	fillRefUnsigned := profile.FillRefUnsigned
 	maxSteps := opts.EffectiveMaxSteps()
 

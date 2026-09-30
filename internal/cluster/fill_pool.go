@@ -29,7 +29,9 @@ func readFillObjectPool(s *dartfmt.Stream, cm *ClusterMeta, profile *snapshot.Ve
 	if debugFill {
 		saved := s.Position()
 		rawBytes, _ := s.ReadBytes(40)
-		s.SetPosition(saved)
+		if err := s.SetPosition(saved); err != nil {
+			return nil, fmt.Errorf("object pool debug rewind: %w", err)
+		}
 		fmt.Fprintf(os.Stderr, "  ObjectPool fill start @0x%x raw=%x\n", saved, rawBytes)
 	}
 	var entries []PoolEntry

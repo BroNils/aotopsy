@@ -27,29 +27,28 @@ func NewStream(data []byte) *Stream {
 	return &Stream{data: data, pos: 0, end: len(data)}
 }
 
-// NewStreamAt creates a stream starting at offset within data.
-func NewStreamAt(data []byte, offset int) *Stream {
-	if offset < 0 {
-		offset = 0
+// NewStreamAt creates a stream starting at offset within data. Invalid offsets
+// are malformed input: silently clamping them can turn a corrupt absolute
+// offset into a plausible parse from byte 0 or EOF.
+func NewStreamAt(data []byte, offset int) (*Stream, error) {
+	if offset < 0 || offset > len(data) {
+		return nil, fmt.Errorf("stream: start offset %d outside [0,%d]", offset, len(data))
 	}
-	if offset > len(data) {
-		offset = len(data)
-	}
-	return &Stream{data: data, pos: offset, end: len(data)}
+	return &Stream{data: data, pos: offset, end: len(data)}, nil
 }
 
 // Position returns the current read position.
 func (s *Stream) Position() int { return s.pos }
 
-// SetPosition sets the read position.
-func (s *Stream) SetPosition(pos int) {
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > s.end {
-		pos = s.end
+// SetPosition sets the read position without silently normalizing an invalid
+// offset. Rewinds are used only for diagnostics today, but keeping the primitive
+// fail-loud prevents future parser code from masking a bad wire offset.
+func (s *Stream) SetPosition(pos int) error {
+	if pos < 0 || pos > s.end {
+		return fmt.Errorf("stream: position %d outside [0,%d]", pos, s.end)
 	}
 	s.pos = pos
+	return nil
 }
 
 // Remaining returns bytes left to read.
@@ -89,7 +88,7 @@ func (s *Stream) ReadUint8() (uint8, error) {
 
 // ReadUint16 reads a little-endian uint16.
 func (s *Stream) ReadUint16() (uint16, error) {
-	if s.pos+2 > s.end {
+	if 2 > s.end-s.pos {
 		return 0, ErrStreamEOF
 	}
 	v := binary.LittleEndian.Uint16(s.data[s.pos:])
@@ -99,7 +98,7 @@ func (s *Stream) ReadUint16() (uint16, error) {
 
 // ReadUint32 reads a little-endian uint32.
 func (s *Stream) ReadUint32() (uint32, error) {
-	if s.pos+4 > s.end {
+	if 4 > s.end-s.pos {
 		return 0, ErrStreamEOF
 	}
 	v := binary.LittleEndian.Uint32(s.data[s.pos:])
@@ -109,7 +108,7 @@ func (s *Stream) ReadUint32() (uint32, error) {
 
 // ReadUint64 reads a little-endian uint64.
 func (s *Stream) ReadUint64() (uint64, error) {
-	if s.pos+8 > s.end {
+	if 8 > s.end-s.pos {
 		return 0, ErrStreamEOF
 	}
 	v := binary.LittleEndian.Uint64(s.data[s.pos:])
@@ -310,6 +309,114 @@ func (s *Stream) ReadRefId() (int64, error) {
 	return 0, ErrStreamOverrun
 }
 
+// ReadULEB128 reads one standard unsigned LEB128 value using Dart's
+// ReadStream::ReadLEB128 convention: seven low-order payload bits per byte and
+// bit 7 means another byte follows. This is a different encoding from
+// ReadUnsigned, whose final byte is marked by adding 128.
+//
+// bits is the logical destination width. Rejecting payload bits outside that
+// width is intentionally stricter than the VM's debug ASSERTs: malformed input
+// must not truncate high bits and leave the stream aligned on a plausible next
+// field.
+func (s *Stream) ReadULEB128(bits int) (uint64, error) {
+	const (
+		moreBit  = byte(0x80)
+		dataMask = byte(0x7f)
+	)
+	if bits <= 0 || bits > 64 {
+		return 0, fmt.Errorf("stream: invalid ULEB128 width %d", bits)
+	}
+
+	maxBytes := (bits + dataBitsPerByte - 1) / dataBitsPerByte
+	var value uint64
+	var shift uint
+	for i := 0; i < maxBytes; i++ {
+		b, err := s.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		payload := uint64(b & dataMask)
+		remaining := bits - int(shift)
+		if remaining < dataBitsPerByte {
+			maxPayload := uint64(1<<remaining) - 1
+			if payload > maxPayload {
+				return 0, ErrStreamOverrun
+			}
+		}
+		value |= payload << shift
+		shift += dataBitsPerByte
+		if b&moreBit == 0 {
+			return value, nil
+		}
+		if i == maxBytes-1 {
+			return 0, ErrStreamOverrun
+		}
+	}
+	return 0, ErrStreamOverrun
+}
+
+// ReadSLEB128 reads one standard signed LEB128 value using Dart's
+// ReadStream::ReadSLEB128 convention: seven low-order payload bits per byte,
+// bit 7 means another byte follows, and bit 6 of the final byte is the sign.
+//
+// bits is the logical destination width (for example 32 for
+// kind_and_metadata and 64 for intptr_t pc deltas). The width is part of the
+// wire contract: accepting an oversized value and truncating it would move the
+// stream to a valid-looking next field with corrupted metadata.
+func (s *Stream) ReadSLEB128(bits int) (int64, error) {
+	const (
+		moreBit  = byte(0x80)
+		signBit  = byte(0x40)
+		dataMask = byte(0x7f)
+	)
+	if bits <= 0 || bits > 64 {
+		return 0, fmt.Errorf("stream: invalid SLEB128 width %d", bits)
+	}
+
+	maxBytes := (bits + dataBitsPerByte - 1) / dataBitsPerByte
+	var value uint64
+	var shift uint
+	for i := 0; i < maxBytes; i++ {
+		b, err := s.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		payload := uint64(b & dataMask)
+		remaining := bits - int(shift)
+		if remaining < dataBitsPerByte {
+			lowMask := uint64(1<<remaining) - 1
+			low := payload & lowMask
+			high := payload &^ lowMask
+			signSet := low&(uint64(1)<<uint(remaining-1)) != 0
+			expectedHigh := uint64(0)
+			if signSet {
+				expectedHigh = uint64(dataMask) &^ lowMask
+			}
+			if high != expectedHigh {
+				return 0, ErrStreamOverrun
+			}
+			payload = low
+		}
+		value |= payload << shift
+		shift += dataBitsPerByte
+
+		if b&moreBit == 0 {
+			if b&signBit != 0 {
+				if shift < uint(bits) {
+					value |= ^uint64(0) << shift
+				} else if bits < 64 {
+					value |= ^((uint64(1) << uint(bits)) - 1)
+				}
+			}
+			return int64(value), nil
+		}
+		if i == maxBytes-1 {
+			return 0, ErrStreamOverrun
+		}
+	}
+	return 0, ErrStreamOverrun
+}
+
 // ReadCString reads a null-terminated string.
 func (s *Stream) ReadCString() (string, error) {
 	start := s.pos
@@ -324,18 +431,38 @@ func (s *Stream) ReadCString() (string, error) {
 	return "", fmt.Errorf("stream: unterminated string at offset %d", start)
 }
 
-// Align advances position to the next alignment boundary.
-func (s *Stream) Align(alignment int) {
-	if alignment <= 0 {
-		return
+// Align advances to the next SDK Utils::RoundUp(position, alignment, offset)
+// boundary. Dart added the offset parameter to ReadStream::Align in 2.19; an
+// offset of zero is the older behavior. Utils::RoundUp requires a power-of-two
+// alignment and offset < alignment, so invalid values fail instead of being
+// silently normalized. If the aligned position lies past the input, the stream
+// is left unchanged.
+func (s *Stream) Align(alignment, offset int) error {
+	if alignment <= 0 || alignment&(alignment-1) != 0 {
+		return fmt.Errorf("stream: alignment %d is not a positive power of two", alignment)
 	}
+	if offset < 0 || offset >= alignment {
+		return fmt.Errorf("stream: alignment offset %d outside [0,%d)", offset, alignment)
+	}
+
+	// Compute (pos+offset) % alignment without overflowing int.
 	rem := s.pos % alignment
-	if rem != 0 {
-		s.pos += alignment - rem
+	threshold := alignment - offset
+	var mod int
+	if rem >= threshold {
+		mod = rem - threshold
+	} else {
+		mod = rem + offset
 	}
-	if s.pos > s.end {
-		s.pos = s.end
+	if mod == 0 {
+		return nil
 	}
+	delta := alignment - mod
+	if delta > s.end-s.pos {
+		return ErrStreamEOF
+	}
+	s.pos += delta
+	return nil
 }
 
 // Skip advances the position by n bytes.

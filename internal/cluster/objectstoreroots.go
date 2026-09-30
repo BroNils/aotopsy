@@ -32,7 +32,10 @@ func ReadObjectStoreRefs(data []byte, result *Result, profile *snapshot.VersionP
 	if result.FillEnd <= 0 || profile.ObjectStoreAOTFieldCount <= 0 {
 		return nil
 	}
-	s := dartfmt.NewStreamAt(data, result.FillEnd)
+	s, err := dartfmt.NewStreamAt(data, result.FillEnd)
+	if err != nil {
+		return fmt.Errorf("object store roots: stream start: %w", err)
+	}
 	return readObjectStoreRefsFromStream(s, result, profile)
 }
 
