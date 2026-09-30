@@ -65,7 +65,6 @@ var goldenFiles = []string{
 	"classes.jsonl",
 	"scripts.jsonl",
 	"loading_units.jsonl",
-	"kpi.jsonl",
 	"instances.jsonl",
 	"contexts.jsonl",
 	"type_arguments.jsonl",

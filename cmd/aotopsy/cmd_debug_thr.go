@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/jsonutil"
@@ -121,7 +122,7 @@ func cmdTHRClassify(args []string) error {
 	}
 
 	summary := thraudit.Summarize(classified)
-	fmt.Fprintf(os.Stderr, "%s (Dart %s): %d unresolved\n",
+	cli.Errf("%s (Dart %s): %d unresolved\n",
 		summary.Sample, summary.DartVersion, summary.Total)
 
 	classes := []thraudit.THRClass{
@@ -136,10 +137,10 @@ func cmdTHRClassify(args []string) error {
 		if summary.Total > 0 {
 			pct = float64(count) / float64(summary.Total) * 100
 		}
-		fmt.Fprintf(os.Stderr, "  %-30s %4d (%5.1f%%)\n", cls, count, pct)
+		cli.Errf("  %-30s %4d (%5.1f%%)\n", cls, count, pct)
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s\n", classPath)
+	cli.Errf("wrote %s\n", classPath)
 	return nil
 }
 
@@ -183,10 +184,10 @@ func cmdTHRCluster(args []string) error {
 		return fmt.Errorf("write markdown: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "%s: %d bands from %d unresolved accesses\n",
+	cli.Errf("%s: %d bands from %d unresolved accesses\n",
 		br.Sample, len(br.Bands), br.TotalUnresolved)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", jsonPath)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", mdPath)
+	cli.Errf("wrote %s\n", jsonPath)
+	cli.Errf("wrote %s\n", mdPath)
 
 	return nil
 }

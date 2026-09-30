@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/sdk"
@@ -50,13 +51,13 @@ func cmdObjects(args []string) error {
 	poolDisplay := sc.PoolDisplay
 
 	if info.Version != nil && info.Version.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 	}
 	if sc.VMResult != nil {
-		fmt.Fprintf(os.Stderr, "vm snapshot: %d clusters, %d strings, %d named\n",
+		cli.Errf("vm snapshot: %d clusters, %d strings, %d named\n",
 			len(sc.VMResult.Clusters), len(sc.VMResult.Strings), len(sc.VMResult.Named))
 	}
-	fmt.Fprintf(os.Stderr, "pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
+	cli.Errf("pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
 
 	// Output.
 	if *jsonOut {

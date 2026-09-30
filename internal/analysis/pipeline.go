@@ -447,9 +447,13 @@ func runPipeline(opts Opts) (*Result, error) {
 			// Say it out loud. Without this line, "0 code source maps" and
 			// "most functions named stub_<hex>" look like the analyser
 			// failing, when they are what the binary was built to be.
-			opts.warnf("dwarf stack traces (--split-debug-info/--obfuscate): "+
-				"%d code source maps, %d discarded Code objects -- inline attribution unavailable",
-				build.CodeSourceMaps, build.DiscardedCodes)
+			//
+			// This describes how the binary was built, it is not a degradation of
+			// the analysis, so it is an ordinary (quiet-able) log line and not a
+			// Warn: warnings are always shown and must stay reserved for lost output.
+			opts.logf("  %sbuild:%s dwarf stack traces (--split-debug-info/--obfuscate): "+
+				"%d code source maps, %d discarded Code objects -- inline attribution unavailable\n",
+				cli.Gold, cli.Reset, build.CodeSourceMaps, build.DiscardedCodes)
 		}
 	}
 
@@ -464,33 +468,34 @@ func runPipeline(opts Opts) (*Result, error) {
 	}
 	result.ClassCount = len(classLayouts)
 
-	// Write captured-data JSONL files (scripts, loading_units, kpi, instances,
+	// Write captured-data JSONL files (scripts, loading_units, instances,
 	// contexts, type_arguments, exception_handlers, icdata).
 	// These are produced from the fill-phase capture layer and provide
 	// structured access to snapshot objects that were previously discarded.
 	//
-	// Note: ICData, Context and KernelProgramInfo do not appear in AOT
-	// snapshots, so their files are never written.
+	// Note: ICData and Context do not appear in AOT snapshots, so their files
+	// are never written.
 	//
 	// The reason is NOT "their serialization cluster is behind
 	// #if !defined(DART_PRECOMPILED_RUNTIME)" -- an earlier version of this
 	// comment claimed that, and it is wrong. Checked against
 	// runtime/vm/app_snapshot.cc @ 3.9.2: Serializer::NewClusterForClass has
-	// no such guard for kICDataCid, kContextCid or kKernelProgramInfoCid (the
-	// serializer as a whole only exists in non-AOT-runtime builds, but
-	// gen_snapshot is exactly such a build and it is what writes AOT
-	// snapshots). The only one genuinely #if-guarded is KernelProgramInfo's
-	// *deserialization* cluster.
+	// no such guard for kICDataCid or kContextCid (the serializer as a whole
+	// only exists in non-AOT-runtime builds, but gen_snapshot is exactly such a
+	// build and it is what writes AOT snapshots).
 	//
 	// The real reasons:
 	// - ICData: a JIT inline cache. The precompiler does not retain
 	//   ic_data_array_, so nothing ever reaches the serializer.
 	// - Context: allocated on the heap when a closure runs, not ahead of time.
-	// - KernelProgramInfo: dropped because the kernel binary is not needed at
-	//   runtime in AOT ("KernelProgramInfo objects are not written into a
-	//   full AOT snapshot" -- SDK comment above the deserialization cluster).
 	//
-	// Confirmed empirically: 0 entries for all three across 16 corpus samples
+	// KernelProgramInfo is not captured at all: the kernel binary is not needed
+	// at runtime in AOT ("KernelProgramInfo objects are not written into a full
+	// AOT snapshot" -- SDK comment above the deserialization cluster), so a
+	// cluster under its CID is malformed and fails closed in the cluster
+	// package (notSerializedInFullAOT).
+	//
+	// Confirmed empirically: 0 ICData/Context entries across 16 corpus samples
 	// (Dart 2.12.0 / 3.7.0 / 3.9.2 / 3.10.7 / 3.11.0 / 3.12.2, arm64 + x64).
 	if err := writeCapturedJSONL(&opts, clResult, pl, classLayouts, table); err != nil {
 		return nil, err
@@ -808,7 +813,6 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	// Build all records first, then write each non-empty slice.
 	scripts := BuildScripts(clResult, pl)
 	loadingUnits := BuildLoadingUnits(clResult)
-	kpis := BuildKPI(clResult)
 	instances := BuildInstances(clResult, layouts)
 	contexts := BuildContexts(clResult)
 	typeArgs := BuildTypeArguments(clResult)
@@ -853,10 +857,6 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	if len(loadingUnits) > 0 {
 		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "loading_units.jsonl"), loadingUnits)
 		entries = append(entries, entry{"loading_units.jsonl", "loading_units", n, err})
-	}
-	if len(kpis) > 0 {
-		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "kpi.jsonl"), kpis)
-		entries = append(entries, entry{"kpi.jsonl", "kpi", n, err})
 	}
 	if len(instances) > 0 {
 		n, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "instances.jsonl"), instances)

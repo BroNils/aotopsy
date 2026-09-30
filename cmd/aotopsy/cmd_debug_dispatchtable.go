@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 )
 
@@ -29,14 +29,14 @@ func cmdDispatchTable(args []string) error {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
+	cli.Errf("Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
 	entries, err := analysis.ResolveDispatchTable(ctx)
 	if err != nil {
 		return err
 	}
 	if entries == nil {
-		fmt.Fprintf(os.Stderr, "dispatch-table: no dispatch table in this snapshot (length 0)\n")
+		cli.Errf("dispatch-table: no dispatch table in this snapshot (length 0)\n")
 		return nil
 	}
 
@@ -73,7 +73,7 @@ func cmdDispatchTable(args []string) error {
 		printed++
 	}
 
-	fmt.Fprintf(os.Stderr, "dispatch-table: %d entries total (null=%d code=%d stub=%d unnamed=%d), printed %d\n",
+	cli.Errf("dispatch-table: %d entries total (null=%d code=%d stub=%d unnamed=%d), printed %d\n",
 		len(entries), nullCount, codeCount, stubCount, unnamedCount, printed)
 	return nil
 }

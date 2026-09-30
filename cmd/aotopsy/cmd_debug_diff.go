@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/funcdiff"
 	"aotopsy/internal/symbolmap"
 )
@@ -35,12 +36,12 @@ func cmdSymbolMap(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "machine=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
+	cli.Errf("machine=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
 		rep.Machine, rep.ExecLayoutMatch, rep.ExecBytesMatch, rep.UnstrippedSymCnt)
-	fmt.Fprintf(os.Stderr, "call sites: %d (exact=%d nearest=%d unresolved=%d), unique targets=%d\n",
+	cli.Errf("call sites: %d (exact=%d nearest=%d unresolved=%d), unique targets=%d\n",
 		len(rep.CallSites), rep.ExactCount, rep.NearestCount, rep.UnresolvedCount, len(rep.Targets))
 	for _, n := range rep.Notes {
-		fmt.Fprintf(os.Stderr, "note: %s\n", n)
+		cli.Errf("note: %s\n", n)
 	}
 
 	if *outDir == "" {
@@ -52,7 +53,7 @@ func cmdSymbolMap(args []string) error {
 	if err := symbolmap.WriteArtifacts(*outDir, rep); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "wrote symbolmap artifacts under %s\n", *outDir)
+	cli.Errf("wrote symbolmap artifacts under %s\n", *outDir)
 	return nil
 }
 
@@ -75,12 +76,12 @@ func cmdFuncDiff(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "old: %d functions (%s, %s)\nnew: %d functions (%s, %s)\ncommon=%d added=%d removed=%d changed=%d indeterminate=%d\n",
+	cli.Errf("old: %d functions (%s, %s)\nnew: %d functions (%s, %s)\ncommon=%d added=%d removed=%d changed=%d indeterminate=%d\n",
 		rep.OldCount, rep.OldVersion, rep.OldMachine,
 		rep.NewCount, rep.NewVersion, rep.NewMachine,
 		rep.CommonCount, rep.AddedTotal, rep.RemovedTotal, rep.ChangedTotal, rep.IndeterminateTotal)
 	if !rep.CodeComparable {
-		fmt.Fprintf(os.Stderr, "code comparison disabled: %s\n", rep.IncomparableReason)
+		cli.Errf("code comparison disabled: %s\n", rep.IncomparableReason)
 	}
 
 	data, err := json.MarshalIndent(rep, "", "  ")
@@ -94,6 +95,6 @@ func cmdFuncDiff(args []string) error {
 	if err := os.WriteFile(*out, data, 0o644); err != nil {
 		return fmt.Errorf("funcdiff: write %s: %w", *out, err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
+	cli.Errf("wrote %s\n", *out)
 	return nil
 }

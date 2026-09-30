@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/elfx"
 )
 
@@ -105,14 +106,14 @@ func cmdIDA(args []string) error {
 	if err != nil {
 		return fmt.Errorf("ida script: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "script: %s\n", scriptPath)
+	cli.Errf("script: %s\n", scriptPath)
 
 	// Step 3: Find python3 with idapro.
 	python, err := analysis.FindPython(*pythonBin)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "python: %s\n", python)
+	cli.Errf("python: %s\n", python)
 
 	// Step 5: Run idalib.
 	decompDir := filepath.Join(pipeResult.OutDir, "decompiled")
@@ -120,11 +121,11 @@ func cmdIDA(args []string) error {
 	absDecompDir, _ := filepath.Abs(decompDir)
 
 	if *all {
-		fmt.Fprintf(os.Stderr, "running IDA idalib analysis (decompiling ALL functions)...\n")
+		cli.Errf("running IDA idalib analysis (decompiling ALL functions)...\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "running IDA idalib analysis (signal functions only, use --all for everything)...\n")
+		cli.Errf("running IDA idalib analysis (signal functions only, use --all for everything)...\n")
 	}
-	fmt.Fprintf(os.Stderr, "  decompile output: %s\n", absDecompDir)
+	cli.Errf("  decompile output: %s\n", absDecompDir)
 
 	cmd := exec.Command(python, scriptPath, absLibPath, absMetaPath, absDecompDir)
 	cmd.Stdout = os.Stderr
@@ -135,7 +136,7 @@ func cmdIDA(args []string) error {
 	}
 
 	cCount := analysis.CountDecompiledFiles(absDecompDir)
-	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
+	cli.Errf("decompiled %d functions → %s\n", cCount, absDecompDir)
 
 	return nil
 }

@@ -145,35 +145,6 @@ func BuildLoadingUnits(result *cluster.Result) []LoadingUnitRecord {
 	return records
 }
 
-// KPIRecord is one KernelProgramInfo entry in kpi.jsonl.
-type KPIRecord struct {
-	RefID              int `json:"ref_id"`
-	KernelComponentRef int `json:"kernel_component_ref,omitempty"`
-	StringOffsetsRef   int `json:"string_offsets_ref,omitempty"`
-	StringDataRef      int `json:"string_data_ref,omitempty"`
-	CanonicalNamesRef  int `json:"canonical_names_ref,omitempty"`
-	ConstantsRef       int `json:"constants_ref,omitempty"`
-	ConstantsTableRef  int `json:"constants_table_ref,omitempty"`
-}
-
-// BuildKPI converts cluster.KernelProgramInfoRef → output records.
-func BuildKPI(result *cluster.Result) []KPIRecord {
-	var records []KPIRecord
-	for _, kpi := range result.KernelProgramInfo {
-		rec := KPIRecord{
-			RefID:              kpi.RefID,
-			KernelComponentRef: kpi.KernelComponentRef,
-			StringOffsetsRef:   kpi.StringOffsetsRef,
-			StringDataRef:      kpi.StringDataRef,
-			CanonicalNamesRef:  kpi.CanonicalNamesRef,
-			ConstantsRef:       kpi.ConstantsRef,
-			ConstantsTableRef:  kpi.ConstantsTableRef,
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
 // InstanceFieldRecord is one captured pointer field of an instance.
 type InstanceFieldRecord struct {
 	Offset int    `json:"offset"`

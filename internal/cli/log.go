@@ -40,6 +40,16 @@ func NewLogger(w io.Writer, quiet bool) *Logger {
 	}
 }
 
+// Errf writes one formatted diagnostic to the process's current os.Stderr with
+// exactly the sanitizing and per-destination color handling of Logger.Printf.
+// It is the single route for command-level stderr output: paths, symbol names,
+// library URLs and error text come from the analysed binary or the command
+// line and must never reach fmt.Fprintf(os.Stderr, ...) unsanitized. os.Stderr
+// is read on every call, so a caller (or test) that swaps it is honored.
+func Errf(format string, args ...any) {
+	NewLogger(os.Stderr, false).Printf(format, args...)
+}
+
 // Printf logs formatted output unless quiet is enabled.
 func (l *Logger) Printf(format string, args ...any) {
 	if !l.quiet {

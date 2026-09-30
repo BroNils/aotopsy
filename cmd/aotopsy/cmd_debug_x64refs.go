@@ -3,9 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/frida"
@@ -52,8 +52,8 @@ func cmdX64Refs(args []string) error {
 	pl := sc.Pool
 	poolDisplay := sc.PoolDisplay
 
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
-	fmt.Fprintf(os.Stderr, "ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
+	cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
+	cli.Errf("ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
 
 	if *disasmFuncVA != "" {
 		var targetVA uint64
@@ -90,7 +90,7 @@ func cmdX64Refs(args []string) error {
 				if !ok {
 					return fmt.Errorf("CodeRange with Index==%d starts before the instructions image", targetIdx)
 				}
-				fmt.Fprintf(os.Stderr, "resolved code index %d -> %s @ 0x%x\n", *disasmByCodeIndex, funcName, funcVA)
+				cli.Errf("resolved code index %d -> %s @ 0x%x\n", *disasmByCodeIndex, funcName, funcVA)
 				return analysis.DumpFuncDisasm(funcVA, ranges, code, codeOff, codeVA, pl, poolDisplay)
 			}
 		}
@@ -110,7 +110,7 @@ func cmdX64Refs(args []string) error {
 			}
 		}
 		if !found {
-			fmt.Fprintf(os.Stderr, "cid=%d not found in class cluster (%d classes total) -- may be a predefined/VM cid, not an app class\n", *cidName, len(result.Classes))
+			cli.Errf("cid=%d not found in class cluster (%d classes total) -- may be a predefined/VM cid, not an app class\n", *cidName, len(result.Classes))
 		}
 		return nil
 	}
@@ -143,7 +143,7 @@ func cmdX64Refs(args []string) error {
 		for _, c := range calls {
 			fmt.Printf("%s @ 0x%x  [%s]  %s  ; %s\n", c.FuncName, c.Addr, c.Kind, c.Text, c.Detail)
 		}
-		fmt.Fprintf(os.Stderr, "total indirect call sites: %d\n", len(calls))
+		cli.Errf("total indirect call sites: %d\n", len(calls))
 		return nil
 	}
 

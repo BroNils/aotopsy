@@ -1,9 +1,8 @@
 package main
 
 import (
+	"aotopsy/internal/cli"
 	"aotopsy/internal/frida"
-	"fmt"
-	"os"
 )
 
 // Command describes one CLI subcommand. The registry replaces the
@@ -92,7 +91,7 @@ func findCommand(registry []Command, name string) *Command {
 // printPrimaryUsage prints the top-level help text, generated from the
 // command registry.
 func printPrimaryUsage() {
-	fmt.Fprintf(os.Stderr, `aotopsy — Dart AOT snapshot analyzer
+	cli.Errf(`aotopsy — Dart AOT snapshot analyzer
 
 Usage:
   aotopsy <libapp.so>                         Full analysis pipeline
@@ -101,14 +100,14 @@ Usage:
 		if c.Debug || c.Name == "_debug" || c.Special != nil {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "  aotopsy %-36s %s\n", c.Name+" <args>", c.Short)
+		cli.Errf("  aotopsy %-36s %s\n", c.Name+" <args>", c.Short)
 	}
 	// signal has Special dispatch, so it's not in the loop above.
 	if sc := findCommand(primaryCommands, "signal"); sc != nil {
-		fmt.Fprintf(os.Stderr, "  aotopsy %-36s %s\n", "signal <libapp.so>", sc.Short)
+		cli.Errf("  aotopsy %-36s %s\n", "signal <libapp.so>", sc.Short)
 	}
-	fmt.Fprintf(os.Stderr, "  aotopsy _debug <cmd>                        Internal commands\n")
-	fmt.Fprintf(os.Stderr, `
+	cli.Errf("  aotopsy _debug <cmd>                        Internal commands\n")
+	cli.Errf(`
 Flags:
   --out <dir>         Output directory (default: <basename>.aotopsy/). It is
                       replaced as a whole, so an existing one must be empty or
@@ -126,7 +125,7 @@ Flags:
 // printDebugUsage prints the _debug help text, generated from the
 // debug command registry.
 func printDebugUsage() {
-	fmt.Fprintf(os.Stderr, `aotopsy _debug — internal commands
+	cli.Errf(`aotopsy _debug — internal commands
 
 Usage:
   aotopsy _debug <command> [args]
@@ -134,6 +133,6 @@ Usage:
 Commands:
 `)
 	for _, c := range debugCommands {
-		fmt.Fprintf(os.Stderr, "  %-20s %s\n", c.Name, c.Short)
+		cli.Errf("  %-20s %s\n", c.Name, c.Short)
 	}
 }

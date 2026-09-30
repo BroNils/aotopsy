@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/output"
 )
 
@@ -46,7 +47,7 @@ func cmdFindLibapp(args []string) error {
 		if err := output.WriteFileAtomic(outPath, data, 0o644); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", outPath)
+		cli.Errf("wrote %s\n", outPath)
 	} else {
 		fmt.Println(string(data))
 	}
@@ -200,9 +201,9 @@ func cmdFindLibappBatch(args []string) error {
 	}
 	committed = true
 	finalReportPath := filepath.Join(*outDir, "no_libapp_report.md")
-	fmt.Fprintf(os.Stderr, "find-libapp-batch: %d total archives, %d without standard libapp.so\n", len(results), noLibapp)
-	fmt.Fprintf(os.Stderr, "  FOUND (renamed): %d, NOT_FLUTTER: %d, NO_SUPPORTED_ABI: %d, ERROR: %d\n", found, notFlutter, noSupportedABI, failed)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", finalReportPath)
+	cli.Errf("find-libapp-batch: %d total archives, %d without standard libapp.so\n", len(results), noLibapp)
+	cli.Errf("  FOUND (renamed): %d, NOT_FLUTTER: %d, NO_SUPPORTED_ABI: %d, ERROR: %d\n", found, notFlutter, noSupportedABI, failed)
+	cli.Errf("wrote %s\n", finalReportPath)
 
 	if len(batchErrs) > 0 {
 		return fmt.Errorf("find-libapp-batch: %d archive(s) failed: %w", len(batchErrs), errors.Join(batchErrs...))

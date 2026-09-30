@@ -2,9 +2,9 @@ package analysis
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/jsonutil"
@@ -66,7 +66,7 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 	defer func() { _ = ef.Close() }()
 
 	if info.Version != nil && info.Version.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 	}
 	if info.Version != nil && !info.Version.Supported {
 		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
@@ -370,9 +370,9 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 	}
 	committed = true
 
-	fmt.Fprintf(os.Stderr, "Wrote %d objects to %s\n", objectCount, filepath.Join(outDir, "objects.jsonl"))
-	fmt.Fprintf(os.Stderr, "Wrote %d edges to %s\n", edgeCount, filepath.Join(outDir, "edges.jsonl"))
-	fmt.Fprintf(os.Stderr, "Wrote %d code mappings to %s\n", codeMapCount, filepath.Join(outDir, "code_map.jsonl"))
+	cli.Errf("Wrote %d objects to %s\n", objectCount, filepath.Join(outDir, "objects.jsonl"))
+	cli.Errf("Wrote %d edges to %s\n", edgeCount, filepath.Join(outDir, "edges.jsonl"))
+	cli.Errf("Wrote %d code mappings to %s\n", codeMapCount, filepath.Join(outDir, "code_map.jsonl"))
 
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
@@ -74,20 +75,20 @@ func cmdClusters(args []string) error {
 
 	for _, t := range targets {
 		if len(t.data) < 64 {
-			fmt.Fprintf(os.Stderr, "%s: data too short (%d bytes)\n", t.name, len(t.data))
+			cli.Errf("%s: data too short (%d bytes)\n", t.name, len(t.data))
 			continue
 		}
 
 		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", t.name, err)
+			cli.Errf("%s: %v\n", t.name, err)
 			continue
 		}
 
 		isVM := t.name == "VM"
 		result, err := cluster.ScanClusters(t.data, clusterStart, info.Version, isVM, opts)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: scan error: %v\n", t.name, err)
+			cli.Errf("%s: scan error: %v\n", t.name, err)
 			continue
 		}
 
@@ -135,7 +136,7 @@ func cmdClusters(args []string) error {
 			fmt.Printf("\n  Fill Positions (%s, fill_start=0x%x):\n", t.name, result.FillStart)
 			err := cluster.DebugFillPositions(t.data, result, info.Version, isVM, os.Stdout)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  fill debug error: %v\n", err)
+				cli.Errf("  fill debug error: %v\n", err)
 			}
 		}
 	}
@@ -181,7 +182,7 @@ func cmdRefInfo(args []string) error {
 	pl := sc.Pool
 	ct := info.Version.CIDs
 
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+	cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 
 	for _, r := range refs {
 		analysis.PrintRefChain(r, pl, ct, *walk, make(map[int]bool))

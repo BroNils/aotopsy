@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/output"
 )
 
@@ -142,7 +143,7 @@ func cmdInventory(args []string) error {
 		verCount[ver]++
 	}
 
-	fmt.Fprintf(os.Stderr, "inventory: %d zips, %d with libapp, %d no libapp, %d errors, %d unique hashes\n",
+	cli.Errf("inventory: %d zips, %d with libapp, %d no libapp, %d errors, %d unique hashes\n",
 		len(rows), found, notFound, errCount, len(hashCount))
 	type vc struct {
 		ver   string
@@ -154,7 +155,7 @@ func cmdInventory(args []string) error {
 	}
 	sort.Slice(vcs, func(i, j int) bool { return vcs[i].ver < vcs[j].ver })
 	for _, v := range vcs {
-		fmt.Fprintf(os.Stderr, "  %-10s %d\n", v.ver, v.count)
+		cli.Errf("  %-10s %d\n", v.ver, v.count)
 	}
 	if errCount > 0 {
 		return fmt.Errorf("inventory completed with %d archive error(s)", errCount)
