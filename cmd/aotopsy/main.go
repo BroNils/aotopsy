@@ -25,7 +25,8 @@ func main() {
 
 	// Version flags.
 	if cmd == "version" || cmd == "--version" || cmd == "-V" {
-		fmt.Printf("aotopsy %s (commit %s, built %s)\n", cli.Version, cli.Commit, cli.Date)
+		fmt.Printf("aotopsy %s (commit %s, built %s)\n",
+			cli.SafeLine(cli.Version), cli.SafeLine(cli.Commit), cli.SafeLine(cli.Date))
 		os.Exit(0)
 	}
 

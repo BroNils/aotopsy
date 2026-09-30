@@ -110,7 +110,7 @@ func TestInstanceAllocRejectsImpossibleLayout(t *testing.T) {
 	data = append(data, encTagged64(5)...)
 	data = append(data, encTagged64(4)...)
 	cm := &ClusterMeta{CID: 123}
-	if _, err := skipInstanceAllocV(dartfmt.NewStream(data), cm, 100); err == nil {
+	if _, err := skipInstanceAllocV(dartfmt.NewStream(data), cm, 100, false); err == nil {
 		t.Fatal("instance alloc accepted next_field_offset greater than instance_size")
 	}
 }

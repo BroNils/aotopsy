@@ -180,10 +180,10 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 	return named, classes, nil
 }
 
-// readFillField parses v2.17.6 Field fill with conditional ReadUnsigned for static fields.
-// v2.17.6 AOT: ReadFromTo(4 refs) + Read<uint16_t>(kind_bits) + ReadRef(value_or_offset) +
+// readFillField parses the <=2.17 Field fill with conditional ReadUnsigned for static fields.
+// Full AOT: ReadFromTo(4 refs) + Read<uint16_t>(kind_bits) + ReadRef(value_or_offset) +
 // [if static: ReadUnsigned(field_id)].
-// kStaticBit = 1 in v2.17.6 kind_bits.
+// kStaticBit = 1 in this era's kind_bits.
 func readFillField(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUnsigned bool) ([]NamedObject, []FieldInfo, error) {
 	count := int(cm.Count)
 	if count <= 0 {
@@ -220,7 +220,7 @@ func readFillField(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		}
 
 		// Read<uint16_t>(kind_bits) — Read16(marker 192).
-		kindBits, err := s.ReadTagged32()
+		kindBits, err := s.ReadTagged16()
 		if err != nil {
 			return named, fields, fmt.Errorf("field %d/%d kind_bits: %w", i, count, err)
 		}

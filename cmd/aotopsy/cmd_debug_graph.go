@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/output"
@@ -63,13 +64,14 @@ func cmdRender(args []string) error {
 	if *asmDir == "" {
 		*asmDir = filepath.Join(*inDir, "asm")
 	}
+	logger := cli.NewLogger(os.Stderr, false)
 
 	// Read functions.jsonl.
 	funcs, err := jsonutil.ReadJSONL[disasm.FuncRecord](filepath.Join(*inDir, "functions.jsonl"), jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read functions.jsonl: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "read %d functions\n", len(funcs))
+	logger.Printf("read %d functions\n", len(funcs))
 	index, err := jsonutil.ReadJSONL[strutil.DisasmIndexEntry](filepath.Join(*inDir, "index.jsonl"), jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read index.jsonl: %w", err)
@@ -84,7 +86,7 @@ func cmdRender(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read call_edges.jsonl: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "read %d call edges\n", len(edges))
+	logger.Printf("read %d call edges\n", len(edges))
 
 	// Read unresolved_thr.jsonl (optional).
 	unresTHRPath := filepath.Join(*inDir, "unresolved_thr.jsonl")
@@ -94,7 +96,7 @@ func cmdRender(args []string) error {
 		if err != nil {
 			return fmt.Errorf("read unresolved_thr.jsonl: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "read %d unresolved THR records\n", len(unresTHR))
+		logger.Printf("read %d unresolved THR records\n", len(unresTHR))
 	}
 
 	finalRenderDir := filepath.Join(*inDir, "render")
@@ -116,7 +118,7 @@ func cmdRender(args []string) error {
 	// Compute reachability.
 	entryPoints := render.FindEntryPoints(funcs, edges)
 	reachable := render.ReachableSet(entryPoints, edges)
-	fmt.Fprintf(os.Stderr, "entry points: %d, reachable functions: %d / %d\n",
+	logger.Printf("entry points: %d, reachable functions: %d / %d\n",
 		len(entryPoints), len(reachable), len(funcs))
 
 	// Generate reachability DOT.
@@ -126,7 +128,7 @@ func cmdRender(args []string) error {
 	if err := os.WriteFile(reachDotPath, []byte(reachDOT), 0o644); err != nil {
 		return fmt.Errorf("write reachable.dot: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", reachDotPath, len(reachDOT))
+	logger.Printf("wrote %s (%d bytes)\n", reachDotPath, len(reachDOT))
 
 	// Generate callgraph DOT.
 	dot := render.CallgraphDOT(funcs, edges, *title, render.NASA, *maxNodes)
@@ -134,7 +136,7 @@ func cmdRender(args []string) error {
 	if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
 		return fmt.Errorf("write callgraph.dot: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", dotPath, len(dot))
+	logger.Printf("wrote %s (%d bytes)\n", dotPath, len(dot))
 
 	// Generate classgraph DOT.
 	classDOT := render.ClassgraphDOT(funcs, edges, *title+" (class level)", render.NASA, *maxNodes)
@@ -142,7 +144,7 @@ func cmdRender(args []string) error {
 	if err := os.WriteFile(classDotPath, []byte(classDOT), 0o644); err != nil {
 		return fmt.Errorf("write classgraph.dot: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", classDotPath, len(classDOT))
+	logger.Printf("wrote %s (%d bytes)\n", classDotPath, len(classDOT))
 
 	// Generate SVGs via graphviz dot.
 	hasCallgraphSVG := false
@@ -150,30 +152,36 @@ func cmdRender(args []string) error {
 	hasReachableSVG := false
 	if !*noDot {
 		svgPath := filepath.Join(renderDir, "callgraph.svg")
-		if err := runDot(dotPath, svgPath, "svg"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: callgraph SVG failed: %v (use --no-dot to skip)\n", err)
+		stderr, err := runDot(dotPath, svgPath, "svg")
+		if err != nil {
+			warnDotFailure(logger, "callgraph SVG", err, stderr, " (use --no-dot to skip)")
 		} else {
+			warnDotOutput(logger, "callgraph SVG", stderr)
 			hasCallgraphSVG = true
 			fi, _ := os.Stat(svgPath)
-			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", svgPath, fi.Size())
+			logger.Printf("wrote %s (%d bytes)\n", svgPath, fi.Size())
 		}
 
 		classSvgPath := filepath.Join(renderDir, "classgraph.svg")
-		if err := runDot(classDotPath, classSvgPath, "svg"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: classgraph SVG failed: %v\n", err)
+		stderr, err = runDot(classDotPath, classSvgPath, "svg")
+		if err != nil {
+			warnDotFailure(logger, "classgraph SVG", err, stderr, "")
 		} else {
+			warnDotOutput(logger, "classgraph SVG", stderr)
 			hasClassgraphSVG = true
 			fi, _ := os.Stat(classSvgPath)
-			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", classSvgPath, fi.Size())
+			logger.Printf("wrote %s (%d bytes)\n", classSvgPath, fi.Size())
 		}
 
 		reachSvgPath := filepath.Join(renderDir, "reachable.svg")
-		if err := runDot(reachDotPath, reachSvgPath, "svg"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: reachable SVG failed: %v\n", err)
+		stderr, err = runDot(reachDotPath, reachSvgPath, "svg")
+		if err != nil {
+			warnDotFailure(logger, "reachable SVG", err, stderr, "")
 		} else {
+			warnDotOutput(logger, "reachable SVG", stderr)
 			hasReachableSVG = true
 			fi, _ := os.Stat(reachSvgPath)
-			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", reachSvgPath, fi.Size())
+			logger.Printf("wrote %s (%d bytes)\n", reachSvgPath, fi.Size())
 		}
 	}
 
@@ -189,17 +197,17 @@ func cmdRender(args []string) error {
 			return fmt.Errorf("--cfg requires provenance.json with arch arm64 or x64")
 		}
 		if _, err := os.Stat(*asmDir); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: --cfg requires asm directory at %s\n", *asmDir)
+			logger.Warn("--cfg requires asm directory at %s", *asmDir)
 		} else {
 			cfgDir := filepath.Join(renderDir, "cfg")
 			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir cfg: %w", err)
 			}
-			cfgFuncs, cfgLinks, err = generateCFGs(funcs, edges, reachable, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
+			cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reachable, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
 			if err != nil {
 				return fmt.Errorf("generate CFGs: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "generated %d CFGs in %s\n", cfgFuncs, cfgDir)
+			logger.Printf("generated %d CFGs in %s\n", cfgFuncs, cfgDir)
 		}
 	}
 
@@ -213,7 +221,7 @@ func cmdRender(args []string) error {
 		return fmt.Errorf("write index.html: %w", err)
 	}
 	fi, _ := os.Stat(htmlPath)
-	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", htmlPath, fi.Size())
+	logger.Printf("wrote %s (%d bytes)\n", htmlPath, fi.Size())
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("publish render generation: %w", err)
 	}
@@ -222,7 +230,7 @@ func cmdRender(args []string) error {
 	return nil
 }
 
-func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, artifactFiles map[string]string, asmDir, cfgDir, arch string, genSVG bool) (int, map[string]string, error) {
+func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, artifactFiles map[string]string, asmDir, cfgDir, arch string, genSVG bool) (int, map[string]string, error) {
 	// Call edges bucketed by caller, so each CFG can be drawn with the
 	// callees of that function rather than of the whole binary.
 	edgesByFunc := make(map[string][]disasm.CallEdgeRecord, len(funcs))
@@ -289,9 +297,11 @@ func generateCFGs(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reac
 
 		if genSVG {
 			svgPath := strings.TrimSuffix(dotPath, filepath.Ext(dotPath)) + ".svg"
-			if err := runDot(dotPath, svgPath, "svg"); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: CFG SVG failed for %s: %v\n", f.Name, err)
+			stderr, err := runDot(dotPath, svgPath, "svg")
+			if err != nil {
+				warnDotFailure(logger, "CFG SVG for "+f.Name, err, stderr, "")
 			} else {
+				warnDotOutput(logger, "CFG SVG for "+f.Name, stderr)
 				svgRel := strings.TrimSuffix(dotRel, filepath.Ext(dotRel)) + ".svg"
 				cfgLinks[f.Name] = filepath.ToSlash(filepath.Join("cfg", svgRel))
 			}
@@ -322,8 +332,24 @@ func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
 	return insts
 }
 
-func runDot(dotPath, outPath, format string) error {
+func runDot(dotPath, outPath, format string) (string, error) {
 	cmd := exec.Command("dot", "-T"+format, "-o", outPath, dotPath)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	stderr := cli.NewDiagnosticBuffer(cli.DefaultDiagnosticCaptureLimit)
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	return stderr.String(), err
+}
+
+func warnDotFailure(logger *cli.Logger, label string, err error, stderr, suffix string) {
+	if stderr == "" {
+		logger.Warn("%s failed: %v%s", label, err, suffix)
+		return
+	}
+	logger.Warn("%s failed: %v: %s%s", label, err, stderr, suffix)
+}
+
+func warnDotOutput(logger *cli.Logger, label, stderr string) {
+	if stderr != "" {
+		logger.Warn("%s: %s", label, stderr)
+	}
 }

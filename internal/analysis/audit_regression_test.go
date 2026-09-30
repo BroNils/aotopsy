@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -584,8 +585,12 @@ func TestOptionalMetaDropsStaleX64ArtifactFromClonedGeneration(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "published")
-	if _, err := Run(Opts{FromDir: src, OutDir: dst, Meta: MetaIfSupported, Quiet: true}); err != nil {
+	var log bytes.Buffer
+	if _, err := Run(Opts{FromDir: src, OutDir: dst, Meta: MetaIfSupported, Quiet: true, Log: &log}); err != nil {
 		t.Fatalf("optional x64 meta rerun failed: %v", err)
+	}
+	if got := log.String(); !strings.Contains(got, "warning: flutter_meta.json generation skipped") {
+		t.Fatalf("quiet mode hid optional-meta degradation warning: %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "flutter_meta.json")); !os.IsNotExist(err) {
 		t.Fatalf("stale x64 flutter_meta survived optional rerun: %v", err)
@@ -737,9 +742,13 @@ func TestRunSignalStageLegacyArtifactsDoNotGuessArchitecture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := RunSignalStage(src, dst, 1, false, true, io.Discard, false)
+	var log bytes.Buffer
+	res, err := RunSignalStage(src, dst, 1, false, true, &log, false)
 	if err != nil {
 		t.Fatalf("legacy signal reuse failed without provenance: %v", err)
+	}
+	if got := log.String(); !strings.Contains(got, "warning: legacy analysis has no provenance architecture") {
+		t.Fatalf("quiet mode hid missing-provenance warning: %q", got)
 	}
 	if res.SignalCount != 1 {
 		t.Fatalf("signal count = %d, want 1", res.SignalCount)
@@ -1089,6 +1098,35 @@ func TestRunMetaStageSanitizesUntrustedLogArguments(t *testing.T) {
 	}
 	if !strings.Contains(got, "3.9.2HIDDEN FORGED") {
 		t.Fatalf("sanitization lost printable metadata: %q", got)
+	}
+}
+
+func TestPipelineDiagnosticsRemainVisibleBoundedAndSanitizedInQuietMode(t *testing.T) {
+	var log bytes.Buffer
+	opts := Opts{Quiet: true, Log: &log}
+	result := &Result{}
+	diags := make([]dartfmt.Diag, maxReportedPipelineDiagnostics+3)
+	for i := range diags {
+		diags[i] = dartfmt.Diag{
+			Offset: uint64(i),
+			Kind:   dartfmt.DiagTruncated,
+			Msg:    fmt.Sprintf("broken-%d\nFORGED\x1b[2J\u202etext", i),
+		}
+	}
+
+	opts.reportDiagnostics(result, "snapshot", diags)
+	got := log.String()
+	if strings.Contains(got, "\nFORGED") || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, '\u202e') {
+		t.Fatalf("pipeline diagnostic injected terminal controls in quiet mode: %q", got)
+	}
+	if !strings.Contains(got, "warning: snapshot diagnostic:") {
+		t.Fatalf("quiet mode hid pipeline diagnostic: %q", got)
+	}
+	if !strings.Contains(got, "3 additional issue(s) suppressed") {
+		t.Fatalf("diagnostic cap was not reported: %q", got)
+	}
+	if want := maxReportedPipelineDiagnostics + 1; len(result.Diags) != want {
+		t.Fatalf("Result.Diags length = %d, want %d bounded entries", len(result.Diags), want)
 	}
 }
 

@@ -321,8 +321,9 @@ func CmdFridaImport(args []string) error {
 	}
 	committed = true
 
-	fmt.Fprintf(os.Stderr, "Frida import complete: %s\n", *outDir)
-	fmt.Fprintf(os.Stderr, "  indirect edges enriched: %d\n", resolvedEdges)
+	logger := cli.NewLogger(os.Stderr, false)
+	logger.Printf("Frida import complete: %s\n", *outDir)
+	logger.Printf("  indirect edges enriched: %d\n", resolvedEdges)
 	return nil
 }
 

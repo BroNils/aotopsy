@@ -71,7 +71,8 @@ The central source of truth for ground-truth Dart VM architecture facts, registe
 
 **Every table has an SDK drift gate, and each one exists because its absence
 cost something.** They re-derive the table from `dart-lang/sdk` at the pinned tag
-via `gh api` and diff it against what is committed:
+(local `~/dev/dartsdk-research/<version>/` first, then the disk cache, and `gh api`
+only as a fallback — see `internal/sdktest`) and diff it against what is committed:
 `TestThreadStubOffsetsMatchSDK`, `TestStubNamesMatchSDK`,
 `TestRuntimeEntriesMatchSDK`, `TestThreadFieldNamesMatchSDK`.
 

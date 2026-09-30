@@ -9,6 +9,14 @@ import (
 
 func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapshot.CIDTable, isVM bool, profile *snapshot.VersionProfile, diags *dartfmt.Diags, maxSteps int) (int64, error) {
 	cid := cm.CID
+	if ct != nil && ct.NativePointerCid != 0 && cid == ct.NativePointerCid &&
+		!snapshot.VersionAtLeast(profile.DartVersion, "2.19.0") {
+		return 0, fmt.Errorf("CID %d has no DeltaEncodedTypedData Full-AOT cluster before Dart 2.19.0", cid)
+	}
+	if ct != nil && (cid == ct.Float32x4 || cid == ct.Int32x4 || cid == ct.Float64x2) &&
+		!snapshot.VersionAtLeast(profile.DartVersion, "3.4.3") {
+		return 0, fmt.Errorf("SIMD CID %d has no Full-AOT serialization cluster before Dart 3.4.3", cid)
+	}
 	kind := ClassifyAlloc(cid, ct)
 	// v2.12 and earlier (NoCanonicalSetData): canonical sets are rebuilt in memory
 	// during PostLoad, never written to the stream. CanonicalSetDeserializationCluster
@@ -25,7 +33,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 	// profile. Same stream shape as skipRODataAlloc: count + one ReadUnsigned
 	// per object, no canonical-set data.
 	if profile.ClosureAllocHasLength && ct != nil && ct.Closure != 0 && cid == ct.Closure {
-		return skipRODataAlloc(s, cm, false, false, maxSteps)
+		return skipCountedLengthAlloc(s, cm, maxSteps, "closure", true)
 	}
 
 	switch kind {
@@ -67,9 +75,9 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// This path should not be reached.
 		return 0, fmt.Errorf("AllocMint should be handled before skipAllocV")
 	case AllocArray:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "array")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "array", true)
 	case AllocWeakArray:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "weak_array")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "weak_array", true)
 	case AllocTypeArguments:
 		// TypeArguments uses kAllCanonicalObjectsAreIncludedIntoSet=true.
 		// In 2.13 (SplitCanonical), first_element is NOT in stream.
@@ -83,7 +91,7 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		stateBitsInAlloc := profile.Tags != snapshot.TagStyleCidInt32
 		return skipCodeAlloc(s, cm, stateBitsInAlloc, maxSteps)
 	case AllocObjectPool:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "object_pool")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "object_pool", true)
 	case AllocROData:
 		// ROData for PcDescriptors/CodeSourceMap/CompressedStackMaps is never
 		// canonical, so the readFirstElement value doesn't matter.
@@ -96,21 +104,29 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// much of the stream is consumed.
 		return skipRODataAlloc(s, cm, canonicalSetInStream, !profile.SplitCanonical, maxSteps)
 	case AllocExceptionHandlers:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "exception_handlers")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "exception_handlers", true)
 	case AllocContext:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "context")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "context", true)
 	case AllocContextScope:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "context_scope")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "context_scope", true)
 	case AllocRecord:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "record")
+		return skipCountedLengthAlloc(s, cm, maxSteps, "record", true)
 	case AllocTypedData:
-		return skipCountedLengthAlloc(s, cm, maxSteps, "typed_data")
+		// TypedData length is a byte/element extent consumed with one bounded
+		// Skip/ReadBytes in fill, not a parser loop count. Do not apply MaxSteps
+		// to it; the fill handler performs checked byte arithmetic and truncation
+		// validation instead.
+		return skipCountedLengthAlloc(s, cm, maxSteps, "typed_data", false)
+	case AllocLocalVarDescriptors:
+		return skipCountedLengthAlloc(s, cm, maxSteps, "local_var_descriptors", true)
 	case AllocInstance:
-		return skipInstanceAllocV(s, cm, maxSteps)
+		return skipInstanceAllocV(s, cm, maxSteps, profile.CompressedPointers)
 	case AllocEmpty:
-		// WeakSerializationReference in v2.13+: WriteAlloc writes only the CID tag,
-		// ReadAlloc reads nothing. In v2.10 (PreCanonicalSplit), WSR has a count.
-		if profile.PreCanonicalSplit {
+		// WeakSerializationReference changes at 2.13. In 2.10/2.12 WriteAlloc
+		// carries a count and allocates canonical WSR objects; 2.13+ forwards the
+		// weak refs to their target/replacement and the cluster itself has no alloc
+		// payload at all.
+		if !snapshot.VersionAtLeast(profile.DartVersion, "2.13.0") {
 			return skipFixedAllocSimple(s, maxSteps)
 		}
 		return 0, nil
@@ -300,6 +316,9 @@ func skipTypeArgumentsAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool
 		if err != nil {
 			return count, fmt.Errorf("type_arguments %d/%d alloc: %w", i, count, err)
 		}
+		if length < 0 || length > int64(maxSteps) {
+			return count, fmt.Errorf("type_arguments %d/%d length %d exceeds max_steps %d", i, count, length, maxSteps)
+		}
 		cm.Lengths[i] = length
 	}
 	if isCanonical {
@@ -313,11 +332,6 @@ func skipTypeArgumentsAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool
 // skipClassAlloc skips Class alloc:
 //
 //	predefined_count + per-class ReadCid(), then new_count.
-//
-// Some Dart SDK builds (observed in Dart 3.5.1 / Flutter forks) write an extra
-// WriteUnsigned(total_class_count) before the standard predefined_count field.
-// We detect this by checking whether the first value exceeds NumPredefinedCids;
-// if so, we consume it and read the next value as the actual predefined_count.
 //
 // Stores predefined count in cm.MainCount for fill-phase use.
 func skipClassAlloc(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fixedSize bool, maxSteps int) (int64, error) {
@@ -348,17 +362,14 @@ func skipClassAlloc(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, f
 	if err != nil {
 		return 0, err
 	}
-	// Heuristic: predefined_count must be ≤ NumPredefinedCids (174 for v3.4.3+).
-	// If the value is larger, it's an extra "total class count" prefix; skip it
-	// and read the real predefined_count.
-	if ct != nil && int(predefined) > ct.NumPredefinedCids {
-		predefined, err = s.ReadUnsigned()
-		if err != nil {
-			return 0, err
-		}
-	}
 	if predefined < 0 || int(predefined) > maxSteps {
 		return 0, fmt.Errorf("predefined class count %d out of range", predefined)
+	}
+	if ct == nil || ct.NumPredefinedCids <= 0 {
+		return 0, fmt.Errorf("predefined class count %d cannot be validated without a CID table", predefined)
+	}
+	if int(predefined) > ct.NumPredefinedCids {
+		return 0, fmt.Errorf("predefined class count %d exceeds SDK kNumPredefinedCids %d", predefined, ct.NumPredefinedCids)
 	}
 	cm.PredefCIDs = make([]int64, predefined)
 	for i := int64(0); i < predefined; i++ {
@@ -438,14 +449,16 @@ func skipCodeAlloc(s *dartfmt.Stream, cm *ClusterMeta, stateBitsInAlloc bool, ma
 // skipCountedLengthAlloc reads the alloc section shared by every cluster
 // whose format is "count, then one length per object": ObjectPool,
 // ExceptionHandlers, Context, ContextScope, WeakArray, Record and
-// TypedData. label names the cluster in error messages.
+// TypedData. label names the cluster in error messages. When boundLength is
+// true, each per-object length is also a parser loop count and therefore obeys
+// MaxSteps. Raw byte extents such as TypedData deliberately leave it false.
 //
 // These were seven separate functions, byte-identical apart from that
 // label -- ~112 lines encoding one rule seven times. The hazard is not
 // the line count: a correction to the count bound or the error wrapping
 // had to be made in seven places, and missing one would leave a cluster
 // silently parsing differently from its siblings.
-func skipCountedLengthAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int, label string) (int64, error) {
+func skipCountedLengthAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int, label string, boundLength bool) (int64, error) {
 	count, err := s.ReadUnsigned()
 	if err != nil {
 		return 0, err
@@ -458,6 +471,9 @@ func skipCountedLengthAlloc(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int, la
 		length, err := s.ReadUnsigned()
 		if err != nil {
 			return count, fmt.Errorf("%s %d/%d alloc: %w", label, i, count, err)
+		}
+		if boundLength && (length < 0 || length > int64(maxSteps)) {
+			return count, fmt.Errorf("%s %d/%d length %d exceeds max_steps %d", label, i, count, length, maxSteps)
 		}
 		cm.Lengths[i] = length
 	}
@@ -507,7 +523,7 @@ func skipRODataAlloc(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, readF
 //	count = ReadUnsigned()
 //	next_field_offset = Read<int32_t>()
 //	instance_size = Read<int32_t>()
-func skipInstanceAllocV(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64, error) {
+func skipInstanceAllocV(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int, compressedPointers bool) (int64, error) {
 	count, err := s.ReadUnsigned()
 	if err != nil {
 		return 0, err
@@ -529,6 +545,19 @@ func skipInstanceAllocV(s *dartfmt.Stream, cm *ClusterMeta, maxSteps int) (int64
 	if nfoWords <= 0 || instanceSizeWords <= 0 || nfoWords > instanceSizeWords {
 		return count, fmt.Errorf("instance(%d) invalid layout next_field_offset=%d instance_size=%d",
 			cm.CID, nfoWords, instanceSizeWords)
+	}
+	headerWords := int32(1)
+	if compressedPointers {
+		headerWords = 2
+	}
+	if nfoWords < headerWords {
+		return count, fmt.Errorf("instance(%d) next_field_offset %d is inside %d-word object header",
+			cm.CID, nfoWords, headerWords)
+	}
+	fieldSlots := int64(nfoWords - headerWords)
+	if fieldSlots > int64(maxSteps) {
+		return count, fmt.Errorf("instance(%d) field slot count %d exceeds max_steps %d",
+			cm.CID, fieldSlots, maxSteps)
 	}
 	cm.NextFieldOffsetInWords = nfoWords
 	cm.InstanceSizeInWords = instanceSizeWords

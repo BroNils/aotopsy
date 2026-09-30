@@ -125,8 +125,8 @@ type VersionProfile struct {
 	// at the wrong field, so 0 of 2228 resolved through MintValues, against
 	// 2254 of 2255 on 2.14.0. See docs/findings-repo/012.
 	TypeClassIdIsRef   bool
-	FuncTypeNumRefs    int  // FunctionType fill ref count override. 0 = default (6). v2.13=6 (different scalars).
-	FuncTypeOldScalars bool // FunctionType v2.13: 2 scalars (uint8+uint32) not 3.
+	FuncTypeNumRefs    int  // FunctionType fill ref count override. 0 = default (6); all supported FunctionType layouts currently consume 6 refs.
+	FuncTypeOldScalars bool // FunctionType v2.12-v2.13: 2 scalars (uint8+uint32) rather than the later 3-scalar layout.
 
 	// BuildMode records the build configuration detected from the features
 	// string. Defaults to BuildProduct, which is what every shipped release
@@ -172,13 +172,13 @@ type VersionProfile struct {
 	// raw_object.h isn't at the same repo path at that tag) -- left at 0
 	// (unverified) rather than guessed.
 	FuncTypeParamTypesIdx int
-	TypeParamNumRefs      int  // TypeParameter fill ref count override. 0 = default (3). v2.13=5, v2.14/v2.15=2.
-	TypeParamWideScalars  bool // TypeParameter v2.13: base/index use Read<uint16_t> not Read<uint8_t>.
+	TypeParamNumRefs      int  // TypeParameter fill ref count override. 0 = default (3). v2.10-v2.13=5; v2.14+ consume the default 3 refs.
+	TypeParamWideScalars  bool // TypeParameter v2.12-v2.13: base/index use Read<uint16_t> rather than the v2.14-v2.19 uint8 form.
 	TypeRefNumRefs        int  // TypeRef fill ref count override. 0 = default (2). All versions use 2 refs (type_test_stub + type).
 	CodeNumRefs           int  // Code fill ref count override. 0 = default (6). v2.10-v2.15=7 (includes compressed_stackmaps).
 	CodeTextOffsetDelta   bool // Code ReadInstructions reads extra ReadUnsigned (text_offset_delta). v2.10-v2.15.
-	CodeStateBitsAfterRef int  // Code state_bits_ position in fill: 0=not in fill (v2.14+), N=read after first N refs. v2.13=1 (1 ref → state_bits → 6 refs).
-	CodeStateBitsAtEnd    bool // Code state_bits_ Read<int32_t> after ALL refs (no discarded check). v2.10.
+	CodeStateBitsAfterRef int  // Code interleaved state_bits_ position: N=read after first N refs. v2.13=1 (1 ref → state_bits → 6 refs); 0 means use the non-interleaved path.
+	CodeStateBitsAtEnd    bool // Code state_bits_ Read<int32_t> after ALL refs (no discarded check). v2.10 and v2.12.
 
 	// ClassAllocFixedSize marks the Dart 3.13.0+ Class alloc, which is a plain
 	// ReadAllocFixedSize: ONE ReadUnsigned(count) and nothing else. Up to
@@ -200,7 +200,7 @@ type VersionProfile struct {
 	// CompressedStackMaps / LocalVarDescriptors.
 	// SDK-verified: ClosureDeserializationCluster::ReadAlloc @3.13.0 vs @3.12.2.
 	ClosureAllocHasLength bool
-	ClosureDataNumRefs    int  // ClosureData ref count override. 0 = default (2). v2.13=3 (includes default_type_arguments).
+	ClosureDataNumRefs    int  // ClosureData ref count override after 2.13. 2.10-2.13 are selected exactly by version in specClosureData.
 	TypeHasTokenPos       bool // Type/TypeParameter fill has ReadTokenPosition scalar. v2.10 only.
 	ScriptHasLineCol      bool // Script fill has line_offset + col_offset scalars before kernel_script_index. v2.10, v2.13.
 	ScriptHasFlags        bool // Script fill has flags (uint8) scalar between col_offset and kernel_script_index. v2.10 only.
@@ -295,6 +295,7 @@ type CIDTable struct {
 	Function            int
 	ClosureData         int
 	SignatureData       int // 0 if not present (v2.10 only, removed in v2.13)
+	RedirectionData     int // 0 if not present (v2.10 only)
 	Field               int
 	Script              int
 	Library             int
@@ -331,6 +332,7 @@ type CIDTable struct {
 	ExceptionHandlers          int
 	Context                    int
 	ContextScope               int
+	ParameterTypeCheck         int // 0 if not present (v2.10 only)
 	UnlinkedCall               int
 	ICData                     int
 	MegamorphicCache           int
@@ -378,13 +380,21 @@ type CIDTable struct {
 	TypedDataInt8ArrayCid int // first internal TypedData CID
 	ByteDataViewCid       int // end marker (exclusive)
 	TypedDataCidStride    int // 3 for v2.17.6, 4 for v3.x
+	// FfiMarkerFirstCid..FfiMarkerLastCid is the contiguous
+	// CLASS_LIST_FFI_TYPE_MARKER range. NewClusterForClass routes exactly these
+	// predefined FFI CIDs through InstanceSerializationCluster; the neighboring
+	// FfiNativeFunction/FfiNativeType/FfiStruct (and older Pointer/
+	// DynamicLibrary entries) do not take that path.
+	FfiMarkerFirstCid int
+	FfiMarkerLastCid  int
 
 	// DeltaEncodedTypedData pseudo-CID (kNativePointer = 1 in all versions).
 	NativePointerCid int
 
 	// NumPredefinedCids is the count of VM-internal class IDs. CIDs >= this
-	// value are app-defined Instance subclasses. CIDs < this that aren't
-	// explicitly handled should default to AllocSimple, NOT AllocInstance.
+	// value are app-defined Instance subclasses. CIDs below it are accepted only
+	// when their exact Full-AOT cluster shape is explicitly modeled; there is no
+	// generic count-only fallback for unknown predefined CIDs.
 	NumPredefinedCids int
 }
 
@@ -491,13 +501,13 @@ var knownHashes = map[string]string{
 // Tag format: raw int32 CID. Single cluster loop (no canonical split).
 var cidsV210 = CIDTable{
 	Class: 4, PatchClass: 5, Function: 6,
-	ClosureData: 7, SignatureData: 8, FfiTrampolineData: 10, Field: 11, Script: 12,
+	ClosureData: 7, SignatureData: 8, RedirectionData: 9, FfiTrampolineData: 10, Field: 11, Script: 12,
 	Library: 13, Namespace: 14, KernelProgramInfo: 15,
 	WeakSerializationReference: 77,
 	// No TypeParameters in v2.10
 	Code: 16, ObjectPool: 20, PcDescriptors: 21, CodeSourceMap: 22,
 	CompressedStackMaps: 23, ExceptionHandlers: 25, Context: 26,
-	ContextScope: 27, SingleTargetCache: 29, UnlinkedCall: 30,
+	ContextScope: 27, ParameterTypeCheck: 28, SingleTargetCache: 29, UnlinkedCall: 30,
 	MonomorphicSmiableCall: 31, CallSiteData: 32,
 	ICData: 33, MegamorphicCache: 34, SubtypeTestCache: 35,
 	LoadingUnit: 36, LanguageError: 39, UnhandledException: 40,
@@ -517,6 +527,7 @@ var cidsV210 = CIDTable{
 	String: 80, OneByteString: 81, TwoByteString: 82,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 108, ByteDataViewCid: 150, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 92, FfiMarkerLastCid: 104,
 	NumPredefinedCids: 156,
 }
 
@@ -559,6 +570,7 @@ var cidsV212 = CIDTable{
 	String: 77, OneByteString: 78, TwoByteString: 79,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 100, ByteDataViewCid: 142, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 84, FfiMarkerLastCid: 96,
 	NumPredefinedCids: 148,
 }
 
@@ -593,6 +605,7 @@ var cidsV213 = CIDTable{
 	String: 77, OneByteString: 78, TwoByteString: 79,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 100, ByteDataViewCid: 142, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 84, FfiMarkerLastCid: 96,
 	NumPredefinedCids: 148,
 }
 
@@ -625,6 +638,7 @@ var cidsV214 = CIDTable{
 	String: 81, OneByteString: 82, TwoByteString: 83,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 104, ByteDataViewCid: 146, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 88, FfiMarkerLastCid: 100,
 	NumPredefinedCids: 152,
 }
 
@@ -667,6 +681,7 @@ var cidsV215 = CIDTable{
 	String: 84, OneByteString: 85, TwoByteString: 86,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 106, ByteDataViewCid: 148, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 90, FfiMarkerLastCid: 103,
 	NativePointerCid: 1, NumPredefinedCids: 154,
 }
 
@@ -698,6 +713,7 @@ var cidsV216 = CIDTable{
 	String: 84, OneByteString: 85, TwoByteString: 86,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 106, ByteDataViewCid: 148, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 90, FfiMarkerLastCid: 103,
 	NativePointerCid: 1, NumPredefinedCids: 154,
 }
 
@@ -728,6 +744,7 @@ var cidsV217 = CIDTable{
 	String: 89, OneByteString: 90, TwoByteString: 91,
 	// TypedData internals: stride 3 (no UnmodifiableView in v2.17.6)
 	TypedDataInt8ArrayCid: 110, ByteDataViewCid: 152, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 95, FfiMarkerLastCid: 107,
 	NativePointerCid: 1, NumPredefinedCids: 158,
 }
 
@@ -761,6 +778,7 @@ var cidsV218 = CIDTable{
 	String: 90, OneByteString: 91, TwoByteString: 92,
 	// TypedData internals: stride 3 (no UnmodifiableView in v2.18)
 	TypedDataInt8ArrayCid: 111, ByteDataViewCid: 153, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 96, FfiMarkerLastCid: 108,
 	NativePointerCid: 1, NumPredefinedCids: 159,
 }
 
@@ -792,6 +810,7 @@ var cidsV219 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 }
 
@@ -822,6 +841,7 @@ var cidsV305 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 114, ByteDataViewCid: 170, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 99, FfiMarkerLastCid: 111,
 	NativePointerCid: 1, NumPredefinedCids: 177,
 }
 
@@ -849,6 +869,7 @@ var cidsV325 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 }
 
@@ -878,6 +899,7 @@ var cidsV343 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 111, ByteDataViewCid: 167, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 96, FfiMarkerLastCid: 108,
 	NativePointerCid: 1, NumPredefinedCids: 174,
 }
 
@@ -907,6 +929,7 @@ var cidsV362 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 112, ByteDataViewCid: 168, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 97, FfiMarkerLastCid: 109,
 	NativePointerCid: 1, NumPredefinedCids: 175,
 }
 
@@ -935,6 +958,7 @@ var cidsV392 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 112, ByteDataViewCid: 168, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 97, FfiMarkerLastCid: 109,
 	NativePointerCid: 1, NumPredefinedCids: 175,
 }
 
@@ -969,6 +993,7 @@ var cidsV3130 = CIDTable{
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	// LinkedHashBaseCid = 96 (new in 3.13.0, shifts everything below +1)
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 	// New in 3.13.0: see CIDTable.LocalVarDescriptors / .ApiError.
 	LocalVarDescriptors: 27, ApiError: 41, UnwindError: 44,
@@ -983,13 +1008,13 @@ var versionProfiles = map[string]*VersionProfile{
 	// function came out as sub_<addr> and classes.jsonl was not written at all
 	// because no class name would resolve.
 	"2.10.0": {DartVersion: "2.10.0", Supported: true, HeaderFields: 4, Tags: TagStyleCidInt32, CIDs: &cidsV210, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, StringRODataPerSubclass: true, PreCanonicalSplit: true, ClassNumRefs: 16, ClassHasTokenPos: true, FuncNumRefs: 7, TypeNumRefs: 5, TypeClassIdIsRef: true, TypeHasTokenPos: true, TypeParamNumRefs: 5, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ScriptHasLineCol: true, ScriptHasFlags: true, ObjectStoreAOTFieldCount: 176}, // SDK-verified: from()=object_class -> to_snapshot(kFullAOT)=slow_tts_stub = 176 fields (object_store.h @2.10.0)
-	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 8 refs
-	// (object_pool, owner, exception_handlers, pc_descriptors, catch_entry,
-	// compressed_stackmaps, inlined_id_to_function, code_source_map), not interleaved
-	// after compressed_stackmaps like v2.13. Verified against dart-lang/sdk
+	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 7 refs
+	// (owner, exception_handlers, pc_descriptors, catch_entry, compressed_stackmaps,
+	// inlined_id_to_function, code_source_map), not interleaved after
+	// compressed_stackmaps like v2.13. Verified against dart-lang/sdk
 	// runtime/vm/clustered_snapshot.cc CodeDeserializationCluster::ReadFill at the
 	// 2.12.0 tag (no Code::IsDiscarded concept either — that's 2.13+/PRECOMPILED_RUNTIME).
-	"2.12.0": {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
+	"2.12.0": {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 4, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
 	"2.13.0": {DartVersion: "2.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV213, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAfterRef: 1, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191},                                                          // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.13.0)
 	"2.14.0": {DartVersion: "2.14.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV214, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 202},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 202 fields (object_store.h @2.14.0)
 	// 2.15.0 shares 2.16.0's Type layout exactly -- no TypeClassIdIsRef, no

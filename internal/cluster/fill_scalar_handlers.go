@@ -47,7 +47,7 @@ type scalarState struct {
 	scriptKernelIdx int32
 	scriptFlags     byte
 	// LoadingUnit
-	loadingUnitID int32
+	loadingUnitID int64
 	// FfiTrampolineData
 	callbackID int32
 	ffiKind    uint8
@@ -206,12 +206,25 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 // completes the object (si == 1), or nil otherwise.
 func readFieldScalar(s *dartfmt.Stream, si int, ref int, nameRef, ownerRef, sigRef, fieldTypeRef int, state *scalarState, i, count int, op ScalarOp) (*FieldInfo, error) {
 	if si == 0 {
-		// kind_bits is OpTagged32 at scalar index 0.
-		kb, err := s.ReadTagged32()
-		if err != nil {
-			return nil, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
+		// kind_bits is uint16 through Dart 3.9 and uint32 from 3.10.7.
+		// Honor the spec's scalar width instead of always using Read32: the
+		// encodings overlap for small values, but their accepted domains do not.
+		switch op {
+		case OpUint16, OpInt16:
+			kb, err := s.ReadTagged16()
+			if err != nil {
+				return nil, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
+			}
+			state.fieldKindBits = int32(kb)
+		case OpTagged32:
+			kb, err := s.ReadTagged32()
+			if err != nil {
+				return nil, fmt.Errorf("obj %d/%d kind_bits: %w", i, count, err)
+			}
+			state.fieldKindBits = int32(kb)
+		default:
+			return nil, fmt.Errorf("obj %d/%d unsupported field kind_bits scalar op %d", i, count, op)
 		}
-		state.fieldKindBits = int32(kb)
 		return nil, nil
 	}
 	if si == 1 {
@@ -476,11 +489,23 @@ func readScriptScalar(s *dartfmt.Stream, si int, profile *snapshot.VersionProfil
 }
 
 // readLoadingUnitScalar reads one scalar for a LoadingUnit cluster.
-func readLoadingUnitScalar(s *dartfmt.Stream, state *scalarState, i, count int) error {
-	v, err := s.ReadTagged32()
-	if err != nil {
-		return fmt.Errorf("obj %d/%d loading_unit id: %w", i, count, err)
+func readLoadingUnitScalar(s *dartfmt.Stream, state *scalarState, i, count int, op ScalarOp) error {
+	switch op {
+	case OpTagged32:
+		v, err := s.ReadTagged32()
+		if err != nil {
+			return fmt.Errorf("obj %d/%d loading_unit id: %w", i, count, err)
+		}
+		state.loadingUnitID = int64(int32(v))
+		return nil
+	case OpTagged64:
+		v, err := s.ReadTagged64()
+		if err != nil {
+			return fmt.Errorf("obj %d/%d loading_unit id: %w", i, count, err)
+		}
+		state.loadingUnitID = v
+		return nil
+	default:
+		return fmt.Errorf("obj %d/%d loading_unit id: unexpected scalar op %d", i, count, op)
 	}
-	state.loadingUnitID = int32(v)
-	return nil
 }

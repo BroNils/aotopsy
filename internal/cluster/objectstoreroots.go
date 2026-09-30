@@ -33,6 +33,14 @@ func ReadObjectStoreRefs(data []byte, result *Result, profile *snapshot.VersionP
 		return nil
 	}
 	s := dartfmt.NewStreamAt(data, result.FillEnd)
+	return readObjectStoreRefsFromStream(s, result, profile)
+}
+
+// readObjectStoreRefsFromStream consumes the complete roots prefix through the
+// ObjectStore range from the caller's current stream position. Both the early
+// name-resolution path and ParseDispatchTable use this exact helper so a future
+// Dart roots-layout change cannot advance one path but not the other.
+func readObjectStoreRefsFromStream(s *dartfmt.Stream, result *Result, profile *snapshot.VersionProfile) error {
 	for i := 0; i < profile.RootsPrefixRefCount; i++ {
 		if _, err := readRef(s, profile.FillRefUnsigned); err != nil {
 			return fmt.Errorf("object store roots: prefix ref %d/%d: %w", i, profile.RootsPrefixRefCount, err)
@@ -46,6 +54,8 @@ func ReadObjectStoreRefs(data []byte, result *Result, profile *snapshot.VersionP
 		}
 		refs = append(refs, int(r))
 	}
-	result.ObjectStoreRefs = refs
+	if result.ObjectStoreRefs == nil {
+		result.ObjectStoreRefs = refs
+	}
 	return nil
 }

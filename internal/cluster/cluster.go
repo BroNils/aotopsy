@@ -156,6 +156,12 @@ type Result struct {
 	MintValues  map[int]int64 // Mint/Smi ref→int64 value from alloc phase
 	FillStart   int           // byte offset where the fill section begins
 	FillEnd     int           // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
+	// AllocComplete is set only when every declared cluster's alloc record was
+	// consumed successfully and the final reference count agrees with the
+	// snapshot header's num_objects. Best-effort ScanClusters may return a
+	// partial Result with diagnostics, but semantic consumers must not treat the
+	// current stream position as FillStart in that case.
+	AllocComplete bool
 
 	// ObjectStoreRefs holds the isolate roots section's ObjectStore field
 	// refs, in serialized order -- ObjectStore::from() through
@@ -252,6 +258,12 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	if err != nil {
 		return nil, fmt.Errorf("cluster header: num_objects: %w", err)
 	}
+	if result.Header.NumObjects < 0 {
+		return nil, fmt.Errorf("cluster: negative num_objects %d", result.Header.NumObjects)
+	}
+	if result.Header.NumObjects < result.Header.NumBaseObjects {
+		return nil, fmt.Errorf("cluster: num_objects %d is smaller than num_base_objects %d", result.Header.NumObjects, result.Header.NumBaseObjects)
+	}
 	// Header field evolution:
 	//   2.10      (HF=4): base, objects, clusters, field_table_len
 	//   2.12-2.13 (HF=5, SplitCanonical): base, objects, canonical_clusters, clusters, field_table_len
@@ -328,6 +340,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	result.Clusters = make([]ClusterMeta, 0, initialCaptureCap(nc64, s.Remaining()))
 	ct := profile.CIDs
 	nextRef := int(result.Header.NumBaseObjects) + 1
+	allocFailed := false
 	for i := 0; i < nc; i++ {
 		tagPos := s.Position()
 
@@ -372,6 +385,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 			}
 			diags.Addf(uint64(tagPos), dartfmt.DiagTruncated,
 				"cluster %d/%d: tags: %v", i, nc, tagErr)
+			allocFailed = true
 			break
 		}
 
@@ -415,6 +429,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 			}
 			diags.Addf(uint64(s.Position()), dartfmt.DiagTruncated,
 				"cluster %d (CID %d %s): alloc skip: %v", i, cid, name, err)
+			allocFailed = true
 			cm.EndOffset = s.Position()
 			if count < 0 || count > maxInt-int64(nextRef) {
 				return nil, fmt.Errorf("cluster %d (CID %d): object count %d overflows reference index %d", i, cid, count, nextRef)
@@ -444,6 +459,13 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	}
 
 	result.FillStart = s.Position()
+	if !allocFailed && len(result.Clusters) == nc {
+		gotObjects := int64(nextRef - 1)
+		if gotObjects != result.Header.NumObjects {
+			return result, fmt.Errorf("cluster: allocated reference count %d disagrees with header num_objects %d", gotObjects, result.Header.NumObjects)
+		}
+		result.AllocComplete = true
+	}
 	if debugAlloc {
 		fmt.Fprintf(os.Stderr, "ALLOC: nc=%d, FillStart=0x%06x totalRefs=%d expectedObjs=%d deficit=%d\n",
 			nc, result.FillStart, nextRef-1, result.Header.NumObjects, result.Header.NumObjects-int64(nextRef-1))

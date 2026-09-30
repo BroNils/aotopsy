@@ -9,6 +9,7 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/arch/x86"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/output"
@@ -52,12 +53,13 @@ func cmdDump(args []string) error {
 	}
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
+	logger := cli.NewLogger(os.Stderr, false)
 
 	// Write parser/debug snapshot metadata separately from pipeline provenance.
 	if err := output.WriteSnapshotInfoJSON(*outDir, info); err != nil {
 		return fmt.Errorf("write snapshot_info.json: %w", err)
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "wrote %s/snapshot_info.json\n", *outDir)
+	logger.Printf("wrote %s/snapshot_info.json\n", *outDir)
 
 	// Generate placeholder symbols from instruction region.
 	symbols := make(map[uint64]string)
@@ -87,7 +89,7 @@ func cmdDump(args []string) error {
 	if err := output.WriteSymbolsJSON(*outDir, symList); err != nil {
 		return fmt.Errorf("write symbols.json: %w", err)
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "wrote %s/symbols.json (%d entries)\n", *outDir, len(symList))
+	logger.Printf("wrote %s/symbols.json (%d entries)\n", *outDir, len(symList))
 
 	lookup := disasm.PlaceholderLookup(symbols)
 
@@ -95,13 +97,13 @@ func cmdDump(args []string) error {
 		if len(info.IsolateInstructions.Data) > 0 {
 			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "warning: could not parse isolate instructions image header: %v\n", err)
+				logger.Warn("could not parse isolate instructions image header: %v", err)
 				code = info.IsolateInstructions.Data
 				codeOff = 0
 				payloadLen = uint64(len(code))
 			}
 			codeVA := info.IsolateInstructions.VA + codeOff
-			_, _ = fmt.Fprintf(os.Stderr, "disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
+			logger.Printf("disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
 				len(code), codeVA, payloadLen)
 			insts := disasm.Disassemble(code, disasm.Options{
 				BaseAddr: codeVA,
@@ -111,12 +113,13 @@ func cmdDump(args []string) error {
 			if err := output.WriteASMSingle(*outDir, insts, lookup); err != nil {
 				return fmt.Errorf("write asm.txt: %w", err)
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "wrote %s/asm.txt (%d instructions)\n", *outDir, len(insts))
+			logger.Printf("wrote %s/asm.txt (%d instructions)\n", *outDir, len(insts))
 		}
 
 		if len(info.VmInstructions.Data) > 0 {
 			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
+				logger.Warn("could not parse VM instructions image header: %v", err)
 				code = info.VmInstructions.Data
 				codeOff = 0
 			}
@@ -128,30 +131,31 @@ func cmdDump(args []string) error {
 			if err := output.WriteASM(*outDir, "vm_stubs", insts, lookup); err != nil {
 				return fmt.Errorf("write asm/vm_stubs.txt: %w", err)
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "wrote %s/asm/vm_stubs.txt (%d instructions)\n", *outDir, len(insts))
+			logger.Printf("wrote %s/asm/vm_stubs.txt (%d instructions)\n", *outDir, len(insts))
 		}
 	} else {
 		if len(info.IsolateInstructions.Data) > 0 {
 			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "warning: could not parse isolate instructions image header: %v\n", err)
+				logger.Warn("could not parse isolate instructions image header: %v", err)
 				code = info.IsolateInstructions.Data
 				codeOff = 0
 				payloadLen = uint64(len(code))
 			}
 			codeVA := info.IsolateInstructions.VA + codeOff
-			_, _ = fmt.Fprintf(os.Stderr, "disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
+			logger.Printf("disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
 				len(code), codeVA, payloadLen)
 			n, err := writeX86ASMBlob(filepath.Join(*outDir, "asm.txt"), code, codeVA, lookup, opts.EffectiveMaxSteps())
 			if err != nil {
 				return fmt.Errorf("write asm.txt: %w", err)
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "wrote %s/asm.txt (%d instructions)\n", *outDir, n)
+			logger.Printf("wrote %s/asm.txt (%d instructions)\n", *outDir, n)
 		}
 
 		if len(info.VmInstructions.Data) > 0 {
 			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
+				logger.Warn("could not parse VM instructions image header: %v", err)
 				code = info.VmInstructions.Data
 				codeOff = 0
 			}
@@ -163,14 +167,14 @@ func cmdDump(args []string) error {
 			if err != nil {
 				return fmt.Errorf("write asm/vm_stubs.txt: %w", err)
 			}
-			_, _ = fmt.Fprintf(os.Stderr, "wrote %s/asm/vm_stubs.txt (%d instructions)\n", *outDir, n)
+			logger.Printf("wrote %s/asm/vm_stubs.txt (%d instructions)\n", *outDir, n)
 		}
 	}
 
 	if len(info.Diags) > 0 {
-		_, _ = fmt.Fprintf(os.Stderr, "\ndiagnostics: %d issues\n", len(info.Diags))
+		logger.Printf("\ndiagnostics: %d issues\n", len(info.Diags))
 		for _, d := range info.Diags {
-			_, _ = fmt.Fprintf(os.Stderr, "  %s\n", d)
+			logger.Printf("  %s\n", d)
 		}
 	}
 

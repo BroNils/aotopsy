@@ -12,7 +12,8 @@ func TestReadFillRejectsCaptureAboveMaxBytesBeforeParsing(t *testing.T) {
 	const arrayCID = 100
 	profile := &snapshot.VersionProfile{CIDs: &snapshot.CIDTable{Array: arrayCID}}
 	result := &Result{
-		FillStart: 1,
+		FillStart:     1,
+		AllocComplete: true,
 		Clusters: []ClusterMeta{{
 			CID:      arrayCID,
 			Count:    1,
