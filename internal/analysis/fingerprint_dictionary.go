@@ -8,11 +8,13 @@ import (
 	"aotopsy/internal/naming"
 )
 
-// applyFingerprintDictionary mutates the shared naming source before disasm so
-// every downstream artifact sees the same recovered name. It deliberately
-// refuses to rename functions that already have a semantic name and refuses a
-// target-owner contradiction even when raw machine-code hashes collide.
-func applyFingerprintDictionary(
+// countFingerprintDictionaryCandidates compares unnamed target functions to a
+// version/architecture-pinned bytes-only dictionary. A match is a HEURISTIC
+// candidate, never authoritative naming evidence: identical instructions can
+// read different object-pool contents in different binaries, and tiny functions
+// in the same owner can legitimately compile to identical bytes. Consequently
+// this function must not mutate PoolLookups.CodeNames/CodeRefDisplay.
+func countFingerprintDictionaryCandidates(
 	pl *naming.PoolLookups,
 	ranges []cluster.CodeRange,
 	code []byte,
@@ -23,13 +25,7 @@ func applyFingerprintDictionary(
 		return 0, fmt.Errorf("nil pool lookups or dictionary")
 	}
 	image := cluster.CodeImage{Code: code, CodeVA: codeVA, CodeOff: codeOff}
-	if pl.CodeNames == nil {
-		pl.CodeNames = make(map[int]naming.CodeNameInfo)
-	}
-	if pl.CodeRefDisplay == nil {
-		pl.CodeRefDisplay = make(map[int]string)
-	}
-	recovered := 0
+	candidates := 0
 	for _, r := range ranges {
 		if r.RefID < 0 {
 			continue // VM/isolate stubs are not Dart Function naming seeds.
@@ -51,17 +47,7 @@ func applyFingerprintDictionary(
 			// ownership is stronger evidence than a cross-sample hash.
 			continue
 		}
-		ci.FuncName = name
-		if ci.OwnerName == "" {
-			ci.OwnerName = owner
-		}
-		pl.CodeNames[r.RefID] = ci
-		if ci.OwnerName != "" {
-			pl.CodeRefDisplay[r.RefID] = ci.OwnerName + "." + ci.FuncName
-		} else {
-			pl.CodeRefDisplay[r.RefID] = ci.FuncName
-		}
-		recovered++
+		candidates++
 	}
-	return recovered, nil
+	return candidates, nil
 }

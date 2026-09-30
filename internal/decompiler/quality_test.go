@@ -556,6 +556,54 @@ func TestReturnTypeEmission(t *testing.T) {
 	}
 }
 
+func TestReturnDoesNotFabricateUntrackedMachineRegister(t *testing.T) {
+	for _, tc := range []struct {
+		name, ret string
+	}{
+		{"arm64", sdk.ARM64ReturnRegStr},
+		{"x64", sdk.X86ReturnRegStr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fir := newFuncIR("unknownReturn", 0x1000)
+			fir.ReturnReg = tc.ret
+			fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Op: OpReturn, Src: "ret"}}})
+			src := EmitPseudocode(fir, nil, nil).Source
+			if strings.Contains(src, "return "+tc.ret+";") {
+				t.Fatalf("untracked machine return register leaked as source value:\n%s", src)
+			}
+			if !strings.Contains(src, "return;") {
+				t.Fatalf("unknown return should degrade to bare return:\n%s", src)
+			}
+		})
+	}
+}
+
+func TestVoidReturnIgnoresStaleTrackedRegister(t *testing.T) {
+	fir := newFuncIR("voidFn", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ReturnType = "void"
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
+		{Op: OpOther, Src: "mov x0, #99"},
+		{Op: OpReturn, Src: "ret"},
+	}})
+	src := EmitPseudocode(fir, nil, nil).Source
+	if strings.Contains(src, "return 99;") || !strings.Contains(src, "return;") {
+		t.Fatalf("declared void function emitted a value return:\n%s", src)
+	}
+}
+
+func TestArm64UntouchedFpuArgumentIsNotAssumedReturned(t *testing.T) {
+	fir := newFuncIR("unknownFpuReturn", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.FpuArgRegs = []string{"v0"}
+	fir.FpuReturnReg = "v0"
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Op: OpReturn, Src: "ret"}}})
+	src := EmitPseudocode(fir, nil, nil).Source
+	if strings.Contains(src, "fparg0") {
+		t.Fatalf("FPU ABI slot was fabricated as an undeclared source parameter:\n%s", src)
+	}
+}
+
 // TestForInLoopReconstruction verifies Phase 6: iterator while-loops are reconstructed into for-in syntax.
 func TestForInLoopReconstruction(t *testing.T) {
 	input := []string{
@@ -603,8 +651,12 @@ func TestNullAwareAndCascadeReconstruction(t *testing.T) {
 	}
 }
 
-// TestAsyncStateMachineLinearization verifies Phase 7: async state machine dispatch is unwrapped into linear await statements.
-func TestAsyncStateMachineLinearization(t *testing.T) {
+// A sequential integer branch inside an async function is still ordinary source
+// control flow unless the machine code proves a suspension dispatcher. Compact
+// SuspendState lowering stores a resume PC, not these small state ordinals, so
+// flattening this tree would delete a real condition. Exact await helper text may
+// still be normalized inside the preserved branch.
+func TestAsyncIntegerBranchesAreNotFlattenedAsStateMachine(t *testing.T) {
 	input := []string{
 		"dynamic fetchUser() async {",
 		"  if (state == 0) {",
@@ -617,14 +669,14 @@ func TestAsyncStateMachineLinearization(t *testing.T) {
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "if (state == 0)") || strings.Contains(compacted, "} else if (state == 1)") {
-		t.Errorf("Phase 7 violation: async state machine dispatch was not unwrapped:\n%s", compacted)
+	if !strings.Contains(compacted, "if (state == 0)") || !strings.Contains(compacted, "} else if (state == 1)") {
+		t.Errorf("ordinary async integer branches were flattened/fabricated:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, "await") {
-		t.Errorf("expected linear await in output:\n%s", compacted)
+	if !strings.Contains(compacted, "final t1 = await fut;") {
+		t.Errorf("exact await helper normalization was lost:\n%s", compacted)
 	}
 	if !strings.Contains(compacted, "return parseUser(") {
-		t.Errorf("expected return parseUser in output:\n%s", compacted)
+		t.Errorf("branch body was lost:\n%s", compacted)
 	}
 }
 
@@ -719,5 +771,30 @@ func TestTypedDeclarations(t *testing.T) {
 	}
 	if !strings.Contains(compacted, `final UserModel user = UserModel();`) {
 		t.Errorf("expected typed UserModel declaration, got:\n%s", compacted)
+	}
+}
+
+func TestTypedCollectionDeclarationsFollowDartLiteralGrammar(t *testing.T) {
+	input := []string{
+		"dynamic collections() {",
+		"  final empty = {};",
+		`  final strings = {"a:b"};`,
+		"  final ternary = {cond ? a : b};",
+		"  final nestedMapSet = {{1: 2}};",
+		"  final map = {1: 2};",
+		"  return empty;",
+		"}",
+	}
+	got := compactLines(strings.Join(input, "\n"))
+	for _, want := range []string{
+		"final Map empty = {};",
+		`final Set strings = {"a:b"};`,
+		"final Set ternary = {cond ? a : b};",
+		"final Set nestedMapSet = {{1: 2}};",
+		"final Map map = {1: 2};",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }

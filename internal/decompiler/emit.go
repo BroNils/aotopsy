@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
@@ -167,6 +168,11 @@ type emitter struct {
 	// Key packs source/target block ids into one uint64.
 	emittedEdges map[uint64]bool
 	currentBlock int
+	// orphanBlocks records predecessorless/unreached blocks emitted after the
+	// main structured walk. Their labels are semantic control-flow boundaries for
+	// the compactor even when no goto references them; pruning those labels would
+	// let dead-code elimination delete the orphan body after an earlier return.
+	orphanBlocks map[int]bool
 
 	// spillSeq numbers the `_tN` temporaries setReg materializes for
 	// expressions too large to keep inlining. Shared with helper sub-emitters
@@ -318,9 +324,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Pre-emission reaching-definition fixpoint: correct value state at each
 	// block entry regardless of the recursive walk's path (ssa.go). The same
 	// fixpoint's exit states drive loop-carried phi detection.
-	entryStates, exitStates := runFixpoint(fir, pool)
-	e.blockEntryState = entryStates
-	e.loopPhis = computeLoopPhis(fir, exitStates)
+	entryStates, exitStates, fixpointConverged := runFixpoint(fir, pool)
+	if fixpointConverged {
+		e.blockEntryState = entryStates
+		e.loopPhis = computeLoopPhis(fir, exitStates)
+	}
 	// Map blocks to the try region covering them, for per-block annotation.
 	e.buildBlockTryIndex()
 	// Allocate up front so sub-emitters for helper functions share the same
@@ -391,13 +399,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
-	// FP argument registers, matching the fixpoint's entry seed (ssa.go).
-	// Arity recovery is integer-register based, so there is no per-slot
-	// parameter name to use here; fpargN names the ABI slot, which is what
-	// is actually known.
-	for i, reg := range fir.FpuArgRegs {
-		e.state.setReg(reg, fmt.Sprintf("fparg%d", i))
-	}
+	// FPU argument registers are deliberately not seeded. Dart's register CC
+	// chooses GPR vs FPU from per-parameter Representation; a bank index alone
+	// does not identify the corresponding source parameter, and `fpargN` would be
+	// an undeclared pseudo-parameter in otherwise-Dart output. See ssa.go.
 	// Type-testing stubs are entered with the TypeTestABI registers already
 	// holding their operands; see seedTypeTestABI.
 	seedTypeTestABI(fir, e.state)
@@ -448,19 +453,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		modifier = "async"
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
-	// A1: Use LocalTypeHints for typed return when available, otherwise
-	// infer from function name heuristic.
+	// A declared return type is emitted only when enrichment recovered an exact
+	// serialized AbstractType. Function names do not constrain return types in
+	// Dart (an application is free to declare `int clear()` or `String isReady()`),
+	// so unresolved metadata must stay dynamic rather than being guessed from a
+	// familiar SDK method spelling.
 	returnType := "dynamic"
-	if fir.LocalTypeHints != nil {
-		if hint, ok := fir.LocalTypeHints["return"]; ok && hint != "" {
-			returnType = hint
-		}
-	}
-	if returnType == "dynamic" && fir.ReturnType != "" && fir.ReturnType != "?" {
+	if fir.ReturnType != "" && fir.ReturnType != "?" {
 		returnType = fir.ReturnType
-	}
-	if returnType == "dynamic" {
-		returnType = inferReturnTypeFromName(fir.Name)
 	}
 	baseSignature := fmt.Sprintf("%s %s(%s)", returnType, sig, strings.Join(argList, ", "))
 	modifierSuffix := ""
@@ -468,6 +468,10 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		modifierSuffix = " " + modifier
 	}
 	e.lines = append(e.lines, baseSignature+modifierSuffix+" {")
+	if !fixpointConverged {
+		e.lines = append(e.lines, "  // reaching-definition fixpoint did not converge; SSA enrichment disabled")
+		e.stats.UnresolvedCF++
+	}
 	e.state.setReg(fir.ThreadReg, sdk.SymTHR)
 	e.state.setReg(fir.PoolReg, sdk.SymPP)
 	// SPREG and the versioned ARM64 heap/GC pinned registers have fixed VM
@@ -486,15 +490,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		e.state.setReg(fir.BarrierMaskReg, sdk.SymBarrierMask)
 	}
 
-	// P7: Async state machine annotation. Dart compiles async functions
-	// into state machines: the function body is split at each await point,
-	// and a switch on the SuspendState's state index selects which
-	// continuation to run on resume. The if/switch chain the compiler
-	// generates is visible in the CFG as branches on a loaded state index.
-	// Annotate it so the reader knows the if/else chain is the async
-	// state machine dispatch, not application logic.
+	// Async/async* is a source-level modifier recovered from suspendable runtime
+	// calls/metadata. Do not claim a numeric state-index dispatcher here:
+	// SuspendState stores a resume PC in supported AOT releases (2.18+), and
+	// ordinary application comparisons inside an async function are still just
+	// ordinary branches. Await sites are annotated only where the call lowering
+	// itself proves them.
 	if fir.IsAsync {
-		e.lines = append(e.lines, "  // async state machine: branches on SuspendState state index")
 		e.lines = append(e.lines, "  // await points are marked with `await` below")
 	}
 
@@ -610,7 +612,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	e.appendHelperFunctions() // appends sibling "_block_N()" top-level functions, if any
 
 	source := strings.Join(e.lines, "\n")
-	source = dropUnusedLabels(source)
+	source = dropUnusedLabels(source, e.orphanBlocks)
 	// Structural compaction, dataflow and expression cleanup all run inside
 	// compactLines, on the statement/expression trees, to a shared fixed
 	// point -- the expression passes used to be four separate regex sweeps
@@ -681,7 +683,7 @@ var gotoRefRe = regexp.MustCompile(`goto block_(\d+);`)
 //   - a `goto block_N;` whose target block was never emitted -- it can be
 //     unreachable from the walk, or dropped by the step budget -- becomes a
 //     comment, rather than naming a label that does not exist.
-func dropUnusedLabels(source string) string {
+func dropUnusedLabels(source string, preserve map[int]bool) string {
 	lines := strings.Split(source, "\n")
 	used := map[string]bool{}
 	declared := map[string]bool{}
@@ -696,7 +698,8 @@ func dropUnusedLabels(source string) string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
-			if !used[m[1]] {
+			id, _ := strconv.Atoi(m[1])
+			if !used[m[1]] && !preserve[id] {
 				continue
 			}
 			out = append(out, line)
@@ -737,11 +740,26 @@ func indentStr(n int) string { return strings.Repeat("  ", n) }
 // so that case is rejected explicitly -- otherwise this would trade a
 // missing return for `return v0;`, which is a leak, not a fix.
 func (e *emitter) returnValue(intVal string) string {
+	if e.fir.ReturnType == "void" {
+		return ""
+	}
 	if usableReturnValue(intVal) {
 		return intVal
 	}
 	if e.fir.FpuReturnReg != "" {
-		fp := e.state.lookupReg(e.fir.FpuReturnReg)
+		full, tracked := e.state.Regs[canonReg(e.fir.FpuReturnReg)]
+		if !tracked {
+			return ""
+		}
+		fp := readRegView(e.fir.FpuReturnReg, full)
+		// ARM64 V0 is both the first FPU argument register and the FPU return
+		// register. An untouched entry seed therefore proves only "argument 0
+		// arrived in V0", not that this function returns it. Prefer a missing
+		// value to a fabricated `return fparg0;`; a real operation/copy will
+		// replace the seed with a computed expression before RET.
+		if fp == "fparg0" && len(e.fir.FpuArgRegs) > 0 && canonReg(e.fir.FpuArgRegs[0]) == canonReg(e.fir.FpuReturnReg) {
+			return ""
+		}
 		if usableReturnValue(fp) && fp != e.fir.FpuReturnReg {
 			return fp
 		}

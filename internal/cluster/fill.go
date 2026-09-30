@@ -77,6 +77,10 @@ type NamedObject struct {
 	// kRecognizedTagSize=9, kModifierPos=14, kModifierSize=2 identically at
 	// 2.10.0, 2.12.0, 2.17.6, 2.19.0, 3.0.5, 3.1.0, 3.2.5, 3.3.0 and 3.4.3.
 	IsSuspendable bool
+	// FuncModifier is the exact UntaggedFunction::AsyncModifier decoded from
+	// kind_tag_: none/async/sync*/async*. HasKindTag distinguishes a captured
+	// kNoModifier from unavailable metadata.
+	FuncModifier FunctionModifier
 
 	// TypeParameter metadata is carried here because TypeParameter is an
 	// AbstractType with no source name of its own. The VM names it from

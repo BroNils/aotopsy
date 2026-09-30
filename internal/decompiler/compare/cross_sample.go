@@ -5,9 +5,10 @@ import (
 	"strings"
 )
 
-// CrossSampleNameTransfer applies function names recovered from one
-// binary to unnamed functions in another binary, using instruction-byte
-// hashing to match identical functions across samples.
+// CrossSampleNameTransfer proposes candidate names recovered from one binary
+// for unnamed functions in another, using instruction-byte hashing. The result
+// is heuristic comparison output, not ground truth suitable for mutating the
+// decompiler's semantic naming tables without independent corroboration.
 //
 // This is the implementation of Tier 4 item 15 (cross-sample name
 // transfer). The same package (e.g. package:flutter, dart:async)
@@ -31,13 +32,9 @@ import (
 // Arch) pair. CrossSampleNameTransfer enforces this by tagging each
 // dictionary entry with its source version and arch.
 //
-// SDK-verified: the Dart AOT compiler (gen_snapshot) is deterministic
-// for the same source + SDK version + arch + flags, so the same
-// function produces the same instruction bytes across apps. Verified
-// empirically: sub_1b555c appears 83777 times in the 2.12 sample,
-// indicating a shared framework function compiled identically across
-// many call sites within one binary — and by extension, across
-// binaries built with the same SDK.
+// Deterministic compilation can make a true same-function match byte-identical,
+// but the converse is not guaranteed because semantic data may live in the
+// object pool. Callers must preserve this one-way implication.
 
 // CrossSampleDictionary is a versioned function dictionary that can
 // be built from one sample and applied to another. It enforces

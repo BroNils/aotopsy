@@ -387,6 +387,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				IsNative:          ss.isNative,
 				IsExternal:        ss.isExternal,
 				IsSuspendable:     ss.isSuspendable,
+				FuncModifier:      ss.funcModifier,
 				HasKindTag:        ss.hasKindTag,
 				FuncKind:          ss.funcKind,
 			}

@@ -2,6 +2,7 @@ package decompiler
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -24,12 +25,11 @@ import (
 // instruction text is produced. Unknown tokens (THR, PP, sp, named
 // pseudo-regs) pass through lowercased unchanged.
 //
-// Width semantics: a 32-bit write zero-extends the upper bits on both
-// architectures, so treating the narrow and wide views as the same symbolic
-// value is the correct approximation for an expression-level lifter that does
-// not model bit widths. It is strictly better than keeping divergent stale
-// aliases, which corrupts values (verified against dart-3.9.2 ground truth:
-// `cmp w0, w16` where a prior pool-load rewrote x16 but not w16).
+// Width semantics live in regView/readRegView/writeRegView below. Canonicalizing
+// aliases to one physical slot is necessary, but it is NOT sufficient: W/E
+// writes zero-extend while AX/AL/AH-style x86 writes preserve the other bits.
+// Keeping one full-width stored value plus explicit view transforms models both
+// facts without reviving stale per-width aliases.
 func canonReg(tok string) string {
 	tok = strings.ToLower(strings.TrimSpace(tok))
 	if tok == "" {
@@ -91,6 +91,135 @@ var x86RegCanon = map[string]string{
 	"rdi": "rdi", "edi": "rdi", "di": "rdi", "dil": "rdi",
 	"rbp": "rbp", "ebp": "rbp", "bpl": "rbp",
 	"rsp": "rsp", "esp": "rsp", "spl": "rsp",
+}
+
+// regView describes a GPR spelling as a bit slice of the canonical 64-bit
+// physical register. zeroExtendWrite is true for the architectural 32-bit
+// views whose writes clear bits 32..63 (ARM64 Wn and x86-64 En/RnD).
+//
+// SIMD/FP aliases intentionally do not participate. Their lane/scalar write
+// semantics are instruction-specific (legacy SSE versus VEX, ARM64 scalar
+// lanes versus vector writes), so applying GPR rules to them would be another
+// confident approximation rather than a correctness fix.
+type regView struct {
+	width           uint
+	shift           uint
+	zeroExtendWrite bool
+}
+
+func gprView(tok string) (regView, bool) {
+	tok = strings.ToLower(strings.TrimSpace(tok))
+	if tok == "" {
+		return regView{}, false
+	}
+	// ARM64 GPRs.
+	if len(tok) > 1 && isAllDigits(tok[1:]) {
+		switch tok[0] {
+		case 'x':
+			return regView{width: 64}, true
+		case 'w':
+			return regView{width: 32, zeroExtendWrite: true}, true
+		}
+	}
+
+	// x86-64 extended GPRs r8..r15 and their d/w/b views.
+	if tok[0] == 'r' && len(tok) > 1 {
+		body := tok[1:]
+		core := body
+		view := regView{width: 64}
+		if n := len(body); n > 0 {
+			switch body[n-1] {
+			case 'd':
+				core = body[:n-1]
+				view = regView{width: 32, zeroExtendWrite: true}
+			case 'w':
+				core = body[:n-1]
+				view = regView{width: 16}
+			case 'b':
+				core = body[:n-1]
+				view = regView{width: 8}
+			}
+		}
+		if isAllDigits(core) {
+			switch core {
+			case "8", "9", "10", "11", "12", "13", "14", "15":
+				return view, true
+			}
+		}
+	}
+
+	// x86-64 legacy GPRs. High-byte AH/BH/CH/DH are the only supported view
+	// whose slice does not begin at bit zero.
+	switch tok {
+	case "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp":
+		return regView{width: 64}, true
+	case "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp":
+		return regView{width: 32, zeroExtendWrite: true}, true
+	case "ax", "bx", "cx", "dx", "si", "di":
+		return regView{width: 16}, true
+	case "al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl":
+		return regView{width: 8}, true
+	case "ah", "bh", "ch", "dh":
+		return regView{width: 8, shift: 8}, true
+	}
+	return regView{}, false
+}
+
+func regBitMask(width uint) uint64 {
+	if width >= 64 {
+		return ^uint64(0)
+	}
+	return (uint64(1) << width) - 1
+}
+
+func truncateRegExpr(expr string, width uint) string {
+	if width >= 64 {
+		return expr
+	}
+	mask := regBitMask(width)
+	if v, ok := parseImm(expr); ok {
+		return strconv.FormatUint(uint64(v)&mask, 10)
+	}
+	return fmt.Sprintf("(%s & 0x%x)", expr, mask)
+}
+
+func readRegView(tok, full string) string {
+	v, ok := gprView(tok)
+	if !ok || v.width == 64 {
+		return full
+	}
+	if imm, ok := parseImm(full); ok {
+		return strconv.FormatUint((uint64(imm)>>v.shift)&regBitMask(v.width), 10)
+	}
+	if v.shift == 0 {
+		return truncateRegExpr(full, v.width)
+	}
+	return fmt.Sprintf("((%s >> %d) & 0x%x)", full, v.shift, regBitMask(v.width))
+}
+
+func writeRegView(tok, oldFull, value string) string {
+	v, ok := gprView(tok)
+	if !ok || v.width == 64 {
+		return value
+	}
+	if v.zeroExtendWrite {
+		return truncateRegExpr(value, v.width)
+	}
+	if oldFull == "" {
+		oldFull = canonReg(tok)
+	}
+	mask := regBitMask(v.width) << v.shift
+	if oldImm, okOld := parseImm(oldFull); okOld {
+		if newImm, okNew := parseImm(value); okNew {
+			u := (uint64(oldImm) &^ mask) | ((uint64(newImm) << v.shift) & mask)
+			return strconv.FormatUint(u, 10)
+		}
+	}
+	insert := truncateRegExpr(value, v.width)
+	if v.shift != 0 {
+		insert = fmt.Sprintf("(%s << %d)", insert, v.shift)
+	}
+	return fmt.Sprintf("((%s & 0x%x) | %s)", oldFull, ^mask, insert)
 }
 
 // stackComputedSlot recognises a symbolic value that is a computed SP-relative
@@ -166,16 +295,22 @@ const maxForwardedExprLen = 240
 // the over-long value is dropped instead, which is what the fixpoint already
 // does whenever predecessors disagree.
 func (s *LiftState) setReg(dst, val string) {
+	key := canonReg(dst)
+	old := s.Regs[key]
+	if old == ffiCallTargetSentinel || strings.HasPrefix(old, thrStubSentinelPrefix) {
+		old = key
+	}
+	val = writeRegView(dst, old, val)
 	if len(val) > maxForwardedExprLen {
 		if s.spillSeq == nil {
-			delete(s.Regs, canonReg(dst))
+			delete(s.Regs, key)
 			return
 		}
 		*s.spillSeq++
 		name := fmt.Sprintf("_t%d", *s.spillSeq)
 		s.Spills = append(s.Spills, fmt.Sprintf("var %s = %s;", name, val))
-		s.Regs[canonReg(dst)] = name
+		s.Regs[key] = name
 		return
 	}
-	s.Regs[canonReg(dst)] = val
+	s.Regs[key] = val
 }

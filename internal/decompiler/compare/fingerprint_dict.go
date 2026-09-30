@@ -17,11 +17,10 @@ const (
 	maxDictionaryLineBytes          = 1 << 20
 )
 
-// FunctionFingerprint is a content hash of a function's raw instruction
-// bytes, used to identify the same function across different compiled
-// binaries. Functions compiled from the same Dart source with the same
-// SDK version, arch, and compiler flags produce near-identical machine
-// code, so the same fingerprint appears in multiple apps.
+// FunctionFingerprint is a content hash of raw instruction bytes. It is useful
+// for finding cross-binary CANDIDATES, not proving semantic function identity:
+// pool-relative instructions can be byte-identical while the referenced object
+// pool entries differ, and trivial functions can share machine code.
 //
 // This is the implementation of Tier 4 item 13 (known-function
 // dictionary): hash compiled bodies from the SDK and popular packages,
@@ -54,10 +53,9 @@ func ComputeFingerprint(code []byte, name, owner string) FunctionFingerprint {
 	}
 }
 
-// FunctionDictionary is a lookup from instruction-byte hash to
-// function name. Built from samples where names ARE recovered
-// (via symtab, snapshot metadata, or other means), then applied
-// to samples where names are NOT recovered.
+// FunctionDictionary is a lookup from instruction-byte hash to candidate name.
+// Consumers must treat Lookup/LookupCode as heuristic evidence and must not
+// overwrite authoritative snapshot/compiler metadata from it alone.
 //
 // Usage:
 //  1. Build: run aotopsy on a sample with .symtab, collect

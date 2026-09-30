@@ -167,6 +167,33 @@ func TestResolvePoolDisplayZeroStringCIDDoesNotMatchUnknownCID(t *testing.T) {
 	}
 }
 
+func TestExactTypeNameIsExactOrEmpty(t *testing.T) {
+	pl := &PoolLookups{
+		TypeTestingStubNames: map[int]string{
+			40: "TypeTestingStub_List<String>",
+		},
+		BaseObjectNames: []string{
+			"null", "sentinel", "<dynamic type>", "<void type>",
+		},
+		// TypeNames is intentionally looser display metadata. It must never be
+		// consulted by ExactTypeName or `List` below would look precise while
+		// dropping its serialized type argument.
+		TypeNames: map[int]string{41: "List"},
+	}
+	if got := pl.ExactTypeName(40); got != "List<String>" {
+		t.Fatalf("exact Type name = %q, want List<String>", got)
+	}
+	if got := pl.ExactTypeName(3); got != "dynamic" {
+		t.Fatalf("dynamic base-object type = %q", got)
+	}
+	if got := pl.ExactTypeName(4); got != "void" {
+		t.Fatalf("void base-object type = %q", got)
+	}
+	if got := pl.ExactTypeName(41); got != "" {
+		t.Fatalf("best-effort TypeNames leaked into exact signature path: %q", got)
+	}
+}
+
 func TestIsolateNameAndOwnerDoNotCrossIntoHighVMRefs(t *testing.T) {
 	ct := &snapshot.CIDTable{Class: 4, Field: 10, OneByteString: 20}
 	vmClass := &cluster.NamedObject{CID: ct.Class, RefID: 100, NameRefID: 8, OwnerRefID: -1}

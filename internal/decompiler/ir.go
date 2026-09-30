@@ -130,11 +130,11 @@ type FuncIR struct {
 	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
 	ArgsDescReg string
 
-	// FpuArgRegs holds the FPU argument register names (ARM64: v0-v5;
-	// x86_64: xmm1-xmm6) in calling-convention order. Used by the lifter
-	// to recognize FPU argument patterns and by the emitter to display
-	// double/float parameters. Empty when the architecture has no FPU
-	// calling convention (not currently the case for either supported arch).
+	// FpuArgRegs holds the architecture's possible FPU argument registers
+	// (ARM64: v0-v5; x86_64: xmm1-xmm6) in calling-convention allocation order.
+	// It is ABI metadata, NOT proof that a particular source parameter occupies
+	// one of these slots: exact per-function Representation/unboxing is required
+	// for that mapping and is not always serialized in Full AOT.
 	FpuArgRegs []string
 	// FpuReturnReg holds the FPU return register name (ARM64: v0; x86_64:
 	// xmm0). Used to recognize double return values.
@@ -310,17 +310,21 @@ type FuncIR struct {
 	// EmitPseudocode runs.
 	FieldNameResolver func(classID int, byteOffset int64) string `json:"-"`
 
-	// IsAsync is set for async/async* functions from SDK-classified direct or THR
-	// stubs, plus independent SuspendState evidence populated by analysis callers.
-	// sync* generator stubs deliberately do not set it.
+	// IsAsync is set from the serialized Function modifier when owner metadata is
+	// available, with SDK-classified suspendable stubs as a fallback while walking
+	// code. async* also sets it; sync* deliberately does not.
 	IsAsync bool `json:"-"`
+	// SuspendModifierKnown means IsAsync/IsSyncStar/IsAsyncStar came from the
+	// serialized Function modifier. When true, code-pattern/stub detection may
+	// corroborate the value but must not override it.
+	SuspendModifierKnown bool `json:"-"`
 
 	// IsSyncStar is set when the function is detected as a sync* generator.
-	// Detection comes from SDK-classified Init/Suspend sync-star stubs.
+	// Prefer serialized Function modifier; SDK-classified stubs are a fallback.
 	IsSyncStar bool `json:"-"`
 
 	// IsAsyncStar is set when the function is detected as an async* generator.
-	// Detection comes from SDK-classified Init/Yield/Return async-star stubs.
+	// Prefer serialized Function modifier; SDK-classified stubs are a fallback.
 	IsAsyncStar bool `json:"-"`
 
 	// SwitchCases holds recovered switch/case dispatch info for indirect
@@ -343,8 +347,10 @@ type FuncIR struct {
 	// FieldNameResolver can use it for per-class field name resolution.
 	ReceiverClassID int `json:"-"`
 
-	// ReturnType holds the recovered or inferred return type name (e.g. "String", "int", "bool", "void").
-	// When non-empty, the signature emits `<ReturnType> funcName(...)` instead of `dynamic funcName(...)`.
+	// ReturnType holds an exact return type name recovered from serialized
+	// Function/FunctionType result_type metadata. It is intentionally empty when
+	// the complete type cannot be reconstructed; the emitter then uses dynamic
+	// rather than inferring a type from the function's spelling or body.
 	ReturnType string `json:"-"`
 
 	// ClassNameToID maps a class name to its class ID. It lets the emitter tag a
@@ -434,7 +440,28 @@ type ExceptionHandlerEntry struct {
 // BlockByVA resolves a block by its start address.
 func (f *FuncIR) BlockByVA(va uint64) (int, bool) {
 	id, ok := f.blockByVA[va]
-	return id, ok
+	if ok && id >= 0 && id < len(f.Blocks) {
+		return id, true
+	}
+	// FuncIR is exported and a few callers/tests construct it directly rather
+	// than through addBlock, leaving blockByVA nil. Fall back to a bounded scan
+	// instead of silently treating EntryVA/branch targets as block 0/missing.
+	for i := range f.Blocks {
+		if f.Blocks[i].StartVA == va {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (f *FuncIR) entryBlockID() (int, bool) {
+	if len(f.Blocks) == 0 {
+		return 0, false
+	}
+	if id, ok := f.BlockByVA(f.EntryVA); ok {
+		return id, true
+	}
+	return 0, false
 }
 
 func newFuncIR(name string, entryVA uint64) *FuncIR {

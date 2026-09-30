@@ -236,6 +236,29 @@ func funcKindLayoutFor(profile *snapshot.VersionProfile) *funcKindLayout {
 // nonzero field means suspendable.
 const kindTagModifierMask uint32 = 0b11 << 14
 
+// FunctionModifier is UntaggedFunction::AsyncModifier normalized directly from
+// kind_tag_. Unlike FunctionKind, these ordinals and their two-bit position are
+// stable across every supported SDK release:
+//
+//	kNoModifier = 0, kAsync = 1, kSyncGen = 2, kAsyncGen = 3
+//
+// Verified in raw_object.h/object.h at 2.10.0, 2.17.6, 2.18.0 and 3.13.0;
+// Function::IsAsyncFunction/IsSyncGenerator/IsAsyncGenerator compare the field
+// to exactly these values. HasKindTag on NamedObject distinguishes a genuine
+// FunctionModifierNone from metadata that was not captured.
+type FunctionModifier uint8
+
+const (
+	FunctionModifierNone FunctionModifier = iota
+	FunctionModifierAsync
+	FunctionModifierSyncStar
+	FunctionModifierAsyncStar
+)
+
+func decodeFunctionModifier(kindTag uint32) FunctionModifier {
+	return FunctionModifier((kindTag & kindTagModifierMask) >> 14)
+}
+
 type functionKindTagFlagLayout struct {
 	staticBit   uint
 	nativeBit   uint

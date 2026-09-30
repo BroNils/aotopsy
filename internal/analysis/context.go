@@ -605,33 +605,58 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	return fir, nil
 }
 
-// enrichSignatureAndAsync attaches parameter types, generic type parameters,
-// named-parameter names, local type hints, and SuspendState async detection to
-// fir — the signature/async enrichment the cmd funcIRBuilder applies, so the
-// pipeline path (export-dart, ffitrace, strxref, census) produces the same
-// FuncIR rather than a poorer one.
+// enrichSignatureAndAsync attaches exact serialized signature metadata and the
+// Function modifier to fir. Function.kind_tag_ is present in Full AOT across
+// every supported release and its two ModifierBits distinguish async, sync* and
+// async* exactly; no pool/load heuristic is needed.
 func (c *AnalysisContext) enrichSignatureAndAsync(fir *decompiler.FuncIR, r cluster.CodeRange) {
 	// ensureDecompileMaps early-returns on a minimal Context (nil Result/Pool/Info),
 	// leaving the enrichment resolvers nil; nothing to attach then.
-	if c.Pool == nil || c.Enrichment.TypeParams == nil {
+	if c.Pool == nil || c.Enrichment == nil {
 		return
 	}
 	ce := cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index}
-	if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex, c.Pool.CT); ok && owner != nil && owner.SignatureRefID > 0 {
-		if ft, ok := c.Enrichment.ParamFuncTypeByRef[owner.SignatureRefID]; ok {
-			names := c.Enrichment.TypeParams.ParamTypeNames(*ft)
-			if ft.HasImplicit && len(names) > 0 {
-				names = names[1:] // drop the implicit receiver's own type
+	if owner, ok := naming.ResolveCodeOwner(ce, c.Pool.RefToNamed, c.Enrichment.ParamTypeByCodeIndex, c.Pool.CT); ok && owner != nil {
+		if owner.HasKindTag {
+			fir.SuspendModifierKnown = true
+			switch owner.FuncModifier {
+			case cluster.FunctionModifierAsync:
+				fir.IsAsync = true
+			case cluster.FunctionModifierSyncStar:
+				fir.IsSyncStar = true
+			case cluster.FunctionModifierAsyncStar:
+				fir.IsAsync = true
+				fir.IsAsyncStar = true
 			}
-			fir.ParamTypeNames = names
-			fir.NamedParamNames = c.Enrichment.TypeParams.NamedParamNames(*ft)
 		}
-		if params := c.Enrichment.FuncTypeGenerics[owner.SignatureRefID]; len(params) > 0 {
-			out := make([]string, len(params))
-			for i, p := range params {
-				out[i] = p.String()
+		// Return type is serialized metadata, not a naming convention. Dart 2.10
+		// stores result_type directly on Function; 2.12+ reaches it through the
+		// FunctionType signature. ExactTypeName is deliberately exact-or-empty so
+		// unresolved generics/nullability degrade to dynamic instead of a plausible
+		// but fabricated signature.
+		resultTypeRef := owner.ResultTypeRefID
+		if owner.SignatureRefID > 0 {
+			if ft, ok := c.Enrichment.ParamFuncTypeByRef[owner.SignatureRefID]; ok {
+				resultTypeRef = ft.ResultTypeRefID
+				if c.Enrichment.TypeParams != nil {
+					names := c.Enrichment.TypeParams.ParamTypeNames(*ft)
+					if ft.HasImplicit && len(names) > 0 {
+						names = names[1:] // drop the implicit receiver's own type
+					}
+					fir.ParamTypeNames = names
+					fir.NamedParamNames = c.Enrichment.TypeParams.NamedParamNames(*ft)
+				}
 			}
-			fir.TypeParamNames = out
+			if params := c.Enrichment.FuncTypeGenerics[owner.SignatureRefID]; len(params) > 0 {
+				out := make([]string, len(params))
+				for i, p := range params {
+					out[i] = p.String()
+				}
+				fir.TypeParamNames = out
+			}
+		}
+		if resultTypeRef > cluster.RefNull {
+			fir.ReturnType = c.Pool.ExactTypeName(resultTypeRef)
 		}
 	}
 	if len(fir.ParamTypeNames) > 0 {
@@ -639,26 +664,6 @@ func (c *AnalysisContext) enrichSignatureAndAsync(fir *decompiler.FuncIR, r clus
 		for i, tn := range fir.ParamTypeNames {
 			if tn != "" {
 				fir.LocalTypeHints[fmt.Sprintf("arg%d", i)] = tn
-			}
-		}
-	}
-	// Async state machine: a SuspendState CID loaded from the pool marks the
-	// function as async (drives the await/async-for linearizer).
-	if !fir.IsAsync && c.Info != nil && c.Info.Version.CIDs.SuspendState != 0 {
-		for bi := range fir.Blocks {
-			for _, ins := range fir.Blocks[bi].Instrs {
-				if ins.Op != decompiler.OpLoadPool || ins.PoolIndex < 0 {
-					continue
-				}
-				if pe, ok := c.Enrichment.PoolByIndex[ins.PoolIndex]; ok {
-					if cid, ok2 := c.Pool.RefCID[pe.RefID]; ok2 && cid == c.Info.Version.CIDs.SuspendState {
-						fir.IsAsync = true
-						break
-					}
-				}
-			}
-			if fir.IsAsync {
-				break
 			}
 		}
 	}
