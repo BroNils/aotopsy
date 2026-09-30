@@ -206,7 +206,7 @@ func readFuncTypeScalar(s *dartfmt.Stream, si int, ref int, paramTypesRef, typeP
 // completes the object (si == 1), or nil otherwise.
 func readFieldScalar(s *dartfmt.Stream, si int, ref int, nameRef, ownerRef, sigRef, fieldTypeRef int, state *scalarState, i, count int, op ScalarOp) (*FieldInfo, error) {
 	if si == 0 {
-		// kind_bits is uint16 through Dart 3.9 and uint32 from 3.10.7.
+		// kind_bits is uint16 through Dart 3.9 and uint32 from 3.10.0.
 		// Honor the spec's scalar width instead of always using Read32: the
 		// encodings overlap for small values, but their accepted domains do not.
 		switch op {

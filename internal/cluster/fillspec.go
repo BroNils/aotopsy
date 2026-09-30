@@ -46,7 +46,9 @@ const (
 	FillExternalTypedData
 
 	// FillSimd128 reads the raw 16-byte simd128_value_t payload used by
-	// Int32x4/Float32x4/Float64x2 from Dart 3.4.3 onward.
+	// Int32x4/Float32x4/Float64x2 from Dart 3.4.0 onward (SDK: the serializer case
+	// exists in 3.4.0..3.4.4 and never in 3.3.x; Simd128DeserializationCluster
+	// ReadFill is ReadBytes(sizeof(simd128_value_t))).
 	FillSimd128
 
 	// FillDeltaEncodedTypedData is the special CID-1 cluster introduced in
@@ -371,9 +373,11 @@ func specField(fillRefUnsigned bool, dartVersion string) FillSpec {
 	// ReadRef(host_offset_or_field_id). The conditional trailing field_id from
 	// the older layout is gone here: static fields serialize the Smi field id as
 	// value_or_offset itself.
-	// 3.10.7+ widens kind_bits to uint32_t; the rest of the shape is unchanged.
+	// 3.10.0+ widens kind_bits to uint32_t; the rest of the shape is unchanged.
+	// SDK: FieldSerializationCluster::WriteFill is Write<uint16_t>(kind_bits_)
+	// through 3.9.4 and Write<uint32_t> from 3.10.0.
 	kindBitsOp := OpUint16
-	if snapshot.VersionAtLeast(dartVersion, "3.10.7") {
+	if snapshot.VersionAtLeast(dartVersion, "3.10.0") {
 		kindBitsOp = OpTagged32
 	}
 	return FillSpec{
@@ -442,9 +446,11 @@ func specLibrary() FillSpec {
 }
 
 func specNamespace(dartVersion string) FillSpec {
-	// 2.10/2.12 serialize the full pointer range: library, show_names,
-	// hide_names, metadata_field = 4 refs. Dart 2.13 changes to_snapshot(kFullAOT)
-	// to stop at target/library only; every later supported release keeps 1 ref.
+	// 2.10/2.12 serialize the full pointer range (to_snapshot returns to()): 2.10
+	// has library, show_names, hide_names, metadata_field; 2.12 has target,
+	// show_names, hide_names, owner -- 4 refs either way. Dart 2.13 changes
+	// to_snapshot(kFullAOT) to stop at target only; every later supported release
+	// keeps 1 ref. TestFillLayoutsMatchSDK derives this from raw_object.h per tag.
 	numRefs := 1
 	if !snapshot.VersionAtLeast(dartVersion, "2.13.0") {
 		numRefs = 4
@@ -666,19 +672,25 @@ func specRegExp(dartVersion string) FillSpec {
 	// 2.13-3.3.0: ReadFromTo = 10 refs (capture_name_map, pattern, one_byte, two_byte,
 	//   external_one_byte, external_two_byte, one_byte_sticky, two_byte_sticky,
 	//   external_one_byte_sticky, external_two_byte_sticky).
-	// ≥3.4.3: ReadFromTo = 6 refs (external_* fields removed).
+	// ≥3.4.0: ReadFromTo = 6 refs (external_* fields removed).
 	// Scalars are two int32 register counts followed by RegExp flags. The flags
-	// field itself changed width at 3.12.2: through 3.11 it is Read<int8_t>(),
-	// while 3.12.2+ uses Read<uint32_t>() (new flag bits no longer fit in the old
+	// field itself changed width at 3.12.0: through 3.11 it is Read<int8_t>(),
+	// while 3.12.0+ uses Read<uint32_t>() (new flag bits no longer fit in the old
 	// byte representation).
+	//
+	// SDK (UntaggedRegExp VISIT_FROM..VISIT_TO): 2.12.0 num_bracket_expressions..
+	// external_two_byte_sticky (11); 2.13.0..3.3.4 capture_name_map..
+	// external_two_byte_sticky (10); 3.4.0 onward capture_name_map..two_byte_sticky
+	// (6). RegExpSerializationCluster::WriteFill: Write<int8_t>(type_flags_) in
+	// 3.10.7/3.11.x, Write<uint32_t>(flags_) in 3.12.0/3.12.1/3.12.2/3.13.
 	numRefs := 11
-	if snapshot.VersionAtLeast(dartVersion, "3.4.3") {
+	if snapshot.VersionAtLeast(dartVersion, "3.4.0") {
 		numRefs = 6
 	} else if snapshot.VersionAtLeast(dartVersion, "2.13.0") {
 		numRefs = 10
 	}
 	flagOp := OpInt8
-	if snapshot.VersionAtLeast(dartVersion, "3.12.2") {
+	if snapshot.VersionAtLeast(dartVersion, "3.12.0") {
 		flagOp = OpTagged32
 	}
 	return FillSpec{
@@ -962,9 +974,9 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	case cid == ct.Double:
 		return FillSpec{Kind: FillDouble, NameIdx: -1, OwnerIdx: -1}
 	case cid == ct.Float32x4, cid == ct.Int32x4, cid == ct.Float64x2:
-		if !snapshot.VersionAtLeast(profile.DartVersion, "3.4.3") {
+		if !snapshot.VersionAtLeast(profile.DartVersion, "3.4.0") {
 			// These CIDs existed earlier, but NewClusterForClass had no SIMD case
-			// through 3.3.0, so a Full-AOT cluster under them is invalid.
+			// through 3.3.4, so a Full-AOT cluster under them is invalid.
 			return specUnsupported()
 		}
 		return FillSpec{Kind: FillSimd128, NameIdx: -1, OwnerIdx: -1}

@@ -14,8 +14,10 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		return 0, fmt.Errorf("CID %d has no DeltaEncodedTypedData Full-AOT cluster before Dart 2.19.0", cid)
 	}
 	if ct != nil && (cid == ct.Float32x4 || cid == ct.Int32x4 || cid == ct.Float64x2) &&
-		!snapshot.VersionAtLeast(profile.DartVersion, "3.4.3") {
-		return 0, fmt.Errorf("SIMD CID %d has no Full-AOT serialization cluster before Dart 3.4.3", cid)
+		!snapshot.VersionAtLeast(profile.DartVersion, "3.4.0") {
+		// SDK: Serializer::NewClusterForClass gains the Simd128SerializationCluster
+		// case in 3.4.0 (absent in every 3.3.x tag, present 3.4.0 onward).
+		return 0, fmt.Errorf("SIMD CID %d has no Full-AOT serialization cluster before Dart 3.4.0", cid)
 	}
 	kind := ClassifyAlloc(cid, ct)
 	// v2.12 and earlier (NoCanonicalSetData): canonical sets are rebuilt in memory
