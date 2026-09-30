@@ -297,6 +297,11 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 					c.tag, c.table.TypedDataCidStride, stride)
 			}
 
+			ffiFirst, ffiLast, err := ffiMarkerRange(c.tag, enum)
+			if err != nil {
+				t.Fatalf("derive FFI type-marker range @%s: %v", c.tag, err)
+			}
+
 			v := reflect.ValueOf(*c.table)
 			ty := v.Type()
 			checked, absent := 0, 0
@@ -308,6 +313,24 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 				got := int(v.Field(i).Int())
 				if f.Name == "TypedDataCidStride" {
 					continue // checked above, against the macro template
+				}
+				if f.Name == "FfiMarkerFirstCid" || f.Name == "FfiMarkerLastCid" {
+					want := ffiFirst
+					if f.Name == "FfiMarkerLastCid" {
+						want = ffiLast
+					}
+					if got != want {
+						t.Errorf("%s: %s = %d, but CLASS_LIST_FFI_TYPE_MARKER routed by NewClusterForClass @%s gives %d\n"+
+							"  Before 2.16.0 the serializer has no such case and the range must be 0/0;\n"+
+							"  a non-zero range there accepts a cluster the SDK never writes.",
+							c.tag, f.Name, got, c.tag, want)
+					}
+					if want == 0 {
+						absent++
+					} else {
+						checked++
+					}
+					continue
 				}
 				want, ok := lookupCID(enum, f.Name)
 				if got == 0 {
@@ -397,6 +420,63 @@ func lookupCID(enum map[string]int, field string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ffiMarkerRange derives what CIDTable.FfiMarkerFirstCid/FfiMarkerLastCid must
+// hold for one SDK tag: the id range Serializer::NewClusterForClass routes
+// through InstanceSerializationCluster via CLASS_LIST_FFI_TYPE_MARKER.
+//
+// Two things decide it and both are read from the tag rather than assumed:
+//   - the serializer must actually have that case. It appears in 2.16.0; before
+//     that, NewClusterForClass returns nullptr for these classes, so a cluster
+//     under them is malformed and the table must hold 0/0.
+//   - the range is the macro's expansion, whose first and last entries (and
+//     length) change between releases.
+func ffiMarkerRange(tag string, enum map[string]int) (first, last int, err error) {
+	var snap string
+	for _, name := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
+		if snap, err = sdktest.SDKFileAtTag(name, tag); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	start := strings.Index(snap, "Serializer::NewClusterForClass")
+	if start < 0 {
+		return 0, 0, cidError("Serializer::NewClusterForClass not found at " + tag)
+	}
+	body := snap[start:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "CLASS_LIST_FFI_TYPE_MARKER(") {
+		return 0, 0, nil
+	}
+	src, err := sdktest.SDKFileAtTag("runtime/vm/class_id.h", tag)
+	if err != nil {
+		return 0, 0, err
+	}
+	classes, err := cmacro.Expand(cmacro.ParseMacros(src), "CLASS_LIST_FFI_TYPE_MARKER")
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(classes) == 0 {
+		return 0, 0, cidError("CLASS_LIST_FFI_TYPE_MARKER expanded to nothing at " + tag)
+	}
+	for i, c := range classes {
+		id, ok := enum["Ffi"+c]
+		if !ok {
+			return 0, 0, cidError("kFfi" + c + "Cid missing from the ClassId enum at " + tag)
+		}
+		if i == 0 {
+			first = id
+		} else if id != first+i {
+			return 0, 0, cidError("CLASS_LIST_FFI_TYPE_MARKER is not a contiguous id range at " + tag)
+		}
+		last = id
+	}
+	return first, last, nil
 }
 
 // TestNumPredefinedCidsMatchSDK checks the derived enum terminates where

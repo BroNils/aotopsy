@@ -385,6 +385,11 @@ type CIDTable struct {
 	// predefined FFI CIDs through InstanceSerializationCluster; the neighboring
 	// FfiNativeFunction/FfiNativeType/FfiStruct (and older Pointer/
 	// DynamicLibrary entries) do not take that path.
+	//
+	// 0/0 before Dart 2.16.0: the serializer has no such case there, so a
+	// cluster under these CIDs is malformed and must not be accepted as an
+	// Instance. TestCIDTablesMatchSDK derives both the presence of the case and
+	// the range from each tag.
 	FfiMarkerFirstCid int
 	FfiMarkerLastCid  int
 
@@ -527,7 +532,6 @@ var cidsV210 = CIDTable{
 	String: 80, OneByteString: 81, TwoByteString: 82,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 108, ByteDataViewCid: 150, TypedDataCidStride: 3,
-	FfiMarkerFirstCid: 92, FfiMarkerLastCid: 104,
 	NumPredefinedCids: 156,
 }
 
@@ -570,7 +574,6 @@ var cidsV212 = CIDTable{
 	String: 77, OneByteString: 78, TwoByteString: 79,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 100, ByteDataViewCid: 142, TypedDataCidStride: 3,
-	FfiMarkerFirstCid: 84, FfiMarkerLastCid: 96,
 	NumPredefinedCids: 148,
 }
 
@@ -605,7 +608,6 @@ var cidsV213 = CIDTable{
 	String: 77, OneByteString: 78, TwoByteString: 79,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 100, ByteDataViewCid: 142, TypedDataCidStride: 3,
-	FfiMarkerFirstCid: 84, FfiMarkerLastCid: 96,
 	NumPredefinedCids: 148,
 }
 
@@ -638,7 +640,6 @@ var cidsV214 = CIDTable{
 	String: 81, OneByteString: 82, TwoByteString: 83,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 104, ByteDataViewCid: 146, TypedDataCidStride: 3,
-	FfiMarkerFirstCid: 88, FfiMarkerLastCid: 100,
 	NumPredefinedCids: 152,
 }
 
@@ -681,7 +682,6 @@ var cidsV215 = CIDTable{
 	String: 84, OneByteString: 85, TwoByteString: 86,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 106, ByteDataViewCid: 148, TypedDataCidStride: 3,
-	FfiMarkerFirstCid: 90, FfiMarkerLastCid: 103,
 	NativePointerCid: 1, NumPredefinedCids: 154,
 }
 

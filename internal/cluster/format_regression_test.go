@@ -419,7 +419,7 @@ func TestSimd128ClusterBoundaryAndRawPayload(t *testing.T) {
 }
 
 func TestGenericInstanceFallbackRejectsUnknownPredefinedCIDs(t *testing.T) {
-	for _, version := range []string{"2.10.0", "2.18.0", "3.13.0"} {
+	for _, version := range []string{"2.10.0", "2.15.0", "2.16.0", "2.18.0", "3.13.0"} {
 		t.Run(version, func(t *testing.T) {
 			profile := snapshot.ProfileForVersion(version)
 			if profile == nil || profile.CIDs == nil {
@@ -437,15 +437,23 @@ func TestGenericInstanceFallbackRejectsUnknownPredefinedCIDs(t *testing.T) {
 				t.Fatalf("Smi CID %d fill kind=%d, want FillUnknown", smiCID, got)
 			}
 
-			if ct.FfiMarkerFirstCid == 0 || ct.FfiMarkerLastCid < ct.FfiMarkerFirstCid {
-				t.Fatalf("invalid FFI marker range %d..%d", ct.FfiMarkerFirstCid, ct.FfiMarkerLastCid)
-			}
-			ffiCID := ct.FfiMarkerFirstCid
-			if got := ClassifyAlloc(ffiCID, ct); got != AllocInstance {
-				t.Fatalf("FFI marker CID %d alloc kind=%d, want AllocInstance", ffiCID, got)
-			}
-			if got := GetFillSpec(ffiCID, &ClusterMeta{CID: ffiCID}, profile).Kind; got != FillInstance {
-				t.Fatalf("FFI marker CID %d fill kind=%d, want FillInstance", ffiCID, got)
+			if !snapshot.VersionAtLeast(version, "2.16.0") {
+				// NewClusterForClass only gains the CLASS_LIST_FFI_TYPE_MARKER case
+				// in 2.16.0, so before it there is no FFI range to accept.
+				if ct.FfiMarkerFirstCid != 0 || ct.FfiMarkerLastCid != 0 {
+					t.Fatalf("pre-2.16 FFI marker range = %d..%d, want 0..0", ct.FfiMarkerFirstCid, ct.FfiMarkerLastCid)
+				}
+			} else {
+				if ct.FfiMarkerFirstCid == 0 || ct.FfiMarkerLastCid < ct.FfiMarkerFirstCid {
+					t.Fatalf("invalid FFI marker range %d..%d", ct.FfiMarkerFirstCid, ct.FfiMarkerLastCid)
+				}
+				ffiCID := ct.FfiMarkerFirstCid
+				if got := ClassifyAlloc(ffiCID, ct); got != AllocInstance {
+					t.Fatalf("FFI marker CID %d alloc kind=%d, want AllocInstance", ffiCID, got)
+				}
+				if got := GetFillSpec(ffiCID, &ClusterMeta{CID: ffiCID}, profile).Kind; got != FillInstance {
+					t.Fatalf("FFI marker CID %d fill kind=%d, want FillInstance", ffiCID, got)
+				}
 			}
 
 			appCID := ct.NumPredefinedCids
