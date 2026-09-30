@@ -503,7 +503,9 @@ func skipFillExternalTypedData(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.
 		if pad > s.Remaining() {
 			return fmt.Errorf("external_typed_data %d/%d alignment needs %d bytes, only %d remain", i, cm.Count, pad, s.Remaining())
 		}
-		s.Align(dataAlignment)
+		if err := s.Align(dataAlignment, 0); err != nil {
+			return fmt.Errorf("external_typed_data %d/%d alignment: %w", i, cm.Count, err)
+		}
 		byteLen := length * int64(elementSize)
 		if byteLen > int64(s.Remaining()) {
 			return fmt.Errorf("external_typed_data %d/%d payload %d bytes exceeds remaining %d", i, cm.Count, byteLen, s.Remaining())

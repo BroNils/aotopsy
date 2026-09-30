@@ -9,9 +9,14 @@ import (
 	"unicode"
 )
 
-var macroDefRe = regexp.MustCompile(`(?m)^[\t ]*#[\t ]*define[\t ]+([A-Za-z_]\w*)(\([^)]*\))?(.*)$`)
+var macroDefRe = regexp.MustCompile(`^[\t ]*#[\t ]*define[\t ]+([A-Za-z_]\w*)(.*)$`)
+var defineDirectiveRe = regexp.MustCompile(`^[\t ]*#[\t ]*define(?:[\t ]|$)`)
+var undefDirectiveRe = regexp.MustCompile(`^[\t ]*#[\t ]*undef(?:[\t ]|$)`)
+var macroUndefRe = regexp.MustCompile(`^[\t ]*#[\t ]*undef[\t ]+([A-Za-z_]\w*)[\t ]*$`)
+var conditionalDirectiveRe = regexp.MustCompile(`^[\t ]*#[\t ]*(if|ifdef|ifndef|elif|else|endif)(?:[\t ]|$)`)
 
 const (
+	maxSourceBytes    = 8 << 20
 	maxExpansionDepth = 256
 	maxExpansionSteps = 100000
 	maxExpansionRows  = 100000
@@ -33,9 +38,11 @@ type expansionState struct {
 // Dart headers compose lists as LIST(V) -> SUBLIST(V), and some use F/X/etc.
 // Dropping the formals makes correct nested substitution impossible.
 type Macro struct {
-	Params       []string
-	Body         string
-	FunctionLike bool
+	Params            []string
+	Body              string
+	FunctionLike      bool
+	Ambiguous         bool
+	UnsupportedParams bool
 }
 
 // Macros is the parsed macro table keyed by definition name.
@@ -43,51 +50,173 @@ type Macros map[string]Macro
 
 // ParseMacros returns every #define body in a C/C++ header. Line
 // continuations are joined and comments are removed without treating comment
-// markers inside string/character literals as comments. The last textual
-// definition of a name wins. This is intentionally a definition catalog rather
-// than a full preprocessor: conditional directives and #undef do not remove
-// definitions, because SDK drift checks also inspect list macros after their
-// declaration site has been undefined.
-func ParseMacros(src string) Macros {
+// markers inside string/character literals as comments. This is intentionally a
+// definition catalog rather than a full preprocessor: conditional directives
+// and #undef do not select an active branch. Identical redefinitions are safe;
+// different redefinitions are recorded as ambiguous and fail if a caller tries
+// to expand that name without preprocessing context.
+func ParseMacros(src string) (Macros, error) {
+	if len(src) > maxSourceBytes {
+		return nil, Error(fmt.Sprintf("macro source exceeds byte limit %d", maxSourceBytes))
+	}
 	src = strings.ReplaceAll(src, "\\\r\n", "")
 	src = strings.ReplaceAll(src, "\\\n", "")
-	src = stripComments(src)
+	var err error
+	src, err = stripComments(src)
+	if err != nil {
+		return nil, err
+	}
 	out := Macros{}
-	for _, m := range macroDefRe.FindAllStringSubmatch(src, -1) {
+	type conditionalFrame struct {
+		id     int
+		branch int
+	}
+	var conditionalStack []conditionalFrame
+	nextConditionalID := 0
+	contextKey := func() string {
+		if len(conditionalStack) == 0 {
+			return ""
+		}
+		var b strings.Builder
+		for _, f := range conditionalStack {
+			fmt.Fprintf(&b, "%d:%d/", f.id, f.branch)
+		}
+		return b.String()
+	}
+	lastDefinitionContext := map[string]string{}
+	lastUndefContext := map[string]string{}
+	for lineNo, line := range strings.Split(src, "\n") {
+		if m := conditionalDirectiveRe.FindStringSubmatch(line); m != nil {
+			switch m[1] {
+			case "if", "ifdef", "ifndef":
+				nextConditionalID++
+				conditionalStack = append(conditionalStack, conditionalFrame{id: nextConditionalID})
+			case "elif", "else":
+				if len(conditionalStack) == 0 {
+					return nil, Error(fmt.Sprintf("unmatched #%s at line %d", m[1], lineNo+1))
+				}
+				conditionalStack[len(conditionalStack)-1].branch++
+			case "endif":
+				if len(conditionalStack) == 0 {
+					return nil, Error(fmt.Sprintf("unmatched #endif at line %d", lineNo+1))
+				}
+				conditionalStack = conditionalStack[:len(conditionalStack)-1]
+			}
+			continue
+		}
+		if undefDirectiveRe.MatchString(line) {
+			m := macroUndefRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, Error(fmt.Sprintf("malformed #undef at line %d", lineNo+1))
+			}
+			lastUndefContext[m[1]] = contextKey()
+			continue
+		}
+		if !defineDirectiveRe.MatchString(line) {
+			continue
+		}
+		m := macroDefRe.FindStringSubmatch(line)
+		if m == nil {
+			return nil, Error(fmt.Sprintf("malformed #define at line %d", lineNo+1))
+		}
+		name, rest := m[1], m[2]
+		functionLike := strings.HasPrefix(rest, "(")
+		body := rest
 		var params []string
-		if m[2] != "" {
-			inside := strings.TrimSpace(m[2][1 : len(m[2])-1])
+		unsupportedParams := false
+		if functionLike {
+			close := strings.IndexByte(rest, ')')
+			if close < 0 {
+				return nil, Error(fmt.Sprintf("unterminated formal parameter list for macro %s at line %d", name, lineNo+1))
+			}
+			inside := strings.TrimSpace(rest[1:close])
+			body = rest[close+1:]
 			if inside != "" {
-				for _, p := range strings.Split(inside, ",") {
-					p = strings.TrimSpace(p)
+				seenParam := map[string]bool{}
+				for _, raw := range strings.Split(inside, ",") {
+					p := strings.TrimSpace(raw)
+					if p == "" || !validMacroParam(p) || seenParam[p] {
+						unsupportedParams = true
+					}
 					if p != "" {
 						params = append(params, p)
+						seenParam[p] = true
 					}
 				}
 			}
 		}
-		out[m[1]] = Macro{Params: params, Body: m[3], FunctionLike: m[2] != ""}
+		next := Macro{
+			Params:            params,
+			Body:              body,
+			FunctionLike:      functionLike,
+			UnsupportedParams: unsupportedParams,
+		}
+		ctx := contextKey()
+		if prev, exists := out[name]; exists {
+			resetByUndef := lastUndefContext[name] == ctx && lastDefinitionContext[name] == ctx
+			if !resetByUndef {
+				next.Ambiguous = prev.Ambiguous || !sameMacroDefinition(prev, next)
+			}
+		}
+		out[name] = next
+		lastDefinitionContext[name] = ctx
+		delete(lastUndefContext, name)
 	}
-	return out
+	if len(conditionalStack) != 0 {
+		return nil, Error(fmt.Sprintf("unterminated conditional directive depth %d", len(conditionalStack)))
+	}
+	return out, nil
 }
 
 // ExpandRaw expands one list macro recursively and returns every entry's
 // top-level arguments. The list callback is the root macro's first formal
 // parameter (V/F/X/etc.); object-like lists default to the conventional V.
 func ExpandRaw(macros Macros, name string) ([][]string, error) {
-	m, ok := macros[name]
-	if !ok {
-		return nil, Error("macro " + name + " not found")
+	m, err := expansionMacro(macros, name)
+	if err != nil {
+		return nil, err
 	}
 	callback := "V"
 	if len(m.Params) > 0 {
 		callback = m.Params[0]
 	}
+	callbacks := map[string]bool{callback: true}
 	state := &expansionState{}
 	if err := chargeExpansionBytes(state, len(m.Body)); err != nil {
 		return nil, err
 	}
-	return expandBody(macros, m.Body, callback, map[string]bool{name: true}, state, 0)
+	var out [][]string
+	if err := expandBody(macros, m.Body, callbacks, map[string]bool{name: true}, state, 0, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ExpandRawAllCallbacks expands a list whose root macro has more than one row
+// callback formal. Calls to any root formal are returned in exact source order.
+// This matches Dart's OBJECT_STORE_FIELD_LIST shape, where R_, RW, ARW_* and
+// LAZY_* are all field-row callbacks.
+func ExpandRawAllCallbacks(macros Macros, name string) ([][]string, error) {
+	m, err := expansionMacro(macros, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(m.Params) == 0 {
+		return nil, Error("macro " + name + " has no callback formals")
+	}
+	callbacks := make(map[string]bool, len(m.Params))
+	for _, p := range m.Params {
+		callbacks[p] = true
+	}
+	state := &expansionState{}
+	if err := chargeExpansionBytes(state, len(m.Body)); err != nil {
+		return nil, err
+	}
+	var out [][]string
+	if err := expandBody(macros, m.Body, callbacks, map[string]bool{name: true}, state, 0, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Expand returns the first column of an expanded list.
@@ -117,17 +246,18 @@ func Column(macros Macros, name string, i int) ([]string, error) {
 }
 
 // expandBody walks identifier/call tokens in one instantiated macro body.
-// callback is the entry macro visible in this expansion (usually V).
-func expandBody(macros Macros, body, callback string, seen map[string]bool, state *expansionState, depth int) ([][]string, error) {
+// callbacks contains the row callback identifiers visible in this expansion.
+// All recursion appends into one accumulator so a deep nested-list chain does
+// not repeatedly copy the complete row set on its way back to the root.
+func expandBody(macros Macros, body string, callbacks map[string]bool, seen map[string]bool, state *expansionState, depth int, out *[][]string) error {
 	if depth > maxExpansionDepth {
-		return nil, Error(fmt.Sprintf("macro expansion exceeds depth limit %d", maxExpansionDepth))
+		return Error(fmt.Sprintf("macro expansion exceeds depth limit %d", maxExpansionDepth))
 	}
-	var out [][]string
 	for i := 0; i < len(body); {
 		if body[i] == '\'' || body[i] == '"' {
 			end, ok := quotedLiteralEnd(body, i)
 			if !ok {
-				return nil, Error("unterminated quoted literal in macro body")
+				return Error("unterminated quoted literal in macro body")
 			}
 			i = end
 			continue
@@ -150,19 +280,22 @@ func expandBody(macros Macros, body, callback string, seen map[string]bool, stat
 		if j < len(body) && body[j] == '(' {
 			inner, end, ok := balanced(body, j)
 			if !ok {
-				return nil, Error("unterminated macro invocation " + name)
+				return Error("unterminated macro invocation " + name)
 			}
 			i = end
-			args := SplitTopLevel(inner)
-			if name == callback {
+			args, err := SplitTopLevel(inner)
+			if err != nil {
+				return Error(fmt.Sprintf("malformed arguments to %s: %v", name, err))
+			}
+			if callbacks[name] {
 				if len(args) == 1 && args[0] == "" {
-					continue
+					return Error("empty callback row for " + name)
 				}
 				state.rows++
 				if state.rows > maxExpansionRows {
-					return nil, Error(fmt.Sprintf("macro expansion exceeds row limit %d", maxExpansionRows))
+					return Error(fmt.Sprintf("macro expansion exceeds row limit %d", maxExpansionRows))
 				}
-				out = append(out, args)
+				*out = append(*out, args)
 				continue
 			}
 
@@ -172,10 +305,13 @@ func expandBody(macros Macros, body, callback string, seen map[string]bool, stat
 				// token, so calls inside an entry expression are never visited here.
 				// An unknown call at this level is therefore a missing nested-list
 				// macro and must fail loudly instead of truncating an SDK table.
-				return nil, Error("macro " + name + " not found while expanding list")
+				return Error("macro " + name + " not found while expanding list")
 			}
 			if seen[name] {
-				return nil, Error("recursive macro expansion at " + name)
+				return Error("recursive macro expansion at " + name)
+			}
+			if err := validateExpansionMacro(name, sub); err != nil {
+				return err
 			}
 			if !sub.FunctionLike {
 				// C expands an object-like macro even when the next token happens
@@ -185,18 +321,17 @@ func expandBody(macros Macros, body, callback string, seen map[string]bool, stat
 				// loses every callback row in its replacement list.
 				state.steps++
 				if state.steps > maxExpansionSteps {
-					return nil, Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
+					return Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
 				}
 				if err := chargeExpansionBytes(state, len(sub.Body)); err != nil {
-					return nil, err
+					return err
 				}
 				seen[name] = true
-				vals, err := expandBody(macros, sub.Body, callback, seen, state, depth+1)
+				err := expandBody(macros, sub.Body, callbacks, seen, state, depth+1, out)
 				delete(seen, name)
 				if err != nil {
-					return nil, err
+					return err
 				}
-				out = append(out, vals...)
 				continue
 			}
 			if strings.TrimSpace(inner) == "" {
@@ -206,55 +341,56 @@ func expandBody(macros Macros, body, callback string, seen map[string]bool, stat
 				// Not an invocation of this macro in the parsed form (e.g. a name
 				// collision with an overloaded-looking C call). Only fail when it
 				// clearly participates in the list by mentioning the callback.
-				if containsIdent(inner, callback) {
-					return nil, Error(fmt.Sprintf("macro %s expects %d args, got %d", name, len(sub.Params), len(args)))
+				if containsAnyIdent(inner, callbacks) {
+					return Error(fmt.Sprintf("macro %s expects %d args, got %d", name, len(sub.Params), len(args)))
 				}
 				continue
 			}
 			state.steps++
 			if state.steps > maxExpansionSteps {
-				return nil, Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
+				return Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
 			}
 			remaining := maxExpansionBytes - state.bytes
 			instantiated, err := substituteIdentifiers(sub.Body, sub.Params, args, remaining)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if err := chargeExpansionBytes(state, len(instantiated)); err != nil {
-				return nil, err
+				return err
 			}
 			seen[name] = true
-			vals, err := expandBody(macros, instantiated, callback, seen, state, depth+1)
+			err = expandBody(macros, instantiated, callbacks, seen, state, depth+1, out)
 			delete(seen, name)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			out = append(out, vals...)
 			continue
 		}
 
 		// Object-like nested list macro.
 		if sub, exists := macros[name]; exists && !sub.FunctionLike {
+			if err := validateExpansionMacro(name, sub); err != nil {
+				return err
+			}
 			if seen[name] {
-				return nil, Error("recursive macro expansion at " + name)
+				return Error("recursive macro expansion at " + name)
 			}
 			state.steps++
 			if state.steps > maxExpansionSteps {
-				return nil, Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
+				return Error(fmt.Sprintf("macro expansion exceeds step limit %d", maxExpansionSteps))
 			}
 			if err := chargeExpansionBytes(state, len(sub.Body)); err != nil {
-				return nil, err
+				return err
 			}
 			seen[name] = true
-			vals, err := expandBody(macros, sub.Body, callback, seen, state, depth+1)
+			err := expandBody(macros, sub.Body, callbacks, seen, state, depth+1, out)
 			delete(seen, name)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			out = append(out, vals...)
 		}
 	}
-	return out, nil
+	return nil
 }
 
 func quotedLiteralEnd(s string, start int) (int, bool) {
@@ -324,8 +460,9 @@ func balanced(body string, open int) (string, int, bool) {
 // literals and C++ template angle brackets. Angle brackets are treated as a
 // template only in the common lexical form `Type<...>` (no whitespace before
 // '<'), so shift/comparison expressions such as `kOne >> 1` and `a < b` do not
-// corrupt the nesting depth.
-func SplitTopLevel(s string) []string {
+// corrupt the nesting depth. Unbalanced delimiters fail loudly instead of
+// returning a plausible shorter row.
+func SplitTopLevel(s string) ([]string, error) {
 	var out []string
 	paren, bracket, brace, angle := 0, 0, 0, 0
 	start := 0
@@ -355,24 +492,29 @@ func SplitTopLevel(s string) []string {
 		case '(':
 			paren++
 		case ')':
-			if paren > 0 {
-				paren--
+			if paren == 0 {
+				return nil, Error("unmatched ')' in macro arguments")
 			}
+			paren--
 		case '[':
 			bracket++
 		case ']':
-			if bracket > 0 {
-				bracket--
+			if bracket == 0 {
+				return nil, Error("unmatched ']' in macro arguments")
 			}
+			bracket--
 		case '{':
 			brace++
 		case '}':
-			if brace > 0 {
-				brace--
+			if brace == 0 {
+				return nil, Error("unmatched '}' in macro arguments")
 			}
+			brace--
 		case '<':
 			if looksLikeTemplateOpen(s, k) {
 				angle++
+			} else if looksLikeTemplatePrefix(s, k) && !hasPlausibleTemplateClose(s, k+1) {
+				return nil, Error("unterminated C++ template argument list")
 			}
 		case '>':
 			if angle > 0 {
@@ -390,10 +532,20 @@ func SplitTopLevel(s string) []string {
 			}
 		}
 	}
-	return append(out, strings.TrimSpace(s[start:]))
+	if quote != 0 {
+		return nil, Error("unterminated quoted literal in macro arguments")
+	}
+	if paren != 0 || bracket != 0 || brace != 0 || angle != 0 {
+		return nil, Error(fmt.Sprintf("unbalanced macro arguments: paren=%d bracket=%d brace=%d angle=%d", paren, bracket, brace, angle))
+	}
+	return append(out, strings.TrimSpace(s[start:])), nil
 }
 
 func looksLikeTemplateOpen(s string, i int) bool {
+	return looksLikeTemplatePrefix(s, i) && hasPlausibleTemplateClose(s, i+1)
+}
+
+func looksLikeTemplatePrefix(s string, i int) bool {
 	if i == 0 || unicode.IsSpace(rune(s[i-1])) {
 		return false
 	}
@@ -424,7 +576,7 @@ func looksLikeTemplateOpen(s string, i int) bool {
 			return false
 		}
 	}
-	return hasPlausibleTemplateClose(s, i+1)
+	return true
 }
 
 // hasPlausibleTemplateClose rejects the important ambiguous case `a<b, next`:
@@ -554,7 +706,16 @@ func containsIdent(s, ident string) bool {
 	return false
 }
 
-func stripComments(s string) string {
+func containsAnyIdent(s string, idents map[string]bool) bool {
+	for ident := range idents {
+		if containsIdent(s, ident) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripComments(s string) (string, error) {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		if s[i] == '\'' || s[i] == '"' {
@@ -562,6 +723,7 @@ func stripComments(s string) string {
 			start := i
 			i++
 			escaped := false
+			closed := false
 			for i < len(s) {
 				c := s[i]
 				i++
@@ -574,8 +736,12 @@ func stripComments(s string) string {
 					continue
 				}
 				if c == q {
+					closed = true
 					break
 				}
+			}
+			if !closed {
+				return "", Error("unterminated quoted literal in macro source")
 			}
 			b.WriteString(s[start:i])
 			continue
@@ -591,18 +757,76 @@ func stripComments(s string) string {
 		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
 			b.WriteByte(' ')
 			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+			closed := false
+			for i < len(s) {
+				if i+1 < len(s) && s[i] == '*' && s[i+1] == '/' {
+					i += 2
+					closed = true
+					break
+				}
+				// C preprocessing replaces a block comment with whitespace while
+				// preserving physical newlines. Keeping them also prevents a
+				// following #define from being merged into the previous line.
+				if s[i] == '\n' {
+					b.WriteByte('\n')
+				}
 				i++
 			}
-			if i+1 < len(s) {
-				i += 2
+			if !closed {
+				return "", Error("unterminated block comment in macro source")
 			}
 			continue
 		}
 		b.WriteByte(s[i])
 		i++
 	}
-	return b.String()
+	return b.String(), nil
+}
+
+func validMacroParam(p string) bool {
+	if p == "" || !isIdentStart(p[0]) {
+		return false
+	}
+	for i := 1; i < len(p); i++ {
+		if !isIdentContinue(p[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameMacroDefinition(a, b Macro) bool {
+	if a.Body != b.Body || a.FunctionLike != b.FunctionLike ||
+		a.UnsupportedParams != b.UnsupportedParams || len(a.Params) != len(b.Params) {
+		return false
+	}
+	for i := range a.Params {
+		if a.Params[i] != b.Params[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func expansionMacro(macros Macros, name string) (Macro, error) {
+	m, ok := macros[name]
+	if !ok {
+		return Macro{}, Error("macro " + name + " not found")
+	}
+	if err := validateExpansionMacro(name, m); err != nil {
+		return Macro{}, err
+	}
+	return m, nil
+}
+
+func validateExpansionMacro(name string, m Macro) error {
+	if m.Ambiguous {
+		return Error("macro " + name + " has multiple different definitions; conditional preprocessing context is required")
+	}
+	if m.UnsupportedParams {
+		return Error("macro " + name + " has unsupported formal parameters")
+	}
+	return nil
 }
 
 func isIdentStart(c byte) bool {

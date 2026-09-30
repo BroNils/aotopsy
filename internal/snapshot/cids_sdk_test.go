@@ -41,7 +41,10 @@ func cidEnum(tag string) (map[string]int, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	macros := cmacro.ParseMacros(src)
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	body, err := enumBody(src)
 	if err != nil {
@@ -457,7 +460,11 @@ func ffiMarkerRange(tag string, enum map[string]int) (first, last int, err error
 	if err != nil {
 		return 0, 0, err
 	}
-	classes, err := cmacro.Expand(cmacro.ParseMacros(src), "CLASS_LIST_FFI_TYPE_MARKER")
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return 0, 0, err
+	}
+	classes, err := cmacro.Expand(macros, "CLASS_LIST_FFI_TYPE_MARKER")
 	if err != nil {
 		return 0, 0, err
 	}

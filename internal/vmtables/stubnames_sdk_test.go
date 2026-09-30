@@ -50,7 +50,10 @@ func TestVMStubNamesMatchSDK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cannot verify stub_code_list.h@%s after SDK gate was enabled: %v", tag, err)
 			}
-			macros := cmacro.ParseMacros(src)
+			macros, err := cmacro.ParseMacros(src)
+			if err != nil {
+				t.Fatalf("parse stub macros@%s: %v", tag, err)
+			}
 			full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 			if err != nil {
 				t.Fatalf("expand VM_STUB_CODE_LIST@%s: %v", tag, err)

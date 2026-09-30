@@ -10,9 +10,13 @@ func TestDecodeCompressedStackMapsRejectsTruncatedULEB128(t *testing.T) {
 	}
 }
 
-func TestReadLEB128RejectsOverflow(t *testing.T) {
-	data := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02}
-	if _, _, err := readLEB128(data, 0); err == nil {
-		t.Fatal("overflowing ULEB128 was accepted")
+func TestDecodeCompressedStackMapsRejectsOverflowingULEB128(t *testing.T) {
+	// Ten continuation/final bytes that overflow uint64. Keep the check at the
+	// real CSM caller as well as dartfmt's primitive regression so a future
+	// decoder bypass cannot reintroduce truncation.
+	data := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02}
+	payload := append([]byte{byte(len(data) << 2), 0, 0, 0}, data...)
+	if entries, err := DecodeCompressedStackMaps(payload, nil); err == nil {
+		t.Fatalf("overflowing ULEB128 accepted with entries=%+v", entries)
 	}
 }

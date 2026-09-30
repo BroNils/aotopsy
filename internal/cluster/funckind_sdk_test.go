@@ -102,7 +102,11 @@ func TestFunctionKindTagFlagLayoutsMatchSDK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fetch object.h: %v", err)
 			}
-			flags, err := cmacro.Expand(cmacro.ParseMacros(src), "FOR_EACH_FUNCTION_KIND_BIT")
+			macros, err := cmacro.ParseMacros(src)
+			if err != nil {
+				t.Fatalf("parse object.h macros: %v", err)
+			}
+			flags, err := cmacro.Expand(macros, "FOR_EACH_FUNCTION_KIND_BIT")
 			if err != nil {
 				t.Fatalf("expand FOR_EACH_FUNCTION_KIND_BIT: %v", err)
 			}
@@ -251,5 +255,9 @@ func sdkFunctionKinds(tag string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cmacro.Expand(cmacro.ParseMacros(src), "FOR_EACH_RAW_FUNCTION_KIND")
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
+	return cmacro.Expand(macros, "FOR_EACH_RAW_FUNCTION_KIND")
 }

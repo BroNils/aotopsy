@@ -139,7 +139,7 @@ func DecodeCodeSourceMap(payload []byte) ([]CSMEntry, error) {
 	var pc int64
 	tokenPos := CSMNoPosition
 	var stack *csmInlineFrame
-	s := dartfmt.NewStreamAt(payload, 0)
+	s := dartfmt.NewStream(payload)
 
 	// Record the state at the current PC. Called after every AdvancePC, since
 	// that is what delimits one PC range from the next.

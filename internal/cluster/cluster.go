@@ -233,14 +233,17 @@ type Result struct {
 // If profile is nil, the v3.x format is assumed. isVM indicates whether this
 // is the VM snapshot (affects canonical set handling for strings).
 func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfile, isVM bool, opts dartfmt.Options) (*Result, error) {
-	if clusterStart >= len(data) {
+	if clusterStart < 0 || clusterStart >= len(data) {
 		return nil, fmt.Errorf("cluster: start offset %d beyond data length %d", clusterStart, len(data))
 	}
 	if profile == nil {
 		profile = snapshot.DetectVersion("")
 	}
 
-	s := dartfmt.NewStreamAt(data, clusterStart)
+	s, err := dartfmt.NewStreamAt(data, clusterStart)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: stream start: %w", err)
+	}
 	maxSteps := opts.EffectiveMaxSteps()
 
 	var diags dartfmt.Diags
@@ -248,7 +251,6 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 
 	// Read header values (count depends on version).
 	// Header counts use WriteUnsigned in all versions (even 2.10/2.13).
-	var err error
 	result.Header.NumBaseObjects, err = s.ReadUnsigned()
 	if err != nil {
 		return nil, fmt.Errorf("cluster header: num_base_objects: %w", err)
@@ -399,6 +401,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 
 		// Skip alloc data for this cluster using version-aware CID dispatch.
 		// Mint clusters are handled separately to capture ref→value mapping.
+		allocPos := s.Position()
 		var count int64
 		var err error
 		if ClassifyAlloc(cid, ct) == AllocMint {
@@ -424,9 +427,9 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 					i, cid, name, ak, count, s.Position(), err)
 			}
 			if opts.Mode == dartfmt.ModeStrict {
-				return nil, fmt.Errorf("cluster %d (CID %d %s) alloc skip: %w", i, cid, name, err)
+				return nil, fmt.Errorf("cluster %d (CID %d %s) alloc skip at 0x%x: %w", i, cid, name, allocPos, err)
 			}
-			diags.Addf(uint64(s.Position()), dartfmt.DiagTruncated,
+			diags.Addf(uint64(allocPos), dartfmt.DiagTruncated,
 				"cluster %d (CID %d %s): alloc skip: %v", i, cid, name, err)
 			allocFailed = true
 			cm.EndOffset = s.Position()

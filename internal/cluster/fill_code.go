@@ -65,7 +65,9 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 		if debugFill && (i < 3 || i >= cm.Count-3 || (i >= 21600 && i <= 21610)) {
 			saved := s.Position()
 			hexBytes, _ := s.ReadBytes(30)
-			s.SetPosition(saved)
+			if err := s.SetPosition(saved); err != nil {
+				return codes, fmt.Errorf("code %d/%d debug rewind: %w", i, cm.Count, err)
+			}
 			fmt.Fprintf(os.Stderr, "  code[%d] RAW@0x%x: %x\n", i, posStart, hexBytes)
 		}
 
@@ -147,9 +149,13 @@ func readFillCode(s *dartfmt.Stream, cm *ClusterMeta, ct *snapshot.CIDTable, fil
 					fmt.Fprintf(os.Stderr, "  code[%d] state_bits ERR at pos=0x%x (code start=0x%x)\n", i, sbPos, posStart)
 					// Dump raw bytes from code start.
 					saved := s.Position()
-					s.SetPosition(posStart)
+					if rewindErr := s.SetPosition(posStart); rewindErr != nil {
+						return codes, fmt.Errorf("code %d/%d debug rewind to start: %w", i, cm.Count, rewindErr)
+					}
 					hexBytes, _ := s.ReadBytes(40)
-					s.SetPosition(saved)
+					if rewindErr := s.SetPosition(saved); rewindErr != nil {
+						return codes, fmt.Errorf("code %d/%d debug restore position: %w", i, cm.Count, rewindErr)
+					}
 					fmt.Fprintf(os.Stderr, "  hex@0x%x=%x\n", posStart, hexBytes)
 				}
 				return codes, fmt.Errorf("code %d/%d state_bits: %w", i, cm.Count, err)

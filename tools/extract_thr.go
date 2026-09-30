@@ -209,7 +209,10 @@ func fetchSDKFile(path, tag string) (string, error) {
 // and VM_TYPE_TESTING_STUB_CODE_LIST. Dart 2.10 inlines the type-testing
 // stubs, while later SDKs expand a nested macro at the same semantic point.
 func parseVMStubCodeList(header string) ([]string, error) {
-	macros := cmacro.ParseMacros(header)
+	macros, err := cmacro.ParseMacros(header)
+	if err != nil {
+		return nil, err
+	}
 	return cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 }
 
@@ -367,14 +370,18 @@ func sdkThreadStubNames(tag string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := cmacro.ExpandRaw(cmacro.ParseMacros(src), "CACHED_ADDRESSES_LIST")
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(macros, "CACHED_ADDRESSES_LIST")
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
-	for _, r := range rows {
-		if len(r) < 3 {
-			continue
+	for i, r := range rows {
+		if len(r) != 4 {
+			return nil, fmt.Errorf("CACHED_ADDRESSES_LIST row %d has %d columns, want 4", i, len(r))
 		}
 		m := reStubCtor.FindStringSubmatch(r[2])
 		if m == nil {
@@ -659,7 +666,11 @@ func runEmitRuntimeEntries(tags []string) int {
 			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
 			continue
 		}
-		macros := cmacro.ParseMacros(relSrc)
+		macros, err := cmacro.ParseMacros(relSrc)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			continue
+		}
 		runtime, err := cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
@@ -1060,7 +1071,11 @@ func runCheckRoots() int {
 // countMacroEntries counts entries through the same fail-loud X-macro engine
 // used by every other SDK drift gate.
 func countMacroEntries(header, macroName string) (int, error) {
-	entries, err := cmacro.Expand(cmacro.ParseMacros(header), macroName)
+	macros, err := cmacro.ParseMacros(header)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := cmacro.Expand(macros, macroName)
 	if err != nil {
 		return 0, err
 	}
@@ -1720,38 +1735,24 @@ func objectStoreFields(tag string) ([]string, string, error) {
 		body = src[i:]
 	}
 
-	fieldRe := regexp.MustCompile(`^\s*(R_|RW|CW|FW|ARW_RELAXED|ARW_AR|LAZY_[A-Z]+)\(\s*[\w:]+\s*,\s*(\w+)\s*\)`)
-	macroList := func(macro string) []string {
-		i := strings.Index(src, "#define "+macro)
-		if i < 0 {
-			return nil
-		}
-		var names []string
-		for _, ln := range strings.Split(src[i:], "\n")[1:] {
-			if m := fieldRe.FindStringSubmatch(ln); m != nil {
-				names = append(names, m[2])
-			}
-			if !strings.HasSuffix(strings.TrimSpace(ln), "\\") {
-				break
-			}
-		}
-		return names
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: parse object_store.h macros: %w", tag, err)
 	}
-
-	// Which field lists the declaration block expands, in order.
-	declRe := regexp.MustCompile(`(?s)#define DECLARE_OBJECT_STORE_FIELD.*?\n((?:[^\n]*_FIELD_LIST\([^\n]*\n)+)`)
-	var order []string
-	if m := declRe.FindStringSubmatch(body); m != nil {
-		for _, mm := range regexp.MustCompile(`([A-Z_0-9]+_FIELD_LIST)\(`).FindAllStringSubmatch(m[1], -1) {
-			order = append(order, mm[1])
+	rows, err := cmacro.ExpandRawAllCallbacks(macros, "OBJECT_STORE_FIELD_LIST")
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: expand OBJECT_STORE_FIELD_LIST: %w", tag, err)
+	}
+	names := make([]string, 0, len(rows))
+	for i, row := range rows {
+		if len(row) != 2 {
+			return nil, "", fmt.Errorf("%s: OBJECT_STORE_FIELD_LIST row %d has %d columns, want 2", tag, i, len(row))
 		}
-	}
-	if len(order) == 0 {
-		order = []string{"OBJECT_STORE_FIELD_LIST"}
-	}
-	var names []string
-	for _, macro := range order {
-		names = append(names, macroList(macro)...)
+		name := strings.TrimSpace(row[1])
+		if name == "" {
+			return nil, "", fmt.Errorf("%s: OBJECT_STORE_FIELD_LIST row %d has empty field name", tag, i)
+		}
+		names = append(names, name)
 	}
 
 	fromRe := regexp.MustCompile(`ObjectPtr\* from\(\)\s*\{\s*return[^&]*&(\w+)_\)`)
@@ -2197,7 +2198,10 @@ func sdkStubNamesFor(tag string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	macros := cmacro.ParseMacros(src)
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
 	full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 	if err != nil {
 		return nil, err
@@ -2237,7 +2241,10 @@ func sdkRuntimeEntriesFor(tag string) (runtime, leaf []string, contiguous bool, 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	macros := cmacro.ParseMacros(src)
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, nil, false, err
+	}
 	runtime, err = cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
 	if err != nil {
 		return nil, nil, false, err
