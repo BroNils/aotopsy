@@ -448,8 +448,10 @@ func skipFillContextScope(s *dartfmt.Stream, cm *ClusterMeta, fillRefUnsigned bo
 		}
 		// WriteFromTo(scope, length) walks exactly the pointer-storage slots of
 		// VariableDesc. The count changed twice: 8 through 2.19, 9 in 3.0/3.1
-		// (kernel_offset added), then 10 from 3.2.5 (the type/value union split
-		// into independent type and cid fields).
+		// (kernel_offset added at 3.0.0), then 10 from 3.2.0 (the type/value union
+		// split into independent type and cid fields). SDK: UntaggedContextScope::
+		// VariableDesc has no kernel_offset in 2.19.6, has it from 3.0.0, and has
+		// `CompressedSmiPtr cid` from 3.2.0 (absent in 3.1.5).
 		if length > math.MaxInt64/int64(refsPerVariable) {
 			return fmt.Errorf("context_scope %d ref count overflow: length=%d refs_per_variable=%d", i, length, refsPerVariable)
 		}
@@ -471,9 +473,9 @@ func contextScopeRefsPerVariable(profile *snapshot.VersionProfile) int {
 		return 0
 	}
 	switch {
-	case snapshot.VersionAtLeast(profile.DartVersion, "3.2.5"):
+	case snapshot.VersionAtLeast(profile.DartVersion, "3.2.0"):
 		return 10
-	case snapshot.VersionAtLeast(profile.DartVersion, "3.0.5"):
+	case snapshot.VersionAtLeast(profile.DartVersion, "3.0.0"):
 		return 9
 	default:
 		return 8
