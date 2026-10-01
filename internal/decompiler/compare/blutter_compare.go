@@ -269,6 +269,23 @@ func extractFuncNameFromAsm(line string) string {
 	return ""
 }
 
+// stripHexSuffix removes the trailing _<hex> address suffix that
+// QualifiedCodeName appends (e.g. "Duration.compareTo_80" → "Duration.compareTo").
+func stripHexSuffix(name string) string {
+	// Find the last underscore followed by hex digits.
+	idx := strings.LastIndex(name, "_")
+	if idx < 0 || idx == len(name)-1 {
+		return name
+	}
+	suffix := name[idx+1:]
+	for _, c := range suffix {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return name
+		}
+	}
+	return name[:idx]
+}
+
 // normalizeName strips address suffixes and normalizes naming
 // conventions for comparison.
 func normalizeName(name string) string {

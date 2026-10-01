@@ -81,7 +81,6 @@ var goldenFiles = []string{
 	"selector_dispatch_xref.jsonl",
 	"pool_immediates.jsonl",
 	"typetrack_report.json",
-	"function_fingerprints.jsonl",
 	"evidence.jsonl",
 	"platform_channels.jsonl",
 	"deobfuscate_map.jsonl",

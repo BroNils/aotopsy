@@ -18,7 +18,6 @@ import (
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
-	comparepkg "aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
@@ -46,11 +45,6 @@ type Opts struct {
 	Decompile   bool      // emit per-function Dart pseudocode into <out>/dart/
 	Quiet       bool      // suppress verbose output (verbose is default)
 	Log         io.Writer // stderr by default
-	// FingerprintDictionary, when non-nil, is used only to count heuristic
-	// bytes-only name candidates. It never mutates semantic naming: instruction
-	// bytes do not include object-pool semantics, so a hash match is not ground
-	// truth even when version/architecture match exactly.
-	FingerprintDictionary *comparepkg.FunctionDictionary
 }
 
 // MetaMode controls generation of flutter_meta.json. The artifact is currently
@@ -381,21 +375,6 @@ func runPipeline(opts Opts) (*Result, error) {
 	pl := sc.Pool
 	poolDisplay := sc.PoolDisplay
 
-	if opts.FingerprintDictionary != nil {
-		dartVersion := ""
-		if info.Version != nil {
-			dartVersion = info.Version.DartVersion
-		}
-		if err := opts.FingerprintDictionary.ValidateTarget(dartVersion, arch); err != nil {
-			return nil, err
-		}
-		candidates, err := countFingerprintDictionaryCandidates(pl, ranges, code, codeOff, codeVA, opts.FingerprintDictionary)
-		if err != nil {
-			return nil, fmt.Errorf("compare fingerprint dictionary: %w", err)
-		}
-		opts.logf("  %sfingerprint candidates:%s %d heuristic matches (not applied as names)\n", cli.Muted, cli.Reset, candidates)
-	}
-
 	if info.Version != nil && info.Version.DartVersion != "" {
 		opts.stagef("elf", "Dart SDK %s%s%s", cli.Gold, info.Version.DartVersion, cli.Reset)
 		result.DartVersion = info.Version.DartVersion
@@ -675,14 +654,7 @@ func runPipeline(opts Opts) (*Result, error) {
 		return nil, fmt.Errorf("r2 export: %w", err)
 	}
 
-	// Step 8: Function fingerprint dictionary — Item 13.
-	// Writes function_fingerprints.jsonl with SHA-256 hashes of each
-	// function's instruction bytes, for cross-sample name transfer.
-	if err := writeFunctionFingerprints(opts.OutDir, analysisRanges, pl, code, codeOff, codeVA); err != nil {
-		return nil, fmt.Errorf("fingerprints: %w", err)
-	}
-
-	// Step 9: Unified Evidence collection & export.
+	// Step 8: Unified Evidence collection & export.
 	//
 	// Three of the collector's four sources were never called. Only
 	// FromCallEdges ran, so evidence.jsonl held nothing but Kind "call" --

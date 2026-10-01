@@ -46,30 +46,6 @@ func TestFridaExportRejectsOutputAliases(t *testing.T) {
 	}
 }
 
-func TestFingerprintCommandsRejectDestructiveAliasesAndSurplusArgs(t *testing.T) {
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "function_fingerprints.jsonl")
-	if err := os.WriteFile(fp, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmdBuildFingerprintDict([]string{dir, fp}); err == nil {
-		t.Fatal("dictionary build accepted output aliasing source fingerprints")
-	}
-	if err := cmdBuildFingerprintDict([]string{dir, filepath.Join(dir, "dict.jsonl"), "surplus"}); err == nil {
-		t.Fatal("dictionary build accepted surplus positional argument")
-	}
-
-	lib := filepath.Join(dir, "libapp.so")
-	if err := os.WriteFile(lib, []byte("not-an-elf"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	out := filepath.Join(dir, "out")
-	dict := filepath.Join(out, "dict.jsonl")
-	if err := cmdApplyFingerprintDict([]string{"--dict", dict, "--out", out, lib}); err == nil {
-		t.Fatal("dictionary apply accepted output directory containing dictionary input")
-	}
-}
-
 // Every command that takes exactly one libapp.so must reject a second
 // positional instead of silently analysing only the first and dropping the
 // rest; ghidra already did, ida/run/meta/signal used `< 1`.

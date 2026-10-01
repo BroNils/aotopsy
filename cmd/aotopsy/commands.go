@@ -39,8 +39,6 @@ var primaryCommands = []Command{
 	{Name: "parity", Short: "Corpus parity report", Run: cmdParity},
 	{Name: "inventory", Short: "Sample inventory", Run: cmdInventory},
 	{Name: "compare-blutter", Short: "Compare output with blutter", Run: cmdCompareBlutter},
-	{Name: "build-fingerprint-dict", Short: "Build function fingerprint dictionary", Run: cmdBuildFingerprintDict},
-	{Name: "apply-fingerprint-dict", Short: "Apply fingerprint dictionary to unnamed functions", Run: cmdApplyFingerprintDict},
 	{Name: "import-darter", Short: "Import darter output for older Dart versions", Run: cmdImportDarter},
 	{Name: "export-dart", Short: "Export decompiled Dart project structure to .dart files", Run: cmdExportDart},
 	{Name: "sdk-check", Short: "Verify SDK tables (THR, ObjectStore, stubs, roots) against dart-lang/sdk", Run: cmdSDKCheck},

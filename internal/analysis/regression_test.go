@@ -355,13 +355,6 @@ func TestPipelineLimitBoundsPerFunctionArtifacts(t *testing.T) {
 		}
 	}
 
-	// Fingerprints hash function bytes, so they must use exactly the same
-	// function population as disassembly rather than silently scanning the
-	// whole binary behind --limit.
-	if got := len(readJSONL(t, filepath.Join(outDir, "function_fingerprints.jsonl"))); got != limit {
-		t.Fatalf("function_fingerprints.jsonl records = %d, want %d", got, limit)
-	}
-
 	// Type-inference field accesses and unified evidence are function-scoped.
 	// None may refer to a function outside functions.jsonl in a limited run.
 	for _, rec := range readJSONL(t, filepath.Join(outDir, "field_accessor_xref.jsonl")) {
