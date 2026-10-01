@@ -104,7 +104,7 @@ jobs:
           ./internal/sdktest
           ./internal/snapshot
           ./internal/vmtables
-          -run '(MatchSDK|SDKBacked|SDKFileAtTag)' -count=1 -timeout 20m
+          -run '(Match(es)?SDK|SDKBacked|SDKFileAtTag)' -count=1 -timeout 20m
 
   race-coverage:
     name: race + coverage (linux/amd64)

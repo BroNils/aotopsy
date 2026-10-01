@@ -235,9 +235,10 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState, conver
 		return nil, nil, false
 	}
 
+	order := fixpointVisitOrder(fir, entryID)
 	for round := 0; round < ssaMaxFixpointRounds; round++ {
 		changed := false
-		for bi := 0; bi < n; bi++ {
+		for _, bi := range order {
 			blk := &fir.Blocks[bi]
 			var in *LiftState
 			preds := blk.Preds
@@ -279,6 +280,45 @@ func runFixpoint(fir *FuncIR, pool PoolLookup) (entry, exit []*LiftState, conver
 	// converge, disable SSA enrichment rather than leaking that transient claim
 	// into emitted pseudocode.
 	return nil, nil, false
+}
+
+// fixpointVisitOrder returns the block IDs in reverse post-order of a DFS from
+// the entry, followed by the blocks the entry cannot reach (in ID order). In
+// reverse post-order every predecessor except a back-edge source is visited
+// before its successor, so an acyclic CFG converges in two rounds regardless of
+// how the blocks happen to be laid out in the slice.
+func fixpointVisitOrder(fir *FuncIR, entryID int) []int {
+	n := len(fir.Blocks)
+	seen := make([]bool, n)
+	post := make([]int, 0, n)
+	type frame struct{ id, next int }
+	stack := []frame{{id: entryID}}
+	seen[entryID] = true
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		succs := fir.Blocks[top.id].Succs
+		if top.next < len(succs) {
+			s := succs[top.next].BlockID
+			top.next++
+			if s >= 0 && s < n && !seen[s] {
+				seen[s] = true
+				stack = append(stack, frame{id: s})
+			}
+			continue
+		}
+		post = append(post, top.id)
+		stack = stack[:len(stack)-1]
+	}
+	order := make([]int, 0, n)
+	for i := len(post) - 1; i >= 0; i-- {
+		order = append(order, post[i])
+	}
+	for i := 0; i < n; i++ {
+		if !seen[i] {
+			order = append(order, i)
+		}
+	}
+	return order
 }
 
 func liftStatesEqual(a, b *LiftState) bool {

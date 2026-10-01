@@ -752,14 +752,9 @@ func (e *emitter) returnValue(intVal string) string {
 			return ""
 		}
 		fp := readRegView(e.fir.FpuReturnReg, full)
-		// ARM64 V0 is both the first FPU argument register and the FPU return
-		// register. An untouched entry seed therefore proves only "argument 0
-		// arrived in V0", not that this function returns it. Prefer a missing
-		// value to a fabricated `return fparg0;`; a real operation/copy will
-		// replace the seed with a computed expression before RET.
-		if fp == "fparg0" && len(e.fir.FpuArgRegs) > 0 && canonReg(e.fir.FpuArgRegs[0]) == canonReg(e.fir.FpuReturnReg) {
-			return ""
-		}
+		// Entry no longer seeds FPU registers (nothing produces "fparg0"), so an
+		// untracked register is already handled above and any tracked value is a
+		// computed one.
 		if usableReturnValue(fp) && fp != e.fir.FpuReturnReg {
 			return fp
 		}

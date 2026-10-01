@@ -88,7 +88,8 @@ func ARM64RegName(n int) string {
 // The numbering is the instruction-encoding order, which is what
 // arch/x86.CanonReg produces and what the ABI tables in abi.go are
 // written in: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
-// R8..R15=8..15. This is the counterpart of ARM64RegName; without it the
+// R8..R15=8..15 (SDK @3.12.2 runtime/vm/constants_x64.h:22-41, read; other
+// versions not checked). This is the counterpart of ARM64RegName; without it the
 // x86 half of an ABI table could not be turned back into a name, so the
 // tables were only usable on ARM64.
 func X86RegName(n int) string {
@@ -174,15 +175,22 @@ const (
 // ── Dart register calling convention ──────────────────────────────────
 //
 // Dart did NOT always pass AOT Dart parameters in registers. The
-// DartCallingConvention tables first appear at 3.4.3; <=3.3.0 passes Dart
-// parameters on the stack. Treating the register table as timeless caused
-// every consumer (decompiler, typetrack, call-edge arity inference and Frida)
-// to invent register arguments for old binaries.
+// DartCallingConvention tables first appear at SDK 3.4.0 (absent through
+// 3.3.4); <=3.3.x passes Dart parameters on the stack. Treating the register
+// table as timeless caused every consumer (decompiler, typetrack, call-edge
+// arity inference and Frida) to invent register arguments for old binaries.
+// FirstRegisterCallingConventionVersion is "3.4.3" only because that is the
+// first SUPPORTED profile of the 3.4 line (its one snapshot hash maps there);
+// it is not the SDK boundary. TestDartCallingConventionMatchesSDK and
+// TestDartCallingConventionBoundaryMatchesSDK re-derive both from the SDK.
 //
-// Exact source:
+// Exact source (read, not only grepped):
 //
-//	3.3.0 runtime/vm/constants_{arm64,x64}.h: no DartCallingConvention
-//	3.4.3 runtime/vm/constants_arm64.h:
+//	3.3.4 runtime/vm/constants_{arm64,x64}.h: no DartCallingConvention
+//	3.4.0 constants_arm64.h:622, constants_x64.h:677: struct present;
+//	      compiler/backend/dart_calling_conventions.cc identical to 3.4.3;
+//	      object.cc:104 DEFINE_FLAG(use_register_cc, true)
+//	3.4.3 runtime/vm/constants_arm64.h:623 (same lists at 3.12.2:653):
 //	    kCpuRegistersForArgs = {R1,R2,R3,R5,R6,R7}
 //	    kFpuRegistersForArgs = {V0,V1,V2,V3,V4,V5}
 //	3.4.3 runtime/vm/constants_x64.h:

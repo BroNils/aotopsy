@@ -2,7 +2,6 @@ package naming
 
 import (
 	"fmt"
-	"strings"
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/sdk"
@@ -163,6 +162,12 @@ type PoolLookups struct {
 	// the only Type-derived map safe for Code names and call targets.
 	TypeTestingStubNames map[int]string
 
+	// SourceTypeNames is the Dart-source spelling of each Type whose identity the
+	// snapshot proves completely (List<int?>). It is what ExactTypeName serves to
+	// signatures: unlike the stub identities it never contains a canonical
+	// type-parameter name (X0, C1X0) and renders legacy nullability without `*`.
+	SourceTypeNames map[int]string
+
 	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
 	// `TypeTestingStub_dart_core__List__dart_core__int` where TypeNames plus
 	// TypeTestingStubName gives `TypeTestingStub_List<int>`. Keyed the same
@@ -265,6 +270,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	l.TypeNames = typeNames
 	l.TypeArgumentNames = typeArgNames
 	l.TypeTestingStubNames = buildExactTypeTestingStubNames(result, l, ct, dartVersion)
+	l.SourceTypeNames = buildExactSourceTypeNames(result, l, ct, dartVersion)
 	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
 		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex, ct)
@@ -503,15 +509,12 @@ func (l *PoolLookups) ExactTypeName(ref int) string {
 	if l == nil || ref <= cluster.RefNull {
 		return ""
 	}
-	if stub := l.TypeTestingStubNames[ref]; strings.HasPrefix(stub, "TypeTestingStub_") {
-		return strings.TrimPrefix(stub, "TypeTestingStub_")
+	if name := l.SourceTypeNames[ref]; name != "" {
+		return name
 	}
 	if ref >= 1 && ref <= len(l.BaseObjectNames) {
-		switch l.BaseObjectNames[ref-1] {
-		case "<dynamic type>":
-			return "dynamic"
-		case "<void type>":
-			return "void"
+		if name, ok := singletonTypeName(l.BaseObjectNames[ref-1]); ok {
+			return name
 		}
 	}
 	return ""

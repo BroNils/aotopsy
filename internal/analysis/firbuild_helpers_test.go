@@ -20,9 +20,9 @@ func TestEnrichSignatureUsesSerializedResultTypeNotFunctionName(t *testing.T) {
 	pl := &naming.PoolLookups{
 		CT:         ct,
 		RefToNamed: owners,
-		TypeTestingStubNames: map[int]string{
-			300: "TypeTestingStub_String",
-			301: "TypeTestingStub_int",
+		SourceTypeNames: map[int]string{
+			300: "String",
+			301: "int",
 		},
 	}
 	resolver := naming.NewTypeParamResolver(&cluster.Result{}, pl)

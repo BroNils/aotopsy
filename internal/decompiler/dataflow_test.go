@@ -215,11 +215,13 @@ func TestLiveInX86ArgsRecognizesSubregisterViews(t *testing.T) {
 	}
 }
 
-func TestRunFixpointBudgetDisablesPartialSSA(t *testing.T) {
+func TestRunFixpointConvergesOnReverseIndexedChain(t *testing.T) {
 	// Reverse-indexed chain: propagation starts at block 0 -> 29 -> 28 -> ...
-	// -> 1, but runFixpoint visits blocks in ascending ID order. The value can
-	// therefore advance only one edge per round and needs more than the bounded
-	// 24 rounds. A partial result must not be consumed as if it were a fixpoint.
+	// -> 1. Visiting blocks in ascending ID order advances the value one edge per
+	// round and needs more than the 24-round cap, which used to disable SSA for
+	// the whole function though the CFG is trivially acyclic. Blocks are visited
+	// in reverse post-order from the entry, so the layout of the blocks does not
+	// decide convergence, and the value must reach the end of the chain.
 	fir := newFuncIR("slow_fixpoint", 0x1000)
 	const last = 29
 	for i := 0; i <= last; i++ {
@@ -233,13 +235,15 @@ func TestRunFixpointBudgetDisablesPartialSSA(t *testing.T) {
 		fir.addBlock(b)
 	}
 	fir.ComputePreds()
-	entry, exit, converged := runFixpoint(fir, nil)
-	if converged || entry != nil || exit != nil {
-		t.Fatalf("bounded non-converged fixpoint leaked partial states: converged=%v entry=%v exit=%v", converged, entry != nil, exit != nil)
+	_, exit, converged := runFixpoint(fir, nil)
+	if !converged {
+		t.Fatal("acyclic reverse-indexed chain did not converge")
 	}
-
+	if got := exit[1].Regs["x8"]; got != "7" {
+		t.Fatalf("x8 at the end of the chain = %q, want 7", got)
+	}
 	src := EmitPseudocode(fir, nil, nil).Source
-	if !strings.Contains(src, "SSA enrichment disabled") {
-		t.Fatalf("non-convergence was not surfaced in emitted output:\n%s", src)
+	if strings.Contains(src, "SSA enrichment disabled") {
+		t.Fatalf("converging function was reported as non-converged:\n%s", src)
 	}
 }
