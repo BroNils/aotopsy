@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- **Function fingerprint dictionary (cross-sample name transfer).** The feature
+  existed and has been removed entirely: the `build-fingerprint-dict` and
+  `apply-fingerprint-dict` commands, the `function_fingerprints.jsonl` artifact,
+  `Opts.FingerprintDictionary`, and the `compare.FunctionDictionary` /
+  `CrossSampleDictionary` library. Its idea was to hash each function's
+  instruction bytes in a binary whose names are known and propose those names
+  for the same bytes in a stripped or obfuscated binary of the same Dart
+  version and architecture. A byte hash is not proof of a name (the same
+  instructions can read different object-pool contents, and small functions
+  collide), the dictionary stopped being applied to names, and nothing in the
+  CLI consumed it any more. History, for anyone who wants to bring it back
+  (`git show <commit>:<path>`):
+  - `c164512` (2026-08-19, #7) added the library
+    (`internal/decompiler/compare/fingerprint_dict.go`, `cross_sample.go`) and
+    the `function_fingerprints.jsonl` writer
+    (`internal/analysis/r2_fingerprint_export.go`).
+  - `0fdbf49` (2026-09-02, #13) added the CLI commands
+    (`cmd/aotopsy/cmd_fingerprint_dict.go`). Last release that has it: v1.6.0.
+  - `498c0b2` (2026-09-29) added the pipeline hook
+    (`internal/analysis/fingerprint_dictionary.go`) that applied dictionary
+    names to unnamed functions.
+  - `0c80f93` (2026-10-01) stopped applying names: the hook only counted
+    heuristic matches and logged them.
+  - Removed in the commit that adds this entry (find it with
+    `git log -S build-fingerprint-dict --oneline`).
+
+  Any user of `function_fingerprints.jsonl` or the two commands must stay on
+  v1.6.0 or earlier, or recompute hashes themselves. The golden records no
+  longer list `function_fingerprints.jsonl`.
+
 ## [1.6.0] - 2026-09-09
 
 The Ghidra and IDA integration was documented, wired into the CLI, and read by
