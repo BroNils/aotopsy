@@ -439,13 +439,15 @@ type ExceptionHandlerEntry struct {
 
 // BlockByVA resolves a block by its start address.
 func (f *FuncIR) BlockByVA(va uint64) (int, bool) {
-	id, ok := f.blockByVA[va]
-	if ok && id >= 0 && id < len(f.Blocks) {
-		return id, true
+	if f.blockByVA != nil {
+		// The index is authoritative once newFuncIR built it: a miss is a branch
+		// target outside the function (tail call), not a reason to scan every block.
+		id, ok := f.blockByVA[va]
+		return id, ok && id >= 0 && id < len(f.Blocks)
 	}
 	// FuncIR is exported and a few callers/tests construct it directly rather
-	// than through addBlock, leaving blockByVA nil. Fall back to a bounded scan
-	// instead of silently treating EntryVA/branch targets as block 0/missing.
+	// than through addBlock, leaving blockByVA nil. Scan instead of silently
+	// treating EntryVA/branch targets as block 0/missing.
 	for i := range f.Blocks {
 		if f.Blocks[i].StartVA == va {
 			return i, true

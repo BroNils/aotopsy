@@ -169,8 +169,8 @@ func TestResolvePoolDisplayZeroStringCIDDoesNotMatchUnknownCID(t *testing.T) {
 
 func TestExactTypeNameIsExactOrEmpty(t *testing.T) {
 	pl := &PoolLookups{
-		TypeTestingStubNames: map[int]string{
-			40: "TypeTestingStub_List<String>",
+		SourceTypeNames: map[int]string{
+			40: "List<String>",
 		},
 		BaseObjectNames: []string{
 			"null", "sentinel", "<dynamic type>", "<void type>",

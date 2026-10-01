@@ -13,9 +13,15 @@ import (
 // more forgiving because it is also used for human-oriented pool display;
 // this context is for identities that become Code names and call targets.
 type ttsNameContext struct {
-	pl             *PoolLookups
-	ct             *snapshot.CIDTable
-	dartVersion    string
+	pl          *PoolLookups
+	ct          *snapshot.CIDTable
+	dartVersion string
+	// forSource renders a type as Dart SOURCE rather than as a stub identity: a
+	// type that mentions a type parameter is refused (the VM's canonical X0/Y0/
+	// C1X0 spelling is an identity, not a declared identifier) and a legacy
+	// nullability marker is dropped (`String*` is not Dart syntax; a legacy
+	// library simply writes `String`).
+	forSource      bool
 	classNames     map[int32]string
 	typeByRef      map[int]*cluster.TypeInfo
 	typeArgsByRef  map[int]*cluster.TypeArgumentsInfo
@@ -208,6 +214,15 @@ func readableNullabilitySuffix(n cluster.TypeNullability, baseName string) (stri
 	}
 }
 
+// nullabilitySuffix is readableNullabilitySuffix with the source-mode rule for
+// legacy types applied.
+func (c *ttsNameContext) nullabilitySuffix(n cluster.TypeNullability, baseName string) (string, bool) {
+	if c.forSource && n == cluster.TypeNullabilityLegacy {
+		return "", true
+	}
+	return readableNullabilitySuffix(n, baseName)
+}
+
 func (c *ttsNameContext) typeParameterForRef(ref int) (*cluster.NamedObject, bool) {
 	if c.pl == nil || c.ct == nil || c.ct.TypeParameter == 0 || ref <= cluster.RefNull {
 		return nil, false
@@ -231,6 +246,9 @@ func (c *ttsNameContext) readableRef(ref int, path map[int]bool) (string, bool) 
 		return c.readableType(t, path)
 	}
 	if no, ok := c.typeParameterForRef(ref); ok {
+		if c.forSource {
+			return "", false
+		}
 		name, ok := c.typeParameterTTSName(no)
 		if !ok {
 			return "", false
@@ -243,7 +261,13 @@ func (c *ttsNameContext) readableRef(ref int, path map[int]bool) (string, bool) 
 	}
 	// dynamic and void are VM-isolate base objects on the versions where they
 	// can appear here, so they have no TypeInfo in the app snapshot.
-	switch snapshot.BaseObjectName(c.dartVersion, ref) {
+	return singletonTypeName(snapshot.BaseObjectName(c.dartVersion, ref))
+}
+
+// singletonTypeName maps the VM-isolate base-object labels of the two singleton
+// types that have no TypeInfo (dynamic, void) to their Dart spelling.
+func singletonTypeName(baseObjectName string) (string, bool) {
+	switch baseObjectName {
 	case "<dynamic type>":
 		return "dynamic", true
 	case "<void type>":
@@ -277,11 +301,34 @@ func (c *ttsNameContext) readableType(t *cluster.TypeInfo, path map[int]bool) (s
 		}
 		name += "<" + strings.Join(parts, ", ") + ">"
 	}
-	suffix, ok := readableNullabilitySuffix(t.Nullability, name)
+	suffix, ok := c.nullabilitySuffix(t.Nullability, name)
 	if !ok {
 		return "", false
 	}
 	return name + suffix, true
+}
+
+// buildExactSourceTypeNames renders every Type whose complete identity the
+// snapshot proves as the Dart source spelling of that type (List<int?>,
+// Map<String, Foo>?). It is exact-or-absent like the stub identities, but a type
+// that mentions a type parameter is absent: a signature cannot name X0.
+func buildExactSourceTypeNames(result *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
+	if result == nil || len(result.Types) == 0 {
+		return nil
+	}
+	c := newTTSNameContext(result, pl, ct, dartVersion)
+	c.forSource = true
+	out := make(map[int]string, len(result.Types))
+	for i := range result.Types {
+		t := &result.Types[i]
+		if name, ok := c.readableType(t, make(map[int]bool)); ok {
+			out[t.RefID] = name
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildExactTypeTestingStubNames(result *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {

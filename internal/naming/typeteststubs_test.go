@@ -166,8 +166,15 @@ func TestTypeTestingStubNamesRefuseWhenUnresolvable(t *testing.T) {
 	}
 }
 
-func TestExactTypeTestingStubNamesPreserveNestedArgsNullabilityAndTypeParameters(t *testing.T) {
-	ct := &snapshot.CIDTable{Class: 4, Library: 11, Type: 46, TypeParameter: 49}
+// genericTTSFixture builds a small snapshot with int/String/List/Map/Box classes
+// and these Type objects, used by the type-testing-stub and source-type tests:
+//
+//	10 int?                         11 String
+//	12 List<int?>                   13 Map<String, List<int?>>?
+//	14 Box<X0?>  (class type param) 15 List<missing TypeArguments>
+//	16 Map<String, 15>              17 List<truncated TypeArguments>
+func genericTTSFixture() (res *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, tp *cluster.NamedObject) {
+	ct = &snapshot.CIDTable{Class: 4, Library: 11, Type: 46, TypeParameter: 49}
 	const (
 		cidInt    = 100
 		cidString = 101
@@ -187,8 +194,8 @@ func TestExactTypeTestingStubNamesPreserveNestedArgsNullabilityAndTypeParameters
 		{cidMap, 1003, 2003, "Map"},
 		{cidBox, 1004, 2004, "Box"},
 	}
-	res := &cluster.Result{}
-	pl := &PoolLookups{
+	res = &cluster.Result{}
+	pl = &PoolLookups{
 		CT:           ct,
 		RefToStr:     map[int]string{},
 		RefToNamed:   map[int]*cluster.NamedObject{},
@@ -203,7 +210,7 @@ func TestExactTypeTestingStubNamesPreserveNestedArgsNullabilityAndTypeParameters
 		pl.RefToStr[d.nameRef] = d.name
 	}
 
-	tp := &cluster.NamedObject{
+	tp = &cluster.NamedObject{
 		CID:                  ct.TypeParameter,
 		RefID:                900,
 		NameRefID:            -1,
@@ -233,6 +240,36 @@ func TestExactTypeTestingStubNamesPreserveNestedArgsNullabilityAndTypeParameters
 		{RefID: 503, Length: 2, TypeRefs: []int{11, 15}},
 		{RefID: 504, Length: 2, TypeRefs: []int{10}}, // malformed/truncated vector
 	}
+	return res, pl, ct, tp
+}
+
+// ExactTypeName feeds function signatures. The VM spells a type parameter in a
+// stub identity with its canonical name (X0, Y0, C1X0; `T` only up to 2.13),
+// which is a stable identity but not a declared Dart identifier, so a signature
+// containing one is a confident false claim. Such a type must degrade to "".
+func TestExactTypeNameNeverEmitsCanonicalTypeParameterNames(t *testing.T) {
+	res, pl, ct, _ := genericTTSFixture()
+	pl.TypeTestingStubNames = buildExactTypeTestingStubNames(res, pl, ct, "3.13.0")
+	pl.SourceTypeNames = buildExactSourceTypeNames(res, pl, ct, "3.13.0")
+
+	if got := pl.ExactTypeName(14); got != "" {
+		t.Fatalf("Box<X0?> leaked a canonical type-parameter name into a signature: %q", got)
+	}
+	// Types with no type parameter keep their exact source spelling.
+	for ref, want := range map[int]string{
+		10: "int?",
+		11: "String",
+		12: "List<int?>",
+		13: "Map<String, List<int?>>?",
+	} {
+		if got := pl.ExactTypeName(ref); got != want {
+			t.Errorf("ExactTypeName(%d) = %q, want %q", ref, got, want)
+		}
+	}
+}
+
+func TestExactTypeTestingStubNamesPreserveNestedArgsNullabilityAndTypeParameters(t *testing.T) {
+	res, pl, ct, tp := genericTTSFixture()
 
 	got := buildExactTypeTestingStubNames(res, pl, ct, "3.13.0")
 	if want := "TypeTestingStub_Map<String, List<int?>>?"; got[13] != want {

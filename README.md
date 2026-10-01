@@ -163,7 +163,7 @@ aotopsy export-dart --lib libapp.so --out ./lib/ --filter Auth   # targeted expo
 
 Produces clean, idiomatic Dart code directly from binary machine instructions:
 - **Structural Control Flow**: `for-in` iterators, `while`, `for`, `try-catch-finally` with exact PC bounding.
-- **Async/Await Linearization**: Unwraps `_SuspendState` state machines into linear `await future` and `await for`.
+- **Async/Await Linearization**: Rewrites `_SuspendState._await` helper calls and `_StreamIterator` loops into `await future` and `await for`; the resume-state branch structure is preserved.
 - **Lambda Inlining**: Synthesizes arrow callbacks `(item) => process(item)` directly at call sites.
 - **Type Lattice**: Propagates concrete Dart types (`String`, `int`, `UserModel`) across SSA values without running a live VM.
 - **Dart Idioms**: Null-aware (`?.`, `??`, `??=`), cascade (`..`), Set/List/Map literals, string interpolation (`"${a}${b}"`).
