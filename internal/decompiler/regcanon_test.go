@@ -42,9 +42,14 @@ func TestCanonRegViewsPreserveArchitecturalWidthSemantics(t *testing.T) {
 		t.Fatalf("w16 read of x16=-1 = %q, want low 32 bits", got)
 	}
 
-	// x86 E writes clear the upper half; byte/word writes do not. This exact
-	// distinction is why the SDK emits setcc followed by movzxb when it needs a
-	// full-register boolean value.
+	// x86 E writes clear the upper half; byte/word writes do not. The SDK says so
+	// itself ("Clear upper part of the out register. We are going to use setcc on
+	// it which is a byte move") and copes in three ways, all in il_x64.cc: clear
+	// the register BEFORE the compare (IfThenElseInstr, ClearRegister(RDX) then
+	// setcc(.., DL)); clear it, setcc, then negl (Int32x4FromBools); or follow
+	// setcc with movzxb (EmitToBoolean). SDK @3.12.2 il_x64.cc:548-597 and
+	// 4453-4481, read in full; the same sites exist at 2.12.0 and 3.9.2 by grep
+	// only (not read).
 	s.setReg("rax", "0x1122334455667788")
 	s.setReg("al", "0xaa")
 	want := strconv.FormatUint(0x11223344556677aa, 10)

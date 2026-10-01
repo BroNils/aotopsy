@@ -521,7 +521,8 @@ func runTypeInference(
 		if ownerName != "" && codeName.ReceiverKnown && codeName.HasImplicitReceiver {
 			if cid, ok := classNameToID[ownerName]; ok && cid >= 0 {
 				ctx.FuncOwnerClass[name] = cid
-				// Before Dart 3.4.3 there is no register calling convention:
+				// Before the register calling convention (SDK 3.4.0, first
+				// supported profile 3.4.3) there is none:
 				// the receiver comes in on the caller's stack and the prologue
 				// loads it out. WHERE depends on whether the function copies
 				// its parameters -- see cluster.ReceiverFrameSlot, which

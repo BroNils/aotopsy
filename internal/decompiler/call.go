@@ -242,10 +242,13 @@ func (e *emitter) emitAsyncStubSemantics(role sdk.StubRole, tmpName, argsText st
 	case sdk.StubRoleAsyncAwait:
 		// SuspendStubABI::kArgumentReg is R0 on ARM64 and RAX on x64 in
 		// every compact-suspendable release (2.18+), i.e. the ordinary Dart
-		// return register. It is NOT a Dart parameter register: from 3.4.3 the
+		// return register. It is NOT a Dart parameter register: from 3.4.0 the
 		// latter are R1... / RDI..., so using generic argsText here reads the
-		// wrong machine value. AwaitWithTypeCheck has an additional type-args
-		// register, but the source `await` operand is still kArgumentReg.
+		// wrong machine value. AwaitWithTypeCheck has an additional kTypeArgsReg
+		// (R1 / RDX), but the source `await` operand is still kArgumentReg. SDK
+		// constants_{arm64,x64}.h SuspendStubABI, read at 2.18.0, 3.4.3 and
+		// 3.12.2; AwaitWithTypeCheckStub is absent at 2.18.0 and 2.19.0 and
+		// present at 3.0.5 (by grep only; versions between were not checked).
 		awaited := e.state.lookupReg(e.fir.ReturnReg)
 		if awaited == "" {
 			awaited = e.fir.ReturnReg

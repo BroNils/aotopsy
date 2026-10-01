@@ -1170,7 +1170,8 @@ func packedParamLayoutFor(dartVersion string) PackedParamLayout {
 //
 // Reading 2.10 with the 2.12 shifts does not merely garble a reported arity:
 // num_fixed_parameters is what CodeNameInfo.FixedParamsWithReceiver turns into
-// the frame slot the receiver arrives at on every version before 3.4.3. A wrong
+// the frame slot the receiver arrives at on every version before the register
+// calling convention (SDK 3.4.0; first supported profile 3.4.3). A wrong
 // count seeds `this` at the wrong stack offset, so the seed is never read back,
 // and the receiver's class is unknown at every field load that follows -- on
 // the 2.10 x64 sample the declared-field-type source knew the owning class 57

@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     names to unnamed functions.
   - `0c80f93` (2026-10-01) stopped applying names: the hook only counted
     heuristic matches and logged them.
-  - Removed in the commit that adds this entry (find it with
-    `git log -S build-fingerprint-dict --oneline`).
+  - `b66f5ed` removed it (2026-10-01). Restore with
+    `git show b66f5ed^:<path>`.
 
   Any user of `function_fingerprints.jsonl` or the two commands must stay on
   v1.6.0 or earlier, or recompute hashes themselves. The golden records no

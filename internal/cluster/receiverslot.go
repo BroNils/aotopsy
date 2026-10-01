@@ -2,10 +2,11 @@ package cluster
 
 // Receiver frame-slot recovery for Dart versions before 3.4.3.
 //
-// Up to and including 3.3.0 there is no register calling convention --
-// `DartCallingConvention` does not exist in constants_arm64.h at that tag and
-// first appears at 3.4.3 -- so arguments arrive on the stack and the receiver
-// has to be located in the frame.
+// Up to and including 3.3.x there is no register calling convention --
+// `DartCallingConvention` does not exist in constants_arm64.h at those tags and
+// first appears at SDK 3.4.0 (3.4.3 is the first supported profile of that
+// line) -- so arguments arrive on the stack and the receiver has to be located
+// in the frame.
 //
 // Whether there IS a static slot is decided by
 // PrologueBuilder::BuildParameterHandling (prologue_builder.cc), which emits
