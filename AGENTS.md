@@ -250,7 +250,8 @@ baseline noise, not your edit's fault, and **do not** run `gofmt -w` to
   achievable. The kHeapObjectTag off-by-one fix seemed trivial but unlocked
   11550 field hits from 11.
 - **Root cause analysis must be deep.** Grep the local SDK tree
-  (`~/dev/dartsdk-research/<version>/`) to verify every assumption. Do not guess. Example:
+  (`~/dev/dartsdk-research/<version>/`) to find, then `Read` the surrounding files to
+  verify every assumption (a grep hit alone is still a guess). Do not guess. Example:
   ObjectStoreAOTFieldCount was wrong because it only counted RW fields,
   when there are also CW, FW, LAZY_CORE, LAZY_FFI, etc.
 - **"Data limitation" is not the end of research.** If BLR is low, find
@@ -325,7 +326,8 @@ doesn't buy anything.
   The earlier "chicken-and-egg genuine" conclusion was wrong — the root
   cause was not 2.x stack-based receiver passing, but a type tracker bug.
   2.x does pass the receiver via the stack (`DartCallingConvention` does
-  not exist in `constants_arm64.h` at 2.12.0, first appears at 3.4.3),
+  not exist in `constants_arm64.h` at 2.12.0, first appears at SDK 3.4.0 --
+  absent at 3.3.4; 3.4.3 is only the first supported profile),
   but the selector scan fallback does not need the receiver class — it
   scans all dispatch table entries at a given selector offset.
   Seeding `this` from a frame slot was tried and discarded for a different
@@ -388,11 +390,16 @@ explicitly in the tool, not silently tolerated.
 
 **Local first.** The source of truth is `~/dev/dartsdk-research/<exact-version>/`
 (one plain directory per Dart SDK version, no `.git`; the directory name is the
-version). Read it **only with `grep`** — `grep -n -B3 -A20 'pattern' <tree>/runtime/vm/<file>`
-for one version, `grep -rln` to locate the file, a `for v in ...; do grep ...; done` loop
-across versions (`rg` is not installed on every host); do not open SDK files with `Read`,
-`cat`, `sed` or `awk`. It covers every version, has no rate limits, and is what
-`internal/sdktest` already resolves first.
+version). **`grep` finds, `Read` proves.** Locate with `grep -n -B3 -A20 'pattern'
+<tree>/runtime/vm/<file>`, `grep -rln` to find the file, a `for v in ...; do grep ...; done`
+loop across versions (`rg` is not installed on every host); then open the matching files
+with `Read` (whole file if small, otherwise a range wide enough to cover the enclosing
+function/class/enum/macro, its counterpart such as Serialize vs Deserialize or x64 vs
+arm64, its callers, and the siblings it is compared against). A conclusion drawn from
+grep output alone is a guess, not a fact: a snippet hides `#if` branches, macros,
+defaults and other users, so mark it "not verified: context too narrow". Do not use
+`cat`, `sed` or `awk` on SDK files; use `Read`. The trees cover every version, have no
+rate limits, and are what `internal/sdktest` already resolves first.
 
 Grep MCP and `gh api` are a **fallback only**: use them when the version you need is
 missing from the local trees, or when the user names them explicitly. Never reach for
