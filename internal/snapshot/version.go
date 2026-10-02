@@ -92,7 +92,7 @@ type VersionProfile struct {
 	CIDs                    *CIDTable
 	CompressedPointers      bool // true if snapshot uses compressed pointers (from features string)
 	FillRefUnsigned         bool // ≤2.17: ReadRef() = ReadUnsigned(); Function has packed_fields
-	CodeIndexOneBased       bool // ≥2.16: Function.code_index is 1-based (0=LazyCompile stub). ≤2.15: 0-based direct ref.
+	CodeIndexOneBased       bool // ≥2.16: Function.code_index is a 1-based InstructionsTable slot (0=LazyCompile stub). ≤2.15: the serialized scalar is an absolute snapshot Code ref ID.
 	PreV32Format            bool // ≤3.1: PatchClass has 3 refs; ObjectPool uses v2 type bits
 	HasTypeParamClassId     bool // ≤3.0: TypeParameter has parameterized_class_id scalar
 	TypeParamByteScalars    bool // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>

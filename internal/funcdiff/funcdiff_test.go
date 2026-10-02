@@ -1,7 +1,9 @@
 package funcdiff
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"aotopsy/internal/analysis"
@@ -12,8 +14,16 @@ import (
 
 const testLibraryURL = "package:test/test.dart"
 
+func descriptor(lib, owner, name, kind, enclosing string) FuncDescriptor {
+	return FuncDescriptor{LibraryURI: lib, Owner: owner, Name: name, Kind: kind, Enclosing: enclosing}
+}
+
+func testDescriptor(owner, name, kind, enclosing string) FuncDescriptor {
+	return descriptor(testLibraryURL, owner, name, kind, enclosing)
+}
+
 // attachTestLibrary makes synthetic Function fixtures model the part of the
-// snapshot object graph funcdiff uses for semantic identity: Class -> Library
+// snapshot object graph funcdiff uses for source-identity-shaped matching: Class -> Library
 // -> URL string. Rebuild RefToNamed after appending so every stored pointer
 // refers to the current Named slice.
 func attachTestLibrary(res *cluster.Result, pl *naming.PoolLookups, ct *snapshot.CIDTable, classRefs ...int) {
@@ -84,16 +94,16 @@ func TestBuildAndDiff(t *testing.T) {
 	resA := &cluster.Result{
 		Named: []cluster.NamedObject{
 			{RefID: 1, CID: 20, NameRefID: 100},
-			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
-			{RefID: 3, CID: 10, NameRefID: 102, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 50, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 3, CID: 10, NameRefID: 102, OwnerRefID: 1, CodeIndex: 51, FuncKind: cluster.FunctionKindRegular},
 		},
 	}
 	// Two functions at distinct offsets in a synthetic instructions image.
 	// PayloadInfo is deliberately NOT used here any more: it is the
 	// unchecked-entry offset with a flag in the low bit, not a size.
 	rangesA := []cluster.CodeRange{
-		{OwnerRef: 2, PCOffset: 0, Size: 8},
-		{OwnerRef: 3, PCOffset: 8, Size: 8},
+		{RefID: 50, OwnerRef: 2, Index: 0, PCOffset: 0, Size: 8},
+		{RefID: 51, OwnerRef: 3, Index: 1, PCOffset: 8, Size: 8},
 	}
 	codeA := []byte{
 		1, 1, 1, 1, 1, 1, 1, 1,
@@ -113,23 +123,24 @@ func TestBuildAndDiff(t *testing.T) {
 	}
 	attachTestLibrary(resA, plA, ct, 1)
 
-	funcsA := Build(resA, plA, profile, nil, rangesA, codeA, 0)
-	if len(funcsA) != 2 {
-		t.Fatalf("Build A got %d funcs, want 2", len(funcsA))
+	builtA := Build(resA, plA, profile, nil, rangesA, codeA, 0)
+	funcsA := builtA.Functions
+	if len(funcsA) != 2 || builtA.Stats.ResolvedFunctions != 2 || builtA.Stats.WithInstructionBytes != 2 {
+		t.Fatalf("Build A = funcs=%d stats=%+v, want 2 resolved with bytes", len(funcsA), builtA.Stats)
 	}
 
 	resB := &cluster.Result{
 		Named: []cluster.NamedObject{
 			{RefID: 1, CID: 20, NameRefID: 100},
-			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
-			{RefID: 4, CID: 10, NameRefID: 103, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 50, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 4, CID: 10, NameRefID: 103, OwnerRefID: 1, CodeIndex: 52, FuncKind: cluster.FunctionKindRegular},
 		},
 	}
 	// funcOne's body is rewritten to the SAME length. Diffing on size
 	// alone would call it unchanged; the instruction hash catches it.
 	rangesB := []cluster.CodeRange{
-		{OwnerRef: 2, PCOffset: 0, Size: 8},
-		{OwnerRef: 4, PCOffset: 8, Size: 8},
+		{RefID: 50, OwnerRef: 2, Index: 0, PCOffset: 0, Size: 8},
+		{RefID: 52, OwnerRef: 4, Index: 1, PCOffset: 8, Size: 8},
 	}
 	codeB := []byte{
 		9, 9, 9, 9, 9, 9, 9, 9,
@@ -149,20 +160,23 @@ func TestBuildAndDiff(t *testing.T) {
 	}
 	attachTestLibrary(resB, plB, ct, 1)
 
-	funcsB := Build(resB, plB, profile, nil, rangesB, codeB, 0)
+	funcsB := Build(resB, plB, profile, nil, rangesB, codeB, 0).Functions
 	diff := DiffDescriptors(funcsA, funcsB, 0)
 
-	wantOne := func(name string) string {
-		return testLibraryURL + "::MyClass::" + name + " [kind=regular]"
+	wantOne := func(name string) FuncDescriptor {
+		return testDescriptor("MyClass", name, "regular", "")
 	}
-	if len(diff.Added) != 1 || diff.Added[0] != (DiffEntry{Descriptor: wantOne("funcThree"), Count: 1}) {
-		t.Errorf("Added = %v, want funcThree x1", diff.Added)
+	if len(diff.IdentityAdded) != 1 || diff.IdentityAdded[0] != (DiffEntry{Descriptor: wantOne("funcThree"), Count: 1}) {
+		t.Errorf("IdentityAdded = %v, want funcThree x1", diff.IdentityAdded)
 	}
-	if len(diff.Removed) != 1 || diff.Removed[0] != (DiffEntry{Descriptor: wantOne("funcTwo"), Count: 1}) {
-		t.Errorf("Removed = %v, want funcTwo x1", diff.Removed)
+	if len(diff.IdentityRemoved) != 1 || diff.IdentityRemoved[0] != (DiffEntry{Descriptor: wantOne("funcTwo"), Count: 1}) {
+		t.Errorf("IdentityRemoved = %v, want funcTwo x1", diff.IdentityRemoved)
 	}
-	if len(diff.Changed) != 1 || diff.Changed[0] != (DiffEntry{Descriptor: wantOne("funcOne"), Count: 1}) {
-		t.Errorf("Changed = %v, want funcOne x1", diff.Changed)
+	if len(diff.InstructionBytesDifferent) != 1 || diff.InstructionBytesDifferent[0] != (DiffEntry{Descriptor: wantOne("funcOne"), Count: 1}) {
+		t.Errorf("InstructionBytesDifferent = %v, want funcOne x1", diff.InstructionBytesDifferent)
+	}
+	if diff.InstructionBytesDifferentTotal != 1 || diff.MatchedIdentityTotal != 1 {
+		t.Fatalf("byte/identity totals = %+v", diff)
 	}
 }
 
@@ -186,8 +200,8 @@ func TestBuildUsesVMOnlyFunctionNameAndLibraryIdentity(t *testing.T) {
 		VmRefToNamed: map[int]*cluster.NamedObject{},
 		BaseObjLimit: 1000,
 	}
-	got := Build(res, pl, profile, nil, nil, nil, 0)
-	d := FuncDescriptor("package:p/p.dart::Owner::vmOnlyName [kind=regular]")
+	got := Build(res, pl, profile, nil, nil, nil, 0).Functions
+	d := descriptor("package:p/p.dart", "Owner", "vmOnlyName", "regular", "")
 	if len(got[d]) != 1 || got[d][0].RefID != 3 {
 		t.Fatalf("VM-only named Function missing: %#v", got)
 	}
@@ -210,7 +224,7 @@ func TestBuildDoesNotAliasAppRefsIntoVMNamespace(t *testing.T) {
 			BaseObjLimit: 100,
 		}
 		attachTestLibrary(res, pl, ct, 2)
-		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got) != 0 {
+		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got.Functions) != 0 {
 			t.Fatalf("app-domain NameRef reused unrelated VM string: %#v", got)
 		}
 	})
@@ -231,7 +245,7 @@ func TestBuildDoesNotAliasAppRefsIntoVMNamespace(t *testing.T) {
 			VmRefToNamed: map[int]*cluster.NamedObject{999: &vmClass, 998: &vmLibrary},
 			BaseObjLimit: 100,
 		}
-		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got) != 0 {
+		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got.Functions) != 0 {
 			t.Fatalf("app-domain owner/library refs reused VM objects: %#v", got)
 		}
 	})
@@ -254,7 +268,7 @@ func TestBuildRequiresCompleteSemanticIdentity(t *testing.T) {
 			RefToStr:   map[int]string{100: "void", 101: "<optimized out>"},
 			RefToNamed: map[int]*cluster.NamedObject{2: &res.Named[0], 3: &res.Named[1]},
 		}
-		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got) != 0 {
+		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got.Functions) != 0 {
 			t.Fatalf("library-less Function became a stable descriptor: %#v", got)
 		}
 	})
@@ -266,8 +280,37 @@ func TestBuildRequiresCompleteSemanticIdentity(t *testing.T) {
 		}}
 		pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "f"}}
 		attachTestLibrary(res, pl, ct, 2)
-		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got) != 0 {
-			t.Fatalf("unknown Function kind became semantic identity: %#v", got)
+		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got.Functions) != 0 || got.Stats.SkippedUnstableKind != 1 {
+			t.Fatalf("unknown Function kind became stable descriptor identity: %#v", got)
+		}
+	})
+
+	t.Run("unmodelled function kind", func(t *testing.T) {
+		res := &cluster.Result{Named: []cluster.NamedObject{
+			{RefID: 2, CID: 20, NameRefID: 100},
+			{RefID: 3, CID: 10, NameRefID: 101, OwnerRefID: 2, FuncKind: cluster.FunctionKindOther},
+		}}
+		pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "f"}}
+		attachTestLibrary(res, pl, ct, 2)
+		got := Build(res, pl, profile, nil, nil, nil, 0)
+		if funcSetCount(got.Functions) != 0 || got.Stats.SkippedUnstableKind != 1 {
+			t.Fatalf("unmodelled Function kind became stable identity: %+v", got)
+		}
+	})
+
+	t.Run("illegal owner CID", func(t *testing.T) {
+		res := &cluster.Result{Named: []cluster.NamedObject{
+			{RefID: 2, CID: ct.Library, NameRefID: 100},
+			{RefID: 3, CID: ct.Function, NameRefID: 101, OwnerRefID: 2, FuncKind: cluster.FunctionKindRegular},
+		}}
+		pl := &naming.PoolLookups{
+			CT:         ct,
+			RefToStr:   map[int]string{100: "looksLikeOwner", 101: "f"},
+			RefToNamed: map[int]*cluster.NamedObject{2: &res.Named[0], 3: &res.Named[1]},
+		}
+		got := Build(res, pl, profile, nil, nil, nil, 0)
+		if funcSetCount(got.Functions) != 0 || got.Stats.SkippedOwner != 1 {
+			t.Fatalf("illegal Function owner became identity: %+v", got)
 		}
 	})
 
@@ -287,7 +330,7 @@ func TestBuildRequiresCompleteSemanticIdentity(t *testing.T) {
 			BaseObjLimit: 100,
 		}
 		attachTestLibrary(res, pl, ct, 2)
-		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got) != 0 {
+		if got := Build(res, pl, profile, nil, nil, nil, 0); funcSetCount(got.Functions) != 0 {
 			t.Fatalf("closure with unresolved required parent lost its qualifier: %#v", got)
 		}
 	})
@@ -302,40 +345,64 @@ func TestBuildRecognizesRealTopLevelOwner(t *testing.T) {
 	}}
 	pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "::", 101: "f"}}
 	attachTestLibrary(res, pl, ct, 2)
-	got := Build(res, pl, profile, nil, nil, nil, 0)
-	d := FuncDescriptor(testLibraryURL + "::<top-level>::f [kind=regular]")
+	got := Build(res, pl, profile, nil, nil, nil, 0).Functions
+	d := testDescriptor("<top-level>", "f", "regular", "")
 	if len(got[d]) != 1 || got[d][0].RefID != 3 {
 		t.Fatalf("real top-level owner was not preserved: %#v", got)
+	}
+}
+
+func TestBuildFunctionKindSeparatesConstructorFromRegularName(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 10, Class: 20}
+	profile := &snapshot.VersionProfile{CIDs: ct}
+	res := &cluster.Result{Named: []cluster.NamedObject{
+		{RefID: 2, CID: 20, NameRefID: 100},
+		{RefID: 3, CID: 10, NameRefID: 101, OwnerRefID: 2, FuncKind: cluster.FunctionKindRegular},
+		{RefID: 4, CID: 10, NameRefID: 101, OwnerRefID: 2, FuncKind: cluster.FunctionKindConstructor},
+	}}
+	pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "Owner.named"}}
+	attachTestLibrary(res, pl, ct, 2)
+	got := Build(res, pl, profile, nil, nil, nil, 0).Functions
+	regular := testDescriptor("Owner", "Owner.named", "regular", "")
+	ctor := testDescriptor("Owner", "Owner.named", "constructor", "")
+	if len(got[regular]) != 1 || len(got[ctor]) != 1 {
+		t.Fatalf("constructor and regular function with same name aliased: %#v", got)
 	}
 }
 
 func TestBuildPreservesDescriptorCollisionsAsMultiset(t *testing.T) {
 	ct := &snapshot.CIDTable{Function: 10, Class: 20}
 	profile := &snapshot.VersionProfile{CIDs: ct}
-	res := &cluster.Result{Named: []cluster.NamedObject{
-		{RefID: 1, CID: 20, NameRefID: 100},
-		{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, FuncKind: cluster.FunctionKindClosure},
-		{RefID: 3, CID: 10, NameRefID: 101, OwnerRefID: 1, FuncKind: cluster.FunctionKindClosure},
-	}}
+	res := &cluster.Result{
+		Named: []cluster.NamedObject{
+			{RefID: 1, CID: 20, NameRefID: 100},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, DataRefID: 50, FuncKind: cluster.FunctionKindClosure},
+			{RefID: 3, CID: 10, NameRefID: 101, OwnerRefID: 1, DataRefID: 51, FuncKind: cluster.FunctionKindClosure},
+			{RefID: 4, CID: 10, NameRefID: 102, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
+		},
+		ClosureData: []cluster.ClosureDataInfo{
+			{RefID: 50, ParentFunctionRef: 4},
+			{RefID: 51, ParentFunctionRef: 4},
+		},
+	}
 	pl := &naming.PoolLookups{
 		CT:         ct,
-		RefToStr:   map[int]string{100: "Owner", 101: "closure"},
-		RefToNamed: map[int]*cluster.NamedObject{1: &res.Named[0], 2: &res.Named[1], 3: &res.Named[2]},
+		RefToStr:   map[int]string{100: "Owner", 101: "closure", 102: "outer"},
+		RefToNamed: map[int]*cluster.NamedObject{1: &res.Named[0], 2: &res.Named[1], 3: &res.Named[2], 4: &res.Named[3]},
 	}
 	attachTestLibrary(res, pl, ct, 1)
 	got := Build(res, pl, profile, nil, nil, nil, 0)
-	if funcSetCount(got) != 2 {
-		t.Fatalf("Build retained %d Functions, want 2: %#v", funcSetCount(got), got)
+	d := testDescriptor("Owner", "closure", "closure", "Owner.outer")
+	if len(got.Functions[d]) != 2 {
+		t.Fatalf("collision descriptor has %d Functions, want 2: %#v", len(got.Functions[d]), got.Functions)
 	}
-	for d, list := range got {
-		if len(list) != 2 {
-			t.Fatalf("descriptor %q has %d entries, want 2", d, len(list))
-		}
+	if got.Stats.ResolvedFunctions != 3 || got.Stats.CollisionBuckets != 1 || got.Stats.CollisionFunctions != 2 {
+		t.Fatalf("collision stats = %+v, want resolved=3 buckets=1 funcs=2", got.Stats)
 	}
 }
 
 func TestDiffDescriptorsKeepsDuplicateMismatchesIndeterminate(t *testing.T) {
-	d := FuncDescriptor("lib::Owner::f [kind=closure]")
+	d := descriptor("lib", "Owner", "f", "closure", "Owner.outer")
 	oldSet := FuncSet{d: {
 		{RefID: 50, CodeSize: 4, InstrHash: "same"},
 		{RefID: 10, CodeSize: 4, InstrHash: "old"},
@@ -345,24 +412,24 @@ func TestDiffDescriptorsKeepsDuplicateMismatchesIndeterminate(t *testing.T) {
 		{RefID: 888, CodeSize: 4, InstrHash: "same"},
 	}}
 	rep := DiffDescriptors(oldSet, newSet, 0)
-	if rep.OldCount != 2 || rep.NewCount != 2 || rep.CommonCount != 2 || rep.ChangedTotal != 0 || rep.IndeterminateTotal != 1 {
+	if rep.OldIdentity.ResolvedFunctions != 2 || rep.NewIdentity.ResolvedFunctions != 2 || rep.MatchedIdentityTotal != 2 || rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 1 || rep.InstructionBytesEqualTotal != 1 {
 		t.Fatalf("unexpected multiset report: %+v", rep)
 	}
-	if len(rep.Indeterminate) != 1 || rep.Indeterminate[0].Descriptor != string(d) || rep.Indeterminate[0].Count != 1 {
-		t.Fatalf("Indeterminate = %+v, want %q x1", rep.Indeterminate, d)
+	if len(rep.InstructionBytesIndeterminate) != 1 || rep.InstructionBytesIndeterminate[0].Descriptor != d || rep.InstructionBytesIndeterminate[0].Count != 1 {
+		t.Fatalf("InstructionBytesIndeterminate = %+v, want %q x1", rep.InstructionBytesIndeterminate, d.String())
 	}
-	if rep.AddedTotal != 0 || rep.RemovedTotal != 0 {
+	if rep.IdentityAddedTotal != 0 || rep.IdentityRemovedTotal != 0 {
 		t.Fatalf("same multiplicity became added/removed: %+v", rep)
 	}
 }
 
-func TestBuildPrefersCodeIndexOwnerOverBogusCodeOwnerRef(t *testing.T) {
+func TestBuildLegacyCodeRefDoesNotDependOnBogusCodeOwnerRef(t *testing.T) {
 	ct := &snapshot.CIDTable{Function: 10, Class: 20, Mint: 30}
 	profile := &snapshot.VersionProfile{CIDs: ct}
 	res := &cluster.Result{
 		Named: []cluster.NamedObject{
 			{RefID: 1, CID: 20, NameRefID: 100},
-			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 7, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 50, FuncKind: cluster.FunctionKindRegular},
 			{RefID: 900, CID: 30}, // the bogus raw Code.OwnerRef shape seen in 3.7 x86_64
 		},
 		Codes: []cluster.CodeEntry{{RefID: 50, OwnerRef: 900, ClusterIndex: 7}},
@@ -375,9 +442,57 @@ func TestBuildPrefersCodeIndexOwnerOverBogusCodeOwnerRef(t *testing.T) {
 	attachTestLibrary(res, pl, ct, 1)
 	ranges := []cluster.CodeRange{{RefID: 50, OwnerRef: 900, Index: 7, PCOffset: 0, Size: 4}}
 	got := Build(res, pl, profile, nil, ranges, []byte{1, 2, 3, 4}, 0)
-	d := FuncDescriptor(testLibraryURL + "::Owner::f [kind=regular]")
-	if len(got[d]) != 1 || got[d][0].CodeSize != 4 || got[d][0].InstrHash == "" {
-		t.Fatalf("reliable CodeIndex owner did not receive code evidence: %#v", got)
+	d := testDescriptor("Owner", "f", "regular", "")
+	if len(got.Functions[d]) != 1 || got.Functions[d][0].CodeSize != 4 || got.Functions[d][0].InstrHash == "" {
+		t.Fatalf("legacy Function Code ref did not receive code evidence: %#v", got)
+	}
+}
+
+func TestBuildModernSharedCodeGivesEachFunctionByteEvidence(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 10, Class: 20}
+	profile := &snapshot.VersionProfile{CIDs: ct, CodeIndexOneBased: true}
+	res := &cluster.Result{Named: []cluster.NamedObject{
+		{RefID: 1, CID: 20, NameRefID: 100},
+		{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 11, FuncKind: cluster.FunctionKindRegular},
+		{RefID: 3, CID: 10, NameRefID: 102, OwnerRefID: 1, CodeIndex: 11, FuncKind: cluster.FunctionKindRegular},
+	}}
+	pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "f", 102: "g"}}
+	attachTestLibrary(res, pl, ct, 1)
+	table := &cluster.InstructionsTable{FirstEntryWithCode: 10}
+	ranges := []cluster.CodeRange{{RefID: 50, Index: 0, PCOffset: 0, Size: 4}}
+	got := Build(res, pl, profile, table, ranges, []byte{1, 2, 3, 4}, 0)
+	for _, name := range []string{"f", "g"} {
+		d := testDescriptor("Owner", name, "regular", "")
+		if len(got.Functions[d]) != 1 || got.Functions[d][0].InstrHash == "" {
+			t.Fatalf("shared Code evidence missing for %s: %#v", name, got)
+		}
+	}
+	if got.Stats.WithInstructionBytes != 2 || got.Stats.WithoutInstructionBytes != 0 {
+		t.Fatalf("shared Code stats = %+v", got.Stats)
+	}
+}
+
+func TestSameSourceIdentitySurvivesLegacyToIndexedCodeBoundary(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 10, Class: 20}
+	makeBuild := func(profile *snapshot.VersionProfile, functionCodeIndex int, table *cluster.InstructionsTable, codeRef, clusterIndex int) BuildResult {
+		res := &cluster.Result{Named: []cluster.NamedObject{
+			{RefID: 1, CID: 20, NameRefID: 100},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: functionCodeIndex, FuncKind: cluster.FunctionKindRegular},
+		}}
+		pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "f"}}
+		attachTestLibrary(res, pl, ct, 1)
+		ranges := []cluster.CodeRange{{RefID: codeRef, Index: clusterIndex, PCOffset: 0, Size: 4}}
+		return Build(res, pl, profile, table, ranges, []byte{1, 2, 3, 4}, 0)
+	}
+
+	// <=2.15 stores an absolute Code ref. >=2.16 stores a one-based table slot.
+	legacy := makeBuild(&snapshot.VersionProfile{CIDs: ct}, 50, nil, 50, 0)
+	modern := makeBuild(&snapshot.VersionProfile{CIDs: ct, CodeIndexOneBased: true}, 11,
+		&cluster.InstructionsTable{FirstEntryWithCode: 10}, 60, 0)
+	rep := DiffDescriptors(legacy.Functions, modern.Functions, 0)
+	if rep.MatchedIdentityTotal != 1 || rep.IdentityAddedTotal != 0 || rep.IdentityRemovedTotal != 0 ||
+		rep.InstructionBytesEqualTotal != 1 || rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 0 {
+		t.Fatalf("code-index format boundary created false identity/byte churn: %+v", rep)
 	}
 }
 
@@ -392,24 +507,52 @@ func TestBuildStripsPrivateLibraryKeysFromDescriptorNames(t *testing.T) {
 	}, ClosureData: []cluster.ClosureDataInfo{{RefID: 50, ParentFunctionRef: 3}}}
 	pl := &naming.PoolLookups{
 		CT:         ct,
-		RefToStr:   map[int]string{100: "_Owner@6be832b", 101: "_f@6be832b", 102: "_parent@6be832b", 103: "_Parent@6be832b"},
+		RefToStr:   map[int]string{100: "_Owner@709387912", 101: "_f@709387912", 102: "_parent@709387912", 103: "_Parent@709387912"},
 		RefToNamed: map[int]*cluster.NamedObject{1: &res.Named[0], 2: &res.Named[1], 3: &res.Named[2], 4: &res.Named[3]},
 	}
 	attachTestLibrary(res, pl, ct, 1, 4)
-	got := Build(res, pl, profile, nil, nil, nil, 0)
-	d := FuncDescriptor(testLibraryURL + "::_Owner::_f [kind=closure] [parent=_Parent._parent]")
+	got := Build(res, pl, profile, nil, nil, nil, 0).Functions
+	d := testDescriptor("_Owner", "_f", "closure", "_Parent._parent")
 	if len(got[d]) != 1 {
 		t.Fatalf("private key remained in descriptor: %#v", got)
 	}
+	if got := stableDescriptorName("name@not_a_vm_private_key.part"); got != "name@not_a_vm_private_key.part" {
+		t.Fatalf("non-generated @ text was stripped: %q", got)
+	}
 }
 
-func TestBuildDoesNotTreatStubRangeIndexAsCodeClusterIndex(t *testing.T) {
+func TestBuildUsesRecursiveClosureAncestry(t *testing.T) {
 	ct := &snapshot.CIDTable{Function: 10, Class: 20}
 	profile := &snapshot.VersionProfile{CIDs: ct}
 	res := &cluster.Result{
 		Named: []cluster.NamedObject{
 			{RefID: 1, CID: 20, NameRefID: 100},
-			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 0, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, FuncKind: cluster.FunctionKindRegular},
+			{RefID: 3, CID: 10, NameRefID: 102, OwnerRefID: 1, DataRefID: 50, FuncKind: cluster.FunctionKindClosure},
+			{RefID: 4, CID: 10, NameRefID: 102, OwnerRefID: 1, DataRefID: 51, FuncKind: cluster.FunctionKindClosure},
+		},
+		ClosureData: []cluster.ClosureDataInfo{
+			{RefID: 50, ParentFunctionRef: 2},
+			{RefID: 51, ParentFunctionRef: 3},
+		},
+	}
+	pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "outer", 102: "<anonymous closure>"}}
+	attachTestLibrary(res, pl, ct, 1)
+	got := Build(res, pl, profile, nil, nil, nil, 0).Functions
+	first := testDescriptor("Owner", "<anonymous closure>", "closure", "Owner.outer")
+	nested := testDescriptor("Owner", "<anonymous closure>", "closure", "Owner.outer.<anonymous closure>")
+	if len(got[first]) != 1 || len(got[nested]) != 1 {
+		t.Fatalf("recursive closure ancestry not preserved: %#v", got)
+	}
+}
+
+func TestBuildDoesNotTreatStubRangeIndexAsCodeClusterIndex(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 10, Class: 20}
+	profile := &snapshot.VersionProfile{CIDs: ct, CodeIndexOneBased: true}
+	res := &cluster.Result{
+		Named: []cluster.NamedObject{
+			{RefID: 1, CID: 20, NameRefID: 100},
+			{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 3, FuncKind: cluster.FunctionKindRegular},
 		},
 		Codes: []cluster.CodeEntry{{RefID: 50, OwnerRef: 2, ClusterIndex: 0}},
 	}
@@ -422,15 +565,39 @@ func TestBuildDoesNotTreatStubRangeIndexAsCodeClusterIndex(t *testing.T) {
 	// Stub indices start at zero too. With no real Code range present, this
 	// must not fabricate code evidence for Function ref 2.
 	ranges := []cluster.CodeRange{{RefID: -1, OwnerRef: -1, Index: 0, PCOffset: 0, Size: 4}}
-	got := Build(res, pl, profile, nil, ranges, []byte{1, 2, 3, 4}, 0)
-	d := FuncDescriptor(testLibraryURL + "::Owner::f [kind=regular]")
-	if len(got[d]) != 1 || got[d][0].CodeSize != 0 || got[d][0].InstrHash != "" {
+	table := &cluster.InstructionsTable{FirstEntryWithCode: 5}
+	got := Build(res, pl, profile, table, ranges, []byte{1, 2, 3, 4}, 0)
+	d := testDescriptor("Owner", "f", "regular", "")
+	if len(got.Functions[d]) != 1 || got.Functions[d][0].CodeSize != 0 || got.Functions[d][0].InstrHash != "" {
 		t.Fatalf("stub range leaked into Function code evidence: %#v", got)
+	}
+	if got.Stats.WithoutInstructionBytes != 1 {
+		t.Fatalf("discarded/stub evidence was not surfaced as unavailable: %+v", got.Stats)
+	}
+}
+
+func TestBuildDuplicateRangeIdentityFailsClosedToMissingBytes(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 10, Class: 20}
+	profile := &snapshot.VersionProfile{CIDs: ct}
+	res := &cluster.Result{Named: []cluster.NamedObject{
+		{RefID: 1, CID: 20, NameRefID: 100},
+		{RefID: 2, CID: 10, NameRefID: 101, OwnerRefID: 1, CodeIndex: 50, FuncKind: cluster.FunctionKindRegular},
+	}}
+	pl := &naming.PoolLookups{CT: ct, RefToStr: map[int]string{100: "Owner", 101: "f"}}
+	attachTestLibrary(res, pl, ct, 1)
+	ranges := []cluster.CodeRange{
+		{RefID: 50, Index: 0, PCOffset: 0, Size: 4},
+		{RefID: 50, Index: 1, PCOffset: 4, Size: 4},
+	}
+	got := Build(res, pl, profile, nil, ranges, []byte{1, 2, 3, 4, 5, 6, 7, 8}, 0)
+	d := testDescriptor("Owner", "f", "regular", "")
+	if len(got.Functions[d]) != 1 || got.Functions[d][0].InstrHash != "" || got.Stats.WithoutInstructionBytes != 1 {
+		t.Fatalf("ambiguous duplicate Code ref was resolved last-wins: %+v", got)
 	}
 }
 
 func TestDiffDescriptorsDoesNotLetMissingHashConsumeExactMatch(t *testing.T) {
-	d := FuncDescriptor("lib::Owner::f [kind=regular]")
+	d := descriptor("lib", "Owner", "f", "regular", "")
 	oldSet := FuncSet{d: {
 		{RefID: 1, CodeSize: 4},
 		{RefID: 2, CodeSize: 4, InstrHash: "A"},
@@ -440,26 +607,26 @@ func TestDiffDescriptorsDoesNotLetMissingHashConsumeExactMatch(t *testing.T) {
 		{RefID: 4, CodeSize: 4, InstrHash: "B"},
 	}}
 	rep := DiffDescriptors(oldSet, newSet, 0)
-	if rep.ChangedTotal != 0 || rep.IndeterminateTotal != 1 || rep.CommonCount != 2 {
+	if rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 1 || rep.MatchedIdentityTotal != 2 || rep.InstructionBytesEqualTotal != 1 {
 		t.Fatalf("mixed evidence misclassified: %+v", rep)
 	}
-	if len(rep.Indeterminate) != 1 || rep.Indeterminate[0].Count != 1 {
-		t.Fatalf("Indeterminate = %+v, want one unknown pair", rep.Indeterminate)
+	if len(rep.InstructionBytesIndeterminate) != 1 || rep.InstructionBytesIndeterminate[0].Count != 1 {
+		t.Fatalf("InstructionBytesIndeterminate = %+v, want one unknown pair", rep.InstructionBytesIndeterminate)
 	}
 }
 
 func TestDiffDescriptorsMissingHashIsIndeterminateNotUnchanged(t *testing.T) {
-	d := FuncDescriptor("lib::Owner::f [kind=regular]")
+	d := descriptor("lib", "Owner", "f", "regular", "")
 	rep := DiffDescriptors(
 		FuncSet{d: {{RefID: 1, CodeSize: 4, InstrHash: "A"}}},
 		FuncSet{d: {{RefID: 2, CodeSize: 4}}}, 0)
-	if rep.ChangedTotal != 0 || rep.IndeterminateTotal != 1 || rep.CommonCount != 1 {
+	if rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 1 || rep.MatchedIdentityTotal != 1 {
 		t.Fatalf("missing hash was not marked indeterminate: %+v", rep)
 	}
 }
 
 func TestDiffDescriptorsDuplicateUnknownsDoNotForceKnownHashesToPair(t *testing.T) {
-	d := FuncDescriptor("lib::Owner::f [kind=closure]")
+	d := descriptor("lib", "Owner", "f", "closure", "Owner.outer")
 	oldSet := FuncSet{d: {
 		{RefID: 1, CodeSize: 4, InstrHash: "B"},
 		{RefID: 2, CodeSize: 4},
@@ -469,18 +636,58 @@ func TestDiffDescriptorsDuplicateUnknownsDoNotForceKnownHashesToPair(t *testing.
 		{RefID: 4, CodeSize: 4},
 	}}
 	rep := DiffDescriptors(oldSet, newSet, 0)
-	if rep.ChangedTotal != 0 || rep.IndeterminateTotal != 2 || rep.CommonCount != 2 {
+	if rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 2 || rep.MatchedIdentityTotal != 2 {
 		t.Fatalf("ambiguous duplicate identities overclaimed a change: %+v", rep)
 	}
 }
 
 func TestCrossMachineDiffSuppressesRawByteChangedClassification(t *testing.T) {
-	d := FuncDescriptor("lib::Owner::f [kind=regular]")
+	d := descriptor("lib", "Owner", "f", "regular", "")
 	rep := diffDescriptors(
 		FuncSet{d: {{RefID: 1, CodeSize: 4, InstrHash: "arm"}}},
 		FuncSet{d: {{RefID: 2, CodeSize: 8, InstrHash: "x64"}}}, 0, false)
-	if rep.CodeComparable || rep.ChangedTotal != 0 || rep.IndeterminateTotal != 1 || rep.CommonCount != 1 {
+	if rep.InstructionBytesComparable || rep.InstructionBytesDifferentTotal != 0 || rep.InstructionBytesIndeterminateTotal != 1 || rep.MatchedIdentityTotal != 1 {
 		t.Fatalf("cross-machine byte evidence was compared: %+v", rep)
+	}
+}
+
+func TestReportSchemaDoesNotCallRawByteDifferenceSemanticChange(t *testing.T) {
+	d := descriptor("lib", "Owner", "f", "regular", "")
+	rep := DiffDescriptors(
+		FuncSet{d: {{RefID: 1, CodeSize: 4, InstrHash: "old"}}},
+		FuncSet{d: {{RefID: 2, CodeSize: 4, InstrHash: "new"}}}, 0)
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"instruction_bytes_different_total":1`) || strings.Contains(s, `"changed`) {
+		t.Fatalf("report schema overclaims raw byte drift as semantic change: %s", s)
+	}
+}
+
+func TestDiffDescriptorsJSONDeterministicAcrossMapInsertionOrder(t *testing.T) {
+	a := descriptor("package:a/a.dart", "A", "f", "regular", "")
+	b := descriptor("package:b/b.dart", "B", "g", "regular", "")
+	old1 := FuncSet{}
+	old1[b] = []FuncInfo{{RefID: 20, CodeSize: 4, InstrHash: "same-b"}}
+	old1[a] = []FuncInfo{{RefID: 10, CodeSize: 4, InstrHash: "old-a"}}
+	new1 := FuncSet{}
+	new1[a] = []FuncInfo{{RefID: 99, CodeSize: 4, InstrHash: "new-a"}}
+	new1[b] = []FuncInfo{{RefID: 88, CodeSize: 4, InstrHash: "same-b"}}
+
+	old2 := FuncSet{a: append([]FuncInfo(nil), old1[a]...), b: append([]FuncInfo(nil), old1[b]...)}
+	new2 := FuncSet{b: append([]FuncInfo(nil), new1[b]...), a: append([]FuncInfo(nil), new1[a]...)}
+	j1, err := json.Marshal(DiffDescriptors(old1, new1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j2, err := json.Marshal(DiffDescriptors(old2, new2, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(j1) != string(j2) {
+		t.Fatalf("funcdiff JSON depends on map insertion order:\n%s\n%s", j1, j2)
 	}
 }
 

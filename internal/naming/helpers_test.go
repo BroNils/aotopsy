@@ -252,23 +252,26 @@ func TestIsolateOwnerMayUseVMBaseObjectPrefix(t *testing.T) {
 // bogus shared Code.OwnerRef that resolves to CID 61 (Mint), never a
 // legal Code owner. This reproduces exactly that shape -- OwnerRef
 // points at a Mint NamedObject instead of the real Function -- and
-// verifies the reliable Function.CodeIndex==Code.ClusterIndex
-// cross-reference is used instead, recovering the real owner.
+// verifies the reliable Function->Code cross-reference is used instead,
+// recovering the real owner. In the legacy (<=2.15) encoding the Function
+// field is the Code object's absolute snapshot ref ID, not ClusterIndex.
 func TestResolveCodeOwner_PrefersCodeIndexOverBogusOwnerRef(t *testing.T) {
 	const (
 		mintCID    = 61
 		funcCID    = 6
 		bogusRef   = 900 // the Mint object every buggy Code.OwnerRef points at
 		realFnRef  = 901
+		codeRef    = 950
 		clusterIdx = 5
 	)
 	ct := &snapshot.CIDTable{Function: funcCID}
 
-	realFn := &cluster.NamedObject{CID: funcCID, RefID: realFnRef, CodeIndex: clusterIdx}
+	realFn := &cluster.NamedObject{CID: funcCID, RefID: realFnRef, CodeIndex: codeRef}
 	bogusMint := &cluster.NamedObject{CID: mintCID, RefID: bogusRef, CodeIndex: -1}
 
 	result := &cluster.Result{
 		Named: []cluster.NamedObject{*realFn, *bogusMint},
+		Codes: []cluster.CodeEntry{{RefID: codeRef, ClusterIndex: clusterIdx}},
 	}
 	byCodeIndex := CodeIndexToFunc(result, ct, false, -1)
 
@@ -354,13 +357,29 @@ func TestCodeIndexToFunc_AmbiguousIndexDropped(t *testing.T) {
 	ct := &snapshot.CIDTable{Function: funcCID}
 	result := &cluster.Result{
 		Named: []cluster.NamedObject{
-			{CID: funcCID, RefID: 1, CodeIndex: 3},
-			{CID: funcCID, RefID: 2, CodeIndex: 3}, // collides with ref=1
+			{CID: funcCID, RefID: 10, CodeIndex: 30},
+			{CID: funcCID, RefID: 11, CodeIndex: 30}, // both point at one Code object
 		},
+		Codes: []cluster.CodeEntry{{RefID: 30, ClusterIndex: 3}},
 	}
 	m := CodeIndexToFunc(result, ct, false, -1)
 	if _, ok := m[3]; ok {
 		t.Error("expected ambiguous CodeIndex 3 to be dropped, not mapped to either candidate")
+	}
+}
+
+func TestCodeIndexToFunc_LegacyUsesAbsoluteCodeRef(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 6}
+	result := &cluster.Result{
+		Named: []cluster.NamedObject{{CID: 6, RefID: 101, CodeIndex: 700}},
+		Codes: []cluster.CodeEntry{{RefID: 700, ClusterIndex: 4}},
+	}
+	m := CodeIndexToFunc(result, ct, false, -1)
+	if got := m[4]; got == nil || got.RefID != 101 {
+		t.Fatalf("legacy Code ref 700 -> cluster index 4 = %+v, want Function ref 101", got)
+	}
+	if _, ok := m[700]; ok {
+		t.Fatal("absolute snapshot Code ref leaked into Code-cluster index domain")
 	}
 }
 

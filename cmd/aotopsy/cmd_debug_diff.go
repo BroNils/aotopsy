@@ -57,12 +57,13 @@ func cmdSymbolMap(args []string) error {
 	return nil
 }
 
-// cmdFuncDiff implements "aotopsy _debug funcdiff": diffs the Dart function set between two libapp.so builds.
+// cmdFuncDiff implements "aotopsy _debug funcdiff": compares source-identity-
+// shaped Function descriptors and, separately, raw instruction bytes.
 func cmdFuncDiff(args []string) error {
 	fs := flag.NewFlagSet("funcdiff", flag.ExitOnError)
 	oldPath := fs.String("old", "", "path to the OLD build's libapp.so")
 	newPath := fs.String("new", "", "path to the NEW build's libapp.so")
-	topN := fs.Int("top", 200, "max added/removed/changed/indeterminate entries to report each (0 = unlimited)")
+	topN := fs.Int("top", 200, "max identity-added/removed and instruction-byte different/indeterminate entries to report each (0 = unlimited)")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -76,13 +77,16 @@ func cmdFuncDiff(args []string) error {
 		return err
 	}
 
-	cli.Errf("old: %d functions (%s, %s)\nnew: %d functions (%s, %s)\ncommon=%d added=%d removed=%d changed=%d indeterminate=%d\n",
-		rep.OldCount, rep.OldVersion, rep.OldMachine,
-		rep.NewCount, rep.NewVersion, rep.NewMachine,
-		rep.CommonCount, rep.AddedTotal, rep.RemovedTotal, rep.ChangedTotal, rep.IndeterminateTotal)
-	if !rep.CodeComparable {
-		cli.Errf("code comparison disabled: %s\n", rep.IncomparableReason)
+	cli.Errf("old: resolved=%d/%d descriptors=%d collisions=%d (%s, %s)\nnew: resolved=%d/%d descriptors=%d collisions=%d (%s, %s)\n",
+		rep.OldIdentity.ResolvedFunctions, rep.OldIdentity.FunctionObjects, rep.OldIdentity.DescriptorBuckets, rep.OldIdentity.CollisionBuckets, rep.OldVersion, rep.OldMachine,
+		rep.NewIdentity.ResolvedFunctions, rep.NewIdentity.FunctionObjects, rep.NewIdentity.DescriptorBuckets, rep.NewIdentity.CollisionBuckets, rep.NewVersion, rep.NewMachine)
+	cli.Errf("identity: matched=%d added=%d removed=%d\ninstruction bytes: equal=%d different=%d indeterminate=%d\n",
+		rep.MatchedIdentityTotal, rep.IdentityAddedTotal, rep.IdentityRemovedTotal,
+		rep.InstructionBytesEqualTotal, rep.InstructionBytesDifferentTotal, rep.InstructionBytesIndeterminateTotal)
+	if !rep.InstructionBytesComparable {
+		cli.Errf("instruction-byte comparison disabled: %s\n", rep.InstructionBytesIncomparableReason)
 	}
+	cli.Errf("note: instruction-byte differences are not proof of Dart source-semantic changes; pool/layout/relocation/codegen drift can change bytes\n")
 
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
