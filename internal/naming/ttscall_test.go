@@ -74,3 +74,16 @@ func TestTTSCallResolvesNothingWithoutStubNames(t *testing.T) {
 		t.Errorf("expected no resolution, got %q", got)
 	}
 }
+
+func TestPoolCallTargetIgnoresDisplaySuffix(t *testing.T) {
+	exact := map[int]string{75: "ExactCodeTarget"}
+	if got := PoolCallTarget("PP[75] Widget.build", exact); got != "ExactCodeTarget" {
+		t.Fatalf("PoolCallTarget = %q, want exact map target", got)
+	}
+	if got := PoolCallTarget("PP[76] ExactCodeTarget", exact); got != "" {
+		t.Fatalf("display-only target was promoted: %q", got)
+	}
+	if idx, ok := PoolIndexFromVia("pp[75] anything"); !ok || idx != 75 {
+		t.Fatalf("PoolIndexFromVia = (%d,%v), want (75,true)", idx, ok)
+	}
+}

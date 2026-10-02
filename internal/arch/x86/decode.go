@@ -71,6 +71,10 @@ func Walk(code []byte, baseVA uint64, fn func(Decoded) bool) {
 			off++
 			continue
 		}
+		lastOff := uint64(off) + uint64(inst.Len-1)
+		if lastOff < uint64(off) || lastOff > ^uint64(0)-baseVA {
+			return
+		}
 		if !fn(Decoded{Inst: inst, VA: va, Len: inst.Len}) {
 			return
 		}

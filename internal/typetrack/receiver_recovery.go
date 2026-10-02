@@ -133,7 +133,7 @@ func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeCon
 		}
 		dst, dok := in.Args[0].(x86asm.Reg)
 		mem, mok := in.Args[1].(x86asm.Mem)
-		if !dok || !mok || x86.CanonReg(mem.Base) != 5 || mem.Index != 0 {
+		if !dok || !mok || x86.CanonReg(mem.Base) != sdk.X86FrameReg || mem.Index != 0 {
 			continue
 		}
 		if off := int(mem.Disp); off >= receiverSlotFloor {

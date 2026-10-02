@@ -69,9 +69,6 @@ func BuildX86IR(name string, insts []x86.Decoded, cc sdk.RegisterCallingConventi
 	fir.FpuReturnReg = cc.FPUReturn
 	fir.TypeTestABIRegs = sdk.TypeTestRegNames(false)
 
-	funcStart := insts[0].VA
-	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len) //nolint:gosec // instruction length is always non-negative
-
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, in := range insts {
 		addrToIdx[in.VA] = i
@@ -95,7 +92,7 @@ func BuildX86IR(name string, insts []x86.Decoded, cc sdk.RegisterCallingConventi
 		if i+1 < len(insts) {
 			leaders[i+1] = true
 		}
-		if ok && tgt >= funcStart && tgt < funcEnd {
+		if ok {
 			if idx, exists := addrToIdx[tgt]; exists {
 				leaders[idx] = true
 			}
@@ -328,24 +325,23 @@ func isX86PoolLoad(in x86.Decoded) bool {
 		if !ok {
 			continue
 		}
-		if strings.ToLower(mem.Base.String()) == sdk.X86PoolRegStr {
+		if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); static {
 			return true
 		}
 	}
 	return false
 }
 
-// x86PoolIndex converts a "[r15+disp]" displacement to a pool slot index
-// using this project's own already-established x86_64 convention
-// (disp/8 - 2, confirmed identical in cmd/aotopsy/x64refs.go and
-// gdtcall.go's poolIdx computation -- x86_64's PP register points 2
-// slots further into the pool array than ARM64's does, unlike ARM64
-// where idx is a plain byteOff/8 with no adjustment, per
-// internal/disasm/annotate.go's PPAnnotator).
+// x86PoolIndex converts a static "[r15+disp]" displacement to a pool slot
+// using disasm.X64PoolIndex, the SDK-derived tagged-PP arithmetic shared by all
+// consumers. Indexed addressing is not a constant pool slot and is rejected.
 func x86PoolIndex(in x86.Decoded) int {
 	for _, arg := range in.Inst.Args {
 		mem, ok := arg.(x86asm.Mem)
-		if !ok || strings.ToLower(mem.Base.String()) != sdk.X86PoolRegStr {
+		if !ok {
+			continue
+		}
+		if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
 			continue
 		}
 		idx, idxOK := disasm.X64PoolIndex(mem.Disp)

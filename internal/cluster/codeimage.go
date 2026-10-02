@@ -42,7 +42,11 @@ func (im CodeImage) VAAt(pcOffset uint32) (uint64, bool) {
 	if uint64(pcOffset) < im.CodeOff {
 		return 0, false
 	}
-	return im.CodeVA + (uint64(pcOffset) - im.CodeOff), true
+	delta := uint64(pcOffset) - im.CodeOff
+	if delta > ^uint64(0)-im.CodeVA {
+		return 0, false
+	}
+	return im.CodeVA + delta, true
 }
 
 // Slice returns r's bytes, clamped to the end of the image, and its
@@ -56,6 +60,9 @@ func (im CodeImage) VAAt(pcOffset uint32) (uint64, bool) {
 func (im CodeImage) Slice(r CodeRange) (code []byte, va uint64, ok bool) {
 	va, ok = im.FuncVA(r)
 	if !ok {
+		return nil, 0, false
+	}
+	if r.Size > 0 && uint64(r.Size-1) > ^uint64(0)-va {
 		return nil, 0, false
 	}
 	if len(im.Code) == 0 {
@@ -90,9 +97,12 @@ func (im CodeImage) SliceExact(r CodeRange) (code []byte, va uint64, ok bool) {
 	if !ok || len(im.Code) == 0 {
 		return nil, 0, false
 	}
+	if r.Size > 0 && uint64(r.Size-1) > ^uint64(0)-va {
+		return nil, 0, false
+	}
 	start := uint64(r.PCOffset) - im.CodeOff
 	end := start + uint64(r.Size)
-	if end > uint64(len(im.Code)) {
+	if end < start || end > uint64(len(im.Code)) {
 		return nil, 0, false
 	}
 	return im.Code[start:end], va, true

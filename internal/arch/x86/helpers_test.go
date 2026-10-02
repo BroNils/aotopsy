@@ -63,6 +63,20 @@ func TestCanonRegRejectsNonGP(t *testing.T) {
 	}
 }
 
+func TestStaticBaseDispRejectsFoldedIndex(t *testing.T) {
+	plain := x86asm.Mem{Base: x86asm.R15, Disp: 0x27}
+	if disp, ok := StaticBaseDisp(plain, 15); !ok || disp != 0x27 {
+		t.Fatalf("plain base+disp = (%#x,%v), want (0x27,true)", disp, ok)
+	}
+	indexed := x86asm.Mem{Base: x86asm.R15, Index: x86asm.RCX, Scale: 8, Disp: 0x27}
+	if disp, ok := StaticBaseDisp(indexed, 15); ok {
+		t.Fatalf("indexed address fabricated static displacement %#x", disp)
+	}
+	if _, ok := StaticBaseDisp(plain, 14); ok {
+		t.Fatal("wrong base register accepted as static base+disp")
+	}
+}
+
 // A rel displacement is measured from the END of the instruction, and it is
 // signed. The copies this replaced disagreed in form -- one computed in
 // int64, the others added a wrapped uint64 -- so a backward branch is the

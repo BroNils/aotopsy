@@ -38,7 +38,6 @@ func BuildCFG(name string, insts []Inst) FuncCFG {
 	blocks := PartitionBlocks(
 		len(insts),
 		func(i int) uint64 { return insts[i].Addr },
-		func(i int) int { return 4 },
 		func(i int) FlowInfo {
 			if IsARM64SemanticBarrier(insts[i]) {
 				return FlowInfo{Kind: FlowIndirect}
@@ -55,9 +54,9 @@ func BuildCFG(name string, insts []Inst) FuncCFG {
 				return FlowInfo{Kind: FlowIndirect}
 			}
 			if bi.Cond {
-				return FlowInfo{Kind: FlowCondJump, Target: bi.Target, HasTarget: true}
+				return FlowInfo{Kind: FlowCondJump, Target: bi.Target, HasTarget: bi.HasTarget}
 			}
-			return FlowInfo{Kind: FlowJump, Target: bi.Target, HasTarget: true}
+			return FlowInfo{Kind: FlowJump, Target: bi.Target, HasTarget: bi.HasTarget}
 		},
 	)
 

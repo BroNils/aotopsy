@@ -287,7 +287,7 @@ func TestUnresolvedProvenanceDoesNotImplyStub(t *testing.T) {
 		{name: "generic provenance", via: "some_register_origin", want: ConfUnknown},
 		{name: "pool placeholder", via: "PP[9] <Instance_42>", want: ConfUnknown},
 		{name: "pool string", via: `pp[12] "hello world"`, want: ConfUnknown},
-		{name: "pool callable display", via: "PP[7] Widget.build", want: ConfStub},
+		{name: "pool callable-looking display", via: "PP[7] Widget.build", want: ConfUnknown},
 		{name: "thread data field", via: "THR.dispatch_table_array", want: ConfUnknown},
 		{name: "thread scalar field", via: "THR.stack_limit", want: ConfUnknown},
 		{name: "thread entry point", via: "THR.AllocateArray_ep", want: ConfStub},
@@ -302,6 +302,17 @@ func TestUnresolvedProvenanceDoesNotImplyStub(t *testing.T) {
 				t.Fatalf("Via %q confidence = %q, want %q", tt.via, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExactTypeTestingStubTargetIsStubEvidence(t *testing.T) {
+	c := NewCollector()
+	c.FromCallEdges([]disasm.CallEdgeRecord{{
+		FromFunc: "F", FromPC: "0x1000", Kind: "blr",
+		Via: "PP[7] misleading.display", Target: "TypeTestingStub_List<int>",
+	}})
+	if got := c.records[0].Confidence; got != ConfStub {
+		t.Fatalf("exact TTS target confidence = %q, want %q", got, ConfStub)
 	}
 }
 

@@ -13,14 +13,15 @@ import (
 type Inst struct {
 	Addr     uint64
 	Raw      uint32
-	Size     int // always 4 for ARM64
+	Size     int // 4 for decoded ARM64 instructions; 1-3 for a truncated bad tail
 	Mnemonic string
 	Operands string
 	Text     string // full disassembly line
-	// Bad marks a 32-bit word the architecture decoder rejected. Listing
-	// recovery still emits it as `.word`, but semantic analyses must treat it
-	// as a control-flow/provenance barrier rather than flowing facts through
-	// bytes whose instruction semantics are unknown.
+	// Bad marks bytes that cannot form a valid decoded instruction: either a
+	// rejected 32-bit word or a truncated 1-3 byte tail. Listing recovery keeps
+	// them visible as `.word`/`.byte`, but semantic analyses must treat them as a
+	// control-flow/provenance barrier rather than flowing facts through bytes
+	// whose instruction semantics are unknown.
 	Bad bool
 }
 
@@ -47,19 +48,23 @@ func (o Options) effectiveMax() int {
 // Returns decoded instructions up to MaxSteps or end of data.
 func Disassemble(data []byte, opts Options) []Inst {
 	maxSteps := opts.effectiveMax()
-	n := len(data) / 4
+	full := len(data) / 4
+	n := full
+	if len(data)%4 != 0 {
+		n++
+	}
 	if n > maxSteps {
 		n = maxSteps
 	}
 
 	result := make([]Inst, 0, n)
-	for i := 0; i < n; i++ {
+	for i := 0; i < full && len(result) < n; i++ {
 		off := i * 4
-		if off+4 > len(data) {
+		addr, ok := checkedInstructionAddr(opts.BaseAddr, off, 4)
+		if !ok {
 			break
 		}
 		raw := binary.LittleEndian.Uint32(data[off : off+4])
-		addr := opts.BaseAddr + uint64(off)
 
 		inst, err := arm64asm.Decode(data[off : off+4])
 		var mnemonic, operands, text string
@@ -89,7 +94,44 @@ func Disassemble(data []byte, opts Options) []Inst {
 			Bad:      bad,
 		})
 	}
+
+	// AArch64 instructions are fixed-width. A final 1-3 bytes therefore cannot
+	// be an instruction and must remain visible as malformed input rather than
+	// disappearing from the listing and semantic analyses.
+	if rem := len(data) % 4; rem != 0 && len(result) < n {
+		off := full * 4
+		if addr, ok := checkedInstructionAddr(opts.BaseAddr, off, rem); ok {
+			var raw uint32
+			parts := make([]string, 0, rem)
+			for i := 0; i < rem; i++ {
+				b := data[off+i]
+				raw |= uint32(b) << (8 * i)
+				parts = append(parts, fmt.Sprintf("0x%02x", b))
+			}
+			operands := strings.Join(parts, ", ")
+			result = append(result, Inst{
+				Addr:     addr,
+				Raw:      raw,
+				Size:     rem,
+				Mnemonic: ".byte",
+				Operands: operands,
+				Text:     ".byte " + operands,
+				Bad:      true,
+			})
+		}
+	}
 	return result
+}
+
+func checkedInstructionAddr(base uint64, off, size int) (uint64, bool) {
+	if off < 0 || size <= 0 {
+		return 0, false
+	}
+	span := uint64(off) + uint64(size-1)
+	if span < uint64(off) || span > ^uint64(0)-base {
+		return 0, false
+	}
+	return base + uint64(off), true
 }
 
 // Format renders a slice of instructions as stable text output.
@@ -100,9 +142,20 @@ func Format(insts []Inst, lookup SymbolLookup, annotators ...Annotator) string {
 	for _, inst := range insts {
 		// Address.
 		fmt.Fprintf(&b, "0x%08x  ", inst.Addr)
-		// Raw bytes (little-endian hex).
-		fmt.Fprintf(&b, "%02x %02x %02x %02x  ",
-			byte(inst.Raw), byte(inst.Raw>>8), byte(inst.Raw>>16), byte(inst.Raw>>24))
+		// Raw bytes (little-endian hex). Synthetic callers historically leave
+		// Size at zero, so preserve the four-byte display in that case.
+		size := inst.Size
+		if size <= 0 || size > 4 {
+			size = 4
+		}
+		for i := 0; i < 4; i++ {
+			if i < size {
+				fmt.Fprintf(&b, "%02x ", byte(inst.Raw>>uint(8*i)))
+			} else {
+				b.WriteString("   ")
+			}
+		}
+		b.WriteByte(' ')
 		// Disassembly.
 		b.WriteString(inst.Text)
 		// Symbol comment.

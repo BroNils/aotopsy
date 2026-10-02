@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 
-	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
@@ -18,7 +17,6 @@ import (
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
 	"aotopsy/internal/render"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
 )
@@ -175,7 +173,7 @@ func RunDisasmStage(
 	}
 
 	codeImage := NewCodeImage(code, codeVA, codeOff, pl, elfFuncSyms)
-	compute := func(r *cluster.CodeRange, out *funcOutput, peep *disasm.PeepholeState) {
+	compute := func(r *cluster.CodeRange, out *funcOutput) {
 		fs, ok := codeImage.Slice(*r)
 		if !ok {
 			out.skip = true
@@ -199,14 +197,14 @@ func RunDisasmStage(
 		}
 		out.name = name
 
-		peep.Reset()
 		insts := disasm.Disassemble(funcCode, disasm.Options{
 			BaseAddr: funcVA,
 			Symbols:  lookup,
 		})
 
 		thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
-		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, peep.Annotate}
+		ppCtxAnn := disasm.PPContextAnnotator(insts, poolDisplay)
+		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, ppCtxAnn}
 
 		filename := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
 		out.filename = filename
@@ -246,7 +244,7 @@ func RunDisasmStage(
 			ParamCount: paramCount,
 		}
 
-		edges := disasm.ExtractCallEdgesCFG(name, insts, lookup, annotators)
+		edges := disasm.ExtractCallEdgesCFG(name, insts, lookup, annotators, poolDisplay)
 		out.edges = edges
 		for _, e := range edges {
 			rec := disasm.CallEdgeRecord{
@@ -256,7 +254,7 @@ func RunDisasmStage(
 				Reg:      e.Reg,
 				Via:      e.Via,
 			}
-			if e.Kind == "bl" {
+			if e.Kind == "bl" && e.TargetValid {
 				if e.TargetName != "" {
 					rec.Target = e.TargetName
 				} else {
@@ -305,12 +303,6 @@ func RunDisasmStage(
 		}
 	}
 
-	// One peephole state per worker: it is stateful across the instructions
-	// of a single function and must not be shared between goroutines.
-	peepholes := make([]*disasm.PeepholeState, workers)
-	for i := range peepholes {
-		peepholes[i] = disasm.NewPeepholeState(poolDisplay)
-	}
 	outputs := make([]funcOutput, chunkSize)
 
 	for base := 0; base < n; base += chunkSize {
@@ -327,7 +319,7 @@ func RunDisasmStage(
 			go func(w int) {
 				defer wg.Done()
 				for i := base + w; i < end; i += workers {
-					compute(&ranges[i], &outputs[i-base], peepholes[w])
+					compute(&ranges[i], &outputs[i-base])
 				}
 			}(w)
 		}
@@ -441,53 +433,26 @@ func RunDisasmStage(
 // ExtractStringRefs scans instructions for PP loads that resolve to string values.
 func ExtractStringRefs(insts []disasm.Inst, poolDisplay map[int]string, funcName string) []disasm.StringRefRecord {
 	var refs []disasm.StringRefRecord
-	peep := disasm.NewPeepholeState(poolDisplay)
-
-	for _, inst := range insts {
-		// Check single-instruction PP load: LDR Xt, [X27, #imm]. X27 = ARM64
-		// object-pool pointer -- this whole function is only ever reached
-		// for ARM64 input (pipeline.Run rejects x86_64 before this stage
-		// runs), so 27 is not a magic number that needs to vary by arch.
-		if baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(inst.Raw); ok && baseReg == sdk.ARM64PP {
-			idx, idxOK := disasm.ARM64PoolIndex(byteOff)
-			if s, found := poolDisplay[idx]; idxOK && found && len(s) > 0 && s[0] == '"' {
-				val, err := strconv.Unquote(s)
-				if err == nil {
-					refs = append(refs, disasm.StringRefRecord{
-						Func:    funcName,
-						PC:      fmt.Sprintf("0x%x", inst.Addr),
-						Kind:    "PP",
-						PoolIdx: idx,
-						Value:   val,
-					})
-				}
-			}
+	for _, load := range disasm.ExtractARM64PoolLoads(insts, poolDisplay) {
+		s, found := poolDisplay[load.PoolIndex]
+		if !found || len(s) == 0 || s[0] != '"' {
+			continue
 		}
-
-		// Check two-instruction peephole: ADD Xd, X27, #upper + LDR Xt, [Xd, #lower]
-		ann := peep.Annotate(inst)
-		if ann != "" && strings.HasPrefix(ann, "PP[") {
-			closeBracket := strings.IndexByte(ann, ']')
-			if closeBracket > 3 {
-				idxStr := ann[3:closeBracket]
-				idx, err := strconv.Atoi(idxStr)
-				if err == nil {
-					rest := strings.TrimSpace(ann[closeBracket+1:])
-					if len(rest) > 0 && rest[0] == '"' {
-						val, err := strconv.Unquote(rest)
-						if err == nil {
-							refs = append(refs, disasm.StringRefRecord{
-								Func:    funcName,
-								PC:      fmt.Sprintf("0x%x", inst.Addr),
-								Kind:    "PP_peep",
-								PoolIdx: idx,
-								Value:   val,
-							})
-						}
-					}
-				}
-			}
+		val, err := strconv.Unquote(s)
+		if err != nil {
+			continue
 		}
+		kind := "PP_peep"
+		if load.Direct {
+			kind = "PP"
+		}
+		refs = append(refs, disasm.StringRefRecord{
+			Func:    funcName,
+			PC:      fmt.Sprintf("0x%x", load.PC),
+			Kind:    kind,
+			PoolIdx: load.PoolIndex,
+			Value:   val,
+		})
 	}
 	return refs
 }

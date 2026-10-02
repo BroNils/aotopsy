@@ -35,7 +35,10 @@ func provInputReg(note string) (int, bool) {
 
 // runProvFixpoint runs the monotonic reaching-definitions dataflow fixpoint
 // across CFG blocks for a given register count.
-// It converges monotonically to the least fixed point or terminates at maxVisits.
+// It converges monotonically to the least fixed point. A defensive visit cap
+// bounds malformed/adversarial inputs; if that cap is ever exhausted, the
+// result fails closed to Bottom rather than publishing a partially-converged
+// Known provenance as if it were trustworthy.
 func runProvFixpoint(
 	nblocks int,
 	nregs int,
@@ -69,7 +72,7 @@ func runProvFixpoint(
 		inWorklist[i] = true
 	}
 
-	maxVisits := nblocks*nblocks + 64
+	maxVisits := provVisitLimit(nblocks)
 	visits := 0
 
 	in := make([]lvalue, nregs)
@@ -129,6 +132,25 @@ func runProvFixpoint(
 			}
 		}
 	}
+	if len(worklist) != 0 {
+		for b := range entryState {
+			for r := range entryState[b] {
+				entryState[b][r] = lvalue{kind: lvBottom}
+			}
+		}
+	}
 
 	return entryState
+}
+
+func provVisitLimit(nblocks int) int {
+	const slack = 64
+	maxInt := int(^uint(0) >> 1)
+	if nblocks <= 0 {
+		return slack
+	}
+	if nblocks > (maxInt-slack)/nblocks {
+		return maxInt
+	}
+	return nblocks*nblocks + slack
 }

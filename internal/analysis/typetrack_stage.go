@@ -275,8 +275,8 @@ func runTypeInference(
 	// order, so that loop picked an arbitrary function starting within 64 KB
 	// below the address -- a different, and usually wrong, one on each run.
 	type funcSpan struct {
-		start, end uint64
-		name       string
+		start, size uint64
+		name        string
 	}
 	spans := make([]funcSpan, 0, len(ranges))
 	for _, r := range ranges {
@@ -291,7 +291,7 @@ func runTypeInference(
 		if !ok {
 			continue
 		}
-		spans = append(spans, funcSpan{start: start, end: start + uint64(r.Size), name: ci.FuncName})
+		spans = append(spans, funcSpan{start: start, size: uint64(r.Size), name: ci.FuncName})
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	funcNameAt := func(va uint64) (string, bool) {
@@ -300,7 +300,7 @@ func runTypeInference(
 			return "", false
 		}
 		s := spans[i-1]
-		if va < s.start || va >= s.end {
+		if va < s.start || va-s.start >= s.size {
 			return "", false
 		}
 		return s.name, true
@@ -354,7 +354,15 @@ func runTypeInference(
 			// Try matching by TextOffset → VA → function name
 			if _, exists := poolCodeNames[pe.Index]; !exists {
 				if ce, ok2 := codeByRef[pe.RefID]; ok2 && ce.TextOffset > 0 {
-					va := codeVA + uint64(ce.TextOffset) - codeOff
+					textOff := uint64(ce.TextOffset)
+					if textOff < codeOff {
+						continue
+					}
+					delta := textOff - codeOff
+					if delta > ^uint64(0)-codeVA {
+						continue
+					}
+					va := codeVA + delta
 					if name, ok3 := funcNameAt(va); ok3 {
 						poolCodeNames[pe.Index] = name
 					}
@@ -468,8 +476,11 @@ func runTypeInference(
 
 	// Build address → function name lookup for BL/CALL target resolution.
 	type funcRange struct {
-		start, end uint64
-		name       string
+		start, size uint64
+		name        string
+	}
+	containsFuncVA := func(fr funcRange, va uint64) bool {
+		return va >= fr.start && va-fr.start < fr.size
 	}
 	codeImage := NewCodeImage(code, codeVA, codeOff, pl, nil)
 	// Build the complete target-address index BEFORE extracting any call edges.
@@ -487,7 +498,7 @@ func runTypeInference(
 		}
 		funcRanges = append(funcRanges, funcRange{
 			start: fs.VA,
-			end:   fs.VA + uint64(ranges[i].Size),
+			size:  uint64(ranges[i].Size),
 			name:  fs.Name,
 		})
 	}
@@ -595,7 +606,7 @@ func runTypeInference(
 				if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
 					calleeName := ""
 					for _, fr := range funcRanges {
-						if target >= fr.start && target < fr.end {
+						if containsFuncVA(fr, target) {
 							calleeName = fr.name
 							break
 						}
@@ -643,7 +654,7 @@ func runTypeInference(
 					if target, ok := x86.RelTarget(inst.Inst, inst.VA, inst.Len); ok {
 						calleeName := ""
 						for _, fr := range funcRanges {
-							if target >= fr.start && target < fr.end {
+							if containsFuncVA(fr, target) {
 								calleeName = fr.name
 								break
 							}
@@ -686,6 +697,7 @@ func runTypeInference(
 		outDir,
 		interResult,
 		naming.BuildTTSCallTargets(clResult.Pool, pl),
+		poolCodeNames,
 		buildThreadCallableTargets(thrFields, allocStubOffsets),
 	)
 	if err != nil {
@@ -830,6 +842,7 @@ func rewriteCallEdges(
 	outDir string,
 	interResult *typetrack.InterResult,
 	ttsByPoolIndex map[int]string,
+	codeByPoolIndex map[int]string,
 	thrStubTargets map[string]string,
 ) (BLRBreakdown, error) {
 	var bd BLRBreakdown
@@ -887,6 +900,12 @@ func rewriteCallEdges(
 			// monomorphic call.
 			e.Target = name
 			bd.Stub++
+		} else if name := naming.PoolCallTarget(e.Via, codeByPoolIndex); name != "" {
+			// The pool index was independently proven to hold a Code object.
+			// Ignore Via's display suffix completely: it is provenance text, not
+			// callee identity. A Code slot denotes one exact callable.
+			e.Target = name
+			bd.Monomorphic++
 		} else if strings.HasPrefix(e.Via, "THR.") {
 			// A Thread-relative provenance names a FIELD, not necessarily a
 			// callable. The same SDK table contains data such as
@@ -902,17 +921,7 @@ func rewriteCallEdges(
 				bd.Unresolved++
 			}
 		} else {
-			// For unresolved BLR edges, resolve via the pool display
-			// string in the Via annotation. This catches pool-loaded Code
-			// objects that the type tracker missed -- overwhelmingly the
-			// x86_64 type-testing and inline-cache stubs; see
-			// resolveViaPoolDisplay for the measurement.
-			if resolved := resolveViaPoolDisplay(e.Via); resolved != "" {
-				e.Target = resolved
-				bd.Stub++
-			} else {
-				bd.Unresolved++
-			}
+			bd.Unresolved++
 		}
 		// NOTE: there used to be a third branch here that matched
 		// `via = "THR+0xNNN LDR[RUNTIME_ENTRY]"` and set Target =
@@ -992,59 +1001,4 @@ func buildThreadCallableTargets(thrFields map[int]string, stubOffsets map[int64]
 		return nil
 	}
 	return out
-}
-
-// resolveViaPoolDisplay resolves an unresolved BLR edge from the pool display
-// string in its Via annotation.
-//
-// Via annotations for pool-loaded objects look like:
-//
-//	"PP[123] foo"   (ARM64, annotate.go)
-//	"pp[123] foo"   (x86_64, x86.go / dataflowx86.go)
-//
-// and the register provenance behind them is a real forward dataflow over the
-// function's CFG (ExtractCallEdgesCFG), so the named slot is the value that
-// actually reaches the BLR -- not something found by scanning nearby.
-//
-// Measured across the four corpus samples. It fires on x86_64 and essentially
-// nowhere else: 641 pp[ sites on sample312_x64, of which 503 resolve to 49
-// distinct targets, against 0 on compare_sample_arm64 and sample313_arm64 and
-// 1 on dart212_arm64. That asymmetry is expected -- ARM64 reaches these stubs
-// through THR-cached entry points, which the branch above handles. Every one
-// of the 49 is a genuine BLR target: type-testing stubs, inline-cache stubs
-// and shared-slow-path allocation stubs.
-//
-// The guards below matter because the display string alone does not say what
-// KIND of object the slot holds. ResolvePoolDisplay renders a String entry
-// with %q and an unnamed object as "<CidName>", so both are rejected outright:
-// nothing can be called through a String, and a placeholder names no target.
-// This is the same failure that made the deleted symbolic_blr.go report
-// "Subtype6TestCache" as a call target -- worth guarding against even though
-// the current corpus produces no such case.
-func resolveViaPoolDisplay(via string) string {
-	if via == "" {
-		return ""
-	}
-	// Look for "PP[" or "pp[" prefix.
-	if !strings.HasPrefix(strings.ToLower(via), "pp[") {
-		return ""
-	}
-	closeBracket := strings.IndexByte(via, ']')
-	if closeBracket < 0 {
-		return ""
-	}
-	rest := strings.TrimSpace(via[closeBracket+1:])
-	if rest == "" {
-		return ""
-	}
-	// "<vm:NNN>", "<Instance_42>", "<String>": a placeholder, not a name.
-	if strings.HasPrefix(rest, "<") {
-		return ""
-	}
-	// A quoted display is a String constant (ResolvePoolDisplay uses %q for
-	// entries whose CID is a string class). Code cannot live there.
-	if strings.HasPrefix(rest, `"`) {
-		return ""
-	}
-	return rest
 }

@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
 )
 
 // ExtractCallEdgesCFG is ExtractCallEdges's CFG-wide replacement: instead
@@ -26,7 +27,7 @@ import (
 // Meet = intersection: two equal knowns stay known, anything else collapses
 // toward bottom. This is monotonic (values only ever get less precise
 // across iterations), so the worklist below is guaranteed to terminate.
-func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annotators []Annotator) []CallEdge {
+func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annotators []Annotator, poolDisplay map[int]string) []CallEdge {
 	if len(insts) == 0 {
 		return nil
 	}
@@ -34,6 +35,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 	if len(cfg.Blocks) == 0 {
 		return nil
 	}
+	poolNotes := arm64PoolNotesByPC(ExtractARM64PoolLoads(insts, poolDisplay))
 
 	// Precompute each block's local effect: which registers it touches
 	// (defines or kills) and what they end up as, replaying the block's
@@ -51,7 +53,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 		}
 		var touched [31]bool
 		for i := blk.Start; i < blk.End && i < len(insts); i++ {
-			touchInstrEffect(insts[i], &regs, annotators, &touched)
+			touchInstrEffect(insts[i], &regs, annotators, poolNotes, &touched)
 		}
 		eff := provBlockEffect{
 			touched:  touched[:],
@@ -96,10 +98,11 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 		}
 		for i := blk.Start; i < blk.End && i < len(insts); i++ {
 			inst := insts[i]
-			if target, ok := arm64.BL(inst.Raw, inst.Addr); ok {
+			if arm64.IsBLEncoding(inst.Raw) {
+				target, targetValid := arm64.BL(inst.Raw, inst.Addr)
 				argMask := inferCallArgRegMaskLocal(insts, i, blk.Start)
-				e := CallEdge{FromPC: inst.Addr, Kind: "bl", TargetPC: target, ArgCountHint: popcount8(argMask), ArgRegMask: argMask}
-				if symbols != nil {
+				e := CallEdge{FromPC: inst.Addr, Kind: "bl", TargetPC: target, TargetValid: targetValid, ArgCountHint: popcount8(argMask), ArgRegMask: argMask}
+				if targetValid && symbols != nil {
 					if n, found := symbols(target); found {
 						e.TargetName = n
 					}
@@ -126,7 +129,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 				continue
 			}
 			var touched [31]bool
-			touchInstrEffect(inst, &regs, annotators, &touched)
+			touchInstrEffect(inst, &regs, annotators, poolNotes, &touched)
 		}
 	}
 
@@ -169,18 +172,18 @@ func meetLvalue(a, b lvalue) lvalue {
 
 // touchInstrEffect applies one instruction's register-definition effect
 // (if any) to regs, mirroring ExtractCallEdges's per-instruction logic
-// exactly (dispatch-table loads, object-field LDUR, annotator-detected
+// exactly (dispatch-table loads, object-field LDR/LDUR, annotator-detected
 // PP/THR loads, and killing any other load/data-processing destination)
 // -- but without emitting CallEdge records, since BL/BLR sites are
 // classified separately by the two passes above (the local-effect
 // precompute pass never needs them; the final emission pass classifies
 // them inline before falling through to this function).
-func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, touched *[31]bool) {
+func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, poolNotes map[uint64]map[int]string, touched *[31]bool) {
 	if IsARM64SemanticBarrier(inst) {
 		killAllRegs(regs, touched)
 		return
 	}
-	if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
+	if arm64.IsBLEncoding(inst.Raw) {
 		killAllRegs(regs, touched)
 		return
 	}
@@ -188,25 +191,30 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 		killAllRegs(regs, touched)
 		return
 	}
-	if base, _, dstR, ok := arm64.LDRRegExtended(inst.Raw); ok && base == regDT {
-		defineReg(regs, touched, dstR, "dispatch_table")
+	if rd, rm, ok := arm64.MOVOrr(inst.Raw); ok {
+		if rm >= 0 && rm < len(regs) && regs[rm] != "" {
+			defineReg(regs, touched, rd, regs[rm])
+		} else {
+			killReg(regs, touched, rd)
+		}
 		return
 	}
-	if base, dstR, off, ok := arm64.LDUR64(inst.Raw); ok {
-		// A Code entry-point load inherits its base's provenance: the entry
-		// point OF Code X is X. See IsCodeEntryPointDisp.
-		//
-		// When the base is unknown HERE the result is the same anonymous
-		// object_field it always was, so nothing gets worse. During the
-		// block-local precompute `regs` starts blank, which means this only
-		// fires when the pool load and the entry-point load sit in the same
-		// block -- and measured on the corpus they are one or two
-		// instructions apart, so that covers essentially all of them.
-		if IsCodeEntryPointDisp(off) && base >= 0 && base < len(regs) && regs[base] != "" {
-			defineReg(regs, touched, dstR, regs[base])
-			return
+	if notes := poolNotes[inst.Addr]; len(notes) > 0 {
+		// A scalar load has one destination/note; LDP has two distinct pool
+		// slots and therefore two distinct notes. Kill any destination that the
+		// structured pool-load census did not prove rather than applying one
+		// inline string annotation to every written register.
+		for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
+			if note, ok := notes[rd]; ok && note != "" {
+				defineReg(regs, touched, rd, note)
+			} else {
+				killReg(regs, touched, rd)
+			}
 		}
-		defineReg(regs, touched, dstR, ObjectFieldViaAt(off))
+		return
+	}
+	if base, _, dstR, ok := arm64.LDRRegExtended(inst.Raw); ok && base == regDT {
+		defineReg(regs, touched, dstR, "dispatch_table")
 		return
 	}
 	var annotation string
@@ -221,6 +229,35 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, tou
 		for _, rd := range dsts {
 			defineReg(regs, touched, rd, annotation)
 		}
+		return
+	}
+	if mem, ok := arm64.Load64Immediate(inst.Raw); ok && mem.Mode == arm64.AddressOffset {
+		base, dstR, off := mem.BaseReg, mem.Reg, mem.ByteOffset
+		// Fixed-role registers do not name heap object fields. PP/THR facts are
+		// handled above by structured pool notes / annotators; SP/FP are stack
+		// slots; DT is dispatch storage. If none of those paths recognized this
+		// load, unknown is safer than inventing object_field provenance.
+		switch base {
+		case sdk.ARM64SPReg, sdk.ARM64FrameReg, sdk.ARM64PP, sdk.ARM64THR, sdk.ARM64DT:
+			killReg(regs, touched, dstR)
+			return
+		}
+		// A Code entry-point load inherits its base's provenance: the entry
+		// point OF Code X is X. See IsCodeEntryPointDisp.
+		if IsCodeEntryPointDisp(off) && base >= 0 && base < len(regs) && regs[base] != "" {
+			defineReg(regs, touched, dstR, regs[base])
+			return
+		}
+		// A displacement alone does not prove that an arbitrary register holds
+		// a heap object. Only retain generic object-field provenance when the
+		// base itself already has path-consistent provenance. This keeps a load
+		// after a CFG join from turning an unknown/bypassed temporary into a
+		// fabricated heap-field fact.
+		if base < 0 || base >= len(regs) || regs[base] == "" {
+			killReg(regs, touched, dstR)
+			return
+		}
+		defineReg(regs, touched, dstR, ObjectFieldViaAt(off))
 		return
 	}
 	for _, rd := range dsts {

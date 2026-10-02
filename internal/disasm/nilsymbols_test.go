@@ -29,7 +29,7 @@ func TestNilSymbolLookupIsSafeOnBothArches(t *testing.T) {
 
 	// ARM64: `bl #0` at 0x1000.
 	insts := []Inst{{Addr: 0x1000, Raw: 0x94000000, Size: 4, Text: "bl #0"}}
-	edges := ExtractCallEdgesCFG("fn", insts, nil, nil)
+	edges := ExtractCallEdgesCFG("fn", insts, nil, nil, nil)
 	if len(edges) == 0 {
 		t.Fatalf("expected a call edge from `bl`")
 	}

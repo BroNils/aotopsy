@@ -117,6 +117,21 @@ func TestBuildPlatformChannels(t *testing.T) {
 	}
 }
 
+func TestBuildPlatformChannelsDoesNotTreatViaAsAPIIdentity(t *testing.T) {
+	cl := &cluster.Result{Pool: []cluster.PoolEntry{{Index: 0, Kind: cluster.PoolTagged, RefID: 10}}}
+	pl := &naming.PoolLookups{RefToStr: map[int]string{10: "plugins.flutter.io/example"}}
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "caller",
+		Via:      "package:flutter/services.dart::MethodChannel.invokeMethod",
+	}}
+	refs := []disasm.StringRefRecord{{Func: "caller", Value: "plugins.flutter.io/example"}}
+
+	channels := BuildPlatformChannels(cl, pl, edges, refs)
+	if len(channels) != 0 {
+		t.Fatalf("Via provenance fabricated platform API call: %+v", channels)
+	}
+}
+
 func TestBuildDeobfuscationMap(t *testing.T) {
 	cl := &cluster.Result{
 		Classes: []cluster.ClassInfo{

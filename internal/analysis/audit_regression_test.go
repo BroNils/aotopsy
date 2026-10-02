@@ -124,6 +124,16 @@ func TestCheckedCodeEndOffsetRejectsTruncationAndWrap(t *testing.T) {
 	}
 }
 
+func TestCheckedCodeVARejectsWrap(t *testing.T) {
+	max := ^uint64(0)
+	if got, ok := checkedCodeVA(max-7, 7); !ok || got != max {
+		t.Fatalf("boundary VA = %#x, %v; want %#x, true", got, ok, max)
+	}
+	if got, ok := checkedCodeVA(max-3, 8); ok {
+		t.Fatalf("wrapped VA accepted as %#x", got)
+	}
+}
+
 func TestBuildThreadCallableTargetsRejectsDataAndKeepsSDKCallableFields(t *testing.T) {
 	thrFields := map[int]string{
 		0x10: "dispatch_table_array",

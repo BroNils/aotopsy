@@ -350,7 +350,7 @@ func AnalyzeFunction(
 		// implied class ID by kOriginElement.)
 		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
 		if !found {
-			if rd, ok := arm64.MOVOrr(raw); ok && rd == sdk.ARM64LinkReg {
+			if rd, _, ok := arm64.MOVOrr(raw); ok && rd == sdk.ARM64LinkReg {
 				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
 					if insts[j].Bad || insts[j+1].Bad {
 						break
@@ -449,8 +449,7 @@ func AnalyzeFunction(
 			}
 			jraw := insts[j].Raw
 			// Check for MOV Xp, Xn (ORR Xd, XZR, Xm) that bridges the class ID.
-			if movRd, movOK := arm64.MOVOrr(jraw); movOK && movRd < 31 {
-				movRm := int((jraw >> 16) & 0x1F)
+			if movRd, movRm, movOK := arm64.MOVOrr(jraw); movOK && movRd < 31 {
 				if movRm == classIdReg {
 					classIdReg = movRd
 					continue
@@ -688,7 +687,7 @@ func arm64PreservesCompareFlags(raw uint32, pc uint64) bool {
 	if raw == 0xD503201F { // NOP
 		return true
 	}
-	if _, ok := arm64.MOVOrr(raw); ok {
+	if _, _, ok := arm64.MOVOrr(raw); ok {
 		return true
 	}
 	if _, _, _, ok := arm64.ADD64Immediate(raw); ok {
@@ -733,7 +732,7 @@ func arm64PreservesCompareFlags(raw uint32, pc uint64) bool {
 	if arm64.IsRet(raw) {
 		return true
 	}
-	if _, ok := arm64.BL(raw, pc); ok {
+	if arm64.IsBLEncoding(raw) {
 		return true
 	}
 	if _, ok := arm64.BLR(raw); ok {
@@ -742,10 +741,10 @@ func arm64PreservesCompareFlags(raw uint32, pc uint64) bool {
 	if _, ok := arm64.IsBR(raw); ok {
 		return true
 	}
-	if _, ok := arm64.B(raw, pc); ok {
+	if arm64.IsBEncoding(raw) {
 		return true
 	}
-	if _, ok := arm64.CondBranch(raw, pc); ok {
+	if arm64.IsConditionalBranchEncoding(raw) {
 		return true
 	}
 	_, _, kind, ok := arm64.BCond(raw, pc)
@@ -863,8 +862,9 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			}
 			continue
 		}
-		// Check for BL (branch with link) — creates a new block after it.
-		if _, ok := arm64.BL(inst.Raw, inst.Addr); ok {
+		// Check for BL (branch with link) — creates a new block after it even
+		// when target arithmetic overflows at a malformed high virtual address.
+		if arm64.IsBLEncoding(inst.Raw) {
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
@@ -876,16 +876,20 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			}
 		}
 		// Check for B (unconditional branch) — target is a leader, next inst is a leader.
-		if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
-			leaders[target] = true
+		if arm64.IsBEncoding(inst.Raw) {
+			if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
+				leaders[target] = true
+			}
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
 			}
 		}
 		// Check for B.cond / CBZ / CBNZ / TBZ / TBNZ — both targets are leaders.
-		if targets, ok := isCondBranch(inst.Raw, inst.Addr); ok {
-			for _, t := range targets {
-				leaders[t] = true
+		if arm64.IsConditionalBranchEncoding(inst.Raw) {
+			if targets, ok := isCondBranch(inst.Raw, inst.Addr); ok {
+				for _, t := range targets {
+					leaders[t] = true
+				}
 			}
 			if i+1 < len(insts) {
 				leaders[insts[i+1].Addr] = true
@@ -944,16 +948,20 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 		fallThroughAddr, hasFallThroughAddr := arm64.PCRelativeTarget(lastInst.Addr, int64(lastInst.Size))
 
 		// Branch targets.
-		if target, ok := arm64.B(lastInst.Raw, lastInst.Addr); ok {
-			if bi, ok2 := addrToBlock[target]; ok2 {
-				blk.successors = append(blk.successors, bi)
+		if arm64.IsBEncoding(lastInst.Raw) {
+			if target, ok := arm64.B(lastInst.Raw, lastInst.Addr); ok {
+				if bi, ok2 := addrToBlock[target]; ok2 {
+					blk.successors = append(blk.successors, bi)
+				}
 			}
 			continue // unconditional branch — no fall-through
 		}
-		if targets, ok := isCondBranch(lastInst.Raw, lastInst.Addr); ok {
-			for _, t := range targets {
-				if bi, ok2 := addrToBlock[t]; ok2 {
-					blk.successors = append(blk.successors, bi)
+		if arm64.IsConditionalBranchEncoding(lastInst.Raw) {
+			if targets, ok := isCondBranch(lastInst.Raw, lastInst.Addr); ok {
+				for _, t := range targets {
+					if bi, ok2 := addrToBlock[t]; ok2 {
+						blk.successors = append(blk.successors, bi)
+					}
 				}
 			}
 			// Fall-through (if not the last instruction overall).
@@ -973,7 +981,7 @@ func buildBlocks(insts []disasm.Inst) []basicBlock {
 			continue
 		}
 		// BL/BLR: fall-through to next block.
-		if _, ok := arm64.BL(lastInst.Raw, lastInst.Addr); ok {
+		if arm64.IsBLEncoding(lastInst.Raw) {
 			if hasFallThroughAddr {
 				if bi, ok2 := addrToBlock[fallThroughAddr]; ok2 {
 					blk.successors = append(blk.successors, bi)
