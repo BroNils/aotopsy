@@ -202,7 +202,7 @@ aotopsy _debug strings --lib libapp.so --find "X-Signature" --xref   # which fun
 aotopsy _debug ffi-trace --lib libapp.so --filter MyClass            # dart:ffi call sites
 aotopsy _debug dispatch-table --lib libapp.so --filter MyClass       # dispatch table entries
 aotopsy _debug fingerprint --lib libapp.so                           # ELF/snapshot identity + Dart version evidence
-aotopsy _debug funcdiff --old old.so --new new.so                    # function set diff
+aotopsy _debug funcdiff --old old.so --new new.so                    # function identity + instruction-byte diff
 aotopsy _debug symbolmap --stripped lib.so --unstripped debug.so     # resolve stripped targets
 ```
 
@@ -257,7 +257,7 @@ internal/
   decompiler/         Dart-AOT pseudocode decompiler (both architectures)
   typetrack/          Whole-program type inference and receiver recovery
   fingerprint/        ELF/snapshot identity and bounded version evidence
-  funcdiff/           Function-set diffing between builds
+  funcdiff/           Function identity + instruction-byte diffing between builds
   symbolmap/          Stripped-vs-unstripped symbol resolution
   ffitrace/           Static dart:ffi call-site tracing
   strxref/            String-to-function cross-referencing

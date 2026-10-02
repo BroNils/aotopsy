@@ -60,7 +60,7 @@ func newTTSNameContext(result *cluster.Result, pl *PoolLookups, ct *snapshot.CID
 		ci := &result.Classes[i]
 		if pl != nil {
 			if no, ok := pl.RefToNamed[ci.RefID]; ok {
-				name := scrubDartPrivateKeys(pl.resolveIsolateName(no))
+				name := ScrubDartPrivateKeys(pl.resolveIsolateName(no))
 				if name != "" {
 					c.classNames[ci.ClassID] = name
 				}
@@ -164,11 +164,12 @@ func (c *ttsNameContext) typeParameterTTSName(no *cluster.NamedObject) (string, 
 	return name, name != ""
 }
 
-// scrubDartPrivateKeys is the class-name part of String::ScrubName used by
+// ScrubDartPrivateKeys is the private-key portion of String::ScrubName used by
 // Class::ScrubbedNameCString: each private suffix `@<digits>` is removed, even
-// when a generated class name contains several of them. Class names do not use
-// the getter/setter/constructor spellings that String::ScrubName also handles.
-func scrubDartPrivateKeys(name string) string {
+// when a generated name contains several of them. It deliberately does not
+// perform the getter/setter/constructor spelling rewrites that ScrubName also
+// performs; callers choose those separately according to their identity model.
+func ScrubDartPrivateKeys(name string) string {
 	first := -1
 	for i := 0; i+1 < len(name); i++ {
 		if name[i] == '@' && name[i+1] >= '0' && name[i+1] <= '9' {

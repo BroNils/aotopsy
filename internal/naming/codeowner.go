@@ -14,22 +14,45 @@ func isAllocationStubOwner(owner *cluster.NamedObject, ct *snapshot.CIDTable) bo
 // CodeIndexToFunc maps a Code's ClusterIndex to its unambiguous owning
 // Function NamedObject via the Function->CodeIndex direction.
 //
-// For Dart versions whose Function.code_index is one-based, the serialized
-// value is an InstructionsTable slot, not a Code-cluster index. The VM's
-// Deserializer::CodeIndexToClusterIndex conversion is exactly:
+// The serialized Function field changed domains at Dart 2.16.0:
 //
-//	code_index - 1 - first_entry_with_code
+//   - <=2.15: it is the absolute snapshot reference ID of the Code object
+//     (`d->Ref(code_index)`). Resolve that ref through Result.Codes first.
 //
-// firstEntryWithCode must therefore be supplied from the parsed instructions
-// table. Pass -1 when it is unavailable; in the one-based era that deliberately
-// disables this cross-reference so callers fall back to Code.OwnerRef instead
-// of fabricating a mapping in the wrong numbering domain.
+//   - >=2.16: it is a one-based InstructionsTable slot, not a Code-cluster
+//     index. The VM's Deserializer::CodeIndexToClusterIndex conversion is:
+//
+//     code_index - 1 - first_entry_with_code
+//
+// Exact SDK boundary: clustered_snapshot.cc/app_snapshot.cc @2.15.0 reads the
+// field with d->Ref(code_index), while @2.16.0 serializes GetCodeIndex(code) and
+// defines CodeIndexToClusterIndex. firstEntryWithCode must therefore be supplied
+// in the one-based era. Pass -1 when unavailable; mapping is then deliberately
+// disabled rather than fabricated in the wrong numbering domain.
 func CodeIndexToFunc(result *cluster.Result, ct *snapshot.CIDTable, codeIndexOneBased bool, firstEntryWithCode int) map[int]*cluster.NamedObject {
-	if ct == nil {
+	if result == nil || ct == nil {
 		return nil
 	}
 	if codeIndexOneBased && firstEntryWithCode < 0 {
 		return nil
+	}
+	legacyCodeRefToCluster := make(map[int]int, len(result.Codes))
+	legacyAmbiguousRef := make(map[int]bool)
+	if !codeIndexOneBased {
+		for i := range result.Codes {
+			code := &result.Codes[i]
+			if code.RefID <= cluster.RefNull || code.ClusterIndex < 0 {
+				continue
+			}
+			if _, exists := legacyCodeRefToCluster[code.RefID]; exists {
+				legacyAmbiguousRef[code.RefID] = true
+				continue
+			}
+			legacyCodeRefToCluster[code.RefID] = code.ClusterIndex
+		}
+		for ref := range legacyAmbiguousRef {
+			delete(legacyCodeRefToCluster, ref)
+		}
 	}
 	m := make(map[int]*cluster.NamedObject)
 	ambiguous := make(map[int]bool)
@@ -38,9 +61,15 @@ func CodeIndexToFunc(result *cluster.Result, ct *snapshot.CIDTable, codeIndexOne
 		if no.CID != ct.Function || no.CodeIndex < 0 {
 			continue
 		}
-		clusterIdx := no.CodeIndex
+		clusterIdx := -1
 		if codeIndexOneBased {
 			clusterIdx = no.CodeIndex - 1 - firstEntryWithCode
+		} else {
+			var ok bool
+			clusterIdx, ok = legacyCodeRefToCluster[no.CodeIndex]
+			if !ok {
+				continue
+			}
 		}
 		if clusterIdx < 0 {
 			continue

@@ -70,7 +70,7 @@ var debugCommands = []Command{
 	{Name: "x64refs", Short: "x86_64 disasm/callers-of/hash-scan", Run: cmdX64Refs, Debug: true},
 	{Name: "fingerprint", Short: "ELF/snapshot identity + Dart version evidence", Run: cmdFingerprint, Debug: true},
 	{Name: "symbolmap", Short: "Diff a stripped vs unstripped libapp.so's symbols", Run: cmdSymbolMap, Debug: true},
-	{Name: "funcdiff", Short: "Diff functions between two libapp.so builds", Run: cmdFuncDiff, Debug: true},
+	{Name: "funcdiff", Short: "Diff function identity + instruction bytes between builds", Run: cmdFuncDiff, Debug: true},
 	{Name: "decompile-native", Short: "Dart-AOT-aware pseudocode (no Ghidra dependency)", Run: cmdDecompileNative, Debug: true},
 	{Name: "ffi-trace", Short: "Static dart:ffi DynamicLibrary.open/lookup call-site tracing", Run: cmdFFITrace, Debug: true},
 	{Name: "dispatch-table", Short: "Recover real names for megamorphic/polymorphic dispatch targets", Run: cmdDispatchTable, Debug: true},
