@@ -27,16 +27,11 @@ type FlowInfo struct {
 func PartitionBlocks(
 	n int,
 	instAddr func(i int) uint64,
-	instLen func(i int) int,
 	instFlow func(i int) FlowInfo,
 ) []BasicBlock {
 	if n == 0 {
 		return nil
 	}
-
-	funcStart := instAddr(0)
-	lastIdx := n - 1
-	funcEnd := instAddr(lastIdx) + uint64(instLen(lastIdx))
 
 	addrToIdx := make(map[uint64]int, n)
 	flow := make([]FlowInfo, n)
@@ -56,7 +51,7 @@ func PartitionBlocks(
 
 	for i := range n {
 		fl := flow[i]
-		if fl.HasTarget && fl.Target >= funcStart && fl.Target < funcEnd {
+		if fl.HasTarget {
 			if idx, ok := addrToIdx[fl.Target]; ok {
 				leaders[idx] = true
 			}

@@ -42,7 +42,7 @@ func TestExtractCallEdgesCFGBeyondOldWindow(t *testing.T) {
 
 	annotators := []Annotator{THRContextAnnotator(insts, fields)}
 
-	edges := ExtractCallEdgesCFG("test_fn", insts, nil, annotators)
+	edges := ExtractCallEdgesCFG("test_fn", insts, nil, annotators, nil)
 
 	var blr *CallEdge
 	for i := range edges {

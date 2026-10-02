@@ -12,6 +12,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 )
 
 // DumpFuncDisasm finds the range containing targetVA and prints a full
@@ -40,14 +41,17 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 		annotation := ""
 		for _, arg := range d.Inst.Args {
 			if mem, ok := arg.(x86asm.Mem); ok {
-				if mem.Base == x86asm.R15 {
-					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); static {
+					poolIdx, idxOK := disasm.X64PoolIndex(mem.Disp)
+					if !idxOK {
+						continue
+					}
 					if disp, ok := poolDisplay[poolIdx]; ok {
 						annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
 					} else {
 						annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
 					}
-				} else if mem.Base == x86asm.R14 {
+				} else if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); static {
 					annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
 				}
 			}
@@ -203,10 +207,16 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 			if !d.Bad {
 				for _, arg := range d.Inst.Args {
 					mem, ok := arg.(x86asm.Mem)
-					if !ok || mem.Base != x86asm.R15 {
+					if !ok {
 						continue
 					}
-					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+					if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+						continue
+					}
+					poolIdx, idxOK := disasm.X64PoolIndex(mem.Disp)
+					if !idxOK {
+						continue
+					}
 					display, resolved := poolDisplay[poolIdx]
 					if !resolved {
 						continue

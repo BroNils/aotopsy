@@ -15,7 +15,7 @@ func TestARM64CallClobbersTrackedProvenance(t *testing.T) {
 
 	edges := ExtractCallEdgesCFG("call_clobber", insts, nil, []Annotator{
 		THRContextAnnotator(insts, map[int]string{thrOff: "runtime_entry"}),
-	})
+	}, nil)
 	if len(edges) != 2 {
 		t.Fatalf("edges = %+v, want BL and BLR", edges)
 	}

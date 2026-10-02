@@ -278,9 +278,6 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 	if len(insts) == 0 {
 		return nil
 	}
-	funcStart := insts[0].VA
-	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len)
-
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, d := range insts {
 		addrToIdx[d.VA] = i
@@ -300,7 +297,7 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 			isBranch = true
 		case x86asm.JMP:
 			isBranch = true
-			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok && t >= funcStart && t < funcEnd {
+			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					leaders[idx] = true
 				}
@@ -308,7 +305,7 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 		default:
 			if x86.IsCondJump(d.Inst.Op) {
 				isBranch = true
-				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok && t >= funcStart && t < funcEnd {
+				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 					if idx, ok2 := addrToIdx[t]; ok2 {
 						leaders[idx] = true
 					}
@@ -370,14 +367,10 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 					}
 				}
 			}
-			// Fall-through successor (for non-jump and cond-jump false branch).
-			lastInst := blk.insts[len(blk.insts)-1]
-			fallThroughAddr := lastInst.VA + uint64(lastInst.Len)
-			if idx, ok := addrToIdx[fallThroughAddr]; ok {
-				if nb, ok2 := leaderToBlock[idx]; ok2 {
-					blk.successors = append(blk.successors, nb)
-				}
-			} else if bi+1 < len(blocks) {
+			// The next block in instruction order is the real fallthrough. Do
+			// not reconstruct it with VA+Len: near MaxUint64 that arithmetic can
+			// wrap even though the block order itself is already known.
+			if bi+1 < len(blocks) {
 				blk.successors = append(blk.successors, bi+1)
 			}
 		}
@@ -442,18 +435,20 @@ func handleX86Store(tc *transferCtxX86) bool {
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			baseIdx := x86.CanonReg(mem.Base)
-			if baseIdx == 5 { // RBP = frame register
-				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := x86.CanonReg(srcReg)
-					if srcIdx >= 0 && srcIdx < 31 {
-						tc.stackTypes[int(mem.Disp)] = tc.state[srcIdx]
+			if baseIdx == sdk.X86FrameReg {
+				if mem.Index == 0 {
+					if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
+						srcIdx := x86.CanonReg(srcReg)
+						if srcIdx >= 0 && srcIdx < 31 {
+							tc.stackTypes[int(mem.Disp)] = tc.state[srcIdx]
+						}
 					}
 				}
 				return true
 			}
 			// Not the frame, not a reserved register: an object field.
 			if baseIdx >= 0 && baseIdx < 31 &&
-				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR && baseIdx != sdk.X86SPReg &&
+				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR && baseIdx != sdk.X86SPReg && mem.Index == 0 &&
 				tc.state[baseIdx].Kind == LatticeKnownClass {
 				recordFieldAccess(tc.result, tc.state[baseIdx].ClassID, int32(mem.Disp), true, tc.inst.VA)
 				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
@@ -478,7 +473,11 @@ func handleX86Load(tc *transferCtxX86) bool {
 			if dstIdx >= 0 && dstIdx < 31 {
 				if mem, ok := ins.Args[1].(x86asm.Mem); ok {
 					baseIdx := x86.CanonReg(mem.Base)
-					if baseIdx == 5 { // RBP
+					if baseIdx == sdk.X86FrameReg {
+						if mem.Index != 0 {
+							tc.state[dstIdx] = Top()
+							return true
+						}
 						if t, ok2 := tc.stackTypes[int(mem.Disp)]; ok2 {
 							tc.state[dstIdx] = t
 						} else {
@@ -505,6 +504,10 @@ func handleX86Load(tc *transferCtxX86) bool {
 			baseIdx := x86.CanonReg(mem.Base)
 			// PP load: MOV reg, [R15+disp] → KnownClass.
 			if baseIdx == sdk.X86PP {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+					tc.state[dstIdx] = Top()
+					return true
+				}
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
 				if !poolIdxOK {
 					// Same rule as disasm's provenance tracker: the load
@@ -525,6 +528,10 @@ func handleX86Load(tc *transferCtxX86) bool {
 			}
 			// THR load: MOV reg, [R14+disp] → KnownStub.
 			if baseIdx == sdk.X86THR {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); !static {
+					tc.state[dstIdx] = Top()
+					return true
+				}
 				byteOff := int(mem.Disp)
 				stubName := ""
 				if tc.ctx.AllocStubOffsets != nil {
@@ -545,7 +552,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 				return true
 			}
 			// Closure field load: MOV reg, [closure + function/entry_point].
-			if baseIdx >= 0 && baseIdx < 31 {
+			if mem.Index == 0 && baseIdx >= 0 && baseIdx < 31 {
 				if lat, ok := ResolveClosureField(tc.ctx, tc.state[baseIdx], int(mem.Disp)); ok {
 					tc.state[dstIdx] = lat
 					return true
@@ -571,7 +578,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 			// the selector-offset scan possible, so x86_64 dispatch
 			// resolution was dead on every version up to 2.18.
 			hwDisp, hasHalfWord := tc.ctx.HalfWordClassIDDisp()
-			if hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
+			if mem.Index == 0 && hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
 				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
 				if tc.state[baseIdx].Kind == LatticeKnownClass {
 					tc.state[dstIdx] = KnownClass(tc.state[baseIdx].ClassID)
@@ -582,7 +589,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 				return true
 			}
 			// Field type lookup — MOV reg, [reg+offset] where base has KnownClass.
-			if baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownClass {
+			if mem.Index == 0 && baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownClass {
 				// Displacement -1 is the object header (FieldAddress
 				// subtracts the heap tag), i.e. a class-ID extraction, not
 				// a field. Matching 0 as well was too broad; ARM64 checks
@@ -626,7 +633,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 			// producer -- this path fell through to Top, so the check could
 			// not fire. Measured consequence: 91.6% of x86_64 dispatch
 			// calls reached the call site with no class in cid_reg.
-			if mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
+			if mem.Index == 0 && mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
 				tc.state[dstIdx] = Bottom()
 				tc.ctx.HeaderHits++
 				return true
@@ -753,7 +760,7 @@ func x86PrevLoadsHeaderInto(prev *x86.Decoded, dstIdx int) bool {
 	if !ok {
 		return false
 	}
-	return mem.Disp == -1 && x86.CanonReg(mem.Base) >= 0
+	return mem.Index == 0 && mem.Disp == -1 && x86.CanonReg(mem.Base) >= 0
 }
 
 // handleX86Call handles dispatch calls, allocation stubs, and direct calls.
@@ -886,7 +893,7 @@ func handleX86Decompress(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.ADD && len(ins.Args) >= 2 && tc.ctx.THRFields != nil {
 		if mem, memOK := ins.Args[1].(x86asm.Mem); memOK &&
-			x86.CanonReg(mem.Base) == sdk.X86THR {
+			mem.Index == 0 && x86.CanonReg(mem.Base) == sdk.X86THR {
 			if name, found := tc.ctx.THRFields[int(mem.Disp)]; found && name == "heap_base" {
 				return true
 			}

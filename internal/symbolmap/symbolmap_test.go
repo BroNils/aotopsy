@@ -63,8 +63,8 @@ func TestWriteCallSitesTSV(t *testing.T) {
 	path := filepath.Join(dir, "call_sites.tsv")
 
 	sites := []CallSite{
-		{FromVA: 0x1000, TargetVA: 0x2000, Match: MatchExact, SymbolName: "helper", SymbolVA: 0x2000, SymbolOffset: 0},
-		{FromVA: 0x1020, TargetVA: 0x3010, Match: MatchNearest, SymbolName: "subroutine", SymbolVA: 0x3000, SymbolOffset: 16},
+		{FromVA: 0x1000, TargetVA: 0x2000, TargetValid: true, Match: MatchExact, SymbolName: "helper", SymbolVA: 0x2000, SymbolOffset: 0},
+		{FromVA: 0x1020, TargetVA: 0x3010, TargetValid: true, Match: MatchNearest, SymbolName: "subroutine", SymbolVA: 0x3000, SymbolOffset: 16},
 	}
 
 	if err := WriteCallSitesTSV(path, sites); err != nil {
@@ -102,7 +102,7 @@ func TestARM64ScannerIncludesIndirectBLR(t *testing.T) {
 	if len(sites) != 2 {
 		t.Fatalf("ARM64 sites = %+v, want BL + BLR", sites)
 	}
-	if sites[0].Indirect || sites[0].TargetVA != 0x1010 {
+	if sites[0].Indirect || !sites[0].TargetValid || sites[0].TargetVA != 0x1010 {
 		t.Fatalf("direct BL = %+v", sites[0])
 	}
 	if !sites[1].Indirect || sites[1].Reg != "X16" || sites[1].TargetVA != 0 {
@@ -121,7 +121,7 @@ func TestX86ScannerIncludesIndirectCall(t *testing.T) {
 	if len(sites) != 2 {
 		t.Fatalf("x86 sites = %+v, want direct + indirect CALL", sites)
 	}
-	if sites[0].Indirect || sites[0].TargetVA != 0x2005 {
+	if sites[0].Indirect || !sites[0].TargetValid || sites[0].TargetVA != 0x2005 {
 		t.Fatalf("direct CALL = %+v", sites[0])
 	}
 	if !sites[1].Indirect || sites[1].Reg != "RAX" || sites[1].TargetVA != 0 {

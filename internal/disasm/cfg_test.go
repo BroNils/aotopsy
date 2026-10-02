@@ -1,6 +1,9 @@
 package disasm
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // makeInst creates a synthetic Inst at the given address with raw encoding.
 func makeInst(addr uint64, raw uint32) Inst {
@@ -124,5 +127,57 @@ func TestBuildCFG_Empty(t *testing.T) {
 	cfg := BuildCFG("empty", nil)
 	if len(cfg.Blocks) != 0 {
 		t.Errorf("blocks = %d, want 0", len(cfg.Blocks))
+	}
+}
+
+func TestPartitionBlocksTargetMembershipDoesNotWrapAtMaxAddress(t *testing.T) {
+	addrs := []uint64{math.MaxUint64 - 11, math.MaxUint64 - 7, math.MaxUint64 - 3}
+	blocks := PartitionBlocks(
+		len(addrs),
+		func(i int) uint64 { return addrs[i] },
+		func(i int) FlowInfo {
+			if i == 0 {
+				return FlowInfo{Kind: FlowJump, Target: addrs[2], HasTarget: true}
+			}
+			if i == 1 {
+				return FlowInfo{Kind: FlowNormal}
+			}
+			return FlowInfo{Kind: FlowRet}
+		},
+	)
+	if len(blocks) != 3 || len(blocks[0].Succs) != 1 || blocks[0].Succs[0].BlockID != 2 {
+		t.Fatalf("target at known instruction address lost near MaxUint64: %+v", blocks)
+	}
+}
+
+func TestBuildCFGPreservesBranchIdentityWhenTargetOverflows(t *testing.T) {
+	const pc = uint64(math.MaxUint64 - 7)
+	for _, tc := range []struct {
+		name      string
+		raw       uint32
+		wantSuccs int
+		wantCond  string
+	}{
+		{name: "B", raw: 0x14000002, wantSuccs: 0},                   // +8 overflows
+		{name: "B.EQ", raw: 0x54000040, wantSuccs: 1, wantCond: "F"}, // +8 overflows
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := BuildCFG(tc.name, []Inst{
+				makeInst(pc, tc.raw),
+				makeInst(pc+4, 0xD65F03C0),
+			})
+			if len(cfg.Blocks) != 2 {
+				t.Fatalf("blocks = %+v, want 2", cfg.Blocks)
+			}
+			if len(cfg.Blocks[0].Succs) != tc.wantSuccs {
+				t.Fatalf("overflowing branch succs = %+v, want %d", cfg.Blocks[0].Succs, tc.wantSuccs)
+			}
+			if tc.wantSuccs == 0 && !cfg.Blocks[0].IsTerm {
+				t.Fatalf("overflowing unconditional branch stopped being terminal: %+v", cfg.Blocks[0])
+			}
+			if tc.wantSuccs == 1 && cfg.Blocks[0].Succs[0].Cond != tc.wantCond {
+				t.Fatalf("overflowing conditional branch lost fallthrough semantics: %+v", cfg.Blocks[0].Succs)
+			}
+		})
 	}
 }

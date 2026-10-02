@@ -50,6 +50,7 @@ const (
 type CallSite struct {
 	FromVA       uint64    `json:"from_va"`
 	TargetVA     uint64    `json:"target_va,omitempty"`
+	TargetValid  bool      `json:"target_valid,omitempty"`
 	Kind         SiteKind  `json:"kind"`
 	Indirect     bool      `json:"indirect,omitempty"`
 	Reg          string    `json:"reg,omitempty"`
@@ -196,9 +197,11 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	targetBranches := make(map[uint64]int, len(callSites))
 	for i := range callSites {
 		cs := &callSites[i]
-		if cs.Indirect {
+		if cs.Indirect || !cs.TargetValid {
 			cs.Match = MatchUnresolved
-			rep.IndirectCount++
+			if cs.Indirect {
+				rep.IndirectCount++
+			}
 			rep.UnresolvedCount++
 			continue
 		}
@@ -226,7 +229,7 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	targets := make([]TargetSummary, 0, len(targetCalls)+len(targetBranches))
 	seen := make(map[uint64]bool, len(targetCalls)+len(targetBranches))
 	for _, cs := range callSites {
-		if cs.Indirect || cs.TargetVA == 0 {
+		if cs.Indirect || !cs.TargetValid {
 			continue
 		}
 		if seen[cs.TargetVA] {
@@ -619,11 +622,11 @@ func scanARM64CallSites(sections []execSection, symbols map[uint64]symbolInfo, s
 	var out []CallSite
 	for _, chunk := range buildARM64ScanChunks(sections, symbols, sortedVAs) {
 		insts := disasm.Disassemble(chunk.Data, disasm.Options{BaseAddr: chunk.VA, MaxSteps: len(chunk.Data)/4 + 1})
-		for _, edge := range disasm.ExtractCallEdgesCFG(chunk.Name, insts, lookup, nil) {
+		for _, edge := range disasm.ExtractCallEdgesCFG(chunk.Name, insts, lookup, nil, nil) {
 			cs := CallSite{FromVA: edge.FromPC, Kind: SiteCall, Reg: edge.Reg, Via: edge.Via}
 			switch edge.Kind {
 			case "bl":
-				cs.TargetVA = edge.TargetPC
+				cs.TargetVA, cs.TargetValid = edge.TargetPC, edge.TargetValid
 			case "blr":
 				cs.Indirect = true
 			default:
@@ -633,8 +636,9 @@ func scanARM64CallSites(sections []execSection, symbols map[uint64]symbolInfo, s
 		}
 		if includeBranches {
 			for _, inst := range insts {
-				if target, ok := arm64.B(inst.Raw, inst.Addr); ok {
-					out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target, Kind: SiteBranch})
+				if arm64.IsBEncoding(inst.Raw) {
+					target, valid := arm64.B(inst.Raw, inst.Addr)
+					out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target, TargetValid: valid, Kind: SiteBranch})
 				}
 			}
 		}
@@ -655,7 +659,7 @@ func scanX86CallSites(sections []execSection, symbols map[uint64]symbolInfo, sor
 			cs := CallSite{FromVA: edge.FromPC, Kind: SiteCall, Reg: edge.Reg, Via: edge.Via}
 			switch edge.Kind {
 			case "call":
-				cs.TargetVA = edge.TargetPC
+				cs.TargetVA, cs.TargetValid = edge.TargetPC, edge.TargetValid
 			case "call_indirect":
 				cs.Indirect = true
 			default:
@@ -666,9 +670,8 @@ func scanX86CallSites(sections []execSection, symbols map[uint64]symbolInfo, sor
 		if includeBranches {
 			x86.Walk(chunk.Data, chunk.VA, func(d x86.Decoded) bool {
 				if !d.Bad && d.Inst.Op == x86asm.JMP {
-					if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
-						out = append(out, CallSite{FromVA: d.VA, TargetVA: target, Kind: SiteBranch})
-					}
+					target, valid := x86.RelTarget(d.Inst, d.VA, d.Len)
+					out = append(out, CallSite{FromVA: d.VA, TargetVA: target, TargetValid: valid, Kind: SiteBranch})
 				}
 				return true
 			})
@@ -701,7 +704,7 @@ func encodeCallSitesTSV(sites []CallSite) ([]byte, error) {
 	}
 	for _, cs := range sites {
 		targetVA := ""
-		if !cs.Indirect && cs.TargetVA != 0 {
+		if !cs.Indirect && cs.TargetValid {
 			targetVA = fmt.Sprintf("0x%x", cs.TargetVA)
 		}
 		symbolVA := ""

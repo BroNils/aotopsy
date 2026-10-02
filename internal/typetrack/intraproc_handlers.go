@@ -117,8 +117,7 @@ func observeShadowFrameUpdate(raw uint32, s *shadowSPState) {
 		return
 	}
 
-	if rd, ok := arm64.MOVOrr(raw); ok {
-		rm := int((raw >> 16) & 0x1F)
+	if rd, rm, ok := arm64.MOVOrr(raw); ok {
 		switch {
 		case rd == sdk.ARM64FrameReg && rm == sdk.ARM64SPReg,
 			rd == sdk.ARM64SPReg && rm == sdk.ARM64FrameReg:

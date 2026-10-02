@@ -178,7 +178,11 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		return nil, fmt.Errorf("code region extent: %w", err)
 	}
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
-	codeVA := info.IsolateInstructions.VA + codeOff
+	codeVA, ok := checkedCodeVA(info.IsolateInstructions.VA, codeOff)
+	if !ok {
+		_ = ef.Close()
+		return nil, fmt.Errorf("code region virtual address overflows uint64: base=0x%x off=0x%x", info.IsolateInstructions.VA, codeOff)
+	}
 	// A CodeRange is semantic input to every later stage: disassembly,
 	// type inference, fingerprints, decompilation and FFI tracing all assume the
 	// declared function body exists in full. Historically CodeImage.Slice clamps
@@ -257,6 +261,13 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		CodeOff:     codeOff,
 		IsARM64:     isARM64,
 	}, nil
+}
+
+func checkedCodeVA(base, off uint64) (uint64, bool) {
+	if off > ^uint64(0)-base {
+		return 0, false
+	}
+	return base + off, true
 }
 
 // Close releases the underlying ELF file. Callers must call this when done.

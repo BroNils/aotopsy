@@ -27,6 +27,24 @@ func TestB(t *testing.T) {
 	}
 }
 
+func TestBranchEncodingIdentitySurvivesTargetOverflow(t *testing.T) {
+	if !IsBLEncoding(0x94000001) || !IsBEncoding(0x14000001) {
+		t.Fatal("direct branch encoding identity was not recognized")
+	}
+	if !IsConditionalBranchEncoding(0x54000040) || !IsConditionalBranchEncoding(0x34000040) || !IsConditionalBranchEncoding(0x36000040) {
+		t.Fatal("conditional branch encoding identity was not recognized")
+	}
+	if IsConditionalBranchEncoding(0x5400004E) || IsConditionalBranchEncoding(0x5400004F) {
+		t.Fatal("B.AL/B.NV were misclassified as conditional")
+	}
+	if _, ok := BL(0x94000001, math.MaxUint64-3); ok {
+		t.Fatal("overflowing BL produced a target")
+	}
+	if _, ok := B(0x14000001, math.MaxUint64-3); ok {
+		t.Fatal("overflowing B produced a target")
+	}
+}
+
 func TestBLR(t *testing.T) {
 	raw := uint32(0xD63F0000 | (30 << 5))
 	rn, ok := BLR(raw)
@@ -209,6 +227,35 @@ func TestSUBS32ImmediateIgnores64Bit(t *testing.T) {
 	}
 }
 
+func TestLargePoolFallbackInstructionDecoders(t *testing.T) {
+	// Exact shape used by Assembler::LoadWordFromPoolIndex when a byte offset
+	// cannot be encoded by the direct LDR or ADD+LDR cases:
+	//   movz x16,#0x10
+	//   movk x16,#0x100,lsl #16
+	//   ldr  x16,[x27,x16]
+	movz := uint32(0xD2800000 | (0x10 << 5) | 16)
+	movk := uint32(0xF2800000 | (1 << 21) | (0x100 << 5) | 16)
+	ldr := uint32(0xF8606800 | (16 << 16) | (27 << 5) | 16)
+
+	if rd, imm, ok := MOVZ64(movz); !ok || rd != 16 || imm != 0x10 {
+		t.Fatalf("MOVZ64 = (%d,%#x,%v), want (16,0x10,true)", rd, imm, ok)
+	}
+	if rd, imm, shift, ok := MOVK64(movk); !ok || rd != 16 || imm != 0x100 || shift != 16 {
+		t.Fatalf("MOVK64 = (%d,%#x,%d,%v), want (16,0x100,16,true)", rd, imm, shift, ok)
+	}
+	base, rm, rt, scaled, ok := LDR64RegisterOffset(ldr)
+	if !ok || base != 27 || rm != 16 || rt != 16 || scaled {
+		t.Fatalf("LDR64RegisterOffset = (%d,%d,%d,%v,%v), want (27,16,16,false,true)", base, rm, rt, scaled, ok)
+	}
+	if _, _, _, ok := LDRRegExtended(ldr); ok {
+		t.Fatal("scaled dispatch-table decoder accepted unscaled pool-offset LDR")
+	}
+	scaledLDR := ldr | (1 << 12)
+	if base, rm, rt, ok := LDRRegExtended(scaledLDR); !ok || base != 27 || rm != 16 || rt != 16 {
+		t.Fatalf("LDRRegExtended(scaled) = (%d,%d,%d,%v)", base, rm, rt, ok)
+	}
+}
+
 // TestDstRegsOfInstStoresDefineNothing pins the load/store split.
 //
 // transferInstruction uses DstRegsOfInst to invalidate a register's
@@ -309,15 +356,15 @@ func TestAliasDecodersRejectTransformsAndMTE(t *testing.T) {
 	if _, _, _, _, ok := UBFX(0xD374CCA4); ok { // LSL X4,X5,#12
 		t.Fatal("UBFX accepted wrapping UBFM/LSL encoding")
 	}
-	if _, ok := MOVOrr(0xAA0307E2); ok { // ORR X2,XZR,X3,LSL #1
+	if _, _, ok := MOVOrr(0xAA0307E2); ok { // ORR X2,XZR,X3,LSL #1
 		t.Fatal("MOVOrr accepted shifted ORR")
 	}
 	if _, _, _, ok := ADD64Immediate(0x91800360); ok { // ADDG X0,X27,#0,#0
 		t.Fatal("ADD64Immediate accepted MTE ADDG encoding")
 	}
 	// The exact aliases still match.
-	if rd, ok := MOVOrr(0xAA0303E2); !ok || rd != 2 { // MOV X2,X3
-		t.Fatalf("MOVOrr(real MOV) = (%d,%v), want (2,true)", rd, ok)
+	if rd, rm, ok := MOVOrr(0xAA0303E2); !ok || rd != 2 || rm != 3 { // MOV X2,X3
+		t.Fatalf("MOVOrr(real MOV) = (%d,%d,%v), want (2,3,true)", rd, rm, ok)
 	}
 	// UBFX X2,X1,#12,#20 => UBFM X2,X1,#12,#31.
 	if rd, rn, lsb, width, ok := UBFX(0xD34C7C22); !ok || rd != 2 || rn != 1 || lsb != 12 || width != 20 {

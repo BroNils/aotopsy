@@ -51,8 +51,7 @@ func handleUBFX(tc *transferCtx) bool {
 // handleMOV handles case 6: MOV (ORR Xd, XZR, Xm) → copy type.
 func handleMOV(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, ok := arm64.MOVOrr(raw); ok {
-		rm := int((raw >> 16) & 0x1F)
+	if rd, rm, ok := arm64.MOVOrr(raw); ok {
 		if rd >= 31 {
 			return true
 		}

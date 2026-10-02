@@ -69,6 +69,16 @@ func TestWalkStopsBeforeVirtualAddressWrap(t *testing.T) {
 	}
 }
 
+func TestWalkRejectsInstructionExtentAcrossVirtualAddressWrap(t *testing.T) {
+	// MOV RAX,RAX is three bytes. Starting it at MaxUint64-1 would require
+	// the final byte to live at virtual address 0 after wrap, so the instruction
+	// has no valid contiguous address range and must not be emitted.
+	got := Decode([]byte{0x48, 0x89, 0xc0}, math.MaxUint64-1)
+	if len(got) != 0 {
+		t.Fatalf("Decode emitted instruction spanning uint64 VA wrap: %+v", got)
+	}
+}
+
 func TestSplitAtInstructionBoundary(t *testing.T) {
 	data := make([]byte, 32)
 	for i := range data {

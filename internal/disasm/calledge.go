@@ -11,16 +11,17 @@ const regDT = sdk.ARM64DT // X21 = dispatch table register (shared from sdk)
 
 // CallEdge represents a call site extracted from disassembly.
 type CallEdge struct {
-	FromPC     uint64 `json:"from_pc"`
-	Kind       string `json:"kind"`                // "bl" or "blr"
-	TargetPC   uint64 `json:"target_pc,omitempty"` // resolved VA for bl
-	TargetName string `json:"target_name,omitempty"`
-	Reg        string `json:"reg,omitempty"` // register for blr (e.g. "X16")
-	Via        string `json:"via,omitempty"` // provenance: "THR.AllocateArray_ep", "PP[36] foo", ""
+	FromPC      uint64 `json:"from_pc"`
+	Kind        string `json:"kind"`                // "bl" or "blr"
+	TargetPC    uint64 `json:"target_pc,omitempty"` // resolved VA for bl
+	TargetValid bool   `json:"-"`                   // distinguishes a valid VA 0 from target arithmetic failure
+	TargetName  string `json:"target_name,omitempty"`
+	Reg         string `json:"reg,omitempty"` // register for blr (e.g. "X16")
+	Via         string `json:"via,omitempty"` // provenance: "THR.AllocateArray_ep", "PP[36] foo", ""
 
 	// ArgCountHint is a per-call-site guess at the callee's real argument
 	// count, for "bl" edges only (0 for "blr" -- not computed there). It is
-	// the count of X0-X7 argument registers freshly defined in the
+	// the count of SDK-declared Dart argument GPRs freshly defined in the
 	// immediate lead-up to this call (see inferCallArgCountLocal) -- NOT
 	// ground truth, just one call site's local evidence. Aggregate across
 	// every edge targeting the same callee (majority/consistency across
@@ -30,8 +31,9 @@ type CallEdge struct {
 	// declaration-metadata approach was abandoned in favor of this).
 	ArgCountHint int `json:"arg_count_hint,omitempty"`
 
-	// ArgRegMask is ArgCountHint's underlying bitmask (bit i = Xi touched),
-	// "bl" edges only. Prefer this over ArgCountHint when aggregating --
+	// ArgRegMask is ArgCountHint's underlying bitmask (bit i = position i in
+	// DartCallingConvention.GPR), "bl" edges only. Prefer this over
+	// ArgCountHint when aggregating --
 	// two call sites can agree on a COUNT while disagreeing on WHICH
 	// registers hold the real arguments (e.g. count=1 via X0 alone vs.
 	// count=1 via X1 alone are different, contradictory calling shapes,
@@ -90,7 +92,7 @@ func inferCallArgRegMaskLocal(insts []Inst, callIdx, blockStart int) uint8 {
 	}
 	for i, steps := callIdx-1, 0; i >= blockStart && steps < maxArgSetupBack; i, steps = i-1, steps+1 {
 		in := insts[i]
-		if _, ok := arm64.BL(in.Raw, in.Addr); ok {
+		if arm64.IsBLEncoding(in.Raw) {
 			break
 		}
 		if _, ok := arm64.BLR(in.Raw); ok {
@@ -128,13 +130,16 @@ const ObjectFieldVia = "object_field"
 // Code entry-point displacements, as an instruction encodes them (byte offset
 // minus kHeapObjectTag).
 //
-// UntaggedCode opens with two uwords right after the object header:
+// UntaggedCode opens with four generated-code entry-point uwords right after
+// the object header:
 //
-//	uword entry_point_;              // offset 8  -> displacement 7
-//	uword monomorphic_entry_point_;  // offset 16 -> displacement 0xf
+//	uword entry_point_;                       // offset 8  -> displacement 0x7
+//	uword monomorphic_entry_point_;           // offset 16 -> displacement 0xf
+//	uword unchecked_entry_point_;             // offset 24 -> displacement 0x17
+//	uword monomorphic_unchecked_entry_point_; // offset 32 -> displacement 0x1f
 //
-// (raw_object.h, identical at 2.12.0 and 3.12.2; the header stays 8 bytes even
-// on compressed-pointer builds, so the offsets do not move.)
+// (raw_object.h, verified at 2.12.0 and 3.13.0; the entry-point caches are
+// uwords, so compressed heap pointers do not shrink these fields.)
 // IsCodeEntryPointDisp reports whether a load displacement reads one of a Code
 // object's entry points across compressed and uncompressed modes.
 //

@@ -27,3 +27,19 @@ func TestBuildSignalGraphExpandsPolymorphicTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildSignalGraphDoesNotPromoteViaToCallee(t *testing.T) {
+	funcs := []disasm.FuncRecord{{Name: "caller"}, {Name: "dispatch_table"}}
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "caller", Kind: "call_indirect", Via: "dispatch_table",
+	}}
+	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	if len(g.Edges) != 0 {
+		t.Fatalf("Via-only provenance became signal call edge: %+v", g.Edges)
+	}
+	for _, f := range g.Funcs {
+		if f.Name == "dispatch_table" && f.Role == "context" {
+			t.Fatalf("Via-only provenance made %q reachable context", f.Name)
+		}
+	}
+}

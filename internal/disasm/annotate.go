@@ -156,94 +156,31 @@ func thrAnnotationLabel(byteOff int, isStore bool, width int, cls thraudit.THRCl
 	return fmt.Sprintf("THR+0x%x %s%s[%s]", byteOff, wStr, op, classTag)
 }
 
-// PeepholeState tracks state for multi-instruction annotation patterns.
-// Fase 7 PART B: tracks register liveness to avoid false positives when
-// the ADD destination register is overwritten between ADD and LDR.
-type PeepholeState struct {
-	pool       map[int]string
-	addDestReg int  // destination register from ADD (for liveness tracking)
-	addImm     int  // immediate from ADD (for combined offset)
-	addValid   bool // true if prev was ADD Xd, X27, #imm
-	lastAddr   uint64
-	haveAddr   bool
-}
-
-// NewPeepholeState creates a peephole annotator for ADD+LDR PP patterns.
-func NewPeepholeState(pool map[int]string) *PeepholeState {
-	return &PeepholeState{pool: pool, addDestReg: -1}
-}
-
-// Reset clears the peephole state. Call between functions.
-func (p *PeepholeState) Reset() {
-	p.addValid = false
-	p.addDestReg = -1
-	p.lastAddr = 0
-	p.haveAddr = false
-}
-
-// Annotate checks for ADD Xd, X27, #upper followed by LDR Xt, [Xd, #lower].
-// Call this for each instruction in sequence. Returns annotation for the
-// current instruction (may annotate the LDR in a two-instruction sequence).
-// Fase 7 PART B: if an instruction between ADD and LDR defines the ADD's
-// destination register, the ADD result is killed and no annotation is made.
-func (p *PeepholeState) Annotate(inst Inst) string {
-	// Format(), block-effect precomputation and the final CFG pass may replay
-	// the same annotator over the function. A stateful pending ADD from the end
-	// of the previous pass must never annotate an earlier instruction in the
-	// next pass. Detect that address rewind locally so callers cannot forget a
-	// Reset between semantic passes.
-	if p.haveAddr && inst.Addr < p.lastAddr {
-		p.Reset()
+// PPContextAnnotator renders the canonical per-register pool-load facts from
+// ExtractARM64PoolLoads. Scalar loads keep the historical single-note format;
+// an LDP with two independent pool slots renders both registers explicitly so
+// one inline comment can never imply that both destination registers hold the
+// same object.
+func PPContextAnnotator(insts []Inst, pool map[int]string) Annotator {
+	anns := make(map[uint64]string)
+	byPC := make(map[uint64][]ARM64PoolLoad)
+	for _, load := range ExtractARM64PoolLoads(insts, pool) {
+		byPC[load.PC] = append(byPC[load.PC], load)
 	}
-	p.lastAddr = inst.Addr
-	p.haveAddr = true
-
-	result := ""
-
-	// First, check if current is LDR Xt, [Xd, #lower] matching a pending ADD.
-	// Do this BEFORE checking for register kills, because LDR reads the base
-	// register (addDestReg) before writing the destination register.
-	if p.addValid && p.addDestReg >= 0 {
-		baseReg, ldrOff, ldrOK := arm64.LDR64UnsignedOffset(inst.Raw)
-		if !ldrOK {
-			baseReg, ldrOff, _, ldrOK = arm64.LDR32UnsignedOffset(inst.Raw)
+	for pc, group := range byPC {
+		if len(group) == 1 {
+			anns[pc] = group[0].Note
+			continue
 		}
-		if !ldrOK {
-			base, _, off, ok := arm64.LDUR64(inst.Raw)
-			if ok {
-				baseReg, ldrOff, ldrOK = base, off, true
+		text := ""
+		for i, load := range group {
+			if i != 0 {
+				text += ", "
 			}
+			text += fmt.Sprintf("X%d=%s", load.Reg, load.Note)
 		}
-		if ldrOK && baseReg == p.addDestReg {
-			combined := p.addImm + ldrOff
-			if idx, idxOK := ARM64PoolIndex(combined); idxOK {
-				if s, found := p.pool[idx]; found {
-					result = fmt.Sprintf("PP[%d] %s", idx, s)
-				} else {
-					result = fmt.Sprintf("PP[%d]", idx)
-				}
-			}
-			p.addValid = false // consumed
-		}
+		anns[pc] = text
 	}
 
-	// If not consumed by LDR, check if current instruction kills the ADD dest.
-	if p.addValid && p.addDestReg >= 0 {
-		for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
-			if rd == p.addDestReg {
-				p.addValid = false
-				break
-			}
-		}
-	}
-
-	// Check if current instruction is a new ADD Xd, X27, #upper.
-	addRd, addRn, addImm, addOK := arm64.ADD64Immediate(inst.Raw)
-	if addOK && addRn == sdk.ARM64PP {
-		p.addDestReg = addRd
-		p.addImm = addImm
-		p.addValid = true
-	}
-
-	return result
+	return func(inst Inst) string { return anns[inst.Addr] }
 }

@@ -398,11 +398,12 @@ func BuildSignalContent(
 	for _, er := range edgeRecords {
 		pc := strutil.ParseHexAddr(er.FromPC)
 		ce := disasm.CallEdge{
-			FromPC:     pc,
-			Kind:       er.Kind,
-			TargetName: er.Target,
-			TargetPC:   strutil.ParseHexAddr(er.Target),
-			Via:        er.Via,
+			FromPC:      pc,
+			Kind:        er.Kind,
+			TargetName:  er.Target,
+			TargetPC:    strutil.ParseHexAddr(er.Target),
+			TargetValid: er.Target != "",
+			Via:         er.Via,
 		}
 		edgesByFunc[er.FromFunc] = append(edgesByFunc[er.FromFunc], ce)
 	}
@@ -465,9 +466,6 @@ func BuildSignalContent(
 		for _, addr := range instAddrs {
 			if e, ok := edgeByPC[addr]; ok {
 				callee := e.TargetName
-				if callee == "" {
-					callee = e.Via
-				}
 				if signal.IsInterestingCallee(callee) && !seenCalls[callee] {
 					seenCalls[callee] = true
 					calls = append(calls, callee)

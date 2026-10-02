@@ -121,8 +121,7 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 			continue
 		}
 		// MOV Xd, Xs -- propagate an ARGS_DESC_REG copy.
-		if rd, ok := arm64.MOVOrr(raw); ok {
-			rs := int((raw >> 16) & 0x1F)
+		if rd, rs, ok := arm64.MOVOrr(raw); ok {
 			wasArgsDesc := argsDesc[rs]
 			kill(rd)
 			if wasArgsDesc {

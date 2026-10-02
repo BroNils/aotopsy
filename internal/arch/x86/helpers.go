@@ -69,6 +69,18 @@ func CanonReg(r x86asm.Reg) int {
 	return -1
 }
 
+// StaticBaseDisp reports whether mem is exactly [base+disp], with no index
+// register contributing to the effective address. Consumers that map a
+// displacement to a semantic slot (PP index, THR field, frame slot, object
+// field) must use this rather than checking Base alone: [base+index*scale+disp]
+// does not identify the static slot named by disp.
+func StaticBaseDisp(mem x86asm.Mem, base int) (int64, bool) {
+	if CanonReg(mem.Base) != base || mem.Index != 0 {
+		return 0, false
+	}
+	return mem.Disp, true
+}
+
 // RelTarget resolves a PC-relative branch or call to its absolute target.
 // addr is the instruction's address and length its encoded size; an x86 Rel
 // displacement is measured from the END of the instruction.

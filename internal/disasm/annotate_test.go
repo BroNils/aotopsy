@@ -169,40 +169,43 @@ func TestTHRContextAnnotatorClassifiesUnresolvedARM64(t *testing.T) {
 	}
 }
 
-func TestPeepholeState(t *testing.T) {
+func TestPPContextAnnotator(t *testing.T) {
 	pool := map[int]string{
 		2046: `"large pool string"`,
 	}
-	ps := NewPeepholeState(pool)
 
 	// ADD X0, X27, #0x4000 (shift=1, imm12=4)
 	addRaw := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
-	got := ps.Annotate(Inst{Raw: addRaw})
-	if got != "" {
-		t.Errorf("ADD alone should not annotate, got %q", got)
-	}
-
 	// LDR X1, [X0, #0] → combined offset = 0x4000, idx = (0x4000-16)/8 = 2046
 	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
-	got = ps.Annotate(Inst{Raw: ldrRaw})
+	insts := []Inst{
+		{Addr: 0x1000, Raw: addRaw},
+		{Addr: 0x1004, Raw: ldrRaw},
+	}
+	ann := PPContextAnnotator(insts, pool)
+	if got := ann(insts[0]); got != "" {
+		t.Errorf("ADD alone should not annotate, got %q", got)
+	}
+	got := ann(insts[1])
 	want := `PP[2046] "large pool string"`
 	if got != want {
-		t.Errorf("peephole = %q, want %q", got, want)
+		t.Errorf("PP context = %q, want %q", got, want)
 	}
 }
 
-func TestPeepholeStateAutoResetsOnReplay(t *testing.T) {
+func TestPPContextAnnotatorRejectsBypassedBaseAtJoin(t *testing.T) {
 	pool := map[int]string{2046: `"large pool string"`}
-	ps := NewPeepholeState(pool)
+	bEqToLdr := uint32(0x54000000 | (2 << 5))
 	addRaw := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
 	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
-
-	// End a first pass with a pending future ADD.
-	_ = ps.Annotate(Inst{Addr: 0x2000, Raw: addRaw})
-	// A semantic replay starts from an earlier address. The stale ADD from
-	// 0x2000 must not annotate the earlier load.
-	if got := ps.Annotate(Inst{Addr: 0x1000, Raw: ldrRaw}); got != "" {
-		t.Fatalf("cross-pass stale peephole state produced %q", got)
+	insts := []Inst{
+		{Addr: 0x1000, Raw: bEqToLdr},
+		{Addr: 0x1004, Raw: addRaw},
+		{Addr: 0x1008, Raw: ldrRaw},
+	}
+	ann := PPContextAnnotator(insts, pool)
+	if got := ann(insts[2]); got != "" {
+		t.Fatalf("bypassed PP base produced %q at CFG join", got)
 	}
 }
 

@@ -78,7 +78,7 @@ func TestExtractCallEdgesCFG_BL(t *testing.T) {
 		0x100C: "target_func",
 	})
 
-	edges := ExtractCallEdgesCFG("test_fn", insts, symbols, nil)
+	edges := ExtractCallEdgesCFG("test_fn", insts, symbols, nil, nil)
 	if len(edges) != 1 {
 		t.Fatalf("got %d edges, want 1", len(edges))
 	}
@@ -107,7 +107,7 @@ func TestExtractCallEdgesCFG_BLR_WithProvenance(t *testing.T) {
 	thrFields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true})
 	thrAnn := THRContextAnnotator(insts, thrFields)
 
-	edges := ExtractCallEdgesCFG("test_fn", insts, nil, []Annotator{thrAnn})
+	edges := ExtractCallEdgesCFG("test_fn", insts, nil, []Annotator{thrAnn}, nil)
 	if len(edges) != 1 {
 		t.Fatalf("got %d edges, want 1", len(edges))
 	}

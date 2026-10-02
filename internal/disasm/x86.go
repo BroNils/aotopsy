@@ -116,7 +116,7 @@ const maxX86ArgSetupBack = 16
 
 // inferX86CallArgRegMaskLocal is inferCallArgRegMaskLocal's x86_64
 // counterpart: scans backward from insts[callIdx] (a CALL instruction)
-// counting which of RDI/RSI/RDX/RCX/R8/R9 (bit i = x86ArgRegCanon[i]) were
+// counting which of RDI/RSI/RDX/RBX/R8/R9 (bit i = x86ArgRegCanon[i]) were
 // freshly defined via MOV/LEA in the immediate lead-up to this call. Stops
 // at the first earlier CALL (a previous, unrelated call's own setup) or
 // after maxX86ArgSetupBack instructions. Same caveats as the ARM64
@@ -160,6 +160,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			}
 			_ = rel // the type check above distinguishes direct from indirect CALL
 			e.TargetPC = target
+			e.TargetValid = true
 			// Nil-safe, matching ARM64: arm64.go's Format and
 			// dataflowarm64.go's touchInstrEffect both guard their lookup,
 			// so the same call with the same arguments worked on one
@@ -214,7 +215,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				// the MOV path next door already does (dataflowx86.go), and
 				// it makes them resolve as stubs, which is what ARM64's
 				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
-				if mem.Index == 0 {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); static {
 					if name, ok := thrFields[int(mem.Disp)]; ok {
 						baseNote = "THR." + name
 					} else {
@@ -222,10 +223,11 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 						// Report the slot rather than inventing a category.
 						baseNote = fmt.Sprintf("THR+0x%x", mem.Disp)
 					}
-				} else {
-					baseNote = "dispatch_table"
 				}
 			case sdk.X86PP:
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+					break
+				}
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
@@ -235,7 +237,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			default:
 				baseNote = rt.lookup(x86.CanonReg(mem.Base))
 			}
-			if x86.CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if x86.CanonReg(mem.Index) == sdk.X86ClassIdReg && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote
@@ -307,7 +309,10 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				continue
 			}
 			mem, ok := arg.(x86asm.Mem)
-			if !ok || x86.CanonReg(mem.Base) != sdk.X86THR {
+			if !ok {
+				continue
+			}
+			if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); !static {
 				continue
 			}
 

@@ -22,8 +22,10 @@ import (
 // (sign-extended imm26 * 4 + PC).
 // Encoding: 1 | 00101 | imm26
 // Mask: 0xFC000000, Value: 0x94000000
+func IsBLEncoding(raw uint32) bool { return raw&0xFC000000 == 0x94000000 }
+
 func BL(raw uint32, pc uint64) (target uint64, ok bool) {
-	if raw&0xFC000000 != 0x94000000 {
+	if !IsBLEncoding(raw) {
 		return 0, false
 	}
 	imm26 := int32(raw & 0x03FFFFFF)
@@ -36,8 +38,10 @@ func BL(raw uint32, pc uint64) (target uint64, ok bool) {
 // B decodes ARM64 B (unconditional branch). Returns the target address.
 // Encoding: 0 | 00101 | imm26
 // Mask: 0xFC000000, Value: 0x14000000
+func IsBEncoding(raw uint32) bool { return raw&0xFC000000 == 0x14000000 }
+
 func B(raw uint32, pc uint64) (target uint64, ok bool) {
-	if raw&0xFC000000 != 0x14000000 {
+	if !IsBEncoding(raw) {
 		return 0, false
 	}
 	imm26 := int32(raw & 0x03FFFFFF)
@@ -148,6 +152,21 @@ func BCond(raw uint32, pc uint64) (target uint64, cond uint8, kind BCondKind, ok
 // IsReservedBCond reports the architecturally invalid B.cond NV encoding.
 func IsReservedBCond(raw uint32) bool {
 	return raw&0xFF00001F == 0x5400000F
+}
+
+// IsConditionalBranchEncoding reports the conditional control-flow encodings
+// B.cond (excluding AL/NV), CBZ/CBNZ, and TBZ/TBNZ without doing target
+// arithmetic. This lets CFG construction retain branch/fallthrough semantics
+// even when an adversarial section VA makes the encoded PC-relative target
+// overflow the uint64 address space.
+func IsConditionalBranchEncoding(raw uint32) bool {
+	if _, kind, ok := BCondClass(raw); ok {
+		return kind == BCondConditional
+	}
+	if raw&0x7E000000 == 0x34000000 { // CBZ/CBNZ, W/X
+		return true
+	}
+	return raw&0x7E000000 == 0x36000000 // TBZ/TBNZ, W/X
 }
 
 // CondBranch detects ARM64 conditional branches (B.cond, CBZ, CBNZ, TBZ, TBNZ).
@@ -391,17 +410,35 @@ func STR32UnsignedOffset(raw uint32) (baseReg int, byteOffset int, srcReg int, o
 	return rn, imm12 << 2, rt, true
 }
 
-// LDRRegExtended detects LDR Xt, [Xn, Xm, LSL #3] (register offset).
-// Returns base, index, and destination register.
-// Encoding: 11|111|V=0|01|opc=01|1|Rm|option|S|10|Rn|Rt
-// Mask: 0xFFE0FC00, Value: 0xF8607800 (option=011, S=1 for scaled LSL)
-func LDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
-	if raw&0xFFE0FC00 != 0xF8607800 {
-		return 0, 0, 0, false
+// LDR64RegisterOffset detects the UXTX register-offset forms of
+// LDR Xt, [Xn, Xm] and LDR Xt, [Xn, Xm, LSL #3]. The returned scaled flag is
+// false for the byte-offset form and true for the element-scaled form.
+//
+// Dart uses both: dispatch-table indexing is scaled, while the large object-
+// pool fallback in Assembler::LoadWordFromPoolIndex materializes the byte
+// displacement in a register and uses the unscaled form.
+// Encoding: 11|111|V=0|01|opc=01|1|Rm|option=011|S|10|Rn|Rt
+// Mask ignores S (bit 12), Value has S=0.
+func LDR64RegisterOffset(raw uint32) (base, rm, rt int, scaled bool, ok bool) {
+	if raw&0xFFE0EC00 != 0xF8606800 {
+		return 0, 0, 0, false, false
 	}
 	rt = int(raw & 0x1F)
 	base = int((raw >> 5) & 0x1F)
 	rm = int((raw >> 16) & 0x1F)
+	scaled = raw&(1<<12) != 0
+	return base, rm, rt, scaled, true
+
+}
+
+// LDRRegExtended detects the scaled LDR Xt, [Xn, Xm, LSL #3] form used by
+// dispatch-table indexing. Keep this narrower compatibility helper so callers
+// that require scale-by-eight do not accidentally accept byte-offset loads.
+func LDRRegExtended(raw uint32) (base, rm, rt int, ok bool) {
+	base, rm, rt, scaled, ok := LDR64RegisterOffset(raw)
+	if !ok || !scaled {
+		return 0, 0, 0, false
+	}
 	return base, rm, rt, true
 }
 
@@ -605,6 +642,19 @@ func MOVZ64(raw uint32) (rd int, imm int, ok bool) {
 	return rd, imm, true
 }
 
+// MOVK64 detects MOVK Xd, #imm16, LSL #shift (64-bit).
+// shift is one of 0, 16, 32, 48.
+// Encoding: sf=1 | opc=11 | 100101 | hw | imm16 | Rd
+func MOVK64(raw uint32) (rd int, imm int, shift int, ok bool) {
+	if raw&0xFF800000 != 0xF2800000 {
+		return 0, 0, 0, false
+	}
+	rd = int(raw & 0x1F)
+	imm = int((raw >> 5) & 0xFFFF)
+	shift = int((raw>>21)&0x3) * 16
+	return rd, imm, shift, true
+}
+
 // UBFX detects UBFM/UBFX Xt, Xn, #lsb, #width (64-bit).
 // Returns dest, source register, lsb, and width.
 // Encoding: sf=1 | 10 | 100110 | N=1 | immr | imms | Rn | Rd
@@ -631,17 +681,17 @@ func UBFX(raw uint32) (rd, rn int, lsb, width int, ok bool) {
 }
 
 // MOVOrr detects MOV (alias of ORR Xd, XZR, Xm).
-// Returns destination register.
+// Returns destination and source registers.
 // Encoding: sf=1 | 01 | 01010 | 00 | 0 | Rm | 000000 | Rn=31 | Rd
 // Mask: 0xFF200000, Value: 0xAA000000
-func MOVOrr(raw uint32) (rd int, ok bool) {
+func MOVOrr(raw uint32) (rd, rm int, ok bool) {
 	// MOV Xd, Xm is exactly ORR Xd, XZR, Xm, LSL #0. The shift kind and
 	// imm6 are part of the alias contract: accepting ORR ... LSL/LSR #N as
 	// a move copies provenance/types across a value-transforming instruction.
 	if raw&0xFFE0FFE0 == 0xAA0003E0 {
-		return int(raw & 0x1F), true
+		return int(raw & 0x1F), int((raw >> 16) & 0x1F), true
 	}
-	return 0, false
+	return 0, 0, false
 }
 
 // LDP64UnsignedOffset detects LDP Xt1, Xt2, [Xn, #imm] (64-bit pair load).

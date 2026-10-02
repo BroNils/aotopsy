@@ -73,24 +73,24 @@ type StringRefRecord struct {
 	Value   string `json:"value"` // raw string value (unquoted)
 }
 
-// ResolvedTargets returns the callee name(s) for a call edge, in priority order:
-// 1. Target (direct call — single callee)
+// ResolvedTargets returns the resolved callee identity stored on a call edge,
+// in priority order:
+// 1. Target (single callee)
 // 2. Targets (polymorphic indirect call — multiple candidates)
-// 3. Via (indirect call with provenance but no resolved target — last resort)
-// 4. nil (truly unresolved)
+// 3. nil (no callee identity recorded)
 //
-// All consumers that need "what does this edge call?" should use this helper
-// instead of checking Target/Via/Candidates individually, so the resolution
-// policy is consistent across render, signal, callgraph, and xref.
+// Via is deliberately excluded: it records provenance such as THR fields,
+// object-pool slots, dispatch-table loads, or object fields. Provenance is
+// evidence about where a call target came from, not itself a callee identity.
+// RuntimeTargets stays explicit runtime evidence. frida-import may promote a
+// runtime-only identity into Target/Targets when static analysis had no answer;
+// once promoted it is still a callee identity, unlike Via.
 func (e CallEdgeRecord) ResolvedTargets() []string {
 	if e.Target != "" {
 		return []string{e.Target}
 	}
 	if len(e.Targets) > 0 {
 		return e.Targets
-	}
-	if e.Via != "" {
-		return []string{e.Via}
 	}
 	return nil
 }

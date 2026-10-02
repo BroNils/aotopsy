@@ -721,21 +721,18 @@ func edgeViaIsStub(e disasm.CallEdgeRecord) bool {
 	if e.Kind != "blr" && e.Kind != "call_indirect" {
 		return false
 	}
+	if strings.HasPrefix(e.Target, "TypeTestingStub_") {
+		return true
+	}
 	via := strings.TrimSpace(e.Via)
 	if via == "" || via == "dispatch_table" || via == disasm.ObjectFieldVia || strings.HasPrefix(via, disasm.ObjectFieldVia+"+") || strings.HasPrefix(via, disasm.ObjectFieldVia+"-") {
 		return false
 	}
 	lower := strings.ToLower(via)
 	if strings.HasPrefix(lower, "pp[") {
-		closeBracket := strings.IndexByte(via, ']')
-		if closeBracket < 0 {
-			return false
-		}
-		display := strings.TrimSpace(via[closeBracket+1:])
-		// Pool provenance is callable only when it carries the same kind of
-		// resolved display accepted by analysis.resolveViaPoolDisplay. A bare
-		// slot, a String display, or an object placeholder names no callee.
-		return display != "" && !strings.HasPrefix(display, "<") && !strings.HasPrefix(display, `"`)
+		// A pool display is provenance only. Exact TTS/Code resolution is stored
+		// in Target by analysis after the pool slot's object kind is proven.
+		return false
 	}
 	if strings.HasPrefix(via, "THR.") {
 		field := strings.ToLower(strings.TrimPrefix(via, "THR."))
@@ -744,5 +741,5 @@ func edgeViaIsStub(e disasm.CallEdgeRecord) bool {
 		// entry-point fields establish a callable stub by themselves.
 		return field == "stub" || strings.HasSuffix(field, "_entry_point") || strings.HasSuffix(field, "_ep")
 	}
-	return strings.Contains(lower, "typetestingstub") || strings.Contains(lower, "type testing stub")
+	return false
 }

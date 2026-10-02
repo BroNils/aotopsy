@@ -875,8 +875,8 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 			if len(insts) == 0 {
 				continue
 			}
-			for _, e := range disasm.ExtractCallEdgesCFG(c.SymbolNames[fVA], insts, symLk, nil) {
-				if e.Kind == "bl" && e.ArgRegMask != 0 {
+			for _, e := range disasm.ExtractCallEdgesCFG(c.SymbolNames[fVA], insts, symLk, nil, nil) {
+				if e.Kind == "bl" && e.TargetValid && e.ArgRegMask != 0 {
 					c.Enrichment.ArgRegMasks[e.TargetPC] = append(c.Enrichment.ArgRegMasks[e.TargetPC], e.ArgRegMask)
 				}
 			}
@@ -884,7 +884,7 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 		}
 		scan := disasm.ScanX86FunctionCFG(fs.Code, fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
 		for _, e := range scan.Edges {
-			if e.Kind == "call" && e.ArgRegMask != 0 {
+			if e.Kind == "call" && e.TargetValid && e.ArgRegMask != 0 {
 				c.Enrichment.ArgRegMasks[e.TargetPC] = append(c.Enrichment.ArgRegMasks[e.TargetPC], e.ArgRegMask)
 			}
 		}

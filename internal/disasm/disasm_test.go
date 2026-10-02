@@ -2,6 +2,7 @@ package disasm
 
 import (
 	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 )
@@ -48,10 +49,25 @@ func TestDisassembleEmpty(t *testing.T) {
 }
 
 func TestDisassembleShort(t *testing.T) {
-	// Less than 4 bytes.
+	// Less than 4 bytes is malformed/truncated input. Keep it visible as a
+	// semantic barrier instead of silently dropping bytes from the listing.
 	insts := Disassemble([]byte{0x01, 0x02}, Options{})
-	if len(insts) != 0 {
-		t.Fatalf("got %d instructions for 2 bytes", len(insts))
+	if len(insts) != 1 || !insts[0].Bad || insts[0].Size != 2 {
+		t.Fatalf("truncated tail = %+v, want one 2-byte bad instruction", insts)
+	}
+}
+
+func TestDisassembleStopsBeforeAddressWrap(t *testing.T) {
+	data := make([]byte, 12)
+	for i := 0; i < 3; i++ {
+		binary.LittleEndian.PutUint32(data[i*4:], 0xd503201f)
+	}
+	insts := Disassemble(data, Options{BaseAddr: math.MaxUint64 - 7})
+	if len(insts) != 2 {
+		t.Fatalf("decoded %d instructions across uint64 address wrap, want 2", len(insts))
+	}
+	if insts[1].Addr != math.MaxUint64-3 {
+		t.Fatalf("last address = %#x, want %#x", insts[1].Addr, uint64(math.MaxUint64-3))
 	}
 }
 

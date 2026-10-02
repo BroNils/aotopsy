@@ -475,6 +475,35 @@ func typeArgsListString(
 // a register loaded from the object pool: "pp[123]" or "pp[123] <Type>".
 var viaPoolIndex = regexp.MustCompile(`(?i)^pp\[(\d+)\]`)
 
+// PoolIndexFromVia extracts only the pool index from a provenance annotation.
+// The display suffix is intentionally ignored: it is human-readable context,
+// not proof that the slot contains a callable object.
+func PoolIndexFromVia(via string) (int, bool) {
+	m := viaPoolIndex.FindStringSubmatch(via)
+	if m == nil {
+		return 0, false
+	}
+	idx, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+// PoolCallTarget resolves PP provenance only through an independently-built
+// pool-index -> exact callable map. It never promotes the display text after
+// "PP[n]" into a callee identity.
+func PoolCallTarget(via string, byPoolIndex map[int]string) string {
+	if len(byPoolIndex) == 0 {
+		return ""
+	}
+	idx, ok := PoolIndexFromVia(via)
+	if !ok {
+		return ""
+	}
+	return byPoolIndex[idx]
+}
+
 // BuildTTSCallTargets maps an object-pool INDEX to the type-testing stub name
 // for the type in that slot, for slots that hold a Type at all. Returns nil
 // when no type-testing stub names are available, so callers resolve nothing
@@ -499,16 +528,5 @@ func BuildTTSCallTargets(pool []cluster.PoolEntry, pl *PoolLookups) map[int]stri
 // provenance annotation of the called register, or "" when the site is not
 // one of these.
 func TtsCallTarget(via string, byPoolIndex map[int]string) string {
-	if len(byPoolIndex) == 0 {
-		return ""
-	}
-	m := viaPoolIndex.FindStringSubmatch(via)
-	if m == nil {
-		return ""
-	}
-	idx, err := strconv.Atoi(m[1])
-	if err != nil {
-		return ""
-	}
-	return byPoolIndex[idx]
+	return PoolCallTarget(via, byPoolIndex)
 }

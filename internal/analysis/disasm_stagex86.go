@@ -142,7 +142,7 @@ func RunDisasmStageX86(
 				FromFunc: name, FromPC: fmt.Sprintf("0x%x", e.FromPC),
 				Kind: e.Kind, Reg: e.Reg, Via: e.Via,
 			}
-			if e.Kind == "call" {
+			if e.Kind == "call" && e.TargetValid {
 				if e.TargetName != "" {
 					rec.Target = e.TargetName
 				} else {
