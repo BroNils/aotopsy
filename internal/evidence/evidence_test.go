@@ -1,9 +1,8 @@
 package evidence
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"aotopsy/internal/disasm"
@@ -11,419 +10,331 @@ import (
 	"aotopsy/internal/typetrack"
 )
 
-func TestFromCallEdges(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "Foo.bar", FromPC: "0x1000", Kind: "bl", Target: "Baz.qux"},
-		{FromFunc: "Foo.bar", FromPC: "0x2000", Kind: "blr", Via: "THR.AllocateArray_ep"},
-		{FromFunc: "Foo.bar", FromPC: "0x3000", Kind: "blr", Targets: []string{"A.paint", "B.paint"}, Candidates: 2},
-		{FromFunc: "Foo.bar", FromPC: "0x4000", Kind: "blr"},
-		{FromFunc: "Foo.bar", FromPC: "0x5000", Kind: "blr", Target: "Inferred.target"},
+const evidenceTestDartVersion = "3.13.0"
+
+func testRuntimeEvidence(targets ...disasm.RuntimeTargetObservation) disasm.RuntimeEvidence {
+	observations := 0
+	for _, target := range targets {
+		observations += target.Count
+	}
+	return disasm.RuntimeEvidence{
+		Source:       "frida",
+		GenerationID: strings.Repeat("b", 64),
+		SourceSHA256: strings.Repeat("a", 64),
+		SourceSize:   1234,
+		ModuleName:   "libapp.so",
+		DartVersion:  evidenceTestDartVersion,
+		Architecture: "arm64",
+		Agreement:    disasm.RuntimeObservedOnly,
+		Targets:      targets,
+		ClassIDs:     []int{10, 11},
+		Observations: observations,
+	}
+}
+
+func TestCallEdgeEvidenceHasStrictConfidenceRulesAndSDKRefs(t *testing.T) {
+	c := NewCollector(evidenceTestDartVersion)
+	c.FromCallEdges([]disasm.CallEdgeRecord{
+		{FromFunc: "F", FromPC: "0x100", Kind: "bl", Target: "Direct", TargetAddress: "0x900"},
+		{FromFunc: "F", FromPC: "0x200", Kind: "blr", Target: "AllocateArrayStub", Via: "THR.AllocateArray_entry_point", Reg: "X16"},
+		{FromFunc: "F", FromPC: "0x300", Kind: "blr", Via: "THR.AllocateArray_entry_point", Reg: "X16"},
+		{FromFunc: "F", FromPC: "0x400", Kind: "blr", Targets: []string{"A.paint", "B.paint"}, Candidates: 2, Via: "dispatch_table"},
+	})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 
-	c := NewCollector()
-	c.FromCallEdges(edges)
 	records := c.Records()
 	if len(records) != 5 {
-		t.Fatalf("want 5 records, got %d", len(records))
+		t.Fatalf("records = %d, want 5", len(records))
 	}
-
-	// Direct call → exact
-	if records[0].Confidence != "exact" {
-		t.Errorf("record 0 confidence = %s, want exact", records[0].Confidence)
+	if got := records[0]; got.Source != SourceCallEdges || got.Confidence != ConfExact || got.Rule != RuleDirectCallAddress || got.Result["target_address"] != "0x900" {
+		t.Fatalf("direct evidence = %+v", got)
+	} else if got.SDKRef != nil {
+		t.Fatalf("encoded direct target should not need SDK support: %+v", got.SDKRef)
 	}
-	if records[0].Result["target"] != "Baz.qux" {
-		t.Errorf("record 0 target = %v, want Baz.qux", records[0].Result["target"])
+	if got := records[1]; got.Source != SourceCallEdges || got.Confidence != ConfStaticInferred || got.Rule != RuleDirectCallTarget || got.Result["target"] != "Direct" {
+		t.Fatalf("direct symbolic identity = %+v", got)
 	}
-
-	// Via only → stub
-	if records[1].Confidence != "stub" {
-		t.Errorf("record 1 confidence = %s, want stub", records[1].Confidence)
+	if got := records[2]; got.Confidence != ConfStub || got.Rule != RuleIndirectStub {
+		t.Fatalf("resolved THR evidence = %+v", got)
+	} else if got.SDKRef != nil {
+		t.Fatalf("THR runtime-entry provenance fabricated SDK symbol: %+v", got.SDKRef)
 	}
-
-	// Polymorphic → polymorphic
-	if records[2].Confidence != "polymorphic" {
-		t.Errorf("record 2 confidence = %s, want polymorphic", records[2].Confidence)
+	if got := records[3]; got.Confidence != ConfUnknown || got.Rule != RuleIndirectUnresolved {
+		t.Fatalf("unresolved provenance raised certainty: %+v", got)
 	}
-
-	// Unresolved → unknown
-	if records[3].Confidence != "unknown" {
-		t.Errorf("record 3 confidence = %s, want unknown", records[3].Confidence)
-	}
-
-	// An indirect edge may carry a single statically inferred target after
-	// typetrack. The mere presence of Target does not make the machine code a
-	// direct call and must never be labelled exact.
-	if records[4].Confidence != ConfStaticInferred {
-		t.Errorf("record 4 confidence = %s, want static_inferred", records[4].Confidence)
-	}
-	if records[4].Rule != "indirect_call_static_inferred" {
-		t.Errorf("record 4 rule = %q", records[4].Rule)
+	if got := records[4]; got.Confidence != ConfPolymorphic || got.Rule != RuleIndirectPolymorphic {
+		t.Fatalf("polymorphic evidence = %+v", got)
+	} else if _, hasSingleTarget := got.Result["target"]; hasSingleTarget {
+		t.Fatalf("polymorphic evidence fabricated single target: %+v", got.Result)
 	}
 }
 
-func TestWriteJSONL(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "Foo.bar", FromPC: "0x1000", Kind: "bl", Target: "Baz.qux"},
+func TestBLRResolutionEvidenceNeverPromotesIndirectCallToExact(t *testing.T) {
+	c := NewCollector(evidenceTestDartVersion)
+	c.FromBLRResolutions("F", []typetrack.BlrResolution{
+		{PC: 0x1000, Resolved: true, TargetName: "A", Confidence: typetrack.ResolutionStaticInferred, Derivation: typetrack.DerivationDispatchTable},
+		{PC: 0x2000, Resolved: true, Polymorphic: true, TargetNames: []string{"A", "B"}, Candidates: 2, Confidence: typetrack.ResolutionPolymorphic, Derivation: typetrack.DerivationDispatchTable},
+		{PC: 0x3000, Resolved: false, Confidence: typetrack.ResolutionUnknown, Derivation: typetrack.DerivationUnknown},
+		{PC: 0x4000, Resolved: true, TargetName: "C", Confidence: typetrack.ResolutionStaticInferred, Derivation: typetrack.DerivationUnlinkedCall},
+	}, true)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
-	c := NewCollector()
-	c.FromCallEdges(edges)
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "sub", "evidence.jsonl")
-	if err := c.WriteJSONL(path); err != nil {
-		t.Fatalf("WriteJSONL: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-
-	var rec Evidence
-	if err := json.Unmarshal(data[:len(data)-1], &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if rec.Function != "Foo.bar" {
-		t.Errorf("function = %s, want Foo.bar", rec.Function)
-	}
-	if rec.Confidence != "exact" {
-		t.Errorf("confidence = %s, want exact", rec.Confidence)
-	}
-}
-
-func TestRecordsSortedByPC(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x3000", Kind: "bl", Target: "C"},
-		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A"},
-		{FromFunc: "F", FromPC: "0x20", Kind: "bl", Target: "B"},
-	}
-	c := NewCollector()
-	c.FromCallEdges(edges)
 	records := c.Records()
-	if records[0].PC != "0x20" || records[1].PC != "0x1000" || records[2].PC != "0x3000" {
-		t.Errorf("records not sorted numerically by PC: %s, %s, %s", records[0].PC, records[1].PC, records[2].PC)
+	if records[0].Confidence != ConfStaticInferred || records[0].Confidence == ConfExact {
+		t.Fatalf("indirect monomorphic confidence = %q", records[0].Confidence)
+	}
+	if records[0].SDKRef == nil || records[0].SDKRef.Tag != evidenceTestDartVersion || records[0].SDKRef.Symbol != "EmitDispatchTableCall" {
+		t.Fatalf("dispatch sdk ref = %+v", records[0].SDKRef)
+	}
+	if records[1].Confidence != ConfPolymorphic || records[2].Confidence != ConfUnknown {
+		t.Fatalf("unexpected confidence sequence: %+v", records)
+	}
+	if records[3].SDKRef != nil || records[3].Inputs["derivation"] != string(typetrack.DerivationUnlinkedCall) {
+		t.Fatalf("unlinked-call inference acquired dispatch SDK provenance: %+v", records[3])
 	}
 }
 
-func TestFromSignalFindingsAndFieldAccesses(t *testing.T) {
-	c := NewCollector()
-	c.FromSignalFindings([]output.SignalFinding{
-		{Category: "rooting", StringValue: "su", Function: "SecurityCheck", PC: "0x50"},
-	})
-	c.FromFieldAccesses("User.getName", []typetrack.FieldAccess{
-		{ClassID: 42, ByteOffset: 16, IsStore: false, PC: 0x60},
-	}, func(cid int) string {
-		if cid == 42 {
-			return "User"
-		}
-		return ""
-	})
-	records := c.Records()
-	if len(records) != 2 {
-		t.Fatalf("want 2 records, got %d", len(records))
-	}
-	if records[0].Kind != "signal" || records[0].Confidence != "static_inferred" {
-		t.Errorf("record 0 = %+v", records[0])
-	}
-	if records[1].Kind != "field_access" || records[1].Result["class_name"] != "User" {
-		t.Errorf("record 1 = %+v", records[1])
-	}
-}
-
-func TestMergeRuntime(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A.foo"},
-		{FromFunc: "F", FromPC: "0x2000", Kind: "blr", Via: "THR.stub"},
-		{FromFunc: "F", FromPC: "0x3000", Kind: "blr"},
-	}
-	c := NewCollector()
-	c.FromCallEdges(edges)
-
-	// Runtime confirms 0x1000 (exact match) and 0x3000 (was unknown).
-	rt := []RuntimeResolution{
-		{PC: "0x1000", Function: "F", TargetName: "A.foo"},
-		{PC: "0x3000", Function: "F", TargetName: "B.bar"},
-	}
-	c.MergeRuntime(rt)
-	records := c.Records()
-
-	// 0x1000: exact → runtime_confirmed
-	if records[0].Confidence != "runtime_confirmed" {
-		t.Errorf("0x1000 confidence = %s, want runtime_confirmed", records[0].Confidence)
-	}
-	if records[0].Result["runtime_target"] != "A.foo" {
-		t.Errorf("0x1000 runtime_target = %v, want A.foo", records[0].Result["runtime_target"])
-	}
-
-	// 0x2000: stub, no runtime match → stays stub
-	if records[1].Confidence != "stub" {
-		t.Errorf("0x2000 confidence = %s, want stub (no runtime match)", records[1].Confidence)
-	}
-
-	// 0x3000: unknown → runtime_confirmed
-	if records[2].Confidence != "runtime_confirmed" {
-		t.Errorf("0x3000 confidence = %s, want runtime_confirmed", records[2].Confidence)
-	}
-}
-
-func TestMergeRuntimeRequiresTargetAgreement(t *testing.T) {
-	t.Run("exact conflict does not upgrade", func(t *testing.T) {
-		c := NewCollectorFromRecords([]Evidence{{
-			PC: "0x1000", Function: "F", Kind: "call", Confidence: ConfExact,
-			Result: map[string]any{"target": "Static.target"},
-		}})
-		c.MergeRuntime([]RuntimeResolution{{PC: "0x1000", Function: "F", TargetName: "Runtime.other"}})
-		got := c.records[0]
-		if got.Confidence != ConfExact {
-			t.Fatalf("conflicting runtime target upgraded confidence to %q", got.Confidence)
-		}
-		if conflict, _ := got.Result["runtime_conflict"].(bool); !conflict {
-			t.Fatalf("conflict not recorded: %+v", got.Result)
-		}
-	})
-
-	t.Run("polymorphic outside candidate stays conflict", func(t *testing.T) {
-		c := NewCollectorFromRecords([]Evidence{{
-			PC: "0x2000", Function: "F", Kind: "dispatch", Confidence: ConfPolymorphic,
-			Result: map[string]any{"targets": []string{"A.run", "B.run"}, "candidate_count": 2},
-		}})
-		c.MergeRuntime([]RuntimeResolution{
-			{PC: "0x2000", Function: "F", TargetName: "B.run"},
-			{PC: "0x2000", Function: "F", TargetName: "Z.run"},
-		})
-		got := c.records[0]
-		if got.Confidence != ConfPolymorphic {
-			t.Fatalf("polymorphic confidence changed to %q", got.Confidence)
-		}
-		if conflict, _ := got.Result["runtime_conflict"].(bool); !conflict {
-			t.Fatalf("out-of-set runtime target not marked conflict: %+v", got.Result)
-		}
-	})
-}
-
-func TestRuntimeObservationsPreserveMultipleTargetsAndRejectMalformedPCs(t *testing.T) {
-	c := NewCollectorFromRecords([]Evidence{{
-		PC: "0x3000", Function: "F", Kind: "call", Confidence: ConfUnknown,
-		Result: map[string]any{"resolved": false},
+func TestSignalEvidencePreservesRuleAndProducerConfidenceSeparately(t *testing.T) {
+	c := NewCollector(evidenceTestDartVersion)
+	c.FromSignalFindings([]output.SignalFinding{{
+		Category:           "behavioral",
+		StringValue:        "credential_to_network",
+		Function:           "F",
+		RuleID:             "signal.behavioral.credential_to_network",
+		ProducerConfidence: "medium",
 	}})
-	runtime := []RuntimeResolution{
-		{PC: "0x3000", Function: "F", TargetName: "A.run"},
-		{PC: "0x3000", Function: "F", TargetName: "B.run"},
-		{PC: "definitely-not-an-address", Function: "F", TargetName: "Never.zero"},
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
-	c.MergeRuntime(runtime)
-	got := c.records[0]
-	if got.Confidence != ConfRuntimeConfirmed {
-		t.Fatalf("unknown site with runtime evidence confidence = %q", got.Confidence)
+	got := c.Records()[0]
+	if got.Source != SourceSignal || got.Confidence != ConfHeuristic || got.Rule != "signal.behavioral.credential_to_network" {
+		t.Fatalf("signal evidence = %+v", got)
 	}
-	targets, ok := got.Result["runtime_targets"].([]string)
-	if !ok || len(targets) != 2 || targets[0] != "A.run" || targets[1] != "B.run" {
-		t.Fatalf("runtime target multiset collapsed: %#v", got.Result["runtime_targets"])
-	}
-	rep := c.Coverage(runtime)
-	if rep.InvalidRuntime != 1 {
-		t.Fatalf("InvalidRuntime = %d, want 1", rep.InvalidRuntime)
-	}
-	if rep.RuntimeOnly != 0 {
-		t.Fatalf("malformed PC became runtime-only address: %+v", rep)
+	if got.Result["producer_confidence"] != "medium" {
+		t.Fatalf("producer confidence lost: %+v", got.Result)
 	}
 }
 
-func TestFromBLRResolutionsUsesArchitectureSpecificDispatchReference(t *testing.T) {
-	r := typetrack.BlrResolution{
-		PC: 0x1234, SlotIndex: 9, Resolved: true, TargetName: "A.run", Confidence: "static_inferred",
+func TestMergeRuntimePreservesStaticClaimAndRecordsRelationship(t *testing.T) {
+	base := Evidence{
+		PC:         "0x100",
+		Function:   "F",
+		Kind:       "dispatch",
+		Source:     SourceTypeTrack,
+		Result:     map[string]any{"target": "A"},
+		Confidence: ConfStaticInferred,
+		Rule:       RuleTypeTrackDispatch,
 	}
-	c := NewCollector()
-	c.FromBLRResolutions("F", []typetrack.BlrResolution{r}, false)
-	if len(c.records) != 1 || c.records[0].SDKRef == nil ||
-		c.records[0].SDKRef.File != "runtime/vm/compiler/backend/flow_graph_compiler_x64.cc" {
-		t.Fatalf("x64 dispatch SDK reference = %+v", c.records)
+	c := NewCollectorFromRecords(evidenceTestDartVersion, []Evidence{base})
+	match := RuntimeObservation{
+		PC:       "0x100",
+		Function: "F",
+		Runtime:  testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 3}),
+	}
+	if err := c.MergeRuntime([]RuntimeObservation{match}); err != nil {
+		t.Fatalf("MergeRuntime: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	got := c.Records()[0]
+	if got.Confidence != ConfStaticInferred || got.Result["target"] != "A" {
+		t.Fatalf("runtime changed static claim: %+v", got)
+	}
+	if got.Runtime == nil || got.Runtime.Agreement != disasm.RuntimeAgrees || got.Runtime.Observations != 3 {
+		t.Fatalf("runtime agreement = %+v", got.Runtime)
 	}
 
-	c = NewCollector()
-	r.Confidence = "stub"
-	c.FromBLRResolutions("F", []typetrack.BlrResolution{r}, true)
-	if len(c.records) != 1 || c.records[0].SDKRef != nil {
-		t.Fatalf("stub resolution incorrectly cites dispatch lowering: %+v", c.records[0].SDKRef)
+	c = NewCollectorFromRecords(evidenceTestDartVersion, []Evidence{base})
+	conflict := match
+	conflict.Runtime = testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "B", Count: 2})
+	if err := c.MergeRuntime([]RuntimeObservation{conflict}); err != nil {
+		t.Fatalf("MergeRuntime conflict: %v", err)
+	}
+	got = c.Records()[0]
+	if got.Confidence != ConfStaticInferred || got.Result["target"] != "A" || got.Runtime == nil || got.Runtime.Agreement != disasm.RuntimeConflicts {
+		t.Fatalf("runtime conflict overwrote static claim: %+v", got)
 	}
 }
 
-func TestFromBLRResolutionsDoesNotCallIndirectDispatchExact(t *testing.T) {
-	c := NewCollector()
-	c.FromBLRResolutions("F", []typetrack.BlrResolution{{
-		PC: 0x1234, SlotIndex: 7, Resolved: true, TargetName: "A.run", Confidence: "exact",
-	}}, true)
-	if len(c.records) != 1 {
-		t.Fatalf("records = %d, want 1", len(c.records))
+func TestMergeRuntimeDistinguishesUnresolvedFromAbsentEvidence(t *testing.T) {
+	unresolved := Evidence{
+		PC:         "0x100",
+		Function:   "F",
+		Kind:       "dispatch",
+		Source:     SourceTypeTrack,
+		Result:     map[string]any{"resolved": false},
+		Confidence: ConfUnknown,
+		Rule:       RuleTypeTrackDispatch,
 	}
-	if got := c.records[0].Confidence; got != ConfStaticInferred {
-		t.Fatalf("indirect dispatch confidence = %q, want %q", got, ConfStaticInferred)
+	observation := RuntimeObservation{
+		PC:       "0x100",
+		Function: "F",
+		Runtime:  testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 1}),
+	}
+	c := NewCollectorFromRecords(evidenceTestDartVersion, []Evidence{unresolved})
+	if err := c.MergeRuntime([]RuntimeObservation{observation}); err != nil {
+		t.Fatalf("MergeRuntime unresolved: %v", err)
+	}
+	got := c.Records()[0]
+	if got.Confidence != ConfUnknown || got.Runtime == nil || got.Runtime.Agreement != disasm.RuntimeObservedOnly {
+		t.Fatalf("unresolved observation semantics = %+v", got)
+	}
+
+	observation.PC = "0x200"
+	c = NewCollector(evidenceTestDartVersion)
+	if err := c.MergeRuntime([]RuntimeObservation{observation}); err != nil {
+		t.Fatalf("MergeRuntime runtime-only: %v", err)
+	}
+	records := c.Records()
+	if len(records) != 1 || records[0].Kind != "runtime_call" || records[0].Source != SourceFrida || records[0].Confidence != ConfRuntimeObserved {
+		t.Fatalf("runtime-only row = %+v", records)
 	}
 }
 
-func TestResolvedStubTargetKeepsStubProvenance(t *testing.T) {
-	c := NewCollector()
-	c.FromCallEdges([]disasm.CallEdgeRecord{{
-		FromFunc: "F", FromPC: "0x1000", Kind: "blr",
-		Via: "THR.AllocateArray_entry_point", Target: "AllocateArray",
-	}})
-	got := c.records[0]
-	if got.Confidence != ConfStub {
-		t.Fatalf("confidence = %q, want stub", got.Confidence)
+func TestMergeRuntimeRejectsMixedBinaryIdentity(t *testing.T) {
+	first := RuntimeObservation{PC: "0x100", Function: "F", Runtime: testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 1})}
+	second := RuntimeObservation{PC: "0x200", Function: "G", Runtime: testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "B", Count: 1})}
+	second.Runtime.GenerationID = strings.Repeat("c", 64)
+
+	c := NewCollector(evidenceTestDartVersion)
+	if err := c.MergeRuntime([]RuntimeObservation{first, second}); err == nil {
+		t.Fatal("mixed runtime generations were accepted")
 	}
-	if got.Rule != "indirect_call_via_THR.AllocateArray_entry_point" {
-		t.Fatalf("rule = %q", got.Rule)
+	report := c.Coverage([]RuntimeObservation{first, second})
+	if report.TotalRuntime != 1 || report.InvalidRuntime != 1 {
+		t.Fatalf("mixed runtime identity coverage = %+v", report)
 	}
 }
 
-func TestUnresolvedProvenanceDoesNotImplyStub(t *testing.T) {
+func TestRuntimeEvidenceRejectsImpossibleCountsAndClassIDs(t *testing.T) {
+	tests := []disasm.RuntimeEvidence{
+		func() disasm.RuntimeEvidence {
+			rt := testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 2})
+			rt.Observations = 1
+			return rt
+		}(),
+		func() disasm.RuntimeEvidence {
+			rt := testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 1})
+			rt.ClassIDs = []int{0}
+			return rt
+		}(),
+	}
+	for i := range tests {
+		if err := validateRuntimeEvidence(&tests[i]); err == nil {
+			t.Fatalf("runtime invariant case %d was accepted: %+v", i, tests[i])
+		}
+	}
+}
+
+func TestValidateRejectsMalformedCertaintyAndProvenance(t *testing.T) {
 	tests := []struct {
 		name string
-		via  string
-		want Confidence
+		rec  Evidence
 	}{
-		{name: "dispatch table", via: "dispatch_table", want: ConfUnknown},
-		{name: "object field", via: disasm.ObjectFieldViaAt(0x17), want: ConfUnknown},
-		{name: "generic provenance", via: "some_register_origin", want: ConfUnknown},
-		{name: "pool placeholder", via: "PP[9] <Instance_42>", want: ConfUnknown},
-		{name: "pool string", via: `pp[12] "hello world"`, want: ConfUnknown},
-		{name: "pool callable-looking display", via: "PP[7] Widget.build", want: ConfUnknown},
-		{name: "thread data field", via: "THR.dispatch_table_array", want: ConfUnknown},
-		{name: "thread scalar field", via: "THR.stack_limit", want: ConfUnknown},
-		{name: "thread entry point", via: "THR.AllocateArray_ep", want: ConfStub},
+		{
+			name: "dynamic rule text",
+			rec:  Evidence{PC: "0x1", Kind: "call", Source: SourceCallEdges, Result: map[string]any{"target": "A"}, Confidence: ConfExact, Rule: RuleID("call via THR.foo")},
+		},
+		{
+			name: "unknown with target",
+			rec:  Evidence{PC: "0x1", Kind: "dispatch", Source: SourceTypeTrack, Result: map[string]any{"target": "A"}, Confidence: ConfUnknown, Rule: RuleTypeTrackDispatch},
+		},
+		{
+			name: "polymorphic as single target",
+			rec:  Evidence{PC: "0x1", Kind: "dispatch", Source: SourceTypeTrack, Result: map[string]any{"target": "A"}, Confidence: ConfPolymorphic, Rule: RuleTypeTrackDispatch},
+		},
+		{
+			name: "wrong sdk version",
+			rec:  Evidence{PC: "0x1", Kind: "call", Source: SourceCallEdges, Result: map[string]any{"target_address": "0x2"}, Confidence: ConfExact, Rule: RuleDirectCallAddress, SDKRef: &SDKReference{Tag: "3.12.2", File: "runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc", Symbol: "GenerateStaticDartCall"}},
+		},
+		{
+			name: "fabricated sdk symbol",
+			rec: Evidence{
+				PC: "0x1", Kind: "dispatch", Source: SourceTypeTrack,
+				Result: map[string]any{"target": "A"}, Confidence: ConfStaticInferred, Rule: RuleTypeTrackDispatch,
+				SDKRef: &SDKReference{Tag: evidenceTestDartVersion, File: "runtime/vm/compiler/runtime_offsets_extracted.h", Symbol: "Thread_Fabricated_entry_point_offset"},
+			},
+		},
+		{
+			name: "fabricated call rule",
+			rec: Evidence{
+				PC: "0x1", Kind: "call", Source: SourceCallEdges,
+				Result: map[string]any{"resolved": false}, Confidence: ConfUnknown, Rule: "call.fabricated",
+			},
+		},
+		{
+			name: "fabricated typetrack rule",
+			rec: Evidence{
+				PC: "0x1", Kind: "dispatch", Source: SourceTypeTrack,
+				Result: map[string]any{"resolved": false}, Confidence: ConfUnknown, Rule: "typetrack.fabricated",
+			},
+		},
+		{
+			name: "non canonical pc",
+			rec: Evidence{
+				PC: "0X0001", Kind: "call", Source: SourceCallEdges,
+				Result: map[string]any{"target_address": "0x2"}, Confidence: ConfExact, Rule: RuleDirectCallAddress,
+			},
+		},
+		{
+			name: "unsorted polymorphic candidates",
+			rec: Evidence{
+				PC: "0x1", Kind: "dispatch", Source: SourceTypeTrack,
+				Result: map[string]any{"targets": []string{"B", "A"}, "candidate_count": 2}, Confidence: ConfPolymorphic, Rule: RuleTypeTrackDispatch,
+			},
+		},
+		{
+			name: "call rule confidence mismatch",
+			rec: Evidence{
+				PC: "0x1", Kind: "call", Source: SourceCallEdges,
+				Result: map[string]any{"target": "A"}, Confidence: ConfStaticInferred, Rule: RuleIndirectStub,
+			},
+		},
+		{
+			name: "runtime version mismatch",
+			rec: func() Evidence {
+				rt := testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "A", Count: 1})
+				rt.DartVersion = "3.12.2"
+				rt.Agreement = disasm.RuntimeAgrees
+				return Evidence{PC: "0x1", Function: "F", Kind: "dispatch", Source: SourceTypeTrack, Result: map[string]any{"target": "A"}, Confidence: ConfStaticInferred, Rule: RuleTypeTrackDispatch, Runtime: &rt}
+			}(),
+		},
+		{
+			name: "false runtime agreement",
+			rec: func() Evidence {
+				rt := testRuntimeEvidence(disasm.RuntimeTargetObservation{Target: "B", Count: 1})
+				rt.Agreement = disasm.RuntimeAgrees
+				return Evidence{PC: "0x1", Function: "F", Kind: "dispatch", Source: SourceTypeTrack, Result: map[string]any{"target": "A"}, Confidence: ConfStaticInferred, Rule: RuleTypeTrackDispatch, Runtime: &rt}
+			}(),
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := NewCollector()
-			c.FromCallEdges([]disasm.CallEdgeRecord{{
-				FromFunc: "F", FromPC: "0x1000", Kind: "blr", Via: tt.via,
-			}})
-			if got := c.records[0].Confidence; got != tt.want {
-				t.Fatalf("Via %q confidence = %q, want %q", tt.via, got, tt.want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewCollectorFromRecords(evidenceTestDartVersion, []Evidence{tc.rec})
+			if err := c.Validate(); err == nil {
+				t.Fatalf("Validate accepted malformed evidence: %+v", tc.rec)
 			}
 		})
 	}
 }
 
-func TestExactTypeTestingStubTargetIsStubEvidence(t *testing.T) {
-	c := NewCollector()
-	c.FromCallEdges([]disasm.CallEdgeRecord{{
-		FromFunc: "F", FromPC: "0x1000", Kind: "blr",
-		Via: "PP[7] misleading.display", Target: "TypeTestingStub_List<int>",
-	}})
-	if got := c.records[0].Confidence; got != ConfStub {
-		t.Fatalf("exact TTS target confidence = %q, want %q", got, ConfStub)
+func TestRecordsAreDeterministicAndDeduplicateExactClaims(t *testing.T) {
+	a := Evidence{PC: "0x20", Function: "B", Kind: "call", Source: SourceCallEdges, Result: map[string]any{"target_address": "0x200"}, Confidence: ConfExact, Rule: RuleDirectCallAddress}
+	b := Evidence{PC: "0x10", Function: "A", Kind: "call", Source: SourceCallEdges, Result: map[string]any{"target_address": "0x100"}, Confidence: ConfExact, Rule: RuleDirectCallAddress}
+	c := NewCollectorFromRecords(evidenceTestDartVersion, []Evidence{a, b, a})
+	first := c.Records()
+	second := c.Records()
+	if len(first) != 2 {
+		t.Fatalf("deduped records = %d, want 2: %+v", len(first), first)
 	}
-}
-
-func TestCoverage(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x1000", Kind: "bl", Target: "A.foo"},
-		{FromFunc: "F", FromPC: "0x2000", Kind: "bl", Target: "B.bar"},
-		{FromFunc: "F", FromPC: "0x3000", Kind: "blr"},
+	if first[0].PC != "0x10" || first[1].PC != "0x20" {
+		t.Fatalf("numeric ordering = %+v", first)
 	}
-	c := NewCollector()
-	c.FromCallEdges(edges)
-
-	rt := []RuntimeResolution{
-		{PC: "0x1000", TargetName: "A.foo"},  // match
-		{PC: "0x2000", TargetName: "C.baz"},  // conflict
-		{PC: "0x3000", TargetName: "D.qux"},  // runtime confirmed (was unknown)
-		{PC: "0x9999", TargetName: "E.only"}, // runtime only
-	}
-	rep := c.Coverage(rt)
-
-	if rep.BothMatch != 1 {
-		t.Errorf("BothMatch = %d, want 1", rep.BothMatch)
-	}
-	if rep.BothConflict != 1 {
-		t.Errorf("BothConflict = %d, want 1", rep.BothConflict)
-	}
-	if rep.RuntimeConfirmed != 1 {
-		t.Errorf("RuntimeConfirmed = %d, want 1", rep.RuntimeConfirmed)
-	}
-	if rep.StaticOnly != 0 {
-		t.Errorf("StaticOnly = %d, want 0", rep.StaticOnly)
-	}
-	if rep.RuntimeOnly != 1 {
-		t.Errorf("RuntimeOnly = %d, want 1", rep.RuntimeOnly)
-	}
-	if rep.TotalStatic != 3 {
-		t.Errorf("TotalStatic = %d, want 3", rep.TotalStatic)
-	}
-	if rep.TotalRuntime != 4 {
-		t.Errorf("TotalRuntime = %d, want 4", rep.TotalRuntime)
-	}
-}
-
-func TestCoverageCountsCallAndDispatchAsOneSite(t *testing.T) {
-	c := NewCollectorFromRecords([]Evidence{
-		{PC: "0x1000", Function: "F", Kind: "call", Confidence: ConfStaticInferred,
-			Result: map[string]any{"target": "A.run"}},
-		{PC: "0x1000", Function: "F", Kind: "dispatch", Confidence: ConfStaticInferred,
-			Result: map[string]any{"target": "A.run"}},
-	})
-	rep := c.Coverage([]RuntimeResolution{{PC: "0x1000", Function: "F", TargetName: "A.run"}})
-	if rep.TotalStatic != 1 || rep.TotalRuntime != 1 || rep.BothMatch != 1 {
-		t.Fatalf("duplicate provenance rows counted as sites: %+v", rep)
-	}
-}
-
-func TestRuntimeMergeAndCoverageIgnoreNonCallEvidence(t *testing.T) {
-	c := NewCollectorFromRecords([]Evidence{
-		{PC: "0x1000", Function: "F", Kind: "signal", Confidence: ConfStaticInferred,
-			Result: map[string]any{"signal": "interesting"}},
-		{PC: "0x1000", Function: "F", Kind: "field_access", Confidence: ConfStaticInferred,
-			Result: map[string]any{"class_name": "C"}},
-	})
-	runtime := []RuntimeResolution{{PC: "0x1000", Function: "F", TargetName: "A.run"}}
-	c.MergeRuntime(runtime)
-	for i, rec := range c.records {
-		if _, ok := rec.Result["runtime_target"]; ok {
-			t.Fatalf("non-call evidence %d was annotated with runtime target: %+v", i, rec)
-		}
-	}
-	rep := c.Coverage(runtime)
-	if rep.TotalStatic != 0 || rep.StaticOnly != 0 || rep.RuntimeConfirmed != 0 || rep.RuntimeOnly != 1 {
-		t.Fatalf("non-call evidence polluted runtime coverage: %+v", rep)
-	}
-}
-
-func TestTruncatedCandidateListIsIndeterminateNotConflict(t *testing.T) {
-	targets := []string{"A", "B", "C", "D", "E", "F", "G", "H"}
-	c := NewCollectorFromRecords([]Evidence{{
-		PC: "0x2000", Function: "F", Kind: "dispatch", Confidence: ConfPolymorphic,
-		Result: map[string]any{"targets": targets, "candidate_count": 9},
-	}})
-	runtime := []RuntimeResolution{{PC: "0x2000", Function: "F", TargetName: "I"}}
-	c.MergeRuntime(runtime)
-	if conflict, _ := c.records[0].Result["runtime_conflict"].(bool); conflict {
-		t.Fatalf("truncated candidate list produced false conflict: %+v", c.records[0].Result)
-	}
-	if indeterminate, _ := c.records[0].Result["runtime_indeterminate"].(bool); !indeterminate {
-		t.Fatalf("truncated candidate list did not record indeterminate result: %+v", c.records[0].Result)
-	}
-	rep := c.Coverage(runtime)
-	if rep.BothIndeterminate != 1 || rep.BothConflict != 0 || rep.BothMatch != 0 {
-		t.Fatalf("coverage = %+v, want one indeterminate site", rep)
-	}
-}
-
-func TestCandidateCountSmallerThanListIsMalformed(t *testing.T) {
-	c := NewCollectorFromRecords([]Evidence{{
-		PC: "0x2000", Function: "F", Kind: "dispatch", Confidence: ConfPolymorphic,
-		Result: map[string]any{"targets": []string{"A", "B"}, "candidate_count": 1},
-	}})
-	runtime := []RuntimeResolution{{PC: "0x2000", Function: "F", TargetName: "Z"}}
-	c.MergeRuntime(runtime)
-	if conflict, _ := c.records[0].Result["runtime_conflict"].(bool); conflict {
-		t.Fatalf("malformed candidate count produced false conflict: %+v", c.records[0].Result)
-	}
-	if indeterminate, _ := c.records[0].Result["runtime_indeterminate"].(bool); !indeterminate {
-		t.Fatalf("malformed candidate count did not stay indeterminate: %+v", c.records[0].Result)
-	}
-	rep := c.Coverage(runtime)
-	if rep.BothIndeterminate != 1 || rep.BothConflict != 0 {
-		t.Fatalf("coverage = %+v, want malformed candidate list to be indeterminate", rep)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("Records is nondeterministic:\nfirst=%+v\nsecond=%+v", first, second)
 	}
 }

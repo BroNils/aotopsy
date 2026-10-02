@@ -145,7 +145,7 @@ func cmdFridaExport(args []string) error {
 
 	cli.Errf("Frida metadata exported: %s\n", *outPath)
 	cli.Errf("  Functions: %d\n", len(meta.Functions))
-	cli.Errf("  Unresolved BLRs: %d\n", len(meta.UnresolvedBLRs))
+	cli.Errf("  Call probes: %d\n", len(meta.CallProbes))
 	cli.Errf("  Dispatch entries: %d\n", len(meta.DispatchTable))
 	cli.Errf("  String refs: %d\n", len(meta.StringRefs))
 	cli.Errf("  Generation binding: %s\n", bindingPath)

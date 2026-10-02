@@ -141,14 +141,15 @@ func RunDisasmStageX86(
 			rec := disasm.CallEdgeRecord{
 				FromFunc: name, FromPC: fmt.Sprintf("0x%x", e.FromPC),
 				Kind: e.Kind, Reg: e.Reg, Via: e.Via,
-			}
-			if e.Kind == "call" && e.TargetValid {
-				if e.TargetName != "" {
-					rec.Target = e.TargetName
-				} else {
-					rec.Target = fmt.Sprintf("0x%x", e.TargetPC)
 				}
-			}
+				if e.Kind == "call" && e.TargetValid {
+					rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
+					if e.TargetName != "" {
+						rec.Target = e.TargetName
+					} else {
+						rec.Target = rec.TargetAddress
+					}
+				}
 			edgeRecs = append(edgeRecs, rec)
 			dr.TotalEdges++
 			if opts.Graph {

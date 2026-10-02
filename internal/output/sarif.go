@@ -167,11 +167,13 @@ var ruleDescription = map[string]string{
 
 // SignalFinding is a single security finding from signal analysis.
 type SignalFinding struct {
-	Category    string `json:"category"`
-	StringValue string `json:"string_value"`
-	Function    string `json:"function"`
-	PC          string `json:"pc"`
-	AddressKind string `json:"address_kind,omitempty"`
+	Category           string `json:"category"`
+	StringValue        string `json:"string_value"`
+	Function           string `json:"function"`
+	PC                 string `json:"pc"`
+	AddressKind        string `json:"address_kind,omitempty"`
+	RuleID             string `json:"rule_id,omitempty"`
+	ProducerConfidence string `json:"producer_confidence,omitempty"`
 }
 
 // ArtifactIdentity is immutable provenance captured when the input was opened.

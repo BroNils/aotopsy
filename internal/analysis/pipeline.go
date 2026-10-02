@@ -71,6 +71,7 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 		out = append(out, output.SignalFinding{
 			Category:    "entropy",
 			StringValue: fmt.Sprintf("%s section %s: entropy %.3f, size %d", f.Verdict, f.Section, f.Entropy, f.Size),
+			RuleID:      "signal.entropy.section_threshold",
 		})
 	}
 
@@ -78,6 +79,7 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 		out = append(out, output.SignalFinding{
 			Category:    signal.CatCryptoConst,
 			StringValue: fmt.Sprintf("%s (%s, pool=%d)", f.Algorithm, f.Constant, f.PoolIndex),
+			RuleID:      "signal.crypto.constant",
 		})
 	}
 
@@ -91,9 +93,11 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			fn = f.SinkFn
 		}
 		out = append(out, output.SignalFinding{
-			Category:    "taint",
-			StringValue: fmt.Sprintf("%s -> %s (%s, confidence=%s)", f.Source, f.Sink, f.FlowType, f.Confidence),
-			Function:    fn,
+			Category:           "taint",
+			StringValue:        fmt.Sprintf("%s -> %s (%s, confidence=%s)", f.Source, f.Sink, f.FlowType, f.Confidence),
+			Function:           fn,
+			RuleID:             "signal.taint.flow",
+			ProducerConfidence: f.Confidence,
 		})
 	}
 
@@ -110,6 +114,7 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			Category:    "yara",
 			StringValue: fmt.Sprintf("%s/%s matched %s", f.RuleName, f.Category, strings.Join(f.Strings, ", ")),
 			Function:    fn,
+			RuleID:      "signal.yara." + f.RuleName,
 		})
 	}
 
@@ -123,9 +128,11 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			fn = f.Functions[0]
 		}
 		out = append(out, output.SignalFinding{
-			Category:    "behavioral",
-			StringValue: fmt.Sprintf("%s/%s: %d edges, confidence=%s", f.Pattern, f.Category, f.EdgeCount, f.Confidence),
-			Function:    fn,
+			Category:           "behavioral",
+			StringValue:        fmt.Sprintf("%s/%s: %d edges, confidence=%s", f.Pattern, f.Category, f.EdgeCount, f.Confidence),
+			Function:           fn,
+			RuleID:             "signal.behavioral." + f.Pattern,
+			ProducerConfidence: f.Confidence,
 		})
 	}
 	return out, nil
@@ -656,12 +663,12 @@ func runPipeline(opts Opts) (*Result, error) {
 
 	// Step 8: Unified Evidence collection & export.
 	//
-	// Three of the collector's four sources were never called. Only
-	// FromCallEdges ran, so evidence.jsonl held nothing but Kind "call" --
-	// and the BLR resolutions it did carry had been through a round trip
-	// via call_edges.jsonl, losing the confidence and slot index the type
-	// analysis produced.
-	evCollector := evidence.NewCollector()
+	// Keep the call-edge summary and lossless typetrack rows separate. The
+	// summary is useful to artifact consumers, while the typetrack records retain
+	// derivation/confidence/slot facts that must not be reconstructed from the
+	// lossy call_edges.jsonl representation. Signal findings are folded in only
+	// after their producer-specific rule/confidence metadata is attached.
+	evCollector := evidence.NewCollector(provenance.DartVersion)
 	if len(edges) > 0 {
 		evCollector.FromCallEdges(edges)
 	}

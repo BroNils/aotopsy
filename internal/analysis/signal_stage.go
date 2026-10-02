@@ -220,6 +220,7 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 					Function:    sf.Name,
 					PC:          ref.PC,
 					AddressKind: "instruction",
+					RuleID:      "signal.category." + cat,
 				})
 			}
 		}
@@ -232,6 +233,7 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 					Function:    sf.Name,
 					PC:          sf.PC,
 					AddressKind: "function",
+					RuleID:      "signal.category." + cat,
 				})
 			}
 		}
@@ -251,6 +253,7 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 			findings = append(findings, output.SignalFinding{
 				Category:    signal.CatObfuscation,
 				StringValue: fmt.Sprintf("%.0f%% of %d identifier-like strings look obfuscated", ratio*100, considered),
+				RuleID:      "signal.obfuscation.ratio",
 			})
 		}
 	}
@@ -276,7 +279,11 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 		logf("  %s->%s %s%s%s (%d bytes, %d findings)\n", cli.Muted, cli.Reset, cli.Blue, sarifPath, cli.Reset, strutil.FileSize(sarifPath), len(findings))
 
 		evidencePath := filepath.Join(outDir, "evidence.jsonl")
-		evCollector := evidence.NewCollector()
+		dartVersion := ""
+		if hasProv {
+			dartVersion = prov.DartVersion
+		}
+		evCollector := evidence.NewCollector(dartVersion)
 		evCollector.FromCallEdges(edges)
 		evCollector.FromSignalFindings(findings)
 		if err := evCollector.WriteJSONL(evidencePath); err != nil {
@@ -398,12 +405,17 @@ func BuildSignalContent(
 	for _, er := range edgeRecords {
 		pc := strutil.ParseHexAddr(er.FromPC)
 		ce := disasm.CallEdge{
-			FromPC:      pc,
-			Kind:        er.Kind,
-			TargetName:  er.Target,
-			TargetPC:    strutil.ParseHexAddr(er.Target),
-			TargetValid: er.Target != "",
-			Via:         er.Via,
+			FromPC:     pc,
+			Kind:       er.Kind,
+			TargetName: er.Target,
+			Via:        er.Via,
+		}
+		if er.Kind == "bl" || er.Kind == "call" {
+			ce.TargetPC = strutil.ParseHexAddr(er.TargetAddress)
+			ce.TargetValid = er.TargetAddress != ""
+			if er.Target == er.TargetAddress {
+				ce.TargetName = ""
+			}
 		}
 		edgesByFunc[er.FromFunc] = append(edgesByFunc[er.FromFunc], ce)
 	}

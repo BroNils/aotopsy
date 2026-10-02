@@ -53,7 +53,7 @@ func writeStaticImportFixture(t *testing.T, dir string, edges []disasm.CallEdgeR
 	for _, f := range funcs {
 		allFunctions = append(allFunctions, FridaFunction{VA: f.PC, Name: f.Name, Owner: f.Owner, Size: f.Size})
 	}
-	allProbes := make([]FridaUnresolvedBLR, 0, len(edges))
+	allProbes := make([]FridaCallProbe, 0, len(edges))
 	for _, e := range edges {
 		probe, ok := RuntimeProbeForEdge(e)
 		if !ok {
@@ -78,9 +78,9 @@ func writeStaticImportFixture(t *testing.T, dir string, edges []disasm.CallEdgeR
 			Kind: "executable", Offset: "0x0", Size: 4,
 			SHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		}},
-		Artifacts:          artifacts,
-		InstalledFunctions: installedFunctions(allFunctions),
-		InstalledBLRs:      installedBLRs(allProbes),
+		Artifacts:           artifacts,
+		InstalledFunctions:  installedFunctions(allFunctions),
+		InstalledCallProbes: installedCallProbes(allProbes),
 	}
 	generationID, err := ComputeGenerationID(binding)
 	if err != nil {
@@ -135,10 +135,11 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{
 		{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"},
 		{FromFunc: "G", FromPC: "0x200", Kind: "call_indirect", Reg: "RAX"},
-		{FromFunc: "H", FromPC: "0x300", Kind: "bl", Target: "Known"},
+		{FromFunc: "H", FromPC: "0x300", Kind: "bl", Target: "Known", TargetAddress: "0x40"},
 	}
 	staticEvidence := []evidence.Evidence{{
-		PC: "0x100", Function: "F", Kind: "call", Confidence: evidence.ConfUnknown,
+		PC: "0x100", Function: "F", Kind: "call", Source: evidence.SourceCallEdges,
+		Confidence: evidence.ConfUnknown, Rule: evidence.RuleIndirectUnresolved,
 		Result: map[string]any{"resolved": false},
 	}}
 	if _, err := jsonutil.WriteJSONLFile(filepath.Join(staticDir, "evidence.jsonl"), staticEvidence); err != nil {
@@ -158,17 +159,17 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 		{Type: "function_enter", Name: "F", FunctionVA: "0x10"},
 		{Type: "function_enter", Name: "H", FunctionVA: "0x30"},
 		{Type: "function_enter", Name: "Known", FunctionVA: "0x40"},
-		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", BLRAddr: "0x100", FromFunc: "F", TargetName: "A", TargetVA: "0xaaa", TargetModule: "libapp.so", ClassID: 10},
-		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", BLRAddr: "0x100", FromFunc: "F", TargetName: "B", TargetVA: "0xbbb", TargetModule: "libapp.so", ClassID: 11},
-		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", BLRAddr: "0x100", FromFunc: "F", TargetName: "A", TargetVA: "0xaaa", TargetModule: "libapp.so", ClassID: 10},
-		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", BLRAddr: "0x200", FromFunc: "G", TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1},
+		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", CallAddr: "0x100", FromFunc: "F", TargetName: "A", TargetVA: "0xaaa", TargetModule: "libapp.so", ClassID: 10},
+		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", CallAddr: "0x100", FromFunc: "F", TargetName: "B", TargetVA: "0xbbb", TargetModule: "libapp.so", ClassID: 11},
+		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", CallAddr: "0x100", FromFunc: "F", TargetName: "A", TargetVA: "0xaaa", TargetModule: "libapp.so", ClassID: 10},
+		{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch", CallAddr: "0x200", FromFunc: "G", TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1},
 	}
 	logPath := writeRuntimeLog(t, binding, events)
 
 	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
 		t.Fatalf("CmdFridaImport: %v", err)
 	}
-	got, err := readStaticCallEdges(filepath.Join(outDir, "call_edges.jsonl"))
+	got, err := readCallEdgesStrict(filepath.Join(outDir, "call_edges.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,21 +177,22 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 		t.Fatalf("merged edges = %d, want 3", len(got))
 	}
 	first := got[0]
-	if first.Target != "" || !reflect.DeepEqual(first.Targets, []string{"A", "B"}) || first.Candidates != 2 {
-		t.Fatalf("polymorphic target merge = %+v", first)
+	if first.Target != "" || len(first.Targets) != 0 || first.Candidates != 0 {
+		t.Fatalf("runtime observation changed unresolved static target state: %+v", first)
 	}
-	if !first.RuntimeResolved || !reflect.DeepEqual(first.RuntimeTargets, []string{"A", "B"}) ||
-		!reflect.DeepEqual(first.RuntimeClassIDs, []int{10, 11}) || first.RuntimeObservations != 3 {
+	if first.Runtime == nil || first.Runtime.Agreement != disasm.RuntimeObservedOnly ||
+		!reflect.DeepEqual(first.Runtime.ClassIDs, []int{10, 11}) || first.Runtime.Observations != 3 ||
+		!reflect.DeepEqual(first.Runtime.Targets, []disasm.RuntimeTargetObservation{{Target: "A", Count: 2}, {Target: "B", Count: 1}}) {
 		t.Fatalf("runtime aggregate = %+v", first)
 	}
-	if !first.RuntimeConfirmed || first.RuntimeCallCount != 3 {
-		t.Fatalf("runtime source count = %+v", first)
+	if first.Runtime.GenerationID != binding.GenerationID || first.Runtime.SourceSHA256 != binding.SourceSHA256 || first.Runtime.DartVersion != binding.DartVersion {
+		t.Fatalf("runtime identity = %+v", first.Runtime)
 	}
 	second := got[1]
-	if second.Target != "libother.so+0x44" || !second.RuntimeResolved {
+	if second.Target != "" || second.Runtime == nil || second.Runtime.Agreement != disasm.RuntimeObservedOnly {
 		t.Fatalf("x86 call_indirect merge = %+v", second)
 	}
-	if got[2].Target != "Known" || got[2].RuntimeResolved || got[2].RuntimeConfirmed || got[2].RuntimeTargetConfirmed {
+	if got[2].Target != "Known" || got[2].Runtime != nil {
 		t.Fatalf("function entry incorrectly confirmed an unobserved direct callsite: %+v", got[2])
 	}
 
@@ -198,12 +200,14 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mergedEvidence) != 1 || mergedEvidence[0].Confidence != evidence.ConfRuntimeConfirmed {
+	if len(mergedEvidence) != 2 {
 		t.Fatalf("runtime evidence was not merged: %+v", mergedEvidence)
 	}
-	runtimeTargets, ok := mergedEvidence[0].Result["runtime_targets"].([]any)
-	if !ok || len(runtimeTargets) != 2 || runtimeTargets[0] != "A" || runtimeTargets[1] != "B" {
-		t.Fatalf("merged runtime targets = %#v", mergedEvidence[0].Result["runtime_targets"])
+	if mergedEvidence[0].Confidence != evidence.ConfUnknown || mergedEvidence[0].Runtime == nil || mergedEvidence[0].Runtime.Agreement != disasm.RuntimeObservedOnly {
+		t.Fatalf("static unresolved evidence was upgraded: %+v", mergedEvidence[0])
+	}
+	if mergedEvidence[1].Source != evidence.SourceFrida || mergedEvidence[1].Confidence != evidence.ConfRuntimeObserved || mergedEvidence[1].Runtime == nil {
+		t.Fatalf("runtime-only observation was not represented explicitly: %+v", mergedEvidence[1])
 	}
 
 	coverageBytes, err := os.ReadFile(filepath.Join(outDir, "runtime_coverage.json"))
@@ -214,7 +218,7 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 	if err := json.Unmarshal(coverageBytes, &coverage); err != nil {
 		t.Fatal(err)
 	}
-	if coverage.RuntimeConfirmed != 1 || coverage.BothConflict != 0 {
+	if coverage.StaticUnresolvedObserved != 1 || coverage.RuntimeOnly != 1 || coverage.BothConflict != 0 {
 		t.Fatalf("runtime coverage = %+v", coverage)
 	}
 	prov, err := readStaticProvenance(filepath.Join(outDir, "provenance.json"))
@@ -238,7 +242,8 @@ func TestRuntimeEventLogRejectsWrongOrMalformedWireFormat(t *testing.T) {
 	if _, err := readRuntimeEventLog(p, binding); err == nil {
 		t.Fatal("legacy/disconnected aggregate JSON was accepted without any AOTOPSY_EVENT records")
 	}
-	raw := runtimeEventPrefix + `{"schema_version":2,"generation_id":"` + binding.GenerationID + `","source_sha256":"` + testSourceSHA256 + `","source_size":1234,"architecture":"x64","type":"dispatch","unexpected":1}` + "\n"
+	raw := fmt.Sprintf(`%s{"schema_version":%d,"generation_id":"%s","source_sha256":"%s","source_size":1234,"architecture":"x64","type":"dispatch","unexpected":1}`+"\n",
+		runtimeEventPrefix, MetadataSchemaVersion, binding.GenerationID, testSourceSHA256)
 	if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -265,22 +270,22 @@ func TestFridaImportRejectsRuntimeIdentityAndSitePoisoning(t *testing.T) {
 		{
 			name: "wrong source",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: strings.Repeat("b", 64), Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetName: "Target", ClassID: 10},
+				CallAddr: "0x100", FromFunc: "F", TargetName: "Target", ClassID: 10},
 		},
 		{
 			name: "unknown site",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x999", FromFunc: "F", TargetName: "Target", ClassID: 10},
+				CallAddr: "0x999", FromFunc: "F", TargetName: "Target", ClassID: 10},
 		},
 		{
 			name: "wrong function",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "G", TargetName: "Target", ClassID: 10},
+				CallAddr: "0x100", FromFunc: "G", TargetName: "Target", ClassID: 10},
 		},
 		{
 			name: "class id on non dispatch",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x200", FromFunc: "G", TargetName: "Target", ClassID: 77},
+				CallAddr: "0x200", FromFunc: "G", TargetName: "Target", ClassID: 77},
 		},
 		{
 			name: "unknown function enter",
@@ -290,17 +295,17 @@ func TestFridaImportRejectsRuntimeIdentityAndSitePoisoning(t *testing.T) {
 		{
 			name: "wrong generation",
 			ev: runtimeEvent{GenerationID: strings.Repeat("d", 64), Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
 		},
 		{
 			name: "wrong runtime size",
 			ev: runtimeEvent{SourceSize: 9999, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
 		},
 		{
 			name: "wrong runtime architecture",
 			ev: runtimeEvent{Architecture: "arm64", Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetModule: "libapp.so"},
 		},
 	}
 	for _, tt := range tests {
@@ -336,39 +341,34 @@ func TestFridaImportRejectsUnexportedSitesAndTargetIdentityPoisoning(t *testing.
 		ev   runtimeEvent
 	}{
 		{
-			name: "resolved static edge was never exported",
-			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x200", FromFunc: "Resolved", TargetVA: "0x400", TargetName: "Known", TargetModule: "libapp.so"},
-		},
-		{
 			name: "unsupported provenance was never exported",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x300", FromFunc: "Unsupported", TargetVA: "0x400", TargetName: "Known", TargetModule: "libapp.so"},
+				CallAddr: "0x300", FromFunc: "Unsupported", TargetVA: "0x400", TargetName: "Known", TargetModule: "libapp.so"},
 		},
 		{
 			name: "own module name does not match target pc",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetName: "Known", TargetModule: "libapp.so", ClassID: 7},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x10", TargetName: "Known", TargetModule: "libapp.so", ClassID: 7},
 		},
 		{
 			name: "unknown own module name",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x400", TargetName: "Spoofed", TargetModule: "libapp.so", ClassID: 7},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x400", TargetName: "Spoofed", TargetModule: "libapp.so", ClassID: 7},
 		},
 		{
 			name: "external module target does not match module",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "other.so+0x44", TargetModule: "evil.so", ClassID: 7},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "other.so+0x44", TargetModule: "evil.so", ClassID: 7},
 		},
 		{
 			name: "ownerless absolute runtime target",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x7fff12345678", ClassID: -1},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x7fff12345678", ClassID: -1},
 		},
 		{
 			name: "invalid negative class id",
 			ev: runtimeEvent{SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-				BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x400", TargetModule: "libapp.so", ClassID: -2},
+				CallAddr: "0x100", FromFunc: "F", TargetVA: "0x400", TargetModule: "libapp.so", ClassID: -2},
 		},
 	}
 
@@ -386,16 +386,16 @@ func TestFridaImportRejectsUnexportedSitesAndTargetIdentityPoisoning(t *testing.
 func TestFridaImportRejectsEligibleButUninstalledSites(t *testing.T) {
 	t.Run("probe beyond cap", func(t *testing.T) {
 		staticDir := t.TempDir()
-		edges := make([]disasm.CallEdgeRecord, 0, maxInstalledBLRs+1)
-		for i := 0; i < maxInstalledBLRs+1; i++ {
+		edges := make([]disasm.CallEdgeRecord, 0, maxInstalledCallProbes+1)
+		for i := 0; i < maxInstalledCallProbes+1; i++ {
 			edges = append(edges, disasm.CallEdgeRecord{
 				FromFunc: "F", FromPC: fmt.Sprintf("0x%x", 0x1000+i), Kind: "call_indirect", Reg: "RAX",
 			})
 		}
 		binding := writeStaticImportFixture(t, staticDir, edges, []disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}})
-		uninstalled := edges[maxInstalledBLRs].FromPC
+		uninstalled := edges[maxInstalledCallProbes].FromPC
 		logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
-			Type: "dispatch", BLRAddr: uninstalled, FromFunc: "F",
+			Type: "dispatch", CallAddr: uninstalled, FromFunc: "F",
 			TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
 		}})
 		outDir := filepath.Join(t.TempDir(), "merged")
@@ -427,7 +427,7 @@ func TestFridaImportRejectsStaticGenerationDrift(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "RAX"}}
 	binding := writeStaticImportFixture(t, staticDir, edges, []disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}})
 	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
-		Type: "dispatch", BLRAddr: "0x100", FromFunc: "F",
+		Type: "dispatch", CallAddr: "0x100", FromFunc: "F",
 		TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
 	}})
 
@@ -451,7 +451,7 @@ func TestFridaImportRejectsInputInsideOutputWithoutDeletingIt(t *testing.T) {
 		[]disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}},
 	)
 	sourceLog := writeRuntimeLog(t, binding, []runtimeEvent{{
-		Type: "dispatch", BLRAddr: "0x100", FromFunc: "F",
+		Type: "dispatch", CallAddr: "0x100", FromFunc: "F",
 		TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
 	}})
 	logBytes, err := os.ReadFile(sourceLog)
@@ -482,21 +482,23 @@ func TestFridaImportCanonicalizesOwnModuleTargetFromStaticIdentity(t *testing.T)
 	staticDir := t.TempDir()
 	outDir := filepath.Join(t.TempDir(), "merged")
 	binding := writeStaticImportFixture(t, staticDir,
-		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"}},
+		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table", Target: "Known"}},
 		[]disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}, {PC: "0x400", Size: 4, Name: "Known"}},
 	)
 	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
 		SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-		BLRAddr: "0x100", FromFunc: "F", TargetVA: "0x0400", TargetModule: "libapp.so", ClassID: 7,
+		CallAddr: "0x100", FromFunc: "F", TargetVA: "0x0400", TargetModule: "libapp.so", ClassID: 7,
 	}})
 	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
 		t.Fatal(err)
 	}
-	edges, err := readStaticCallEdges(filepath.Join(outDir, "call_edges.jsonl"))
+	edges, err := readCallEdgesStrict(filepath.Join(outDir, "call_edges.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(edges) != 1 || edges[0].Target != "Known" || !reflect.DeepEqual(edges[0].RuntimeTargets, []string{"Known"}) {
+	if len(edges) != 1 || edges[0].Target != "Known" || edges[0].Runtime == nil ||
+		edges[0].Runtime.Agreement != disasm.RuntimeAgrees ||
+		!reflect.DeepEqual(edges[0].Runtime.Targets, []disasm.RuntimeTargetObservation{{Target: "Known", Count: 1}}) {
 		t.Fatalf("own-module runtime target was not canonicalized from static identity: %+v", edges)
 	}
 }
@@ -522,7 +524,7 @@ func TestFridaImportFailurePreservesPreviousGeneration(t *testing.T) {
 	}
 	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
 		SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
-		BLRAddr: "0x100", FromFunc: "F", TargetName: "Target", ClassID: 10,
+		CallAddr: "0x100", FromFunc: "F", TargetName: "Target", ClassID: 10,
 	}})
 	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
 		t.Fatal("expected malformed evidence to fail import")
@@ -530,6 +532,65 @@ func TestFridaImportFailurePreservesPreviousGeneration(t *testing.T) {
 	b, err := os.ReadFile(sentinel)
 	if err != nil || string(b) != "previous generation" {
 		t.Fatalf("failed import damaged prior generation: %q, %v", b, err)
+	}
+}
+
+func TestFridaImportRejectsRuntimeEnrichedStaticGeneration(t *testing.T) {
+	tests := []struct {
+		name          string
+		runtimeOnEdge bool
+		runtimeInEv   bool
+	}{
+		{name: "runtime on call edge", runtimeOnEdge: true},
+		{name: "runtime in evidence", runtimeInEv: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			staticDir := t.TempDir()
+			edge := disasm.CallEdgeRecord{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "RAX"}
+			if tt.runtimeOnEdge {
+				edge.Runtime = &disasm.RuntimeEvidence{}
+			}
+			if tt.runtimeInEv {
+				rt := disasm.RuntimeEvidence{
+					Source: "frida", GenerationID: strings.Repeat("b", 64), SourceSHA256: testSourceSHA256,
+					SourceSize: 1234, ModuleName: "libapp.so", DartVersion: "3.12.2", Architecture: "x64",
+					Agreement: disasm.RuntimeObservedOnly,
+					Targets:   []disasm.RuntimeTargetObservation{{Target: "A", Count: 1}}, Observations: 1,
+				}
+				record := evidence.Evidence{
+					PC: "0x100", Function: "F", Kind: "call", Source: evidence.SourceCallEdges,
+					Confidence: evidence.ConfUnknown, Rule: evidence.RuleIndirectUnresolved,
+					Result: map[string]any{"resolved": false}, Runtime: &rt,
+				}
+				if _, err := jsonutil.WriteJSONLFile(filepath.Join(staticDir, "evidence.jsonl"), []evidence.Evidence{record}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			binding := writeStaticImportFixture(t, staticDir, []disasm.CallEdgeRecord{edge}, []disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}})
+			logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
+				Type: "dispatch", CallAddr: "0x100", FromFunc: "F", TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
+			}})
+			if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", filepath.Join(t.TempDir(), "merged")}); err == nil {
+				t.Fatal("runtime-enriched static generation was accepted")
+			}
+		})
+	}
+}
+
+func TestFridaImportRemovesStaleRuntimeCoverageWhenNoDispatchWasObserved(t *testing.T) {
+	staticDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(staticDir, "runtime_coverage.json"), []byte(`{"both_match":99}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binding := writeStaticImportFixture(t, staticDir, nil, []disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}})
+	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{Type: "function_enter", Name: "F", FunctionVA: "0x10"}})
+	outDir := filepath.Join(t.TempDir(), "merged")
+	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "runtime_coverage.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale runtime_coverage.json survived a run with no dispatch observations: %v", err)
 	}
 }
 
@@ -552,13 +613,35 @@ func TestRuntimeEventLogHonorsTotalByteBudget(t *testing.T) {
 	}
 }
 
-func TestReadStaticCallEdgesRejectsSchemaDrift(t *testing.T) {
+func TestRuntimeAgreementForEdgeKeepsCandidateCompletenessSemantics(t *testing.T) {
+	runtime := disasm.RuntimeEvidence{Targets: []disasm.RuntimeTargetObservation{{Target: "C", Count: 1}}}
+	tests := []struct {
+		name string
+		edge disasm.CallEdgeRecord
+		want disasm.RuntimeAgreement
+	}{
+		{"monomorphic agreement", disasm.CallEdgeRecord{Target: "C"}, disasm.RuntimeAgrees},
+		{"monomorphic conflict", disasm.CallEdgeRecord{Target: "A"}, disasm.RuntimeConflicts},
+		{"complete polymorphic conflict", disasm.CallEdgeRecord{Targets: []string{"A", "B"}, Candidates: 2}, disasm.RuntimeConflicts},
+		{"truncated polymorphic indeterminate", disasm.CallEdgeRecord{Targets: []string{"A", "B"}, Candidates: 5}, disasm.RuntimeIndeterminate},
+		{"unresolved observed only", disasm.CallEdgeRecord{}, disasm.RuntimeObservedOnly},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runtimeAgreementForEdge(tc.edge, runtime); got != tc.want {
+				t.Fatalf("agreement = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadCallEdgesStrictRejectsSchemaDrift(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "call_edges.jsonl")
 	body := `{"from_func":"F","from_pc":"0x100","kind":"blr","stale":true}` + "\n"
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readStaticCallEdges(p); err == nil {
+	if _, err := readCallEdgesStrict(p); err == nil {
 		t.Fatal("unknown static call-edge field was accepted")
 	}
 }

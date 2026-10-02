@@ -1,6 +1,7 @@
 package frida
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -8,38 +9,108 @@ import (
 	"aotopsy/internal/disasm"
 )
 
-const MetadataSchemaVersion = 2
+// ValidateStaticCallEdges enforces the call-edge invariants required by a
+// Frida static generation. Runtime-enriched edges are deliberately rejected:
+// otherwise exporting a previously merged directory would bind stale runtime
+// observations into a new generation, and an unobserved site on the next run
+// could retain evidence from the old execution.
+func ValidateStaticCallEdges(edges []disasm.CallEdgeRecord) error {
+	for i, e := range edges {
+		if strings.TrimSpace(e.FromFunc) == "" || strings.TrimSpace(e.FromPC) == "" || strings.TrimSpace(e.Kind) == "" {
+			return fmt.Errorf("call edge %d missing required field", i)
+		}
+		canonicalPC, err := canonicalRuntimeHex(e.FromPC)
+		if err != nil {
+			return fmt.Errorf("call edge %d has invalid from_pc %q: %w", i, e.FromPC, err)
+		}
+		if canonicalPC != e.FromPC {
+			return fmt.Errorf("call edge %d has non-canonical from_pc %q", i, e.FromPC)
+		}
+		if e.Runtime != nil {
+			return fmt.Errorf("call edge %d contains runtime enrichment in a static generation", i)
+		}
+
+		switch e.Kind {
+		case "bl", "call":
+			if e.TargetAddress != "" {
+				canonicalTarget, err := canonicalRuntimeHex(e.TargetAddress)
+				if err != nil {
+					return fmt.Errorf("direct call edge %d has invalid target_address %q: %w", i, e.TargetAddress, err)
+				}
+				if canonicalTarget != e.TargetAddress {
+					return fmt.Errorf("direct call edge %d has non-canonical target_address %q", i, e.TargetAddress)
+				}
+			} else if e.Target != "" {
+				return fmt.Errorf("direct call edge %d has symbolic target without encoded target_address", i)
+			}
+			if len(e.Targets) != 0 || e.Candidates != 0 {
+				return fmt.Errorf("direct call edge %d carries polymorphic candidates", i)
+			}
+		case "blr", "call_indirect":
+			if e.TargetAddress != "" {
+				return fmt.Errorf("indirect call edge %d carries a direct target_address", i)
+			}
+			if e.Target != "" && len(e.Targets) != 0 {
+				return fmt.Errorf("indirect call edge %d claims both one target and a candidate set", i)
+			}
+			if len(e.Targets) == 0 {
+				if e.Target == "" && e.Candidates != 0 {
+					return fmt.Errorf("indirect call edge %d has candidate_count without any static target", i)
+				}
+				if e.Target != "" && e.Candidates != 0 && e.Candidates != 1 {
+					return fmt.Errorf("monomorphic indirect call edge %d has candidate_count %d", i, e.Candidates)
+				}
+				continue
+			}
+			if len(e.Targets) < 2 || e.Candidates < len(e.Targets) {
+				return fmt.Errorf("indirect call edge %d has malformed polymorphic candidates", i)
+			}
+			last := ""
+			for j, target := range e.Targets {
+				if strings.TrimSpace(target) == "" || (j > 0 && target <= last) {
+					return fmt.Errorf("indirect call edge %d targets are not strictly sorted and unique", i)
+				}
+				last = target
+			}
+		default:
+			return fmt.Errorf("call edge %d has unsupported kind %q", i, e.Kind)
+		}
+	}
+	return nil
+}
+
+const MetadataSchemaVersion = 3
 
 // FridaMetadata is the JSON structure exported for Frida scripts.
 type FridaMetadata struct {
-	SchemaVersion      int                   `json:"schema_version"`
-	AnalyzerVersion    string                `json:"analyzer_version"`
-	AnalyzerCommit     string                `json:"analyzer_commit"`
-	GenerationID       string                `json:"generation_id"`
-	SourceSHA256       string                `json:"source_sha256"`
-	SourceSize         int64                 `json:"source_size"`
-	ModuleName         string                `json:"module_name"`
-	RuntimeIdentity    []RuntimeRegionDigest `json:"runtime_identity"`
-	DartVersion        string                `json:"dart_version"`
-	Architecture       string                `json:"architecture"`
-	CompressedPointers bool                  `json:"compressed_pointers"`
-	PointerSize        int                   `json:"pointer_size"`
-	THRFields          map[int]string        `json:"thr_fields"`
-	THRReg             string                `json:"thr_reg"`
-	PPReg              string                `json:"pp_reg"`
-	DTReg              string                `json:"dt_reg"`
-	HeapBaseMode       string                `json:"heap_base_mode,omitempty"` // none, register, heap_bits, thread_field
-	HeapBaseReg        string                `json:"heap_base_reg,omitempty"`
-	HeapBaseTHRField   string                `json:"heap_base_thr_field,omitempty"`
-	HeaderBitOffset    int                   `json:"header_bit_offset"`
-	HeaderBitWidth     int                   `json:"header_bit_width"`
-	Functions          []FridaFunction       `json:"functions"`
-	UnresolvedBLRs     []FridaUnresolvedBLR  `json:"unresolved_blrs"`
-	InstalledFunctions []FridaFunction       `json:"installed_functions"`
-	InstalledBLRs      []FridaUnresolvedBLR  `json:"installed_blrs"`
-	Artifacts          []ArtifactDigest      `json:"artifacts"`
-	DispatchTable      []FridaDispatchEntry  `json:"dispatch_table"`
-	StringRefs         []FridaStringRef      `json:"string_refs"`
+	SchemaVersion       int                   `json:"schema_version"`
+	AnalyzerVersion     string                `json:"analyzer_version"`
+	AnalyzerCommit      string                `json:"analyzer_commit"`
+	GenerationID        string                `json:"generation_id"`
+	SourceSHA256        string                `json:"source_sha256"`
+	SourceSize          int64                 `json:"source_size"`
+	ModuleName          string                `json:"module_name"`
+	RuntimeIdentity     []RuntimeRegionDigest `json:"runtime_identity"`
+	DartVersion         string                `json:"dart_version"`
+	Architecture        string                `json:"architecture"`
+	CompressedPointers  bool                  `json:"compressed_pointers"`
+	PointerSize         int                   `json:"pointer_size"`
+	THRFields           map[int]string        `json:"thr_fields"`
+	THRReg              string                `json:"thr_reg"`
+	PPReg               string                `json:"pp_reg"`
+	DTReg               string                `json:"dt_reg"`
+	HeapBaseMode        string                `json:"heap_base_mode,omitempty"` // none, register, heap_bits, thread_field
+	HeapBaseReg         string                `json:"heap_base_reg,omitempty"`
+	HeapBaseTHRField    string                `json:"heap_base_thr_field,omitempty"`
+	HeaderBitOffset     int                   `json:"header_bit_offset"`
+	HeaderBitWidth      int                   `json:"header_bit_width"`
+	Functions           []FridaFunction       `json:"functions"`
+	CallProbes          []FridaCallProbe      `json:"call_probes"`
+	InstalledFunctions  []FridaFunction       `json:"installed_functions"`
+	InstalledCallProbes []FridaCallProbe      `json:"installed_call_probes"`
+	Artifacts           []ArtifactDigest      `json:"artifacts"`
+	DispatchTable       []FridaDispatchEntry  `json:"dispatch_table"`
+	StringRefs          []FridaStringRef      `json:"string_refs"`
 }
 
 type RuntimeRegionDigest struct {
@@ -56,7 +127,10 @@ type FridaFunction struct {
 	Size  int    `json:"size"`
 }
 
-type FridaUnresolvedBLR struct {
+// FridaCallProbe describes how the runtime script evaluates one indirect call
+// target. The static analyzer may already have a prediction for the site; the
+// probe exists to observe runtime behavior independently of that prediction.
+type FridaCallProbe struct {
 	VA         string `json:"va"`
 	FromFunc   string `json:"from_func"`
 	Via        string `json:"via,omitempty"`
@@ -88,7 +162,7 @@ const (
 	maxX86MemoryDisp int64 = 1<<31 - 1
 )
 
-// NewUnresolvedProbe converts the call-edge target spelling emitted by
+// NewCallProbe converts the call-edge target spelling emitted by
 // internal/disasm into an explicit runtime target recipe. Frida's CPU context
 // is keyed by register name; a CALL [base+index*scale+disp] is NOT a register
 // name and has to be evaluated then dereferenced at runtime.
@@ -96,8 +170,8 @@ const (
 // Returning false is intentional fail-closed behavior: if a future disassembler
 // spelling is not understood, the exporter must not emit a probe that can never
 // resolve or, worse, reads the wrong context slot.
-func NewUnresolvedProbe(va, fromFunc, target, via string) (FridaUnresolvedBLR, bool) {
-	p := FridaUnresolvedBLR{VA: va, FromFunc: fromFunc, Via: via}
+func NewCallProbe(va, fromFunc, target, via string) (FridaCallProbe, bool) {
+	p := FridaCallProbe{VA: va, FromFunc: fromFunc, Via: via}
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return p, false
@@ -147,17 +221,14 @@ func NewUnresolvedProbe(va, fromFunc, target, via string) (FridaUnresolvedBLR, b
 // export and import. If this returns false, a generated aotopsy script will not
 // instrument the static call edge and frida-import must therefore reject any
 // runtime event claiming to originate from it.
-func RuntimeProbeForEdge(e disasm.CallEdgeRecord) (FridaUnresolvedBLR, bool) {
+func RuntimeProbeForEdge(e disasm.CallEdgeRecord) (FridaCallProbe, bool) {
 	if e.Kind != "blr" && e.Kind != "call_indirect" {
-		return FridaUnresolvedBLR{}, false
-	}
-	if e.Target != "" {
-		return FridaUnresolvedBLR{}, false
+		return FridaCallProbe{}, false
 	}
 	if e.Via != "" && e.Via != "dispatch_table" && !strings.HasPrefix(e.Via, disasm.ObjectFieldVia) {
-		return FridaUnresolvedBLR{}, false
+		return FridaCallProbe{}, false
 	}
-	return NewUnresolvedProbe(e.FromPC, e.FromFunc, e.Reg, e.Via)
+	return NewCallProbe(e.FromPC, e.FromFunc, e.Reg, e.Via)
 }
 
 func isContextRegister(s string) bool {

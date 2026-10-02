@@ -119,13 +119,19 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 	// 2. address_callers_xref.jsonl — target function → callers
 	targetCallers := map[string]map[string]bool{}
 	for _, e := range edges {
-		if e.Target == "" {
-			continue
+		// A polymorphic edge is evidence that the callee is one of Targets,
+		// not evidence for one privileged member of the set. Include every
+		// recorded candidate as an over-approximate xref rather than silently
+		// dropping the site (the old Target-only loop did exactly that).
+		for _, target := range e.ResolvedTargets() {
+			if target == "" {
+				continue
+			}
+			if targetCallers[target] == nil {
+				targetCallers[target] = map[string]bool{}
+			}
+			targetCallers[target][e.FromFunc] = true
 		}
-		if targetCallers[e.Target] == nil {
-			targetCallers[e.Target] = map[string]bool{}
-		}
-		targetCallers[e.Target][e.FromFunc] = true
 	}
 	if err := writeJSONL(filepath.Join(outDir, "address_callers_xref.jsonl"), func() []interface{} {
 		var out []interface{}

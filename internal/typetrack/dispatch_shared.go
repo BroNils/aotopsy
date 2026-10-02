@@ -22,7 +22,7 @@ func appendKnownStubResolution(t TypeLattice, pc uint64, reg int, ctx *TypeConte
 	if strings.HasPrefix(sn, "UnlinkedCall:") {
 		methodName := strings.TrimPrefix(sn, "UnlinkedCall:")
 		if selectorImms := ctx.MethodNameToSelectorImms[methodName]; len(selectorImms) > 0 {
-			res := BlrResolution{PC: pc, Reg: reg, SlotIndex: -1, Confidence: "static_inferred"}
+			res := BlrResolution{PC: pc, Reg: reg, SlotIndex: -1, Confidence: ResolutionStaticInferred, Derivation: DerivationUnlinkedCall}
 			seen := make(map[string]bool)
 			var targets []string
 			for _, imm := range selectorImms {
@@ -36,30 +36,30 @@ func appendKnownStubResolution(t TypeLattice, pc uint64, reg int, ctx *TypeConte
 			sort.Strings(targets)
 			applySelectorCandidates(&res, targets)
 			if res.Polymorphic {
-				res.Confidence = "polymorphic"
+				res.Confidence = ResolutionPolymorphic
 			}
 			recordBLRResolution(result, res)
 			return true
 		}
-		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: methodName, Resolved: true, Confidence: "stub"})
+		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: methodName, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 		return true
 	}
 	if strings.HasPrefix(sn, "PPCode:") {
-		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "PPCode:"), Resolved: true, Confidence: "stub"})
+		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "PPCode:"), Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 		return true
 	}
 	if strings.HasPrefix(sn, "TTS:") {
-		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "TTS:"), Resolved: true, Confidence: "stub"})
+		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "TTS:"), Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 		return true
 	}
 	if strings.HasPrefix(sn, "Closure:") || strings.HasPrefix(sn, "ClosureEntry:") {
 		if name := ctx.PoolClosureFunctionNames[t.StubOff]; name != "" {
-			recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: name, Resolved: true, Confidence: "stub"})
+			recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: name, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 			return true
 		}
 		return false
 	}
-	recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: sn, Resolved: true, Confidence: "stub"})
+	recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: sn, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 	return true
 }
 

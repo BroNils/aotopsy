@@ -85,6 +85,47 @@ func TestRewriteCallEdgesRequiresExactPoolCallableMetadata(t *testing.T) {
 	}
 }
 
+func TestRewriteCallEdgesReplacesStaleResolutionState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "call_edges.jsonl")
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "F", FromPC: "0x1000", Kind: "call_indirect", Reg: "RAX",
+		Targets: []string{"OldA", "OldB"}, Candidates: 2,
+	}}
+	if _, err := jsonutil.WriteJSONLFile(path, edges); err != nil {
+		t.Fatal(err)
+	}
+	bd, err := rewriteCallEdges(dir, &typetrack.InterResult{}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bd.Unresolved != 1 {
+		t.Fatalf("breakdown = %+v", bd)
+	}
+	got, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](path, jsonutil.StandardLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Target != "" || len(got[0].Targets) != 0 || got[0].Candidates != 0 {
+		t.Fatalf("stale resolution survived rerun: %+v", got[0])
+	}
+}
+
+func TestRewriteCallEdgesRejectsRuntimeEnrichedInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "call_edges.jsonl")
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "F", FromPC: "0x1000", Kind: "call_indirect", Reg: "RAX",
+		Runtime: &disasm.RuntimeEvidence{},
+	}}
+	if _, err := jsonutil.WriteJSONLFile(path, edges); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rewriteCallEdges(dir, &typetrack.InterResult{}, nil, nil, nil); err == nil {
+		t.Fatal("static typetrack rewrite accepted runtime-enriched call edges")
+	}
+}
+
 func TestBuildThreadCallableTargetsUsesSDKStubNamesWithoutDataFields(t *testing.T) {
 	fields := map[int]string{
 		0x60:  "dispatch_table_array",

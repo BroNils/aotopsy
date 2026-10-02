@@ -880,6 +880,16 @@ func rewriteCallEdges(
 		if e.Kind != "blr" && e.Kind != "call_indirect" {
 			continue
 		}
+		if e.Runtime != nil {
+			return bd, fmt.Errorf("call edge %s/%s contains runtime enrichment; static type inference requires a static generation", e.FromFunc, e.FromPC)
+		}
+		// Resolution is current fixed-point state, not historical enrichment.
+		// Clear any result from a previous typetrack pass before applying this
+		// run so a formerly-polymorphic/monomorphic site can become unresolved
+		// without retaining stale callees.
+		e.Target = ""
+		e.Targets = nil
+		e.Candidates = 0
 		bd.Total++
 		key := resKey{funcName: e.FromFunc, pc: e.FromPC}
 		if res, ok := resolutionMap[key]; ok {

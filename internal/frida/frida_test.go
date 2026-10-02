@@ -52,7 +52,7 @@ func TestGenerateFridaScriptFromMeta(t *testing.T) {
 		Functions: []FridaFunction{
 			{Name: "User.login", VA: "0x1000", Size: 64},
 		},
-		UnresolvedBLRs: []FridaUnresolvedBLR{
+		CallProbes: []FridaCallProbe{
 			{VA: "0x1020", FromFunc: "User.login", TargetKind: "register", Reg: "x0"},
 		},
 		THRFields: map[int]string{0x70: "later", 0x48: "earlier"},
@@ -110,29 +110,29 @@ func TestGenerateFridaScriptFromMeta(t *testing.T) {
 	}
 }
 
-func TestNewUnresolvedProbeStructuredTargets(t *testing.T) {
-	reg, ok := NewUnresolvedProbe("0x100", "F", "X16", "")
+func TestNewCallProbeStructuredTargets(t *testing.T) {
+	reg, ok := NewCallProbe("0x100", "F", "X16", "")
 	if !ok || reg.TargetKind != "register" || reg.Reg != "x16" {
 		t.Fatalf("register probe = %+v,%v", reg, ok)
 	}
-	mem, ok := NewUnresolvedProbe("0x200", "F", "[RAX+RCX*8+0xd700]", "dispatch_table")
+	mem, ok := NewCallProbe("0x200", "F", "[RAX+RCX*8+0xd700]", "dispatch_table")
 	if !ok || mem.TargetKind != "x86_mem" || mem.BaseReg != "rax" || mem.IndexReg != "rcx" || mem.Scale != 8 || mem.Disp != 0xd700 {
 		t.Fatalf("x86 memory probe = %+v,%v", mem, ok)
 	}
-	if _, ok := NewUnresolvedProbe("0x300", "F", "[not parseable", ""); ok {
+	if _, ok := NewCallProbe("0x300", "F", "[not parseable", ""); ok {
 		t.Fatal("malformed memory target produced a runtime probe")
 	}
-	neg, ok := NewUnresolvedProbe("0x301", "F", "[RAX+RCX*8-0x20]", "")
+	neg, ok := NewCallProbe("0x301", "F", "[RAX+RCX*8-0x20]", "")
 	if !ok || neg.Disp != -0x20 {
 		t.Fatalf("negative displacement probe = %+v,%v", neg, ok)
 	}
 	for _, target := range []string{"[RAX+0x7fffffff]", "[RAX-0x80000000]"} {
-		if _, ok := NewUnresolvedProbe("0x302", "F", target, ""); !ok {
+		if _, ok := NewCallProbe("0x302", "F", target, ""); !ok {
 			t.Fatalf("valid signed disp32 target %q was rejected", target)
 		}
 	}
 	for _, target := range []string{"[RAX+0x80000000]", "[RAX-0x80000001]"} {
-		if _, ok := NewUnresolvedProbe("0x303", "F", target, ""); ok {
+		if _, ok := NewCallProbe("0x303", "F", target, ""); ok {
 			t.Fatalf("impossible x86 displacement target %q produced a runtime probe", target)
 		}
 	}
@@ -153,7 +153,7 @@ func TestX86MemoryProbeScriptEvaluatesAndDereferencesAddress(t *testing.T) {
 		HeapBaseMode:    "none",
 		HeaderBitOffset: 12,
 		HeaderBitWidth:  20,
-		UnresolvedBLRs: []FridaUnresolvedBLR{{
+		CallProbes: []FridaCallProbe{{
 			VA: "0x100", FromFunc: "F", TargetKind: "x86_mem",
 			BaseReg: "rax", IndexReg: "rcx", Scale: 8, Disp: 0xd700,
 		}},
@@ -284,12 +284,12 @@ func TestFinalizeMetadataBindsExactInstalledSubset(t *testing.T) {
 	for i := 0; i < maxInstalledFunctions+5; i++ {
 		meta.Functions = append(meta.Functions, FridaFunction{VA: "0x" + strconv.FormatInt(int64(0x1000+i), 16), Name: "F" + strconv.Itoa(i), Size: 4})
 	}
-	for i := 0; i < maxInstalledBLRs+5; i++ {
-		meta.UnresolvedBLRs = append(meta.UnresolvedBLRs, FridaUnresolvedBLR{VA: "0x" + strconv.FormatInt(int64(0x2000+i), 16), FromFunc: "F0", TargetKind: "register", Reg: "rax"})
+	for i := 0; i < maxInstalledCallProbes+5; i++ {
+		meta.CallProbes = append(meta.CallProbes, FridaCallProbe{VA: "0x" + strconv.FormatInt(int64(0x2000+i), 16), FromFunc: "F0", TargetKind: "register", Reg: "rax"})
 	}
 	meta = finalizeTestMetadata(t, meta)
-	if len(meta.InstalledFunctions) != maxInstalledFunctions || len(meta.InstalledBLRs) != maxInstalledBLRs {
-		t.Fatalf("installed subset sizes=(%d,%d), want (%d,%d)", len(meta.InstalledFunctions), len(meta.InstalledBLRs), maxInstalledFunctions, maxInstalledBLRs)
+	if len(meta.InstalledFunctions) != maxInstalledFunctions || len(meta.InstalledCallProbes) != maxInstalledCallProbes {
+		t.Fatalf("installed subset sizes=(%d,%d), want (%d,%d)", len(meta.InstalledFunctions), len(meta.InstalledCallProbes), maxInstalledFunctions, maxInstalledCallProbes)
 	}
 	if meta.GenerationID == "" {
 		t.Fatal("metadata generation binding is empty")

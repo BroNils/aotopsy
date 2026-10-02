@@ -253,14 +253,15 @@ func RunDisasmStage(
 				Kind:     e.Kind,
 				Reg:      e.Reg,
 				Via:      e.Via,
-			}
-			if e.Kind == "bl" && e.TargetValid {
-				if e.TargetName != "" {
-					rec.Target = e.TargetName
-				} else {
-					rec.Target = fmt.Sprintf("0x%x", e.TargetPC)
 				}
-			}
+				if e.Kind == "bl" && e.TargetValid {
+					rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
+					if e.TargetName != "" {
+						rec.Target = e.TargetName
+					} else {
+						rec.Target = rec.TargetAddress
+					}
+				}
 			out.edgeRecs = append(out.edgeRecs, rec)
 			out.edgeKinds = append(out.edgeKinds, e.Kind)
 		}

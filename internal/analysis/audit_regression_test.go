@@ -24,6 +24,7 @@ import (
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/evidence"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
@@ -242,11 +243,61 @@ func TestBuildFridaMetadataIncludesX64IndirectCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(meta.UnresolvedBLRs) != 1 || meta.UnresolvedBLRs[0].VA != "0x1234" {
-		t.Fatalf("x64 indirect call was not exported: %+v", meta.UnresolvedBLRs)
+	if len(meta.CallProbes) != 1 || meta.CallProbes[0].VA != "0x1234" {
+		t.Fatalf("x64 indirect call was not exported: %+v", meta.CallProbes)
 	}
 	if len(meta.RuntimeIdentity) != 1 || meta.RuntimeIdentity[0].Kind != "executable" || len(meta.RuntimeIdentity[0].SHA256) != 64 {
 		t.Fatalf("runtime identity regions were not derived from ELF load bytes: %+v", meta.RuntimeIdentity)
+	}
+}
+
+func TestBuildFridaMetadataRejectsRuntimeEnrichedGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		runtimeOnEdge bool
+		runtimeInEv   bool
+	}{
+		{name: "runtime on call edge", runtimeOnEdge: true},
+		{name: "runtime in evidence", runtimeInEv: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ef := writeFridaTestProvenance(t, dir, "3.12.2", false, false)
+			if _, err := jsonutil.WriteJSONLFile[disasm.FuncRecord](filepath.Join(dir, "functions.jsonl"), nil); err != nil {
+				t.Fatal(err)
+			}
+			edge := disasm.CallEdgeRecord{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "RAX"}
+			if tc.runtimeOnEdge {
+				edge.Runtime = &disasm.RuntimeEvidence{}
+			}
+			if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "call_edges.jsonl"), []disasm.CallEdgeRecord{edge}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.runtimeInEv {
+				rt := disasm.RuntimeEvidence{
+					Source: "frida", GenerationID: strings.Repeat("b", 64), SourceSHA256: strings.Repeat("a", 64),
+					SourceSize: 256, ModuleName: "libapp.so", DartVersion: "3.12.2", Architecture: "x64",
+					Agreement: disasm.RuntimeObservedOnly,
+					Targets:   []disasm.RuntimeTargetObservation{{Target: "A", Count: 1}}, Observations: 1,
+				}
+				record := evidence.Evidence{
+					PC: "0x100", Function: "F", Kind: "call", Source: evidence.SourceCallEdges,
+					Confidence: evidence.ConfUnknown, Rule: evidence.RuleIndirectUnresolved,
+					Result: map[string]any{"resolved": false}, Runtime: &rt,
+				}
+				if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "evidence.jsonl"), []evidence.Evidence{record}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := &AnalysisContext{
+				Info:        &snapshot.Info{Version: &snapshot.VersionProfile{DartVersion: "3.12.2"}},
+				DartVersion: "3.12.2",
+				EF:          ef,
+			}
+			if _, err := BuildFridaMetadata(ctx, dir); err == nil {
+				t.Fatal("runtime-enriched directory was accepted as a new static Frida generation")
+			}
+		})
 	}
 }
 
@@ -336,11 +387,11 @@ func TestBuildFridaMetadataUsesVersionedDispatchCIDRegister(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(meta.UnresolvedBLRs) != 1 || meta.UnresolvedBLRs[0].ClassIDReg != tt.want {
-				t.Fatalf("dispatch probe=%+v, want class-id register %q", meta.UnresolvedBLRs, tt.want)
+			if len(meta.CallProbes) != 1 || meta.CallProbes[0].ClassIDReg != tt.want {
+				t.Fatalf("dispatch probe=%+v, want class-id register %q", meta.CallProbes, tt.want)
 			}
-			if len(meta.InstalledBLRs) != 1 || meta.InstalledBLRs[0].ClassIDReg != tt.want {
-				t.Fatalf("installed dispatch probe=%+v, want class-id register %q", meta.InstalledBLRs, tt.want)
+			if len(meta.InstalledCallProbes) != 1 || meta.InstalledCallProbes[0].ClassIDReg != tt.want {
+				t.Fatalf("installed dispatch probe=%+v, want class-id register %q", meta.InstalledCallProbes, tt.want)
 			}
 		})
 	}

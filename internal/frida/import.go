@@ -43,7 +43,7 @@ type runtimeEvent struct {
 	Type          string `json:"type"`
 	Name          string `json:"name,omitempty"`
 	FunctionVA    string `json:"function_va,omitempty"`
-	BLRAddr       string `json:"blr_addr,omitempty"`
+	CallAddr      string `json:"call_addr,omitempty"`
 	FromFunc      string `json:"from_func,omitempty"`
 	TargetVA      string `json:"target_va,omitempty"`
 	TargetName    string `json:"target_name,omitempty"`
@@ -78,7 +78,7 @@ type staticGeneration struct {
 type resolutionAggregate struct {
 	targets      map[string]int
 	classIDs     map[int]struct{}
-	functions    map[string]struct{}
+	function     string
 	observations int
 }
 
@@ -162,8 +162,8 @@ func CmdFridaImport(args []string) error {
 		}
 		installedFunctions[pc] = f.Name
 	}
-	sites := make(map[string]staticRuntimeSite, len(generation.binding.InstalledBLRs))
-	for _, p := range generation.binding.InstalledBLRs {
+	sites := make(map[string]staticRuntimeSite, len(generation.binding.InstalledCallProbes))
+	for _, p := range generation.binding.InstalledCallProbes {
 		pc, err := canonicalRuntimeHex(p.VA)
 		if err != nil {
 			return fmt.Errorf("frida-import: installed probe has invalid pc %q: %w", p.VA, err)
@@ -193,19 +193,19 @@ func CmdFridaImport(args []string) error {
 			}
 			runtimeCalls[ev.Name]++
 		case "dispatch":
-			if ev.BLRAddr == "" {
-				return fmt.Errorf("frida-import: dispatch event missing blr_addr")
+			if ev.CallAddr == "" {
+				return fmt.Errorf("frida-import: dispatch event missing call_addr")
 			}
-			pc, err := canonicalRuntimeHex(ev.BLRAddr)
+			pc, err := canonicalRuntimeHex(ev.CallAddr)
 			if err != nil {
-				return fmt.Errorf("frida-import: dispatch event has invalid blr_addr %q: %w", ev.BLRAddr, err)
+				return fmt.Errorf("frida-import: dispatch event has invalid call_addr %q: %w", ev.CallAddr, err)
 			}
 			site, ok := sites[pc]
 			if !ok {
 				return fmt.Errorf("frida-import: dispatch event references site %s that was not in the exact installed probe set", pc)
 			}
 			if ev.FromFunc == "" || ev.FromFunc != site.fromFunc {
-				return fmt.Errorf("frida-import: dispatch site %s function %q does not match static %q", ev.BLRAddr, ev.FromFunc, site.fromFunc)
+				return fmt.Errorf("frida-import: dispatch site %s function %q does not match static %q", ev.CallAddr, ev.FromFunc, site.fromFunc)
 			}
 			if ev.ClassID < -1 || int64(ev.ClassID) > 1<<31-1 {
 				return fmt.Errorf("frida-import: site %s supplied impossible class id %d", pc, ev.ClassID)
@@ -215,17 +215,14 @@ func CmdFridaImport(args []string) error {
 			}
 			target, err := validateRuntimeTarget(ev, prov, knownFunctions, knownFunctionPCs)
 			if err != nil {
-				return fmt.Errorf("frida-import: dispatch site %s target: %w", ev.BLRAddr, err)
+				return fmt.Errorf("frida-import: dispatch site %s target: %w", ev.CallAddr, err)
 			}
 			a := resolutions[pc]
 			if a == nil {
-				a = &resolutionAggregate{targets: map[string]int{}, classIDs: map[int]struct{}{}, functions: map[string]struct{}{}}
+				a = &resolutionAggregate{targets: map[string]int{}, classIDs: map[int]struct{}{}, function: site.fromFunc}
 				resolutions[pc] = a
 			}
 			a.targets[target]++
-			if ev.FromFunc != "" {
-				a.functions[ev.FromFunc] = struct{}{}
-			}
 			if ev.ClassID > 0 {
 				a.classIDs[ev.ClassID] = struct{}{}
 			}
@@ -235,8 +232,11 @@ func CmdFridaImport(args []string) error {
 		}
 	}
 
-	resolvedEdges := 0
-	confirmedEdges := 0
+	observedEdges := 0
+	agreeingEdges := 0
+	conflictingEdges := 0
+	indeterminateEdges := 0
+	observedOnlyEdges := 0
 	for i := range edges {
 		e := &edges[i]
 		if e.Kind != "blr" && e.Kind != "call_indirect" {
@@ -250,26 +250,19 @@ func CmdFridaImport(args []string) error {
 		if a == nil {
 			continue
 		}
-		targets := sortedTargetKeys(a.targets)
-		e.RuntimeResolved = true
-		e.RuntimeTargets = targets
-		e.RuntimeObservations = a.observations
-		e.RuntimeClassIDs = sortedIntKeys(a.classIDs)
-		e.RuntimeConfirmed = true
-		e.RuntimeCallCount = a.observations
-		resolvedEdges++
-		confirmedEdges++
-
-		// Only fill the ordinary static target fields when static analysis had no
-		// answer at all. A runtime observation narrows what happened in THIS run;
-		// it must not erase an existing static polymorphic candidate set.
-		if e.Target == "" && len(e.Targets) == 0 {
-			if len(targets) == 1 {
-				e.Target = targets[0]
-			} else if len(targets) > 1 {
-				e.Targets = append([]string(nil), targets...)
-				e.Candidates = len(targets)
-			}
+		rt := runtimeEvidenceFromAggregate(generation.binding, a)
+		rt.Agreement = runtimeAgreementForEdge(*e, rt)
+		e.Runtime = &rt
+		observedEdges++
+		switch rt.Agreement {
+		case disasm.RuntimeAgrees:
+			agreeingEdges++
+		case disasm.RuntimeConflicts:
+			conflictingEdges++
+		case disasm.RuntimeIndeterminate:
+			indeterminateEdges++
+		case disasm.RuntimeObservedOnly:
+			observedOnlyEdges++
 		}
 	}
 
@@ -294,7 +287,13 @@ func CmdFridaImport(args []string) error {
 	if stagedGeneration.binding.GenerationID != generation.binding.GenerationID {
 		return fmt.Errorf("frida-import: static generation changed while it was being cloned")
 	}
-	for _, name := range []string{BindingFileName, "frida_metadata.json", "frida_hooks.js"} {
+	for _, name := range []string{
+		BindingFileName,
+		"frida_metadata.json",
+		"frida_hooks.js",
+		"runtime_coverage.json",
+		"frida_import_report.txt",
+	} {
 		if err := os.Remove(filepath.Join(stage, name)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("frida-import: remove stale Frida export artifact %s: %w", name, err)
 		}
@@ -302,16 +301,17 @@ func CmdFridaImport(args []string) error {
 	if _, err := jsonutil.WriteJSONLFile(filepath.Join(stage, "call_edges.jsonl"), edges); err != nil {
 		return fmt.Errorf("frida-import: write merged edges: %w", err)
 	}
-	runtimeResolutions := flattenRuntimeResolutions(resolutions)
-	coverage, evidenceMerged, err := mergeRuntimeEvidence(stage, stage, runtimeResolutions)
+	runtimeObservations := flattenRuntimeObservations(generation.binding, resolutions)
+	coverage, evidenceMerged, err := mergeRuntimeEvidence(stage, stage, generation.binding.DartVersion, runtimeObservations)
 	if err != nil {
 		return err
 	}
 
 	report := fmt.Sprintf(
-		"Frida Import Report\n===================\n\nStatic output: %s\nFrida event log: %s\nMerged output: %s\nGeneration ID: %s\n\nRuntime events: %d\nFunction entries observed: %d\nDispatch sites observed: %d\nIndirect edges enriched: %d\nRuntime-confirmed source edges: %d\nEvidence merged: %t\nEvidence coverage: static_only=%d runtime_only=%d match=%d conflict=%d indeterminate=%d runtime_confirmed=%d invalid_runtime=%d\n",
-		*staticDir, *inPath, *outDir, generation.binding.GenerationID, len(events), totalRuntimeCalls(runtimeCalls), len(resolutions), resolvedEdges, confirmedEdges,
-		evidenceMerged, coverage.StaticOnly, coverage.RuntimeOnly, coverage.BothMatch, coverage.BothConflict, coverage.BothIndeterminate, coverage.RuntimeConfirmed, coverage.InvalidRuntime,
+		"Frida Import Report\n===================\n\nStatic output: %s\nFrida event log: %s\nMerged output: %s\nGeneration ID: %s\nSource SHA-256: %s\n\nRuntime events: %d\nFunction entries observed: %d\nDispatch sites observed: %d\nIndirect edges observed: %d\nStatic/runtime agreement: %d\nStatic/runtime conflict: %d\nStatic/runtime indeterminate: %d\nRuntime observed with no static target: %d\nEvidence merged: %t\nEvidence coverage: static_only=%d runtime_only=%d match=%d conflict=%d indeterminate=%d static_unresolved_observed=%d invalid_runtime=%d\n",
+		*staticDir, *inPath, *outDir, generation.binding.GenerationID, generation.binding.SourceSHA256,
+		len(events), totalRuntimeCalls(runtimeCalls), len(resolutions), observedEdges, agreeingEdges, conflictingEdges, indeterminateEdges, observedOnlyEdges,
+		evidenceMerged, coverage.StaticOnly, coverage.RuntimeOnly, coverage.BothMatch, coverage.BothConflict, coverage.BothIndeterminate, coverage.StaticUnresolvedObserved, coverage.InvalidRuntime,
 	)
 	if err := output.WriteFileAtomic(filepath.Join(stage, "frida_import_report.txt"), []byte(report), 0o644); err != nil {
 		return fmt.Errorf("frida-import: write report: %w", err)
@@ -323,55 +323,109 @@ func CmdFridaImport(args []string) error {
 
 	logger := cli.NewLogger(os.Stderr, false)
 	logger.Printf("Frida import complete: %s\n", *outDir)
-	logger.Printf("  indirect edges enriched: %d\n", resolvedEdges)
+	logger.Printf("  indirect edges observed: %d\n", observedEdges)
 	return nil
 }
 
-func flattenRuntimeResolutions(aggregates map[string]*resolutionAggregate) []evidence.RuntimeResolution {
+func runtimeEvidenceFromAggregate(binding FridaBinding, aggregate *resolutionAggregate) disasm.RuntimeEvidence {
+	targetNames := sortedTargetKeys(aggregate.targets)
+	targets := make([]disasm.RuntimeTargetObservation, 0, len(targetNames))
+	for _, target := range targetNames {
+		targets = append(targets, disasm.RuntimeTargetObservation{Target: target, Count: aggregate.targets[target]})
+	}
+	return disasm.RuntimeEvidence{
+		Source:       "frida",
+		GenerationID: strings.ToLower(binding.GenerationID),
+		SourceSHA256: strings.ToLower(binding.SourceSHA256),
+		SourceSize:   binding.SourceSize,
+		ModuleName:   binding.ModuleName,
+		DartVersion:  binding.DartVersion,
+		Architecture: binding.Architecture,
+		Agreement:    disasm.RuntimeObservedOnly,
+		Targets:      targets,
+		ClassIDs:     sortedIntKeys(aggregate.classIDs),
+		Observations: aggregate.observations,
+	}
+}
+
+func runtimeAgreementForEdge(edge disasm.CallEdgeRecord, runtime disasm.RuntimeEvidence) disasm.RuntimeAgreement {
+	if edge.Target != "" {
+		for _, observed := range runtime.Targets {
+			if observed.Target != edge.Target {
+				return disasm.RuntimeConflicts
+			}
+		}
+		return disasm.RuntimeAgrees
+	}
+	if len(edge.Targets) == 0 {
+		return disasm.RuntimeObservedOnly
+	}
+	allowed := make(map[string]struct{}, len(edge.Targets))
+	for _, target := range edge.Targets {
+		allowed[target] = struct{}{}
+	}
+	for _, observed := range runtime.Targets {
+		if _, ok := allowed[observed.Target]; ok {
+			continue
+		}
+		if edge.Candidates > 0 && edge.Candidates == len(edge.Targets) {
+			return disasm.RuntimeConflicts
+		}
+		return disasm.RuntimeIndeterminate
+	}
+	return disasm.RuntimeAgrees
+}
+
+func flattenRuntimeObservations(binding FridaBinding, aggregates map[string]*resolutionAggregate) []evidence.RuntimeObservation {
 	pcs := make([]string, 0, len(aggregates))
 	for pc := range aggregates {
 		pcs = append(pcs, pc)
 	}
 	sort.Strings(pcs)
-	var out []evidence.RuntimeResolution
+	var out []evidence.RuntimeObservation
 	for _, pc := range pcs {
 		a := aggregates[pc]
 		if a == nil {
 			continue
 		}
-		targets := sortedTargetKeys(a.targets)
-		functions := make([]string, 0, len(a.functions))
-		for fn := range a.functions {
-			functions = append(functions, fn)
-		}
-		sort.Strings(functions)
-		if len(functions) == 0 {
-			functions = []string{""}
-		}
-		for _, fn := range functions {
-			for _, target := range targets {
-				out = append(out, evidence.RuntimeResolution{PC: pc, Function: fn, TargetName: target})
-			}
-		}
+		out = append(out, evidence.RuntimeObservation{
+			PC:       pc,
+			Function: a.function,
+			Runtime:  runtimeEvidenceFromAggregate(binding, a),
+		})
 	}
 	return out
 }
 
-func mergeRuntimeEvidence(staticDir, outDir string, runtime []evidence.RuntimeResolution) (evidence.CoverageReport, bool, error) {
+func mergeRuntimeEvidence(staticDir, outDir, dartVersion string, runtime []evidence.RuntimeObservation) (evidence.CoverageReport, bool, error) {
 	staticPath := filepath.Join(staticDir, "evidence.jsonl")
+	hasStatic := true
 	if _, err := os.Stat(staticPath); err != nil {
 		if os.IsNotExist(err) {
-			return evidence.NewCollector().Coverage(runtime), false, nil
+			hasStatic = false
+		} else {
+			return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: stat evidence.jsonl: %w", err)
 		}
-		return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: stat evidence.jsonl: %w", err)
 	}
-	records, err := jsonutil.ReadJSONL[evidence.Evidence](staticPath, jsonutil.StandardLimits)
-	if err != nil {
-		return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: read evidence.jsonl: %w", err)
+	var records []evidence.Evidence
+	if hasStatic {
+		var err error
+		records, err = jsonutil.ReadJSONL[evidence.Evidence](staticPath, jsonutil.StandardLimits)
+		if err != nil {
+			return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: read evidence.jsonl: %w", err)
+		}
 	}
-	c := evidence.NewCollectorFromRecords(records)
-	c.MergeRuntime(runtime)
+	c := evidence.NewCollectorFromRecords(dartVersion, records)
+	if err := c.ValidateStatic(); err != nil {
+		return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: validate static evidence.jsonl: %w", err)
+	}
+	if err := c.MergeRuntime(runtime); err != nil {
+		return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: merge runtime evidence: %w", err)
+	}
 	coverage := c.Coverage(runtime)
+	if !hasStatic && len(runtime) == 0 {
+		return coverage, false, nil
+	}
 	if err := c.WriteJSONL(filepath.Join(outDir, "evidence.jsonl")); err != nil {
 		return evidence.CoverageReport{}, false, fmt.Errorf("frida-import: write enriched evidence.jsonl: %w", err)
 	}
@@ -503,15 +557,24 @@ func readStaticGeneration(dir string) (staticGeneration, error) {
 	if err != nil {
 		return out, fmt.Errorf("frida-import: decode call_edges.jsonl: %w", err)
 	}
-	if err := validateStaticCallEdges(edges); err != nil {
-		return out, err
+	if err := ValidateStaticCallEdges(edges); err != nil {
+		return out, fmt.Errorf("frida-import: invalid static call_edges.jsonl: %w", err)
+	}
+	if evidenceBytes, ok := blobs["evidence.jsonl"]; ok {
+		records, err := decodeStaticJSONLBytes[evidence.Evidence](evidenceBytes)
+		if err != nil {
+			return out, fmt.Errorf("frida-import: decode evidence.jsonl: %w", err)
+		}
+		if err := evidence.NewCollectorFromRecords(binding.DartVersion, records).ValidateStatic(); err != nil {
+			return out, fmt.Errorf("frida-import: invalid static evidence.jsonl: %w", err)
+		}
 	}
 
 	allFunctions := make([]FridaFunction, 0, len(funcs))
 	for _, f := range funcs {
 		allFunctions = append(allFunctions, FridaFunction{VA: f.PC, Name: f.Name, Owner: f.Owner, Size: f.Size})
 	}
-	allProbes := make([]FridaUnresolvedBLR, 0)
+	allProbes := make([]FridaCallProbe, 0)
 	for _, e := range edges {
 		p, ok := RuntimeProbeForEdge(e)
 		if !ok {
@@ -525,7 +588,7 @@ func readStaticGeneration(dir string) (staticGeneration, error) {
 	if !sameInstalledFunctions(binding.InstalledFunctions, installedFunctions(allFunctions)) {
 		return out, fmt.Errorf("frida-import: installed function subset does not match bound functions.jsonl")
 	}
-	if !sameInstalledBLRs(binding.InstalledBLRs, installedBLRs(allProbes)) {
+	if !sameInstalledCallProbes(binding.InstalledCallProbes, installedCallProbes(allProbes)) {
 		return out, fmt.Errorf("frida-import: installed probe subset does not match bound call_edges.jsonl")
 	}
 
@@ -606,24 +669,12 @@ func decodeStaticJSONLBytes[T any](b []byte) ([]T, error) {
 	return out, nil
 }
 
-func readStaticCallEdges(path string) ([]disasm.CallEdgeRecord, error) {
+func readCallEdgesStrict(path string) ([]disasm.CallEdgeRecord, error) {
 	out, err := jsonutil.ReadJSONL[disasm.CallEdgeRecord](path, jsonutil.StandardLimits)
 	if err != nil {
 		return nil, fmt.Errorf("frida-import: read call_edges.jsonl: %w", err)
 	}
-	if err := validateStaticCallEdges(out); err != nil {
-		return nil, err
-	}
 	return out, nil
-}
-
-func validateStaticCallEdges(out []disasm.CallEdgeRecord) error {
-	for i, e := range out {
-		if e.FromFunc == "" || e.FromPC == "" || e.Kind == "" {
-			return fmt.Errorf("frida-import: call_edges line %d missing required field", i+1)
-		}
-	}
-	return nil
 }
 
 func validateStaticFunctions(out []disasm.FuncRecord) error {
