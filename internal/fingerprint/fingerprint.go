@@ -7,16 +7,16 @@ package fingerprint
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"debug/dwarf"
 	"debug/elf"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/elfx"
 )
 
 // Confidence levels for the detected version/build markers.
@@ -45,48 +45,42 @@ type Report struct {
 
 // Run fingerprints the ELF file at path.
 func Run(path string) (*Report, error) {
-	f, err := os.Open(path) //nolint:gosec // path is an explicit CLI-provided target, not untrusted input
+	ef, err := elfx.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("fingerprint: open: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("fingerprint: stat: %w", err)
-	}
-
-	ef, err := elf.NewFile(f)
-	if err != nil {
-		return nil, fmt.Errorf("fingerprint: not an ELF file: %w", err)
+		return nil, fmt.Errorf("fingerprint: open supported AOT ELF: %w", err)
 	}
 	defer func() { _ = ef.Close() }()
 
 	rep := &Report{
 		Path:     path,
-		Machine:  machineName(ef.Machine),
-		FileSize: info.Size(),
+		Machine:  machineName(ef.Machine()),
+		FileSize: ef.FileSize(),
 	}
-	rep.FileSHA256, err = hashOpenedFile(f, info.Size())
+	rep.FileSHA256, err = ef.SHA256()
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: hash file: %w", err)
 	}
 
 	var buildConflicts []string
-	rep.BuildID, buildConflicts = extractBuildID(ef)
+	rep.BuildID, buildConflicts, err = extractBuildID(ef)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: build-id: %w", err)
+	}
 	rep.EvidenceConflicts = append(rep.EvidenceConflicts, buildConflicts...)
 
-	for _, s := range ef.Sections {
+	for _, s := range ef.Sections() {
 		if s.Flags&elf.SHF_EXECINSTR != 0 {
+			if rep.ExecSectionSize > ^uint64(0)-s.Size {
+				return nil, fmt.Errorf("fingerprint: executable section size overflow")
+			}
 			rep.ExecSectionSize += s.Size
 		}
 	}
 
 	// Provenance banners are runtime data. Scan only file-backed bytes that the
 	// ELF maps into memory, never arbitrary appended bytes after the last segment.
-	// ET_REL/debug artifacts without PT_LOAD use SHF_ALLOC sections as the same
-	// trust boundary. The reader is streaming and aggregate-capped.
-	markers, err := scanEngineMarkers(mappedMarkerReader(f, ef, info.Size()))
+	// The reader is streaming and aggregate-capped inside elfx.
+	markers, err := scanEngineMarkers(ef.MappedReader(maxMarkerScanBytes))
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: scan markers: %w", err)
 	}
@@ -94,7 +88,10 @@ func Run(path string) (*Report, error) {
 	// sections are not mapped, so they cannot be included in the PT_LOAD trust
 	// boundary above; parse that one structured field through debug/dwarf rather
 	// than falling back to arbitrary raw-file strings.
-	producerVersions, producerArchs, producerMarkers := scanDartDWARFProducers(ef)
+	producerVersions, producerArchs, producerMarkers, err := scanDartDWARFProducers(ef)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: structured DWARF evidence: %w", err)
+	}
 	mergeStructuredDartEvidence(&markers, producerVersions, producerArchs, producerMarkers)
 	rep.FlutterMarkers = markers.FlutterMarkers
 	rep.DartMarkers = markers.DartMarkers
@@ -102,9 +99,9 @@ func Run(path string) (*Report, error) {
 	rep.DartVersion = markers.DartVersion
 	rep.DartArch = markers.DartArch
 	rep.EvidenceConflicts = append(rep.EvidenceConflicts, markers.Conflicts...)
-	if rep.DartArch != "" && !machineMatchesDartArch(ef.Machine, ef.Class, rep.DartArch) {
+	if rep.DartArch != "" && !machineMatchesDartArch(ef.Machine(), ef.Class(), rep.DartArch) {
 		rep.EvidenceConflicts = append(rep.EvidenceConflicts,
-			fmt.Sprintf("Dart banner architecture %q contradicts ELF machine %s", rep.DartArch, ef.Machine))
+			fmt.Sprintf("Dart banner architecture %q contradicts ELF machine %s", rep.DartArch, ef.Machine()))
 	}
 
 	rep.Confidence = confidenceLevel(rep.DartVersion != "", rep.FlutterVersion != "", len(rep.EvidenceConflicts) != 0)
@@ -121,20 +118,20 @@ const (
 // refuses legacy .zdebug sections (whose compressed size is not a trustworthy
 // bound) and caps aggregate uncompressed modern DWARF size before asking the Go
 // DWARF decoder to materialize it.
-func scanDartDWARFProducers(ef *elf.File) (versions, archs map[string]bool, markers []string) {
+func scanDartDWARFProducers(ef *elfx.File) (versions, archs map[string]bool, markers []string, err error) {
 	versions = make(map[string]bool, 2)
 	archs = make(map[string]bool, 2)
 	var total uint64
 	hasInfo := false
-	for _, s := range ef.Sections {
+	for _, s := range ef.Sections() {
 		if strings.HasPrefix(s.Name, ".zdebug") {
-			return versions, archs, nil
+			return versions, archs, nil, nil
 		}
 		if !strings.HasPrefix(s.Name, ".debug_") {
 			continue
 		}
 		if s.Size > maxDWARFBytes || total > maxDWARFBytes-s.Size {
-			return versions, archs, nil
+			return versions, archs, nil, nil
 		}
 		total += s.Size
 		if s.Name == ".debug_info" {
@@ -142,18 +139,22 @@ func scanDartDWARFProducers(ef *elf.File) (versions, archs map[string]bool, mark
 		}
 	}
 	if !hasInfo || total == 0 {
-		return versions, archs, nil
+		return versions, archs, nil, nil
 	}
 
 	d, err := ef.DWARF()
 	if err != nil {
-		return versions, archs, nil
+		return nil, nil, nil, err
 	}
 	r := d.Reader()
 	seenMarkers := make(map[string]bool)
-	for entries := 0; entries < maxDWARFEntries; entries++ {
+	entries := 0
+	for ; entries < maxDWARFEntries; entries++ {
 		entry, err := r.Next()
-		if err != nil || entry == nil {
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if entry == nil {
 			break
 		}
 		producer, ok := entry.Val(dwarf.AttrProducer).(string)
@@ -171,8 +172,17 @@ func scanDartDWARFProducers(ef *elf.File) (versions, archs map[string]bool, mark
 			markers = append(markers, producer)
 		}
 	}
+	if entries == maxDWARFEntries {
+		entry, err := r.Next()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if entry != nil {
+			return nil, nil, nil, fmt.Errorf("DWARF entry count exceeds limit %d", maxDWARFEntries)
+		}
+	}
 	sort.Strings(markers)
-	return versions, archs, markers
+	return versions, archs, markers, nil
 }
 
 func mergeStructuredDartEvidence(result *markerScanResult, versions, archs map[string]bool, markers []string) {
@@ -237,31 +247,12 @@ func appendUniqueString(values []string, value string) []string {
 	return append(values, value)
 }
 
-func hashOpenedFile(f *os.File, size int64) (string, error) {
-	if f == nil || size < 0 {
-		return "", fmt.Errorf("invalid opened file")
-	}
-	h := sha256.New()
-	if _, err := io.CopyN(h, io.NewSectionReader(f, 0, size), size); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 func machineName(m elf.Machine) string {
 	switch m {
 	case elf.EM_AARCH64:
 		return "aarch64"
 	case elf.EM_X86_64:
 		return "x86_64"
-	case elf.EM_ARM:
-		return "arm"
-	case elf.EM_386:
-		return "x86"
-	case elf.EM_RISCV:
-		return "riscv"
-	case elf.EM_PPC64:
-		return "ppc64"
 	default:
 		return fmt.Sprintf("unknown(0x%x)", uint16(m))
 	}
@@ -281,7 +272,7 @@ const (
 	maxMarkerScanBytes  = 512 << 20
 )
 
-func extractBuildID(ef *elf.File) (string, []string) {
+func extractBuildID(ef *elfx.File) (string, []string, error) {
 	ids := make(map[string]bool, 2)
 	addIDs := func(found []string) {
 		for _, id := range found {
@@ -294,40 +285,51 @@ func extractBuildID(ef *elf.File) (string, []string) {
 		}
 	}
 	progRegions := 0
-	for _, p := range ef.Progs {
+	for _, p := range ef.Programs() {
 		if p.Type != elf.PT_NOTE || p.Filesz == 0 {
 			continue
 		}
 		progRegions++
-		if progRegions > maxNoteRegions || p.Filesz > maxNoteBytes {
-			continue
+		if progRegions > maxNoteRegions {
+			return "", nil, fmt.Errorf("PT_NOTE count exceeds limit %d", maxNoteRegions)
 		}
-		data, err := io.ReadAll(io.LimitReader(p.Open(), int64(p.Filesz)))
+		if p.Filesz > maxNoteBytes {
+			return "", nil, fmt.Errorf("PT_NOTE %d size %d exceeds limit %d", p.Index, p.Filesz, maxNoteBytes)
+		}
+		data, err := ef.ReadProgram(p.Index, maxNoteBytes)
 		if err != nil {
-			continue
+			return "", nil, fmt.Errorf("read PT_NOTE %d: %w", p.Index, err)
 		}
-		addIDs(parseBuildIDNotes(data, ef.ByteOrder))
+		found, err := parseBuildIDNotes(data, binary.LittleEndian)
+		if err != nil {
+			return "", nil, fmt.Errorf("parse PT_NOTE %d: %w", p.Index, err)
+		}
+		addIDs(found)
 	}
 	sectionRegions := 0
-	for _, s := range ef.Sections {
+	for _, s := range ef.Sections() {
 		if s.Type != elf.SHT_NOTE {
 			continue
 		}
 		sectionRegions++
-		if sectionRegions > maxNoteRegions || s.Size > maxNoteBytes || strings.HasPrefix(s.Name, ".zdebug") {
+		if sectionRegions > maxNoteRegions {
+			return "", nil, fmt.Errorf("SHT_NOTE count exceeds limit %d", maxNoteRegions)
+		}
+		if strings.HasPrefix(s.Name, ".zdebug") {
 			continue
 		}
-		// Section.Open streams both modern SHF_COMPRESSED and ordinary note
-		// sections. LimitReader prevents a legacy/hostile decompressor from using
-		// an advertised uncompressed size to make Data() allocate arbitrarily.
-		data, err := io.ReadAll(io.LimitReader(s.Open(), maxNoteBytes+1))
+		if s.Size > maxNoteBytes {
+			return "", nil, fmt.Errorf("SHT_NOTE %q size %d exceeds limit %d", s.Name, s.Size, maxNoteBytes)
+		}
+		data, err := ef.ReadSection(s.Index, maxNoteBytes)
 		if err != nil {
-			continue
+			return "", nil, fmt.Errorf("read SHT_NOTE %q: %w", s.Name, err)
 		}
-		if len(data) > maxNoteBytes {
-			continue
+		found, err := parseBuildIDNotes(data, binary.LittleEndian)
+		if err != nil {
+			return "", nil, fmt.Errorf("parse SHT_NOTE %q: %w", s.Name, err)
 		}
-		addIDs(parseBuildIDNotes(data, ef.ByteOrder))
+		addIDs(found)
 	}
 	keys := make([]string, 0, len(ids))
 	for id := range ids {
@@ -336,31 +338,36 @@ func extractBuildID(ef *elf.File) (string, []string) {
 	sort.Strings(keys)
 	switch len(keys) {
 	case 0:
-		return "", nil
+		return "", nil, nil
 	case 1:
-		return keys[0], nil
+		return keys[0], nil, nil
 	default:
-		return "", []string{fmt.Sprintf("conflicting GNU build-id notes: %s", strings.Join(keys, ", "))}
+		return "", []string{fmt.Sprintf("conflicting GNU build-id notes: %s", strings.Join(keys, ", "))}, nil
 	}
 }
 
 // parseBuildIDNotes walks a raw ELF note-section byte stream (repeated
 // namesz/descsz/type u32 triples, name padded to 4-byte alignment,
 // descriptor padded to 4-byte alignment) looking for name=="GNU" type==3.
-// The u32 fields are read using the ELF's native byte order (bo), which is
-// ef.ByteOrder from the caller -- not hardcoded little-endian, so big-endian
-// ELFs are handled correctly.
-func parseBuildIDNotes(data []byte, bo binary.ByteOrder) []string {
+// The caller supplies byte order explicitly. AOTopsy's trust boundary accepts
+// only little-endian ELF, so production calls use binary.LittleEndian.
+func parseBuildIDNotes(data []byte, bo binary.ByteOrder) ([]string, error) {
 	off := 0
 	var ids []string
-	for off+12 <= len(data) {
+	for off < len(data) {
+		if len(data)-off < 12 {
+			if allZeroBytes(data[off:]) {
+				return ids, nil
+			}
+			return nil, fmt.Errorf("truncated ELF note header at offset %d", off)
+		}
 		namesz := bo.Uint32(data[off:])
 		descsz := bo.Uint32(data[off+4:])
 		ntype := bo.Uint32(data[off+8:])
 		off += 12
 
 		if uint64(namesz) > uint64(len(data)-off) {
-			return ids
+			return nil, fmt.Errorf("ELF note name at offset %d exceeds region", off)
 		}
 		nameEnd := off + int(namesz)
 		name := ""
@@ -377,12 +384,18 @@ func parseBuildIDNotes(data []byte, bo binary.ByteOrder) []string {
 		}
 		off = align4(nameEnd)
 
-		if off > len(data) || uint64(descsz) > uint64(len(data)-off) {
-			return ids
+		if off > len(data) {
+			return nil, fmt.Errorf("ELF note name padding exceeds region")
+		}
+		if uint64(descsz) > uint64(len(data)-off) {
+			return nil, fmt.Errorf("ELF note descriptor at offset %d exceeds region", off)
 		}
 		descEnd := off + int(descsz)
 		desc := data[off:descEnd]
 		off = align4(descEnd)
+		if off > len(data) {
+			return nil, fmt.Errorf("ELF note descriptor padding exceeds region")
+		}
 
 		if exactGNUOwner && name == "GNU" && ntype == 3 { // NT_GNU_BUILD_ID
 			id := hex.EncodeToString(desc)
@@ -391,7 +404,16 @@ func parseBuildIDNotes(data []byte, bo binary.ByteOrder) []string {
 			}
 		}
 	}
-	return ids
+	return ids, nil
+}
+
+func allZeroBytes(data []byte) bool {
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func slicesContains(values []string, want string) bool {
@@ -405,56 +427,6 @@ func slicesContains(values []string, want string) bool {
 
 func align4(n int) int {
 	return (n + 3) &^ 3
-}
-
-// mappedMarkerReader returns a bounded concatenation of bytes the ELF loader
-// actually maps. A NUL separator prevents a printable run from being fabricated
-// by concatenating the end of one region with the start of another.
-func mappedMarkerReader(f *os.File, ef *elf.File, fileSize int64) io.Reader {
-	var readers []io.Reader
-	remaining := int64(maxMarkerScanBytes)
-	addFileRange := func(off, size uint64) {
-		if remaining <= 0 || fileSize <= 0 || off >= uint64(fileSize) {
-			return
-		}
-		available := uint64(fileSize) - off
-		if size > available {
-			size = available
-		}
-		if size > uint64(remaining) {
-			size = uint64(remaining)
-		}
-		if size == 0 {
-			return
-		}
-		readers = append(readers, io.NewSectionReader(f, int64(off), int64(size)), bytes.NewReader([]byte{0}))
-		remaining -= int64(size)
-	}
-
-	hasLoad := false
-	for _, p := range ef.Progs {
-		if p.Type == elf.PT_LOAD && p.Filesz > 0 {
-			hasLoad = true
-			addFileRange(p.Off, p.Filesz)
-		}
-	}
-	if !hasLoad {
-		for _, s := range ef.Sections {
-			if remaining <= 0 {
-				break
-			}
-			if s.Flags&elf.SHF_ALLOC == 0 || s.Type == elf.SHT_NOBITS || s.Size == 0 {
-				continue
-			}
-			limit := int64(s.Size)
-			if limit > remaining {
-				limit = remaining
-			}
-			readers = append(readers, io.LimitReader(s.Open(), limit), bytes.NewReader([]byte{0}))
-			remaining -= limit
-		}
-	}
-	return io.MultiReader(readers...)
 }
 
 // scanEngineMarkers streams printable-ASCII runs from r. Generic Dart strings
@@ -763,21 +735,6 @@ func machineMatchesDartArch(machine elf.Machine, class elf.Class, arch string) b
 		return class == elf.ELFCLASS64 && arch == "arm64"
 	case elf.EM_X86_64:
 		return class == elf.ELFCLASS64 && (arch == "x64" || arch == "x86_64")
-	case elf.EM_ARM:
-		return class == elf.ELFCLASS32 && arch == "arm"
-	case elf.EM_386:
-		return class == elf.ELFCLASS32 && (arch == "ia32" || arch == "x86")
-	case elf.EM_RISCV:
-		switch class {
-		case elf.ELFCLASS32:
-			return arch == "riscv32"
-		case elf.ELFCLASS64:
-			return arch == "riscv64"
-		default:
-			return false
-		}
-	case elf.EM_PPC64:
-		return class == elf.ELFCLASS64 && (arch == "ppc64" || arch == "ppc64le")
 	default:
 		return false
 	}

@@ -88,6 +88,29 @@ func TestWriteCallSitesTSV(t *testing.T) {
 	}
 }
 
+func TestWriteCallSitesTSVPreservesResolvedSymbolAtAddressZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "call_sites.tsv")
+	sites := []CallSite{{
+		FromVA: 0x10, TargetVA: 0, TargetValid: true, Match: MatchExact,
+		SymbolName: "zero", SymbolVA: 0,
+	}}
+	if err := WriteCallSitesTSV(path, sites); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("TSV lines = %d, want header + one row:\n%s", len(lines), data)
+	}
+	fields := strings.Split(lines[1], "\t")
+	if len(fields) != 10 || fields[1] != "0x0" || fields[6] != string(MatchExact) || fields[7] != "zero" || fields[8] != "0x0" {
+		t.Fatalf("resolved VA zero was serialized as missing: fields=%q", fields)
+	}
+}
+
 func TestARM64ScannerIncludesIndirectBLR(t *testing.T) {
 	sec := execSection{Name: ".text", Addr: 0x1000, Data: armWords(
 		0x94000004, // BL 0x1010

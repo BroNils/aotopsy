@@ -78,7 +78,7 @@ func cmdInventory(args []string) error {
 		row.DeclaredLibapp = true
 		row.ABI = abi
 
-		hash, dartVer, features, err := analysis.InventoryScanLibapp(libapp)
+		hash, dartVer, features, err := analysis.InventoryScanLibapp(libapp, abi)
 		_ = os.Remove(libapp)
 		if err != nil {
 			row.Error = err.Error()

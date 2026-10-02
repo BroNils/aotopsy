@@ -610,24 +610,107 @@ func TestOptionalMetaDropsStaleX64ArtifactFromClonedGeneration(t *testing.T) {
 	}
 }
 
-func TestPrepareOptionalFuncSymbolsIsNonFatalAndRangeBound(t *testing.T) {
-	if got, warning := prepareOptionalFuncSymbols(nil, errors.New("corrupt symtab"), nil, 0, 0); got != nil || warning == "" {
-		t.Fatalf("malformed optional symtab = %#v,%q; want nil + warning", got, warning)
-	}
+func TestPrepareFuncSymbolsIsRangeBound(t *testing.T) {
 	ranges := []cluster.CodeRange{{PCOffset: 0x20, Size: 4}}
-	got, warning := prepareOptionalFuncSymbols(map[uint64]string{
+	got := prepareFuncSymbols(map[uint64]string{
 		0x1010: "container",
 		0x1020: "real_function",
-	}, nil, ranges, 0x1000, 0)
-	if warning != "" {
-		t.Fatalf("valid symbols produced warning: %s", warning)
-	}
+	}, ranges, 0x1000, 0)
 	if len(got) != 1 || got[0x1020] != "real_function" {
 		t.Fatalf("range-bound symbols = %#v", got)
 	}
 }
 
-func TestFindLibappSupportsX8664StandardABI(t *testing.T) {
+func TestLoadSnapshotKeepsMalformedELFAsOpenError(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "malformed.so")
+	b := make([]byte, 64)
+	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
+	b[4], b[5], b[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), byte(elf.EV_CURRENT)
+	binary.LittleEndian.PutUint16(b[16:18], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(b[18:20], uint16(elf.EM_AARCH64))
+	binary.LittleEndian.PutUint32(b[20:24], uint32(elf.EV_CURRENT))
+	binary.LittleEndian.PutUint64(b[40:48], 64) // section table starts exactly at EOF
+	binary.LittleEndian.PutUint16(b[52:54], 64)
+	binary.LittleEndian.PutUint16(b[58:60], 64)
+	binary.LittleEndian.PutUint16(b[60:62], 1)
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadSnapshot(p, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
+	if !errors.Is(err, elfx.ErrMalformed) {
+		t.Fatalf("LoadSnapshot(malformed ELF) = %v, want ErrMalformed preserved", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "HALT_UNSUPPORTED_VERSION") {
+		t.Fatalf("malformed ELF was mislabeled as unsupported Dart version: %v", err)
+	}
+}
+
+func TestFindLibappDoesNotDowngradeMalformedELFToMagic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "malformed.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("lib/arm64-v8a/libapp.so")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 64)
+	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
+	b[4], b[5], b[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), byte(elf.EV_CURRENT)
+	binary.LittleEndian.PutUint16(b[16:18], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(b[18:20], uint16(elf.EM_AARCH64))
+	binary.LittleEndian.PutUint32(b[20:24], uint32(elf.EV_CURRENT))
+	binary.LittleEndian.PutUint64(b[40:48], 64) // section table is truncated
+	binary.LittleEndian.PutUint16(b[52:54], 64)
+	binary.LittleEndian.PutUint16(b[58:60], 64)
+	binary.LittleEndian.PutUint16(b[60:62], 1)
+	b = append(b, []byte{0xf5, 0xf5, 0xdc, 0xdc}...)
+	if _, err := w.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := FindLibappInZip(path); !errors.Is(err, elfx.ErrMalformed) {
+		t.Fatalf("FindLibappInZip(malformed ELF + magic) = result=%+v err=%v, want ErrMalformed", result, err)
+	}
+}
+
+func TestFindLibappDoesNotTrustMagicInNonELF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fake.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("lib/arm64-v8a/libapp.so")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte{0x00, 0xf5, 0xf5, 0xdc, 0xdc, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindLibappInZip(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Found || got.Reason != "NOT_FLUTTER" {
+		t.Fatalf("non-ELF magic became a Dart hit: %+v", got)
+	}
+}
+
+func TestFindLibappAcceptsX8664CandidateWithoutFabricatingHit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.zip")
 	f, err := os.Create(path)
 	if err != nil {
@@ -639,10 +722,31 @@ func TestFindLibappSupportsX8664StandardABI(t *testing.T) {
 		_ = f.Close()
 		t.Fatal(err)
 	}
-	// An intentionally non-ELF candidate containing Dart snapshot magic takes
-	// the probe's magic fallback. The point of this regression is ABI discovery,
-	// not ELF parsing.
-	if _, err := w.Write([]byte{0x00, 0xf5, 0xf5, 0xdc, 0xdc, 0x00}); err != nil {
+	// A minimal valid x86_64 ET_DYN maps snapshot magic in PT_LOAD but has no
+	// Dart snapshot symbols. ABI discovery must accept the candidate machine
+	// without turning four magic bytes into a verified Dart hit.
+	const (
+		ehSize = 64
+		phSize = 56
+	)
+	b := make([]byte, 0x100)
+	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
+	b[4], b[5], b[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), byte(elf.EV_CURRENT)
+	binary.LittleEndian.PutUint16(b[16:18], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(b[18:20], uint16(elf.EM_X86_64))
+	binary.LittleEndian.PutUint32(b[20:24], uint32(elf.EV_CURRENT))
+	binary.LittleEndian.PutUint64(b[32:40], ehSize)
+	binary.LittleEndian.PutUint16(b[52:54], ehSize)
+	binary.LittleEndian.PutUint16(b[54:56], phSize)
+	binary.LittleEndian.PutUint16(b[56:58], 1)
+	ph := b[ehSize : ehSize+phSize]
+	binary.LittleEndian.PutUint32(ph[0:4], uint32(elf.PT_LOAD))
+	binary.LittleEndian.PutUint32(ph[4:8], uint32(elf.PF_R))
+	binary.LittleEndian.PutUint64(ph[32:40], uint64(len(b)))
+	binary.LittleEndian.PutUint64(ph[40:48], uint64(len(b)))
+	binary.LittleEndian.PutUint64(ph[48:56], 0x1000)
+	copy(b[0xf0:], []byte{0xf5, 0xf5, 0xdc, 0xdc})
+	if _, err := w.Write(b); err != nil {
 		_ = f.Close()
 		t.Fatal(err)
 	}
@@ -658,11 +762,11 @@ func TestFindLibappSupportsX8664StandardABI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Found || got.Reason != "MATCHED_MAGIC" || got.Best == nil {
-		t.Fatalf("x86_64 libapp was not detected: %+v", got)
+	if got.Found || got.Reason != "NOT_FLUTTER" || got.Best != nil {
+		t.Fatalf("x86_64 magic-only candidate became a verified Dart hit: %+v", got)
 	}
-	if got.Best.PathInAPK != "lib/x86_64/libapp.so" || !IsStandardLibappPath(got.Best.PathInAPK) {
-		t.Fatalf("x86_64 standard path classification = %+v", got.Best)
+	if len(got.Candidates) != 1 || got.Candidates[0].PathInAPK != "lib/x86_64/libapp.so" || !IsStandardLibappPath(got.Candidates[0].PathInAPK) {
+		t.Fatalf("x86_64 standard path classification = %+v", got.Candidates)
 	}
 }
 

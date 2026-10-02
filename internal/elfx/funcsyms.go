@@ -1,9 +1,6 @@
 package elfx
 
-import (
-	"debug/elf"
-	"fmt"
-)
+import "debug/elf"
 
 // Function symbols from the static symbol table.
 //
@@ -30,20 +27,16 @@ import (
 // tables are errors and must never be disguised as "stripped", because callers
 // use this API as an external naming ground-truth gate.
 func (f *File) FuncSymbols() (map[uint64]string, error) {
-	syms, err := f.Symbols()
-	if err != nil {
-		return nil, err
-	}
-	if len(syms) == 0 {
+	if f == nil || !f.symtabPresent || len(f.symtab) == 0 {
 		return nil, nil
 	}
-	out := make(map[uint64]string, len(syms))
-	for _, s := range syms {
-		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Name == "" || s.Value == 0 || s.Section == elf.SHN_UNDEF {
+	out := make(map[uint64]string, len(f.symtab))
+	for _, s := range f.symtab {
+		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Name == "" || s.Section == elf.SHN_UNDEF {
 			continue
 		}
 		// Values in the reserved section-index range are not indexes into
-		// f.ELF.Sections. SHN_ABS and SHN_COMMON are valid ELF values, while
+		// f.elfFile.Sections. SHN_ABS and SHN_COMMON are valid ELF values, while
 		// SHN_XINDEX means the real index lives in SHT_SYMTAB_SHNDX (which
 		// debug/elf does not resolve for symbols). None identifies an executable
 		// section we can safely use as function ground truth, so skip them.
@@ -51,29 +44,23 @@ func (f *File) FuncSymbols() (map[uint64]string, error) {
 			continue
 		}
 		sectionIndex := int(s.Section)
-		if sectionIndex < 0 || sectionIndex >= len(f.ELF.Sections) {
-			return nil, fmt.Errorf("elfx: function symbol %q has invalid section index %d", s.Name, s.Section)
+		if sectionIndex < 0 || sectionIndex >= len(f.elfFile.Sections) {
+			return nil, malformedf("function symbol %q has invalid section index %d", s.Name, s.Section)
 		}
-		sec := f.ELF.Sections[sectionIndex]
+		sec := f.elfFile.Sections[sectionIndex]
 		if sec == nil || sec.Flags&elf.SHF_EXECINSTR == 0 {
 			continue
 		}
 		// A STT_FUNC tag alone is not proof that the symbol points into the
 		// section it names. Malformed/legacy tables can carry container symbols
 		// or out-of-range values; never expose those as callable addresses.
-		if s.Value < sec.Addr {
-			continue
+		if err := f.validateExecutableSymbol(s); err != nil {
+			return nil, malformedf("function symbol %q: %v", s.Name, err)
 		}
-		rel := s.Value - sec.Addr
-		if rel >= sec.Size {
-			continue
-		}
-		if s.Size > 0 && s.Size > sec.Size-rel {
-			continue
-		}
-		// Two symbols on one address would make the choice arbitrary; keep
-		// the first and do not overwrite, so the result is deterministic.
-		if _, exists := out[s.Value]; !exists {
+		// Same-VA aliases are common enough to preserve, but choosing by symbol
+		// table order would make attacker-controlled ordering observable. Use a
+		// stable lexical primary name instead.
+		if old, exists := out[s.Value]; !exists || s.Name < old {
 			out[s.Value] = s.Name
 		}
 	}

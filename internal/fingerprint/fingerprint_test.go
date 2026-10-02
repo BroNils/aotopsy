@@ -187,8 +187,19 @@ func TestConflictingBuildIDsAreReportedInsteadOfFirstWins(t *testing.T) {
 func TestBuildIDRequiresExactGNUOwnerEncoding(t *testing.T) {
 	note := buildIDNote([]byte{1, 2, 3, 4})
 	binary.LittleEndian.PutUint32(note[0:4], 3) // malformed: GNU owner size must include trailing NUL
-	if ids := parseBuildIDNotes(note, binary.LittleEndian); len(ids) != 0 {
+	ids, err := parseBuildIDNotes(note, binary.LittleEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
 		t.Fatalf("malformed GNU owner produced build IDs %q", ids)
+	}
+}
+
+func TestBuildIDNotesRejectMalformedRecordAfterValidID(t *testing.T) {
+	note := append(buildIDNote([]byte{1, 2, 3, 4}), []byte{1, 2, 3}...)
+	if ids, err := parseBuildIDNotes(note, binary.LittleEndian); err == nil {
+		t.Fatalf("trailing malformed note was ignored after build-id %q", ids)
 	}
 }
 
@@ -242,14 +253,14 @@ func TestMachineArchitectureMatchingIsFailClosed(t *testing.T) {
 	if machineMatchesDartArch(elf.EM_PPC64, elf.ELFCLASS64, "x64") {
 		t.Fatal("PPC64 accepted x64 Dart banner")
 	}
-	if !machineMatchesDartArch(elf.EM_PPC64, elf.ELFCLASS64, "ppc64") {
-		t.Fatal("PPC64 rejected matching Dart arch")
+	if machineMatchesDartArch(elf.EM_PPC64, elf.ELFCLASS64, "ppc64") {
+		t.Fatal("unsupported PPC64 was accepted")
 	}
-	if !machineMatchesDartArch(elf.EM_RISCV, elf.ELFCLASS32, "riscv32") {
-		t.Fatal("ELF32 RISC-V rejected riscv32 Dart banner")
+	if machineMatchesDartArch(elf.EM_RISCV, elf.ELFCLASS32, "riscv32") {
+		t.Fatal("unsupported ELF32 RISC-V was accepted")
 	}
-	if !machineMatchesDartArch(elf.EM_RISCV, elf.ELFCLASS64, "riscv64") {
-		t.Fatal("ELF64 RISC-V rejected riscv64 Dart banner")
+	if machineMatchesDartArch(elf.EM_RISCV, elf.ELFCLASS64, "riscv64") {
+		t.Fatal("unsupported ELF64 RISC-V was accepted")
 	}
 	if machineMatchesDartArch(elf.EM_RISCV, elf.ELFCLASS32, "riscv64") {
 		t.Fatal("ELF32 RISC-V accepted riscv64 Dart banner")
@@ -274,31 +285,8 @@ func TestMachineArchitectureMatchingIsFailClosed(t *testing.T) {
 func TestRunRejectsDartArchWithWrongELFClass(t *testing.T) {
 	tail := []byte(`3.13.0 (stable) (Tue Sep 1 00:00:00 2026 +0000) on "linux_riscv64"` + "\x00")
 	path := writeProgramLoadELF32(t, elf.EM_RISCV, tail)
-	rep, err := Run(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.DartVersion != "3.13.0" || rep.DartArch != "riscv64" {
-		t.Fatalf("version evidence = %+v, want parsed riscv64 banner", rep)
-	}
-	if rep.Confidence != ConfidenceLow || len(rep.EvidenceConflicts) == 0 {
-		t.Fatalf("ELFCLASS32 + riscv64 report = %+v, want low confidence + architecture conflict", rep)
-	}
-}
-
-func TestHashOpenedFileRejectsShortRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "short.bin")
-	if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := hashOpenedFile(f, 4); err == nil {
-		t.Fatal("hashOpenedFile accepted EOF before the advertised file size")
+	if rep, err := Run(path); err == nil {
+		t.Fatalf("unsupported ELF32/RISC-V fingerprint succeeded: %+v", rep)
 	}
 }
 

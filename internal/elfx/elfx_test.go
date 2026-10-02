@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"testing"
+	"time"
 )
 
 // sampleWithSymbol returns any corpus sample exporting sym, or skips.
@@ -46,7 +47,7 @@ func sampleWithSymbol(t *testing.T, sym string) string {
 				_ = ef.Close()
 				return p
 			}
-			_, _, err = ef.Symbol(sym)
+			_, _, err = ef.DynamicSnapshotSymbol(sym)
 			_ = ef.Close()
 			if err == nil {
 				return p
@@ -144,7 +145,7 @@ func TestSymbolLookup(t *testing.T) {
 	}
 	defer ef.Close()
 
-	va, size, err := ef.Symbol(vmSnapshotSym)
+	va, size, err := ef.DynamicSnapshotSymbol(vmSnapshotSym)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestSymbolNotFound(t *testing.T) {
 	}
 	defer ef.Close()
 
-	_, _, err = ef.Symbol("_kNonExistentSymbol")
+	_, _, err = ef.DynamicSnapshotSymbol("_kNonExistentSymbol")
 	if err == nil {
 		t.Fatal("expected error for missing symbol")
 	}
@@ -180,7 +181,7 @@ func TestVAToFileOffset(t *testing.T) {
 
 	// The first PT_LOAD segment typically has vaddr=0 and offset=0,
 	// so VA should equal file offset for addresses in that segment.
-	va, _, err := ef.Symbol(vmSnapshotSym)
+	va, _, err := ef.DynamicSnapshotSymbol(vmSnapshotSym)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func FuzzELFOpen(f *testing.F) {
 		// If it opens, exercise the API.
 		ef.FileSize()
 		ef.LoadSegments()
-		ef.Symbol(vmSnapshotSym)
+		ef.DynamicSnapshotSymbol(vmSnapshotSym)
 		ef.VAToFileOffset(0)
 		ef.Close()
 	})
@@ -273,7 +274,7 @@ func TestFileCloseClosesUnderlyingFD(t *testing.T) {
 
 func TestVAToFileOffsetRejectsOverflowingProgramHeader(t *testing.T) {
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0, Memsz: math.MaxUint64, Off: math.MaxUint64 - 10,
 		}}}},
 		size: 128,
@@ -285,7 +286,7 @@ func TestVAToFileOffsetRejectsOverflowingProgramHeader(t *testing.T) {
 
 func TestVAToFileOffsetRejectsBSSOnlyAddress(t *testing.T) {
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 8, Filesz: 4, Off: 0,
 		}}}},
 		size: 16,
@@ -298,7 +299,7 @@ func TestVAToFileOffsetRejectsBSSOnlyAddress(t *testing.T) {
 func TestReadBytesAtVARejectsNegativeLength(t *testing.T) {
 	data := []byte{1, 2, 3, 4}
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: uint64(len(data)), Off: 0, Filesz: uint64(len(data)),
 		}}}},
 		raw:  bytes.NewReader(data),
@@ -312,7 +313,7 @@ func TestReadBytesAtVARejectsNegativeLength(t *testing.T) {
 func TestReadBytesAtVAIsExactWithinSegment(t *testing.T) {
 	data := []byte{1, 2, 3, 4, 9, 9, 9, 9}
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 4, Filesz: 4, Off: 0,
 		}}}},
 		raw:  bytes.NewReader(data),
@@ -326,7 +327,7 @@ func TestReadBytesAtVAIsExactWithinSegment(t *testing.T) {
 func TestReadBytesAtVARejectsTruncatedBackingFile(t *testing.T) {
 	data := []byte{1, 2, 3, 4}
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 8, Filesz: 8, Off: 0,
 		}}}},
 		raw:  bytes.NewReader(data),
@@ -351,7 +352,7 @@ func (r shortReaderAt) ReadAt(p []byte, off int64) (int, error) {
 
 func TestReadBytesAtVARejectsShortReaderAt(t *testing.T) {
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
+		elfFile: &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{
 			Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 4, Filesz: 4, Off: 0,
 		}}}},
 		raw:  shortReaderAt{data: []byte{1, 2, 3, 4}},
@@ -362,16 +363,29 @@ func TestReadBytesAtVARejectsShortReaderAt(t *testing.T) {
 	}
 }
 
-func TestVAToFileOffsetContinuesPastOverlappingBSS(t *testing.T) {
+func TestVAToFileOffsetRejectsOverlappingBSSAlias(t *testing.T) {
 	f := &File{
-		ELF: &elf.File{Progs: []*elf.Prog{
+		elfFile: &elf.File{Progs: []*elf.Prog{
 			{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 0x100, Filesz: 0x10, Off: 0}},
 			{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x1080, Memsz: 0x80, Filesz: 0x80, Off: 0x80}},
 		}},
 		size: 0x200,
 	}
-	if got, err := f.VAToFileOffset(0x1088); err != nil || got != 0x88 {
-		t.Fatalf("overlapping file-backed LOAD mapping = %#x,%v; want %#x,nil", got, err, 0x88)
+	if got, err := f.VAToFileOffset(0x1088); err == nil {
+		t.Fatalf("overlapping BSS/file-backed LOAD mapped VA to %#x", got)
+	}
+}
+
+func TestVAToFileOffsetRejectsAmbiguousFileBackedAlias(t *testing.T) {
+	f := &File{
+		elfFile: &elf.File{Progs: []*elf.Prog{
+			{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x1000, Memsz: 0x100, Filesz: 0x100, Off: 0}},
+			{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x1080, Memsz: 0x80, Filesz: 0x80, Off: 0x180}},
+		}},
+		size: 0x400,
+	}
+	if off, err := f.VAToFileOffset(0x1088); err == nil {
+		t.Fatalf("ambiguous PT_LOAD aliases mapped VA to %#x", off)
 	}
 }
 
@@ -407,8 +421,8 @@ func TestOpenRejectsSectionExtentBeyondEOF(t *testing.T) {
 	if err := os.WriteFile(p, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(p); !errors.Is(err, ErrNotELF) {
-		t.Fatalf("Open(section beyond EOF) = %v, want ErrNotELF", err)
+	if _, err := Open(p); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Open(section beyond EOF) = %v, want ErrMalformed", err)
 	}
 }
 
@@ -442,15 +456,158 @@ func TestOpenRejectsMalformedLoadExtent(t *testing.T) {
 	}
 
 	t.Run("outside-file", func(t *testing.T) {
-		if _, err := Open(makeFixture(t, 0x1000, 0x10, 0x10)); !errors.Is(err, ErrNotELF) {
-			t.Fatalf("Open(PT_LOAD beyond EOF) = %v, want ErrNotELF", err)
+		if _, err := Open(makeFixture(t, 0x1000, 0x10, 0x10)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Open(PT_LOAD beyond EOF) = %v, want ErrMalformed", err)
 		}
 	})
 	t.Run("filesz-greater-than-memsz", func(t *testing.T) {
-		if _, err := Open(makeFixture(t, 0, 64, 32)); !errors.Is(err, ErrNotELF) {
-			t.Fatalf("Open(PT_LOAD filesz > memsz) = %v, want ErrNotELF", err)
+		if _, err := Open(makeFixture(t, 0, 64, 32)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Open(PT_LOAD filesz > memsz) = %v, want ErrMalformed", err)
 		}
 	})
+	t.Run("huge-memory-claim", func(t *testing.T) {
+		if _, err := Open(makeFixture(t, 0, 0, maxLoadMemoryBytes+1)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Open(huge PT_LOAD memsz) = %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("virtual-extent-overflow", func(t *testing.T) {
+		p := makeFixture(t, 0, 0, 16)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binary.LittleEndian.PutUint64(b[64+16:], math.MaxUint64-7)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(p); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Open(overflowing PT_LOAD virtual extent) = %v, want ErrMalformed", err)
+		}
+	})
+}
+
+func TestOpenRejectsOverlappingLoadMemory(t *testing.T) {
+	const (
+		ehSize = 64
+		phSize = 56
+	)
+	b := make([]byte, ehSize+2*phSize)
+	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
+	b[4], b[5], b[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), 1
+	binary.LittleEndian.PutUint16(b[16:], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(b[18:], uint16(elf.EM_AARCH64))
+	binary.LittleEndian.PutUint32(b[20:], 1)
+	binary.LittleEndian.PutUint64(b[32:], ehSize)
+	binary.LittleEndian.PutUint16(b[52:], ehSize)
+	binary.LittleEndian.PutUint16(b[54:], phSize)
+	binary.LittleEndian.PutUint16(b[56:], 2)
+	for i, ph := range [][]byte{b[ehSize : ehSize+phSize], b[ehSize+phSize : ehSize+2*phSize]} {
+		binary.LittleEndian.PutUint32(ph[0:], uint32(elf.PT_LOAD))
+		binary.LittleEndian.PutUint32(ph[4:], uint32(elf.PF_R))
+		binary.LittleEndian.PutUint64(ph[8:], uint64(i*64))
+		binary.LittleEndian.PutUint64(ph[32:], 32)
+	}
+	first := b[ehSize : ehSize+phSize]
+	second := b[ehSize+phSize : ehSize+2*phSize]
+	binary.LittleEndian.PutUint64(first[16:], 0x1000)
+	binary.LittleEndian.PutUint64(first[40:], 0x100)
+	binary.LittleEndian.PutUint64(second[16:], 0x1080)
+	binary.LittleEndian.PutUint64(second[40:], 0x80)
+	p := filepath.Join(t.TempDir(), "overlap.so")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := Open(p); !errors.Is(err, ErrMalformed) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("Open(overlapping PT_LOAD memory) = %v, want ErrMalformed", err)
+	}
+}
+
+func TestOpenRejectsExcessiveSectionCountBeforeParsingTables(t *testing.T) {
+	const (
+		ehSize = 64
+		shSize = 64
+		shNum  = 4097
+	)
+	b := make([]byte, ehSize+shSize*shNum)
+	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
+	b[4], b[5], b[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), 1
+	binary.LittleEndian.PutUint16(b[16:], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(b[18:], uint16(elf.EM_AARCH64))
+	binary.LittleEndian.PutUint32(b[20:], 1)
+	binary.LittleEndian.PutUint64(b[40:], ehSize)
+	binary.LittleEndian.PutUint16(b[52:], ehSize)
+	binary.LittleEndian.PutUint16(b[58:], shSize)
+	binary.LittleEndian.PutUint16(b[60:], shNum)
+	p := filepath.Join(t.TempDir(), "too-many-sections.so")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ef, err := Open(p); err == nil {
+		_ = ef.Close()
+		t.Fatal("ELF with excessive section count was accepted")
+	}
+}
+
+func TestOpenRejectsSectionNameAllocationAmplificationBeforeDebugELF(t *testing.T) {
+	const (
+		ehSize  = 64
+		shSize  = 64
+		shNum   = 4096
+		nameLen = 3000
+	)
+	shoff := uint64(ehSize)
+	strOff := uint64(ehSize + shSize*shNum)
+	strs := make([]byte, nameLen+2)
+	for i := 1; i <= nameLen; i++ {
+		strs[i] = 'A'
+	}
+	buf := make([]byte, int(strOff)+len(strs))
+	copy(buf[:4], []byte{0x7f, 'E', 'L', 'F'})
+	buf[4], buf[5], buf[6] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), 1
+	binary.LittleEndian.PutUint16(buf[16:], uint16(elf.ET_DYN))
+	binary.LittleEndian.PutUint16(buf[18:], uint16(elf.EM_AARCH64))
+	binary.LittleEndian.PutUint32(buf[20:], 1)
+	binary.LittleEndian.PutUint64(buf[40:], shoff)
+	binary.LittleEndian.PutUint16(buf[52:], ehSize)
+	binary.LittleEndian.PutUint16(buf[58:], shSize)
+	binary.LittleEndian.PutUint16(buf[60:], shNum)
+	binary.LittleEndian.PutUint16(buf[62:], 1)
+
+	// Section 1 is the shstrtab. Thousands of later sections deliberately point
+	// at the same long string. debug/elf would allocate one copy per section;
+	// preflight must cap that amplification before NewFile is called.
+	for i := 1; i < shNum; i++ {
+		sh := buf[ehSize+i*shSize : ehSize+(i+1)*shSize]
+		binary.LittleEndian.PutUint32(sh[0:], 1)
+	}
+	shstr := buf[ehSize+shSize : ehSize+2*shSize]
+	binary.LittleEndian.PutUint32(shstr[4:], uint32(elf.SHT_STRTAB))
+	binary.LittleEndian.PutUint64(shstr[24:], strOff)
+	binary.LittleEndian.PutUint64(shstr[32:], uint64(len(strs)))
+	copy(buf[strOff:], strs)
+
+	p := filepath.Join(t.TempDir(), "section-name-amplification.so")
+	if err := os.WriteFile(p, buf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := Open(p); !errors.Is(err, ErrMalformed) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("Open(section-name allocation amplification) = %v, want ErrMalformed", err)
+	}
+}
+
+func TestDWARFRejectsLegacyZdebugWithoutDecompression(t *testing.T) {
+	f := &File{elfFile: &elf.File{Sections: []*elf.Section{{
+		SectionHeader: elf.SectionHeader{Name: ".zdebug_info", Type: elf.SHT_PROGBITS, Size: 16, FileSize: 16},
+	}}}}
+	if _, err := f.DWARF(); err == nil {
+		t.Fatal("DWARF accepted legacy .zdebug section whose expanded size is not bounded by ELF metadata")
+	}
 }
 
 func writeELF64SymbolFixture(t *testing.T, typ elf.SectionType, symbolData, stringData []byte) string {
@@ -510,20 +667,216 @@ func makeSym64(name uint32, info byte, shndx uint16, value, size uint64) []byte 
 }
 
 func TestSymbolSkipsUndefinedImportAndFindsDefinedDuplicate(t *testing.T) {
-	strs := []byte("\x00_kDartSnapshotData\x00")
-	symData := make([]byte, elf.Sym64Size) // null symbol
-	nameOff := uint32(1)
-	symData = append(symData, makeSym64(nameOff, byte(elf.STB_GLOBAL)<<4|byte(elf.STT_OBJECT), uint16(elf.SHN_UNDEF), 0, 0)...)
-	symData = append(symData, makeSym64(nameOff, byte(elf.STB_GLOBAL)<<4|byte(elf.STT_OBJECT), 1, 0x1234, 0x80)...)
+	data := make([]byte, 0x200)
+	f := &File{
+		elfFile: &elf.File{
+			Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC, Addr: 0x1200, Size: 0x100}}},
+			Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x1200, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
+		},
+		raw: bytes.NewReader(data), size: int64(len(data)), dynsymPresent: true,
+		dynsym: []elf.Symbol{
+			{Name: "_kDartSnapshotData", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_OBJECT), Section: elf.SHN_UNDEF},
+			{Name: "_kDartSnapshotData", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_OBJECT), Section: 1, Value: 0x1234, Size: 0x40},
+		},
+	}
+	va, size, err := f.DynamicSnapshotSymbol("_kDartSnapshotData")
+	if err != nil || va != 0x1234 || size != 0x40 {
+		t.Fatalf("Symbol chose undefined import or failed duplicate lookup: va=%#x size=%#x err=%v", va, size, err)
+	}
+}
+
+func TestDynamicSnapshotSymbolAcceptsSDKFuncAndObjectTypes(t *testing.T) {
+	for _, typ := range []elf.SymType{elf.STT_FUNC, elf.STT_OBJECT} {
+		t.Run(typ.String(), func(t *testing.T) {
+			data := make([]byte, 0x100)
+			f := &File{
+				elfFile: &elf.File{
+					Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC, Addr: 0x2000, Size: 0x100}}},
+					Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x2000, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
+				},
+				raw: bytes.NewReader(data), size: int64(len(data)), dynsymPresent: true,
+				dynsym: []elf.Symbol{{
+					Name: "_kDartVmSnapshotData", Info: byte(elf.STB_GLOBAL)<<4 | byte(typ),
+					Section: 1, Value: 0x2020, Size: 0x40,
+				}},
+			}
+			va, size, err := f.DynamicSnapshotSymbol("_kDartVmSnapshotData")
+			if err != nil || va != 0x2020 || size != 0x40 {
+				t.Fatalf("SDK snapshot symbol type %s rejected: va=%#x size=%#x err=%v", typ, va, size, err)
+			}
+		})
+	}
+}
+
+func TestFuncSymbolsPreservesZeroSizeAddressZeroAndChoosesStableAlias(t *testing.T) {
+	data := make([]byte, 0x100)
+	f := &File{
+		elfFile: &elf.File{
+			Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC | elf.SHF_EXECINSTR, Addr: 0, Size: 0x100}}},
+			Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
+		},
+		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true,
+		symtab: []elf.Symbol{
+			{Name: "zeta", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0, Size: 0},
+			{Name: "alpha", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0, Size: 0},
+		},
+	}
+	got, err := f.FuncSymbols()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "alpha" {
+		t.Fatalf("zero-size address-zero aliases = %#v, want deterministic alpha at VA 0", got)
+	}
+}
+
+func TestFuncSymbolsAllowsZeroSizeTerminalLabel(t *testing.T) {
+	data := make([]byte, 0x100)
+	f := &File{
+		elfFile: &elf.File{
+			Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC | elf.SHF_EXECINSTR, Addr: 0x4000, Size: 0x100}}},
+			Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x4000, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
+		},
+		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true,
+		symtab: []elf.Symbol{{
+			Name: "terminal", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0x4100, Size: 0,
+		}},
+	}
+	got, err := f.FuncSymbols()
+	if err != nil {
+		t.Fatalf("valid terminal zero-size function label rejected: %v", err)
+	}
+	if got[0x4100] != "terminal" {
+		t.Fatalf("terminal zero-size function label missing: %#v", got)
+	}
+}
+
+func TestOpenRejectsOverlongSymbolName(t *testing.T) {
+	strs := append([]byte{0}, bytes.Repeat([]byte{'A'}, int(maxSymbolNameBytes)+1)...)
+	strs = append(strs, 0)
+	symData := append(make([]byte, elf.Sym64Size), makeSym64(1, byte(elf.STB_GLOBAL)<<4|byte(elf.STT_OBJECT), uint16(elf.SHN_UNDEF), 0, 0)...)
 	p := writeELF64SymbolFixture(t, elf.SHT_DYNSYM, symData, strs)
+	if f, err := Open(p); !errors.Is(err, ErrMalformed) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("Open(overlong symbol name) = %v, want ErrMalformed", err)
+	}
+}
+
+func TestOpenRejectsCompressedSymbolTable(t *testing.T) {
+	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size), []byte("\x00"))
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const symbolSectionHeader = 64 + 2*64
+	binary.LittleEndian.PutUint64(b[symbolSectionHeader+8:], uint64(elf.SHF_COMPRESSED))
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := Open(p); !errors.Is(err, ErrMalformed) {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatalf("Open(compressed .symtab) = %v, want ErrMalformed", err)
+	}
+}
+
+func TestOpenedFileDetectsInPlaceMutation(t *testing.T) {
+	p := writeELF64SymbolFixture(t, elf.SHT_DYNSYM, make([]byte, elf.Sym64Size), []byte("\x00"))
 	f, err := Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	va, size, err := f.Symbol("_kDartSnapshotData")
-	if err != nil || va != 0x1234 || size != 0x80 {
-		t.Fatalf("Symbol chose undefined import or failed duplicate lookup: va=%#x size=%#x err=%v", va, size, err)
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := os.OpenFile(p, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("platform does not allow concurrent fixture mutation: %v", err)
+	}
+	if _, err := w.WriteAt([]byte{0x7e}, int64(before.Size()-1)); err != nil {
+		_ = w.Close()
+		t.Skipf("platform does not allow in-place fixture mutation: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forced := before.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(p, forced, forced); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.SHA256(); !errors.Is(err, ErrChanged) {
+		t.Fatalf("SHA256 after in-place mutation = %v, want ErrChanged", err)
+	}
+}
+
+func TestOpenedFileDetectsMutationAfterMtimeRestoreWhenCtimeAvailable(t *testing.T) {
+	p := writeELF64SymbolFixture(t, elf.SHT_DYNSYM, make([]byte, elf.Sym64Size), []byte("\x00"))
+	f, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	of, ok := f.raw.(*os.File)
+	if !ok {
+		t.Fatal("opened fixture is not backed by *os.File")
+	}
+	beforeSec, beforeNsec, beforeHasChange := fileChangeTime(of, before)
+	if !beforeHasChange {
+		t.Skip("filesystem does not expose a ctime/change-time token through os.FileInfo")
+	}
+	w, err := os.OpenFile(p, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteAt([]byte{0x7e}, int64(before.Size()-1)); err != nil {
+		_ = w.Close()
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSec, afterNsec, afterHasChange := fileChangeTime(of, after)
+	if !afterHasChange || (beforeSec == afterSec && beforeNsec == afterNsec) {
+		t.Skip("filesystem did not expose a changed ctime after fixture mutation")
+	}
+	if _, err := f.SHA256(); !errors.Is(err, ErrChanged) {
+		t.Fatalf("SHA256 after mutation + mtime restore = %v, want ErrChanged", err)
+	}
+}
+
+func TestExecutableSectionsIgnoreUnmappedExecFlaggedSection(t *testing.T) {
+	data := make([]byte, 0x40)
+	f := &File{
+		elfFile: &elf.File{Sections: []*elf.Section{{
+			SectionHeader: elf.SectionHeader{
+				Name: ".dead-code", Type: elf.SHT_PROGBITS, Flags: elf.SHF_EXECINSTR,
+				Addr: 0x9000, Offset: 0, Size: uint64(len(data)), FileSize: uint64(len(data)),
+			},
+		}}},
+		raw: bytes.NewReader(data), size: int64(len(data)),
+	}
+	sections, err := f.ExecutableSections(1 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 0 {
+		t.Fatalf("unmapped SHF_EXECINSTR section became production code: %+v", sections)
 	}
 }
 
@@ -531,38 +884,39 @@ func TestFuncSymbolsSurfacesMalformedSymtab(t *testing.T) {
 	// 25 bytes is deliberately not a multiple of the 24-byte ELF64 symbol
 	// record size. This must be corruption, not "stripped".
 	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size+1), []byte("\x00name\x00"))
-	f, err := Open(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if syms, err := f.FuncSymbols(); err == nil {
-		t.Fatalf("malformed .symtab returned success/stripped: %#v", syms)
+	if f, err := Open(p); err == nil {
+		_ = f.Close()
+		t.Fatal("malformed .symtab crossed the Open trust boundary")
 	}
 }
 
-func TestSymbolTablesRejectZeroLengthSectionsBeforeDebugELF(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		typ  elf.SectionType
-		call func(*File) error
-	}{
-		{"dynsym-lookup", elf.SHT_DYNSYM, func(f *File) error { _, _, err := f.Symbol("x"); return err }},
-		{"dynsym-all", elf.SHT_DYNSYM, func(f *File) error { _, err := f.DynamicSymbols(); return err }},
-		{"symtab-functions", elf.SHT_SYMTAB, func(f *File) error { _, err := f.FuncSymbols(); return err }},
-		{"symtab-all", elf.SHT_SYMTAB, func(f *File) error { _, err := f.Symbols(); return err }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := writeELF64SymbolFixture(t, tc.typ, nil, []byte("\x00"))
-			f, err := Open(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer f.Close()
-			if err := tc.call(f); err == nil {
-				t.Fatal("zero-length symbol table was accepted")
-			}
-		})
+func TestOpenRejectsMalformedPresentSymtabAtTrustBoundary(t *testing.T) {
+	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size+1), []byte("\x00name\x00"))
+	if ef, err := Open(p); err == nil {
+		_ = ef.Close()
+		t.Fatal("Open accepted malformed present .symtab")
+	}
+}
+
+func TestOpenRejectsZeroLengthSymbolTables(t *testing.T) {
+	for _, typ := range []elf.SectionType{elf.SHT_DYNSYM, elf.SHT_SYMTAB} {
+		p := writeELF64SymbolFixture(t, typ, nil, []byte("\x00"))
+		if f, err := Open(p); err == nil {
+			_ = f.Close()
+			t.Fatalf("Open accepted zero-length %s", typ)
+		}
+	}
+}
+
+func TestLoadSymbolTableRejectsExcessiveCountBeforeMaterialization(t *testing.T) {
+	tableSize := (maxSymbolCount + 2) * elf.Sym64Size // null symbol + too many real entries
+	f := &File{elfFile: &elf.File{Sections: []*elf.Section{{
+		SectionHeader: elf.SectionHeader{
+			Type: elf.SHT_SYMTAB, Size: tableSize, FileSize: tableSize, Entsize: elf.Sym64Size,
+		},
+	}}}}
+	if _, _, err := f.loadSymbolTable(elf.SHT_SYMTAB, ".symtab"); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("loadSymbolTable(excessive count) = %v, want ErrMalformed before table read", err)
 	}
 }
 
@@ -579,32 +933,9 @@ func TestSymbolTablesRejectZeroEntrySize(t *testing.T) {
 	if err := os.WriteFile(p, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f, err := Open(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if syms, err := f.Symbols(); err == nil {
-		t.Fatalf("zero sh_entsize returned success: %#v", syms)
-	}
-}
-
-func TestValidateSymbolTableUsesPhysicalFileSize(t *testing.T) {
-	strs := &elf.Section{SectionHeader: elf.SectionHeader{
-		Type: elf.SHT_STRTAB, Offset: 80, Size: 1024, FileSize: 8,
-	}}
-	syms := &elf.Section{SectionHeader: elf.SectionHeader{
-		Type: elf.SHT_SYMTAB, Offset: 64, Size: elf.Sym64Size, FileSize: elf.Sym64Size,
-		Link: 1, Entsize: elf.Sym64Size,
-	}}
-	f := &File{ELF: &elf.File{Sections: []*elf.Section{{}, strs, syms}}, size: 128}
-	if present, err := f.validateSymbolTable(elf.SHT_SYMTAB, ".symtab"); err != nil || !present {
-		t.Fatalf("compressed-size metadata validation = %v,%v; want true,nil", present, err)
-	}
-
-	strs.FileSize = 64
-	if _, err := f.validateSymbolTable(elf.SHT_SYMTAB, ".symtab"); err == nil {
-		t.Fatal("string table physical extent beyond backing file was accepted")
+	if f, err := Open(p); err == nil {
+		_ = f.Close()
+		t.Fatal("Open accepted zero symbol sh_entsize")
 	}
 }
 

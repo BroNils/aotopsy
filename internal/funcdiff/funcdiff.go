@@ -365,7 +365,7 @@ func Load(libPath string) (*LoadedSet, error) {
 	return &LoadedSet{
 		Descriptors: Build(sc.Result, sc.Pool, sc.Info.Version, sc.Table, sc.Ranges, sc.Code, sc.CodeOff),
 		DartVersion: sc.Info.Version.DartVersion,
-		Machine:     sc.EF.ELF.Machine.String(),
+		Machine:     sc.EF.Machine().String(),
 	}, nil
 }
 

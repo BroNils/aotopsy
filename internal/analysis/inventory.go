@@ -105,13 +105,17 @@ func inventoryExtractFile(f *zip.File, work *archiveWorkBudget) (string, error) 
 	return path, err
 }
 
-// InventoryScanLibapp opens a libapp.so and extracts snapshot hash, Dart version, and features.
-func InventoryScanLibapp(path string) (hash, dartVer, features string, err error) {
+// InventoryScanLibapp opens a libapp.so, verifies that its machine agrees with
+// the ABI directory it came from, and extracts snapshot metadata.
+func InventoryScanLibapp(path, expectedABI string) (hash, dartVer, features string, err error) {
 	ef, err := elfx.Open(path)
 	if err != nil {
 		return "", "", "", fmt.Errorf("open elf: %w", err)
 	}
 	defer func() { _ = ef.Close() }()
+	if err := validateNativeELFABI(ef, expectedABI); err != nil {
+		return "", "", "", err
+	}
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 	info, err := snapshot.Extract(ef, opts)

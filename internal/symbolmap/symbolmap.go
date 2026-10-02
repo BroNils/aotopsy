@@ -151,21 +151,21 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	}
 	defer func() { _ = uf.Close() }()
 
-	if sf.ELF.Machine != uf.ELF.Machine {
-		return nil, fmt.Errorf("symbolmap: machine mismatch: stripped=%s unstripped=%s", sf.ELF.Machine, uf.ELF.Machine)
+	if sf.Machine() != uf.Machine() {
+		return nil, fmt.Errorf("symbolmap: machine mismatch: stripped=%s unstripped=%s", sf.Machine(), uf.Machine())
 	}
 
 	rep := &Report{
 		StrippedPath:   strippedPath,
 		UnstrippedPath: unstrippedPath,
-		Machine:        sf.ELF.Machine.String(),
+		Machine:        sf.Machine().String(),
 	}
 
-	strippedExec, err := collectExecSections(sf.ELF)
+	strippedExec, err := collectExecSections(sf)
 	if err != nil {
 		return nil, err
 	}
-	unstrippedExec, err := collectExecSections(uf.ELF)
+	unstrippedExec, err := collectExecSections(uf)
 	if err != nil {
 		return nil, err
 	}
@@ -184,13 +184,13 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	}
 
 	var callSites []CallSite
-	switch sf.ELF.Machine {
+	switch sf.Machine() {
 	case elf.EM_AARCH64:
 		callSites = scanARM64CallSites(strippedExec, symbols, symVAs, opts.IncludeBranches)
 	case elf.EM_X86_64:
 		callSites = scanX86CallSites(strippedExec, symbols, symVAs, opts.IncludeBranches)
 	default:
-		return nil, fmt.Errorf("symbolmap: unsupported machine %s", sf.ELF.Machine)
+		return nil, fmt.Errorf("symbolmap: unsupported machine %s", sf.Machine())
 	}
 
 	targetCalls := make(map[uint64]int, len(callSites))
@@ -259,24 +259,15 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	return rep, nil
 }
 
-func collectExecSections(f *elf.File) ([]execSection, error) {
-	var out []execSection
-	var total uint64
-	for _, s := range f.Sections {
-		if s.Flags&elf.SHF_EXECINSTR == 0 || s.Size == 0 {
-			continue
-		}
-		if s.Size > maxExecBytes || total > maxExecBytes-s.Size {
-			return nil, fmt.Errorf("symbolmap: executable data exceeds %d-byte budget", maxExecBytes)
-		}
-		total += s.Size
-		data, err := s.Data()
-		if err != nil {
-			return nil, fmt.Errorf("symbolmap: read section %s: %w", s.Name, err)
-		}
-		out = append(out, execSection{Name: s.Name, Addr: s.Addr, Size: s.Size, Data: data})
+func collectExecSections(f *elfx.File) ([]execSection, error) {
+	sections, err := f.ExecutableSections(maxExecBytes)
+	if err != nil {
+		return nil, fmt.Errorf("symbolmap: executable sections: %w", err)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Addr < out[j].Addr })
+	out := make([]execSection, 0, len(sections))
+	for _, s := range sections {
+		out = append(out, execSection{Name: s.Name, Addr: s.Addr, Size: s.Size, Data: s.Data})
+	}
 	return out, nil
 }
 
@@ -328,58 +319,44 @@ func isUsefulSymbolName(name string) bool {
 // lexical tie-break so output is deterministic.
 func collectSymbols(f *elfx.File) (map[uint64]symbolInfo, []uint64, error) {
 	byVA := make(map[uint64]symbolInfo)
-	add := func(syms []elf.Symbol) error {
+	add := func(syms []elfx.ExecutableSymbol) error {
 		for _, s := range syms {
-			typ := elf.ST_TYPE(s.Info)
-			if typ != elf.STT_FUNC && typ != elf.STT_NOTYPE && typ != elf.STT_GNU_IFUNC {
-				continue
-			}
-			if s.Section == elf.SHN_UNDEF || s.Value == 0 || !isUsefulSymbolName(s.Name) {
-				continue
-			}
-			if int(s.Section) >= len(f.ELF.Sections) {
-				continue
-			}
-			sec := f.ELF.Sections[s.Section]
-			if sec.Flags&elf.SHF_EXECINSTR == 0 {
+			if !isUsefulSymbolName(s.Name) {
 				continue
 			}
 			candidate := symbolInfo{
 				Name:        s.Name,
-				VA:          s.Value,
+				VA:          s.Addr,
 				Size:        s.Size,
-				Type:        typ,
-				Binding:     elf.ST_BIND(s.Info),
+				Type:        s.Type,
+				Binding:     s.Binding,
 				Section:     s.Section,
-				SectionName: sec.Name,
+				SectionName: s.SectionName,
 				Category:    symbolCategory(s.Name),
 			}
-			if existing, ok := byVA[s.Value]; ok {
+			if existing, ok := byVA[s.Addr]; ok {
 				names := append([]string{existing.Name}, existing.Aliases...)
 				names = append(names, s.Name)
 				names = uniqueSortedStrings(names)
 				if betterPrimarySymbol(candidate, existing) {
 					candidate.Aliases = removeString(names, candidate.Name)
-					byVA[s.Value] = candidate
+					byVA[s.Addr] = candidate
 				} else {
 					existing.Aliases = removeString(names, existing.Name)
-					byVA[s.Value] = existing
+					byVA[s.Addr] = existing
 				}
 			} else {
-				byVA[s.Value] = candidate
+				byVA[s.Addr] = candidate
 			}
 		}
 		return nil
 	}
-	if syms, err := f.Symbols(); err == nil {
-		_ = add(syms)
-	} else {
-		return nil, nil, fmt.Errorf("symbolmap: symtab: %w", err)
+	syms, err := f.ExecutableSymbols()
+	if err != nil {
+		return nil, nil, fmt.Errorf("symbolmap: executable symbols: %w", err)
 	}
-	if syms, err := f.DynamicSymbols(); err == nil {
-		_ = add(syms)
-	} else {
-		return nil, nil, fmt.Errorf("symbolmap: dynsym: %w", err)
+	if err := add(syms); err != nil {
+		return nil, nil, err
 	}
 	vas := make([]uint64, 0, len(byVA))
 	for va := range byVA {
@@ -708,7 +685,7 @@ func encodeCallSitesTSV(sites []CallSite) ([]byte, error) {
 			targetVA = fmt.Sprintf("0x%x", cs.TargetVA)
 		}
 		symbolVA := ""
-		if cs.SymbolVA != 0 {
+		if cs.Match == MatchExact || cs.Match == MatchNearest {
 			symbolVA = fmt.Sprintf("0x%x", cs.SymbolVA)
 		}
 		if err := w.Write([]string{

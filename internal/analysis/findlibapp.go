@@ -2,7 +2,7 @@ package analysis
 
 import (
 	"archive/zip"
-	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,7 +25,7 @@ type FindResult struct {
 // FindCandidate is one .so file probed for Dart AOT indicators.
 type FindCandidate struct {
 	PathInAPK   string `json:"path_in_apk"`
-	Hit         string `json:"hit"` // "symbols", "magic", "none"
+	Hit         string `json:"hit"` // "symbols" or "none"
 	SHA256      string `json:"sha256"`
 	Size        int64  `json:"size"`
 	SnapHash    string `json:"snapshot_hash,omitempty"`
@@ -112,17 +112,29 @@ func probeSOFile(f *zip.File, pathLabel string, work *archiveWorkBudget) (*FindC
 	// Try ELF + snapshot extract (symbol-based detection).
 	ef, err := elfx.Open(tmpPath)
 	if err != nil {
-		// Not a loadable ELF (any architecture) — check for magic without
-		// loading the entire expanded candidate into memory.
-		if hasSnapshotMagicInFile(tmpPath) {
-			c.Hit = "magic"
+		if errors.Is(err, elfx.ErrMalformed) || errors.Is(err, elfx.ErrChanged) {
+			return c, fmt.Errorf("inspect ELF: %w", err)
 		}
+		// A real supported libapp.so is an ELF64 ET_DYN for a supported machine.
+		// Raw magic in a non-ELF/unsupported file is not enough to claim a Dart
+		// binary; doing so let four attacker-controlled bytes become Found=true.
 		return c, nil
 	}
 	defer func() { _ = ef.Close() }()
+	if abi, ok := nativeLibraryABI(pathLabel); ok {
+		if err := validateNativeELFABI(ef, abi); err != nil {
+			return c, err
+		}
+	}
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 	info, err := snapshot.Extract(ef, opts)
+	if err != nil {
+		if errors.Is(err, snapshot.ErrNoSnapshotSymbols) {
+			return c, nil
+		}
+		return c, fmt.Errorf("inspect snapshot: %w", err)
+	}
 	if err == nil && info.PrimaryHeader() != nil && info.SnapshotHash() != "" {
 		c.Hit = "symbols"
 		c.SnapHash = info.SnapshotHash()
@@ -130,28 +142,6 @@ func probeSOFile(f *zip.File, pathLabel string, work *archiveWorkBudget) (*FindC
 			c.DartVersion = info.Version.DartVersion
 		}
 		return c, nil
-	}
-
-	// Symbols not found — try magic probe on loadable segments.
-	segs := ef.LoadSegments()
-	for _, seg := range segs {
-		if seg.Filesz == 0 {
-			continue
-		}
-		// Read first 4KB of each segment.
-		sz := int(seg.Filesz)
-		if sz > 4096 {
-			sz = 4096
-		}
-		buf := make([]byte, sz)
-		_, err := ef.ReadAt(buf, int64(seg.Offset))
-		if err != nil {
-			continue
-		}
-		if snapshot.ProbeSnapshotMagic(buf) >= 0 {
-			c.Hit = "magic"
-			return c, nil
-		}
 	}
 
 	return c, nil
@@ -193,37 +183,9 @@ func probeNestedAPK(f *zip.File, work *archiveWorkBudget) ([]FindCandidate, erro
 	return results, nil
 }
 
-func hasSnapshotMagicInFile(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	magic := []byte{0xf5, 0xf5, 0xdc, 0xdc}
-	buf := make([]byte, 64*1024+len(magic)-1)
-	carry := 0
-	for {
-		n, err := f.Read(buf[carry:])
-		if n > 0 {
-			end := carry + n
-			if bytes.Contains(buf[:end], magic) {
-				return true
-			}
-			carry = len(magic) - 1
-			if end < carry {
-				carry = end
-			}
-			copy(buf[:carry], buf[end-carry:end])
-		}
-		if err != nil {
-			return false
-		}
-	}
-}
-
 func hasAnyHit(candidates []FindCandidate) bool {
 	for _, c := range candidates {
-		if c.Hit != "none" {
+		if c.Hit == "symbols" {
 			return true
 		}
 	}
@@ -231,7 +193,7 @@ func hasAnyHit(candidates []FindCandidate) bool {
 }
 
 func classifyFindResult(r *FindResult) {
-	// Sort candidates: symbols first, then magic, then none. Stable secondary key on PathInAPK.
+	// Sort verified symbol hits first, then non-matches. Stable secondary key on PathInAPK.
 	sort.Slice(r.Candidates, func(i, j int) bool {
 		pi := hitPriority(r.Candidates[i].Hit)
 		pj := hitPriority(r.Candidates[j].Hit)
@@ -248,8 +210,6 @@ func classifyFindResult(r *FindResult) {
 			switch r.Candidates[i].Hit {
 			case "symbols":
 				r.Reason = "MATCHED_SYMBOLS"
-			case "magic":
-				r.Reason = "MATCHED_MAGIC"
 			}
 			return
 		}
@@ -265,10 +225,41 @@ func classifyFindResult(r *FindResult) {
 }
 
 func isSupportedNativeLibraryPath(name string) bool {
-	if !strings.HasSuffix(name, ".so") {
-		return false
+	_, ok := nativeLibraryABI(name)
+	return ok && strings.HasSuffix(name, ".so")
+}
+
+func nativeLibraryABI(name string) (string, bool) {
+	if bang := strings.LastIndex(name, "!"); bang >= 0 {
+		name = name[bang+1:]
 	}
-	return strings.HasPrefix(name, "lib/arm64-v8a/") || strings.HasPrefix(name, "lib/x86_64/")
+	switch {
+	case strings.HasPrefix(name, "lib/arm64-v8a/"):
+		return "arm64-v8a", true
+	case strings.HasPrefix(name, "lib/x86_64/"):
+		return "x86_64", true
+	default:
+		return "", false
+	}
+}
+
+func validateNativeELFABI(ef *elfx.File, abi string) error {
+	if ef == nil {
+		return fmt.Errorf("native ABI %s: missing ELF", abi)
+	}
+	switch abi {
+	case "arm64-v8a":
+		if !ef.IsARM64() {
+			return fmt.Errorf("native ABI path %s contradicts ELF machine %s", abi, ef.Machine())
+		}
+	case "x86_64":
+		if ef.IsARM64() {
+			return fmt.Errorf("native ABI path %s contradicts ELF machine %s", abi, ef.Machine())
+		}
+	default:
+		return fmt.Errorf("unsupported native ABI %q", abi)
+	}
+	return nil
 }
 
 func IsStandardLibappPath(name string) bool {
@@ -282,9 +273,7 @@ func hitPriority(hit string) int {
 	switch hit {
 	case "symbols":
 		return 0
-	case "magic":
-		return 1
 	default:
-		return 2
+		return 1
 	}
 }

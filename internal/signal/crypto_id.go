@@ -2,7 +2,6 @@ package signal
 
 import (
 	"bytes"
-	"debug/elf"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"aotopsy/internal/elfx"
 	"aotopsy/internal/jsonutil"
 )
 
@@ -240,48 +240,35 @@ func isDistinctiveConstant(hex string) bool {
 	return true
 }
 
-// IdentifyCryptoFromBinary identifies constants in executable code. x86_64 can
+// IdentifyCryptoFromELF identifies constants in executable code from the same
+// already-validated ELF descriptor used by the rest of the pipeline. x86_64 can
 // carry a complete immediate byte sequence in an instruction, but AArch64
 // LoadImmediate materialises values as MOVZ/MOVN followed by MOVK chunks. A raw
 // little-endian byte search therefore systematically misses AArch64 constants
-// and can match unrelated data. For real ELFs we use the architecture-specific
-// model and restrict work to executable sections; non-ELF input keeps a raw
-// scan solely for small synthetic/unit-test fixtures.
-func IdentifyCryptoFromBinary(libPath string) ([]CryptoFinding, error) {
-	data, err := os.ReadFile(libPath)
-	if err != nil {
-		return nil, err
+// and can match unrelated data. Production scanning is restricted to validated
+// executable sections; unit tests exercise the pure byte scanner directly.
+func IdentifyCryptoFromELF(ef *elfx.File) ([]CryptoFinding, error) {
+	if ef == nil {
+		return nil, fmt.Errorf("crypto scan: nil ELF source")
 	}
 	patterns := cryptoPatterns()
 	acc := newCryptoAccumulator()
-
-	if ef, openErr := elf.Open(libPath); openErr == nil {
-		defer func() { _ = ef.Close() }()
-		for _, sec := range ef.Sections {
-			if sec.Flags&elf.SHF_EXECINSTR == 0 || sec.Type == elf.SHT_NOBITS || sec.Size == 0 {
-				continue
-			}
-			if sec.Offset > uint64(len(data)) || sec.Size > uint64(len(data))-sec.Offset {
-				return nil, fmt.Errorf("ELF executable section %q exceeds file", sec.Name)
-			}
-			start := int(sec.Offset)
-			end := start + int(sec.Size)
-			code := data[start:end]
-			switch ef.Machine {
-			case elf.EM_AARCH64:
-				identifyCryptoFromARM64Code(code, start, patterns, acc)
-			case elf.EM_X86_64:
-				identifyCryptoFromRawBytes(code, start, patterns, acc)
-			default:
-				return nil, fmt.Errorf("unsupported ELF machine %s for crypto scan", ef.Machine)
-			}
-		}
-		return acc.finish(), nil
+	sections, err := ef.ExecutableSections(256 << 20)
+	if err != nil {
+		return nil, fmt.Errorf("crypto scan executable sections: %w", err)
 	}
-
-	// Non-ELF inputs are accepted only as synthetic byte fixtures. This keeps
-	// the pure detector unit-testable without weakening the real ELF path.
-	identifyCryptoFromRawBytes(data, 0, patterns, acc)
+	maxInt := uint64(^uint(0) >> 1)
+	for _, sec := range sections {
+		if sec.Offset > maxInt {
+			return nil, fmt.Errorf("ELF executable section %q offset is not addressable", sec.Name)
+		}
+		start := int(sec.Offset)
+		if ef.IsARM64() {
+			identifyCryptoFromARM64Code(sec.Data, start, patterns, acc)
+		} else {
+			identifyCryptoFromRawBytes(sec.Data, start, patterns, acc)
+		}
+	}
 	return acc.finish(), nil
 }
 

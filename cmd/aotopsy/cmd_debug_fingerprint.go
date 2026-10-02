@@ -15,7 +15,7 @@ import (
 // flutterdec's engine_fingerprint.rs but arch-agnostic (ARM64 and x86_64).
 func cmdFingerprint(args []string) error {
 	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
-	libPath := fs.String("lib", "", "path to libapp.so (or any ELF) to fingerprint")
+	libPath := fs.String("lib", "", "path to supported ELF64 little-endian ET_DYN libapp.so to fingerprint")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err

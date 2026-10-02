@@ -148,11 +148,29 @@ func LoadContext(libPath string) (ctx *AnalysisContext, err error) {
 		_ = sc.Close()
 		return nil, err
 	}
+	ctx, err = analysisContextFromSnapshot(sc)
+	if err != nil {
+		_ = sc.Close()
+		return nil, err
+	}
+	return ctx, nil
+}
 
+// analysisContextFromSnapshot projects the already-opened SnapshotContext into
+// the richer per-function context without reopening the input path. The caller
+// retains ownership of sc.EF. This distinction matters inside the main pipeline:
+// reopening opts.LibPath after provenance has been bound to sc.EF would allow a
+// path replacement to mix two different binaries into one output generation.
+func analysisContextFromSnapshot(sc *SnapshotContext) (*AnalysisContext, error) {
+	if sc == nil || sc.EF == nil || sc.Info == nil || sc.Result == nil || sc.Pool == nil {
+		return nil, fmt.Errorf("incomplete snapshot context")
+	}
+	if err := sc.RequireCompleteVM(); err != nil {
+		return nil, err
+	}
 	syms, err := BuildSymbolNames(sc.Ranges, sc.Image().CodeImage, sc.Pool, sc.Result, sc.Info,
 		sc.Table, dartfmtOptionsDefault(), sc.Info.IsolateData.Data)
 	if err != nil {
-		_ = sc.Close()
 		return nil, err
 	}
 
