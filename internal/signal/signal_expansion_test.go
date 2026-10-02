@@ -3,7 +3,6 @@ package signal
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,6 +33,12 @@ func TestShannonEntropy(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEntropyRejectsNilSource(t *testing.T) {
+	if findings, err := AnalyzeEntropy(nil); err == nil {
+		t.Fatalf("nil ELF produced entropy findings instead of validation error: %+v", findings)
+	}
+}
+
 func makeAllBytes() []byte {
 	b := make([]byte, 256)
 	for i := 0; i < 256; i++ {
@@ -51,18 +56,12 @@ func abs(x float64) float64 {
 
 // --- Crypto algorithm identification tests ---
 
-func TestIdentifyCryptoFromBinary(t *testing.T) {
-	scan := func(t *testing.T, name string, data []byte) []CryptoFinding {
+func TestIdentifyCryptoFromRawBytes(t *testing.T) {
+	scan := func(t *testing.T, _ string, data []byte) []CryptoFinding {
 		t.Helper()
-		tmpFile := filepath.Join(t.TempDir(), name)
-		if err := writeFile(tmpFile, data); err != nil {
-			t.Fatalf("write temp file: %v", err)
-		}
-		findings, err := IdentifyCryptoFromBinary(tmpFile)
-		if err != nil {
-			t.Fatalf("IdentifyCryptoFromBinary: %v", err)
-		}
-		return findings
+		acc := newCryptoAccumulator()
+		identifyCryptoFromRawBytes(data, 0, cryptoPatterns(), acc)
+		return acc.finish()
 	}
 	has := func(findings []CryptoFinding, algo string) bool {
 		for _, f := range findings {
@@ -116,6 +115,12 @@ func TestIdentifyCryptoFromBinary(t *testing.T) {
 			t.Error("SHA-256 K[0] must still be reported on its own")
 		}
 	})
+}
+
+func TestIdentifyCryptoFromELFRejectsNilSource(t *testing.T) {
+	if findings, err := IdentifyCryptoFromELF(nil); err == nil {
+		t.Fatalf("nil ELF produced crypto findings instead of validation error: %+v", findings)
+	}
 }
 
 func TestIsDistinctiveConstant(t *testing.T) {

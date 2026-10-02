@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -210,7 +209,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 }
 
 func fridaRuntimeIdentityRegions(source *elfx.File) ([]frida.RuntimeRegionDigest, error) {
-	if source == nil || source.ELF == nil {
+	if source == nil {
 		return nil, fmt.Errorf("missing ELF source")
 	}
 	segments := source.LoadSegments()
@@ -225,14 +224,20 @@ func fridaRuntimeIdentityRegions(source *elfx.File) ([]frida.RuntimeRegionDigest
 	}
 
 	var regions []frida.RuntimeRegionDigest
-	if note := source.ELF.Section(".note.gnu.build-id"); note != nil && note.Size > 0 && note.Addr >= minVaddr {
-		data, err := note.Data()
+	const maxBuildIDNoteBytes = uint64(1 << 20)
+	for _, note := range source.Sections() {
+		if note.Name != ".note.gnu.build-id" || note.Type != elf.SHT_NOTE || note.Size == 0 || note.Addr < minVaddr {
+			continue
+		}
+		if !sectionIsFileBackedLoad(segments, note.Addr, note.Size) {
+			continue
+		}
+		data, err := source.ReadSection(note.Index, maxBuildIDNoteBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read GNU build-id note: %w", err)
 		}
-		if len(data) > 0 && sectionIsFileBackedLoad(segments, note.Addr, uint64(len(data))) {
-			regions = append(regions, runtimeRegionDigest("gnu_build_id", note.Addr-minVaddr, data))
-		}
+		regions = append(regions, runtimeRegionDigest("gnu_build_id", note.Addr-minVaddr, data))
+		break
 	}
 
 	for _, seg := range segments {
@@ -244,16 +249,11 @@ func fridaRuntimeIdentityRegions(source *elfx.File) ([]frida.RuntimeRegionDigest
 		if seg.Flags&elf.PF_W != 0 || seg.Filesz == 0 {
 			continue
 		}
-		if seg.Vaddr < minVaddr || seg.Offset > math.MaxInt64 || seg.Filesz > math.MaxInt64 {
+		if seg.Vaddr < minVaddr {
 			return nil, fmt.Errorf("immutable load segment is outside supported range")
 		}
-		end, carry := bits.Add64(seg.Offset, seg.Filesz, 0)
-		if carry != 0 || end > uint64(source.FileSize()) {
-			return nil, fmt.Errorf("immutable load segment exceeds source file")
-		}
-		h := sha256.New()
-		r := io.NewSectionReader(source, int64(seg.Offset), int64(seg.Filesz))
-		if _, err := io.Copy(h, r); err != nil {
+		digest, err := source.HashProgram(seg.Index)
+		if err != nil {
 			return nil, fmt.Errorf("hash immutable load segment: %w", err)
 		}
 		kind := "readonly"
@@ -264,7 +264,7 @@ func fridaRuntimeIdentityRegions(source *elfx.File) ([]frida.RuntimeRegionDigest
 			Kind:   kind,
 			Offset: fmt.Sprintf("0x%x", seg.Vaddr-minVaddr),
 			Size:   int64(seg.Filesz),
-			SHA256: hex.EncodeToString(h.Sum(nil)),
+			SHA256: digest,
 		})
 	}
 	if len(regions) == 0 {

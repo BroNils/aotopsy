@@ -14,6 +14,15 @@ import (
 	"aotopsy/internal/elfx"
 )
 
+var (
+	// ErrNoSnapshotSymbols means the ELF is structurally valid but does not
+	// expose either supported Dart AOT snapshot symbol layout.
+	ErrNoSnapshotSymbols = errors.New("snapshot: no supported snapshot symbols")
+	// ErrMalformedSymbolLayout means the ELF exposes only part of a supported
+	// layout, or mixes the mutually-exclusive legacy and unified layouts.
+	ErrMalformedSymbolLayout = errors.New("snapshot: malformed snapshot symbol layout")
+)
+
 // Well-known symbol names for Dart AOT snapshots.
 const (
 	SymVmSnapshotData              = "_kDartVmSnapshotData"
@@ -25,11 +34,12 @@ const (
 	// Dart 3.13.0+ replaced all four symbols above with these two, and merged
 	// the VM and isolate snapshots into a single one.
 	//
-	// SDK-verified via gh api on runtime/include/dart_api.h at both tags:
-	// 3.12.2 defines kVmSnapshotDataCSymbol / kIsolateSnapshotDataCSymbol and
-	// their Instructions counterparts; 3.13.0 defines only kSnapshotDataCSymbol
-	// and kSnapshotTextCSymbol. That this is deliberate is visible in the SDK
-	// itself: pkg/native_stack_traces/lib/src/constants.dart@3.13.0 keeps the
+	// Verified against the exact local 3.12.2 and 3.13.0 SDK working trees:
+	// runtime/include/dart_api.h in 3.12.2 defines kVmSnapshotDataCSymbol /
+	// kIsolateSnapshotDataCSymbol and their Instructions counterparts, while
+	// 3.13.0 defines only kSnapshotDataCSymbol and kSnapshotTextCSymbol. That
+	// this is deliberate is visible in the SDK itself:
+	// pkg/native_stack_traces/lib/src/constants.dart@3.13.0 keeps the
 	// old four as oldVmSymbolName / oldIsolateSymbolName for reading older
 	// snapshots, and ImageWriter::SectionSymbol lost its `bool vm` parameter,
 	// so there is no VM-vs-isolate distinction at the image level any more.
@@ -210,57 +220,80 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 		return aOff-bOff < bSize
 	}
 
-	// Resolve all four snapshot symbols.
+	// Resolve the snapshot symbol layout before reading any region. Supported
+	// root libapp.so files have exactly one of two layouts: four legacy
+	// VM/isolate symbols through 3.12.2, or the unified data/text pair from
+	// 3.13.0 onward. A partial/mixed set is structural corruption, not an
+	// "unsupported Dart version" and not a best-effort condition.
 	type symTarget struct {
 		name   string
 		region *Region
+		va     uint64
+		size   uint64
+		found  bool
 	}
-	targets := []symTarget{
-		{SymVmSnapshotData, &info.VmData},
-		{SymVmSnapshotInstructions, &info.VmInstructions},
-		{SymIsolateSnapshotData, &info.IsolateData},
-		{SymIsolateSnapshotInstructions, &info.IsolateInstructions},
+	legacy := []symTarget{
+		{name: SymVmSnapshotData, region: &info.VmData},
+		{name: SymVmSnapshotInstructions, region: &info.VmInstructions},
+		{name: SymIsolateSnapshotData, region: &info.IsolateData},
+		{name: SymIsolateSnapshotInstructions, region: &info.IsolateInstructions},
+	}
+	unified := []symTarget{
+		{name: SymUnifiedSnapshotData, region: &info.IsolateData},
+		{name: SymUnifiedSnapshotText, region: &info.IsolateInstructions},
+	}
+	resolve := func(targets []symTarget) (int, error) {
+		found := 0
+		for i := range targets {
+			va, size, err := ef.DynamicSnapshotSymbol(targets[i].name)
+			if errors.Is(err, elfx.ErrNoSymbol) {
+				continue
+			}
+			if err != nil {
+				return 0, fmt.Errorf("snapshot: symbol %s: %w", targets[i].name, err)
+			}
+			targets[i].va, targets[i].size, targets[i].found = va, size, true
+			found++
+		}
+		return found, nil
+	}
+	legacyCount, err := resolve(legacy)
+	if err != nil {
+		return nil, err
+	}
+	unifiedCount, err := resolve(unified)
+	if err != nil {
+		return nil, err
 	}
 
-	// Dart 3.13.0+ unified layout: one data blob and one text blob holding a
-	// SINGLE snapshot that serves as both VM and isolate.
-	//
-	// The blob is mapped onto IsolateData/IsolateInstructions and the VM
-	// regions are left empty. That is not a shortcut for "we did not find it":
-	// there is exactly one snapshot in there, verified on a real 3.13.0
-	// libapp.so by scanning for the 0xdcdcf5f5 magic, which occurs once, at
-	// offset 0. Downstream code already guards VM parsing with
-	// `len(VmData) >= 64`, so it skips cleanly instead of inventing a second
-	// snapshot. UnifiedSnapshot lets callers tell "no VM snapshot exists" from
-	// "VM snapshot extraction failed".
-	if _, _, err := ef.Symbol(SymUnifiedSnapshotData); err == nil {
+	// Dart 3.13.0 changed ImageWriter::SectionSymbol from the VM/isolate form
+	// used through 3.12.2 to one kSnapshotData/kSnapshotText symbol pair. This is
+	// verified against the exact local 3.12.2 and 3.13.0 SDK sources, not inferred
+	// from sample bytes. Map that single pair onto the isolate-facing fields and
+	// leave VM regions empty so callers can distinguish the unified layout.
+	var targets []symTarget
+	switch {
+	case legacyCount == 0 && unifiedCount == 0:
+		return nil, ErrNoSnapshotSymbols
+	case legacyCount == len(legacy) && unifiedCount == 0:
+		targets = legacy
+	case legacyCount == 0 && unifiedCount == len(unified):
 		info.UnifiedSnapshot = true
-		targets = []symTarget{
-			{SymUnifiedSnapshotData, &info.IsolateData},
-			{SymUnifiedSnapshotText, &info.IsolateInstructions},
-		}
+		targets = unified
+	default:
+		return nil, fmt.Errorf("%w: legacy=%d/%d unified=%d/%d",
+			ErrMalformedSymbolLayout, legacyCount, len(legacy), unifiedCount, len(unified))
 	}
 
 	for _, t := range targets {
 		t.region.Name = t.name
-		va, size, err := ef.Symbol(t.name)
-		if err != nil {
-			if opts.Mode == dartfmt.ModeStrict {
-				return nil, fmt.Errorf("snapshot: %w", err)
-			}
-			diags.Add(0, dartfmt.DiagInvalid, fmt.Sprintf("symbol %s not found: %v", t.name, err))
-			continue
-		}
+		va, size := t.va, t.size
 		t.region.VA = va
 		t.region.SymSize = size
 
 		off, err := ef.VAToFileOffset(va)
 		if err != nil {
-			if opts.Mode == dartfmt.ModeStrict {
-				return nil, fmt.Errorf("snapshot: VA mapping for %s: %w", t.name, err)
-			}
-			diags.Add(va, dartfmt.DiagInvalid, fmt.Sprintf("VA 0x%x for %s: %v", va, t.name, err))
-			continue
+			return nil, fmt.Errorf("snapshot: VA mapping for %s: %w", t.name, err)
 		}
 		t.region.FileOffset = off
 
@@ -270,16 +303,14 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 			// For instruction regions, symbol size is often 0. We'll read a
 			// capped amount; the actual size comes from header parsing or
 			// region boundary analysis later.
-			readSize = capRegionSize(ef, va)
+			readSize, err = capRegionSize(ef, va)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot: bound zero-size symbol %s: %w", t.name, err)
+			}
 		}
 		if readSize > 0 {
 			if readSize > maxSnapshotRegionBytes {
-				err := fmt.Errorf("snapshot: symbol %s size 0x%x exceeds per-region limit 0x%x", t.name, readSize, maxSnapshotRegionBytes)
-				if opts.Mode == dartfmt.ModeStrict {
-					return nil, err
-				}
-				diags.Add(va, dartfmt.DiagOverflow, err.Error())
-				continue
+				return nil, fmt.Errorf("snapshot: symbol %s size 0x%x exceeds per-region limit 0x%x", t.name, readSize, maxSnapshotRegionBytes)
 			}
 
 			// Exact aliases share one backing slice. Partial overlaps are not a
@@ -295,41 +326,22 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 					break
 				}
 				if overlaps(off, readSize, lr.off, lr.size) {
-					err := fmt.Errorf("snapshot: symbol %s partially overlaps another snapshot region", t.name)
-					if opts.Mode == dartfmt.ModeStrict {
-						return nil, err
-					}
-					diags.Add(va, dartfmt.DiagInvalid, err.Error())
-					reused = true // skip this malformed alias in best-effort mode
-					break
+					return nil, fmt.Errorf("snapshot: symbol %s partially overlaps another snapshot region", t.name)
 				}
 			}
 			if reused {
 				continue
 			}
 			if aggregateBytes > maxSnapshotAggregateBytes-readSize {
-				err := fmt.Errorf("snapshot: aggregate region budget exceeds 0x%x bytes", maxSnapshotAggregateBytes)
-				if opts.Mode == dartfmt.ModeStrict {
-					return nil, err
-				}
-				diags.Add(va, dartfmt.DiagOverflow, err.Error())
-				continue
+				return nil, fmt.Errorf("snapshot: aggregate region budget exceeds 0x%x bytes", maxSnapshotAggregateBytes)
 			}
 			maxInt := uint64(^uint(0) >> 1)
 			if readSize > maxInt {
-				err := fmt.Errorf("snapshot: symbol %s size 0x%x exceeds addressable read size", t.name, readSize)
-				if opts.Mode == dartfmt.ModeStrict {
-					return nil, err
-				}
-				diags.Add(va, dartfmt.DiagOverflow, err.Error())
-				continue
+				return nil, fmt.Errorf("snapshot: symbol %s size 0x%x exceeds addressable read size", t.name, readSize)
 			}
 			data, err := ef.ReadBytesAtVA(va, int(readSize))
 			if err != nil {
-				if opts.Mode == dartfmt.ModeStrict {
-					return nil, fmt.Errorf("snapshot: read %s: %w", t.name, err)
-				}
-				diags.Add(va, dartfmt.DiagTruncated, fmt.Sprintf("read %s: %v", t.name, err))
+				return nil, fmt.Errorf("snapshot: read %s: %w", t.name, err)
 			} else {
 				t.region.Data = data
 				t.region.DataSize = uint64(len(data))
@@ -473,32 +485,18 @@ func FindClusterDataStart(data []byte) (int, error) {
 	return 0, fmt.Errorf("snapshot: unterminated features string")
 }
 
-// capRegionSize computes a bounded read size for a region whose symbol has size 0.
-// Uses the gap to the next known VA or the segment end.
-func capRegionSize(ef *elfx.File, va uint64) uint64 {
+// capRegionSize computes a bounded read size for a region whose symbol has size
+// 0, using only the remaining bytes in its validated file-backed PT_LOAD.
+func capRegionSize(ef *elfx.File, va uint64) (uint64, error) {
 	const maxCap = 256 * 1024 * 1024 // 256 MiB hard cap
-
-	// Find the PT_LOAD segment containing this VA and use its end as bound.
-	for _, seg := range ef.LoadSegments() {
-		if remaining, ok := segmentRemaining(seg.Vaddr, seg.Filesz, va); ok {
-			if remaining > maxCap {
-				remaining = maxCap
-			}
-			return remaining
-		}
+	remaining, err := ef.FileBackedRemaining(va)
+	if err != nil {
+		return 0, err
 	}
-	return 0
-}
-
-func segmentRemaining(vaddr, filesz, va uint64) (uint64, bool) {
-	if va < vaddr {
-		return 0, false
+	if remaining > maxCap {
+		remaining = maxCap
 	}
-	rel := va - vaddr
-	if rel >= filesz {
-		return 0, false
-	}
-	return filesz - rel, true
+	return remaining, nil
 }
 
 // Snapshot data header layout (observed from Dart AOT snapshots):

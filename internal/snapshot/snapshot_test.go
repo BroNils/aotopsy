@@ -65,16 +65,9 @@ func TestParseHeaderTooShort(t *testing.T) {
 	}
 }
 
-func TestSegmentRemainingAvoidsAddressOverflow(t *testing.T) {
-	vaddr := uint64(math.MaxUint64 - 0xf)
-	filesz := uint64(0x20)
-	va := uint64(math.MaxUint64 - 8)
-	got, ok := segmentRemaining(vaddr, filesz, va)
-	if !ok || got != 0x19 {
-		t.Fatalf("segmentRemaining overflow case = %#x,%v; want 0x19,true", got, ok)
-	}
-	if _, ok := segmentRemaining(vaddr, filesz, vaddr-1); ok {
-		t.Fatal("VA below segment accepted")
+func TestCapRegionSizePropagatesELFMappingError(t *testing.T) {
+	if size, err := capRegionSize(nil, 0); err == nil || size != 0 {
+		t.Fatalf("capRegionSize(nil) = %#x,%v; want zero + error", size, err)
 	}
 }
 

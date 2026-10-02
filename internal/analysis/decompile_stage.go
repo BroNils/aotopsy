@@ -25,13 +25,10 @@ import (
 // app roughly triples the output directory (127 MB -> ~370 MB measured on
 // dart-3.9.2-gt-arm64). Run() says so on every run that does not use it,
 // so the capability is discoverable instead of merely present.
-func RunDecompileStage(opts *Opts) (int, error) {
-	ctx, err := LoadContext(opts.LibPath)
-	if err != nil {
-		return 0, fmt.Errorf("load context: %w", err)
+func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
+	if ctx == nil || ctx.EF == nil {
+		return 0, fmt.Errorf("decompile: missing analysis context")
 	}
-	defer func() { _ = ctx.Close() }()
-
 	dartDir := filepath.Join(opts.OutDir, "dart")
 	if err := os.MkdirAll(dartDir, 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir dart: %w", err)

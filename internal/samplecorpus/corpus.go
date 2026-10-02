@@ -591,8 +591,8 @@ func ValidateSample(path string, s Sample) (*snapshot.Info, error) {
 	} else if s.Arch != "arm64" {
 		return nil, fmt.Errorf("samplecorpus: unsupported architecture %q for %s", s.Arch, s.FileName())
 	}
-	if ef.ELF.Machine != wantMachine {
-		return nil, fmt.Errorf("samplecorpus: %s claims %s but ELF machine is %s", s.FileName(), s.Arch, ef.ELF.Machine)
+	if ef.Machine() != wantMachine {
+		return nil, fmt.Errorf("samplecorpus: %s claims %s but ELF machine is %s", s.FileName(), s.Arch, ef.Machine())
 	}
 	info, err := snapshot.Extract(ef, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {

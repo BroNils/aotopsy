@@ -107,7 +107,7 @@ func TestArchAuditCorpusARM64ChunksStayInstructionAligned(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open %s: %v", s.FileName(), err)
 		}
-		secs, err := collectExecSections(ef.ELF)
+		secs, err := collectExecSections(ef)
 		_ = ef.Close()
 		if err != nil {
 			t.Fatalf("exec sections %s: %v", s.FileName(), err)

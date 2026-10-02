@@ -368,10 +368,10 @@ func runPipeline(opts Opts) (*Result, error) {
 	}
 	result.Arch = arch
 	rawFuncSyms, symErr := ef.FuncSymbols()
-	elfFuncSyms, symWarning := prepareOptionalFuncSymbols(rawFuncSyms, symErr, ranges, codeVA, codeOff)
-	if symWarning != "" {
-		opts.warnf("%s", symWarning)
+	if symErr != nil {
+		return nil, fmt.Errorf("ELF function symbols: %w", symErr)
 	}
+	elfFuncSyms := prepareFuncSymbols(rawFuncSyms, ranges, codeVA, codeOff)
 	pl := sc.Pool
 	poolDisplay := sc.PoolDisplay
 
@@ -589,7 +589,7 @@ func runPipeline(opts Opts) (*Result, error) {
 		}
 
 		// Step 5.1: Entropy analysis (packed/encrypted section detection).
-		if err := signal.WriteEntropyFindings(opts.OutDir, opts.LibPath); err != nil {
+		if err := signal.WriteEntropyFindings(opts.OutDir, ef); err != nil {
 			return nil, fmt.Errorf("entropy: %w", err)
 		}
 
@@ -597,7 +597,7 @@ func runPipeline(opts Opts) (*Result, error) {
 		// Dart AOT compiles integer constants to MOVZ/MOVK instructions,
 		// so crypto constants appear as raw bytes in .text, not as pool
 		// immediates. Scan the binary for known crypto constant patterns.
-		cryptoFromBinary, err := signal.IdentifyCryptoFromBinary(opts.LibPath)
+		cryptoFromBinary, err := signal.IdentifyCryptoFromELF(ef)
 		if err != nil {
 			return nil, fmt.Errorf("crypto binary scan: %w", err)
 		}
@@ -720,7 +720,11 @@ func runPipeline(opts Opts) (*Result, error) {
 	// Step 12: Dart pseudocode. Off by default because it roughly triples
 	// the output directory; announced when off so it is discoverable.
 	if opts.Decompile {
-		count, err := RunDecompileStage(&opts)
+		decompileCtx, err := analysisContextFromSnapshot(sc)
+		if err != nil {
+			return nil, fmt.Errorf("decompile context: %w", err)
+		}
+		count, err := RunDecompileStage(&opts, decompileCtx)
 		if err != nil {
 			return nil, fmt.Errorf("decompile: %w", err)
 		}
@@ -733,20 +737,13 @@ func runPipeline(opts Opts) (*Result, error) {
 	return result, nil
 }
 
-func prepareOptionalFuncSymbols(
+func prepareFuncSymbols(
 	syms map[uint64]string,
-	symErr error,
 	ranges []cluster.CodeRange,
 	codeVA, codeOff uint64,
-) (map[uint64]string, string) {
-	if symErr != nil {
-		// .symtab is optional debug/ground-truth metadata and is never part of
-		// Dart's runtime snapshot loading contract. A corrupt optional table must
-		// not prevent snapshot-derived analysis from proceeding.
-		return nil, fmt.Sprintf("ignoring malformed optional .symtab: %v", symErr)
-	}
+) map[uint64]string {
 	if len(syms) == 0 {
-		return nil, ""
+		return nil
 	}
 	allowed := make(map[uint64]struct{}, len(ranges))
 	for _, r := range ranges {
@@ -767,9 +764,9 @@ func prepareOptionalFuncSymbols(
 		}
 	}
 	if len(out) == 0 {
-		return nil, ""
+		return nil
 	}
-	return out, ""
+	return out
 }
 
 // writeCapturedJSONL writes all captured-data JSONL files from the fill-phase

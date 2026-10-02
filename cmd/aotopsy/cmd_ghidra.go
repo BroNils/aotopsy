@@ -41,12 +41,14 @@ func cmdGhidra(args []string) error {
 	if absLibPath == "" {
 		return fmt.Errorf("file not found: %s", libPath)
 	}
-	if ef, err := elfx.Open(absLibPath); err == nil {
-		isARM64 := ef.IsARM64()
-		_ = ef.Close()
-		if !isARM64 {
-			return fmt.Errorf("ghidra decompilation is ARM64-only for now (register retyping + calling-convention scripts aren't ported to x86_64 yet -- see ARCHITECTURE.md); use `aotopsy _debug decompile-native` for x86_64 pseudocode instead")
-		}
+	ef, err := elfx.Open(absLibPath)
+	if err != nil {
+		return fmt.Errorf("open input ELF: %w", err)
+	}
+	isARM64 := ef.IsARM64()
+	_ = ef.Close()
+	if !isARM64 {
+		return fmt.Errorf("ghidra decompilation is ARM64-only for now (register retyping + calling-convention scripts aren't ported to x86_64 yet -- see ARCHITECTURE.md); use `aotopsy _debug decompile-native` for x86_64 pseudocode instead")
 	}
 
 	if *from != "" && *outDir == "" {
