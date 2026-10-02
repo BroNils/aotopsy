@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/snapshot"
 )
 
 // Finding is one FFI-relevant observation: either a resolved (or attempted)
@@ -31,6 +32,15 @@ type Finding struct {
 	Resolved   bool   `json:"resolved"`
 }
 
+// Result makes bounded-scan completeness explicit. A non-empty Findings slice
+// with ScanLimitReached=true is a valid prefix, not a complete FFI inventory.
+type Result struct {
+	Findings         []Finding
+	Attempted        int
+	Scanned          int
+	ScanLimitReached bool
+}
+
 // Options bounds Trace's cost. A real Flutter app's libapp.so bundles
 // the entire framework -- thousands to tens of thousands of functions,
 // per this project's own README -- and running EITHER detector over
@@ -40,15 +50,12 @@ type Finding struct {
 // ~64GB of RAM and having crashed the whole host (not just the
 // process) TWICE on a 5.8GB-RAM machine.
 //
-// CONFIRMED DIRECTLY during this package's own development (not just
-// inherited caution): running Trace with AllowUnbounded against a
-// SMALL sample app (3MB libapp.so, 8149 functions -- far smaller than
-// a real production app) drove resident set size to 5.4GB on a
-// 5.8GB-RAM machine, pushed 1.7GB into swap, evicted nearly all page
-// cache, and still hadn't finished after 90 seconds. An earlier
-// assumption that FuncIR construction alone (without EmitPseudocode)
-// was "cheap enough to run unbounded" was WRONG and is not repeated
-// here -- BOTH detectors are gated by the same scan bound below.
+// CONFIRMED DIRECTLY during this package's own development: an older Trace
+// implementation that also ran EmitPseudocode as a vm_tag direction fallback
+// reached 5.4GB RSS + 1.7GB swap on an 8149-function sample. That fallback has
+// been removed because the SDK proves vm_tag transitions are direction-neutral
+// (callback NativeReturn uses them too), but FuncIR construction is still
+// bounded here rather than assuming an unbounded real-app scan is cheap.
 type Options struct {
 	// MaxScan caps how many functions Trace processes with EITHER
 	// detector. 0 means use the package default (500, matching
@@ -83,22 +90,20 @@ type Options struct {
 //     accepted only when its FfiTrampolineData says callback_target == null;
 //     callbacks use the same Function::Kind and must not be mislabeled. Dart
 //     3.3+ lowers outbound calls to compiler-generated #ffiClosureN closures,
-//     while kFfiTrampoline is callback-only. The decompiler vm_tag marker is
-//     kept as an independent legacy structural fallback.
+//     while kFfiTrampoline is callback-only. Thread::vm_tag transitions are
+//     deliberately NOT used as a direction fallback: callback NativeReturn and
+//     outbound FFI calls both execute TransitionGeneratedToNative.
 //
 // Applies the same hardening decompile-native --all uses for the same
 // underlying cost profile: GOMAXPROCS cap, a hard memory-limit
 // backstop, and periodic GC.
 //
-// Returns the findings plus how many functions were actually
-// processed -- callers (and this package's own regression tests) can
-// use the scanned count to verify bounding actually took effect,
-// rather than only inferring it indirectly from findings.
-func Trace(ctx *analysis.AnalysisContext, opts Options) ([]Finding, int, error) {
+// Returns findings plus explicit scan-completeness state.
+func Trace(ctx *analysis.AnalysisContext, opts Options) (Result, error) {
+	var result Result
 	if ctx == nil {
-		return nil, 0, fmt.Errorf("ffi trace: nil analysis context")
+		return result, fmt.Errorf("ffi trace: nil analysis context")
 	}
-	var findings []Finding
 	byCodeIndex := ffiOwnerIndex(ctx)
 	ffiData := ffiTrampolineIndex(ctx)
 	scanOpts := analysis.ScanOptions{
@@ -108,29 +113,24 @@ func Trace(ctx *analysis.AnalysisContext, opts Options) ([]Finding, int, error) 
 		GcEveryN:       100,
 	}
 
-	scanned, err := ctx.ScanFuncs(scanOpts, func(r cluster.CodeRange, fir *decompiler.FuncIR, funcVA uint64) {
-		findings = append(findings, findDynamicLibraryCalls(ctx, fir, funcVA)...)
+	scanResult, err := ctx.ScanFuncs(scanOpts, func(r cluster.CodeRange, fir *decompiler.FuncIR, funcVA uint64) {
+		result.Findings = append(result.Findings, findDynamicLibraryCalls(ctx, fir, funcVA)...)
 
-		// Metadata is the primary signal. It distinguishes old outbound
-		// kFfiTrampoline functions from callbacks, and modern FFI call closures
-		// from modern callback-only kFfiTrampoline functions.
-		nativeCall := isOutboundFfiRange(ctx, r, fir.Name, byCodeIndex, ffiData)
-		if !nativeCall {
-			art := decompiler.EmitPseudocode(fir, ctx.SymbolLookup, ctx.PoolLookup)
-			nativeCall = strings.Contains(art.Source, decompiler.FFICallMarker)
-		}
-		if nativeCall {
-			findings = append(findings, Finding{
+		if classifyFfiRange(ctx, r, fir.Name, byCodeIndex, ffiData) == cluster.FfiDirectionOutbound {
+			result.Findings = append(result.Findings, Finding{
 				CallerFunc: fir.Name,
 				CallerVA:   funcVA,
 				Kind:       "native_call_site",
 			})
 		}
 	})
+	result.Attempted = scanResult.Attempted
+	result.Scanned = scanResult.Scanned
+	result.ScanLimitReached = scanResult.ScanLimitReached
 	if err != nil {
-		return findings, scanned, fmt.Errorf("scan functions: %w", err)
+		return result, fmt.Errorf("scan functions: %w", err)
 	}
-	return findings, scanned, nil
+	return result, nil
 }
 
 func ffiOwnerIndex(ctx *analysis.AnalysisContext) map[int]*cluster.NamedObject {
@@ -155,8 +155,11 @@ func ffiTrampolineIndex(ctx *analysis.AnalysisContext) map[int]cluster.FfiTrampo
 	return out
 }
 
-// isOutboundFfiRange classifies function-level outbound FFI wrappers without
-// conflating them with native-to-Dart callbacks.
+// classifyFfiRange classifies function-level FFI wrappers without conflating
+// outbound Dart->native calls with native->Dart callbacks. A direction is
+// returned only from Function/FfiTrampolineData metadata whose semantics are
+// verified for the exact supported SDK range; ambiguous structural transition
+// markers are never promoted to an outbound claim.
 //
 // The SDK changed representation at Dart 3.3:
 //   - older SDKs use kFfiTrampoline for both directions; FfiTrampolineData's
@@ -172,9 +175,9 @@ func ffiTrampolineIndex(ctx *analysis.AnalysisContext) map[int]cluster.FfiTrampo
 // closure name remains the serialized discriminator for Pointer.asFunction.
 // Unknown/missing metadata is an honest false negative rather than a callback
 // false positive.
-func isOutboundFfiRange(ctx *analysis.AnalysisContext, r cluster.CodeRange, funcName string, byCodeIndex map[int]*cluster.NamedObject, ffiData map[int]cluster.FfiTrampolineInfo) bool {
+func classifyFfiRange(ctx *analysis.AnalysisContext, r cluster.CodeRange, funcName string, byCodeIndex map[int]*cluster.NamedObject, ffiData map[int]cluster.FfiTrampolineInfo) cluster.FfiDirection {
 	if ctx == nil || ctx.Pool == nil {
-		return false
+		return cluster.FfiDirectionUnknown
 	}
 	owner, ok := naming.ResolveCodeOwner(
 		cluster.CodeEntry{RefID: r.RefID, OwnerRef: r.OwnerRef, ClusterIndex: r.Index},
@@ -183,40 +186,33 @@ func isOutboundFfiRange(ctx *analysis.AnalysisContext, r cluster.CodeRange, func
 		ctx.Pool.CT,
 	)
 	if !ok || owner == nil {
-		return false
+		return cluster.FfiDirectionUnknown
 	}
 	if owner.FuncKind == cluster.FunctionKindFfiTrampoline {
-		// Starting in 3.3, kFfiTrampoline is callback-only. Treat it as a
-		// callback even if malformed metadata has a null callback_target; using
-		// the old null-target rule here would turn corrupted modern callback
-		// metadata into a confident outbound finding.
 		if usesModernFfiLowering(ctx.DartVersion) {
-			return false
+			return cluster.FfiDirectionCallback
 		}
 		info, ok := ffiData[owner.DataRefID]
-		return ok && info.CallbackTargetRef == cluster.RefNull
+		if !ok {
+			return cluster.FfiDirectionUnknown
+		}
+		return cluster.ClassifyFfiTrampolineDirection(ctx.DartVersion, info)
 	}
 	if usesModernFfiLowering(ctx.DartVersion) && owner.HasKindTag && owner.IsNative && owner.IsExternal {
-		return true
+		return cluster.FfiDirectionOutbound
 	}
-	return owner.FuncKind == cluster.FunctionKindClosure && looksLikeGeneratedFfiCallClosure(funcName)
+	if usesModernFfiLowering(ctx.DartVersion) && owner.FuncKind == cluster.FunctionKindClosure && looksLikeGeneratedFfiCallClosure(funcName) {
+		return cluster.FfiDirectionOutbound
+	}
+	return cluster.FfiDirectionUnknown
 }
 
-// usesModernFfiLowering is deliberately limited to the verified Dart 3.x
-// boundary. The is_ffi_native predicate and #ffiClosure lowering both appear at
-// 3.3. Unknown future major versions stay unclassified until their SDK layout
-// is verified; in production HasKindTag is also false for unsupported profiles.
+// usesModernFfiLowering is deliberately limited to repository-supported exact
+// versions. The is_ffi_native predicate and #ffiClosure lowering both appear at
+// Dart 3.3.0. Unknown/future versions stay unclassified until their SDK source
+// and snapshot layout have been verified and a profile exists here.
 func usesModernFfiLowering(version string) bool {
-	parts := strings.SplitN(version, ".", 3)
-	if len(parts) < 2 {
-		return false
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil || major != 3 {
-		return false
-	}
-	minor, err := strconv.Atoi(parts[1])
-	return err == nil && minor >= 3
+	return snapshot.ProfileForVersion(version) != nil && snapshot.VersionAtLeast(version, "3.3.0")
 }
 
 // findDynamicLibraryCalls scans one function's blocks for direct calls
@@ -285,7 +281,7 @@ func findDynamicLibraryCalls(ctx *analysis.AnalysisContext, fir *decompiler.Func
 				continue
 			}
 			name, ok := ctx.SymbolNames[va]
-			if !ok || !(looksLikeFfiOpenOrLookup(name) || isLegacyFfiOpenTarget(ctx, va, name)) {
+			if !ok || !(looksLikeFfiOpenOrLookup(name) || isPrivateFfiOpenTarget(ctx, va, name)) {
 				clear(literalByReg)
 				clear(literalByStackSlot)
 				continue
@@ -331,12 +327,13 @@ func looksLikeDynamicLibraryOpen(name string) bool {
 	return containsQualifiedMethod(normalizedRecoveredName(name), "dynamiclibrary.open")
 }
 
-// isLegacyFfiOpenTarget covers the pre-3.3 lowering where a
-// DynamicLibrary.open use site can call dart:ffi's private `_open` patch helper
-// directly. `_open` is too generic to trust by name alone, so require the
+// isPrivateFfiOpenTarget covers dart:ffi's private `_open` patch helper, used
+// by DynamicLibrary.open across the supported range (SDK @2.10.0 and @3.13.0
+// sdk/lib/_internal/vm/lib/ffi_dynamic_library_patch.dart: both factory bodies
+// call `_open`). `_open` is too generic to trust by name alone, so require the
 // resolved function owner to belong to the dart:ffi library as well.
-func isLegacyFfiOpenTarget(ctx *analysis.AnalysisContext, va uint64, name string) bool {
-	if !looksLikeLegacyFfiOpenName(name) || ctx == nil || ctx.Result == nil || ctx.Pool == nil || ctx.Info == nil || ctx.Info.Version == nil {
+func isPrivateFfiOpenTarget(ctx *analysis.AnalysisContext, va uint64, name string) bool {
+	if !looksLikePrivateFfiOpenName(name) || ctx == nil || ctx.Result == nil || ctx.Pool == nil || ctx.Info == nil || ctx.Info.Version == nil {
 		return false
 	}
 	var target cluster.CodeRange
@@ -365,7 +362,7 @@ func isLegacyFfiOpenTarget(ctx *analysis.AnalysisContext, va uint64, name string
 	return resolver.LibraryURLForClassRef(classRef) == "dart:ffi"
 }
 
-func looksLikeLegacyFfiOpenName(name string) bool {
+func looksLikePrivateFfiOpenName(name string) bool {
 	name = normalizedRecoveredName(name)
 	if name == "_open" || strings.HasSuffix(name, "::_open") || strings.HasSuffix(name, "._open") {
 		return true
@@ -684,15 +681,15 @@ func isDynamicLibraryOpenHelperCall(ctx *analysis.AnalysisContext, target string
 		return false
 	}
 	if !strings.HasPrefix(target, "0x") {
-		return looksLikeLegacyFfiOpenName(target)
+		return looksLikePrivateFfiOpenName(target)
 	}
 	va, err := strconv.ParseUint(strings.TrimPrefix(target, "0x"), 16, 64)
 	if err != nil || ctx == nil {
 		return false
 	}
 	name, ok := ctx.SymbolNames[va]
-	if !ok || !looksLikeLegacyFfiOpenName(name) {
+	if !ok || !looksLikePrivateFfiOpenName(name) {
 		return false
 	}
-	return isLegacyFfiOpenTarget(ctx, va, name)
+	return isPrivateFfiOpenTarget(ctx, va, name)
 }

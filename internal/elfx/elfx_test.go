@@ -2,10 +2,8 @@ package elfx
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"debug/elf"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"math"
@@ -82,23 +80,22 @@ func TestOpenValid(t *testing.T) {
 	}
 }
 
-func TestSHA256UsesOpenedFileNotReplacedPath(t *testing.T) {
+func TestSHA256FailsClosedWhenOpenedPathIsReplaced(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not allow renaming this fixture while the opened descriptor lacks delete sharing")
 	}
 	p := writeELF64SymbolFixture(t, elf.SHT_DYNSYM, make([]byte, elf.Sym64Size), []byte("\x00"))
-	original, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ef, err := Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ef.Close()
 
-	// Replace the pathname with a different inode after Open. The already-open
-	// descriptor must remain the provenance source.
+	// Replacing the pathname mutates filesystem metadata for the opened inode on
+	// Unix (ctime), even though the descriptor still refers to the old bytes.
+	// Fingerprinting treats any such post-Open mutation as a stability failure:
+	// returning no identity is safer than proving which metadata-only changes are
+	// harmless while trying to catch same-size writes with restored mtime.
 	oldPath := p + ".opened"
 	if err := os.Rename(p, oldPath); err != nil {
 		t.Fatal(err)
@@ -107,14 +104,8 @@ func TestSHA256UsesOpenedFileNotReplacedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := ef.SHA256()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantSum := sha256.Sum256(original)
-	want := hex.EncodeToString(wantSum[:])
-	if got != want {
-		t.Fatalf("SHA256 after path replacement = %s, want opened-file hash %s", got, want)
+	if got, err := ef.SHA256(); !errors.Is(err, ErrChanged) || got != "" {
+		t.Fatalf("SHA256 after path replacement = %q,%v; want empty + ErrChanged", got, err)
 	}
 }
 

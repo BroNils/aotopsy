@@ -65,6 +65,49 @@ func TestParseHeaderTooShort(t *testing.T) {
 	}
 }
 
+func TestParseIdentityHashIsBoundedAndStrict(t *testing.T) {
+	data := make([]byte, hashOffset+hashLen)
+	copy(data[0:4], snapshotMagic[:])
+	binary.LittleEndian.PutUint64(data[4:12], 60) // total size 64 bytes
+	copy(data[hashOffset:hashOffset+hashLen], []byte("abcdef0123456789abcdef0123456789"))
+
+	got, err := parseIdentityHash(data, 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "abcdef0123456789abcdef0123456789" {
+		t.Fatalf("identity hash = %q", got)
+	}
+
+	badHash := append([]byte(nil), data...)
+	badHash[hashOffset] = 'G'
+	if _, err := parseIdentityHash(badHash, 64, 64); err == nil {
+		t.Fatal("non-hex snapshot hash was accepted")
+	}
+	if _, err := parseIdentityHash(data, 63, 64); err == nil {
+		t.Fatal("declared snapshot larger than symbol was accepted")
+	}
+	if _, err := parseIdentityHash(data, 64, 63); err == nil {
+		t.Fatal("declared snapshot larger than mapped extent was accepted")
+	}
+}
+
+func TestConsistentSnapshotHashRejectsLegacyConflict(t *testing.T) {
+	const (
+		vmHash      = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		isolateHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	if got, err := consistentSnapshotHash(vmHash, isolateHash); err == nil || got != "" {
+		t.Fatalf("conflicting snapshot hashes = %q,%v; want empty + error", got, err)
+	}
+	if got, err := consistentSnapshotHash(vmHash, vmHash); err != nil || got != vmHash {
+		t.Fatalf("matching snapshot hashes = %q,%v; want %q,nil", got, err, vmHash)
+	}
+	if got, err := consistentSnapshotHash("", isolateHash); err != nil || got != isolateHash {
+		t.Fatalf("single surviving snapshot hash = %q,%v; want %q,nil", got, err, isolateHash)
+	}
+}
+
 func TestCapRegionSizePropagatesELFMappingError(t *testing.T) {
 	if size, err := capRegionSize(nil, 0); err == nil || size != 0 {
 		t.Fatalf("capRegionSize(nil) = %#x,%v; want zero + error", size, err)

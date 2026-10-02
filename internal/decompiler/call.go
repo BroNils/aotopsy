@@ -302,27 +302,19 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint string, indent int) bool {
 	e.stats.IndirectCalls++
 
-	// A structural signal, checked before anything else: the target
-	// register was JUST stored into a Thread field (see lift.go's
-	// applyStore) -- Dart AOT's native/FFI-leaf-call bookkeeping idiom
-	// (Thread::vm_tag_offset(), recording what's about to run for the
-	// profiler). No other call convention stores the call target itself
-	// into Thread state right before dispatching it, so this is a
-	// confirmed call kind, not a guess -- takes priority over
-	// selector-hint sniffing.
-	if e.state.Regs[canonReg(targetText)] == ffiCallTargetSentinel {
+	// A structural signal, checked before selector hints: the target register was
+	// just stored into Thread::vm_tag by TransitionGeneratedToNative. This proves
+	// a generated->native transition, but not its FFI direction: the same VM
+	// sequence is used by outbound FfiCall code and by NativeReturn when a
+	// native-to-Dart callback returns to native code.
+	if e.state.Regs[canonReg(targetText)] == nativeTransitionTargetSentinel {
 		e.stats.SemanticIndirectCalls++
-		// Emit typed FFI call with argument count for signature inference.
-		// In a full implementation, this would resolve the FFI signature
-		// from FfiTrampolineData (callback_target → Function → signature).
-		// For now, we emit ffi_call with the args and a comment indicating
-		// this is a native FFI call with N arguments.
 		argCount := countArgs(argsText)
-		e.emit(indent, "final %s = %s%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, FFICallMarker, argsText, argCount)
+		e.emit(indent, "final %s = %s%s); // generated-to-native transition (%d args, Thread vm_tag bookkeeping; direction requires metadata)", tmpName, nativeTransitionCallMarker, argsText, argCount)
 		return true
 	}
 
-	// A second structural signal, same priority as the FFI check above:
+	// A second structural signal, same priority as the native-transition check above:
 	// the target register was just loaded from a KNOWN Thread-cached stub
 	// entry-point offset (see lift.go's ldr/mov THR-stub-offset check) --
 	// Dart AOT's fast path for calling a small set of extremely hot

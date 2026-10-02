@@ -68,7 +68,7 @@ var debugCommands = []Command{
 	{Name: "find-libapp-batch", Short: "Batch find-libapp + report", Run: cmdFindLibappBatch, Debug: true},
 	{Name: "refinfo", Short: "Inspect raw ref IDs / owner chains", Run: cmdRefInfo, Debug: true},
 	{Name: "x64refs", Short: "x86_64 disasm/callers-of/hash-scan", Run: cmdX64Refs, Debug: true},
-	{Name: "fingerprint", Short: "Build-id + Flutter/Dart engine version detection", Run: cmdFingerprint, Debug: true},
+	{Name: "fingerprint", Short: "ELF/snapshot identity + Dart version evidence", Run: cmdFingerprint, Debug: true},
 	{Name: "symbolmap", Short: "Diff a stripped vs unstripped libapp.so's symbols", Run: cmdSymbolMap, Debug: true},
 	{Name: "funcdiff", Short: "Diff functions between two libapp.so builds", Run: cmdFuncDiff, Debug: true},
 	{Name: "decompile-native", Short: "Dart-AOT-aware pseudocode (no Ghidra dependency)", Run: cmdDecompileNative, Debug: true},

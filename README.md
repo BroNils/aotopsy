@@ -201,7 +201,7 @@ See `FRIDA.md` for the full guide.
 aotopsy _debug strings --lib libapp.so --find "X-Signature" --xref   # which function loads this string?
 aotopsy _debug ffi-trace --lib libapp.so --filter MyClass            # dart:ffi call sites
 aotopsy _debug dispatch-table --lib libapp.so --filter MyClass       # dispatch table entries
-aotopsy _debug fingerprint --lib libapp.so                           # build-id and version markers
+aotopsy _debug fingerprint --lib libapp.so                           # ELF/snapshot identity + Dart version evidence
 aotopsy _debug funcdiff --old old.so --new new.so                    # function set diff
 aotopsy _debug symbolmap --stripped lib.so --unstripped debug.so     # resolve stripped targets
 ```
@@ -256,7 +256,7 @@ internal/
   output/             JSONL and SARIF 2.1.0 serialization
   decompiler/         Dart-AOT pseudocode decompiler (both architectures)
   typetrack/          Whole-program type inference and receiver recovery
-  fingerprint/        Build-id and version marker identification
+  fingerprint/        ELF/snapshot identity and bounded version evidence
   funcdiff/           Function-set diffing between builds
   symbolmap/          Stripped-vs-unstripped symbol resolution
   ffitrace/           Static dart:ffi call-site tracing

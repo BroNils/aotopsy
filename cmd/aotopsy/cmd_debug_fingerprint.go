@@ -11,8 +11,8 @@ import (
 )
 
 // cmdFingerprint implements "aotopsy _debug fingerprint --lib <path>":
-// build-id + Flutter/Dart engine version detection, ported from
-// flutterdec's engine_fingerprint.rs but arch-agnostic (ARM64 and x86_64).
+// bounded ELF/snapshot identity facts plus explicitly heuristic Dart
+// Version::String evidence. The JSON keeps those evidence classes separate.
 func cmdFingerprint(args []string) error {
 	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
 	libPath := fs.String("lib", "", "path to supported ELF64 little-endian ET_DYN libapp.so to fingerprint")

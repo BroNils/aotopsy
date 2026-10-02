@@ -297,12 +297,15 @@ func TestTrace_DefaultBoundLimitsScan(t *testing.T) {
 	const numFuncs = analysis.DefaultMaxScan + 50 // deliberately more than the default cap
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned, err := Trace(ctx, Options{}) // no MaxScan, no AllowUnbounded -- must use the default cap
+	res, err := Trace(ctx, Options{}) // no MaxScan, no AllowUnbounded -- must use the default cap
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned == 0 || scanned > analysis.DefaultMaxScan {
-		t.Fatalf("expected Trace to process at most %d functions by default, processed %d", analysis.DefaultMaxScan, scanned)
+	if res.Scanned == 0 || res.Scanned > analysis.DefaultMaxScan {
+		t.Fatalf("expected Trace to process at most %d functions by default, processed %d", analysis.DefaultMaxScan, res.Scanned)
+	}
+	if !res.ScanLimitReached {
+		t.Fatal("default capped trace was presented as complete")
 	}
 }
 
@@ -314,12 +317,12 @@ func TestTrace_AllowUnboundedProcessesEverything(t *testing.T) {
 	const numFuncs = 20
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned, err := Trace(ctx, Options{AllowUnbounded: true})
+	res, err := Trace(ctx, Options{AllowUnbounded: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned != numFuncs {
-		t.Fatalf("expected AllowUnbounded to process all %d functions, processed %d", numFuncs, scanned)
+	if res.Scanned != numFuncs || res.ScanLimitReached {
+		t.Fatalf("expected AllowUnbounded to process all %d functions completely, scanned=%d limited=%v", numFuncs, res.Scanned, res.ScanLimitReached)
 	}
 }
 
@@ -330,24 +333,24 @@ func TestTrace_MaxScanOverridesDefault(t *testing.T) {
 	const explicitMax = 5
 	ctx := syntheticContext(numFuncs)
 
-	_, scanned, err := Trace(ctx, Options{MaxScan: explicitMax})
+	res, err := Trace(ctx, Options{MaxScan: explicitMax})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned != explicitMax {
-		t.Fatalf("expected explicit MaxScan=%d to be honored, processed %d", explicitMax, scanned)
+	if res.Scanned != explicitMax || !res.ScanLimitReached {
+		t.Fatalf("expected explicit MaxScan=%d with truncation, scanned=%d limited=%v", explicitMax, res.Scanned, res.ScanLimitReached)
 	}
 }
 
 func TestTrace_NegativeMaxScanUsesSafetyDefault(t *testing.T) {
 	ctx := syntheticContext(analysis.DefaultMaxScan + 25)
 
-	_, scanned, err := Trace(ctx, Options{MaxScan: -1})
+	res, err := Trace(ctx, Options{MaxScan: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned != analysis.DefaultMaxScan {
-		t.Fatalf("negative MaxScan processed %d functions, want safety default %d", scanned, analysis.DefaultMaxScan)
+	if res.Scanned != analysis.DefaultMaxScan || !res.ScanLimitReached {
+		t.Fatalf("negative MaxScan scanned=%d limited=%v, want safety default %d with truncation", res.Scanned, res.ScanLimitReached, analysis.DefaultMaxScan)
 	}
 }
 
@@ -381,20 +384,20 @@ func TestLooksLikeFfiOpenOrLookupRejectsOtherDynamicLibraryMembers(t *testing.T)
 	}
 }
 
-func TestLooksLikeLegacyFfiOpenNameRequiresExactPrivateHelper(t *testing.T) {
+func TestLooksLikePrivateFfiOpenNameRequiresExactHelper(t *testing.T) {
 	for _, name := range []string{"_open", "_open@8050071_46f50", "dart:ffi::_open"} {
-		if !looksLikeLegacyFfiOpenName(name) {
-			t.Errorf("expected legacy dart:ffi open spelling %q to be recognized", name)
+		if !looksLikePrivateFfiOpenName(name) {
+			t.Errorf("expected private dart:ffi open spelling %q to be recognized", name)
 		}
 	}
 	for _, name := range []string{"_openLibrary@8050071_46f50", "reopen@8050071_46f50", "_open@notdigits_46f50"} {
-		if looksLikeLegacyFfiOpenName(name) {
-			t.Errorf("legacy open name false positive for %q", name)
+		if looksLikePrivateFfiOpenName(name) {
+			t.Errorf("private open name false positive for %q", name)
 		}
 	}
 }
 
-func TestIsOutboundFfiRangeDistinguishesCallbacksAndModernClosures(t *testing.T) {
+func TestClassifyFfiRangeDistinguishesCallbacksAndModernClosures(t *testing.T) {
 	ffiOwner := &cluster.NamedObject{CID: 99, RefID: 41, DataRefID: 90, FuncKind: cluster.FunctionKindFfiTrampoline}
 	ctx := &analysis.AnalysisContext{
 		DartVersion: "3.2.5",
@@ -407,35 +410,41 @@ func TestIsOutboundFfiRangeDistinguishesCallbacksAndModernClosures(t *testing.T)
 	data := map[int]cluster.FfiTrampolineInfo{
 		90: {RefID: 90, CallbackTargetRef: cluster.RefNull},
 	}
-	if !isOutboundFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data) {
-		t.Fatal("old outbound FFI trampoline with null callback target was not recognized")
+	class := classifyFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data)
+	if class != cluster.FfiDirectionOutbound {
+		t.Fatalf("old outbound FFI trampoline classification = %q", class)
 	}
 
 	data[90] = cluster.FfiTrampolineInfo{RefID: 90, CallbackTargetRef: 77}
-	if isOutboundFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data) {
-		t.Fatal("native-to-Dart callback trampoline was misclassified as outbound FFI")
+	class = classifyFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data)
+	if class != cluster.FfiDirectionCallback {
+		t.Fatalf("native-to-Dart callback classification = %q", class)
 	}
 	delete(data, 90)
-	if isOutboundFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data) {
-		t.Fatal("FFI trampoline with missing direction metadata must stay unresolved")
+	class = classifyFfiRange(ctx, r, "FfiTrampoline_main_47970", nil, data)
+	if class != cluster.FfiDirectionUnknown {
+		t.Fatalf("FFI trampoline with missing direction metadata = %q; must stay unresolved", class)
 	}
 
 	// Dart 3.3+ kFfiTrampoline is callback-only. Even malformed modern metadata
 	// with a null callback_target must not revive the old outbound rule.
 	ctx.DartVersion = "3.13.0"
 	data[90] = cluster.FfiTrampolineInfo{RefID: 90, CallbackTargetRef: cluster.RefNull}
-	if isOutboundFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data) {
-		t.Fatal("modern callback trampoline with malformed null target was misclassified as outbound FFI")
+	class = classifyFfiRange(ctx, r, "_FfiCallbackcallback_123", nil, data)
+	if class != cluster.FfiDirectionCallback {
+		t.Fatalf("modern callback trampoline classification = %q; malformed null target must not revive outbound", class)
 	}
 
 	closureOwner := &cluster.NamedObject{CID: 99, RefID: 42, FuncKind: cluster.FunctionKindClosure}
 	ctx.Pool.RefToNamed[42] = closureOwner
 	r.OwnerRef = 42
-	if !isOutboundFfiRange(ctx, r, "main.#ffiClosure0_3e2f0", nil, data) {
-		t.Fatal("modern compiler-generated #ffiClosure was not recognized")
+	class = classifyFfiRange(ctx, r, "main.#ffiClosure0_3e2f0", nil, data)
+	if class != cluster.FfiDirectionOutbound {
+		t.Fatalf("modern compiler-generated #ffiClosure classification = %q", class)
 	}
-	if isOutboundFfiRange(ctx, r, "main.<anonymous closure>_3e2f0", nil, data) {
-		t.Fatal("ordinary closure was misclassified as outbound FFI")
+	class = classifyFfiRange(ctx, r, "main.<anonymous closure>_3e2f0", nil, data)
+	if class != cluster.FfiDirectionUnknown {
+		t.Fatalf("ordinary closure classification = %q", class)
 	}
 
 	// @Native functions are ordinary Functions whose kind_tag carries the
@@ -446,23 +455,27 @@ func TestIsOutboundFfiRangeDistinguishesCallbacksAndModernClosures(t *testing.T)
 	}
 	ctx.Pool.RefToNamed[43] = nativeOwner
 	r.OwnerRef = 43
-	if !isOutboundFfiRange(ctx, r, "nativeAssetEntry_123", nil, data) {
-		t.Fatal("3.13 @Native/is_ffi_native function was not recognized")
+	class = classifyFfiRange(ctx, r, "nativeAssetEntry_123", nil, data)
+	if class != cluster.FfiDirectionOutbound {
+		t.Fatalf("3.13 @Native/is_ffi_native classification = %q", class)
 	}
 
 	nativeOwner.IsExternal = false
-	if isOutboundFfiRange(ctx, r, "oldNativeEntry_123", nil, data) {
-		t.Fatal("native but non-external function was misclassified as @Native FFI")
+	class = classifyFfiRange(ctx, r, "oldNativeEntry_123", nil, data)
+	if class != cluster.FfiDirectionUnknown {
+		t.Fatalf("native but non-external function classification = %q", class)
 	}
 	nativeOwner.IsExternal = true
 	nativeOwner.HasKindTag = false
-	if isOutboundFfiRange(ctx, r, "missingKindTag_123", nil, data) {
-		t.Fatal("uncaptured kind_tag flags were trusted as @Native FFI")
+	class = classifyFfiRange(ctx, r, "missingKindTag_123", nil, data)
+	if class != cluster.FfiDirectionUnknown {
+		t.Fatalf("uncaptured kind_tag flags classification = %q", class)
 	}
 	nativeOwner.HasKindTag = true
 	ctx.DartVersion = "3.2.5"
-	if isOutboundFfiRange(ctx, r, "preNativeLowering_123", nil, data) {
-		t.Fatal("pre-3.3 native/external flags were interpreted with unverified @Native semantics")
+	class = classifyFfiRange(ctx, r, "preNativeLowering_123", nil, data)
+	if class != cluster.FfiDirectionUnknown {
+		t.Fatalf("pre-3.3 native/external classification = %q", class)
 	}
 }
 
@@ -472,7 +485,7 @@ func TestUsesModernFfiLoweringVersionBoundary(t *testing.T) {
 			t.Errorf("usesModernFfiLowering(%q) = false, want true", version)
 		}
 	}
-	for _, version := range []string{"", "3", "3.2.5", "2.19.0", "4.0.0", "not-a-version"} {
+	for _, version := range []string{"", "3", "3.2.5", "2.19.0", "3.99.0", "4.0.0", "not-a-version"} {
 		if usesModernFfiLowering(version) {
 			t.Errorf("usesModernFfiLowering(%q) = true, want false", version)
 		}
@@ -515,14 +528,14 @@ func TestTrace_FilterOnlyProcessesMatchingNames(t *testing.T) {
 	}
 	ctx.SymbolNames[0x1008] = "target_match"
 
-	findings, scanned, err := Trace(ctx, Options{Filter: "target_"})
+	res, err := Trace(ctx, Options{Filter: "target_"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned != 1 {
-		t.Fatalf("filtered scan processed %d functions, want 1", scanned)
+	if res.Scanned != 1 || res.ScanLimitReached {
+		t.Fatalf("filtered scan scanned=%d limited=%v, want one complete match", res.Scanned, res.ScanLimitReached)
 	}
-	for _, f := range findings {
+	for _, f := range res.Findings {
 		if !strings.Contains(f.CallerFunc, "target_") {
 			t.Fatalf("filtered scan leaked finding from %q", f.CallerFunc)
 		}

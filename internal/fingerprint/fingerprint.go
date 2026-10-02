@@ -1,8 +1,7 @@
-// Package fingerprint identifies the build-id, target architecture, and
-// Flutter/Dart engine version markers embedded in a native library, without
-// needing any Dart-snapshot-aware parsing. Ported from flutterdec's
-// engine_fingerprint.rs (Rust), generalized to work for any ELF machine
-// type aotopsy's elfx package accepts (ARM64, x86_64), not just ARM64.
+// Package fingerprint reports bounded, source-grounded identity evidence from
+// a Dart AOT ELF. Exact file/build/snapshot identities are kept separate from
+// heuristic Dart version banners so repeated copies of Version::String() cannot
+// manufacture high-confidence SDK identity.
 package fingerprint
 
 import (
@@ -11,36 +10,61 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/snapshot"
 )
 
-// Confidence levels for the detected version/build markers.
+// VersionConfidence describes only the inferred Dart SDK version. Snapshot
+// hashes and build IDs are exact identities but are deliberately not translated
+// into an exact Dart version here: snapshot.DetectVersion selects parser
+// profiles and is not an identity oracle for every hash.
 const (
-	ConfidenceHigh   = "high"
-	ConfidenceMedium = "medium"
-	ConfidenceLow    = "low"
+	VersionConfidenceUnknown    = "unknown"
+	VersionConfidenceHeuristic  = "heuristic"
+	VersionConfidenceConflicted = "conflicted"
 )
+
+// VersionEvidence is one source that produced a Dart Version::String()-shaped
+// version. Both supported sources are heuristic for application identity: a
+// mapped printable string can be application data, while DW_AT_producer is
+// structured but is generated from the same Version::String() value and is not
+// independent corroboration.
+type VersionEvidence struct {
+	Source  string `json:"source"`
+	Version string `json:"version"`
+	Arch    string `json:"arch,omitempty"`
+}
 
 // Report is the fingerprint result for a single ELF file.
 type Report struct {
-	Path              string   `json:"path"`
-	Machine           string   `json:"machine"`
-	FileSHA256        string   `json:"file_sha256"`
-	BuildID           string   `json:"build_id,omitempty"`
-	FlutterVersion    string   `json:"flutter_version,omitempty"`
-	DartVersion       string   `json:"dart_version,omitempty"`
-	DartArch          string   `json:"dart_arch,omitempty"`
-	FlutterMarkers    []string `json:"flutter_markers,omitempty"`
-	DartMarkers       []string `json:"dart_markers,omitempty"`
-	EvidenceConflicts []string `json:"evidence_conflicts,omitempty"`
-	Confidence        string   `json:"confidence"`
-	FileSize          int64    `json:"file_size"`
-	ExecSectionSize   uint64   `json:"exec_section_size"`
+	Path                 string            `json:"path"`
+	Machine              string            `json:"machine"`
+	ELFClass             string            `json:"elf_class"`
+	FileSHA256           string            `json:"file_sha256"`
+	BuildID              string            `json:"build_id,omitempty"`
+	BuildIDSource        string            `json:"build_id_source,omitempty"`
+	SnapshotHash         string            `json:"snapshot_hash,omitempty"`
+	SnapshotLayout       string            `json:"snapshot_layout,omitempty"`
+	DartVersion          string            `json:"dart_version,omitempty"`
+	DartArch             string            `json:"dart_arch,omitempty"`
+	VersionEvidence      []VersionEvidence `json:"version_evidence,omitempty"`
+	DartMarkers          []string          `json:"dart_markers,omitempty"`
+	FlutterMarkers       []string          `json:"flutter_markers,omitempty"` // diagnostic only; never version evidence
+	EvidenceConflicts    []string          `json:"evidence_conflicts,omitempty"`
+	EvidenceLimitations  []string          `json:"evidence_limitations,omitempty"`
+	VersionConfidence    string            `json:"version_confidence"`
+	FileSize             int64             `json:"file_size"`
+	MappedExecutableSize uint64            `json:"mapped_executable_size"`
+	MarkerScanBytes      uint64            `json:"marker_scan_bytes"`
+	MarkerScanComplete   bool              `json:"marker_scan_complete"`
+	DWARFLogicalBytes    uint64            `json:"dwarf_logical_bytes"`
+	DWARFScanComplete    bool              `json:"dwarf_scan_complete"`
 }
 
 // Run fingerprints the ELF file at path.
@@ -54,6 +78,7 @@ func Run(path string) (*Report, error) {
 	rep := &Report{
 		Path:     path,
 		Machine:  machineName(ef.Machine()),
+		ELFClass: className(ef.Class()),
 		FileSize: ef.FileSize(),
 	}
 	rep.FileSHA256, err = ef.SHA256()
@@ -62,25 +87,63 @@ func Run(path string) (*Report, error) {
 	}
 
 	var buildConflicts []string
-	rep.BuildID, buildConflicts, err = extractBuildID(ef)
+	rep.BuildID, rep.BuildIDSource, buildConflicts, err = extractBuildID(ef)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: build-id: %w", err)
 	}
 	rep.EvidenceConflicts = append(rep.EvidenceConflicts, buildConflicts...)
 
-	for _, s := range ef.Sections() {
-		if s.Flags&elf.SHF_EXECINSTR != 0 {
-			if rep.ExecSectionSize > ^uint64(0)-s.Size {
-				return nil, fmt.Errorf("fingerprint: executable section size overflow")
-			}
-			rep.ExecSectionSize += s.Size
+	identity, identityErr := snapshot.ExtractIdentity(ef)
+	switch {
+	case identityErr == nil:
+		rep.SnapshotHash = identity.SnapshotHash
+		if identity.Unified {
+			rep.SnapshotLayout = "unified"
+		} else {
+			rep.SnapshotLayout = "legacy"
+		}
+	case errors.Is(identityErr, snapshot.ErrNoSnapshotSymbols):
+		rep.EvidenceLimitations = append(rep.EvidenceLimitations, "snapshot identity unavailable: no supported snapshot symbols")
+	default:
+		return nil, fmt.Errorf("fingerprint: snapshot identity: %w", identityErr)
+	}
+
+	for _, p := range ef.LoadSegments() {
+		if p.Flags&elf.PF_X == 0 || p.Filesz == 0 {
+			continue
+		}
+		if rep.MappedExecutableSize > ^uint64(0)-p.Filesz {
+			return nil, fmt.Errorf("fingerprint: mapped executable size overflow")
+		}
+		rep.MappedExecutableSize += p.Filesz
+	}
+
+	loadSegments := ef.LoadSegments()
+	markerBytes, markerComplete, err := mappedScanExtent(ef, maxMarkerScanBytes)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: mapped scan extent: %w", err)
+	}
+	rep.MarkerScanBytes = markerBytes
+	rep.MarkerScanComplete = markerComplete
+	if !markerComplete {
+		if len(loadSegments) == 0 {
+			rep.EvidenceLimitations = append(rep.EvidenceLimitations,
+				"mapped marker scan unavailable: ELF has no file-backed PT_LOAD segments")
+		} else {
+			rep.EvidenceLimitations = append(rep.EvidenceLimitations,
+				fmt.Sprintf("mapped marker scan truncated at %d bytes", maxMarkerScanBytes))
 		}
 	}
 
-	// Provenance banners are runtime data. Scan only file-backed bytes that the
-	// ELF maps into memory, never arbitrary appended bytes after the last segment.
-	// The reader is streaming and aggregate-capped inside elfx.
-	markers, err := scanEngineMarkers(ef.MappedReader(maxMarkerScanBytes))
+	// Provenance banners are runtime data. Scan only file-backed PT_LOAD bytes,
+	// never arbitrary appended bytes or section-table-only SHF_ALLOC fallbacks.
+	// elfx.MappedReader has a useful no-PT_LOAD fallback for other callers, so
+	// fingerprint explicitly disables that fallback here.
+	markerReader := io.Reader(bytes.NewReader(nil))
+	if len(loadSegments) != 0 {
+		markerReader = ef.MappedReader(maxMarkerScanBytes)
+	}
+	markers, err := scanEngineMarkers(markerReader)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: scan markers: %w", err)
 	}
@@ -88,23 +151,34 @@ func Run(path string) (*Report, error) {
 	// sections are not mapped, so they cannot be included in the PT_LOAD trust
 	// boundary above; parse that one structured field through debug/dwarf rather
 	// than falling back to arbitrary raw-file strings.
-	producerVersions, producerArchs, producerMarkers, err := scanDartDWARFProducers(ef)
+	producerEvidence, producerMarkers, dwarfStatus, err := scanDartDWARFProducers(ef)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: structured DWARF evidence: %w", err)
 	}
-	mergeStructuredDartEvidence(&markers, producerVersions, producerArchs, producerMarkers)
+	rep.DWARFLogicalBytes = dwarfStatus.LogicalBytes
+	rep.DWARFScanComplete = dwarfStatus.Complete
+	if dwarfStatus.Limitation != "" {
+		rep.EvidenceLimitations = append(rep.EvidenceLimitations, dwarfStatus.Limitation)
+	}
+	mergeDiagnosticMarkers(&markers, producerMarkers)
 	rep.FlutterMarkers = markers.FlutterMarkers
 	rep.DartMarkers = markers.DartMarkers
-	rep.FlutterVersion = markers.FlutterVersion
-	rep.DartVersion = markers.DartVersion
-	rep.DartArch = markers.DartArch
-	rep.EvidenceConflicts = append(rep.EvidenceConflicts, markers.Conflicts...)
+	rep.VersionEvidence = append(rep.VersionEvidence, markers.VersionEvidence...)
+	rep.VersionEvidence = append(rep.VersionEvidence, producerEvidence...)
+	rep.VersionEvidence = normalizeVersionEvidence(rep.VersionEvidence)
+	var versionConflicts []string
+	rep.DartVersion, rep.DartArch, versionConflicts = consensusVersionEvidence(rep.VersionEvidence, nil)
+	rep.EvidenceConflicts = append(rep.EvidenceConflicts, versionConflicts...)
 	if rep.DartArch != "" && !machineMatchesDartArch(ef.Machine(), ef.Class(), rep.DartArch) {
-		rep.EvidenceConflicts = append(rep.EvidenceConflicts,
-			fmt.Sprintf("Dart banner architecture %q contradicts ELF machine %s", rep.DartArch, ef.Machine()))
+		conflict := fmt.Sprintf("Dart banner architecture %q contradicts ELF machine %s/%s", rep.DartArch, ef.Machine(), ef.Class())
+		rep.EvidenceConflicts = append(rep.EvidenceConflicts, conflict)
+		versionConflicts = append(versionConflicts, conflict)
 	}
-
-	rep.Confidence = confidenceLevel(rep.DartVersion != "", rep.FlutterVersion != "", len(rep.EvidenceConflicts) != 0)
+	sort.Strings(rep.EvidenceConflicts)
+	rep.EvidenceConflicts = dedupeStrings(rep.EvidenceConflicts)
+	sort.Strings(rep.EvidenceLimitations)
+	rep.EvidenceLimitations = dedupeStrings(rep.EvidenceLimitations)
+	rep.VersionConfidence = versionConfidence(rep.DartVersion != "", len(versionConflicts) != 0)
 
 	return rep, nil
 }
@@ -114,45 +188,60 @@ const (
 	maxDWARFEntries = 200000
 )
 
+type dwarfScanStatus struct {
+	LogicalBytes uint64
+	Complete     bool
+	Limitation   string
+}
+
 // scanDartDWARFProducers extracts only structured DW_AT_producer strings. It
 // refuses legacy .zdebug sections (whose compressed size is not a trustworthy
 // bound) and caps aggregate uncompressed modern DWARF size before asking the Go
-// DWARF decoder to materialize it.
-func scanDartDWARFProducers(ef *elfx.File) (versions, archs map[string]bool, markers []string, err error) {
-	versions = make(map[string]bool, 2)
-	archs = make(map[string]bool, 2)
+// DWARF decoder to materialize it. SDK @3.5.0 runtime/vm/dwarf.cc:276 writes
+// only "Dart VM"; @3.6.2:281-282 and @3.13.0:258-259 write
+// `Dart <Version::String()>`, so only the latter shape carries version evidence.
+func scanDartDWARFProducers(ef *elfx.File) (evidence []VersionEvidence, markers []string, status dwarfScanStatus, err error) {
+	status.Complete = true
 	var total uint64
 	hasInfo := false
 	for _, s := range ef.Sections() {
-		if strings.HasPrefix(s.Name, ".zdebug") {
-			return versions, archs, nil, nil
+		if strings.HasPrefix(s.Name, ".zdebug_") {
+			status.Complete = false
+			status.LogicalBytes = total
+			status.Limitation = "DWARF producer scan skipped: legacy .zdebug_* compression has no trusted uncompressed-size bound"
+			return nil, nil, status, nil
 		}
 		if !strings.HasPrefix(s.Name, ".debug_") {
 			continue
 		}
 		if s.Size > maxDWARFBytes || total > maxDWARFBytes-s.Size {
-			return versions, archs, nil, nil
+			status.Complete = false
+			status.LogicalBytes = total
+			status.Limitation = fmt.Sprintf("DWARF producer scan skipped: logical debug data exceeds %d-byte budget", maxDWARFBytes)
+			return nil, nil, status, nil
 		}
 		total += s.Size
 		if s.Name == ".debug_info" {
 			hasInfo = true
 		}
 	}
+	status.LogicalBytes = total
 	if !hasInfo || total == 0 {
-		return versions, archs, nil, nil
+		return nil, nil, status, nil
 	}
 
 	d, err := ef.DWARF()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, status, err
 	}
 	r := d.Reader()
 	seenMarkers := make(map[string]bool)
+	seenEvidence := make(map[string]bool, 2)
 	entries := 0
 	for ; entries < maxDWARFEntries; entries++ {
 		entry, err := r.Next()
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, status, err
 		}
 		if entry == nil {
 			break
@@ -165,8 +254,11 @@ func scanDartDWARFProducers(ef *elfx.File) (versions, archs map[string]bool, mar
 		if !ok {
 			continue
 		}
-		addEvidenceValue(versions, v)
-		addEvidenceValue(archs, arch)
+		key := v + "\x00" + arch
+		if !seenEvidence[key] && len(seenEvidence) < 2 {
+			seenEvidence[key] = true
+			evidence = append(evidence, VersionEvidence{Source: "dwarf_producer", Version: v, Arch: arch})
+		}
 		if !seenMarkers[producer] && len(markers) < 2 {
 			seenMarkers[producer] = true
 			markers = append(markers, producer)
@@ -175,17 +267,17 @@ func scanDartDWARFProducers(ef *elfx.File) (versions, archs map[string]bool, mar
 	if entries == maxDWARFEntries {
 		entry, err := r.Next()
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, status, err
 		}
 		if entry != nil {
-			return nil, nil, nil, fmt.Errorf("DWARF entry count exceeds limit %d", maxDWARFEntries)
+			return nil, nil, status, fmt.Errorf("DWARF entry count exceeds limit %d", maxDWARFEntries)
 		}
 	}
 	sort.Strings(markers)
-	return versions, archs, markers, nil
+	return evidence, markers, status, nil
 }
 
-func mergeStructuredDartEvidence(result *markerScanResult, versions, archs map[string]bool, markers []string) {
+func mergeDiagnosticMarkers(result *markerScanResult, markers []string) {
 	if result == nil {
 		return
 	}
@@ -202,49 +294,6 @@ func mergeStructuredDartEvidence(result *markerScanResult, versions, archs map[s
 		}
 	}
 	sort.Strings(result.DartMarkers)
-
-	result.DartVersion, result.Conflicts = mergeSingleEvidence(
-		"Dart version", result.DartVersion, versions, result.Conflicts)
-	result.DartArch, result.Conflicts = mergeSingleEvidence(
-		"Dart architecture", result.DartArch, archs, result.Conflicts)
-}
-
-func mergeSingleEvidence(label, current string, extra map[string]bool, conflicts []string) (string, []string) {
-	value, extraConflicts := singleEvidenceValue(label, extra, nil)
-	for _, c := range extraConflicts {
-		conflicts = appendUniqueString(conflicts, c)
-	}
-	if value == "" {
-		return current, conflicts
-	}
-	// If the raw/mapped evidence was already internally contradictory, a
-	// structured producer cannot make that contradiction disappear.
-	conflictPrefix := "conflicting " + label + " markers:"
-	for _, c := range conflicts {
-		if strings.HasPrefix(c, conflictPrefix) {
-			return "", conflicts
-		}
-	}
-	if current == "" {
-		return value, conflicts
-	}
-	if current == value {
-		return current, conflicts
-	}
-	values := []string{current, value}
-	sort.Strings(values)
-	conflicts = appendUniqueString(conflicts,
-		fmt.Sprintf("conflicting %s markers: %s", label, strings.Join(values, ", ")))
-	return "", conflicts
-}
-
-func appendUniqueString(values []string, value string) []string {
-	for _, v := range values {
-		if v == value {
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func machineName(m elf.Machine) string {
@@ -258,12 +307,30 @@ func machineName(m elf.Machine) string {
 	}
 }
 
+func className(c elf.Class) string {
+	switch c {
+	case elf.ELFCLASS64:
+		return "ELF64"
+	case elf.ELFCLASS32:
+		return "ELF32"
+	default:
+		return fmt.Sprintf("unknown(0x%x)", uint8(c))
+	}
+}
+
 // extractBuildID hand-parses the ELF note format looking for NT_GNU_BUILD_ID
-// (type 3, owner "GNU"). Program headers are authoritative for runtime ELF
-// notes and survive section stripping, so PT_NOTE is checked first. SHT_NOTE is
-// a fallback for relocatable/debug artifacts that retain sections. Section
-// *names* are deliberately irrelevant: a PROGBITS section called "denote" is
-// not an ELF note and must never be trusted as a build-id source.
+// (type 3, owner "GNU"). PT_NOTE is the primary ET_DYN source. A SHT_NOTE
+// corroborator/fallback is accepted only when SHF_ALLOC metadata and the
+// section's VA/offset/size agree with a unique file-backed PT_LOAD mapping.
+// Conflicting primary/corroborating IDs are reported instead of choosing one.
+// Dead section-table bytes are never identity evidence.
+//
+// Dart emits this exact GNU-note shape and exposes the same allocated note as
+// _kDartSnapshotBuildId: SDK @2.10.0 runtime/vm/elf.cc:1183-1197,
+// 1246-1264,1294-1324; @3.13.0 runtime/vm/elf.cc:1525-1529,
+// 1696-1758. Descriptor length is intentionally not fixed here because the SDK
+// has changed the build-id hash composition while retaining valid GNU-note
+// framing.
 
 const (
 	maxNoteBytes        = 1 << 20
@@ -272,15 +339,16 @@ const (
 	maxMarkerScanBytes  = 512 << 20
 )
 
-func extractBuildID(ef *elfx.File) (string, []string, error) {
-	ids := make(map[string]bool, 2)
-	addIDs := func(found []string) {
+func extractBuildID(ef *elfx.File) (id, source string, conflicts []string, err error) {
+	ptIDs := make(map[string]bool, 2)
+	mappedSectionIDs := make(map[string]bool, 2)
+	addIDs := func(dst map[string]bool, found []string) {
 		for _, id := range found {
-			if id == "" || ids[id] {
+			if id == "" || dst[id] {
 				continue
 			}
-			if len(ids) < 2 {
-				ids[id] = true
+			if len(dst) < 2 {
+				dst[id] = true
 			}
 		}
 	}
@@ -291,58 +359,101 @@ func extractBuildID(ef *elfx.File) (string, []string, error) {
 		}
 		progRegions++
 		if progRegions > maxNoteRegions {
-			return "", nil, fmt.Errorf("PT_NOTE count exceeds limit %d", maxNoteRegions)
+			return "", "", nil, fmt.Errorf("PT_NOTE count exceeds limit %d", maxNoteRegions)
 		}
 		if p.Filesz > maxNoteBytes {
-			return "", nil, fmt.Errorf("PT_NOTE %d size %d exceeds limit %d", p.Index, p.Filesz, maxNoteBytes)
+			return "", "", nil, fmt.Errorf("PT_NOTE %d size %d exceeds limit %d", p.Index, p.Filesz, maxNoteBytes)
 		}
 		data, err := ef.ReadProgram(p.Index, maxNoteBytes)
 		if err != nil {
-			return "", nil, fmt.Errorf("read PT_NOTE %d: %w", p.Index, err)
+			return "", "", nil, fmt.Errorf("read PT_NOTE %d: %w", p.Index, err)
 		}
 		found, err := parseBuildIDNotes(data, binary.LittleEndian)
 		if err != nil {
-			return "", nil, fmt.Errorf("parse PT_NOTE %d: %w", p.Index, err)
+			return "", "", nil, fmt.Errorf("parse PT_NOTE %d: %w", p.Index, err)
 		}
-		addIDs(found)
+		addIDs(ptIDs, found)
 	}
+
+	// Corroborate PT_NOTE with only note sections that are themselves
+	// runtime-mapped. If PT_NOTE is absent this also serves as the bounded
+	// fallback. Arbitrary section-table-only notes are an attacker-controlled
+	// append surface and are intentionally ignored.
 	sectionRegions := 0
 	for _, s := range ef.Sections() {
-		if s.Type != elf.SHT_NOTE {
+		if s.Type != elf.SHT_NOTE || s.Size == 0 || strings.HasPrefix(s.Name, ".zdebug_") {
+			continue
+		}
+		if !sectionIsMappedFileBacked(ef, s) {
 			continue
 		}
 		sectionRegions++
 		if sectionRegions > maxNoteRegions {
-			return "", nil, fmt.Errorf("SHT_NOTE count exceeds limit %d", maxNoteRegions)
-		}
-		if strings.HasPrefix(s.Name, ".zdebug") {
-			continue
+			return "", "", nil, fmt.Errorf("mapped SHT_NOTE count exceeds limit %d", maxNoteRegions)
 		}
 		if s.Size > maxNoteBytes {
-			return "", nil, fmt.Errorf("SHT_NOTE %q size %d exceeds limit %d", s.Name, s.Size, maxNoteBytes)
+			return "", "", nil, fmt.Errorf("mapped SHT_NOTE %q size %d exceeds limit %d", s.Name, s.Size, maxNoteBytes)
 		}
 		data, err := ef.ReadSection(s.Index, maxNoteBytes)
 		if err != nil {
-			return "", nil, fmt.Errorf("read SHT_NOTE %q: %w", s.Name, err)
+			return "", "", nil, fmt.Errorf("read mapped SHT_NOTE %q: %w", s.Name, err)
 		}
 		found, err := parseBuildIDNotes(data, binary.LittleEndian)
 		if err != nil {
-			return "", nil, fmt.Errorf("parse SHT_NOTE %q: %w", s.Name, err)
+			return "", "", nil, fmt.Errorf("parse mapped SHT_NOTE %q: %w", s.Name, err)
 		}
-		addIDs(found)
+		addIDs(mappedSectionIDs, found)
 	}
+	return resolveBuildIDEvidence(ptIDs, mappedSectionIDs)
+}
+
+func sectionIsMappedFileBacked(ef *elfx.File, s elfx.SectionInfo) bool {
+	if ef == nil || s.Flags&elf.SHF_ALLOC == 0 || s.Type == elf.SHT_NOBITS || s.Size == 0 {
+		return false
+	}
+	off, err := ef.VAToFileOffset(s.Addr)
+	if err != nil || off != s.Offset {
+		return false
+	}
+	remaining, err := ef.FileBackedRemaining(s.Addr)
+	return err == nil && s.Size <= remaining
+}
+
+func sortedBuildIDs(ids map[string]bool) []string {
 	keys := make([]string, 0, len(ids))
 	for id := range ids {
 		keys = append(keys, id)
 	}
 	sort.Strings(keys)
-	switch len(keys) {
-	case 0:
-		return "", nil, nil
-	case 1:
-		return keys[0], nil, nil
+	return keys
+
+}
+
+func resolveBuildIDEvidence(ptIDs, mappedSectionIDs map[string]bool) (string, string, []string, error) {
+	pt := sortedBuildIDs(ptIDs)
+	sht := sortedBuildIDs(mappedSectionIDs)
+	var conflicts []string
+	if len(pt) > 1 {
+		conflicts = append(conflicts, fmt.Sprintf("conflicting GNU build-id notes from pt_note: %s", strings.Join(pt, ", ")))
+	}
+	if len(sht) > 1 {
+		conflicts = append(conflicts, fmt.Sprintf("conflicting GNU build-id notes from mapped_sht_note: %s", strings.Join(sht, ", ")))
+	}
+	if len(conflicts) != 0 {
+		return "", "", conflicts, nil
+	}
+	switch {
+	case len(pt) == 1 && len(sht) == 1:
+		if pt[0] != sht[0] {
+			return "", "", []string{fmt.Sprintf("conflicting GNU build-id evidence: pt_note=%s mapped_sht_note=%s", pt[0], sht[0])}, nil
+		}
+		return pt[0], "pt_note+mapped_sht_note", nil, nil
+	case len(pt) == 1:
+		return pt[0], "pt_note", nil, nil
+	case len(sht) == 1:
+		return sht[0], "mapped_sht_note", nil, nil
 	default:
-		return "", []string{fmt.Sprintf("conflicting GNU build-id notes: %s", strings.Join(keys, ", "))}, nil
+		return "", "", nil, nil
 	}
 }
 
@@ -433,22 +544,17 @@ func align4(n int) int {
 // (dart: URIs, "Dart SDK", snapshot labels) are retained as diagnostic markers,
 // but VERSION FIELDS are populated only from evidence-specific banner shapes.
 // This prevents an unrelated semver/IP such as 127.0.0 inside a dart: string
-// from being promoted to a high-confidence Dart version.
+// from being promoted to Dart version evidence.
 type markerScanResult struct {
-	FlutterMarkers []string
-	DartMarkers    []string
-	FlutterVersion string
-	DartVersion    string
-	DartArch       string
-	Conflicts      []string
+	FlutterMarkers  []string
+	DartMarkers     []string
+	VersionEvidence []VersionEvidence
 }
 
 func scanEngineMarkers(r io.Reader) (markerScanResult, error) {
 	seenFlutter := make(map[string]bool)
 	seenDart := make(map[string]bool)
-	flutterVersions := make(map[string]bool)
-	dartVersions := make(map[string]bool)
-	dartArchs := make(map[string]bool)
+	seenEvidence := make(map[string]bool, 2)
 	var result markerScanResult
 
 	consume := func(s string) {
@@ -459,15 +565,14 @@ func scanEngineMarkers(r io.Reader) (markerScanResult, error) {
 			strings.Contains(lower, "vm snapshot")
 
 		if v, arch, ok := dartBannerEvidence(s); ok {
-			addEvidenceValue(dartVersions, v)
-			if arch != "" {
-				addEvidenceValue(dartArchs, arch)
+			key := v + "\x00" + arch
+			if !seenEvidence[key] && len(seenEvidence) < 2 {
+				seenEvidence[key] = true
+				result.VersionEvidence = append(result.VersionEvidence, VersionEvidence{
+					Source: "mapped_dart_banner", Version: v, Arch: arch,
+				})
 			}
 			isDart = true
-		}
-		if v := flutterVersionFromBanner(s); v != "" {
-			addEvidenceValue(flutterVersions, v)
-			isFlutter = true
 		}
 		if isFlutter && !seenFlutter[s] && len(seenFlutter) < maxMarkersPerFamily {
 			seenFlutter[s] = true
@@ -519,112 +624,25 @@ func scanEngineMarkers(r io.Reader) (markerScanResult, error) {
 	flush()
 	sort.Strings(result.FlutterMarkers)
 	sort.Strings(result.DartMarkers)
-	result.FlutterVersion, result.Conflicts = singleEvidenceValue("Flutter version", flutterVersions, result.Conflicts)
-	result.DartVersion, result.Conflicts = singleEvidenceValue("Dart version", dartVersions, result.Conflicts)
-	result.DartArch, result.Conflicts = singleEvidenceValue("Dart architecture", dartArchs, result.Conflicts)
 	return result, nil
 }
 
-func addEvidenceValue(values map[string]bool, value string) {
-	if value == "" || values[value] {
-		return
-	}
-	// Two distinct values are sufficient to prove a conflict. Keeping an
-	// attacker-controlled third, fourth, ... value only amplifies memory/sort
-	// work and conflict-string size without adding information.
-	if len(values) < 2 {
-		values[value] = true
-	}
-}
-
-func singleEvidenceValue(label string, values map[string]bool, conflicts []string) (string, []string) {
-	if len(values) == 0 {
-		return "", conflicts
-	}
-	keys := make([]string, 0, len(values))
-	for v := range values {
-		keys = append(keys, v)
-	}
-	sort.Strings(keys)
-	if len(keys) > 1 {
-		return "", append(conflicts, fmt.Sprintf("conflicting %s markers: %s", label, strings.Join(keys, ", ")))
-	}
-	return keys[0], conflicts
-}
-
-// extractSemverToken finds the first "digits.digits.digits" pattern in s
-// (e.g. "Flutter Engine 3.24.1 (stable)" -> "3.24.1"), a hand-rolled
-// state-machine scanner mirroring flutterdec's extract_semver_token.
-func extractSemverToken(s string) string {
-	n := len(s)
-	for i := 0; i < n; i++ {
-		if !isDigit(s[i]) {
-			continue
-		}
-		j := i
-		seg := 0
-		var lastDigitEnd int
-		for seg < 3 {
-			k := j
-			for k < n && isDigit(s[k]) {
-				k++
-			}
-			if k == j {
-				break // no digits in this segment
-			}
-			lastDigitEnd = k
-			seg++
-			if seg == 3 {
-				return s[i:lastDigitEnd]
-			}
-			if k >= n || s[k] != '.' {
-				break
-			}
-			j = k + 1
-		}
-		// Advance i past this failed attempt's first digit run to avoid
-		// re-scanning the same digits repeatedly. The outer loop's i++ only
-		// advances by 1, so without this a string with many digit runs is
-		// O(n^2). Skip to lastDigitEnd (the end of the digit run we just
-		// examined) so the next iteration starts after it.
-		if lastDigitEnd > i+1 {
-			i = lastDigitEnd
-			continue
-		}
-	}
-	return ""
-}
-
-// flutterVersionFromBanner accepts only a Flutter-engine-labelled version.
-// Arbitrary semantic versions elsewhere in a printable run are not evidence.
-func flutterVersionFromBanner(s string) string {
-	lower := strings.ToLower(s)
-	i := strings.Index(lower, "flutter engine")
-	if i < 0 {
-		return ""
-	}
-	rest := strings.TrimSpace(s[i+len("flutter engine"):])
-	return versionPrefix(rest)
-}
-
-// dartBannerEvidence recognizes both exact SDK-generated shapes. Older SDKs
-// such as Dart 2.10 and 2.12 keep only
+// dartBannerEvidence recognizes both exact SDK-generated shapes. Dart 2.10
+// through 2.14 keep only
 //
 //	<version> (<channel>) (<commit time>)
 //
-// and Version::String() appends `on "<os>_<arch>"` dynamically. Starting with
-// Dart 2.15 among the supported profiles, the suffix is embedded directly into
-// str_. Both forms can therefore be
-// present in a compiled image and both are provenance-bearing; a generic
-// semver is not.
+// in str_, while Version::String() appends `on "<os>_<arch>"` dynamically
+// (SDK @2.10.0 runtime/vm/version_in.cc:15-20; @2.14.0:17-29). Starting at
+// Dart 2.15 the suffix is embedded directly in str_ (version_in.cc:11-12,
+// 28-63). Both shapes can therefore be present in mapped runtime data; a
+// generic semver, or the unsupported literal prefix "Dart VM version:", is not
+// SDK-generated provenance for any supported release.
 func dartBannerEvidence(s string) (version, arch string, ok bool) {
-	const prefix = "Dart VM version:"
 	lower := strings.ToLower(s)
-	if strings.HasPrefix(lower, strings.ToLower(prefix)) {
-		s = strings.TrimSpace(s[len(prefix):])
-	} else if strings.HasPrefix(lower, "dart ") {
-		// runtime/vm/dwarf.cc writes producer="Dart %s" where %s is
-		// Version::String() starting with the supported Dart 3.6 line.
+	if strings.HasPrefix(lower, "dart ") {
+		// runtime/vm/dwarf.cc @3.6.2:281-282 writes producer="Dart %s" where %s is
+		// Version::String(); @3.5.0:276 still writes the non-versioned "Dart VM".
 		s = strings.TrimSpace(s[len("Dart "):])
 	}
 	v := versionPrefix(s)
@@ -740,16 +758,115 @@ func machineMatchesDartArch(machine elf.Machine, class elf.Class, arch string) b
 	}
 }
 
-func confidenceLevel(hasDartVersion, hasFlutterVersion, hasConflict bool) string {
-	if hasConflict {
-		return ConfidenceLow
+func normalizeVersionEvidence(in []VersionEvidence) []VersionEvidence {
+	seen := make(map[string]bool, len(in))
+	out := make([]VersionEvidence, 0, len(in))
+	for _, ev := range in {
+		if ev.Version == "" || ev.Source == "" {
+			continue
+		}
+		key := ev.Source + "\x00" + ev.Version + "\x00" + ev.Arch
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ev)
 	}
-	switch {
-	case hasDartVersion && hasFlutterVersion:
-		return ConfidenceHigh
-	case hasDartVersion || hasFlutterVersion:
-		return ConfidenceMedium
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Source != out[j].Source {
+			return out[i].Source < out[j].Source
+		}
+		if out[i].Version != out[j].Version {
+			return out[i].Version < out[j].Version
+		}
+		return out[i].Arch < out[j].Arch
+	})
+	return out
+}
+
+func consensusVersionEvidence(evidence []VersionEvidence, conflicts []string) (version, arch string, outConflicts []string) {
+	versions := make(map[string]bool, 2)
+	archs := make(map[string]bool, 2)
+	for _, ev := range evidence {
+		if ev.Version != "" && len(versions) < 2 {
+			versions[ev.Version] = true
+		}
+		if ev.Arch != "" && len(archs) < 2 {
+			archs[ev.Arch] = true
+		}
+	}
+	outConflicts = append(outConflicts, conflicts...)
+	version, outConflicts = oneConsensus("Dart version", versions, outConflicts)
+	arch, outConflicts = oneConsensus("Dart architecture", archs, outConflicts)
+	return version, arch, outConflicts
+}
+
+func oneConsensus(label string, values map[string]bool, conflicts []string) (string, []string) {
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, value)
+	}
+	sort.Strings(keys)
+	switch len(keys) {
+	case 0:
+		return "", conflicts
+	case 1:
+		return keys[0], conflicts
 	default:
-		return ConfidenceLow
+		return "", append(conflicts, fmt.Sprintf("conflicting %s evidence: %s", label, strings.Join(keys, ", ")))
 	}
+}
+
+func versionConfidence(hasVersion, hasConflict bool) string {
+	if hasConflict {
+		return VersionConfidenceConflicted
+	}
+	if hasVersion {
+		return VersionConfidenceHeuristic
+	}
+	return VersionConfidenceUnknown
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func mappedScanExtent(ef *elfx.File, limit uint64) (bytesScanned uint64, complete bool, err error) {
+	if ef == nil || limit == 0 {
+		return 0, true, nil
+	}
+	var total uint64
+	hasLoad := false
+	add := func(size uint64) error {
+		if total > ^uint64(0)-size {
+			return fmt.Errorf("mapped evidence size overflow")
+		}
+		total += size
+		return nil
+	}
+	for _, p := range ef.LoadSegments() {
+		if p.Filesz == 0 {
+			continue
+		}
+		hasLoad = true
+		if err := add(p.Filesz); err != nil {
+			return 0, false, err
+		}
+	}
+	if !hasLoad {
+		return 0, false, nil
+	}
+	if total > limit {
+		return limit, false, nil
+	}
+	return total, true, nil
 }
