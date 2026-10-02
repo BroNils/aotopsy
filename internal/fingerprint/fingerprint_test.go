@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,23 +12,17 @@ import (
 	"testing"
 )
 
-func TestExtractSemverToken(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"Flutter Engine 3.24.1 (stable)", "3.24.1"},
-		{"Dart VM version: 3.9.2 (stable) on linux_arm64", "3.9.2"},
-		{"Build 12.3", ""},
-		{"Version 2.12.0-dev", "2.12.0"},
-		{"No semver here", ""},
+func TestVersionConfidenceDoesNotEscalateCorrelatedHeuristics(t *testing.T) {
+	evidence := normalizeVersionEvidence([]VersionEvidence{
+		{Source: "mapped_dart_banner", Version: "3.12.2", Arch: "arm64"},
+		{Source: "dwarf_producer", Version: "3.12.2", Arch: "arm64"},
+	})
+	version, arch, conflicts := consensusVersionEvidence(evidence, nil)
+	if version != "3.12.2" || arch != "arm64" || len(conflicts) != 0 {
+		t.Fatalf("consensus = version=%q arch=%q conflicts=%q", version, arch, conflicts)
 	}
-
-	for _, tt := range tests {
-		got := extractSemverToken(tt.input)
-		if got != tt.want {
-			t.Errorf("extractSemverToken(%q) = %q, want %q", tt.input, got, tt.want)
-		}
+	if got := versionConfidence(version != "", false); got != VersionConfidenceHeuristic {
+		t.Fatalf("two Version::String-derived sources escalated to %q, want heuristic", got)
 	}
 }
 
@@ -35,9 +30,6 @@ func TestVersionExtractionRequiresProvenanceBearingBanner(t *testing.T) {
 	dart := `3.12.2 (stable) (Tue Sep 1 00:00:00 2026 +0000) on "linux_arm64"`
 	if got, arch, ok := dartBannerEvidence(dart); !ok || got != "3.12.2" || arch != "arm64" {
 		t.Fatalf("dartBannerEvidence() = (%q,%q,%v), want (3.12.2,arm64,true)", got, arch, ok)
-	}
-	if got, _, ok := dartBannerEvidence("Dart VM version: " + dart); !ok || got != "3.12.2" {
-		t.Fatalf("wrapped dartBannerEvidence() = %q ok=%v, want 3.12.2", got, ok)
 	}
 	legacy := `2.12.0 (stable) (Mon Feb 22 10:35:18 2021 +0100)`
 	if got, arch, ok := dartBannerEvidence(legacy); !ok || got != "2.12.0" || arch != "" {
@@ -58,6 +50,7 @@ func TestVersionExtractionRequiresProvenanceBearingBanner(t *testing.T) {
 	for _, bad := range []string{
 		"dart:io connects to 127.0.0.1",
 		"Dart SDK documentation 127.0.0",
+		"Dart VM version: " + dart,
 		"Version 3.12.2",
 		"3.12.2 stable linux_arm64",
 	} {
@@ -66,11 +59,39 @@ func TestVersionExtractionRequiresProvenanceBearingBanner(t *testing.T) {
 		}
 	}
 
-	if got := flutterVersionFromBanner("Flutter Engine 3.24.1 (stable)"); got != "3.24.1" {
-		t.Fatalf("flutterVersionFromBanner() = %q, want 3.24.1", got)
+}
+
+func TestFlutterEngineLabelIsDiagnosticOnly(t *testing.T) {
+	markers, err := scanEngineMarkers(strings.NewReader("Flutter Engine 3.24.1 (stable)\x00"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := flutterVersionFromBanner("engine docs 3.24.1"); got != "" {
-		t.Fatalf("unlabelled engine text produced Flutter version %q", got)
+	if len(markers.FlutterMarkers) != 1 {
+		t.Fatalf("FlutterMarkers = %q, want one diagnostic marker", markers.FlutterMarkers)
+	}
+	if len(markers.VersionEvidence) != 0 {
+		t.Fatalf("unverified Flutter label became version evidence: %+v", markers.VersionEvidence)
+	}
+}
+
+func TestFlutterDiagnosticTextCannotEscalateDartVersion(t *testing.T) {
+	data := strings.Join([]string{
+		`Flutter Engine 99.88.77 (stable)`,
+		`3.12.2 (stable) (Tue Sep 1 00:00:00 2026 +0000) on "linux_arm64"`,
+	}, "\x00")
+	markers, err := scanEngineMarkers(strings.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, arch, conflicts := consensusVersionEvidence(markers.VersionEvidence, nil)
+	if version != "3.12.2" || arch != "arm64" || len(conflicts) != 0 {
+		t.Fatalf("Dart evidence = version=%q arch=%q conflicts=%q", version, arch, conflicts)
+	}
+	if got := versionConfidence(version != "", false); got != VersionConfidenceHeuristic {
+		t.Fatalf("Flutter diagnostic text escalated version confidence to %q", got)
+	}
+	if len(markers.FlutterMarkers) != 1 {
+		t.Fatalf("Flutter diagnostics = %q, want one marker", markers.FlutterMarkers)
 	}
 }
 
@@ -82,8 +103,9 @@ func TestScanEngineMarkersDoesNotPromoteGenericDartSemver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markers.DartVersion != "3.12.2" {
-		t.Fatalf("DartVersion = %q, want 3.12.2", markers.DartVersion)
+	version, arch, conflicts := consensusVersionEvidence(markers.VersionEvidence, nil)
+	if version != "3.12.2" || arch != "arm64" || len(conflicts) != 0 {
+		t.Fatalf("mapped version evidence = version=%q arch=%q conflicts=%q evidence=%+v", version, arch, conflicts, markers.VersionEvidence)
 	}
 	if len(markers.DartMarkers) != 2 {
 		t.Fatalf("DartMarkers = %q, want diagnostic URI + version banner", markers.DartMarkers)
@@ -98,8 +120,8 @@ func TestConflictingBannerArchitectureDowngradesConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Confidence != ConfidenceLow || len(rep.EvidenceConflicts) == 0 {
-		t.Fatalf("conflicting arch report = %+v, want low confidence + conflict", rep)
+	if rep.VersionConfidence != VersionConfidenceConflicted || len(rep.EvidenceConflicts) == 0 {
+		t.Fatalf("conflicting arch report = %+v, want conflicted version confidence", rep)
 	}
 }
 
@@ -111,8 +133,9 @@ func TestConflictingDartVersionsAreNotPromoted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markers.DartVersion != "" || len(markers.Conflicts) == 0 {
-		t.Fatalf("conflicting versions = %+v, want no promoted version + conflict", markers)
+	version, _, conflicts := consensusVersionEvidence(markers.VersionEvidence, nil)
+	if version != "" || len(conflicts) == 0 {
+		t.Fatalf("conflicting versions = %+v conflicts=%q, want no promoted version", markers.VersionEvidence, conflicts)
 	}
 }
 
@@ -126,11 +149,14 @@ func TestRunBuildIDPlusGenericDartTextIsNotHighConfidenceVersion(t *testing.T) {
 	if rep.BuildID != "deadbeef" {
 		t.Fatalf("BuildID = %q, want deadbeef", rep.BuildID)
 	}
+	if rep.BuildIDSource != "pt_note" {
+		t.Fatalf("BuildIDSource = %q, want pt_note", rep.BuildIDSource)
+	}
 	if rep.DartVersion != "" {
 		t.Fatalf("DartVersion = %q; generic dart: text must not produce a version", rep.DartVersion)
 	}
-	if rep.Confidence != ConfidenceLow {
-		t.Fatalf("Confidence = %q, want %q with build-id only", rep.Confidence, ConfidenceLow)
+	if rep.VersionConfidence != VersionConfidenceUnknown {
+		t.Fatalf("VersionConfidence = %q, want %q with build-id only", rep.VersionConfidence, VersionConfidenceUnknown)
 	}
 	if len(rep.FileSHA256) != 64 {
 		t.Fatalf("FileSHA256 = %q, want SHA-256 hex", rep.FileSHA256)
@@ -148,15 +174,22 @@ func TestBuildIDUsesSectionlessPTNote(t *testing.T) {
 	}
 }
 
-func TestBuildIDUsesSHTNoteAndRejectsNamedPROGBITS(t *testing.T) {
+func TestBuildIDIgnoresUnmappedSHTNoteAndRejectsNamedPROGBITS(t *testing.T) {
 	note := buildIDNote([]byte{0xaa, 0xbb})
-	good := writeSectionELF(t, ".note.gnu.build-id", elf.SHT_NOTE, note)
-	rep, err := Run(good)
+	dead := writeSectionELF(t, ".note.gnu.build-id", elf.SHT_NOTE, note)
+	rep, err := Run(dead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.BuildID != "aabb" {
-		t.Fatalf("SHT_NOTE BuildID = %q, want aabb", rep.BuildID)
+	if rep.BuildID != "" {
+		t.Fatalf("unmapped SHT_NOTE fabricated BuildID %q", rep.BuildID)
+	}
+	if rep.MarkerScanComplete || rep.MarkerScanBytes != 0 {
+		t.Fatalf("section-only ELF reported mapped marker scan complete: bytes=%d complete=%v", rep.MarkerScanBytes, rep.MarkerScanComplete)
+	}
+	limitations := strings.Join(rep.EvidenceLimitations, "\n")
+	if !strings.Contains(limitations, "no file-backed PT_LOAD") || strings.Contains(limitations, "truncated at") {
+		t.Fatalf("section-only scan limitations are misleading: %q", rep.EvidenceLimitations)
 	}
 
 	bad := writeSectionELF(t, "denote", elf.SHT_PROGBITS, note)
@@ -166,6 +199,17 @@ func TestBuildIDUsesSHTNoteAndRejectsNamedPROGBITS(t *testing.T) {
 	}
 	if rep.BuildID != "" {
 		t.Fatalf("PROGBITS section named denote fabricated BuildID %q", rep.BuildID)
+	}
+}
+
+func TestBuildIDUsesMappedSHTNoteFallback(t *testing.T) {
+	path := writeMappedSectionELF(t, ".note.gnu.build-id", elf.SHT_NOTE, elf.SHF_ALLOC, buildIDNote([]byte{0xaa, 0xbb}))
+	rep, err := Run(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.BuildID != "aabb" || rep.BuildIDSource != "mapped_sht_note" {
+		t.Fatalf("mapped SHT_NOTE fallback = id=%q source=%q", rep.BuildID, rep.BuildIDSource)
 	}
 }
 
@@ -184,6 +228,38 @@ func TestConflictingBuildIDsAreReportedInsteadOfFirstWins(t *testing.T) {
 	}
 }
 
+func TestBuildIDConflictDoesNotMislabelVersionConfidence(t *testing.T) {
+	notes := append(buildIDNote([]byte{1, 2, 3, 4}), buildIDNote([]byte{5, 6, 7, 8})...)
+	tail := []byte(`3.12.2 (stable) (Tue Sep 1 00:00:00 2026 +0000) on "linux_arm64"` + "\x00")
+	path := writeProgramNoteELF(t, notes, tail)
+	rep, err := Run(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.BuildID != "" || len(rep.EvidenceConflicts) == 0 {
+		t.Fatalf("build-id conflict was not preserved: %+v", rep)
+	}
+	if rep.DartVersion != "3.12.2" || rep.VersionConfidence != VersionConfidenceHeuristic {
+		t.Fatalf("build-id conflict contaminated Dart version confidence: %+v", rep)
+	}
+}
+
+func TestBuildIDEvidenceConflictAcrossSourcesIsNotChosen(t *testing.T) {
+	id, source, conflicts, err := resolveBuildIDEvidence(
+		map[string]bool{"01020304": true},
+		map[string]bool{"05060708": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "" || source != "" || len(conflicts) != 1 {
+		t.Fatalf("cross-source build-id conflict = id=%q source=%q conflicts=%q", id, source, conflicts)
+	}
+	if !strings.Contains(conflicts[0], "pt_note=01020304") || !strings.Contains(conflicts[0], "mapped_sht_note=05060708") {
+		t.Fatalf("cross-source conflict lost provenance: %q", conflicts)
+	}
+}
+
 func TestBuildIDRequiresExactGNUOwnerEncoding(t *testing.T) {
 	note := buildIDNote([]byte{1, 2, 3, 4})
 	binary.LittleEndian.PutUint32(note[0:4], 3) // malformed: GNU owner size must include trailing NUL
@@ -193,6 +269,17 @@ func TestBuildIDRequiresExactGNUOwnerEncoding(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("malformed GNU owner produced build IDs %q", ids)
+	}
+}
+
+func TestDuplicateBuildIDsCollapseWithoutConflict(t *testing.T) {
+	notes := append(buildIDNote([]byte{1, 2, 3, 4}), buildIDNote([]byte{1, 2, 3, 4})...)
+	ids, err := parseBuildIDNotes(notes, binary.LittleEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "01020304" {
+		t.Fatalf("duplicate build IDs = %q, want one 01020304", ids)
 	}
 }
 
@@ -229,7 +316,7 @@ func TestRunIgnoresUnmappedAppendedVersionBanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.DartVersion != "" || rep.Confidence != ConfidenceLow {
+	if rep.DartVersion != "" || rep.VersionConfidence != VersionConfidenceUnknown {
 		t.Fatalf("unmapped appended banner became trusted evidence: %+v", rep)
 	}
 }
@@ -244,8 +331,41 @@ func TestMappedDartProducerSimArchIsCompatible(t *testing.T) {
 	if rep.DartVersion != "3.12.2" || rep.DartArch != "arm64" || len(rep.EvidenceConflicts) != 0 {
 		t.Fatalf("mapped simulator producer evidence = %+v", rep)
 	}
-	if rep.Confidence != ConfidenceMedium {
-		t.Fatalf("single mapped Dart provenance confidence = %q, want medium", rep.Confidence)
+	if rep.Machine != "aarch64" || rep.ELFClass != "ELF64" {
+		t.Fatalf("ELF identity = machine=%q class=%q", rep.Machine, rep.ELFClass)
+	}
+	if rep.VersionConfidence != VersionConfidenceHeuristic {
+		t.Fatalf("single mapped Dart provenance confidence = %q, want heuristic", rep.VersionConfidence)
+	}
+	if !rep.MarkerScanComplete || rep.MarkerScanBytes != uint64(len(tail)) {
+		t.Fatalf("mapped marker scan accounting = bytes=%d complete=%v, want %d,true", rep.MarkerScanBytes, rep.MarkerScanComplete, len(tail))
+	}
+	if len(rep.VersionEvidence) != 1 || rep.VersionEvidence[0].Source != "mapped_dart_banner" {
+		t.Fatalf("mapped Dart evidence source = %+v", rep.VersionEvidence)
+	}
+}
+
+func TestRunReportJSONIsDeterministic(t *testing.T) {
+	tail := []byte(`3.12.2 (stable) (Tue Sep 1 00:00:00 2026 +0000) on "linux_arm64"` + "\x00")
+	path := writeProgramNoteELF(t, buildIDNote([]byte{1, 2, 3, 4}), tail)
+	a, err := Run(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Run(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ja, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jb, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ja, jb) {
+		t.Fatalf("fingerprint JSON is nondeterministic:\n%s\n%s", ja, jb)
 	}
 }
 
@@ -385,6 +505,41 @@ func writeSectionELF(t *testing.T, name string, typ elf.SectionType, payload []b
 	copy(data[strOff:], shstr)
 
 	writeSectionHeader(data[shoff+64:shoff+128], nameOff, typ, uint64(payloadOff), uint64(len(payload)), 4)
+	writeSectionHeader(data[shoff+128:shoff+192], shstrNameOff, elf.SHT_STRTAB, uint64(strOff), uint64(len(shstr)), 1)
+	return writeTempELF(t, data)
+}
+
+func writeMappedSectionELF(t *testing.T, name string, typ elf.SectionType, flags elf.SectionFlag, payload []byte) string {
+	t.Helper()
+	const (
+		ehSize = 64
+		phSize = 56
+		va     = 0x1000
+	)
+	shstr := []byte("\x00" + name + "\x00.shstrtab\x00")
+	nameOff := uint32(1)
+	shstrNameOff := uint32(1 + len(name) + 1)
+	payloadOff := ehSize + phSize
+	strOff := payloadOff + len(payload)
+	shoff := (strOff + len(shstr) + 7) &^ 7
+	data := make([]byte, shoff+3*64)
+	writeELFIdentAndHeader(data[:ehSize], ehSize, uint64(shoff), 1, 3, 2)
+
+	ph := data[ehSize : ehSize+phSize]
+	binary.LittleEndian.PutUint32(ph[0:4], uint32(elf.PT_LOAD))
+	binary.LittleEndian.PutUint32(ph[4:8], uint32(elf.PF_R))
+	binary.LittleEndian.PutUint64(ph[8:16], uint64(payloadOff))
+	binary.LittleEndian.PutUint64(ph[16:24], va)
+	binary.LittleEndian.PutUint64(ph[32:40], uint64(len(payload)))
+	binary.LittleEndian.PutUint64(ph[40:48], uint64(len(payload)))
+	binary.LittleEndian.PutUint64(ph[48:56], 4)
+
+	copy(data[payloadOff:], payload)
+	copy(data[strOff:], shstr)
+	sec := data[shoff+64 : shoff+128]
+	writeSectionHeader(sec, nameOff, typ, uint64(payloadOff), uint64(len(payload)), 4)
+	binary.LittleEndian.PutUint64(sec[8:16], uint64(flags))
+	binary.LittleEndian.PutUint64(sec[16:24], va)
 	writeSectionHeader(data[shoff+128:shoff+192], shstrNameOff, elf.SHT_STRTAB, uint64(strOff), uint64(len(shstr)), 1)
 	return writeTempELF(t, data)
 }

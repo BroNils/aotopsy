@@ -40,7 +40,7 @@ func cmdFFITrace(args []string) error {
 	// whole-binary pass describes callees' incoming Dart calling conventions,
 	// costs far more than a bounded ffi-trace, and is not evidence for the
 	// arguments of the call site currently being inspected.
-	findings, scanned, err := ffitrace.Trace(ctx, ffitrace.Options{
+	traceResult, err := ffitrace.Trace(ctx, ffitrace.Options{
 		MaxScan:        *maxScan,
 		AllowUnbounded: *allowUnbounded,
 		Filter:         *filter,
@@ -61,7 +61,7 @@ func cmdFFITrace(args []string) error {
 
 	enc := json.NewEncoder(w)
 	dynCalls, nativeCalls, resolved := 0, 0, 0
-	for _, f := range findings {
+	for _, f := range traceResult.Findings {
 		if err := enc.Encode(f); err != nil {
 			return err
 		}
@@ -75,7 +75,10 @@ func cmdFFITrace(args []string) error {
 			nativeCalls++
 		}
 	}
-	cli.Errf("ffi-trace: scanned %d function(s), %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
-		scanned, dynCalls, resolved, nativeCalls, len(findings))
+	cli.Errf("ffi-trace: attempted %d function(s), scanned %d, %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
+		traceResult.Attempted, traceResult.Scanned, dynCalls, resolved, nativeCalls, len(traceResult.Findings))
+	if traceResult.ScanLimitReached {
+		return fmt.Errorf("ffi-trace: incomplete result: function scan cap reached; raise --max-scan or use --allow-unbounded")
+	}
 	return nil
 }

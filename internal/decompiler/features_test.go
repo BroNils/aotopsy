@@ -31,20 +31,21 @@ func featureFuncIR(name string, instrs []Instr) *FuncIR {
 	return fir
 }
 
-// TestFeatureFFICallIsNamed covers the FFI native-call shape.
+// TestFeatureNativeTransitionCallIsNamed covers the generated-to-native
+// transition shape.
 //
-// Dart AOT's TransitionGeneratedToNative stores the call target into
-// Thread::vm_tag_ before dispatching it, and no other calling convention
-// writes the target into Thread state that way -- so a BLR through a register
-// last stored to vm_tag is a confirmed FFI leaf call, not a guess. The emitter
-// must name it rather than fall back to dynamicCall on a raw register.
+// Dart AOT's TransitionGeneratedToNative stores the destination into
+// Thread::vm_tag_ before dispatching it. That proves a native transition, but
+// not direction: NativeReturn in a callback also uses it when returning from
+// Dart to native. The emitter must preserve the structural fact without
+// claiming an outbound application FFI call.
 //
 // The vm_tag offset is deliberately NOT hardcoded here: it is looked up
 // through fir.ThreadFieldNames, the same SDK-derived table
 // (runtime_offsets_extracted.h) the real pipeline supplies. An earlier version
 // fired on ANY Thread store and mislabelled 43528 write-barrier and
 // stack-overflow stores as FFI calls, which is why the table lookup exists.
-func TestFeatureFFICallIsNamed(t *testing.T) {
+func TestFeatureNativeTransitionCallIsNamed(t *testing.T) {
 	const vmTagOff = 0x1a0
 	fir := featureFuncIR("ffi_caller", []Instr{
 		{Addr: 0x1000, Op: OpOther, Src: "ldr x1, [x27, #0x100]"},
@@ -55,9 +56,9 @@ func TestFeatureFFICallIsNamed(t *testing.T) {
 	fir.ThreadFieldNames = map[int64]string{vmTagOff: "vm_tag"}
 
 	art := EmitPseudocode(fir, nil, nil)
-	if !strings.Contains(art.Source, FFICallMarker) {
+	if !strings.Contains(art.Source, nativeTransitionCallMarker) {
 		t.Errorf("a BLR through a register stored to Thread.vm_tag must emit %q, got:\n%s",
-			FFICallMarker, art.Source)
+			nativeTransitionCallMarker, art.Source)
 	}
 	// The store itself is bookkeeping, not application logic, so it must be
 	// suppressed rather than emitted as an assignment. (The emitter does name
@@ -84,7 +85,7 @@ func TestFeatureNonVMTagThreadStoreIsNotFFI(t *testing.T) {
 	}
 
 	art := EmitPseudocode(fir, nil, nil)
-	if strings.Contains(art.Source, FFICallMarker) {
+	if strings.Contains(art.Source, nativeTransitionCallMarker) {
 		t.Errorf("a store to write_barrier_mask must not make the next BLR an FFI call:\n%s",
 			art.Source)
 	}

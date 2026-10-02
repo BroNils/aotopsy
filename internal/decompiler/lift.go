@@ -524,7 +524,7 @@ func (s *LiftState) lookupReg(tok string) string {
 	viewTok := tok
 	key := canonReg(tok)
 	if v, ok := s.Regs[key]; ok {
-		if v == ffiCallTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
+		if v == nativeTransitionTargetSentinel || strings.HasPrefix(v, thrStubSentinelPrefix) {
 			// Internal-only markers (see applyStore / the ldr/mov
 			// THR-stub-offset check in ApplyOther) -- must never leak into
 			// displayed pseudocode. A register can still hold one of these
@@ -962,21 +962,22 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 	return "", false
 }
 
-// ffiCallTargetSentinel marks a register as "was just stored into a Thread
-// field" -- Dart AOT's native/FFI-leaf-call bookkeeping idiom (see
-// applyStore's THR-store handling below for the full rationale).
-// emit.go's emitIndirectCall checks for this instead of falling back to a
-// raw "indirectTarget_xN" name when that same register is used as an
-// indirect call target shortly after.
-const ffiCallTargetSentinel = "__ffi_call_target"
+// nativeTransitionTargetSentinel marks a register as the destination address
+// just written to Thread::vm_tag by TransitionGeneratedToNative. That VM
+// transition is direction-neutral evidence: outbound FfiCall code uses it,
+// but NativeReturn in a native-to-Dart callback uses it as control returns to
+// native code too. Consumers that need FFI direction must combine this marker
+// with Function/FfiTrampolineData metadata.
+// SDK @3.13.0: runtime/vm/compiler/backend/il_arm64.cc:1532-1559 and
+// il_x64.cc:479-510 call TransitionGeneratedToNative from NativeReturnInstr;
+// assembler_arm64.cc:1664 and assembler_x64.cc:181 implement that transition.
+const nativeTransitionTargetSentinel = "__native_transition_target"
 
-// FFICallMarker is the text emitIndirectCall writes for a recognised FFI
-// native call. Exported because internal/ffitrace scans emitted source for
-// it, and a private copy of the string on that side drifted: it looked for
-// `nativeCall(`, which this package has never emitted, so that detection
-// signal was dead from the day it was written. One constant, one source of
-// truth.
-const FFICallMarker = "ffi_call("
+// nativeTransitionCallMarker is the text emitIndirectCall writes for a call
+// whose target was proven by Thread::vm_tag bookkeeping. It deliberately does
+// not call the operation an outbound FFI call because the transition itself is
+// direction-neutral.
+const nativeTransitionCallMarker = "native_transition_call("
 
 // thrStubSentinelPrefix marks a register as "was just loaded from a known
 // Thread-cached stub entry-point offset" (dart-lang/sdk's
@@ -1003,17 +1004,12 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	}
 	base := strings.ToLower(op.memBase)
 	if base == fir.ThreadReg && op.hasDisp {
-		// Dart AOT's native/FFI-leaf-call bookkeeping stores the call
-		// target into Thread::vm_tag_ via TransitionGeneratedToNative
-		// (assembler_arm64.cc / assembler_x64.cc), which runs in PRODUCT
-		// builds. The offset differs by architecture and version, so we
-		// check the SDK-derived ThreadFieldNames table for the "vm_tag"
-		// field name rather than hardcoding a specific offset.
-		//
-		// NOTE: FfiCallInstr::EmitNativeCode (il_arm64.cc / il_x64.cc)
-		// also stores to vm_tag_ but only under #if !defined(PRODUCT),
-		// so that path is NOT the one that fires in release builds.
-		// TransitionGeneratedToNative is the PRODUCT-build source.
+		// Dart AOT's TransitionGeneratedToNative stores the destination
+		// address into Thread::vm_tag_. Outbound FFI calls use this state
+		// transition, and NativeReturn uses the same transition while a
+		// native-to-Dart callback returns to native code. The offset differs
+		// by architecture and version, so check the SDK-derived
+		// ThreadFieldNames table for "vm_tag" instead of hardcoding it.
 		//
 		// Previously this fired on ANY store to ANY Thread field, which
 		// marked 43528 stores as FFI bookkeeping on the x86_64 sample —
@@ -1030,7 +1026,7 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 			// Suppress the emitted line (pure bookkeeping, not application
 			// logic) but mark the register so the upcoming indirect call is
 			// named instead of showing a raw register name.
-			s.setReg(strings.ToLower(srcTok), ffiCallTargetSentinel)
+			s.setReg(strings.ToLower(srcTok), nativeTransitionTargetSentinel)
 			return "", false
 		}
 		// A store to a non-vm_tag Thread field is real application logic

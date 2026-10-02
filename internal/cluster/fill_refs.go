@@ -334,7 +334,7 @@ func readFillRefs(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUns
 				CallbackTargetRef:            allRefs[2],
 				CallbackExceptionalReturnRef: allRefs[3],
 				CallbackID:                   ss.callbackID,
-				CallbackKindRaw:              ss.ffiKind,
+				FfiKindRaw:                   ss.ffiKind,
 			})
 		}
 		// v2.x TypeClassIdIsRef: Type.type_class_id is a Smi ref.

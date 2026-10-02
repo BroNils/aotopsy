@@ -1,6 +1,8 @@
 package analysis
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"aotopsy/internal/cluster"
@@ -16,34 +18,40 @@ func TestBuildFfiBridges(t *testing.T) {
 				SignatureTypeRef:  201,
 				CSignatureRef:     202,
 				CallbackTargetRef: 203,
-				CallbackID:        7,
-				CallbackKindRaw:   4,
+				CallbackID:        0,
+				FfiKindRaw:        4,
 			},
 			{
-				RefID:           102,
-				CallbackKindRaw: 0,
+				RefID:             102,
+				CallbackTargetRef: cluster.RefNull,
+				CallbackID:        -1,
+				FfiKindRaw:        0,
 			},
 		},
 	}
 
 	pl := &naming.PoolLookups{
 		RefToStr: map[int]string{
-			201: "int Function(Pointer, int)",
-			202: "Int32 Function(Pointer<Uint8>, Uint32)",
-			203: "package:my_app/crypto.dart::nativeCallback",
+			cluster.RefNull: "null",
+			201:             "int Function(Pointer, int)",
+			202:             "Int32 Function(Pointer<Uint8>, Uint32)",
+			203:             "package:my_app/crypto.dart::nativeCallback",
 		},
 	}
 
-	records := BuildFfiBridges(cl, pl)
+	records := BuildFfiBridges("3.2.5", cl, pl)
 	if len(records) != 2 {
 		t.Fatalf("expected 2 FfiBridgeRecords, got %d", len(records))
 	}
 
-	if records[0].CallbackKindRaw != 4 {
-		t.Errorf("expected raw callback kind 4, got %d", records[0].CallbackKindRaw)
+	if records[0].FfiKindRaw != 4 {
+		t.Errorf("expected raw FFI kind 4, got %d", records[0].FfiKindRaw)
 	}
-	if records[0].CallbackID != 7 {
-		t.Errorf("expected callback_id 7, got %d", records[0].CallbackID)
+	if records[0].Direction != cluster.FfiDirectionCallback {
+		t.Errorf("expected callback direction, got %q", records[0].Direction)
+	}
+	if records[0].CallbackID != 0 {
+		t.Errorf("expected callback_id 0, got %d", records[0].CallbackID)
 	}
 	if records[0].DartSignature != "int Function(Pointer, int)" {
 		t.Errorf("unexpected dart signature: %q", records[0].DartSignature)
@@ -52,8 +60,22 @@ func TestBuildFfiBridges(t *testing.T) {
 		t.Errorf("unexpected callback target: %q", records[0].CallbackTarget)
 	}
 
-	if records[1].CallbackKindRaw != 0 {
-		t.Errorf("expected raw callback kind 0, got %d", records[1].CallbackKindRaw)
+	if records[1].FfiKindRaw != 0 {
+		t.Errorf("expected raw FFI kind 0, got %d", records[1].FfiKindRaw)
+	}
+	if records[1].Direction != cluster.FfiDirectionOutbound {
+		t.Errorf("expected outbound direction, got %q", records[1].Direction)
+	}
+	if records[1].CallbackTarget != "" {
+		t.Errorf("outbound bridge exposed a callback target: %q", records[1].CallbackTarget)
+	}
+
+	wire, err := json.Marshal(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"callback_id":0`) {
+		t.Fatalf("callback_id=0 was dropped from bridge evidence: %s", wire)
 	}
 }
 

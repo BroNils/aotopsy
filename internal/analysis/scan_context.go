@@ -38,15 +38,25 @@ type ScanOptions struct {
 	GcEveryN int
 }
 
+// ScanResult reports both completed work and whether a function-count cap made
+// the result incomplete. Attempted is incremented before FuncIR construction so
+// a malformed/undecodable function cannot bypass the resource cap.
+type ScanResult struct {
+	Attempted        int
+	Scanned          int
+	ScanLimitReached bool
+}
+
 // ScanFuncs runs a bounded, memory-hardened scan over functions in the AnalysisContext.
 // It manages GOMAXPROCS and memory limits safely, performs range filtering,
 // and invokes fn for each function's FuncIR and virtual address.
-func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(r cluster.CodeRange, fir *decompiler.FuncIR, funcVA uint64)) (int, error) {
+func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(r cluster.CodeRange, fir *decompiler.FuncIR, funcVA uint64)) (ScanResult, error) {
+	var result ScanResult
 	if c == nil {
-		return 0, fmt.Errorf("scan functions: nil analysis context")
+		return result, fmt.Errorf("scan functions: nil analysis context")
 	}
 	if fn == nil {
-		return 0, fmt.Errorf("scan functions: nil callback")
+		return result, fmt.Errorf("scan functions: nil callback")
 	}
 	maxScan := opts.MaxScan
 	if maxScan <= 0 && !opts.AllowUnbounded {
@@ -62,11 +72,7 @@ func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(r cluster.CodeRang
 	oldLimit := debug.SetMemoryLimit(1536 << 20)
 	defer debug.SetMemoryLimit(oldLimit)
 
-	scanned := 0
 	for _, r := range c.Ranges {
-		if !opts.AllowUnbounded && maxScan > 0 && scanned >= maxScan {
-			break
-		}
 		if r.Size == 0 || r.RefID < 0 {
 			continue
 		}
@@ -84,22 +90,27 @@ func (c *AnalysisContext) ScanFuncs(opts ScanOptions, fn func(r cluster.CodeRang
 		if opts.Filter != "" && !strings.Contains(name, opts.Filter) {
 			continue
 		}
+		if !opts.AllowUnbounded && maxScan > 0 && result.Attempted >= maxScan {
+			result.ScanLimitReached = true
+			break
+		}
+		result.Attempted++
 		fir, err := c.FuncIRFor(r)
 		if err != nil {
-			return scanned, fmt.Errorf("build IR for %s: %w", name, err)
+			return result, fmt.Errorf("build IR for %s: %w", name, err)
 		}
 		if fir == nil {
 			continue
 		}
 		funcVA := fs.VA
-		scanned++
+		result.Scanned++
 
 		fn(r, fir, funcVA)
 
-		if scanned%gcInterval == 0 {
+		if result.Scanned%gcInterval == 0 {
 			runtime.GC()
 			debug.FreeOSMemory()
 		}
 	}
-	return scanned, nil
+	return result, nil
 }

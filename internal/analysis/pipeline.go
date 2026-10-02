@@ -478,7 +478,7 @@ func runPipeline(opts Opts) (*Result, error) {
 	//
 	// Confirmed empirically: 0 ICData/Context entries across 16 corpus samples
 	// (Dart 2.12.0 / 3.7.0 / 3.9.2 / 3.10.7 / 3.11.0 / 3.12.2, arm64 + x64).
-	if err := writeCapturedJSONL(&opts, clResult, pl, classLayouts, table); err != nil {
+	if err := writeCapturedJSONL(&opts, info.Version.DartVersion, clResult, pl, classLayouts, table); err != nil {
 		return nil, err
 	}
 
@@ -780,7 +780,7 @@ func prepareFuncSymbols(
 // capture layer. Each file is written only if the corresponding data slice is
 // non-empty. Any write failure is fatal: a pipeline result is not complete when
 // one advertised artifact silently stayed stale or was omitted.
-func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, table *cluster.InstructionsTable) error {
+func writeCapturedJSONL(opts *Opts, dartVersion string, clResult *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, table *cluster.InstructionsTable) error {
 	// Build all records first, then write each non-empty slice.
 	scripts := BuildScripts(clResult, pl)
 	loadingUnits := BuildLoadingUnits(clResult)
@@ -796,7 +796,7 @@ func writeCapturedJSONL(opts *Opts, clResult *cluster.Result, pl *naming.PoolLoo
 	icdata := BuildICData(clResult)
 	closureData := BuildClosureData(clResult)
 	libFuncs := BuildLibraryFunctions(clResult, pl)
-	ffiBridges := BuildFfiBridges(clResult, pl)
+	ffiBridges := BuildFfiBridges(dartVersion, clResult, pl)
 
 	// Report the Code/loading-unit partition, and say plainly when it carries
 	// no information. A single-unit app (no deferred imports) yields one

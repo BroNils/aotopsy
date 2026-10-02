@@ -297,7 +297,7 @@ const maxForwardedExprLen = 240
 func (s *LiftState) setReg(dst, val string) {
 	key := canonReg(dst)
 	old := s.Regs[key]
-	if old == ffiCallTargetSentinel || strings.HasPrefix(old, thrStubSentinelPrefix) {
+	if old == nativeTransitionTargetSentinel || strings.HasPrefix(old, thrStubSentinelPrefix) {
 		old = key
 	}
 	val = writeRegView(dst, old, val)
