@@ -970,12 +970,13 @@ func resolveX86Dispatch(
 	res := BlrResolution{
 		PC:         inst.VA,
 		SlotIndex:  slot,
-		Confidence: "unknown",
+		Confidence: ResolutionUnknown,
+		Derivation: DerivationDispatchTable,
 	}
 	if name, ok := ctx.ResolveDispatchTarget(slot); ok {
 		res.TargetName = name
 		res.Resolved = true
-		res.Confidence = "exact"
+		res.Confidence = ResolutionStaticInferred
 		ctx.DispatchHits++
 	} else {
 		// When selector offset is known, check CHA first for receiver class
@@ -984,9 +985,9 @@ func resolveX86Dispatch(
 			if len(chaTargets) > 0 {
 				applySelectorCandidates(&res, chaTargets)
 				if res.Polymorphic {
-					res.Confidence = "polymorphic"
+					res.Confidence = ResolutionPolymorphic
 				} else if res.Resolved {
-					res.Confidence = "static_inferred"
+					res.Confidence = ResolutionStaticInferred
 				}
 			}
 		}
@@ -996,9 +997,9 @@ func resolveX86Dispatch(
 			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
 			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
 			if res.Polymorphic {
-				res.Confidence = "polymorphic"
+				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {
-				res.Confidence = "static_inferred"
+				res.Confidence = ResolutionStaticInferred
 			}
 		}
 	}
@@ -1024,11 +1025,12 @@ func resolveX86DispatchSelectorOffset(
 	res := BlrResolution{
 		PC:         inst.VA,
 		SlotIndex:  -1,
-		Confidence: "static_inferred",
+		Confidence: ResolutionStaticInferred,
+		Derivation: DerivationDispatchTable,
 	}
 	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 	if res.Polymorphic {
-		res.Confidence = "polymorphic"
+		res.Confidence = ResolutionPolymorphic
 	}
 	recordBLRResolution(result, res)
 }

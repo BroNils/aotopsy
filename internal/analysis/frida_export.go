@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/cli"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/evidence"
 	"aotopsy/internal/frida"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/sdk"
@@ -145,6 +146,9 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: call edges: %w", err)
 	}
+	if err := frida.ValidateStaticCallEdges(edges); err != nil {
+		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: call edges: %w", err)
+	}
 	for i, e := range edges {
 		if !fridaHexOffsetRE.MatchString(e.FromPC) {
 			if e.Kind == "blr" || e.Kind == "call_indirect" {
@@ -159,7 +163,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 		if p.Via == "dispatch_table" {
 			p.ClassIDReg = frida.DispatchClassIDRegister(arch, ctx.DartVersion)
 		}
-		meta.UnresolvedBLRs = append(meta.UnresolvedBLRs, p)
+		meta.CallProbes = append(meta.CallProbes, p)
 	}
 
 	dispatchBytes, dispatchDigest, err := readFridaGenerationArtifact(filepath.Join(dir, "dispatch_table.jsonl"), "dispatch_table.jsonl", jsonutil.StandardLimits.MaxBytes, false)
@@ -196,9 +200,18 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 		}
 	}
 
-	_, evidenceDigest, err := readFridaGenerationArtifact(filepath.Join(dir, "evidence.jsonl"), "evidence.jsonl", jsonutil.StandardLimits.MaxBytes, false)
+	evidenceBytes, evidenceDigest, err := readFridaGenerationArtifact(filepath.Join(dir, "evidence.jsonl"), "evidence.jsonl", jsonutil.StandardLimits.MaxBytes, false)
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: evidence: %w", err)
+	}
+	if evidenceDigest.Present {
+		records, err := decodeFridaJSONLBytes[evidence.Evidence](evidenceBytes)
+		if err != nil {
+			return frida.FridaMetadata{}, fmt.Errorf("frida metadata: evidence: %w", err)
+		}
+		if err := evidence.NewCollectorFromRecords(ctx.DartVersion, records).ValidateStatic(); err != nil {
+			return frida.FridaMetadata{}, fmt.Errorf("frida metadata: evidence: %w", err)
+		}
 	}
 
 	meta.Artifacts = []frida.ArtifactDigest{provDigest, funcDigest, edgeDigest, dispatchDigest, refDigest, evidenceDigest}

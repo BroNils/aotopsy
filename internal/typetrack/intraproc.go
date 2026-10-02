@@ -39,13 +39,57 @@ type BlrResolution struct {
 	Polymorphic bool
 	Candidates  int
 
-	// Confidence classifies how the resolution was derived:
-	//   "exact"          — direct slot lookup with known receiver class
-	//   "static_inferred" — selector scan fallback (receiver unknown, selector known)
-	//   "polymorphic"    — multiple candidates from selector scan
-	//   "stub"           — resolved via THR stub / pool Code / UnlinkedCall / TTS
-	//   "unknown"        — unresolved (Resolved=false)
-	Confidence string `json:"confidence,omitempty"`
+	// Confidence classifies how the resolution was derived. An indirect call is
+	// never exact: even a direct dispatch-slot lookup depends on receiver and
+	// dispatch state inferred outside the CALL/BLR instruction itself.
+	Confidence ResolutionConfidence `json:"confidence"`
+	// Derivation records the independent mechanism that produced the claim.
+	// Confidence alone is insufficient provenance: both a real GDT call and an
+	// UnlinkedCall selector lookup can be static_inferred/polymorphic, but only
+	// the former is justified by FlowGraphCompiler::EmitDispatchTableCall.
+	Derivation ResolutionDerivation `json:"derivation"`
+}
+
+// ResolutionConfidence is the closed vocabulary emitted by typetrack for an
+// indirect call. It is intentionally separate from evidence.Confidence to keep
+// the dependency direction acyclic while preventing arbitrary strings from
+// becoming new certainty tiers.
+type ResolutionConfidence string
+
+const (
+	ResolutionStaticInferred ResolutionConfidence = "static_inferred"
+	ResolutionPolymorphic    ResolutionConfidence = "polymorphic"
+	ResolutionStub           ResolutionConfidence = "stub"
+	ResolutionUnknown        ResolutionConfidence = "unknown"
+)
+
+func (c ResolutionConfidence) Valid() bool {
+	switch c {
+	case ResolutionStaticInferred, ResolutionPolymorphic, ResolutionStub, ResolutionUnknown:
+		return true
+	}
+	return false
+}
+
+// ResolutionDerivation is the closed provenance vocabulary for indirect-call
+// resolution. It deliberately does not encode certainty; that is Confidence's
+// job. Keeping the two axes separate prevents a shared confidence tier from
+// acquiring an SDK reference that belongs to a different lowering mechanism.
+type ResolutionDerivation string
+
+const (
+	DerivationUnknown       ResolutionDerivation = "unknown"
+	DerivationDispatchTable ResolutionDerivation = "dispatch_table"
+	DerivationUnlinkedCall  ResolutionDerivation = "unlinked_call"
+	DerivationStub          ResolutionDerivation = "stub"
+)
+
+func (d ResolutionDerivation) Valid() bool {
+	switch d {
+	case DerivationUnknown, DerivationDispatchTable, DerivationUnlinkedCall, DerivationStub:
+		return true
+	}
+	return false
 }
 
 // maxPolymorphicNames bounds how many callee names a polymorphic resolution
@@ -1110,6 +1154,7 @@ func recordBLRResolution(result *IntraResult, res BlrResolution) {
 	if result == nil {
 		return
 	}
+	res = canonicalBLRResolution(res)
 	for i := range result.BLRResolutions {
 		if result.BLRResolutions[i].PC == res.PC {
 			result.BLRResolutions[i] = res
@@ -1117,6 +1162,57 @@ func recordBLRResolution(result *IntraResult, res BlrResolution) {
 		}
 	}
 	result.BLRResolutions = append(result.BLRResolutions, res)
+}
+
+// canonicalBLRResolution fails contradictory producer state closed. A
+// polymorphic candidate set is never a single callee, and an unresolved site
+// must not retain a stale target from an earlier fixed-point visit.
+func canonicalBLRResolution(res BlrResolution) BlrResolution {
+	failClosed := func() BlrResolution {
+		res.TargetName = ""
+		res.TargetNames = nil
+		res.Resolved = false
+		res.Polymorphic = false
+		res.Candidates = 0
+		res.Confidence = ResolutionUnknown
+		res.Derivation = DerivationUnknown
+		return res
+	}
+
+	if !res.Derivation.Valid() {
+		return failClosed()
+	}
+	if !res.Resolved {
+		res.TargetName = ""
+		res.TargetNames = nil
+		res.Polymorphic = false
+		res.Candidates = 0
+		res.Confidence = ResolutionUnknown
+		return res
+	}
+	if res.Polymorphic {
+		if res.TargetName != "" || len(res.TargetNames) < 2 || res.Candidates < len(res.TargetNames) {
+			return failClosed()
+		}
+		if res.Derivation != DerivationDispatchTable && res.Derivation != DerivationUnlinkedCall {
+			return failClosed()
+		}
+		res.Confidence = ResolutionPolymorphic
+		return res
+	}
+	if res.TargetName == "" || len(res.TargetNames) != 0 {
+		return failClosed()
+	}
+	if res.Confidence != ResolutionStaticInferred && res.Confidence != ResolutionStub {
+		return failClosed()
+	}
+	if res.Confidence == ResolutionStub && res.Derivation != DerivationStub {
+		return failClosed()
+	}
+	if res.Confidence == ResolutionStaticInferred && res.Derivation != DerivationDispatchTable && res.Derivation != DerivationUnlinkedCall {
+		return failClosed()
+	}
+	return res
 }
 
 // resolveBLR attempts to resolve a BLR call site to a dispatch table target.
@@ -1139,7 +1235,8 @@ func resolveBLR(
 	res := BlrResolution{
 		PC:         inst.Addr,
 		Reg:        rn,
-		Confidence: "unknown",
+		Confidence: ResolutionUnknown,
+		Derivation: DerivationUnknown,
 	}
 
 	t := state[rn]
@@ -1171,6 +1268,7 @@ func resolveBLR(
 		// table at that selector across all classes.
 		if t.SelectorOnly {
 			ctx.DispatchHits++
+			res.Derivation = DerivationDispatchTable
 			res.SlotIndex = -1
 			imm := t.SelectorImm
 			// The pre-scan's per-BLR record is authoritative when present:
@@ -1180,22 +1278,23 @@ func resolveBLR(
 			}
 			applySelectorCandidates(&res, ctx.selectorCandidates(imm))
 			if res.Polymorphic {
-				res.Confidence = "polymorphic"
+				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {
-				res.Confidence = "static_inferred"
+				res.Confidence = ResolutionStaticInferred
 			}
 			recordBLRResolution(result, res)
 			return
 		}
 
 		// Direct slot lookup.
+		res.Derivation = DerivationDispatchTable
 		res.SlotIndex = t.DispatchIndex
 		ctx.DispatchHits++
 
 		if name, ok := ctx.ResolveDispatchTarget(t.DispatchIndex); ok {
 			res.TargetName = name
 			res.Resolved = true
-			res.Confidence = "exact"
+			res.Confidence = ResolutionStaticInferred
 		} else {
 			// SUPER FEATURE 2: slot exists but no name.
 			// Try to find the entry and resolve via CodeRange fallback.
@@ -1203,7 +1302,7 @@ func resolveBLR(
 				if name, ok3 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok3 && name != "" {
 					res.TargetName = name
 					res.Resolved = true
-					res.Confidence = "static_inferred"
+					res.Confidence = ResolutionStaticInferred
 				}
 			}
 			// P5 CHA: if direct lookup failed, try subclass dispatch slots.
@@ -1234,6 +1333,7 @@ func resolveBLR(
 			}
 		}
 	case LatticeKnownClass:
+		res.Derivation = DerivationDispatchTable
 		// When a selector offset is known (from preceding ADD/SUB), CHA enumerates
 		// all subclass dispatch targets.
 		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
@@ -1241,9 +1341,9 @@ func resolveBLR(
 			if len(chaTargets) > 0 {
 				applySelectorCandidates(&res, chaTargets)
 				if res.Polymorphic {
-					res.Confidence = "polymorphic"
+					res.Confidence = ResolutionPolymorphic
 				} else if res.Resolved {
-					res.Confidence = "static_inferred"
+					res.Confidence = ResolutionStaticInferred
 				}
 			}
 		}
@@ -1255,9 +1355,9 @@ func resolveBLR(
 			}
 			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
 			if res.Polymorphic {
-				res.Confidence = "polymorphic"
+				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {
-				res.Confidence = "static_inferred"
+				res.Confidence = ResolutionStaticInferred
 			}
 		}
 	case LatticeTop, LatticeBottom:
@@ -1280,13 +1380,14 @@ func resolveBLR(
 		// evidence than Top -- it says the value came from the dispatch table
 		// -- so refusing to use the selector was backwards.
 		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
+			res.Derivation = DerivationDispatchTable
 			// Scan every class's slot at this selector immediate; see
 			// selectorCandidates for the index arithmetic and its SDK source.
 			applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
 			if res.Polymorphic {
-				res.Confidence = "polymorphic"
+				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {
-				res.Confidence = "static_inferred"
+				res.Confidence = ResolutionStaticInferred
 			}
 		}
 	}

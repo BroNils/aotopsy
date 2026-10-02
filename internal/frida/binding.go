@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	BindingSchemaVersion = 1
+	BindingSchemaVersion = 2
 	BindingFileName      = "frida_binding.json"
 
-	maxFunctionMapEntries = 500
-	maxInstalledFunctions = 50
-	maxInstalledBLRs      = 100
+	maxFunctionMapEntries  = 500
+	maxInstalledFunctions  = 50
+	maxInstalledCallProbes = 100
 )
 
 var generationArtifactNames = [...]string{
@@ -40,20 +40,20 @@ type ArtifactDigest struct {
 // artifact generation and records precisely which function/indirect-call sites
 // the stock script can observe.
 type FridaBinding struct {
-	SchemaVersion      int                   `json:"schema_version"`
-	MetadataSchema     int                   `json:"metadata_schema"`
-	AnalyzerVersion    string                `json:"analyzer_version"`
-	AnalyzerCommit     string                `json:"analyzer_commit"`
-	GenerationID       string                `json:"generation_id"`
-	SourceSHA256       string                `json:"source_sha256"`
-	SourceSize         int64                 `json:"source_size"`
-	ModuleName         string                `json:"module_name"`
-	RuntimeIdentity    []RuntimeRegionDigest `json:"runtime_identity"`
-	DartVersion        string                `json:"dart_version"`
-	Architecture       string                `json:"architecture"`
-	Artifacts          []ArtifactDigest      `json:"artifacts"`
-	InstalledFunctions []FridaFunction       `json:"installed_functions"`
-	InstalledBLRs      []FridaUnresolvedBLR  `json:"installed_blrs"`
+	SchemaVersion       int                   `json:"schema_version"`
+	MetadataSchema      int                   `json:"metadata_schema"`
+	AnalyzerVersion     string                `json:"analyzer_version"`
+	AnalyzerCommit      string                `json:"analyzer_commit"`
+	GenerationID        string                `json:"generation_id"`
+	SourceSHA256        string                `json:"source_sha256"`
+	SourceSize          int64                 `json:"source_size"`
+	ModuleName          string                `json:"module_name"`
+	RuntimeIdentity     []RuntimeRegionDigest `json:"runtime_identity"`
+	DartVersion         string                `json:"dart_version"`
+	Architecture        string                `json:"architecture"`
+	Artifacts           []ArtifactDigest      `json:"artifacts"`
+	InstalledFunctions  []FridaFunction       `json:"installed_functions"`
+	InstalledCallProbes []FridaCallProbe      `json:"installed_call_probes"`
 }
 
 func GenerationArtifactNames() []string {
@@ -91,7 +91,7 @@ func FinalizeMetadata(meta *FridaMetadata) error {
 		return fmt.Errorf("frida metadata: nil metadata")
 	}
 	meta.InstalledFunctions = installedFunctions(meta.Functions)
-	meta.InstalledBLRs = installedBLRs(meta.UnresolvedBLRs)
+	meta.InstalledCallProbes = installedCallProbes(meta.CallProbes)
 	binding := BindingFromMetadata(*meta)
 	id, err := ComputeGenerationID(binding)
 	if err != nil {
@@ -103,20 +103,20 @@ func FinalizeMetadata(meta *FridaMetadata) error {
 
 func BindingFromMetadata(meta FridaMetadata) FridaBinding {
 	return FridaBinding{
-		SchemaVersion:      BindingSchemaVersion,
-		MetadataSchema:     meta.SchemaVersion,
-		AnalyzerVersion:    meta.AnalyzerVersion,
-		AnalyzerCommit:     meta.AnalyzerCommit,
-		GenerationID:       meta.GenerationID,
-		SourceSHA256:       meta.SourceSHA256,
-		SourceSize:         meta.SourceSize,
-		ModuleName:         meta.ModuleName,
-		RuntimeIdentity:    append([]RuntimeRegionDigest(nil), meta.RuntimeIdentity...),
-		DartVersion:        meta.DartVersion,
-		Architecture:       meta.Architecture,
-		Artifacts:          append([]ArtifactDigest(nil), meta.Artifacts...),
-		InstalledFunctions: append([]FridaFunction(nil), meta.InstalledFunctions...),
-		InstalledBLRs:      append([]FridaUnresolvedBLR(nil), meta.InstalledBLRs...),
+		SchemaVersion:       BindingSchemaVersion,
+		MetadataSchema:      meta.SchemaVersion,
+		AnalyzerVersion:     meta.AnalyzerVersion,
+		AnalyzerCommit:      meta.AnalyzerCommit,
+		GenerationID:        meta.GenerationID,
+		SourceSHA256:        meta.SourceSHA256,
+		SourceSize:          meta.SourceSize,
+		ModuleName:          meta.ModuleName,
+		RuntimeIdentity:     append([]RuntimeRegionDigest(nil), meta.RuntimeIdentity...),
+		DartVersion:         meta.DartVersion,
+		Architecture:        meta.Architecture,
+		Artifacts:           append([]ArtifactDigest(nil), meta.Artifacts...),
+		InstalledFunctions:  append([]FridaFunction(nil), meta.InstalledFunctions...),
+		InstalledCallProbes: append([]FridaCallProbe(nil), meta.InstalledCallProbes...),
 	}
 }
 
@@ -192,7 +192,7 @@ func ValidateBinding(binding FridaBinding) error {
 			return fmt.Errorf("frida binding: installed function %d: %w", i, err)
 		}
 	}
-	for i, p := range binding.InstalledBLRs {
+	for i, p := range binding.InstalledCallProbes {
 		if err := validateJSOffset(p.VA); err != nil {
 			return fmt.Errorf("frida binding: installed probe %d: %w", i, err)
 		}
@@ -264,11 +264,11 @@ func installedFunctions(functions []FridaFunction) []FridaFunction {
 	return append([]FridaFunction(nil), funcMap...)
 }
 
-func installedBLRs(probes []FridaUnresolvedBLR) []FridaUnresolvedBLR {
-	if len(probes) > maxInstalledBLRs {
-		probes = probes[:maxInstalledBLRs]
+func installedCallProbes(probes []FridaCallProbe) []FridaCallProbe {
+	if len(probes) > maxInstalledCallProbes {
+		probes = probes[:maxInstalledCallProbes]
 	}
-	return append([]FridaUnresolvedBLR(nil), probes...)
+	return append([]FridaCallProbe(nil), probes...)
 }
 
 func sameInstalledFunctions(a, b []FridaFunction) bool {
@@ -283,7 +283,7 @@ func sameInstalledFunctions(a, b []FridaFunction) bool {
 	return true
 }
 
-func sameInstalledBLRs(a, b []FridaUnresolvedBLR) bool {
+func sameInstalledCallProbes(a, b []FridaCallProbe) bool {
 	if len(a) != len(b) {
 		return false
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/disasm"
 	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
@@ -56,5 +57,30 @@ func TestWriteXrefFallbackIncludesVMOnlyPoolStrings(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].StringValue != "vm-shared-string" || len(recs[0].Functions) != 0 {
 		t.Fatalf("VM-only string fallback = %#v, want one empty-reader record", recs)
+	}
+}
+
+func TestWriteXrefIncludesPolymorphicCandidatesWithoutInventingSingleCallee(t *testing.T) {
+	dir := t.TempDir()
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc:   "Caller",
+		FromPC:     "0x100",
+		Kind:       "blr",
+		Targets:    []string{"A.paint", "B.paint"},
+		Candidates: 2,
+	}}
+	if err := writeXrefJSONL(dir, &cluster.Result{}, &naming.PoolLookups{}, nil, edges, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := jsonutil.ReadJSONL[AddressCallersXref](filepath.Join(dir, "address_callers_xref.jsonl"), jsonutil.StandardLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AddressCallersXref{
+		{Target: "A.paint", Callers: []string{"Caller"}},
+		{Target: "B.paint", Callers: []string{"Caller"}},
+	}
+	if !reflect.DeepEqual(recs, want) {
+		t.Fatalf("address caller xref = %#v, want %#v", recs, want)
 	}
 }

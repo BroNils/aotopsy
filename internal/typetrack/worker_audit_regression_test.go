@@ -275,8 +275,8 @@ func TestFixedPointEvidenceReplacesEarlierVisitAtSamePC(t *testing.T) {
 		t.Fatalf("stale first-visit field evidence survived final visit: %+v", result.FieldAccesses)
 	}
 
-	recordBLRResolution(result, BlrResolution{PC: pc, Resolved: true, TargetName: "old"})
-	recordBLRResolution(result, BlrResolution{PC: pc, Resolved: false, Confidence: "unknown"})
+	recordBLRResolution(result, BlrResolution{PC: pc, Resolved: true, TargetName: "old", Confidence: ResolutionStub, Derivation: DerivationStub})
+	recordBLRResolution(result, BlrResolution{PC: pc, Resolved: false, Confidence: ResolutionUnknown, Derivation: DerivationUnknown})
 	if len(result.BLRResolutions) != 1 || result.BLRResolutions[0].Resolved || result.BLRResolutions[0].TargetName != "" {
 		t.Fatalf("BLR final-state replacement failed: %+v", result.BLRResolutions)
 	}
