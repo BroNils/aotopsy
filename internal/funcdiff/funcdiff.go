@@ -188,7 +188,7 @@ func Build(result *cluster.Result, pl *naming.PoolLookups, profile *snapshot.Ver
 			stats.SkippedOwner++
 			continue
 		}
-		name := stableObjectName(pl, no)
+		name := pl.ResolveObjectName(no.RefID)
 		if name == "" {
 			stats.SkippedName++
 			continue // truly unnamed/anonymous objects have no stable diff identity
@@ -286,47 +286,14 @@ func functionLibraryURL(effectiveClass int, classByRef map[int]*cluster.ClassInf
 	if ci == nil || ci.LibraryRefID <= cluster.RefNull {
 		return ""
 	}
-	lib, ok := stableNamedForRef(pl, ci.LibraryRefID)
+	lib, ok := pl.NamedObjectForRef(ci.LibraryRefID)
 	if !ok || lib == nil {
 		return ""
 	}
 	if ct != nil && ct.Library != 0 && lib.CID != ct.Library {
 		return ""
 	}
-	return stableObjectName(pl, lib)
-}
-
-// stableNamedForRef resolves an object reference in the same namespace rules
-// as snapshot references themselves: isolate objects first, VM objects only in
-// the base-object prefix. VmRefToNamed keys are not globally unique with app
-// refs and must not be used as an unconditional fallback.
-func stableNamedForRef(pl *naming.PoolLookups, ref int) (*cluster.NamedObject, bool) {
-	if pl == nil || ref <= cluster.RefNull {
-		return nil, false
-	}
-	if no, ok := pl.RefToNamed[ref]; ok && no != nil {
-		return no, true
-	}
-	if ref < pl.BaseObjLimit && pl.VmRefToNamed != nil {
-		if no, ok := pl.VmRefToNamed[ref]; ok && no != nil {
-			return no, true
-		}
-	}
-	return nil, false
-}
-
-// stableObjectName resolves a NamedObject's string with the same guarded VM
-// fallback used everywhere PoolLookups exposes a raw reference. In particular,
-// do not call ResolveVMName directly here: it cannot tell whether NameRefID is
-// in the VM base-object domain.
-func stableObjectName(pl *naming.PoolLookups, no *cluster.NamedObject) string {
-	if pl == nil || no == nil {
-		return ""
-	}
-	if s, ok := pl.StringForRef(no.NameRefID); ok {
-		return s
-	}
-	return ""
+	return pl.ResolveObjectName(lib.RefID)
 }
 
 // functionOwnerIdentity follows PatchClass wrappers to the real owning Class
@@ -339,7 +306,7 @@ func functionOwnerIdentity(no *cluster.NamedObject, pl *naming.PoolLookups, ct *
 	}
 	ref := no.OwnerRefID
 	for depth := 0; depth <= 4; depth++ {
-		owner, found := stableNamedForRef(pl, ref)
+		owner, found := pl.NamedObjectForRef(ref)
 		if !found {
 			return "", 0, false
 		}
@@ -353,7 +320,7 @@ func functionOwnerIdentity(no *cluster.NamedObject, pl *naming.PoolLookups, ct *
 		if ct.Class == 0 || owner.CID != ct.Class {
 			return "", 0, false
 		}
-		raw := stableObjectName(pl, owner)
+		raw := pl.ResolveObjectName(ref)
 		if raw == "" {
 			return "", 0, false
 		}
@@ -409,11 +376,11 @@ func buildClosureParentIdentities(result *cluster.Result, pl *naming.PoolLookups
 		if depth > 64 || visiting[ref] {
 			return "", false
 		}
-		fn, found := stableNamedForRef(pl, ref)
+		fn, found := pl.NamedObjectForRef(ref)
 		if !found || fn == nil || fn.CID != ct.Function {
 			return "", false
 		}
-		name := stableDescriptorName(stableObjectName(pl, fn))
+		name := stableDescriptorName(pl.ResolveObjectName(ref))
 		if name == "" || fn.FuncKind == cluster.FunctionKindUnknown {
 			return "", false
 		}

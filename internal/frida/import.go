@@ -2,7 +2,6 @@ package frida
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -546,14 +545,14 @@ func readStaticGeneration(dir string) (staticGeneration, error) {
 		return out, fmt.Errorf("frida-import: provenance identity does not match Frida generation binding")
 	}
 
-	funcs, err := decodeStaticJSONLBytes[disasm.FuncRecord](blobs["functions.jsonl"])
+	funcs, err := jsonutil.DecodeJSONL[disasm.FuncRecord](blobs["functions.jsonl"], jsonutil.StandardLimits)
 	if err != nil {
 		return out, fmt.Errorf("frida-import: decode functions.jsonl: %w", err)
 	}
 	if err := validateStaticFunctions(funcs); err != nil {
 		return out, err
 	}
-	edges, err := decodeStaticJSONLBytes[disasm.CallEdgeRecord](blobs["call_edges.jsonl"])
+	edges, err := jsonutil.DecodeJSONL[disasm.CallEdgeRecord](blobs["call_edges.jsonl"], jsonutil.StandardLimits)
 	if err != nil {
 		return out, fmt.Errorf("frida-import: decode call_edges.jsonl: %w", err)
 	}
@@ -561,7 +560,7 @@ func readStaticGeneration(dir string) (staticGeneration, error) {
 		return out, fmt.Errorf("frida-import: invalid static call_edges.jsonl: %w", err)
 	}
 	if evidenceBytes, ok := blobs["evidence.jsonl"]; ok {
-		records, err := decodeStaticJSONLBytes[evidence.Evidence](evidenceBytes)
+		records, err := jsonutil.DecodeJSONL[evidence.Evidence](evidenceBytes, jsonutil.StandardLimits)
 		if err != nil {
 			return out, fmt.Errorf("frida-import: decode evidence.jsonl: %w", err)
 		}
@@ -633,40 +632,6 @@ func readPinnedStaticFile(path string, limit int64, required bool) ([]byte, bool
 		return nil, false, fmt.Errorf("%s exceeds byte limit %d", path, limit)
 	}
 	return b, true, nil
-}
-
-func decodeStaticJSONLBytes[T any](b []byte) ([]T, error) {
-	limits := jsonutil.StandardLimits
-	if int64(len(b)) > limits.MaxBytes {
-		return nil, fmt.Errorf("input is %d bytes, exceeds limit %d", len(b), limits.MaxBytes)
-	}
-	s := bufio.NewScanner(bytes.NewReader(b))
-	initial := 64 << 10
-	if limits.MaxRecordBytes < initial {
-		initial = limits.MaxRecordBytes
-	}
-	s.Buffer(make([]byte, initial), limits.MaxRecordBytes+1)
-	var out []T
-	lineNo := 0
-	for s.Scan() {
-		lineNo++
-		line := append([]byte(nil), s.Bytes()...)
-		if len(bytes.TrimSpace(line)) == 0 {
-			return nil, fmt.Errorf("blank record at line %d", lineNo)
-		}
-		if len(out) >= limits.MaxRecords {
-			return nil, fmt.Errorf("record limit %d exceeded at line %d", limits.MaxRecords, lineNo)
-		}
-		rec, err := jsonutil.DecodeStrictObject[T](line)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		out = append(out, rec)
-	}
-	if err := s.Err(); err != nil {
-		return nil, fmt.Errorf("read line %d: %w", lineNo+1, err)
-	}
-	return out, nil
 }
 
 func readCallEdgesStrict(path string) ([]disasm.CallEdgeRecord, error) {

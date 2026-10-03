@@ -227,9 +227,9 @@ func BuildClosureParents(result *cluster.Result, pl *PoolLookups) map[int]string
 		}
 		name := ""
 		if _, appParent := pl.RefToNamed[parentRef]; appParent {
-			name = pl.resolveIsolateName(parent)
+			name = pl.ResolveIsolateName(parent)
 		} else {
-			name = pl.ResolveVMName(parent)
+			name = pl.resolveVMName(parent)
 		}
 		if name == "" {
 			continue

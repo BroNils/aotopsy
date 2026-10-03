@@ -116,7 +116,7 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 		}
 		className := ""
 		if ci.NameRefID >= 0 {
-			if s, ok := pl.RefToStr[ci.NameRefID]; ok {
+			if s, ok := pl.StringForRef(ci.NameRefID); ok {
 				className = s
 			}
 		}
@@ -142,14 +142,7 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 				}
 				name := ""
 				if rf.nameRefID >= 0 {
-					if s, ok := pl.RefToStr[rf.nameRefID]; ok {
-						name = s
-					}
-					if name == "" {
-						if s, ok := pl.VmRefToStr[rf.nameRefID]; ok {
-							name = s
-						}
-					}
+					name, _ = pl.StringForRef(rf.nameRefID)
 				}
 				if name == "" {
 					name = fmt.Sprintf("field_0x%x", rf.byteOffset)

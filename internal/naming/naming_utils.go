@@ -8,8 +8,20 @@ import (
 )
 
 func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
+	return QualifiedName("", ci.DisplayName(), pcOffset)
+}
+
+// DisplayName returns the semantic name of a Code without an address suffix.
+// Keep this as the single qualification policy for Code identity: constructors
+// already carry their class in Function.name, while non-implicit closures are
+// qualified by their enclosing Function rather than merely by the owning Class.
+// External filename/token sanitization belongs downstream of this method.
+func (ci CodeNameInfo) DisplayName() string {
+	if ci.FuncName == "" {
+		return ""
+	}
 	if ci.IsConstructor {
-		return QualifiedName("", ci.FuncName, pcOffset)
+		return ci.FuncName
 	}
 	// A closure is qualified by the FUNCTION it was declared inside, not by its
 	// owning class -- the SDK spells it `Enclosing.<anonymous closure>` (the
@@ -17,9 +29,12 @@ func (ci CodeNameInfo) Qualified(pcOffset uint32) string {
 	// in a class renders identically and disagrees with the symbol table. The
 	// enclosing name is already class-qualified by BuildClosureParents.
 	if ci.EnclosingFunction != "" {
-		return QualifiedName(ci.EnclosingFunction, ci.FuncName, pcOffset)
+		return ci.EnclosingFunction + "." + ci.FuncName
 	}
-	return QualifiedName(ci.OwnerName, ci.FuncName, pcOffset)
+	if ci.OwnerName != "" {
+		return ci.OwnerName + "." + ci.FuncName
+	}
+	return ci.FuncName
 }
 
 // QualifiedName builds "Owner.FuncName_hexaddr" like blutter.

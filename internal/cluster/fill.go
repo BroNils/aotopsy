@@ -291,6 +291,18 @@ type TypeInfo struct {
 	Nullability TypeNullability
 }
 
+// RecordTypeInfo holds the serialized identity needed to reproduce the VM's
+// TypeTestingStubNamer spelling for a RecordType. Dart 3.x stores the packed
+// RecordShape as a Smi ref and the record's AbstractType field vector as an
+// Array ref; named-field strings are reached separately through ObjectStore's
+// record_field_names table using the shape's field-names index.
+type RecordTypeInfo struct {
+	RefID              int
+	ShapeRef           int
+	FieldTypesArrayRef int
+	Nullability        TypeNullability
+}
+
 // TypeNullability mirrors the VM's semantic nullability states without
 // exposing their version-dependent packed bit width. Dart 2.x/early 3.x use
 // two bits (nullable=0, non-nullable=1, legacy=2); Dart 3.5+ uses one bit and
@@ -819,7 +831,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, icDataInfos, scriptInfos, loadingUnitInfos, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
+			named, funcTypes, fieldInfos, typeInfos, recordTypeInfos, icDataInfos, scriptInfos, loadingUnitInfos, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
@@ -827,6 +839,7 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			result.FuncTypes = append(result.FuncTypes, funcTypes...)
 			result.Fields = append(result.Fields, fieldInfos...)
 			result.Types = append(result.Types, typeInfos...)
+			result.RecordTypes = append(result.RecordTypes, recordTypeInfos...)
 			result.ICData = append(result.ICData, icDataInfos...)
 			result.Scripts = append(result.Scripts, scriptInfos...)
 			result.LoadingUnits = append(result.LoadingUnits, loadingUnitInfos...)
@@ -1227,7 +1240,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
-		_, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
+		_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)

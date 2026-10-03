@@ -19,3 +19,12 @@ type ObjectStoreStubField = objectStoreStubField
 func ObjectStoreStubFields(dartVersion string) []ObjectStoreStubField {
 	return objectStoreStubFields[dartVersion]
 }
+
+// ObjectStoreRecordFieldNamesIndex returns the root index of ObjectStore's
+// record_field_names array for a Dart version. The table is generated from the
+// exact serialized from()..to_snapshot(kFullAOT) field range; false means the
+// field is absent or outside that range and callers must not guess an index.
+func ObjectStoreRecordFieldNamesIndex(dartVersion string) (int, bool) {
+	idx, ok := objectStoreRecordFieldNamesIndex[dartVersion]
+	return idx, ok
+}

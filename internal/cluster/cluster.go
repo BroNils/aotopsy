@@ -136,17 +136,18 @@ type PoolEntry struct {
 
 // Result holds all parsed cluster data.
 type Result struct {
-	Header    Header
-	Clusters  []ClusterMeta
-	Strings   []ParsedString
-	Named     []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
-	FuncTypes []FuncTypeInfo // FunctionType parameter counts extracted from fill
-	Classes   []ClassInfo    // class layout data extracted from fill
-	Types     []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
-	Fields    []FieldInfo    // field layout data extracted from fill
-	Codes     []CodeEntry    // Code objects with owner refs, extracted from fill
-	Arrays    []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
-	Pool      []PoolEntry    // ObjectPool entries extracted from fill
+	Header      Header
+	Clusters    []ClusterMeta
+	Strings     []ParsedString
+	Named       []NamedObject    // named objects extracted from fill (Function, Class, Library, etc.)
+	FuncTypes   []FuncTypeInfo   // FunctionType parameter counts extracted from fill
+	Classes     []ClassInfo      // class layout data extracted from fill
+	Types       []TypeInfo       // Type objects' resolved type_class_id, extracted from fill (v3.x only)
+	RecordTypes []RecordTypeInfo // RecordType shape/field vector/nullability needed for exact TTS names
+	Fields      []FieldInfo      // field layout data extracted from fill
+	Codes       []CodeEntry      // Code objects with owner refs, extracted from fill
+	Arrays      []ArrayInfo      // Array/ImmutableArray elements, extracted from fill
+	Pool        []PoolEntry      // ObjectPool entries extracted from fill
 	// Int32Arrays maps a TypedDataInt32Array's ref to its raw little-endian
 	// payload. These are captured because one of them is a switch's jump
 	// table: IndirectGotoInstr keeps its targets in `const TypedData& offsets_`

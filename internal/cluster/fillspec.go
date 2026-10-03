@@ -141,6 +141,7 @@ type FillSpec struct {
 	ResultTypeIdx int
 	ParamTypesIdx int
 	IsType        bool // true for Type clusters (extract type_class_id)
+	IsRecordType  bool // true for RecordType clusters (capture shape/field types/nullability)
 	// TypeClassIDIsScalar0 marks the Dart 2.16-2.18 Type layout, where
 	// scalar 0 is the raw type_class_id rather than the packed "flags" word
 	// that 2.19.0+ uses:
@@ -585,10 +586,12 @@ func specRecordType() FillSpec {
 	// shape is COMPRESSED_SMI_FIELD (compressed pointer, included in ReadFromTo).
 	// Read<uint8_t>(flags).
 	return FillSpec{
-		Kind:    FillRefs,
-		NumRefs: 4,
-		Scalars: []ScalarOp{OpUint8},
-		NameIdx: -1, OwnerIdx: -1,
+		Kind:         FillRefs,
+		NumRefs:      4,
+		Scalars:      []ScalarOp{OpUint8},
+		NameIdx:      -1,
+		OwnerIdx:     -1,
+		IsRecordType: true,
 	}
 }
 
@@ -605,6 +608,17 @@ func specTypeParameter(hasParamClassId, typeParamByteScalars, typeParamWideScala
 	//   Read<int32_t>(parameterized_class_id) + ReadTokenPosition(token_pos) + Read<int16_t>(index) + Read<uint8_t>(combined)
 	if numRefs == 0 {
 		numRefs = 3
+	}
+	nameIdx := -1
+	if numRefs == 5 {
+		// SDK @2.12.0 runtime/vm/raw_object.h: UntaggedTypeParameter visits
+		// type_test_stub(0), name(1), hash(2), bound(3), default_argument(4).
+		// @2.13.0 keeps that layout and TypeTestingStubNamer still spells a
+		// TypeParameter with TypeParameter::name(). @2.14.0 moves names into the
+		// new TypeParameters object, shrinks TypeParameter to 3 visited refs and
+		// switches the TTS namer to CanonicalNameCString. Capture the old name at
+		// the serialization boundary instead of trying to reconstruct it later.
+		nameIdx = 1
 	}
 	var scalars []ScalarOp
 	switch {
@@ -628,7 +642,7 @@ func specTypeParameter(hasParamClassId, typeParamByteScalars, typeParamWideScala
 		Kind:            FillRefs,
 		NumRefs:         numRefs,
 		Scalars:         scalars,
-		NameIdx:         -1,
+		NameIdx:         nameIdx,
 		OwnerIdx:        -1,
 		IsTypeParameter: true,
 	}

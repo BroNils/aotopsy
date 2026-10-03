@@ -183,6 +183,109 @@ func TestReadJSONFileIsStrictAndBounded(t *testing.T) {
 	}
 }
 
+type nestedRequiredRecord struct {
+	ID   int `json:"id"`
+	Meta struct {
+		Need string `json:"need"`
+	} `json:"meta"`
+}
+
+func TestDecodeStrictObjectRejectsNestedSchemaDriftAndInvalidUTF8(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"missing nested required": []byte(`{"id":1,"meta":{}}`),
+		"duplicate nested":        []byte(`{"id":1,"meta":{"need":"a","need":"b"}}`),
+		"nested unknown":          []byte(`{"id":1,"meta":{"need":"a","stale":true}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeStrictObject[nestedRequiredRecord](body); err == nil {
+				t.Fatalf("accepted nested schema drift: %s", body)
+			}
+		})
+	}
+
+	badUTF8 := append([]byte(`{"id":1,"meta":{"need":"`), 0xff)
+	badUTF8 = append(badUTF8, []byte(`"}}`)...)
+	if _, err := DecodeStrictObject[nestedRequiredRecord](badUTF8); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("invalid UTF-8 accepted or misreported: %v", err)
+	}
+	if _, err := DecodeStrictObject[nestedRequiredRecord]([]byte(`{"id":1,"meta":{"need":"\uD800"}}`)); err == nil || !strings.Contains(err.Error(), "surrogate") {
+		t.Fatalf("unpaired Unicode surrogate accepted or misreported: %v", err)
+	}
+}
+
+type genericEnvelope[T any] struct {
+	Payload  T  `json:"payload"`
+	Optional *T `json:"optional,omitempty"`
+}
+
+func TestDecodeStrictObjectGenericNestedSchemaAndOmitEmpty(t *testing.T) {
+	good := []byte(`{"payload":{"id":1,"meta":{"need":"x"}}}`)
+	got, err := DecodeStrictObject[genericEnvelope[nestedRequiredRecord]](good)
+	if err != nil || got.Payload.Meta.Need != "x" || got.Optional != nil {
+		t.Fatalf("generic strict decode = %+v, %v", got, err)
+	}
+	bad := []byte(`{"payload":{"id":1,"meta":{}}}`)
+	if _, err := DecodeStrictObject[genericEnvelope[nestedRequiredRecord]](bad); err == nil {
+		t.Fatal("generic nested missing key was accepted")
+	}
+}
+
+func TestDecodeStrictObjectRejectsNullForRequiredScalarOrStruct(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"id":null,"meta":{"need":"x"}}`),
+		[]byte(`{"id":1,"meta":null}`),
+	} {
+		if _, err := DecodeStrictObject[nestedRequiredRecord](body); err == nil {
+			t.Fatalf("accepted null that silently decodes to a zero value: %s", body)
+		}
+	}
+}
+
+func TestDecodeJSONLUsesCanonicalStrictParser(t *testing.T) {
+	good := []byte("{\"id\":1,\"name\":\"alpha\"}\r\n{\"id\":2,\"name\":\"beta\"}\n")
+	records, err := DecodeJSONL[sampleRecord](good, Limits{MaxBytes: int64(len(good)), MaxRecords: 2, MaxRecordBytes: 64})
+	if err != nil || len(records) != 2 || records[1].Name != "beta" {
+		t.Fatalf("DecodeJSONL = %+v, %v", records, err)
+	}
+	if _, err := DecodeJSONL[sampleRecord]([]byte("{\"id\":1,\"name\":\"a\"}\n\n"), StandardLimits); err == nil {
+		t.Fatal("DecodeJSONL accepted blank record")
+	}
+}
+
+func TestLimitsCannotDisableHardResourceCeilings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "one.json")
+	if err := os.WriteFile(path, []byte(`{"id":1,"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadJSONFile[sampleRecord](path, int64(^uint64(0)>>1)); err == nil || !strings.Contains(err.Error(), "invalid byte limit") {
+		t.Fatalf("MaxInt64 JSON limit was not rejected explicitly: %v", err)
+	}
+	if _, err := ReadJSONL[sampleRecord](path, Limits{MaxBytes: -1}); err == nil {
+		t.Fatal("negative JSONL limit silently expanded to the standard ceiling")
+	}
+	if _, err := ReadJSONL[sampleRecord](path, Limits{MaxBytes: hardMaxBytes + 1}); err == nil {
+		t.Fatal("JSONL limit above hard ceiling was accepted")
+	}
+}
+
+func TestReadersRejectSymlinkArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "link.json")
+	if err := os.WriteFile(target, []byte(`{"id":1,"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ReadJSONFile[sampleRecord](link, 1024); err == nil {
+		t.Fatal("ReadJSONFile followed symlink artifact")
+	}
+	if _, err := ReadJSONL[sampleRecord](link, StandardLimits); err == nil {
+		t.Fatal("ReadJSONL followed symlink artifact")
+	}
+}
+
 type failingRecord struct {
 	Value string `json:"value"`
 }
@@ -241,6 +344,66 @@ func TestJSONLWriterAbortPreservesCloseErrorWhenTempAlreadyRemoved(t *testing.T)
 	}
 }
 
+func TestJSONLWriterDoesNotRemoveOrPublishSubstitutedTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "records.jsonl")
+	w, err := NewJSONLWriter[sampleRecord](path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := w.tempPath
+	moved := temp + ".original"
+	if err := w.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temp, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temp, []byte("external replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Abort(); err == nil || !strings.Contains(err.Error(), "refusing to remove changed temp") {
+		t.Fatalf("Abort did not report substituted temp: %v", err)
+	}
+	if b, err := os.ReadFile(temp); err != nil || string(b) != "external replacement\n" {
+		t.Fatalf("Abort touched substituted temp: %q, %v", b, err)
+	}
+
+	w, err = NewJSONLWriter[sampleRecord](path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp = w.tempPath
+	moved = temp + ".original"
+	if err := w.Write(&sampleRecord{ID: 1, Name: "safe"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temp, moved); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.OpenFile(moved, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.file = original
+	if err := os.WriteFile(temp, []byte("malicious replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil || !strings.Contains(err.Error(), "temp changed before publication") {
+		t.Fatalf("Close did not reject substituted temp: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("substituted temp was published: %v", err)
+	}
+	if b, err := os.ReadFile(temp); err != nil || string(b) != "malicious replacement\n" {
+		t.Fatalf("Close touched substituted temp: %q, %v", b, err)
+	}
+}
+
 func TestWriteJSONFileReplacesCompleteObject(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "meta.json")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
@@ -256,5 +419,55 @@ func TestWriteJSONFileReplacesCompleteObject(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"name": "new"`) || strings.Contains(string(b), "old") {
 		t.Fatalf("unexpected JSON object: %s", b)
+	}
+}
+
+type failingJSONValue struct{}
+
+func (failingJSONValue) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("intentional JSON object marshal failure")
+}
+
+func TestWriteJSONFileFailurePreservesPreviousArtifact(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.json")
+	const old = "previous generation\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSONFile(path, failingJSONValue{}); err == nil {
+		t.Fatal("expected marshal failure")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != old {
+		t.Fatalf("failed JSON write changed previous artifact: %q", b)
+	}
+}
+
+func TestJSONLWritersCreateMissingParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "deeper", "records.jsonl")
+	if _, err := WriteJSONLFile(path, []sampleRecord{{ID: 1, Name: "alpha"}}); err != nil {
+		t.Fatalf("WriteJSONLFile with missing parents: %v", err)
+	}
+	records, err := ReadJSONL[sampleRecord](path, StandardLimits)
+	if err != nil || len(records) != 1 || records[0].Name != "alpha" {
+		t.Fatalf("round trip = %+v, %v", records, err)
+	}
+}
+
+func TestDecodeStrictObjectRejectsExcessiveNesting(t *testing.T) {
+	body := `{"id":1,"meta":{"need":"x"},"extra":`
+	for range maxJSONNestingDepth + 1 {
+		body += "["
+	}
+	body += "0"
+	for range maxJSONNestingDepth + 1 {
+		body += "]"
+	}
+	body += "}"
+	if _, err := DecodeStrictObject[nestedRequiredRecord]([]byte(body)); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("excessive nesting accepted or misreported: %v", err)
 	}
 }

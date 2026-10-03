@@ -1,13 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"sort"
+	"strings"
 
+	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
+	"aotopsy/internal/jsonutil"
 )
 
 type dart2Bucket struct {
@@ -31,30 +32,24 @@ func cmdDart2Buckets(args []string) error {
 		return fmt.Errorf("--inventory and --out are required")
 	}
 
-	data, err := os.ReadFile(*inventoryPath)
+	rows, err := jsonutil.ReadJSONL[analysis.InventoryRow](*inventoryPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read inventory: %w", err)
 	}
 
-	type invRow struct {
-		SampleID     string `json:"sample_id"`
-		SnapshotHash string `json:"snapshot_hash"`
-		DartVersion  string `json:"dart_version"`
-		Features     string `json:"features"`
-	}
-
 	buckets := map[string]*dart2Bucket{}
-	lines := splitLines(data)
-	for _, line := range lines {
-		if len(line) == 0 {
+	for _, row := range rows {
+		if strings.TrimSpace(row.SampleID) == "" || strings.TrimSpace(row.APKPath) == "" {
+			return fmt.Errorf("inventory record has missing sample_id or apk_path")
+		}
+		if row.Error != "" || !row.DeclaredLibapp {
 			continue
 		}
-		var row invRow
-		if err := json.Unmarshal(line, &row); err != nil {
-			continue
+		if strings.TrimSpace(row.ABI) == "" {
+			return fmt.Errorf("inventory record for sample %q declares libapp but has no abi", row.SampleID)
 		}
 		if row.SnapshotHash == "" || row.DartVersion == "" {
-			continue
+			return fmt.Errorf("inventory record for successful sample %q is missing snapshot_hash or dart_version", row.SampleID)
 		}
 		if row.DartVersion[0] != '2' {
 			continue
@@ -83,17 +78,8 @@ func cmdDart2Buckets(args []string) error {
 		return sorted[i].Hash < sorted[j].Hash
 	})
 
-	f, err := os.Create(*outPath)
-	if err != nil {
-		return fmt.Errorf("create: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	enc := json.NewEncoder(f)
-	for _, b := range sorted {
-		if err := enc.Encode(b); err != nil {
-			return fmt.Errorf("encode: %w", err)
-		}
+	if _, err := jsonutil.WriteJSONLFile(*outPath, sorted); err != nil {
+		return fmt.Errorf("write output: %w", err)
 	}
 
 	cli.Errf("dart2-buckets: %d hashes, %d total samples\n", len(sorted), func() int {

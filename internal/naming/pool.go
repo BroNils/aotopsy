@@ -299,7 +299,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		// on the 3.12 x86_64 sample and 877 of 1286 on 3.x ARM64 -- and
 		// every single one of them, 910 of 910 and 877 of 877, resolves
 		// through the VM table.
-		funcName := l.resolveIsolateName(owner)
+		funcName := l.ResolveIsolateName(owner)
 		ci := CodeNameInfo{
 			FuncName:          funcName,
 			OwnerName:         l.ResolveOwnerName(owner),
@@ -357,12 +357,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	}
 	for _, ce := range result.Codes {
 		ci := l.CodeNames[ce.RefID]
-		if ci.FuncName != "" {
-			if ci.OwnerName != "" {
-				l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
-			} else {
-				l.CodeRefDisplay[ce.RefID] = ci.FuncName
-			}
+		if name := ci.DisplayName(); name != "" {
+			l.CodeRefDisplay[ce.RefID] = name
 		}
 	}
 
@@ -426,7 +422,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 			if !ok {
 				continue
 			}
-			funcName := l.ResolveVMName(owner)
+			funcName := l.resolveVMName(owner)
 			if funcName == "" {
 				continue
 			}
@@ -450,12 +446,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				ci.IsConstructor = true
 			}
 			l.CodeNames[ce.RefID] = ci
-			if ci.FuncName != "" {
-				if ci.OwnerName != "" {
-					l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
-				} else {
-					l.CodeRefDisplay[ce.RefID] = ci.FuncName
-				}
+			if name := ci.DisplayName(); name != "" {
+				l.CodeRefDisplay[ce.RefID] = name
 			}
 		}
 	}
@@ -493,6 +485,114 @@ func (l *PoolLookups) StringForRef(ref int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// CIDForRef resolves the object CID in the namespace visible to the app
+// snapshot. App/isolate refs win. VM refs are visible only in the base-object
+// prefix assigned before isolate clusters are deserialized; above BaseObjLimit
+// the two snapshots have independent numeric ref spaces.
+func (l *PoolLookups) CIDForRef(ref int) (int, bool) {
+	if l == nil || ref <= cluster.RefNull {
+		return 0, false
+	}
+	if cid, ok := l.RefCID[ref]; ok {
+		return cid, true
+	}
+	if ref < l.BaseObjLimit {
+		cid, ok := l.VmRefCID[ref]
+		return cid, ok
+	}
+	return 0, false
+}
+
+// NamedObjectForRef resolves a NamedObject in the namespace visible to the app
+// snapshot. A VM object is eligible only when the ref is inside the shared
+// base-object prefix. Callers that are explicitly traversing vmResult itself
+// should stay inside package naming and use VmRefToNamed directly.
+func (l *PoolLookups) NamedObjectForRef(ref int) (*cluster.NamedObject, bool) {
+	if l == nil || ref <= cluster.RefNull {
+		return nil, false
+	}
+	if no, ok := l.RefToNamed[ref]; ok {
+		return no, no != nil
+	}
+	if ref < l.BaseObjLimit {
+		no, ok := l.VmRefToNamed[ref]
+		return no, ok && no != nil
+	}
+	return nil, false
+}
+
+// ResolveObjectName resolves the semantic name of an object ref visible from
+// the app snapshot. Once a ref is proven to be a VM base object, its internal
+// NameRefID belongs to the VM namespace and may legitimately be above the app's
+// BaseObjLimit; resolveVMName handles that second hop.
+func (l *PoolLookups) ResolveObjectName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	if no, ok := l.RefToNamed[ref]; ok && no != nil {
+		return l.ResolveIsolateName(no)
+	}
+	if ref < l.BaseObjLimit {
+		if no, ok := l.VmRefToNamed[ref]; ok && no != nil {
+			return l.resolveVMName(no)
+		}
+	}
+	return ""
+}
+
+// ResolveVMObjectName resolves a NamedObject that belongs to vmResult itself.
+// Unlike ResolveObjectName, the reference is interpreted in the VM snapshot's
+// own namespace and is therefore not restricted to the app-visible base prefix.
+// Callers should use this only while explicitly traversing vmResult.
+func (l *PoolLookups) ResolveVMObjectName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	no, ok := l.VmRefToNamed[ref]
+	if !ok || no == nil {
+		return ""
+	}
+	return l.resolveVMName(no)
+}
+
+// FunctionDisplayName returns the SDK-style semantic display name for an
+// app/isolate Function ref. It deliberately operates before any filename or
+// token sanitization so the same identity can be reused by analysis consumers.
+func (l *PoolLookups) FunctionDisplayName(ref int) string {
+	if l == nil || l.CT == nil {
+		return ""
+	}
+	no, ok := l.RefToNamed[ref]
+	if !ok || no == nil || no.CID != l.CT.Function {
+		return ""
+	}
+	return l.functionDisplayName(no)
+}
+
+// functionDisplayName resolves an already-identified app Function without
+// requiring that the caller re-find it in RefToNamed. This is needed for
+// discarded Functions, whose NamedObject is already the authoritative object
+// being traversed.
+func (l *PoolLookups) functionDisplayName(no *cluster.NamedObject) string {
+	if l == nil || l.CT == nil || no == nil || no.CID != l.CT.Function {
+		return ""
+	}
+	leaf := l.ResolveIsolateName(no)
+	if leaf == "" {
+		return ""
+	}
+	ci := CodeNameInfo{
+		FuncName:          leaf,
+		OwnerName:         l.ResolveOwnerName(no),
+		EnclosingFunction: l.ClosureParents[no.RefID],
+	}
+	if no.IsConstructor() {
+		ci.FuncName = "new " + leaf
+		ci.IsConstructor = true
+	}
+	return ci.DisplayName()
 }
 
 // ExactTypeName returns a Dart-source type name only when the snapshot data is
@@ -547,19 +647,7 @@ func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
 	return l.resolveIsolateClassName(owner, 0)
 }
 
-func (l *PoolLookups) ResolveName(no *cluster.NamedObject) string {
-	if no == nil {
-		return ""
-	}
-	if no.NameRefID >= 0 {
-		if s, ok := l.RefToStr[no.NameRefID]; ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
+func (l *PoolLookups) resolveVMName(no *cluster.NamedObject) string {
 	if no == nil {
 		return ""
 	}
@@ -575,7 +663,7 @@ func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
 // NameRefID may point at an app string or at a VM-isolate base object, but may
 // not fall through to an arbitrary VM ref above the base-object prefix: the two
 // snapshots allocate independent ref spaces there.
-func (l *PoolLookups) resolveIsolateName(no *cluster.NamedObject) string {
+func (l *PoolLookups) ResolveIsolateName(no *cluster.NamedObject) string {
 	if no == nil || no.NameRefID <= cluster.RefNull {
 		return ""
 	}
@@ -618,7 +706,7 @@ func (l *PoolLookups) resolveIsolateClassName(owner *cluster.NamedObject, depth 
 	// symbol table on ~390 functions per prose sample. The name can come from
 	// EITHER string table -- a dart:_runtime function like _runMain resolves
 	// its "::" owner through the VM table -- so the check must cover both.
-	if n := l.resolveIsolateName(owner); n != "" {
+	if n := l.ResolveIsolateName(owner); n != "" {
 		if n == topLevelClassName {
 			return ""
 		}
@@ -645,7 +733,7 @@ func (l *PoolLookups) resolveVMClassName(owner *cluster.NamedObject, depth int) 
 	if owner == nil || depth > 4 {
 		return ""
 	}
-	if n := l.ResolveVMName(owner); n != "" {
+	if n := l.resolveVMName(owner); n != "" {
 		if n == topLevelClassName {
 			return ""
 		}
@@ -742,7 +830,7 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 		}
 		ci := r.result.Classes[i]
 		if no, ok := r.pl.RefToNamed[ci.RefID]; ok {
-			if s := r.pl.resolveIsolateName(no); s != "" {
+			if s := r.pl.ResolveIsolateName(no); s != "" {
 				return s
 			}
 		}
@@ -876,7 +964,7 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 					display[pe.Index] = "<String>"
 				}
 			} else if no, ok := l.RefToNamed[pe.RefID]; ok {
-				name := l.resolveIsolateName(no)
+				name := l.ResolveIsolateName(no)
 				if name != "" {
 					// Fields share leaf names across owners (e.g. uHb on Wja, Yja, aka).
 					// Qualify with owner when available so pool dumps disambiguate them.
@@ -962,7 +1050,7 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 						display[pe.Index] = fmt.Sprintf("<vm:%d>", pe.RefID)
 					}
 				} else if no, ok := l.VmRefToNamed[pe.RefID]; ok {
-					name := l.ResolveVMName(no)
+					name := l.resolveVMName(no)
 					if name != "" {
 						display[pe.Index] = name
 					} else {

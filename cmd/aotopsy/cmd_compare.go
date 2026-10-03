@@ -3,11 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 )
@@ -49,13 +49,13 @@ func cmdImportDarter(args []string) error {
 	}
 	darterPath := args[0]
 	outputPath := args[1]
-	data, err := os.ReadFile(darterPath)
+	const maxDarterImportBytes = int64(64 << 20)
+	snap, err := jsonutil.ReadJSONFile[compare.DarterSnapshot](darterPath, maxDarterImportBytes)
 	if err != nil {
-		return fmt.Errorf("read darter output: %w", err)
-	}
-	var snap compare.DarterSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
 		return fmt.Errorf("parse darter JSON: %w", err)
+	}
+	if strings.TrimSpace(snap.DartVersion) == "" || strings.TrimSpace(snap.Arch) == "" {
+		return fmt.Errorf("parse darter JSON: missing DartVersion or Arch")
 	}
 	fmt.Printf("Darter snapshot: %s %s, %d functions, %d classes, %d strings\n",
 		snap.DartVersion, snap.Arch,

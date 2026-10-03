@@ -2626,6 +2626,7 @@ func runWriteObjectStoreStubs() int {
 		name string
 	}
 	byVersion := map[string][]entry{}
+	recordFieldNamesIndex := map[string]int{}
 	for _, v := range versions {
 		if strings.IndexByte(v, '-') >= 0 {
 			continue // pre-release, no SDK tag
@@ -2643,6 +2644,9 @@ func runWriteObjectStoreStubs() int {
 		for i, n := range names {
 			if strings.HasSuffix(n, "_stub") {
 				es = append(es, entry{i, n})
+			}
+			if n == "record_field_names" {
+				recordFieldNamesIndex[v] = i
 			}
 		}
 		byVersion[v] = es
@@ -2676,6 +2680,18 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 			fmt.Fprintf(&b, "\t\t{%d, %q},\n", e.idx, e.name)
 		}
 		b.WriteString("\t},\n")
+	}
+	b.WriteString("}\n\n")
+	b.WriteString("// objectStoreRecordFieldNamesIndex is the serialized ObjectStore root\n")
+	b.WriteString("// containing RecordShape's field-name arrays. Absent means the field is\n")
+	b.WriteString("// outside the Full-AOT root range or does not exist in that SDK.\n")
+	b.WriteString("var objectStoreRecordFieldNamesIndex = map[string]int{\n")
+	for _, v := range versions {
+		idx, ok := recordFieldNamesIndex[v]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "\t%q: %d,\n", v, idx)
 	}
 	b.WriteString("}\n")
 

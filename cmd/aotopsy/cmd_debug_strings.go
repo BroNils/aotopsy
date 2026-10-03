@@ -295,13 +295,8 @@ func provenPoolStringRef(pl *naming.PoolLookups, ref int) bool {
 			(pl.CT.TwoByteString != 0 && cid == pl.CT.TwoByteString) ||
 			(pl.CT.String != 0 && cid == pl.CT.String)
 	}
-	if cid, ok := pl.RefCID[ref]; ok {
+	if cid, ok := pl.CIDForRef(ref); ok {
 		return isStringCID(cid)
-	}
-	if ref < pl.BaseObjLimit {
-		if cid, ok := pl.VmRefCID[ref]; ok {
-			return isStringCID(cid)
-		}
 	}
 	return false
 }

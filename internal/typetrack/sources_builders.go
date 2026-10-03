@@ -42,15 +42,8 @@ func buildClassHierarchy(ctx *TypeContext, clResult *cluster.Result, pl *PoolLoo
 
 // buildClassIDToName builds the classID → name map.
 func buildClassIDToName(ctx *TypeContext, clResult *cluster.Result, pl *PoolLookupData) {
-	for i := range clResult.Classes {
-		c := &clResult.Classes[i]
-		name := ""
-		if c.NameRefID >= 0 {
-			if s, ok := pl.RefToStr[c.NameRefID]; ok {
-				name = s
-			}
-		}
-		ctx.ClassIDToName[int(c.ClassID)] = name
+	for cid, name := range pl.ClassIDToName {
+		ctx.ClassIDToName[cid] = name
 	}
 }
 
@@ -188,7 +181,7 @@ func buildPoolClassByIndex(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 		if pl.RefCID != nil {
 			classID = poolEntryClassID(pl.RefCID, refToType, pl.CT, pe.RefID)
 		}
-		if classID < 0 && pl.VmRefCID != nil {
+		if classID < 0 && pe.RefID > cluster.RefNull && pe.RefID < pl.BaseObjLimit && pl.VmRefCID != nil {
 			classID = poolEntryClassID(pl.VmRefCID, refToType, pl.CT, pe.RefID)
 		}
 		if classID >= 0 {
@@ -232,41 +225,33 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 		ctx.CodeRefToName[ref] = name
 	}
 
-	// 7b. Build DispatchCodeIndexToName. Ranging a nil map is a no-op, so
-	// the guard the loop used to carry said nothing.
-	{
-		for clusterIdx, no := range byCodeIndex {
-			if no == nil || no.NameRefID < 0 {
-				continue
-			}
-			name := ""
-			if s, ok := pl.RefToStr[no.NameRefID]; ok {
-				name = s
-			}
-			if name != "" {
-				ctx.DispatchCodeIndexToName[clusterIdx] = name
-			}
+	// 7b. Build DispatchCodeIndexToName from the naming layer's semantic
+	// Function identity. Dispatch results are user-visible call targets, so a
+	// bare leaf such as "build" is not enough when several owners implement it.
+	for clusterIdx, no := range byCodeIndex {
+		if no == nil {
+			continue
+		}
+		if name := pl.FunctionRefToName[no.RefID]; name != "" {
+			ctx.DispatchCodeIndexToName[clusterIdx] = name
 		}
 	}
 
-	// SUPER FEATURE 1: ClusterIndex → OwnerRef fallback.
-	codeClusterToOwner := make(map[int]int, len(clResult.Codes))
+	// ClusterIndex → Code fallback. A Code without a Function cross-reference can
+	// still have an exact semantic identity from CodeNames (allocation/TTS/stub).
+	codeClusterToEntry := make(map[int]*cluster.CodeEntry, len(clResult.Codes))
 	for i := range clResult.Codes {
 		c := &clResult.Codes[i]
 		if c.ClusterIndex >= 0 {
-			codeClusterToOwner[c.ClusterIndex] = c.OwnerRef
+			codeClusterToEntry[c.ClusterIndex] = c
 		}
 	}
-	for clusterIdx, ownerRef := range codeClusterToOwner {
+	for clusterIdx, code := range codeClusterToEntry {
 		if _, hasName := ctx.DispatchCodeIndexToName[clusterIdx]; hasName {
 			continue
 		}
-		if ownerRef >= 0 {
-			if ownerNo, ok := pl.RefToNamed[ownerRef]; ok && ownerNo != nil && ownerNo.NameRefID >= 0 {
-				if name, ok2 := pl.RefToStr[ownerNo.NameRefID]; ok2 && name != "" {
-					ctx.DispatchCodeIndexToName[clusterIdx] = name
-				}
-			}
+		if name := pl.CodeRefToName[code.RefID]; name != "" {
+			ctx.DispatchCodeIndexToName[clusterIdx] = name
 		}
 	}
 
@@ -331,8 +316,21 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 		if entry.Kind != cluster.DispatchCode {
 			continue
 		}
-		name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]
-		if !ok || name == "" {
+		// UnlinkedCall.target_name is a selector leaf, not a semantic target
+		// identity. Keep the leaf lookup separate from DispatchCodeIndexToName so
+		// "foo" can locate all implementations while the candidates themselves
+		// remain qualified (A.foo, B.foo).
+		owner := byCodeIndex[entry.ClusterIndex]
+		if owner == nil {
+			if code := codeClusterToEntry[entry.ClusterIndex]; code != nil && code.OwnerRef > cluster.RefNull {
+				owner = pl.RefToNamed[code.OwnerRef]
+			}
+		}
+		if owner == nil {
+			continue
+		}
+		leaf := pl.FunctionRefToLeafName[owner.RefID]
+		if leaf == "" {
 			continue
 		}
 		cid, hasCID := codeClusterToCID[entry.ClusterIndex]
@@ -340,7 +338,7 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 			continue
 		}
 		selectorImm := key - cid
-		ctx.MethodNameToSelectorImms[name] = append(ctx.MethodNameToSelectorImms[name], selectorImm)
+		ctx.MethodNameToSelectorImms[leaf] = append(ctx.MethodNameToSelectorImms[leaf], selectorImm)
 	}
 	// Deduplicate selector immediates per name (a method may appear at the
 	// same selector from multiple classes).
@@ -361,17 +359,15 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 // buildPoolUnlinkedCallNames builds PP index → UnlinkedCall target_name.
 func buildPoolUnlinkedCallNames(clResult *cluster.Result, pl *PoolLookupData) map[int]string {
 	poolUnlinkedCallNames := make(map[int]string)
-	if pl.CT != nil && pl.RefToNamed != nil && pl.RefToStr != nil {
+	if pl.CT != nil && pl.RefToNamed != nil {
 		for _, pe := range clResult.Pool {
 			if pe.Kind != cluster.PoolTagged {
 				continue
 			}
 			if pl.RefCID != nil {
 				if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.UnlinkedCall {
-					if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 && no != nil && no.NameRefID >= 0 {
-						if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
-							poolUnlinkedCallNames[pe.Index] = name
-						}
+					if name := pl.ObjectRefToName[pe.RefID]; name != "" {
+						poolUnlinkedCallNames[pe.Index] = name
 					}
 				}
 			}
@@ -386,7 +382,7 @@ func buildPoolUnlinkedCallNames(clResult *cluster.Result, pl *PoolLookupData) ma
 // function's name via the pool lookups.
 func buildPoolClosureFunctionNames(clResult *cluster.Result, pl *PoolLookupData) map[int]string {
 	poolClosureFuncNames := make(map[int]string)
-	if pl.CT == nil || pl.RefToNamed == nil || pl.RefToStr == nil {
+	if pl.CT == nil || pl.RefToNamed == nil {
 		return poolClosureFuncNames
 	}
 	// Build ref → ClosureInfo lookup.
@@ -401,37 +397,8 @@ func buildPoolClosureFunctionNames(clResult *cluster.Result, pl *PoolLookupData)
 		if pl.RefCID != nil {
 			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Closure {
 				if ci, ok2 := closureByRef[pe.RefID]; ok2 && ci.FunctionRef >= 0 {
-					if fnNo, ok3 := pl.RefToNamed[ci.FunctionRef]; ok3 && fnNo != nil {
-						name := ""
-						if fnNo.NameRefID >= 0 {
-							if s, ok4 := pl.RefToStr[fnNo.NameRefID]; ok4 {
-								name = s
-							}
-							if name == "" {
-								if s, ok4 := pl.VmRefToStr[fnNo.NameRefID]; ok4 {
-									name = s
-								}
-							}
-						}
-						if name != "" {
-							owner := ""
-							if fnNo.OwnerRefID >= 0 {
-								if ownerNo, ok5 := pl.RefToNamed[fnNo.OwnerRefID]; ok5 && ownerNo != nil {
-									if ownerNo.NameRefID >= 0 {
-										if s, ok6 := pl.RefToStr[ownerNo.NameRefID]; ok6 {
-											owner = s
-										}
-									}
-								}
-							}
-							if owner != "" {
-								name = owner + "." + name
-							}
-							if fnNo.IsConstructor() {
-								name = "new " + name
-							}
-							poolClosureFuncNames[pe.Index] = name
-						}
+					if name := pl.FunctionRefToName[ci.FunctionRef]; name != "" {
+						poolClosureFuncNames[pe.Index] = name
 					}
 				}
 			}
@@ -627,15 +594,14 @@ func buildPoolClosureClass(ctx *TypeContext, clResult *cluster.Result, pl *PoolL
 			continue
 		}
 		ctx.PoolClosureClass[pe.Index] = int(classID)
-		// Also resolve parent function name.
-		if parentFuncNo, ok6 := pl.RefToNamed[parentFuncRef]; ok6 && parentFuncNo.NameRefID >= 0 {
-			if name, ok7 := pl.RefToStr[parentFuncNo.NameRefID]; ok7 && name != "" {
-				if ctx.PoolCodeNames == nil {
-					ctx.PoolCodeNames = make(map[int]string)
-				}
-				if _, exists := ctx.PoolCodeNames[pe.Index]; !exists {
-					ctx.PoolCodeNames[pe.Index] = name
-				}
+		// Also resolve the parent using the same semantic Function identity used
+		// by every other call-target path.
+		if name := pl.FunctionRefToName[parentFuncRef]; name != "" {
+			if ctx.PoolCodeNames == nil {
+				ctx.PoolCodeNames = make(map[int]string)
+			}
+			if _, exists := ctx.PoolCodeNames[pe.Index]; !exists {
+				ctx.PoolCodeNames[pe.Index] = name
 			}
 		}
 	}

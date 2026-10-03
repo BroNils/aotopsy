@@ -167,12 +167,45 @@ func TestDart210ConcreteTypedDataViewReadsCanonicalByte(t *testing.T) {
 	data = append(data, 0x5a)
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-	if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := s.ReadByte()
 	if err != nil || marker != 0x5a {
 		t.Fatalf("stream position after 2.10 typed-data view marker=%#x err=%v, want 0x5a", marker, err)
+	}
+}
+
+func TestRecordTypeCaptureDoesNotDependOnNamedObject(t *testing.T) {
+	profile := snapshot.ProfileForVersion("3.12.2")
+	if profile == nil || profile.CIDs == nil || profile.CIDs.RecordType == 0 {
+		t.Fatal("missing Dart 3.12.2 RecordType profile")
+	}
+	spec := GetFillSpec(profile.CIDs.RecordType, &ClusterMeta{CID: profile.CIDs.RecordType}, profile)
+	if !spec.IsRecordType || spec.NameIdx >= 0 || spec.OwnerIdx >= 0 {
+		t.Fatalf("RecordType spec = %+v, want record capture without name/owner", spec)
+	}
+
+	// SDK @3.12.2 runtime/vm/raw_object.h visits AbstractType's
+	// type_test_stub, hash, then RecordType's shape and field_types. The final
+	// byte is UntaggedAbstractType::flags_ as written by app_snapshot.cc.
+	data := make([]byte, 0, 16)
+	for _, ref := range []int64{11, 12, 13, 14} {
+		data = append(data, encUnsigned(ref)...)
+	}
+	data = append(data, 1) // non-nullable
+	s := dartfmt.NewStream(data)
+	cm := &ClusterMeta{CID: profile.CIDs.RecordType, Count: 1, StartRef: 500}
+	_, _, _, _, records, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("captured RecordTypes = %d, want 1", len(records))
+	}
+	got := records[0]
+	if got.RefID != 500 || got.ShapeRef != 13 || got.FieldTypesArrayRef != 14 || got.Nullability != TypeNullabilityNonNullable {
+		t.Fatalf("RecordType capture = %+v, want ref=500 shape=13 fields=14 non-nullable", got)
 	}
 }
 
@@ -307,7 +340,7 @@ func TestDart210LegacyClustersUseExactFillOrder(t *testing.T) {
 		data = append(data, 0x5a)
 		s := dartfmt.NewStream(data)
 		cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-		if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+		if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 			t.Fatal(err)
 		}
 		marker, err := s.ReadByte()
@@ -332,7 +365,7 @@ func TestDart210LegacyClustersUseExactFillOrder(t *testing.T) {
 		data = append(data, 0x5a)
 		s := dartfmt.NewStream(data)
 		cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 1}
-		if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
+		if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile); err != nil {
 			t.Fatal(err)
 		}
 		marker, err := s.ReadByte()
@@ -374,7 +407,7 @@ func TestClosureDataLayoutAcrossLegacyBoundaries(t *testing.T) {
 			data = append(data, 0x5a)
 			s := dartfmt.NewStream(data)
 			cm := &ClusterMeta{CID: cid, Count: 1, StartRef: 100}
-			_, _, _, _, _, _, _, cds, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
+			_, _, _, _, _, _, _, _, cds, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -604,7 +637,7 @@ func TestRegExpFlagsWidthChangesAt312(t *testing.T) {
 	data = append(data, 0x5a)
 	s := dartfmt.NewStream(data)
 	cm := &ClusterMeta{CID: profile.CIDs.RegExp, Count: 1, StartRef: 1}
-	if _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, profile.FillRefUnsigned, profile); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, profile.FillRefUnsigned, profile); err != nil {
 		t.Fatal(err)
 	}
 	marker, err := s.ReadByte()
@@ -716,7 +749,7 @@ func TestClosureVarLenFillMustMatchAllocLength(t *testing.T) {
 	// Fill claims one tail ref while alloc declared two. Reject before reading
 	// the fixed/tail refs, otherwise all later objects shift by one ref.
 	s := dartfmt.NewStream(encUnsigned(1))
-	_, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
+	_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, &spec, true, profile)
 	if err == nil || !strings.Contains(err.Error(), "differs from alloc length") {
 		t.Fatalf("Closure mismatched length error = %v", err)
 	}

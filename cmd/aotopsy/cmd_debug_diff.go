@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/funcdiff"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/symbolmap"
 )
 
@@ -96,7 +96,7 @@ func cmdFuncDiff(args []string) error {
 		fmt.Println(string(data))
 		return nil
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := jsonutil.WriteJSONFile(*out, rep); err != nil {
 		return fmt.Errorf("funcdiff: write %s: %w", *out, err)
 	}
 	cli.Errf("wrote %s\n", *out)

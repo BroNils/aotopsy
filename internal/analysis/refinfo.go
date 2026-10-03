@@ -20,10 +20,7 @@ func ClassNameByCID(cid int32, result *cluster.Result, pl *naming.PoolLookups, c
 		}
 		ci := result.Classes[i]
 		if no, ok := pl.RefToNamed[ci.RefID]; ok {
-			if s := pl.ResolveName(no); s != "" {
-				return s
-			}
-			if s := pl.ResolveVMName(no); s != "" {
+			if s := pl.ResolveIsolateName(no); s != "" {
 				return s
 			}
 		}
@@ -73,7 +70,7 @@ func FindFieldsOfInstanceCID(targetCID int, result *cluster.Result, pl *naming.P
 		count++
 		name := ""
 		if no, ok := pl.RefToNamed[f.RefID]; ok {
-			name = pl.ResolveName(no)
+			name = pl.ResolveIsolateName(no)
 		}
 		fmt.Printf("  field ref=%d name=%q hostOffset=0x%x kindBits=0x%x initializerRefID=%d\n",
 			f.RefID, name, f.HostOffset, f.KindBits, f.InitializerRefID)
@@ -140,10 +137,7 @@ func ListToplevelFunctions(result *cluster.Result, pl *naming.PoolLookups, ct *s
 			}
 		}
 		if classObj, ok := pl.RefToNamed[effectiveClass]; ok {
-			ownerName = pl.ResolveName(classObj)
-			if ownerName == "" {
-				ownerName = pl.ResolveVMName(classObj)
-			}
+			ownerName = pl.ResolveIsolateName(classObj)
 		}
 		if ownerName != "::" {
 			continue
@@ -155,7 +149,7 @@ func ListToplevelFunctions(result *cluster.Result, pl *naming.PoolLookups, ct *s
 			paramFixed, paramOptional = ft.NumFixed, ft.NumOptional
 			paramTypes = typeParams.ParamTypeNames(*ft)
 		}
-		name := pl.ResolveName(&no)
+		name := pl.ResolveIsolateName(&no)
 		if paramTypes != nil {
 			fmt.Printf("toplevel-fn ref=%d name=%q codeIndex=%d paramFixed=%d paramOptional=%d paramTypes=%v\n",
 				no.RefID, name, no.CodeIndex, paramFixed, paramOptional, paramTypes)
@@ -183,7 +177,7 @@ func FindSiblingsByOwner(classRef int, result *cluster.Result, pl *naming.PoolLo
 			continue
 		}
 		count++
-		name := pl.ResolveName(&no)
+		name := pl.ResolveIsolateName(&no)
 		kind := "Field"
 		if no.CID == ct.Function {
 			kind = "Function"
@@ -233,12 +227,12 @@ func FindOwnerViaCodeIndex(codeRef int, result *cluster.Result, pl *naming.PoolL
 			d := no.CodeIndex - target.ClusterIndex
 			if d >= -window && d <= window {
 				fmt.Printf("  candidate ref=%d name=%q codeIndex=%d (delta=%d) ownerRefID=%d\n",
-					no.RefID, pl.ResolveName(&no), no.CodeIndex, d, no.OwnerRefID)
+					no.RefID, pl.FunctionDisplayName(no.RefID), no.CodeIndex, d, no.OwnerRefID)
 			}
 		}
 	}
 	for _, no := range matches {
-		fmt.Printf("  Function ref=%d name=%q ownerRefID=%d\n", no.RefID, pl.ResolveName(&no), no.OwnerRefID)
+		fmt.Printf("  Function ref=%d name=%q ownerRefID=%d\n", no.RefID, pl.FunctionDisplayName(no.RefID), no.OwnerRefID)
 		if walk && no.OwnerRefID >= 0 {
 			PrintRefChain(no.OwnerRefID, pl, ct, walk, make(map[int]bool))
 		}
@@ -254,16 +248,16 @@ func PrintRefChain(ref int, pl *naming.PoolLookups, ct *snapshot.CIDTable, walk 
 	}
 	seen[ref] = true
 
-	cid, hasCID := pl.RefCID[ref]
+	cid, hasCID := pl.CIDForRef(ref)
 	cidName := cluster.CidNameV(cid, ct)
-	no, hasNamed := pl.RefToNamed[ref]
+	no, hasNamed := pl.NamedObjectForRef(ref)
 
 	fmt.Printf("ref %d: cid=%d(%s) hasCID=%v hasNamedObject=%v\n", ref, cid, cidName, hasCID, hasNamed)
 	if !hasNamed {
 		fmt.Printf("  (not in RefToNamed -- this ref's cluster type doesn't carry a resolvable name/owner)\n")
 		return
 	}
-	name := pl.ResolveName(no)
+	name := pl.ResolveObjectName(ref)
 	rawStr, hasRawStr := pl.RefToStr[no.NameRefID]
 	vmStr, hasVmStr := pl.VmRefToStr[no.NameRefID]
 	fmt.Printf("  name=%q nameRefID=%d (isolateStr hit=%v val=%q) (vmStr hit=%v val=%q) ownerRefID=%d signatureRefID=%d objCID=%d baseObjLimit=%d\n",

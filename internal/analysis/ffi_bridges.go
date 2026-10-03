@@ -56,27 +56,8 @@ func resolveRefName(pl *naming.PoolLookups, ref int) string {
 	if pl == nil || ref < 0 {
 		return ""
 	}
-	if str, ok := pl.RefToStr[ref]; ok && str != "" {
+	if str, ok := pl.StringForRef(ref); ok && str != "" {
 		return str
 	}
-	if str, ok := pl.VmRefToStr[ref]; ok && str != "" {
-		return str
-	}
-	if no, ok := pl.RefToNamed[ref]; ok && no != nil {
-		if name := pl.ResolveName(no); name != "" {
-			return name
-		}
-		if name := pl.ResolveVMName(no); name != "" {
-			return name
-		}
-	}
-	if no, ok := pl.VmRefToNamed[ref]; ok && no != nil {
-		if name := pl.ResolveName(no); name != "" {
-			return name
-		}
-		if name := pl.ResolveVMName(no); name != "" {
-			return name
-		}
-	}
-	return ""
+	return pl.ResolveObjectName(ref)
 }

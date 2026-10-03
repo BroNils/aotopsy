@@ -252,7 +252,9 @@ func runTypeInference(
 	// Build CodeRefToName map from CodeNames.
 	codeRefToName := make(map[int]string, len(pl.CodeNames))
 	for ref, ci := range pl.CodeNames {
-		codeRefToName[ref] = ci.FuncName
+		if name := ci.DisplayName(); name != "" {
+			codeRefToName[ref] = name
+		}
 	}
 
 	// Build PP index → function name map for PP-loaded Code objects.
@@ -291,7 +293,7 @@ func runTypeInference(
 		if !ok {
 			continue
 		}
-		spans = append(spans, funcSpan{start: start, size: uint64(r.Size), name: ci.FuncName})
+		spans = append(spans, funcSpan{start: start, size: uint64(r.Size), name: ci.DisplayName()})
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	funcNameAt := func(va uint64) (string, bool) {
@@ -309,47 +311,14 @@ func runTypeInference(
 		if pe.Kind != cluster.PoolTagged {
 			continue
 		}
-		// Check both app isolate RefCID and VM VmRefCID for Code objects.
-		// VM Code objects (ref < BaseObjLimit) have cid in VmRefCID, not RefCID.
-		isCode := false
-		if pl.CT != nil && pl.RefCID != nil {
-			if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.Code {
-				isCode = true
-			}
-		}
-		if !isCode && pl.CT != nil && pl.VmRefCID != nil {
-			if cid, ok := pl.VmRefCID[pe.RefID]; ok && cid == pl.CT.Code {
-				isCode = true
-			}
-		}
-		// Also check CodeRefDisplay for any ref that has a display string
-		// (covers VM Code objects that don't have CID in either map).
-		if !isCode && pl.CodeRefDisplay != nil {
-			if _, ok := pl.CodeRefDisplay[pe.RefID]; ok {
-				isCode = true
-			}
-		}
+		cid, cidKnown := pl.CIDForRef(pe.RefID)
+		isCode := pl.CT != nil && cidKnown && cid == pl.CT.Code
 		if !isCode {
 			continue
 		}
 		{
-			// Try app isolate NamedObject
-			if no, ok2 := pl.RefToNamed[pe.RefID]; ok2 {
-				if no.NameRefID >= 0 {
-					if name, ok3 := pl.RefToStr[no.NameRefID]; ok3 && name != "" {
-						poolCodeNames[pe.Index] = name
-					}
-				}
-			}
-			// Try VM isolate NamedObject
-			if _, exists := poolCodeNames[pe.Index]; !exists && pl.VmRefToNamed != nil {
-				if no, ok2 := pl.VmRefToNamed[pe.RefID]; ok2 {
-					if no.NameRefID >= 0 {
-						if name, ok3 := pl.VmRefToStr[no.NameRefID]; ok3 && name != "" {
-							poolCodeNames[pe.Index] = name
-						}
-					}
-				}
+			if name := pl.ResolveObjectName(pe.RefID); name != "" {
+				poolCodeNames[pe.Index] = name
 			}
 			// Try matching by TextOffset → VA → function name
 			if _, exists := poolCodeNames[pe.Index]; !exists {
@@ -379,7 +348,7 @@ func runTypeInference(
 			// were resolved via VM Function owner chain in BuildPoolLookups).
 			if _, exists := poolCodeNames[pe.Index]; !exists {
 				if ci, ok2 := pl.CodeNames[pe.RefID]; ok2 && ci.FuncName != "" {
-					poolCodeNames[pe.Index] = ci.FuncName
+					poolCodeNames[pe.Index] = ci.DisplayName()
 				}
 			}
 		}
@@ -392,21 +361,51 @@ func runTypeInference(
 	poolTTSNames := naming.BuildTTSCallTargets(clResult.Pool, pl)
 
 	poolData := &typetrack.PoolLookupData{
-		RefToStr:             pl.RefToStr,
-		RefToNamed:           pl.RefToNamed,
-		RefCID:               pl.RefCID,
-		CT:                   pl.CT,
-		CodeRefToName:        codeRefToName,
-		VmRefToStr:           pl.VmRefToStr,
-		VmRefToNamed:         pl.VmRefToNamed,
-		VmRefCID:             pl.VmRefCID,
-		PoolCodeNames:        poolCodeNames,
-		TypeTestingStubNames: poolTTSNames,
+		RefToNamed:            pl.RefToNamed,
+		RefCID:                pl.RefCID,
+		CT:                    pl.CT,
+		BaseObjLimit:          pl.BaseObjLimit,
+		CodeRefToName:         codeRefToName,
+		VmRefCID:              pl.VmRefCID,
+		PoolCodeNames:         poolCodeNames,
+		TypeTestingStubNames:  poolTTSNames,
+		FunctionRefToName:     make(map[int]string),
+		FunctionRefToLeafName: make(map[int]string),
+		ObjectRefToName:       make(map[int]string),
+		ClassIDToName:         make(map[int]string),
+	}
+	for i := range clResult.Named {
+		no := &clResult.Named[i]
+		if name := pl.ResolveObjectName(no.RefID); name != "" {
+			poolData.ObjectRefToName[no.RefID] = name
+		}
+		if pl.CT != nil && no.CID == pl.CT.Function {
+			if name := pl.FunctionDisplayName(no.RefID); name != "" {
+				poolData.FunctionRefToName[no.RefID] = name
+			}
+			if name := pl.ResolveIsolateName(no); name != "" {
+				poolData.FunctionRefToLeafName[no.RefID] = name
+			}
+		}
+	}
+	for i := range clResult.Classes {
+		ci := &clResult.Classes[i]
+		if name, ok := pl.StringForRef(ci.NameRefID); ok && name != "" {
+			poolData.ClassIDToName[int(ci.ClassID)] = name
+		}
 	}
 	if vmResult != nil {
 		poolData.VmFields = vmResult.Fields
 		poolData.VmTypes = vmResult.Types
 		poolData.VmClasses = vmResult.Classes
+		for i := range vmResult.Classes {
+			ci := &vmResult.Classes[i]
+			if name := pl.ResolveVMObjectName(ci.RefID); name != "" {
+				if _, exists := poolData.ClassIDToName[int(ci.ClassID)]; !exists {
+					poolData.ClassIDToName[int(ci.ClassID)] = name
+				}
+			}
+		}
 	}
 
 	// Compute kOriginElement: ARM64=4096, x86_64=16.

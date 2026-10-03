@@ -4,12 +4,17 @@ package jsonutil
 import (
 	"bufio"
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"unicode/utf8"
 )
 
 // Limits bounds hostile or accidentally huge artifact inputs before they can
@@ -22,53 +27,80 @@ type Limits struct {
 
 // StandardLimits are deliberately generous for normal aotopsy artifacts while
 // still fitting below the repository's 2.5 GiB per-process WSL safety cap.
+const (
+	hardMaxBytes        int64 = 256 << 20
+	hardMaxRecords            = 2_000_000
+	hardMaxRecordBytes        = 4 << 20
+	maxJSONNestingDepth       = 256
+)
+
 var StandardLimits = Limits{
-	MaxBytes:       256 << 20,
-	MaxRecords:     2_000_000,
-	MaxRecordBytes: 4 << 20,
+	MaxBytes:       hardMaxBytes,
+	MaxRecords:     hardMaxRecords,
+	MaxRecordBytes: hardMaxRecordBytes,
 }
 
-func (l Limits) normalized() Limits {
-	if l.MaxBytes <= 0 {
-		l.MaxBytes = StandardLimits.MaxBytes
+func (l Limits) normalized() (Limits, error) {
+	if l.MaxBytes < 0 || l.MaxRecords < 0 || l.MaxRecordBytes < 0 {
+		return Limits{}, fmt.Errorf("jsonl: limits must not be negative: bytes=%d records=%d record_bytes=%d", l.MaxBytes, l.MaxRecords, l.MaxRecordBytes)
 	}
-	if l.MaxRecords <= 0 {
-		l.MaxRecords = StandardLimits.MaxRecords
+	if l.MaxBytes == 0 {
+		l.MaxBytes = hardMaxBytes
 	}
-	if l.MaxRecordBytes <= 0 {
-		l.MaxRecordBytes = StandardLimits.MaxRecordBytes
+	if l.MaxRecords == 0 {
+		l.MaxRecords = hardMaxRecords
 	}
-	return l
+	if l.MaxRecordBytes == 0 {
+		l.MaxRecordBytes = hardMaxRecordBytes
+	}
+	if l.MaxBytes > hardMaxBytes || l.MaxRecords > hardMaxRecords || l.MaxRecordBytes > hardMaxRecordBytes {
+		return Limits{}, fmt.Errorf("jsonl: limits exceed hard ceiling: bytes<=%d records<=%d record_bytes<=%d", hardMaxBytes, hardMaxRecords, hardMaxRecordBytes)
+	}
+	return l, nil
 }
 
 // ReadJSONL reads strict line-delimited JSON objects. Each non-empty record must
 // occupy exactly one physical line. Unknown, duplicate and missing required
-// top-level keys are rejected so schema drift cannot silently decode to zero
-// values. Limits are enforced before and during decoding.
+// keys at every statically-typed object level are rejected so schema drift
+// cannot silently decode to zero values. Duplicate keys at any nesting depth and
+// malformed UTF-8 are also rejected before encoding/json can apply last-wins or
+// replacement-rune recovery. Limits are enforced before and during decoding.
 func ReadJSONL[T any](path string, limits Limits) ([]T, error) {
-	limits = limits.normalized()
-	f, err := os.Open(path)
+	var err error
+	limits, err = limits.normalized()
+	if err != nil {
+		return nil, err
+	}
+	f, st, err := openPinnedRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	if st, err := f.Stat(); err != nil {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
-	} else if st.Size() > limits.MaxBytes {
+	if st.Size() > limits.MaxBytes {
 		return nil, fmt.Errorf("jsonl: %s is %d bytes, exceeds limit %d", path, st.Size(), limits.MaxBytes)
 	}
+	return decodeJSONLReader[T](f, limits, path)
+}
 
-	required, err := requiredJSONKeys[T]()
+// DecodeJSONL applies the same strict schema and resource policy as ReadJSONL
+// to an already-bounded in-memory artifact. It exists for callers that pin and
+// digest a file before decoding it; they must not reimplement Scanner behavior
+// and drift away from the canonical parser.
+func DecodeJSONL[T any](b []byte, limits Limits) ([]T, error) {
+	var err error
+	limits, err = limits.normalized()
 	if err != nil {
-		return nil, fmt.Errorf("jsonl: derive schema: %w", err)
+		return nil, err
 	}
+	if int64(len(b)) > limits.MaxBytes {
+		return nil, fmt.Errorf("jsonl: input is %d bytes, exceeds limit %d", len(b), limits.MaxBytes)
+	}
+	return decodeJSONLReader[T](bytes.NewReader(b), limits, "input")
+}
 
-	var scanReader io.Reader = f
-	var inputLimit *io.LimitedReader
-	if limits.MaxBytes < (1<<63)-1 {
-		inputLimit = &io.LimitedReader{R: f, N: limits.MaxBytes + 1}
-		scanReader = inputLimit
-	}
+func decodeJSONLReader[T any](r io.Reader, limits Limits, source string) ([]T, error) {
+	inputLimit := &io.LimitedReader{R: r, N: limits.MaxBytes + 1}
+	var scanReader io.Reader = inputLimit
 	s := bufio.NewScanner(scanReader)
 	initial := 64 << 10
 	if limits.MaxRecordBytes < initial {
@@ -90,7 +122,7 @@ func ReadJSONL[T any](path string, limits Limits) ([]T, error) {
 	lineNo := 0
 	for s.Scan() {
 		lineNo++
-		if inputLimit != nil && inputLimit.N == 0 {
+		if inputLimit.N == 0 {
 			return nil, fmt.Errorf("jsonl: input exceeds byte limit %d at line %d", limits.MaxBytes, lineNo)
 		}
 		line := s.Bytes()
@@ -103,53 +135,37 @@ func ReadJSONL[T any](path string, limits Limits) ([]T, error) {
 		if len(records) >= limits.MaxRecords {
 			return nil, fmt.Errorf("jsonl: record limit %d exceeded at line %d", limits.MaxRecords, lineNo)
 		}
-		keys, err := objectKeys(line)
+		rec, err := DecodeStrictObject[T](line)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		for key := range required {
-			if !keys[key] {
-				return nil, fmt.Errorf("line %d: missing required key %q", lineNo, key)
-			}
-		}
-
-		var rec T
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&rec); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		if err := requireDecoderEOF(dec); err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		records = append(records, rec)
 	}
 	if err := s.Err(); err != nil {
-		return nil, fmt.Errorf("jsonl: read line %d: %w", lineNo+1, err)
+		return nil, fmt.Errorf("jsonl: read %s line %d: %w", source, lineNo+1, err)
 	}
-	if inputLimit != nil && inputLimit.N == 0 {
+	if inputLimit.N == 0 {
 		return nil, fmt.Errorf("jsonl: input exceeds byte limit %d", limits.MaxBytes)
 	}
 	return records, nil
 }
 
 // ReadJSONFile reads one strict JSON object under a byte budget. Like ReadJSONL,
-// it rejects unknown, duplicate, and missing required top-level keys so a
+// it rejects unknown, duplicate, and missing required keys recursively so a
 // reused artifact cannot silently drift schemas. Multiline/pretty-printed JSON
-// is allowed because this is an object file, not JSONL.
+// is allowed because this is an object file, not JSONL. maxBytes can tighten,
+// but never relax, the repository-wide artifact ceiling.
 func ReadJSONFile[T any](path string, maxBytes int64) (T, error) {
 	var out T
-	if maxBytes <= 0 {
+	if maxBytes <= 0 || maxBytes > hardMaxBytes {
 		return out, fmt.Errorf("json: invalid byte limit %d", maxBytes)
 	}
-	f, err := os.Open(path)
+	f, st, err := openPinnedRegularFile(path)
 	if err != nil {
 		return out, err
 	}
 	defer func() { _ = f.Close() }()
-	if st, err := f.Stat(); err != nil {
-		return out, fmt.Errorf("stat %s: %w", path, err)
-	} else if st.Size() > maxBytes {
+	if st.Size() > maxBytes {
 		return out, fmt.Errorf("json: %s is %d bytes, exceeds limit %d", path, st.Size(), maxBytes)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
@@ -171,18 +187,18 @@ func ReadJSONFile[T any](path string, maxBytes int64) (T, error) {
 // directly from a standalone JSON/JSONL file.
 func DecodeStrictObject[T any](b []byte) (T, error) {
 	var out T
-	required, err := requiredJSONKeys[T]()
-	if err != nil {
-		return out, fmt.Errorf("derive schema: %w", err)
+	if !utf8.Valid(b) {
+		return out, fmt.Errorf("invalid UTF-8")
 	}
-	keys, err := objectKeys(b)
-	if err != nil {
+	if err := validateJSONStringUnicodeEscapes(b); err != nil {
 		return out, err
 	}
-	for key := range required {
-		if !keys[key] {
-			return out, fmt.Errorf("missing required key %q", key)
-		}
+	if err := validateJSONSyntax(b); err != nil {
+		return out, err
+	}
+	rootType := reflect.TypeOf((*T)(nil)).Elem()
+	if err := validateRequiredValue(b, rootType, "$", 0, true); err != nil {
+		return out, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -195,42 +211,141 @@ func DecodeStrictObject[T any](b []byte) (T, error) {
 	return out, nil
 }
 
-func objectKeys(line []byte) (map[string]bool, error) {
-	dec := json.NewDecoder(bytes.NewReader(line))
+func validateJSONStringUnicodeEscapes(b []byte) error {
+	for i := 0; i < len(b); i++ {
+		if b[i] != '"' {
+			continue
+		}
+		for i++; i < len(b); i++ {
+			switch b[i] {
+			case '"':
+				goto nextString
+			case '\\':
+				if i+1 >= len(b) {
+					return nil // the JSON syntax pass reports the truncated escape.
+				}
+				i++
+				if b[i] != 'u' {
+					continue
+				}
+				code, ok := decodeHex4(b, i+1)
+				if !ok {
+					return nil // the JSON syntax pass reports malformed hex/length.
+				}
+				i += 4
+				switch {
+				case code >= 0xD800 && code <= 0xDBFF:
+					if i+6 >= len(b) || b[i+1] != '\\' || b[i+2] != 'u' {
+						return fmt.Errorf("invalid Unicode surrogate pair in JSON string")
+					}
+					low, ok := decodeHex4(b, i+3)
+					if !ok || low < 0xDC00 || low > 0xDFFF {
+						return fmt.Errorf("invalid Unicode surrogate pair in JSON string")
+					}
+					i += 6
+				case code >= 0xDC00 && code <= 0xDFFF:
+					return fmt.Errorf("unpaired low Unicode surrogate in JSON string")
+				}
+			}
+		}
+		return nil // syntax pass reports an unterminated string.
+	nextString:
+	}
+	return nil
+}
+
+func decodeHex4(b []byte, start int) (uint16, bool) {
+	if start < 0 || start+4 > len(b) {
+		return 0, false
+	}
+	var out uint16
+	for i := start; i < start+4; i++ {
+		out <<= 4
+		switch c := b[i]; {
+		case c >= '0' && c <= '9':
+			out |= uint16(c - '0')
+		case c >= 'a' && c <= 'f':
+			out |= uint16(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			out |= uint16(c-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return out, true
+}
+
+func validateJSONSyntax(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := walkJSONValue(dec, 0, "$", true); err != nil {
+		return err
+	}
+	return requireDecoderEOF(dec)
+}
+
+func walkJSONValue(dec *json.Decoder, depth int, path string, root bool) error {
+	if depth > maxJSONNestingDepth {
+		return fmt.Errorf("JSON nesting exceeds limit %d at %s", maxJSONNestingDepth, path)
+	}
 	tok, err := dec.Token()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	delim, ok := tok.(json.Delim)
-	if !ok || delim != '{' {
-		return nil, fmt.Errorf("record must be a JSON object")
+	delim, isDelim := tok.(json.Delim)
+	if root && (!isDelim || delim != '{') {
+		return fmt.Errorf("record must be a JSON object")
 	}
-	keys := make(map[string]bool)
-	for dec.More() {
-		tok, err := dec.Token()
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string at %s", path)
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate key %q at %s", key, path)
+			}
+			seen[key] = struct{}{}
+			if err := walkJSONValue(dec, depth+1, jsonPath(path, key), false); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		key, ok := tok.(string)
-		if !ok {
-			return nil, fmt.Errorf("object key is not a string")
+		if end != json.Delim('}') {
+			return fmt.Errorf("malformed object at %s", path)
 		}
-		if keys[key] {
-			return nil, fmt.Errorf("duplicate key %q", key)
+		return nil
+	case '[':
+		index := 0
+		for dec.More() {
+			if err := walkJSONValue(dec, depth+1, fmt.Sprintf("%s[%d]", path, index), false); err != nil {
+				return err
+			}
+			index++
 		}
-		keys[key] = true
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, err
+		end, err := dec.Token()
+		if err != nil {
+			return err
 		}
+		if end != json.Delim(']') {
+			return fmt.Errorf("malformed array at %s", path)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected delimiter %q at %s", delim, path)
 	}
-	if _, err := dec.Token(); err != nil { // closing }
-		return nil, err
-	}
-	if err := requireDecoderEOF(dec); err != nil {
-		return nil, err
-	}
-	return keys, nil
 }
 
 func requireDecoderEOF(dec *json.Decoder) error {
@@ -245,24 +360,224 @@ func requireDecoderEOF(dec *json.Decoder) error {
 	return err
 }
 
-func requiredJSONKeys[T any]() (map[string]bool, error) {
-	var zero T
-	b, err := json.Marshal(zero)
+var (
+	jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+	textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+	rawMessageType      = reflect.TypeOf(json.RawMessage{})
+	structSchemaCache   sync.Map // reflect.Type -> *strictStructSchema
+)
+
+type strictStructSchema struct {
+	required map[string]struct{}
+	fields   map[string]reflect.Type
+	err      error
+}
+
+func validateRequiredValue(raw []byte, t reflect.Type, path string, depth int, root bool) error {
+	if depth > maxJSONNestingDepth {
+		return fmt.Errorf("JSON nesting exceeds limit %d at %s", maxJSONNestingDepth, path)
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return fmt.Errorf("empty JSON value at %s", path)
+	}
+	for t.Kind() == reflect.Pointer {
+		if bytes.Equal(raw, []byte("null")) {
+			if root {
+				return fmt.Errorf("record must be a JSON object")
+			}
+			return nil
+		}
+		t = t.Elem()
+	}
+	if root && t.Kind() != reflect.Struct {
+		return fmt.Errorf("record type %s does not encode as a JSON object", t)
+	}
+	if bytes.Equal(raw, []byte("null")) {
+		switch t.Kind() {
+		case reflect.Interface, reflect.Map, reflect.Slice:
+			return nil
+		default:
+			return fmt.Errorf("null is not valid for required %s at %s", t, path)
+		}
+	}
+	if isOpaqueJSONType(t) {
+		return nil
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+			if err == nil {
+				err = fmt.Errorf("expected object")
+			}
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		schema := strictSchemaForType(t)
+		if schema.err != nil {
+			return fmt.Errorf("derive schema for %s: %w", path, schema.err)
+		}
+		for key := range schema.required {
+			if _, ok := obj[key]; !ok {
+				return fmt.Errorf("missing required key %q at %s", key, path)
+			}
+		}
+		for key, value := range obj {
+			if ft, ok := schema.fields[key]; ok {
+				if err := validateRequiredValue(value, ft, jsonPath(path, key), depth+1, false); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return nil // encoding/json treats []byte as base64 text, not a JSON array.
+		}
+		fallthrough
+	case reflect.Array:
+		var values []json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		for i := range values {
+			if err := validateRequiredValue(values[i], t.Elem(), fmt.Sprintf("%s[%d]", path, i), depth+1, false); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		for key, value := range values {
+			if err := validateRequiredValue(value, t.Elem(), jsonPath(path, key), depth+1, false); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isOpaqueJSONType(t reflect.Type) bool {
+	if t == rawMessageType || t.Implements(jsonUnmarshalerType) || t.Implements(textUnmarshalerType) {
+		return true
+	}
+	return reflect.PointerTo(t).Implements(jsonUnmarshalerType) || reflect.PointerTo(t).Implements(textUnmarshalerType)
+}
+
+func requiredJSONKeysForType(t reflect.Type) (map[string]struct{}, error) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("%s is not a struct", t)
+	}
+	b, err := json.Marshal(reflect.Zero(t).Interface())
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("record type does not encode as an object: %w", err)
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(b, &obj); err != nil || obj == nil {
+		if err == nil {
+			err = fmt.Errorf("zero value does not encode as object")
+		}
+		return nil, err
 	}
-	if m == nil {
-		return nil, fmt.Errorf("record type does not encode as a JSON object")
+	out := make(map[string]struct{}, len(obj))
+	for key := range obj {
+		out[key] = struct{}{}
 	}
-	required := make(map[string]bool, len(m))
-	for k := range m {
-		required[k] = true
+	return out, nil
+}
+
+func strictSchemaForType(t reflect.Type) *strictStructSchema {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
-	return required, nil
+	if cached, ok := structSchemaCache.Load(t); ok {
+		return cached.(*strictStructSchema)
+	}
+	required, err := requiredJSONKeysForType(t)
+	schema := &strictStructSchema{
+		required: required,
+		fields:   jsonFieldTypes(t),
+		err:      err,
+	}
+	actual, _ := structSchemaCache.LoadOrStore(t, schema)
+	return actual.(*strictStructSchema)
+}
+
+func jsonFieldTypes(t reflect.Type) map[string]reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	out := make(map[string]reflect.Type)
+	if t.Kind() != reflect.Struct {
+		return out
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" && !f.Anonymous {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if f.Anonymous && name == "" {
+			embedded := f.Type
+			for embedded.Kind() == reflect.Pointer {
+				embedded = embedded.Elem()
+			}
+			if embedded.Kind() == reflect.Struct && !isOpaqueJSONType(embedded) {
+				for key, ft := range jsonFieldTypes(embedded) {
+					if _, exists := out[key]; !exists {
+						out[key] = ft
+					}
+				}
+				continue
+			}
+		}
+		if name == "" {
+			name = f.Name
+		}
+		if _, exists := out[name]; !exists {
+			out[name] = f.Type
+		}
+	}
+	return out
+}
+
+func jsonPath(parent, key string) string {
+	if key == "" {
+		return parent
+	}
+	return parent + "." + key
+}
+
+func openPinnedRegularFile(path string) (*os.File, os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("json: %s is not a regular non-symlink file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("stat opened %s: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("json: %s changed while being opened", path)
+	}
+	return f, opened, nil
 }
 
 // WriteJSONLFile atomically replaces path only after every record and the final
@@ -299,11 +614,17 @@ func WriteJSONFile(path string, value any) error {
 		return fmt.Errorf("create temp for %s: %w", path, err)
 	}
 	tmp := f.Name()
+	tmpInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("stat temp for %s: %w", path, err)
+	}
 	committed := false
 	defer func() {
 		_ = f.Close()
 		if !committed {
-			_ = os.Remove(tmp)
+			_, _ = removeFileIfSame(tmp, tmpInfo)
 		}
 	}()
 	if err := f.Chmod(0o644); err != nil {
@@ -321,6 +642,13 @@ func WriteJSONFile(path string, value any) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
 	}
+	exists, same, err := filePathHasIdentity(tmp, tmpInfo)
+	if err != nil {
+		return fmt.Errorf("verify temp for %s: %w", path, err)
+	}
+	if !exists || !same {
+		return fmt.Errorf("temp for %s changed before publication", path)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("publish %s: %w", path, err)
 	}
@@ -336,6 +664,7 @@ type JSONLWriter[T any] struct {
 	enc       *json.Encoder
 	path      string
 	tempPath  string
+	tempInfo  os.FileInfo
 	failed    bool
 	committed bool
 }
@@ -343,6 +672,9 @@ type JSONLWriter[T any] struct {
 func NewJSONLWriter[T any](path string) (*JSONLWriter[T], error) {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir for %s: %w", path, err)
+	}
 	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp for %s: %w", path, err)
@@ -352,9 +684,15 @@ func NewJSONLWriter[T any](path string) (*JSONLWriter[T], error) {
 		_ = os.Remove(f.Name())
 		return nil, fmt.Errorf("chmod temp for %s: %w", path, err)
 	}
+	tempInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, fmt.Errorf("stat temp for %s: %w", path, err)
+	}
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
-	return &JSONLWriter[T]{file: f, enc: enc, path: path, tempPath: f.Name()}, nil
+	return &JSONLWriter[T]{file: f, enc: enc, path: path, tempPath: f.Name(), tempInfo: tempInfo}, nil
 }
 
 func (w *JSONLWriter[T]) Write(rec *T) error {
@@ -386,10 +724,7 @@ func (w *JSONLWriter[T]) Abort() error {
 		w.file = nil
 	}
 	if w.tempPath != "" {
-		removeErr := os.Remove(w.tempPath)
-		if errors.Is(removeErr, os.ErrNotExist) {
-			removeErr = nil
-		}
+		_, removeErr := removeFileIfSame(w.tempPath, w.tempInfo)
 		err = errors.Join(err, removeErr)
 	}
 	return err
@@ -413,15 +748,58 @@ func (w *JSONLWriter[T]) Close() error {
 	if err := w.file.Close(); err != nil {
 		w.file = nil
 		w.failed = true
-		_ = os.Remove(w.tempPath)
+		_, _ = removeFileIfSame(w.tempPath, w.tempInfo)
 		return err
 	}
 	w.file = nil
+	exists, same, err := filePathHasIdentity(w.tempPath, w.tempInfo)
+	if err != nil {
+		w.failed = true
+		return err
+	}
+	if !exists || !same {
+		w.failed = true
+		return fmt.Errorf("jsonl writer temp changed before publication")
+	}
 	if err := os.Rename(w.tempPath, w.path); err != nil {
 		w.failed = true
-		_ = os.Remove(w.tempPath)
+		_, _ = removeFileIfSame(w.tempPath, w.tempInfo)
 		return err
 	}
 	w.committed = true
 	return nil
+}
+
+func filePathHasIdentity(path string, want os.FileInfo) (exists bool, same bool, err error) {
+	if path == "" || want == nil {
+		return false, false, nil
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return true, false, nil
+	}
+	return true, os.SameFile(info, want), nil
+}
+
+func removeFileIfSame(path string, want os.FileInfo) (bool, error) {
+	exists, same, err := filePathHasIdentity(path, want)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	if !same {
+		return false, fmt.Errorf("refusing to remove changed temp file %s", path)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
 }

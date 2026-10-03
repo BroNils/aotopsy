@@ -62,10 +62,11 @@ func TestBuildDispatchTablesDerivesSelectorImmFromFunctionOwner(t *testing.T) {
 	classObj := &cluster.NamedObject{CID: ct.Class, RefID: classRef, NameRefID: -1, OwnerRefID: -1}
 	fn := &cluster.NamedObject{CID: ct.Function, RefID: functionRef, NameRefID: functionName, OwnerRefID: classRef}
 	pl := &PoolLookupData{
-		CT:            ct,
-		RefToStr:      map[int]string{functionName: "foo"},
-		RefToNamed:    map[int]*cluster.NamedObject{classRef: classObj, functionRef: fn},
-		CodeRefToName: map[int]string{},
+		CT:                    ct,
+		RefToNamed:            map[int]*cluster.NamedObject{classRef: classObj, functionRef: fn},
+		CodeRefToName:         map[int]string{},
+		FunctionRefToName:     map[int]string{functionRef: "Widget.foo"},
+		FunctionRefToLeafName: map[int]string{functionRef: "foo"},
 	}
 	result := &cluster.Result{
 		Classes: []cluster.ClassInfo{{RefID: classRef, ClassID: classID}},
@@ -83,6 +84,32 @@ func TestBuildDispatchTablesDerivesSelectorImmFromFunctionOwner(t *testing.T) {
 	imms := ctx.MethodNameToSelectorImms["foo"]
 	if len(imms) != 1 || imms[0] != selectorImm {
 		t.Fatalf("selector immediates = %v, want [%d]", imms, selectorImm)
+	}
+	if got := ctx.DispatchCodeIndexToName[clusterIdx]; got != "Widget.foo" {
+		t.Fatalf("dispatch semantic name = %q, want Widget.foo", got)
+	}
+}
+
+func TestMethodNameIndexKeepsSemanticAndLeafIdentitiesSeparate(t *testing.T) {
+	ct := &snapshot.CIDTable{Function: 11}
+	const functionRef = 100
+	fn := &cluster.NamedObject{CID: ct.Function, RefID: functionRef, NameRefID: 200}
+	pl := &PoolLookupData{
+		CT:                    ct,
+		RefToNamed:            map[int]*cluster.NamedObject{functionRef: fn},
+		FunctionRefToName:     map[int]string{functionRef: "Owner.parent.<anonymous closure>"},
+		FunctionRefToLeafName: map[int]string{functionRef: "<anonymous closure>"},
+	}
+
+	got := buildMethodNameToRefIDs(pl)
+	for _, key := range []string{"Owner.parent.<anonymous closure>", "<anonymous closure>"} {
+		refs := got[key]
+		if len(refs) != 1 || refs[0] != functionRef {
+			t.Fatalf("method index[%q] = %v, want [%d]", key, refs, functionRef)
+		}
+	}
+	if _, exists := got["Owner.<anonymous closure>"]; exists {
+		t.Fatalf("method index rebuilt a class-qualified closure instead of using naming identity: %v", got)
 	}
 }
 
