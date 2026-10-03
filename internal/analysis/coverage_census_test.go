@@ -26,9 +26,6 @@ func TestCoverageCensus(t *testing.T) {
 	for _, s := range samplecorpus.Registry {
 		name := s.FileName()
 		path := corpusSample(t, name)
-		if _, err := samplecorpus.ValidateSample(path, s); err != nil {
-			t.Fatalf("%s: corpus identity validation: %v", name, err)
-		}
 		rows++
 		func() {
 			ctx, err := LoadContext(path)

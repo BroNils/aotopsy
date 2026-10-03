@@ -1,20 +1,18 @@
-package samplecorpus_test
+package samplecorpus
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"aotopsy/internal/samplecorpus"
 )
 
 func TestCorpusRootAbsentIsDistinctFromMissingSample(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if _, err := samplecorpus.CorpusRoot(); !errors.Is(err, samplecorpus.ErrNoCorpus) {
+	if _, err := CorpusRoot(); !errors.Is(err, ErrNoCorpus) {
 		t.Fatalf("CorpusRoot error = %v, want ErrNoCorpus", err)
 	}
-	if _, err := samplecorpus.RequireSample(Registry0FileName()); !errors.Is(err, samplecorpus.ErrNoCorpus) {
+	if _, err := RequireSample(Registry0FileName()); !errors.Is(err, ErrNoCorpus) {
 		t.Fatalf("RequireSample error = %v, want ErrNoCorpus", err)
 	}
 }
@@ -25,12 +23,12 @@ func TestRequireCompleteCorpusTreatsPresentEmptyCorpusAsIncomplete(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	if err := samplecorpus.RequireCompleteCorpus(); err == nil || errors.Is(err, samplecorpus.ErrNoCorpus) {
+	if err := RequireCompleteCorpus(); err == nil || errors.Is(err, ErrNoCorpus) {
 		t.Fatalf("RequireCompleteCorpus error = %v, want present-but-incomplete corpus failure", err)
 	}
 }
 
-func TestRequireSampleUsesNearestCorpusRootOnly(t *testing.T) {
+func TestResolveSamplePathUsesNearestCorpusRootOnly(t *testing.T) {
 	base := t.TempDir()
 	name := Registry0FileName()
 	outer := filepath.Join(base, "samples")
@@ -49,8 +47,8 @@ func TestRequireSampleUsesNearestCorpusRootOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(work)
-	if _, err := samplecorpus.RequireSample(name); !errors.Is(err, samplecorpus.ErrSampleMissing) {
-		t.Fatalf("RequireSample error = %v, want nearest-root ErrSampleMissing", err)
+	if _, err := resolveSamplePath(name); !errors.Is(err, ErrSampleMissing) {
+		t.Fatalf("resolveSamplePath error = %v, want nearest-root ErrSampleMissing", err)
 	}
 }
 
@@ -72,25 +70,25 @@ func TestCorpusRootDoesNotFallThroughDanglingNearestRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(work)
-	if _, err := samplecorpus.CorpusRoot(); err == nil || errors.Is(err, samplecorpus.ErrNoCorpus) {
+	if _, err := CorpusRoot(); err == nil || errors.Is(err, ErrNoCorpus) {
 		t.Fatalf("CorpusRoot error = %v, want dangling nearest corpus to be an inconsistency", err)
 	}
 }
 
-func TestRequireSampleRejectsTraversalAndSeparators(t *testing.T) {
+func TestResolveSamplePathRejectsTraversalAndSeparators(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "samples"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
 	for _, name := range []string{"../escape.so", "a/b.so", `a\b.so`, ".", ".."} {
-		if _, err := samplecorpus.RequireSample(name); err == nil {
-			t.Errorf("RequireSample(%q) unexpectedly succeeded", name)
+		if _, err := resolveSamplePath(name); err == nil {
+			t.Errorf("resolveSamplePath(%q) unexpectedly succeeded", name)
 		}
 	}
 }
 
-func TestRequireSampleRequiresRegularFile(t *testing.T) {
+func TestResolveSamplePathRequiresRegularFile(t *testing.T) {
 	root := t.TempDir()
 	samples := filepath.Join(root, "samples")
 	if err := os.Mkdir(samples, 0o755); err != nil {
@@ -101,12 +99,12 @@ func TestRequireSampleRequiresRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	if _, err := samplecorpus.RequireSample(name); err == nil {
+	if _, err := resolveSamplePath(name); err == nil {
 		t.Fatal("directory masquerading as a sample was accepted")
 	}
 }
 
-func TestRequireSampleAcceptsSymlinkToRegularFile(t *testing.T) {
+func TestResolveSamplePathAcceptsSymlinkToRegularFile(t *testing.T) {
 	root := t.TempDir()
 	samples := filepath.Join(root, "samples")
 	if err := os.Mkdir(samples, 0o755); err != nil {
@@ -121,9 +119,9 @@ func TestRequireSampleAcceptsSymlinkToRegularFile(t *testing.T) {
 		t.Skipf("symlink unavailable on this filesystem: %v", err)
 	}
 	t.Chdir(root)
-	p, err := samplecorpus.RequireSample(name)
+	p, err := resolveSamplePath(name)
 	if err != nil {
-		t.Fatalf("RequireSample(symlink): %v", err)
+		t.Fatalf("resolveSamplePath(symlink): %v", err)
 	}
 	if filepath.Base(p) != name {
 		t.Fatalf("resolved %q, want basename %q", p, name)
@@ -131,8 +129,15 @@ func TestRequireSampleAcceptsSymlinkToRegularFile(t *testing.T) {
 }
 
 func Registry0FileName() string {
-	if len(samplecorpus.Registry) == 0 {
+	if len(Registry) == 0 {
 		return "dart-3.9.2-arm64.so"
 	}
-	return samplecorpus.Registry[0].FileName()
+	return Registry[0].FileName()
+}
+
+func TestRequireSampleRejectsUnregisteredNameBeforeFilesystemLookup(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if _, err := RequireSample("dart-9.9.9-arm64.so"); !errors.Is(err, ErrSampleUnregistered) {
+		t.Fatalf("RequireSample error = %v, want ErrSampleUnregistered", err)
+	}
 }

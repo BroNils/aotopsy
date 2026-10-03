@@ -25,16 +25,14 @@ import (
 // memory and time budget, like the symtab gate.
 func TestDecompileQualityCorpus(t *testing.T) {
 	const perSampleCap = 120
-	// One arm64 + one x64 ground-truth sample keeps both backends covered.
-	targets := []string{"dart-3.9.2-gt-arm64.so", "dart-3.12.2-x64.so"}
+	// One arm64 + one x64 stripped analysis sample keeps both backends covered
+	// without letting a symbol-oracle .symtab make recovery look healthier.
+	targets := []string{"dart-3.9.2-arm64.so", "dart-3.12.2-x64.so"}
 
 	var totalFns, validFns int
 	var fabricatedLambda, fabricatedEmptyList int
-	covered := 0
-
 	for _, name := range targets {
 		path := corpusSample(t, name)
-		covered++
 		ctx, err := LoadContext(path)
 		if err != nil {
 			t.Fatalf("%s: LoadContext: %v", name, err)
@@ -83,9 +81,6 @@ func TestDecompileQualityCorpus(t *testing.T) {
 		}()
 	}
 
-	if covered == 0 {
-		t.Skip("no target sample present on disk")
-	}
 	if totalFns == 0 {
 		t.Fatal("no functions emitted")
 	}

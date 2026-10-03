@@ -135,7 +135,7 @@ func TestFuncTypeParamNames_Chain(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Skip("runUnaryGuarded not present in this sample")
+		t.Fatal("runUnaryGuarded not recovered from canonical 3.9.2 corpus sample")
 	}
 }
 

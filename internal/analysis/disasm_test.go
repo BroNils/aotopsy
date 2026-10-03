@@ -9,80 +9,42 @@ import (
 	"aotopsy/internal/disasm"
 )
 
-// sampleSpec describes expected thresholds for a sample.
+// sampleSpec describes broad pipeline thresholds for a registered corpus
+// sample. The old version of this test used three gitignored app-codename paths
+// (evil-patched.so, blutter-lce.so, newandromo.so) and silently skipped when
+// those local aliases were absent. Two of those aliases are known to have
+// drifted onto the wrong Dart versions. Keep the useful threshold coverage, but
+// bind it to canonical, validated corpus identities instead.
 type sampleSpec struct {
 	name         string
-	libapp       string
+	sample       string
 	minFunctions int
-	minBLRPct    float64 // minimum BLR annotation percentage
+	minBLRPct    float64
 }
 
 var samples = []sampleSpec{
-	{
-		name:         "evil",
-		libapp:       "samples/evil-patched.so",
-		minFunctions: 1000,
-		minBLRPct:    80.0,
-	},
-	{
-		name:         "blutter",
-		libapp:       "samples/blutter-lce.so",
-		minFunctions: 1000,
-		minBLRPct:    80.0,
-	},
-	{
-		name:         "newandromo",
-		libapp:       "samples/newandromo.so",
-		minFunctions: 1000,
-		minBLRPct:    80.0,
-	},
-}
-
-// findProjectRoot walks up from cwd to find go.mod.
-func findProjectRoot() string {
-	dir, _ := os.Getwd()
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
+	{name: "dart-2.17.6", sample: "dart-2.17.6-arm64.so", minFunctions: 1000, minBLRPct: 80.0},
+	{name: "dart-3.1.0", sample: "dart-3.1.0-arm64.so", minFunctions: 1000, minBLRPct: 80.0},
+	{name: "dart-3.9.2", sample: "dart-3.9.2-arm64.so", minFunctions: 1000, minBLRPct: 80.0},
 }
 
 func TestDisasmPipelineThresholds(t *testing.T) {
-	root := findProjectRoot()
-	if root == "" {
-		t.Skip("project root not found")
-	}
-
+	requireCompleteCorpus(t)
 	for _, s := range samples {
 		t.Run(s.name, func(t *testing.T) {
-			libapp := filepath.Join(root, s.libapp)
-			if _, err := os.Stat(libapp); err != nil {
-				t.Skipf("sample not found: %s", libapp)
-			}
-
+			libapp := corpusSample(t, s.sample)
 			outDir := t.TempDir()
-			_, err := Run(Opts{
-				LibPath: libapp,
-				OutDir:  outDir,
-			})
+			_, err := Run(Opts{LibPath: libapp, OutDir: outDir})
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 
-			// Check functions.jsonl.
 			funcsPath := filepath.Join(outDir, "functions.jsonl")
 			funcCount := countJSONLLines(t, funcsPath)
 			if funcCount < s.minFunctions {
 				t.Errorf("functions: %d < %d minimum", funcCount, s.minFunctions)
 			}
 
-			// Check call_edges.jsonl BLR annotation rate.
 			edgesPath := filepath.Join(outDir, "call_edges.jsonl")
 			totalBLR, annotatedBLR := countBLRAnnotations(t, edgesPath)
 			if totalBLR > 0 {
@@ -94,7 +56,6 @@ func TestDisasmPipelineThresholds(t *testing.T) {
 				t.Logf("BLR: %d/%d (%.1f%%)", annotatedBLR, totalBLR, pct)
 			}
 
-			// Check unresolved_thr.jsonl exists.
 			unresTHRPath := filepath.Join(outDir, "unresolved_thr.jsonl")
 			unresTHRCount := countJSONLLines(t, unresTHRPath)
 			t.Logf("functions=%d edges_total=%d blr=%d unres_thr=%d",

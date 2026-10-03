@@ -13,9 +13,6 @@ import (
 // Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
 	libPath := sampleARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_arm64_")
 	if err != nil {
@@ -94,9 +91,6 @@ func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
 // Runs on the Dart 3.12.2 ARM64 sample from the corpus.
 func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 	libPath := sample312ARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_sample_arm64_")
 	if err != nil {
@@ -139,9 +133,6 @@ func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 // Runs on the Dart 3.12.2 x86_64 sample from the corpus.
 func TestPipelineRegression_Sample312_X64(t *testing.T) {
 	libPath := sample312X64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_sample_x64_")
 	if err != nil {
@@ -208,9 +199,6 @@ func TestPipelineRegression_Sample312_X64(t *testing.T) {
 // Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestDecompilerAccuracy_Factorial(t *testing.T) {
 	libPath := sampleARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping decompiler test", libPath)
-	}
 
 	// Run the pipeline first to get output.
 	outDir, err := os.MkdirTemp("", "aotopsy_decomp_test_")
@@ -261,9 +249,6 @@ func TestDecompilerAccuracy_Factorial(t *testing.T) {
 // Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtraction(t *testing.T) {
 	libPath := sampleDart212(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping string extraction test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_dart212_test_")
 	if err != nil {
@@ -307,9 +292,6 @@ func TestDart212StringExtraction(t *testing.T) {
 // Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	libPath := sampleDart212(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping cluster-only string extraction test", libPath)
-	}
 
 	res := clusterOnly(t, libPath)
 

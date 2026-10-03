@@ -67,15 +67,11 @@ func TestCorpusCoverage(t *testing.T) {
 
 	present := 0
 	for _, s := range samplecorpus.Registry {
-		path, err := samplecorpus.RequireSample(s.FileName())
+		_, err := samplecorpus.RequireSample(s.FileName())
 		if err != nil {
 			t.Fatalf("resolve %s: %v", s.FileName(), err)
 		}
 		present++
-		if _, err := samplecorpus.ValidateSample(path, s); err != nil {
-			t.Error(err)
-			continue
-		}
 		p := snapshot.ProfileForVersion(s.DartVersion)
 		if p == nil {
 			t.Errorf("sample %s is a version with no profile", s.FileName())
@@ -142,5 +138,47 @@ func TestValidateRegistryRejectsMissingRegistration(t *testing.T) {
 
 	if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "absent from Registry") {
 		t.Fatalf("ValidateRegistry error = %v, want missing registration error", err)
+	}
+}
+
+func TestValidateRegistryRejectsBrokenTwinContract(t *testing.T) {
+	original := samplecorpus.Registry
+	mutated := append([]samplecorpus.Sample(nil), original...)
+	for i := range mutated {
+		if mutated[i].TwinOf != "" {
+			mutated[i].TwinOf = "dart-3.10.7-arm64.so"
+			samplecorpus.Registry = mutated
+			t.Cleanup(func() { samplecorpus.Registry = original })
+			if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "not source/version/arch-identical") {
+				t.Fatalf("ValidateRegistry error = %v, want false-twin identity error", err)
+			}
+			return
+		}
+	}
+	t.Fatal("registry has no declared ground-truth twin to corrupt")
+}
+
+func TestValidateRegistryRejectsUnknownSourceSet(t *testing.T) {
+	original := samplecorpus.Registry
+	mutated := append([]samplecorpus.Sample(nil), original...)
+	mutated[0].SourceSet = "ad_hoc_unverified_source"
+	samplecorpus.Registry = mutated
+	t.Cleanup(func() { samplecorpus.Registry = original })
+
+	if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "unknown source set") {
+		t.Fatalf("ValidateRegistry error = %v, want unknown source-set error", err)
+	}
+}
+
+func TestDifferentialSourceSetsExcludeSymbolOracles(t *testing.T) {
+	for setName, members := range samplecorpus.DifferentialSourceSets() {
+		if len(members) < 2 {
+			t.Fatalf("source set %q has only %d differential member(s)", setName, len(members))
+		}
+		for _, s := range members {
+			if s.SymbolOracle {
+				t.Fatalf("source set %q includes symbol oracle %s in differential population", setName, s.FileName())
+			}
+		}
 	}
 }

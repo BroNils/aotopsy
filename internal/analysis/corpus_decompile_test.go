@@ -24,7 +24,7 @@ const decompileCorpusFuncs = 200
 // cliff, which is what a version-specific structuring failure looks like.
 const decompileCorpusMinCoverage = 95.0
 
-// TestDecompileCorpus runs every registered sample through the decompiler.
+// TestDecompileCorpus runs every registered analysis sample through the decompiler.
 //
 // This test exists because nothing did. The golden test covers pipeline
 // ARTIFACTS, and pseudocode is not one of them (it is written only under
@@ -44,6 +44,9 @@ func TestDecompileCorpus(t *testing.T) {
 	requireCompleteCorpus(t)
 	seen := map[string]bool{}
 	for _, s := range samplecorpus.Registry {
+		if s.SymbolOracle {
+			continue
+		}
 		name := s.FileName()
 		if seen[name] {
 			continue

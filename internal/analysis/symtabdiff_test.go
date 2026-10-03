@@ -37,23 +37,23 @@ func TestSymtabDifferential(t *testing.T) {
 	requireCompleteCorpus(t)
 	covered := 0
 	for _, s := range samplecorpus.Registry {
+		if !s.SymbolOracle {
+			continue
+		}
 		path := corpusSample(t, s.FileName())
 		name := s.FileName()
 		t.Run(name, func(t *testing.T) {
-			if runSymtabDifferential(t, path, name) {
-				covered++
-			}
+			runSymtabDifferential(t, path, name)
+			covered++
 		})
 	}
 	if covered == 0 {
-		t.Skip("no corpus sample carries a .symtab")
+		t.Fatal("registry contains no symbol-oracle samples")
 	}
 	t.Logf("validated recovered names against .symtab on %d sample(s)", covered)
 }
 
-// runSymtabDifferential reports whether the sample actually had symbols to
-// compare against, so the caller can tell "all skipped" from "all passed".
-func runSymtabDifferential(t *testing.T, libPath, name string) bool {
+func runSymtabDifferential(t *testing.T, libPath, name string) {
 	ctx, err := LoadContext(libPath)
 	if err != nil {
 		t.Fatalf("LoadContext: %v", err)
@@ -65,8 +65,7 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 		t.Fatalf("FuncSymbols: %v", err)
 	}
 	if len(elfSyms) == 0 {
-		t.Skipf("stripped (no .symtab) -- nothing to compare against")
-		return false
+		t.Fatalf("registry marks %s as a symbol oracle, but it has no .symtab", name)
 	}
 
 	// stub_/sub_/SharedStub are not naming claims, they are honest "we don't
@@ -83,8 +82,7 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 		recovered[va] = nm
 	}
 	if len(recovered) == 0 {
-		t.Skipf("no recovered names to compare")
-		return false
+		t.Fatalf("symbol oracle %s produced no recovered names to compare", name)
 	}
 
 	comp := CompareNamesToSymbols(recovered, ctx.SymbolNamesVMForm, elfSyms)
@@ -142,5 +140,4 @@ func runSymtabDifferential(t *testing.T, libPath, name string) bool {
 		t.Errorf("agreement rate %.1f%% < %.1f%% threshold -- %d disagreements out of %d compared",
 			rate*100, minAgreementRate*100, len(comp.Disagreement), comp.Compared)
 	}
-	return true
 }
