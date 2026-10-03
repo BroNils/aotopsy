@@ -146,8 +146,6 @@ func RunDisasmStageX86(
 				rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
 				if e.TargetName != "" {
 					rec.Target = e.TargetName
-				} else {
-					rec.Target = rec.TargetAddress
 				}
 			}
 			edgeRecs = append(edgeRecs, rec)

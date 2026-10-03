@@ -43,7 +43,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 			signalSet[f.Name] = true
 		}
 	}
-	validEdges := validSignalEdges(g)
+	validEdges := signalTraversalEdges(g)
 
 	// Build forward adjacency from every resolved edge. SignalGraph has already
 	// expanded polymorphic indirect candidates, so dropping BLR/call_indirect
@@ -74,7 +74,8 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		via      string
 	}
 	var signalEdges []edgeInfo
-	edgeSeen := make(map[[3]string]bool)
+	type edgeKey struct{ from, to, kind, via string }
+	edgeSeen := make(map[edgeKey]bool)
 
 	for _, e := range validEdges {
 		if e.To == "" {
@@ -84,7 +85,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		if !signalSet[from] || !signalSet[to] {
 			continue
 		}
-		key := [3]string{from, to, e.Kind}
+		key := edgeKey{from, to, e.Kind, e.Via}
 		if edgeSeen[key] {
 			continue
 		}
@@ -129,7 +130,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 					if nextState.indirect {
 						kind = "path_indirect"
 					}
-					key := [3]string{src, next, kind}
+					key := edgeKey{src, next, kind, ""}
 					if !edgeSeen[key] {
 						edgeSeen[key] = true
 						signalEdges = append(signalEdges, edgeInfo{src, next, kind, ""})
@@ -162,9 +163,13 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		hasEdge[e.from] = true
 		hasEdge[e.to] = true
 	}
+	hasEvidence := make(map[string]bool)
+	for _, rel := range signalEvidenceRelations(g, signalSet) {
+		hasEvidence[rel.from] = true
+	}
 	activeSignal := make(map[string]bool)
 	for name := range signalSet {
-		if hasEdge[name] {
+		if hasEdge[name] || hasEvidence[name] {
 			activeSignal[name] = true
 			continue
 		}
@@ -334,6 +339,8 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 			fmt.Fprintf(&b, "  %s -> %s [color=%q];\n", fromID, toID, t.EdgeDirect)
 		}
 	}
+	writeSignalEvidenceRelations(&b, signalEvidenceRelations(g, activeSignal), t)
+	writeSignalCompletenessNote(&b, g, t)
 
 	b.WriteString("}\n")
 	return b.String()

@@ -4,6 +4,8 @@ package render
 import (
 	"encoding/hex"
 	"io"
+	"net/url"
+	"path"
 	"strings"
 	"unicode/utf8"
 )
@@ -84,4 +86,32 @@ func IsAllCaps(s string) bool {
 		}
 	}
 	return true
+}
+
+// safeRelativeArtifactLink converts a report-relative artifact path into a
+// browser-safe href. Render data is untrusted: absolute paths, traversal,
+// URL-like first segments, backslashes, and NULs must never turn an artifact
+// reference into navigation outside the published report directory.
+func safeRelativeArtifactLink(rel string) (string, bool) {
+	if rel == "" || strings.ContainsRune(rel, '\x00') || strings.Contains(rel, "\\") {
+		return "", false
+	}
+	if strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "//") {
+		return "", false
+	}
+	clean := path.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	parts := strings.Split(clean, "/")
+	if len(parts) == 0 || strings.Contains(parts[0], ":") {
+		return "", false
+	}
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/"), true
 }

@@ -280,7 +280,7 @@ func TestTaintAnalysis(t *testing.T) {
 		{FromFunc: "getCredential", Target: "sendData"},
 		{FromFunc: "getPassword", Target: "saveData"},
 	}
-	err := WriteTaintFindings(tmpDir, refs, edges)
+	err := WriteTaintFindings(tmpDir, nil, refs, edges)
 	if err != nil {
 		t.Fatalf("WriteTaintFindings: %v", err)
 	}

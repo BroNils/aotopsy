@@ -116,14 +116,18 @@ func cmdRender(args []string) error {
 	stats := render.ComputeStats(funcs, edges)
 
 	// Compute reachability.
-	entryPoints := render.FindEntryPoints(funcs, edges)
-	reachable := render.ReachableSet(entryPoints, edges)
-	logger.Printf("entry points: %d, reachable functions: %d / %d\n",
-		len(entryPoints), len(reachable), len(funcs))
+	rootCandidates := render.FindRootCandidates(funcs, edges)
+	reach := render.ReachableSet(funcs, rootCandidates, edges)
+	logger.Printf("static root candidates: %d, known functions in structural closure: %d / %d\n",
+		len(rootCandidates), len(reach.Functions), stats.TotalFunctions)
+	if reach.IncompletePolymorphicSites > 0 || reach.UnknownCandidateCountSites > 0 || reach.UnresolvedIndirectSites > 0 {
+		logger.Printf("  reachability lower-bound gaps: %d incomplete polymorphic, %d unknown candidate-count, %d unresolved indirect site(s)\n",
+			reach.IncompletePolymorphicSites, reach.UnknownCandidateCountSites, reach.UnresolvedIndirectSites)
+	}
 
 	// Generate reachability DOT.
-	reachDOT := render.ReachabilityDOT(funcs, edges, reachable, entryPoints,
-		*title+" (reachable)", render.NASA)
+	reachDOT := render.ReachabilityDOT(funcs, edges, reach, rootCandidates,
+		*title+" (static structural closure)", render.NASA)
 	reachDotPath := filepath.Join(renderDir, "reachable.dot")
 	if err := output.WriteArtifactFile(renderDir, "reachable.dot", []byte(reachDOT), 0o644); err != nil {
 		return fmt.Errorf("write reachable.dot: %w", err)
@@ -203,7 +207,7 @@ func cmdRender(args []string) error {
 			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir cfg: %w", err)
 			}
-			cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reachable, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
+			cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reach.Functions, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
 			if err != nil {
 				return fmt.Errorf("generate CFGs: %w", err)
 			}
@@ -216,7 +220,7 @@ func cmdRender(args []string) error {
 	if err := output.WriteAtomic(htmlPath, 0o644, func(w io.Writer) error {
 		return render.WriteIndexHTML(w, stats, unresTHR, *title,
 			hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG,
-			entryPoints, len(reachable), cfgFuncs, cfgLinks)
+			rootCandidates, reach, cfgFuncs, cfgLinks)
 	}); err != nil {
 		return fmt.Errorf("write index.html: %w", err)
 	}

@@ -25,9 +25,9 @@ import (
 
 // SignalResult holds summary stats from the signal stage.
 type SignalResult struct {
-	SignalCount  int
-	ContextCount int
-	EdgeCount    int
+	SignalCount         int
+	ContextCount        int
+	StaticRelationCount int
 	// Findings are returned so the pipeline can fold them into the single
 	// evidence collector. The stage writes its own evidence.jsonl only on
 	// the standalone path, where nothing downstream will.
@@ -113,19 +113,25 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 		return nil, fmt.Errorf("signal expansion: %w", err)
 	}
 
-	// Compute entry points.
-	entryList := render.FindEntryPoints(funcs, edges)
-	entrySet := make(map[string]bool, len(entryList))
-	for _, ep := range entryList {
-		entrySet[ep] = true
+	// Compute structural source-component roots of the resolved static graph.
+	// These are candidates for traversal roots, not language-level entry points.
+	rootList := render.FindRootCandidates(funcs, edges)
+	rootSet := make(map[string]bool, len(rootList))
+	for _, root := range rootList {
+		rootSet[root] = true
 	}
 
 	// Build signal graph.
-	g := signal.BuildSignalGraph(funcs, edges, stringRefs, k, entrySet)
-	stagef("signal", "%s%d%s signal + %s%d%s context, %s%d%s edges",
+	g := signal.BuildSignalGraph(funcs, edges, stringRefs, k, rootSet)
+	stagef("signal", "%s%d%s signal + %s%d%s context, %s%d%s call sites / %s%d%s static relations",
 		cli.Gold, g.Stats.SignalFuncs, cli.Reset,
 		cli.Gold, g.Stats.ContextFuncs, cli.Reset,
-		cli.Gold, g.Stats.TotalEdges, cli.Reset)
+		cli.Gold, g.Stats.CallSites, cli.Reset,
+		cli.Gold, g.Stats.StaticRelations, cli.Reset)
+	if g.Stats.IncompletePolymorphicSites > 0 || g.Stats.UnknownCandidateCountSites > 0 || g.Stats.UnresolvedIndirectSites > 0 || g.Stats.RuntimeObservedSites > 0 {
+		logf("  %sgraph completeness:%s %d incomplete polymorphic, %d unknown candidate-count, %d unresolved indirect, %d runtime-observed site(s)\n",
+			cli.Muted, cli.Reset, g.Stats.IncompletePolymorphicSites, g.Stats.UnknownCandidateCountSites, g.Stats.UnresolvedIndirectSites, g.Stats.RuntimeObservedSites)
+	}
 	categories := make([]string, 0, len(g.Stats.Categories))
 	for cat := range g.Stats.Categories {
 		categories = append(categories, cat)
@@ -162,8 +168,14 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 				}
 			}
 			asmSnippets[sf.Name] = s
-			if rel, err := filepath.Rel(outDir, path); err == nil {
-				asmLinks[sf.Name] = filepath.ToSlash(rel)
+			insideOut, err := output.ContainsPath(outDir, path)
+			if err != nil {
+				return nil, fmt.Errorf("compare signal report/asm paths for %s: %w", sf.Name, err)
+			}
+			if insideOut {
+				if rel, err := filepath.Rel(outDir, path); err == nil {
+					asmLinks[sf.Name] = filepath.ToSlash(rel)
+				}
 			}
 		}
 		logf("  %sasm snippets:%s %d\n", cli.Muted, cli.Reset, len(asmSnippets))
@@ -373,10 +385,10 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 	}
 
 	return &SignalResult{
-		SignalCount:  g.Stats.SignalFuncs,
-		ContextCount: g.Stats.ContextFuncs,
-		EdgeCount:    g.Stats.TotalEdges,
-		Findings:     findings,
+		SignalCount:         g.Stats.SignalFuncs,
+		ContextCount:        g.Stats.ContextFuncs,
+		StaticRelationCount: g.Stats.StaticRelations,
+		Findings:            findings,
 	}, nil
 }
 
@@ -410,23 +422,18 @@ func BuildSignalContent(
 	if arch != "arm64" && arch != "x64" {
 		return nil, fmt.Errorf("signal CFG: unsupported or unknown provenance architecture %q", arch)
 	}
-	edgesByFunc := make(map[string][]disasm.CallEdge)
+	edgesByFunc := make(map[string]map[uint64][]disasm.CallEdgeRecord)
 	for _, er := range edgeRecords {
 		pc := strutil.ParseHexAddr(er.FromPC)
-		ce := disasm.CallEdge{
-			FromPC:     pc,
-			Kind:       er.Kind,
-			TargetName: er.Target,
-			Via:        er.Via,
+		if pc == 0 {
+			continue
 		}
-		if er.Kind == "bl" || er.Kind == "call" {
-			ce.TargetPC = strutil.ParseHexAddr(er.TargetAddress)
-			ce.TargetValid = er.TargetAddress != ""
-			if er.Target == er.TargetAddress {
-				ce.TargetName = ""
-			}
+		byPC := edgesByFunc[er.FromFunc]
+		if byPC == nil {
+			byPC = make(map[uint64][]disasm.CallEdgeRecord)
+			edgesByFunc[er.FromFunc] = byPC
 		}
-		edgesByFunc[er.FromFunc] = append(edgesByFunc[er.FromFunc], ce)
+		byPC[pc] = append(byPC[pc], er)
 	}
 
 	funcByName := make(map[string]disasm.FuncRecord, len(funcs))
@@ -462,11 +469,7 @@ func BuildSignalContent(
 			continue
 		}
 
-		funcEdges := edgesByFunc[sf.Name]
-		edgeByPC := make(map[uint64]disasm.CallEdge, len(funcEdges))
-		for _, e := range funcEdges {
-			edgeByPC[e.FromPC] = e
-		}
+		edgeByPC := edgesByFunc[sf.Name]
 
 		var instAddrs []uint64
 		if arch == "x64" {
@@ -482,17 +485,7 @@ func BuildSignalContent(
 			continue
 		}
 
-		seenCalls := make(map[string]bool)
-		var calls []string
-		for _, addr := range instAddrs {
-			if e, ok := edgeByPC[addr]; ok {
-				callee := e.TargetName
-				if signal.IsInterestingCallee(callee) && !seenCalls[callee] {
-					seenCalls[callee] = true
-					calls = append(calls, callee)
-				}
-			}
-		}
+		calls := staticSignalCalls(edgeByPC, instAddrs)
 
 		seenStrs := make(map[string]bool)
 		var strs []render.ClassifiedString
@@ -517,4 +510,23 @@ func BuildSignalContent(
 	}
 
 	return result, nil
+}
+
+func staticSignalCalls(edgeByPC map[uint64][]disasm.CallEdgeRecord, instAddrs []uint64) []string {
+	seen := make(map[string]bool)
+	var calls []string
+	for _, addr := range instAddrs {
+		for _, e := range edgeByPC[addr] {
+			// Static semantic targets only. Runtime observations remain a separate
+			// evidence axis and must not be promoted into this call list.
+			for _, callee := range e.ResolvedTargets() {
+				if signal.IsInterestingCallee(callee) && !seen[callee] {
+					seen[callee] = true
+					calls = append(calls, callee)
+				}
+			}
+		}
+	}
+	sort.Strings(calls)
+	return calls
 }

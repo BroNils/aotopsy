@@ -120,6 +120,18 @@ func TestBehavioralAnalysisDoesNotMutateCallEdges(t *testing.T) {
 	}
 }
 
+func TestStaticCallerCalleesResolvesDirectTargetAddressButNotRuntimeOnlyTarget(t *testing.T) {
+	funcs := []disasm.FuncRecord{{Name: "caller", PC: "0x1000"}, {Name: "callee", PC: "0x2000"}, {Name: "runtime", PC: "0x3000"}}
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "caller", FromPC: "0x1010", Kind: "bl", TargetAddress: "0x2000",
+		Runtime: &disasm.RuntimeEvidence{Targets: []disasm.RuntimeTargetObservation{{Target: "runtime", Count: 1}}, Observations: 1},
+	}}
+	graph := staticCallerCallees(funcs, edges)
+	if !graph["caller"]["callee"] || graph["caller"]["runtime"] {
+		t.Fatalf("static caller graph = %+v, want address-resolved callee only", graph)
+	}
+}
+
 func TestSecurityCategorySeverityMatchesSARIFPolicy(t *testing.T) {
 	cases := map[string]string{
 		CatRooting:       "error",

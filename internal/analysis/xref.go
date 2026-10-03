@@ -113,12 +113,19 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 
 	// 2. address_callers_xref.jsonl — target function → callers
 	targetCallers := map[string]map[string]bool{}
+	namesByPC := functionNamesByPC(funcs)
 	for _, e := range edges {
 		// A polymorphic edge is evidence that the callee is one of Targets,
 		// not evidence for one privileged member of the set. Include every
 		// recorded candidate as an over-approximate xref rather than silently
 		// dropping the site (the old Target-only loop did exactly that).
-		for _, target := range e.ResolvedTargets() {
+		targets := resolvedFunctionTargets(e, namesByPC)
+		if len(targets) == 0 && e.TargetAddress != "" {
+			// address_callers_xref is also the lossless home for a direct encoded
+			// destination that has no recovered function identity yet.
+			targets = []string{e.TargetAddress}
+		}
+		for _, target := range targets {
 			if target == "" {
 				continue
 			}

@@ -628,7 +628,7 @@ func runPipeline(opts Opts) (*Result, error) {
 
 		// Step 5.2: Data flow / taint analysis (simplified).
 		// Identifies potential source→sink flows based on string patterns.
-		if err := signal.WriteTaintFindings(opts.OutDir, stringRefs, edges); err != nil {
+		if err := signal.WriteTaintFindings(opts.OutDir, funcs, stringRefs, edges); err != nil {
 			return nil, fmt.Errorf("taint: %w", err)
 		}
 
@@ -706,7 +706,7 @@ func runPipeline(opts Opts) (*Result, error) {
 
 	// Step 10: Platform channels endpoint extraction.
 	// Scans for Flutter MethodChannel, BasicMessageChannel, and EventChannel endpoints.
-	channels := BuildPlatformChannels(clResult, pl, edges, stringRefs)
+	channels := BuildPlatformChannels(clResult, pl, funcs, edges, stringRefs)
 	if len(channels) > 0 {
 		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "platform_channels.jsonl"), channels); err != nil {
 			return nil, fmt.Errorf("platform channels: %w", err)

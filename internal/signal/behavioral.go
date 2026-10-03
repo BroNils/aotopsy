@@ -91,7 +91,7 @@ var sinkPatterns = map[string]string{
 // WriteTaintFindings performs taint analysis by identifying functions that
 // access source patterns and functions that access sink patterns, then
 // checking the call graph for source→sink flows (including cross-function).
-func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edges []disasm.CallEdgeRecord) error {
+func WriteTaintFindings(outDir string, funcs []disasm.FuncRecord, stringRefs []disasm.StringRefRecord, edges []disasm.CallEdgeRecord) error {
 	// Build function → patterns map
 	funcSources := map[string]map[string]bool{}
 	funcSinks := map[string]map[string]bool{}
@@ -122,19 +122,7 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 	// Build call graph from in-memory edges (same source as
 	// WriteBehavioralFindings) instead of re-reading call_edges.jsonl
 	// from disk, so the two analyses share identical edge data.
-	callerCallees := map[string]map[string]bool{}
-	for _, e := range edges {
-		targets := e.ResolvedTargets()
-		if len(targets) == 0 {
-			continue
-		}
-		if callerCallees[e.FromFunc] == nil {
-			callerCallees[e.FromFunc] = map[string]bool{}
-		}
-		for _, t := range targets {
-			callerCallees[e.FromFunc][t] = true
-		}
-	}
+	callerCallees := staticCallerCallees(funcs, edges)
 
 	var findings []TaintFinding
 	seenFlows := map[string]bool{}
@@ -414,6 +402,53 @@ type BehavioralFinding struct {
 	Confidence string   `json:"confidence"`
 }
 
+// staticCallerCallees projects only static function identities. Runtime
+// observations stay separate, and a raw direct address becomes a function only
+// when it exactly matches a functions.jsonl PC.
+func staticCallerCallees(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) map[string]map[string]bool {
+	pcToName := make(map[string]string, len(funcs))
+	for _, f := range funcs {
+		if f.PC != "" && f.Name != "" {
+			pcToName[strings.ToLower(strings.TrimSpace(f.PC))] = f.Name
+		}
+	}
+	callerCallees := make(map[string]map[string]bool)
+	for _, e := range edges {
+		seen := make(map[string]bool)
+		var targets []string
+		for _, target := range e.ResolvedTargets() {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+			if name := pcToName[strings.ToLower(target)]; name != "" {
+				target = name
+			} else if isRawSignalTarget(target) {
+				continue
+			}
+			if !seen[target] {
+				seen[target] = true
+				targets = append(targets, target)
+			}
+		}
+		if len(targets) == 0 && e.TargetAddress != "" {
+			if name := pcToName[strings.ToLower(strings.TrimSpace(e.TargetAddress))]; name != "" {
+				targets = append(targets, name)
+			}
+		}
+		if len(targets) == 0 {
+			continue
+		}
+		if callerCallees[e.FromFunc] == nil {
+			callerCallees[e.FromFunc] = make(map[string]bool)
+		}
+		for _, target := range targets {
+			callerCallees[e.FromFunc][target] = true
+		}
+	}
+	return callerCallees
+}
+
 // WriteBehavioralFindings performs call-graph behavioral analysis.
 // Identifies common malware behavioral patterns from the call graph.
 func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) error {
@@ -483,40 +518,9 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 		}
 	}
 
-	// Build a PC → function name map so hex VA call targets (e.Target == "0x...")
-	// can be resolved to a function name before category lookup. Without this,
-	// funcCategory["0x1234"] is always "" and hex VA targets are never matched.
-	pcToName := map[string]string{}
-	for _, f := range funcs {
-		if f.PC != "" && f.Name != "" {
-			pcToName[f.PC] = f.Name
-		}
-	}
-	// Build call graph: caller → callees
-	callerCallees := map[string]map[string]bool{}
-	for _, e := range edges {
-		// ResolvedTargets may return e.Targets' backing array. Resolve names on a
-		// private copy so a report pass cannot mutate the evidence consumed by
-		// later pipeline stages.
-		targets := append([]string(nil), e.ResolvedTargets()...)
-		if len(targets) == 0 {
-			continue
-		}
-		// Resolve hex VA targets to their function name when possible.
-		for i, t := range targets {
-			if strings.HasPrefix(t, "0x") {
-				if resolved, ok := pcToName[t]; ok && resolved != "" {
-					targets[i] = resolved
-				}
-			}
-		}
-		if callerCallees[e.FromFunc] == nil {
-			callerCallees[e.FromFunc] = map[string]bool{}
-		}
-		for _, t := range targets {
-			callerCallees[e.FromFunc][t] = true
-		}
-	}
+	// Build the static call graph from semantic identities. Exact direct
+	// addresses are resolved only when they match a functions.jsonl PC.
+	callerCallees := staticCallerCallees(funcs, edges)
 
 	// Identify behavioral patterns
 	var findings []BehavioralFinding

@@ -28,6 +28,9 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 	funcOwner := make(map[string]string, len(funcs))
 	ownerMethodCount := make(map[string]int)
 	for _, f := range funcs {
+		if _, seen := funcOwner[f.Name]; seen {
+			continue
+		}
 		owner := f.Owner
 		if owner == "" {
 			owner = unowned
@@ -44,13 +47,26 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 	}
 	classCounts := make(map[classEdge]int)
 	indirectCounts := make(map[classEdge]int) // separate count for indirect edges
-	for _, e := range edges {
-		if !isSupportedCallKind(e.Kind) {
-			continue
-		}
+	incompleteSites := make(map[string]bool)
+	unknownCandidateSites := make(map[string]bool)
+	unsupportedSites := make(map[string]bool)
+	seenClassRelations := make(map[string]bool)
+	for edgeIndex, e := range edges {
 		srcOwner, ok := funcOwner[e.FromFunc]
 		if !ok {
 			continue
+		}
+		siteKey := callSitePopulationKey(e, edgeIndex)
+		if !isSupportedCallKind(e.Kind) {
+			unsupportedSites[siteKey] = true
+			continue
+		}
+		sem := inspectCallSite(e)
+		if sem.omittedCandidates() > 0 {
+			incompleteSites[siteKey] = true
+		}
+		if sem.candidateCountUnknown() {
+			unknownCandidateSites[siteKey] = true
 		}
 
 		// Resolve every semantic target owner. A polymorphic call can have
@@ -72,6 +88,11 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 			if srcOwner == dstOwner {
 				continue // skip intra-class calls
 			}
+			relationKey := siteKey + "\x00" + dstOwner
+			if seenClassRelations[relationKey] {
+				continue
+			}
+			seenClassRelations[relationKey] = true
 			ce := classEdge{srcOwner, dstOwner}
 			classCounts[ce]++
 			if e.Kind == "blr" || e.Kind == "call_indirect" {
@@ -105,7 +126,9 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 
 	renderSet := make(map[string]bool)
 	limit := len(ranked)
+	omittedClasses := 0
 	if maxNodes > 0 && limit > maxNodes {
+		omittedClasses = limit - maxNodes
 		limit = maxNodes
 	}
 	for _, rc := range ranked[:limit] {
@@ -204,6 +227,21 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 				t.ExternalText, count)
 		}
 		fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
+	}
+	if len(incompleteSites) > 0 || len(unknownCandidateSites) > 0 {
+		label := fmt.Sprintf("class edges are a lower bound: %d polymorphic site(s) have unlisted candidates; %d site(s) have unknown candidate counts", len(incompleteSites), len(unknownCandidateSites))
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-completeness"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
+	}
+	if len(unsupportedSites) > 0 {
+		label := fmt.Sprintf("%d call site(s) have unsupported call kinds and were not aggregated into class relations", len(unsupportedSites))
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-unsupported-kind"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
+	}
+	if omittedClasses > 0 {
+		label := fmt.Sprintf("display truncated by maxNodes: %d participating class(es) and their incident relation(s) omitted", omittedClasses)
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-display-truncation"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
 	}
 
 	b.WriteString("}\n")

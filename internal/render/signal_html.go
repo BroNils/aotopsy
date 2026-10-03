@@ -47,11 +47,17 @@ func WriteSignalHTML(w io.Writer, g *signal.SignalGraph, title, filename, digest
 	if asmLinks == nil {
 		asmLinks = map[string]string{}
 	}
+	safeAsmLinks := make(map[string]string, len(asmLinks))
+	for name, rel := range asmLinks {
+		if href, ok := safeRelativeArtifactLink(rel); ok {
+			safeAsmLinks[name] = href
+		}
+	}
 	asmJSON, err := json.Marshal(asmSnippets)
 	if err != nil {
 		return fmt.Errorf("marshal asm snippets: %w", err)
 	}
-	asmLinksJSON, err := json.Marshal(asmLinks)
+	asmLinksJSON, err := json.Marshal(safeAsmLinks)
 	if err != nil {
 		return fmt.Errorf("marshal asm links: %w", err)
 	}
@@ -247,14 +253,22 @@ h1 { font-size: var(--fs); font-weight: 600; color: var(--bright); margin-bottom
 	// Stats bar.
 	_, _ = fmt.Fprintf(w, `<div class="stats">
 <span><b>%d</b> signal</span>
-<span><b>%d</b> context</span>
-<span><b>%d</b> total</span>
-<span><b>%d</b> strings</span>
-<span><b>%d</b> edges</span>
+	<span><b>%d</b> context</span>
+	<span><b>%d</b> total</span>
+	<span><b>%d</b> strings</span>
+	<span><b>%d</b> call sites</span>
+	<span><b>%d</b> static relations</span>
+	<span><b>%d</b> incomplete poly</span>
+	<span><b>%d</b> unknown candidate count</span>
+		<span><b>%d</b> unresolved indirect</span>
+		<span><b>%d</b> unsupported call kind</span>
+		<span><b>%d</b> runtime-observed sites</span>
 </div>
-	`, graph.Stats.SignalFuncs, graph.Stats.ContextFuncs,
+		`, graph.Stats.SignalFuncs, graph.Stats.ContextFuncs,
 		graph.Stats.TotalFuncs,
-		graph.Stats.StringRefCount, graph.Stats.TotalEdges)
+		graph.Stats.StringRefCount, graph.Stats.CallSites, graph.Stats.StaticRelations,
+		graph.Stats.IncompletePolymorphicSites, graph.Stats.UnknownCandidateCountSites, graph.Stats.UnresolvedIndirectSites,
+		graph.Stats.UnsupportedCallSites, graph.Stats.RuntimeObservedSites)
 
 	// Toolbar.
 	_, _ = fmt.Fprint(w, `<div class="toolbar">
@@ -334,20 +348,82 @@ let G, ASM, ASM_LINKS;
 })();
 
 function _boot() {
-// Build neighbor index from ALL edges.
-const callers = Object.create(null), callees = Object.create(null);
-G.edges.forEach(e => {
-  if (e.to) {
-    if (!callees[e.from]) callees[e.from] = [];
-    callees[e.from].push(e.to);
-    if (!callers[e.to]) callers[e.to] = [];
-    callers[e.to].push(e.from);
-  }
-});
-
-// Build name→index map for fast lookup.
+// Build name→index map before edge projection so external/runtime targets can
+// be kept as evidence without becoming navigable static function relations.
 const nameIdx = Object.create(null);
 G.funcs.forEach((f, i) => { nameIdx[f.name] = i; });
+
+// Build neighbor index from the known-endpoint STATIC projection. Sets avoid
+// duplicate caller/callee rows when multiple call sites express one relation.
+const callers = Object.create(null), callees = Object.create(null);
+function staticResolution(r) {
+  return r === "direct" || r === "monomorphic" || r === "polymorphic_candidate";
+}
+G.edges.forEach(e => {
+  if (e.to && staticResolution(e.resolution) && nameIdx[e.to] !== undefined) {
+    if (!callees[e.from]) callees[e.from] = new Set();
+    callees[e.from].add(e.to);
+    if (!callers[e.to]) callers[e.to] = new Set();
+    callers[e.to].add(e.from);
+  }
+});
+Object.keys(callers).forEach(k => { callers[k] = Array.from(callers[k]).sort(); });
+Object.keys(callees).forEach(k => { callees[k] = Array.from(callees[k]).sort(); });
+
+// Preserve non-traversable call-site semantics for each function card.
+const callEvidence = Object.create(null);
+const polyListed = Object.create(null);
+G.edges.forEach(e => {
+  if (e.resolution !== "polymorphic_candidate") return;
+  const key = [e.from, e.from_pc || "", e.kind || "", e.via || ""].join("\u0000");
+  polyListed[key] = (polyListed[key] || 0) + (e.to ? 1 : 0);
+});
+const evidenceSeen = Object.create(null);
+function addEvidence(from, key, text) {
+  const full = from + "\u0000" + key;
+  if (evidenceSeen[full]) return;
+  evidenceSeen[full] = true;
+  if (!callEvidence[from]) callEvidence[from] = [];
+  callEvidence[from].push(text);
+}
+G.edges.forEach(e => {
+  const pc = e.from_pc || "unknown pc";
+  const siteKey = [e.from, e.from_pc || "", e.kind || "", e.via || ""].join("\u0000");
+  if (!staticResolution(e.resolution) && e.resolution !== "runtime_observed" &&
+      e.resolution !== "unresolved" && e.resolution !== "address_only") {
+    addEvidence(e.from, "schema\u0000" + siteKey + "\u0000" + (e.to || ""),
+      "invalid/missing resolution @ " + pc);
+    return;
+  }
+  if (e.resolution === "runtime_observed") {
+    let text = "runtime observed: " + (e.to || "unknown target");
+    if (e.runtime_observations) text += " ×" + e.runtime_observations;
+    if (e.runtime_agreement) text += " (" + e.runtime_agreement + ")";
+    addEvidence(e.from, "runtime\u0000" + siteKey + "\u0000" + (e.to || ""), text);
+    return;
+  }
+  if (e.resolution === "unresolved") {
+    addEvidence(e.from, "unresolved\u0000" + siteKey,
+      "unresolved indirect @ " + pc + (e.via ? " via " + e.via : ""));
+  } else if (e.resolution === "address_only") {
+    addEvidence(e.from, "address\u0000" + siteKey,
+      "direct address " + (e.target_address || "unknown") + " @ " + pc);
+  } else if (e.to && nameIdx[e.to] === undefined) {
+    addEvidence(e.from, "external\u0000" + siteKey + "\u0000" + e.to,
+      "external static target: " + e.to + " @ " + pc);
+  }
+  if (e.resolution === "polymorphic_candidate" && !e.targets_complete) {
+    const listed = polyListed[siteKey] || 0;
+    if (e.candidate_count_known) {
+      addEvidence(e.from, "poly\u0000" + siteKey,
+        "candidate set incomplete @ " + pc + ": " + listed + " listed of " + e.candidate_count);
+    } else {
+      addEvidence(e.from, "poly\u0000" + siteKey,
+        "candidate count unknown @ " + pc + ": " + listed + " listed");
+    }
+  }
+});
+Object.keys(callEvidence).forEach(k => callEvidence[k].sort());
 
 let activeCat = null;
 let scope = "signal"; // "signal", "context", "all"
@@ -418,6 +494,13 @@ function renderNeighborList(names) {
   ).join("");
 }
 
+function renderTraceNode(n) {
+  if (n.startsWith("...") || n.startsWith("[cycle] ")) {
+    return '<span class="bt-arrow">' + esc(n) + '</span>';
+  }
+  return '<a class="' + esc(neighborClass(n)) + '" href="#" data-reveal="' + esc(n) + '">' + esc(fmtName(n)) + '</a>';
+}
+
 // Walk callers backwards up to maxDepth, return array of chains (each is an array of names, root first).
 function getBacktraces(name, maxDepth) {
   const traces = [];
@@ -432,7 +515,7 @@ function getBacktraces(name, maxDepth) {
     for (let i = 0; i < limit; i++) {
       const c = cls[i];
       if (visited.has(c)) {
-        traces.push([c + " (cycle)", ...chain]);
+        traces.push(["[cycle] " + c, ...chain]);
         continue;
       }
       visited.add(c);
@@ -446,11 +529,14 @@ function getBacktraces(name, maxDepth) {
   const cls = callers[name] || [];
   if (cls.length === 0) return [];
   const visited = new Set([name]);
-  cls.forEach(c => {
+  const initialLimit = Math.min(cls.length, 3);
+  for (let i = 0; i < initialLimit; i++) {
+    const c = cls[i];
     visited.add(c);
     walk(c, [c], visited);
     visited.delete(c);
-  });
+  }
+  if (cls.length > initialLimit) traces.push(["... +" + (cls.length - initialLimit) + " more"]);
   return traces;
 }
 
@@ -468,18 +554,13 @@ function renderBacktraces(name) {
   // Render singles as a compact inline list.
   if (singles.length > 0) {
     html += '<div class="backtrace-line">';
-    html += singles.map(n => {
-      return '<a class="' + esc(neighborClass(n)) + '" href="#" data-reveal="' + esc(n) + '">' + esc(fmtName(n)) + '</a>';
-    }).join(', ');
+    html += singles.map(renderTraceNode).join(', ');
     html += '</div>';
   }
   // Render chains as before, one per line.
   chains.forEach(chain => {
     html += '<div class="backtrace-line">';
-    html += chain.map(n => {
-      if (n.startsWith("...")) return '<span class="bt-arrow">' + esc(n) + '</span>';
-      return '<a class="' + esc(neighborClass(n)) + '" href="#" data-reveal="' + esc(n) + '">' + esc(fmtName(n)) + '</a>';
-    }).join('<span class="bt-arrow"> \u2192 </span>');
+    html += chain.map(renderTraceNode).join('<span class="bt-arrow"> \u2192 </span>');
     html += '</div>';
   });
   html += '</div>';
@@ -496,7 +577,7 @@ function renderCard(f, i) {
   if (role === "") cls += " other";
   let html = '<div class="' + cls + '" id="card-' + i + '" data-name="' + esc(f.name) + '" data-role="' + esc(role) + '" data-sev="' + esc(f.severity||"") + '" data-cats="' + esc((f.categories||[]).join(",")) + '" data-strings="' + esc((f.string_refs||[]).map(r=>r.value).join("|")) + '" data-owner="' + esc(f.owner||"") + '">';
   html += '<div class="card-header" onclick="toggle(' + i + ')">';
-  if (f.is_entry_point) html += '<span class="sev-badge ep">EP</span>';
+  if (f.is_root_candidate) html += '<span class="sev-badge ep">ROOT</span>';
   if (f.severity === "high") html += '<span class="sev-badge high">HIGH</span>';
   else if (f.severity === "medium") html += '<span class="sev-badge medium">MED</span>';
   html += '<span class="func-name">' + esc(fmtName(f.name)) + '</span>';
@@ -553,6 +634,13 @@ function renderCard(f, i) {
     html += '<div class="cbox">';
     html += '<div class="section-label">' + (ce.length === 1 ? 'Callee' : 'Callees') + '</div>';
     html += '<div class="neighbor-list">' + renderNeighborList(ce) + '</div>';
+    html += '</div>';
+  }
+
+  const evidence = callEvidence[f.name] || [];
+  if (evidence.length > 0) {
+    html += '<div class="cbox"><div class="section-label">Call-site evidence</div>';
+    html += '<div class="neighbor-list">' + evidence.map(x => '<span>' + esc(x) + '</span>').join('') + '</div>';
     html += '</div>';
   }
 
@@ -975,11 +1063,10 @@ func signalGraphHTMLPayload(g *signal.SignalGraph) signal.SignalGraph {
 	if graph.Funcs == nil {
 		graph.Funcs = []signal.SignalFunc{}
 	}
-	graph.Edges = validSignalEdges(&graph)
+	graph.Edges = signalRenderableEdges(&graph)
 	if graph.Edges == nil {
 		graph.Edges = []signal.SignalEdge{}
 	}
-	graph.Stats.TotalEdges = len(graph.Edges)
 	if graph.Stats.Categories == nil {
 		graph.Stats.Categories = map[string]int{}
 	}

@@ -8,16 +8,16 @@ import (
 	"aotopsy/internal/signal"
 )
 
-// SignalDOT renders a focused callgraph showing paths from entry points to signal functions.
-// Uses forward BFS from entry points, traces shortest paths to each reachable signal function,
+// SignalDOT renders a focused callgraph showing paths from structural roots to signal functions.
+// Uses forward BFS from root candidates, traces shortest paths to each reachable signal function,
 // includes all intermediate nodes. Signal functions show their referenced strings as leaf nodes.
-// BLR (indirect call) edges between path nodes are shown with dashed lines.
+// Runtime/external/unresolved evidence is rendered separately and never traversed as a static edge.
 func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	// Index functions and collect string refs.
 	type funcInfo struct {
 		role       string
 		severity   string
-		isEntry    bool
+		isRoot     bool
 		categories []string
 		owner      string
 		stringRefs []signal.ClassifiedStringRef
@@ -27,13 +27,13 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		funcMap[f.Name] = &funcInfo{
 			role:       f.Role,
 			severity:   f.Severity,
-			isEntry:    f.IsEntryPoint,
+			isRoot:     f.IsRootCandidate,
 			categories: f.Categories,
 			owner:      f.Owner,
 			stringRefs: f.StringRefs,
 		}
 	}
-	validEdges := validSignalEdges(g)
+	validEdges := signalTraversalEdges(g)
 
 	// Build complete adjacency. Indirect/polymorphic targets have already been
 	// expanded into SignalEdge records by signal.BuildSignalGraph, so traversal
@@ -73,19 +73,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		}
 	}
 
-	// Build reverse adjacency to find true roots (no direct OR indirect caller).
-	hasCaller := make(map[string]bool)
-	for _, e := range validEdges {
-		if e.To != "" {
-			hasCaller[e.To] = true
-		}
-	}
-
-	// Forward BFS from explicit entry points when the producer supplied them.
-	// Older/manually constructed graphs may not carry that bit, so only then
-	// fall back to structural roots (functions with no incoming call edge).
-	// The visited set is the bound; an arbitrary depth cap silently hid
-	// legitimate paths in deep call chains.
+	// Forward BFS from producer-supplied structural root candidates. The signal
+	// graph schema owns root semantics; the renderer must not invent a second
+	// policy from partial edge data. The visited set bounds cycles without an
+	// arbitrary depth cap that would hide legitimate deep paths.
 	parent := make(map[string]string) // child → parent
 	dist := make(map[string]int)
 
@@ -95,15 +86,8 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	}
 	var roots []string
 	for _, f := range g.Funcs {
-		if f.IsEntryPoint {
+		if f.IsRootCandidate {
 			roots = append(roots, f.Name)
-		}
-	}
-	if len(roots) == 0 {
-		for _, f := range g.Funcs {
-			if !hasCaller[f.Name] {
-				roots = append(roots, f.Name)
-			}
 		}
 	}
 	sort.Strings(roots)
@@ -127,12 +111,12 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		}
 	}
 
-	// For each reachable signal function, trace back to the entry point.
+	// For each reachable signal function, trace back to the structural root.
 	pathNodes := make(map[string]bool)
 	reachableSignals := 0
 	for name := range signalSet {
 		if _, ok := dist[name]; !ok {
-			continue // unreachable from any entry point
+			continue // unreachable from any structural root
 		}
 		reachableSignals++
 		cur := name
@@ -140,7 +124,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			pathNodes[cur] = true
 			p, ok := parent[cur]
 			if !ok {
-				break // reached an entry point (no parent)
+				break // reached a structural root (no parent)
 			}
 			cur = p
 		}
@@ -154,23 +138,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		}
 	}
 
-	// Include signal functions that are roots (no callers).
-	for name := range signalSet {
-		if !hasCaller[name] {
-			pathNodes[name] = true
-		}
-	}
-
-	// If no paths found (signal funcs unreachable from entry points),
-	// just show signal funcs and their 1-hop neighbors.
-	if reachableSignals == 0 {
-		for name := range signalSet {
-			pathNodes[name] = true
-			for _, edge := range fwd[name] {
-				pathNodes[edge.To] = true
-			}
-		}
-	}
+	_ = reachableSignals
 
 	// Render the exact induced edge set among selected nodes. Do not collapse
 	// context chains: doing so changes graph semantics and can turn an indirect
@@ -302,7 +270,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 				cats := truncLabel(strings.Join(fi.categories, ","), 30)
 				label += "\\n" + cats
 			}
-		} else if fi != nil && (fi.isEntry || !hasCaller[name]) {
+		} else if fi != nil && fi.isRoot {
 			attrs = fmt.Sprintf(`, fillcolor="#E8F5E9", color="%s", penwidth=1.2`, t.EdgeTHR)
 		} else {
 			// Intermediate context node.
@@ -387,31 +355,25 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		fmt.Fprintf(&b, "  %s -> %s [style=dotted, arrowsize=0.3, penwidth=0.4, color=\"#C2185B\"];\n",
 			edge[0], edge[1])
 	}
+	writeSignalEvidenceRelations(&b, signalEvidenceRelations(g, pathNodes), t)
+	writeSignalCompletenessNote(&b, g, t)
 
 	b.WriteString("}\n")
 	return b.String()
 }
 
-// validSignalEdges returns only graph edges whose endpoints exist in Funcs and
-// whose kind is one of the call kinds understood by the renderers. This keeps
-// malformed artifacts and provenance-only pseudo-targets from manufacturing
-// nodes or paths in rendered signal graphs.
-func validSignalEdges(g *signal.SignalGraph) []signal.SignalEdge {
+func writeSignalCompletenessNote(b *strings.Builder, g *signal.SignalGraph, t Theme) {
 	if g == nil {
-		return nil
+		return
 	}
-	known := make(map[string]bool, len(g.Funcs))
-	for _, f := range g.Funcs {
-		known[f.Name] = true
+	stats := g.Stats
+	if stats.IncompletePolymorphicSites == 0 && stats.UnknownCandidateCountSites == 0 && stats.UnresolvedIndirectSites == 0 && stats.RuntimeObservedSites == 0 {
+		return
 	}
-	out := make([]signal.SignalEdge, 0, len(g.Edges))
-	for _, e := range g.Edges {
-		if !known[e.From] || !known[e.To] || !isSupportedCallKind(e.Kind) {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
+	label := fmt.Sprintf("static signal graph: %d incomplete polymorphic site(s), %d unknown candidate-count site(s), %d unresolved indirect site(s); runtime evidence on %d site(s) is not promoted to static reachability",
+		stats.IncompletePolymorphicSites, stats.UnknownCandidateCountSites, stats.UnresolvedIndirectSites, stats.RuntimeObservedSites)
+	fmt.Fprintf(b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+		dotID("\x00signal-completeness"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
 }
 
 // sortedSet returns a set's keys in a stable order.
