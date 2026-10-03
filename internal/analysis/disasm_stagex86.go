@@ -103,7 +103,7 @@ func RunDisasmStageX86(
 		}
 
 		relName := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
-		if err := writeX86ASM(asmDir, relName, funcCode, funcVA, lookup); err != nil {
+		if err := writeX86ASM(opts.OutDir, relName, funcCode, funcVA, lookup); err != nil {
 			return nil, fmt.Errorf("write asm %s: %w", name, err)
 		}
 		// The raw bytes are what BuildSignalContent re-decodes for its
@@ -141,15 +141,15 @@ func RunDisasmStageX86(
 			rec := disasm.CallEdgeRecord{
 				FromFunc: name, FromPC: fmt.Sprintf("0x%x", e.FromPC),
 				Kind: e.Kind, Reg: e.Reg, Via: e.Via,
+			}
+			if e.Kind == "call" && e.TargetValid {
+				rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
+				if e.TargetName != "" {
+					rec.Target = e.TargetName
+				} else {
+					rec.Target = rec.TargetAddress
 				}
-				if e.Kind == "call" && e.TargetValid {
-					rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
-					if e.TargetName != "" {
-						rec.Target = e.TargetName
-					} else {
-						rec.Target = rec.TargetAddress
-					}
-				}
+			}
 			edgeRecs = append(edgeRecs, rec)
 			dr.TotalEdges++
 			if opts.Graph {
@@ -188,11 +188,7 @@ func RunDisasmStageX86(
 			dcfg := disasm.BuildX86CFG(name, funcCode, funcVA)
 			if len(dcfg.Blocks) > 1 {
 				dot := render.CFGDOT(dcfg, fnEdgeRecs, render.NASA)
-				dotPath := filepath.Join(cfgDir, relName+".dot")
-				if err := os.MkdirAll(filepath.Dir(dotPath), 0755); err != nil {
-					return nil, fmt.Errorf("mkdir cfg: %w", err)
-				}
-				if err := output.WriteFileAtomic(dotPath, []byte(dot), 0o600); err != nil {
+				if err := output.WriteArtifactFile(opts.OutDir, "cfg/"+relName+".dot", []byte(dot), 0o600); err != nil {
 					return nil, fmt.Errorf("write cfg dot %s: %w", name, err)
 				}
 				dr.CFGCount++
@@ -250,12 +246,8 @@ func RunDisasmStageX86(
 // equivalent of output.WriteASM (which is built around the ARM64 Inst
 // type). Kept minimal: it is the human-readable listing only. Consumers
 // that need to re-decode instructions read the .bin written alongside it.
-func writeX86ASM(asmDir, relName string, funcCode []byte, funcVA uint64, symbols disasm.SymbolLookup) error {
-	path := filepath.Join(asmDir, relName+".txt")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+func writeX86ASM(outDir, relName string, funcCode []byte, funcVA uint64, symbols disasm.SymbolLookup) error {
+	return output.WriteArtifactAtomic(outDir, "asm/"+relName+".txt", 0o644, func(w io.Writer) error {
 		var writeErr error
 		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			if d.Bad {

@@ -11,38 +11,21 @@ import (
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/thraudit"
 )
 
-func TestFridaExportRejectsOutputAliases(t *testing.T) {
-	dir := t.TempDir()
-	lib := filepath.Join(dir, "libapp.so")
-	metadata := filepath.Join(dir, "frida_metadata.json")
-	script := filepath.Join(dir, "frida_hooks.js")
-	for _, tc := range []struct {
-		name   string
-		meta   string
-		script string
-		gen    bool
-	}{
-		{"metadata aliases lib", lib, script, true},
-		{"metadata aliases functions", filepath.Join(dir, "functions.jsonl"), script, true},
-		{"script aliases provenance", metadata, filepath.Join(dir, "provenance.json"), true},
-		{"metadata aliases generation binding", filepath.Join(dir, "frida_binding.json"), script, true},
-		{"custom metadata overwrites unlisted static artifact", filepath.Join(dir, "evidence.jsonl"), script, true},
-		{"custom script overwrites unlisted static artifact", metadata, filepath.Join(dir, "runtime_coverage.json"), true},
-		{"metadata equals script", metadata, metadata, true},
+func TestFridaExportNoLongerAcceptsCrossGenerationDestinations(t *testing.T) {
+	for _, args := range [][]string{
+		{"--out", filepath.Join(t.TempDir(), "metadata.json")},
+		{"--script-out", filepath.Join(t.TempDir(), "hooks.js")},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := validateFridaExportDestinations(lib, dir, tc.meta, tc.script, tc.gen); err == nil {
-				t.Fatal("unsafe output alias was accepted")
-			}
-		})
-	}
-	if err := validateFridaExportDestinations(lib, dir, metadata, script, true); err != nil {
-		t.Fatalf("safe Frida destinations rejected: %v", err)
+		if err := cmdFridaExport(args); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+			t.Fatalf("retired cross-generation destination flag %q was not rejected: %v", args[0], err)
+		}
 	}
 }
 
@@ -73,6 +56,98 @@ func TestFridaExportRejectsSurplusPositionalsBeforeIO(t *testing.T) {
 	}
 }
 
+func TestBatchFridaOutputCannotCollideWithManagedGenerationArtifacts(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "decompile")
+	for _, name := range []string{"combined.dart", analysis.DecompileFailuresFile, output.GenerationMarker} {
+		err := validateBatchFridaOutput(outDir, filepath.Join(outDir, name))
+		if err == nil || !strings.Contains(err.Error(), "managed batch artifact") {
+			t.Fatalf("reserved batch artifact %q was accepted: %v", name, err)
+		}
+	}
+	if err := validateBatchFridaOutput(outDir, outDir); err == nil {
+		t.Fatal("output directory itself was accepted as a Frida script path")
+	}
+	if err := validateBatchFridaOutput(outDir, filepath.Join(filepath.Dir(outDir), "outside.js")); err == nil {
+		t.Fatal("cross-generation Frida script path was accepted")
+	}
+	if err := validateBatchFridaOutput(outDir, filepath.Join(outDir, "hooks", "batch.js")); err != nil {
+		t.Fatalf("ordinary in-generation Frida script path was rejected: %v", err)
+	}
+}
+
+func TestDebugDumpFailurePreservesPreviousGeneration(t *testing.T) {
+	root := t.TempDir()
+	lib := filepath.Join(root, "broken-libapp.so")
+	if err := os.WriteFile(lib, []byte("not-an-elf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(root, "dump")
+	prior, err := output.BeginDirTransaction(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.WriteArtifactFile(prior.StageDir(), "sentinel.txt", []byte("previous generation"), 0o600); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+	if err := prior.Commit(); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+
+	if err := cmdDump([]string{"--lib", lib, "--out", outDir}); err == nil {
+		t.Fatal("invalid ELF unexpectedly produced a dump generation")
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "sentinel.txt"))
+	if err != nil || string(got) != "previous generation" {
+		t.Fatalf("failed dump changed previous generation: %q, %v", got, err)
+	}
+}
+
+func TestTHRClusterPublishesOneFreshGeneration(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "thr_loads.jsonl")
+	record := thraudit.THRAuditRecord{
+		Sample:      "sample.so",
+		DartVersion: "3.12.2",
+		Arch:        thraudit.ArchARM64,
+		PC:          "0x1000",
+		Insn:        "LDR X16, [X26,#0x100]",
+		THROffset:   "0x100",
+		Width:       8,
+		FuncName:    "f",
+		Context:     []string{"> 0x1000: LDR X16, [X26,#0x100]"},
+	}
+	if _, err := jsonutil.WriteJSONLFile(inPath, []thraudit.THRAuditRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(root, "cluster")
+	prior, err := output.BeginDirTransaction(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.WriteArtifactFile(prior.StageDir(), "stale.txt", []byte("old"), 0o600); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+	if err := prior.Commit(); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+
+	if err := cmdTHRCluster([]string{"--in", inPath, "--out", outDir}); err != nil {
+		t.Fatalf("cmdTHRCluster: %v", err)
+	}
+	for _, name := range []string{"bands.json", "bands.md", output.GenerationMarker} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
+			t.Fatalf("fresh generation missing %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale THR-cluster artifact survived replacement: %v", err)
+	}
+}
+
 func TestFindLibappBatchReportsArchiveErrorsAndReplacesGeneration(t *testing.T) {
 	inDir := t.TempDir()
 	for _, name := range []string{"bad.zip", "bad.apk"} {
@@ -81,19 +156,23 @@ func TestFindLibappBatchReportsArchiveErrorsAndReplacesGeneration(t *testing.T) 
 		}
 	}
 	outDir := filepath.Join(t.TempDir(), "out")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	// Build the prior directory through the real transaction contract so its
+	// ownership marker cannot be forged by a test-only sentinel.
+	prior, err := output.BeginDirTransaction(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.WriteArtifactFile(prior.StageDir(), "stale.json", []byte("stale"), 0o600); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+	if err := prior.Commit(); err != nil {
+		prior.Abort()
 		t.Fatal(err)
 	}
 	stale := filepath.Join(outDir, "stale.json")
-	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Only a directory an earlier aotopsy run published may be replaced.
-	if err := os.WriteFile(filepath.Join(outDir, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	err := cmdFindLibappBatch([]string{"--dir", inDir, "--out", outDir})
+	err = cmdFindLibappBatch([]string{"--dir", inDir, "--out", outDir})
 	if err == nil {
 		t.Fatal("corrupt archive was silently accepted by batch command")
 	}
@@ -134,6 +213,18 @@ func TestFindLibappBatchRefusesToReplaceForeignDirectory(t *testing.T) {
 	}
 	if b, readErr := os.ReadFile(precious); readErr != nil || string(b) != "package main" {
 		t.Fatalf("user file was destroyed by --out: %q, %v", b, readErr)
+	}
+}
+
+func TestFindLibappBatchRejectsOutputContainingInputDirectory(t *testing.T) {
+	root := t.TempDir()
+	inDir := filepath.Join(root, "archives")
+	if err := os.MkdirAll(inDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := cmdFindLibappBatch([]string{"--dir", inDir, "--out", root})
+	if err == nil || !strings.Contains(err.Error(), "must not contain the input archive directory") {
+		t.Fatalf("destructive input/output overlap was not rejected: %v", err)
 	}
 }
 

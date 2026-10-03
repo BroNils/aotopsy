@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
 	"aotopsy/internal/render"
@@ -86,46 +86,39 @@ func RunDisasmStage(
 		n = opts.Limit
 	}
 
-	// Open all output files.
-	indexFile, err := os.Create(filepath.Join(opts.OutDir, "index.jsonl"))
+	// Open all shared JSONL outputs through the same pinned-root atomic stream
+	// writer used everywhere else. They remain unpublished until each stream has
+	// encoded, synced, and closed successfully; the outer directory transaction
+	// then publishes the complete analysis generation as one unit.
+	indexWriter, err := jsonutil.NewJSONLWriterUnder[strutil.DisasmIndexEntry](opts.OutDir, "index.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("create index: %w", err)
 	}
-	defer func() { _ = indexFile.Close() }()
-	enc := json.NewEncoder(indexFile)
-	enc.SetEscapeHTML(false)
+	defer func() { _ = indexWriter.Abort() }()
 
-	funcsFile, err := os.Create(filepath.Join(opts.OutDir, "functions.jsonl"))
+	funcsWriter, err := jsonutil.NewJSONLWriterUnder[disasm.FuncRecord](opts.OutDir, "functions.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("create functions.jsonl: %w", err)
 	}
-	defer func() { _ = funcsFile.Close() }()
-	funcsEnc := json.NewEncoder(funcsFile)
-	funcsEnc.SetEscapeHTML(false)
+	defer func() { _ = funcsWriter.Abort() }()
 
-	edgesFile, err := os.Create(filepath.Join(opts.OutDir, "call_edges.jsonl"))
+	edgesWriter, err := jsonutil.NewJSONLWriterUnder[disasm.CallEdgeRecord](opts.OutDir, "call_edges.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("create call_edges.jsonl: %w", err)
 	}
-	defer func() { _ = edgesFile.Close() }()
-	edgesEnc := json.NewEncoder(edgesFile)
-	edgesEnc.SetEscapeHTML(false)
+	defer func() { _ = edgesWriter.Abort() }()
 
-	unresTHRFile, err := os.Create(filepath.Join(opts.OutDir, "unresolved_thr.jsonl"))
+	unresTHRWriter, err := jsonutil.NewJSONLWriterUnder[disasm.UnresolvedTHRRecord](opts.OutDir, "unresolved_thr.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("create unresolved_thr.jsonl: %w", err)
 	}
-	defer func() { _ = unresTHRFile.Close() }()
-	unresTHREnc := json.NewEncoder(unresTHRFile)
-	unresTHREnc.SetEscapeHTML(false)
+	defer func() { _ = unresTHRWriter.Abort() }()
 
-	stringRefsFile, err := os.Create(filepath.Join(opts.OutDir, "string_refs.jsonl"))
+	stringRefsWriter, err := jsonutil.NewJSONLWriterUnder[disasm.StringRefRecord](opts.OutDir, "string_refs.jsonl")
 	if err != nil {
 		return nil, fmt.Errorf("create string_refs.jsonl: %w", err)
 	}
-	defer func() { _ = stringRefsFile.Close() }()
-	stringRefsEnc := json.NewEncoder(stringRefsFile)
-	stringRefsEnc.SetEscapeHTML(false)
+	defer func() { _ = stringRefsWriter.Abort() }()
 
 	dr := &DisasmResult{}
 	var funcRecs []disasm.FuncRecord
@@ -253,15 +246,15 @@ func RunDisasmStage(
 				Kind:     e.Kind,
 				Reg:      e.Reg,
 				Via:      e.Via,
+			}
+			if e.Kind == "bl" && e.TargetValid {
+				rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
+				if e.TargetName != "" {
+					rec.Target = e.TargetName
+				} else {
+					rec.Target = rec.TargetAddress
 				}
-				if e.Kind == "bl" && e.TargetValid {
-					rec.TargetAddress = fmt.Sprintf("0x%x", e.TargetPC)
-					if e.TargetName != "" {
-						rec.Target = e.TargetName
-					} else {
-						rec.Target = rec.TargetAddress
-					}
-				}
+			}
 			out.edgeRecs = append(out.edgeRecs, rec)
 			out.edgeKinds = append(out.edgeKinds, e.Kind)
 		}
@@ -270,7 +263,7 @@ func RunDisasmStage(
 			dcfg := disasm.BuildCFG(name, insts)
 			if len(dcfg.Blocks) > 1 {
 				out.cfgDot = render.CFGDOT(dcfg, out.edgeRecs, render.NASA)
-				out.cfgPath = filepath.Join(cfgDir, filename+".dot")
+				out.cfgPath = "cfg/" + filename + ".dot"
 			}
 		}
 
@@ -336,14 +329,14 @@ func RunDisasmStage(
 			if o.skip {
 				continue
 			}
-			if err := enc.Encode(o.entry); err != nil {
+			if err := indexWriter.Write(&o.entry); err != nil {
 				return nil, fmt.Errorf("write index: %w", err)
 			}
-			if err := funcsEnc.Encode(o.funcRec); err != nil {
+			if err := funcsWriter.Write(&o.funcRec); err != nil {
 				return nil, fmt.Errorf("write functions.jsonl: %w", err)
 			}
 			for ei, rec := range o.edgeRecs {
-				if err := edgesEnc.Encode(rec); err != nil {
+				if err := edgesWriter.Write(&rec); err != nil {
 					return nil, fmt.Errorf("write call_edges.jsonl: %w", err)
 				}
 				dr.TotalEdges++
@@ -358,10 +351,7 @@ func RunDisasmStage(
 			}
 			if opts.Graph {
 				if o.cfgPath != "" {
-					if err := os.MkdirAll(filepath.Dir(o.cfgPath), 0755); err != nil {
-						return nil, fmt.Errorf("mkdir cfg: %w", err)
-					}
-					if err := output.WriteFileAtomic(o.cfgPath, []byte(o.cfgDot), 0o644); err != nil {
+					if err := output.WriteArtifactFile(opts.OutDir, o.cfgPath, []byte(o.cfgDot), 0o644); err != nil {
 						return nil, fmt.Errorf("write cfg dot %s: %w", o.filename, err)
 					}
 					dr.CFGCount++
@@ -370,13 +360,13 @@ func RunDisasmStage(
 				edgeRecs = append(edgeRecs, o.edgeRecs...)
 			}
 			for _, sr := range o.stringRefs {
-				if err := stringRefsEnc.Encode(sr); err != nil {
+				if err := stringRefsWriter.Write(&sr); err != nil {
 					return nil, fmt.Errorf("write string_refs.jsonl: %w", err)
 				}
 				dr.TotalStringRefs++
 			}
 			for _, rec := range o.thrRecs {
-				if err := unresTHREnc.Encode(rec); err != nil {
+				if err := unresTHRWriter.Write(&rec); err != nil {
 					return nil, fmt.Errorf("write unresolved_thr.jsonl: %w", err)
 				}
 				dr.TotalUnresTHR++
@@ -385,26 +375,20 @@ func RunDisasmStage(
 		}
 	}
 
-	// json.Encoder writes directly to the files above, so encode errors catch
-	// ordinary short writes. Sync+close is still part of publication correctness:
-	// a delayed filesystem error must abort the surrounding directory transaction
-	// rather than leave a generation whose JSONL only looked successfully written.
-	for _, item := range []struct {
-		name string
-		file *os.File
-	}{
-		{"index.jsonl", indexFile},
-		{"functions.jsonl", funcsFile},
-		{"call_edges.jsonl", edgesFile},
-		{"unresolved_thr.jsonl", unresTHRFile},
-		{"string_refs.jsonl", stringRefsFile},
-	} {
-		if err := item.file.Sync(); err != nil {
-			return nil, fmt.Errorf("sync %s: %w", item.name, err)
-		}
-		if err := item.file.Close(); err != nil {
-			return nil, fmt.Errorf("close %s: %w", item.name, err)
-		}
+	if err := indexWriter.Close(); err != nil {
+		return nil, fmt.Errorf("commit index.jsonl: %w", err)
+	}
+	if err := funcsWriter.Close(); err != nil {
+		return nil, fmt.Errorf("commit functions.jsonl: %w", err)
+	}
+	if err := edgesWriter.Close(); err != nil {
+		return nil, fmt.Errorf("commit call_edges.jsonl: %w", err)
+	}
+	if err := unresTHRWriter.Close(); err != nil {
+		return nil, fmt.Errorf("commit unresolved_thr.jsonl: %w", err)
+	}
+	if err := stringRefsWriter.Close(); err != nil {
+		return nil, fmt.Errorf("commit string_refs.jsonl: %w", err)
 	}
 
 	opts.logf("  %sfunctions:%s %d -> %s%s%s\n", cli.Muted, cli.Reset, dr.Written, cli.Blue, asmDir, cli.Reset)

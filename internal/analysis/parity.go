@@ -34,6 +34,13 @@ type ParityRow struct {
 
 // RunParity scans a samples directory and generates parity.csv + parity_summary.md.
 func RunParity(samplesDir, outDir string) error {
+	containsSamples, err := output.ContainsPath(outDir, samplesDir)
+	if err != nil {
+		return fmt.Errorf("compare parity input/output paths: %w", err)
+	}
+	if containsSamples {
+		return fmt.Errorf("parity output directory must not contain the samples directory")
+	}
 	entries, err := os.ReadDir(samplesDir)
 	if err != nil {
 		return fmt.Errorf("read samples dir: %w", err)
@@ -75,12 +82,26 @@ func RunParity(samplesDir, outDir string) error {
 	if err := writeParitySummary(&summaryBuf, rows); err != nil {
 		return fmt.Errorf("encode %s: %w", summaryPath, err)
 	}
-	if err := output.PublishFileSet([]output.FileArtifact{
-		{Path: csvPath, Data: csvBuf.Bytes(), Perm: 0o644},
-		{Path: summaryPath, Data: summaryBuf.Bytes(), Perm: 0o644},
-	}); err != nil {
+	tx, err := output.BeginDirTransaction(outDir)
+	if err != nil {
+		return fmt.Errorf("begin parity output transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	if err := output.WriteArtifactFile(tx.StageDir(), "parity.csv", csvBuf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("stage parity.csv: %w", err)
+	}
+	if err := output.WriteArtifactFile(tx.StageDir(), "parity_summary.md", summaryBuf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("stage parity_summary.md: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("publish parity reports: %w", err)
 	}
+	committed = true
 	cli.Errf("\nWrote %s (%d rows)\n", csvPath, len(rows))
 	cli.Errf("Wrote %s\n", summaryPath)
 

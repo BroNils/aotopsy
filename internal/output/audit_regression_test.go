@@ -59,41 +59,23 @@ func TestWriteJSONFileFailurePreservesOldArtifact(t *testing.T) {
 }
 
 func TestWriteAtomicDoesNotDeleteSubstitutedTempOnFailure(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "artifact")
-	var replacement string
+	target := filepath.Join(t.TempDir(), "artifact")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	injected := errors.New("injected writer failure")
 	err := WriteAtomic(target, 0o600, func(w io.Writer) error {
-		f, ok := w.(*os.File)
-		if !ok {
-			t.Fatalf("WriteAtomic writer = %T, want *os.File", w)
+		if _, err := io.WriteString(w, "new-partial"); err != nil {
+			return err
 		}
-		name := f.Name()
-		if !filepath.IsAbs(name) {
-			name = filepath.Join(dir, name)
-		}
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
-		moved := name + ".moved"
-		if err := os.Rename(name, moved); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(name, []byte("external"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		replacement = name
 		return injected
 	})
 	if !errors.Is(err, injected) {
 		t.Fatalf("WriteAtomic error = %v, want injected failure", err)
 	}
-	b, readErr := os.ReadFile(replacement)
-	if readErr != nil || string(b) != "external" {
-		t.Fatalf("cleanup removed substituted temp: %q, %v", b, readErr)
-	}
-	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
-		t.Fatalf("failed write published target: %v", statErr)
+	b, readErr := os.ReadFile(target)
+	if readErr != nil || string(b) != "old" {
+		t.Fatalf("failed write changed current artifact: %q, %v", b, readErr)
 	}
 }
 
@@ -105,27 +87,23 @@ func TestArtifactWritersRejectTraversal(t *testing.T) {
 	}
 }
 
-func TestArtifactPathRejectsDotSegmentsForAllCallers(t *testing.T) {
+func TestArtifactWriterRejectsDotSegmentsForAllCallers(t *testing.T) {
 	base := t.TempDir()
 	for _, name := range []string{".", "..", "./f.dart", "../f.dart", `..\f.dart`, "Owner/../f.dart"} {
-		if path, err := ArtifactPath(base, name); err == nil {
-			t.Errorf("ArtifactPath(%q) = %q,nil; want rejection", name, path)
+		if err := WriteArtifactFile(base, name, []byte("x"), 0o644); err == nil {
+			t.Errorf("WriteArtifactFile(%q) accepted unsafe path", name)
 		}
 	}
-	path, err := ArtifactPath(base, "Owner/f_1000.dart")
-	if err != nil {
+	if err := WriteArtifactFile(base, "Owner/f_1000.dart", []byte("safe"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(base, "Owner", "f_1000.dart")
-	if path != want {
-		t.Fatalf("ArtifactPath safe grouping = %q, want %q", path, want)
+	b, err := os.ReadFile(filepath.Join(base, "Owner", "f_1000.dart"))
+	if err != nil || string(b) != "safe" {
+		t.Fatalf("safe grouped artifact = %q, %v", b, err)
 	}
 }
 
-func TestArtifactPathRejectsWindowsSpecialNames(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows lexical path rules are platform-specific")
-	}
+func TestArtifactWriterRejectsPortableWindowsSpecialNames(t *testing.T) {
 	base := t.TempDir()
 	for _, name := range []string{
 		`file.txt:stream`,
@@ -133,9 +111,13 @@ func TestArtifactPathRejectsWindowsSpecialNames(t *testing.T) {
 		`NUL`,
 		`Owner/CON`,
 		`Owner/COM1`,
+		`Owner/LPT²`,
+		`Owner/CONIN$`,
+		`Owner/trailing.`,
+		`Owner/trailing `,
 	} {
-		if path, err := ArtifactPath(base, name); err == nil {
-			t.Errorf("ArtifactPath(%q) = %q,nil; want Windows special-name rejection", name, path)
+		if err := WriteArtifactFile(base, name, []byte("x"), 0o644); err == nil {
+			t.Errorf("WriteArtifactFile(%q) accepted Windows-unsafe name", name)
 		}
 	}
 }
@@ -150,7 +132,7 @@ func TestArtifactWriterAllowsIntentionalGrouping(t *testing.T) {
 	}
 }
 
-func TestArtifactPathRejectsSymlinkEscape(t *testing.T) {
+func TestArtifactWriterRejectsSymlinkEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows symlink creation may require elevated privileges")
 	}
@@ -160,12 +142,15 @@ func TestArtifactPathRejectsSymlinkEscape(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	if path, err := ArtifactPath(base, "Owner/f.dart"); err == nil {
-		t.Fatalf("ArtifactPath followed child symlink outside root: %q", path)
+	if err := WriteArtifactFile(base, "Owner/f.dart", []byte("escape"), 0o644); err == nil {
+		t.Fatal("WriteArtifactFile followed child symlink outside root")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f.dart")); !os.IsNotExist(err) {
+		t.Fatalf("outside target was modified: %v", err)
 	}
 }
 
-func TestArtifactPathRejectsDanglingSymlinkAncestor(t *testing.T) {
+func TestArtifactWriterRejectsDanglingSymlinkAncestor(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows symlink creation may require elevated privileges")
 	}
@@ -175,8 +160,8 @@ func TestArtifactPathRejectsDanglingSymlinkAncestor(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	if path, err := ArtifactPath(base, "Owner/f.dart"); err == nil {
-		t.Fatalf("ArtifactPath accepted dangling symlink ancestor: %q", path)
+	if err := WriteArtifactFile(base, "Owner/f.dart", []byte("x"), 0o644); err == nil {
+		t.Fatal("WriteArtifactFile accepted dangling symlink ancestor")
 	}
 }
 

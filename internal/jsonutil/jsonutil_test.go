@@ -326,81 +326,24 @@ func TestWriteJSONLFileIsTransactionalAndUsesPointerMarshaler(t *testing.T) {
 	}
 }
 
-func TestJSONLWriterAbortPreservesCloseErrorWhenTempAlreadyRemoved(t *testing.T) {
+func TestJSONLWriterAbortLeavesCurrentArtifactUntouched(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.jsonl")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w, err := NewJSONLWriter[sampleRecord](path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.file.Close(); err != nil {
-		t.Fatalf("pre-close temp: %v", err)
-	}
-	if err := os.Remove(w.tempPath); err != nil {
-		t.Fatalf("remove temp: %v", err)
-	}
-
-	if err := w.Abort(); err == nil {
-		t.Fatal("Abort swallowed close error because temp file was already absent")
-	}
-}
-
-func TestJSONLWriterDoesNotRemoveOrPublishSubstitutedTemp(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "records.jsonl")
-	w, err := NewJSONLWriter[sampleRecord](path)
-	if err != nil {
+	if err := w.Write(&sampleRecord{ID: 1, Name: "staged"}); err != nil {
 		t.Fatal(err)
 	}
-	temp := w.tempPath
-	moved := temp + ".original"
-	if err := w.file.Close(); err != nil {
+	if err := w.Abort(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(temp, moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(temp, []byte("external replacement\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := w.Abort(); err == nil || !strings.Contains(err.Error(), "refusing to remove changed temp") {
-		t.Fatalf("Abort did not report substituted temp: %v", err)
-	}
-	if b, err := os.ReadFile(temp); err != nil || string(b) != "external replacement\n" {
-		t.Fatalf("Abort touched substituted temp: %q, %v", b, err)
-	}
-
-	w, err = NewJSONLWriter[sampleRecord](path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	temp = w.tempPath
-	moved = temp + ".original"
-	if err := w.Write(&sampleRecord{ID: 1, Name: "safe"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(temp, moved); err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.OpenFile(moved, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.file = original
-	if err := os.WriteFile(temp, []byte("malicious replacement\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err == nil || !strings.Contains(err.Error(), "temp changed before publication") {
-		t.Fatalf("Close did not reject substituted temp: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("substituted temp was published: %v", err)
-	}
-	if b, err := os.ReadFile(temp); err != nil || string(b) != "malicious replacement\n" {
-		t.Fatalf("Close touched substituted temp: %q, %v", b, err)
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "old\n" {
+		t.Fatalf("Abort changed current JSONL artifact: %q, %v", b, err)
 	}
 }
 

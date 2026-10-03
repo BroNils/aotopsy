@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
+	"aotopsy/internal/output"
 )
 
 // cmdDecompileNative implements "aotopsy _debug decompile-native" for Dart-AOT-aware pseudocode generation.
@@ -94,75 +96,140 @@ func cmdDecompileNative(args []string) error {
 	if *outDir == "" {
 		return fmt.Errorf("--out is required with --all/--from-main")
 	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", *outDir, err)
-	}
-
-	combinedPath := filepath.Join(*outDir, "combined.dart")
-	outFile, err := os.Create(combinedPath)
+	containsSource, err := output.ContainsPath(*outDir, *libapp)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", combinedPath, err)
+		return fmt.Errorf("compare decompile output/source paths: %w", err)
 	}
-	defer func() { _ = outFile.Close() }()
-	w := bufio.NewWriterSize(outFile, 256*1024)
+	if containsSource {
+		return fmt.Errorf("decompile output directory must not contain the source binary")
+	}
+	if *genFrida && *genFridaOut != "" {
+		if err := validateBatchFridaOutput(*outDir, *genFridaOut); err != nil {
+			return err
+		}
+	}
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stageDir := tx.StageDir()
+	combinedPath := filepath.Join(stageDir, "combined.dart")
+	stagedFridaOut := ""
+	if *genFridaOut != "" {
+		stagedFridaOut = output.RebasePath(*genFridaOut, *outDir, stageDir)
+		insideStage, err := output.ContainsPath(stageDir, stagedFridaOut)
+		if err != nil || !insideStage {
+			return fmt.Errorf("rebase batch Frida output into staging generation")
+		}
+	}
 
 	const gcEveryN = 250
 	startTime := time.Now()
 	debugTrace := os.Getenv("AOTOPSY_DEBUG_TRACE") != ""
 
-	if *fromMain {
-		return analysis.RunFromMain(analysis.FromMainDeps{
-			Ranges:                    deps.Ctx.Ranges,
-			CodeOff:                   deps.Ctx.CodeOff,
-			CodeVA:                    deps.Ctx.CodeVA,
-			SymbolNames:               deps.SymbolNames,
-			BuildFuncIR:               deps.BuildFuncIR,
-			CallTargetsOf:             decompiler.CallTargetsOf,
-			LibraryURLForCodeRef:      deps.LibraryURLForCodeRef,
-			LibraryURLForClassRef:     deps.LibraryURLForClassRef,
-			IsFrameworkLibraryURL:     deps.IsFrameworkLibraryURL,
-			FunctionsByOwnerClassRef:  deps.FunctionsByOwnerClassRef,
-			ClassRefTouchedByPoolLoad: deps.ClassRefTouchedByPoolLoad,
-			SymbolLookup:              deps.SymbolLookup,
-			PoolLookup:                deps.PoolLookup,
-			MaxFuncs:                  *maxFuncs,
-			W:                         w,
-			CombinedPath:              combinedPath,
-			DebugTrace:                debugTrace,
-			GcEveryN:                  gcEveryN,
-			StartTime:                 startTime,
-			IsARM64:                   deps.IsARM64,
-			GenFrida:                  *genFrida,
-			GenFridaOut:               *genFridaOut,
-			FridaOpts:                 frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
-			LibPath:                   *libapp,
-			OutDir:                    *outDir,
-			Strict:                    *strict,
+	runBatch := func(w *bufio.Writer) error {
+		if *fromMain {
+			return analysis.RunFromMain(analysis.FromMainDeps{
+				Ranges:                    deps.Ctx.Ranges,
+				CodeOff:                   deps.Ctx.CodeOff,
+				CodeVA:                    deps.Ctx.CodeVA,
+				SymbolNames:               deps.SymbolNames,
+				BuildFuncIR:               deps.BuildFuncIR,
+				CallTargetsOf:             decompiler.CallTargetsOf,
+				LibraryURLForCodeRef:      deps.LibraryURLForCodeRef,
+				LibraryURLForClassRef:     deps.LibraryURLForClassRef,
+				IsFrameworkLibraryURL:     deps.IsFrameworkLibraryURL,
+				FunctionsByOwnerClassRef:  deps.FunctionsByOwnerClassRef,
+				ClassRefTouchedByPoolLoad: deps.ClassRefTouchedByPoolLoad,
+				SymbolLookup:              deps.SymbolLookup,
+				PoolLookup:                deps.PoolLookup,
+				MaxFuncs:                  *maxFuncs,
+				W:                         w,
+				CombinedPath:              combinedPath,
+				DebugTrace:                debugTrace,
+				GcEveryN:                  gcEveryN,
+				StartTime:                 startTime,
+				IsARM64:                   deps.IsARM64,
+				GenFrida:                  *genFrida,
+				GenFridaOut:               stagedFridaOut,
+				FridaOpts:                 frida.FridaOptions{Stalker: *genFridaStalker, StalkerMinCalls: *genFridaStalkerMin},
+				LibPath:                   *libapp,
+				OutDir:                    stageDir,
+				Strict:                    *strict,
+			})
+		}
+
+		return analysis.RunDecompileLoop(analysis.DecompLoopDeps{
+			Ranges:               deps.Ctx.Ranges,
+			CodeOff:              deps.Ctx.CodeOff,
+			CodeVA:               deps.Ctx.CodeVA,
+			SymbolNames:          deps.SymbolNames,
+			FilterSubstr:         *filterSubstr,
+			SkipFuncs:            *skipFuncs,
+			MaxFuncs:             *maxFuncs,
+			DebugTrace:           debugTrace,
+			DecompileRangeWithIR: deps.DecompileRangeWithIR,
+			W:                    w,
+			CombinedPath:         combinedPath,
+			GcEveryN:             gcEveryN,
+			StartTime:            startTime,
+			Pl:                   deps.Ctx.Pool,
+			GenFrida:             *genFrida,
+			GenFridaOut:          stagedFridaOut,
+			OutDir:               stageDir,
+			Libapp:               *libapp,
+			IsARM64:              deps.IsARM64,
+			GenFridaStalker:      *genFridaStalker,
+			GenFridaStalkerMin:   *genFridaStalkerMin,
+			Strict:               *strict,
 		})
 	}
+	if err := output.WriteAtomic(combinedPath, 0o644, func(dst io.Writer) error {
+		w := bufio.NewWriterSize(dst, 256*1024)
+		if err := runBatch(w); err != nil {
+			return err
+		}
+		return w.Flush()
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
 
-	return analysis.RunDecompileLoop(analysis.DecompLoopDeps{
-		Ranges:               deps.Ctx.Ranges,
-		CodeOff:              deps.Ctx.CodeOff,
-		CodeVA:               deps.Ctx.CodeVA,
-		SymbolNames:          deps.SymbolNames,
-		FilterSubstr:         *filterSubstr,
-		SkipFuncs:            *skipFuncs,
-		MaxFuncs:             *maxFuncs,
-		DebugTrace:           debugTrace,
-		DecompileRangeWithIR: deps.DecompileRangeWithIR,
-		W:                    w,
-		CombinedPath:         combinedPath,
-		GcEveryN:             gcEveryN,
-		StartTime:            startTime,
-		Pl:                   deps.Ctx.Pool,
-		GenFrida:             *genFrida,
-		GenFridaOut:          *genFridaOut,
-		OutDir:               *outDir,
-		Libapp:               *libapp,
-		IsARM64:              deps.IsARM64,
-		GenFridaStalker:      *genFridaStalker,
-		GenFridaStalkerMin:   *genFridaStalkerMin,
-		Strict:               *strict,
-	})
+func validateBatchFridaOutput(outDir, fridaOut string) error {
+	inside, err := output.ContainsPath(outDir, fridaOut)
+	if err != nil {
+		return fmt.Errorf("compare batch Frida/output paths: %w", err)
+	}
+	if !inside {
+		return fmt.Errorf("--gen-frida-out must be inside --out in batch mode so the generation can publish atomically")
+	}
+	sameRoot, err := output.SamePath(outDir, fridaOut)
+	if err != nil {
+		return fmt.Errorf("compare batch Frida/output directory: %w", err)
+	}
+	if sameRoot {
+		return fmt.Errorf("--gen-frida-out must name a file inside --out, not the output directory itself")
+	}
+	for _, managed := range []string{"combined.dart", analysis.DecompileFailuresFile, output.GenerationMarker} {
+		reserved := filepath.Join(outDir, managed)
+		same, err := output.SamePath(fridaOut, reserved)
+		if err != nil {
+			return fmt.Errorf("compare batch Frida output with managed artifact %s: %w", managed, err)
+		}
+		if same {
+			return fmt.Errorf("--gen-frida-out must not replace managed batch artifact %s", managed)
+		}
+	}
+	return nil
 }

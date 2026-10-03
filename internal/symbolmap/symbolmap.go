@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"path/filepath"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -702,10 +702,9 @@ func encodeCallSitesTSV(sites []CallSite) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// WriteArtifacts publishes the symbolmap artifact set through output's shared
-// rollback-capable file-generation transaction. Managed artifacts omitted from
-// the new generation (notably symbol_reverse_map.json when import is disabled)
-// are removed on success rather than left stale from an older run.
+// WriteArtifacts publishes the symbolmap directory as one generation. Optional
+// artifacts omitted from the stage are absent after commit, so a stale reverse
+// map can never survive a successful rerun.
 func WriteArtifacts(dir string, rep *Report) error {
 	if rep == nil {
 		return fmt.Errorf("symbolmap: nil report")
@@ -730,23 +729,43 @@ func WriteArtifacts(dir string, rep *Report) error {
 		return fmt.Errorf("symbolmap: encode report: %w", err)
 	}
 
-	artifacts := []output.FileArtifact{
-		{Path: filepath.Join(dir, "symbol_call_sites.tsv"), Data: tsv, Perm: 0o600},
-		{Path: filepath.Join(dir, "symbol_target_summary.json"), Data: targets, Perm: 0o644},
-		{Path: filepath.Join(dir, "symbol_map_report.json"), Data: report, Perm: 0o644},
+	tx, err := output.BeginDirTransaction(dir)
+	if err != nil {
+		return fmt.Errorf("symbolmap: begin output transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stage := tx.StageDir()
+	for _, artifact := range []struct {
+		name string
+		data []byte
+		perm os.FileMode
+	}{
+		{"symbol_call_sites.tsv", tsv, 0o600},
+		{"symbol_target_summary.json", targets, 0o644},
+		{"symbol_map_report.json", report, 0o644},
+	} {
+		if err := output.WriteArtifactFile(stage, artifact.name, artifact.data, artifact.perm); err != nil {
+			return fmt.Errorf("symbolmap: stage %s: %w", artifact.name, err)
+		}
 	}
 	if rep.Symbols != nil {
 		reverse, err := encodeJSON(rep.Symbols)
 		if err != nil {
 			return fmt.Errorf("symbolmap: encode reverse symbol map: %w", err)
 		}
-		artifacts = append(artifacts, output.FileArtifact{Path: filepath.Join(dir, "symbol_reverse_map.json"), Data: reverse, Perm: 0o644})
-	} else {
-		artifacts = append(artifacts, output.FileArtifact{Path: filepath.Join(dir, "symbol_reverse_map.json"), Remove: true})
+		if err := output.WriteArtifactFile(stage, "symbol_reverse_map.json", reverse, 0o644); err != nil {
+			return fmt.Errorf("symbolmap: stage reverse symbol map: %w", err)
+		}
 	}
-	if err := output.PublishFileSet(artifacts); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("symbolmap: publish artifacts: %w", err)
 	}
+	committed = true
 	return nil
 }
 

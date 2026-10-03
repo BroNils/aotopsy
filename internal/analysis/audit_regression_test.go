@@ -32,6 +32,41 @@ import (
 	"aotopsy/internal/strutil"
 )
 
+func publishAuditTestGeneration(t *testing.T, target string, files map[string][]byte) {
+	t.Helper()
+	tx, err := output.BeginDirTransaction(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	for name, data := range files {
+		if err := output.WriteArtifactFile(tx.StageDir(), name, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	committed = true
+}
+
+func auditFixtureProvenance(t *testing.T, arch, version string) Provenance {
+	t.Helper()
+	return Provenance{
+		Source:      filepath.Join(t.TempDir(), "libapp.so"),
+		SourceName:  "libapp.so",
+		SHA256:      strings.Repeat("0", 64),
+		Size:        1,
+		Arch:        arch,
+		DartVersion: version,
+	}
+}
+
 func TestSemanticPipelineRejectsPartialLegacyVMSnapshot(t *testing.T) {
 	libPath := sampleARM64(t)
 	source, err := LoadSnapshot(libPath, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
@@ -489,17 +524,9 @@ func TestInventoryExtractLibappDistinguishesCleanAbsenceFromArchiveFailure(t *te
 
 func TestRunGraphPublishesOneFreshGeneration(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "graph")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	stale := filepath.Join(outDir, "stale-from-previous-run.txt")
-	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	// Only a directory an earlier aotopsy run published may be replaced.
-	if err := os.WriteFile(filepath.Join(outDir, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	publishAuditTestGeneration(t, outDir, map[string][]byte{"stale-from-previous-run.txt": []byte("stale")})
 
 	if err := RunGraph(sample312X64(t), outDir, "isolate", 0); err != nil {
 		t.Fatalf("RunGraph: %v", err)
@@ -554,16 +581,22 @@ func TestParityEncodersPropagateWriterErrors(t *testing.T) {
 func TestRunParityPublishesManagedReportsTogether(t *testing.T) {
 	samplesDir := t.TempDir()
 	outDir := filepath.Join(t.TempDir(), "parity")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	prior, err := output.BeginDirTransaction(outDir)
+	if err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"parity.csv", "parity_summary.md"} {
-		if err := os.WriteFile(filepath.Join(outDir, name), []byte("stale-generation"), 0o600); err != nil {
+		if err := output.WriteArtifactFile(prior.StageDir(), name, []byte("stale-generation"), 0o600); err != nil {
+			prior.Abort()
 			t.Fatal(err)
 		}
 	}
-	sentinel := filepath.Join(outDir, "unmanaged.txt")
-	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+	if err := output.WriteArtifactFile(prior.StageDir(), "obsolete.txt", []byte("old"), 0o600); err != nil {
+		prior.Abort()
+		t.Fatal(err)
+	}
+	if err := prior.Commit(); err != nil {
+		prior.Abort()
 		t.Fatal(err)
 	}
 
@@ -584,8 +617,19 @@ func TestRunParityPublishesManagedReportsTogether(t *testing.T) {
 	if strings.Contains(string(summary), "stale-generation") || !strings.Contains(string(summary), "Total samples: 0") {
 		t.Fatalf("parity_summary.md was not a fresh generation: %q", summary)
 	}
-	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
-		t.Fatalf("unmanaged output changed: %q, %v", got, err)
+	if _, err := os.Stat(filepath.Join(outDir, "obsolete.txt")); !os.IsNotExist(err) {
+		t.Fatalf("obsolete prior-generation artifact survived whole-directory publication: %v", err)
+	}
+}
+
+func TestRunParityRejectsOutputContainingSamplesDirectory(t *testing.T) {
+	root := t.TempDir()
+	samplesDir := filepath.Join(root, "samples")
+	if err := os.MkdirAll(samplesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunParity(samplesDir, root); err == nil || !strings.Contains(err.Error(), "must not contain the samples directory") {
+		t.Fatalf("destructive parity input/output overlap was not rejected: %v", err)
 	}
 }
 
@@ -596,11 +640,7 @@ func TestRequiredMetaRejectsX64FromGenerationTransactionally(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), Provenance{
-		SourceName:  "libapp.so",
-		Arch:        "x64",
-		DartVersion: "3.12.2",
-	}); err != nil {
+	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), auditFixtureProvenance(t, "x64", "3.12.2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(src, "flutter_meta.json"), []byte("stale-x64-meta"), 0o600); err != nil {
@@ -634,11 +674,7 @@ func TestOptionalMetaDropsStaleX64ArtifactFromClonedGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), Provenance{
-		SourceName:  "libapp.so",
-		Arch:        "x64",
-		DartVersion: "3.12.2",
-	}); err != nil {
+	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), auditFixtureProvenance(t, "x64", "3.12.2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(src, "flutter_meta.json"), []byte("stale-x64-meta"), 0o600); err != nil {
@@ -862,11 +898,7 @@ func TestRunFromExistingCarriesProvenanceIdentityIntoResult(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), Provenance{
-		SourceName:  "libapp.so",
-		Arch:        "x64",
-		DartVersion: "3.12.2",
-	}); err != nil {
+	if err := output.WriteJSONFile(filepath.Join(src, ProvenanceFileName), auditFixtureProvenance(t, "x64", "3.12.2")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1019,7 +1051,7 @@ func TestDisasmArtifactFilesAllowsDeduplicatedCodeAliases(t *testing.T) {
 
 func TestRunFromExistingFailurePreservesPreviousDestination(t *testing.T) {
 	src := t.TempDir()
-	dst := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "dst")
 	// Enough to pass runFromExisting's base validation, then fail inside the
 	// signal stage because string_refs.jsonl is absent.
 	for _, name := range []string{"functions.jsonl", "call_edges.jsonl"} {
@@ -1027,15 +1059,10 @@ func TestRunFromExistingFailurePreservesPreviousDestination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sentinel := filepath.Join(dst, "sentinel.txt")
-	if err := os.WriteFile(sentinel, []byte("previous generation"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	// Without the marker the transaction would refuse the destination before
 	// the signal stage ran, and this test would pass for the wrong reason.
-	if err := os.WriteFile(filepath.Join(dst, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	publishAuditTestGeneration(t, dst, map[string][]byte{"sentinel.txt": []byte("previous generation")})
+	sentinel := filepath.Join(dst, "sentinel.txt")
 	_, err := Run(Opts{FromDir: src, OutDir: dst, Signal: true, Quiet: true})
 	if err == nil {
 		t.Fatal("expected signal regeneration to fail")
@@ -1055,15 +1082,7 @@ func TestRunFromExistingFailurePreservesPreviousDestination(t *testing.T) {
 func TestOutputTransactionCommitReplacesWholeGeneration(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "out")
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "stale.txt"), []byte("stale"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(target, output.GenerationMarker), []byte("prior\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	publishAuditTestGeneration(t, target, map[string][]byte{"stale.txt": []byte("stale")})
 	tx, err := output.BeginDirTransaction(target)
 	if err != nil {
 		t.Fatal(err)

@@ -116,6 +116,21 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 	if err != nil {
 		return nil, fmt.Errorf("resolve merged output: %w", err)
 	}
+	for _, input := range []struct {
+		label string
+		path  string
+	}{
+		{"reFlutter dump", opts.DumpPath},
+		{"source binary", opts.LibPath},
+	} {
+		insideOut, err := output.ContainsPath(outAbs, input.path)
+		if err != nil {
+			return nil, fmt.Errorf("compare merged output/%s paths: %w", input.label, err)
+		}
+		if insideOut {
+			return nil, fmt.Errorf("merged output directory must not contain the %s", input.label)
+		}
+	}
 	if staticAbs != outAbs {
 		overlap, err := output.PathsOverlap(staticAbs, outAbs)
 		if err != nil {

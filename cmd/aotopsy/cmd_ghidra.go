@@ -10,6 +10,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/output"
 )
 
 // cmdGhidra handles "aotopsy ghidra <libapp.so>" — full pipeline + Ghidra decompilation.
@@ -127,8 +128,18 @@ func cmdGhidra(args []string) error {
 
 	// Step 5: Run headless analysis.
 	decompDir := filepath.Join(pipeResult.OutDir, "decompiled")
+	decompTx, err := output.BeginDirTransaction(decompDir)
+	if err != nil {
+		return fmt.Errorf("begin Ghidra decompile generation: %w", err)
+	}
+	decompCommitted := false
+	defer func() {
+		if !decompCommitted {
+			decompTx.Abort()
+		}
+	}()
 	absMetaPath, _ := filepath.Abs(metaPath)
-	absDecompDir, _ := filepath.Abs(decompDir)
+	absDecompStage, _ := filepath.Abs(decompTx.StageDir())
 
 	projectName, err := analysis.GhidraProjectName(prov.SourceName, prov.SHA256)
 	if err != nil {
@@ -147,7 +158,7 @@ func cmdGhidra(args []string) error {
 	}
 	cli.Errf("  project: %s/%s\n", absProjDir, projectName)
 	cli.Errf("  import: %s\n", absLibPath)
-	cli.Errf("  decompile output: %s\n", absDecompDir)
+	cli.Errf("  decompile output: %s\n", decompDir)
 
 	ghidraArgs := []string{
 		absProjDir,
@@ -157,7 +168,7 @@ func cmdGhidra(args []string) error {
 		"-processor", "AARCH64:LE:64:v8A",
 		"-scriptPath", scriptPath,
 		"-preScript", "aotopsy_prescript.py",
-		"-postScript", "aotopsy_apply.py", absMetaPath, absDecompDir,
+		"-postScript", "aotopsy_apply.py", absMetaPath, absDecompStage,
 	}
 
 	env := os.Environ()
@@ -176,9 +187,13 @@ func cmdGhidra(args []string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("analyzeHeadless failed: %w", err)
 	}
+	if err := decompTx.Commit(); err != nil {
+		return fmt.Errorf("publish Ghidra decompile generation: %w", err)
+	}
+	decompCommitted = true
 
-	cCount := analysis.CountDecompiledFiles(absDecompDir)
-	cli.Errf("decompiled %d functions → %s\n", cCount, absDecompDir)
+	cCount := analysis.CountDecompiledFiles(decompDir)
+	cli.Errf("decompiled %d functions → %s\n", cCount, decompDir)
 
 	return nil
 }

@@ -15,17 +15,15 @@ import (
 
 // cmdFridaExport exports analysis metadata and generated hooks for Frida.
 func cmdFridaExport(args []string) error {
-	fs := flag.NewFlagSet("frida-export", flag.ExitOnError)
+	fs := flag.NewFlagSet("frida-export", flag.ContinueOnError)
 	libPath := fs.String("lib", "", "path to libapp.so")
 	fromDir := fs.String("from", "", "reuse existing aotopsy output directory")
-	outPath := fs.String("out", "", "output JSON path (default: <from>/frida_metadata.json)")
 	genScript := fs.Bool("gen-script", false, "also generate a ready-to-run Frida JS script")
-	scriptPath := fs.String("script-out", "", "output path for Frida script (default: <from>/frida_hooks.js)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: aotopsy frida-export (--lib <libapp.so> | --from <aotopsy_dir>) [--out <metadata.json>] [--gen-script] [--script-out <hooks.js>]")
+		return fmt.Errorf("usage: aotopsy frida-export (--lib <libapp.so> | --from <aotopsy_dir>) [--gen-script]")
 	}
 
 	dir := *fromDir
@@ -97,20 +95,6 @@ func cmdFridaExport(args []string) error {
 		}
 	}
 
-	if *outPath == "" {
-		*outPath = filepath.Join(dir, "frida_metadata.json")
-	}
-	if *genScript && *scriptPath == "" {
-		*scriptPath = filepath.Join(dir, "frida_hooks.js")
-	}
-
-	// Export consumes these files from dir. A custom destination may live
-	// anywhere else, but must never overwrite an input artifact or the analysed
-	// binary while export is still using that generation.
-	if err := validateFridaExportDestinations(*libPath, dir, *outPath, *scriptPath, *genScript); err != nil {
-		return err
-	}
-
 	meta, err := analysis.BuildFridaMetadata(ctx, dir)
 	if err != nil {
 		return err
@@ -126,24 +110,54 @@ func cmdFridaExport(args []string) error {
 		return fmt.Errorf("encode Frida generation binding: %w", err)
 	}
 	bindingBytes = append(bindingBytes, '\n')
+	outPath := filepath.Join(dir, "frida_metadata.json")
 	bindingPath := filepath.Join(dir, frida.BindingFileName)
-	artifacts := []output.FileArtifact{
-		{Path: *outPath, Data: metaBytes, Perm: 0o644},
-		{Path: bindingPath, Data: bindingBytes, Perm: 0o644},
-	}
+	scriptPath := filepath.Join(dir, "frida_hooks.js")
 	var script string
 	if *genScript {
 		script, err = frida.GenerateFridaScript(meta)
 		if err != nil {
 			return err
 		}
-		artifacts = append(artifacts, output.FileArtifact{Path: *scriptPath, Data: []byte(script), Perm: 0o644})
-	}
-	if err := output.PublishFileSet(artifacts); err != nil {
-		return fmt.Errorf("publish Frida export generation: %w", err)
 	}
 
-	cli.Errf("Frida metadata exported: %s\n", *outPath)
+	// Export updates an existing static analysis generation. Clone it into a
+	// directory transaction and publish metadata, binding, and optional script
+	// together; custom cross-directory destinations are intentionally no longer
+	// supported because they cannot share one atomic generation boundary.
+	tx, err := output.BeginDirTransaction(dir)
+	if err != nil {
+		return fmt.Errorf("begin Frida export transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stage := tx.StageDir()
+	if err := output.CloneTree(dir, stage); err != nil {
+		return fmt.Errorf("clone static generation for Frida export: %w", err)
+	}
+	if err := output.WriteArtifactFile(stage, "frida_metadata.json", metaBytes, 0o644); err != nil {
+		return fmt.Errorf("stage Frida metadata: %w", err)
+	}
+	if err := output.WriteArtifactFile(stage, frida.BindingFileName, bindingBytes, 0o644); err != nil {
+		return fmt.Errorf("stage Frida generation binding: %w", err)
+	}
+	if *genScript {
+		if err := output.WriteArtifactFile(stage, "frida_hooks.js", []byte(script), 0o644); err != nil {
+			return fmt.Errorf("stage Frida script: %w", err)
+		}
+	} else if err := tx.RemoveStageFile("frida_hooks.js"); err != nil {
+		return fmt.Errorf("remove stale Frida script: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish Frida export generation: %w", err)
+	}
+	committed = true
+
+	cli.Errf("Frida metadata exported: %s\n", outPath)
 	cli.Errf("  Functions: %d\n", len(meta.Functions))
 	cli.Errf("  Call probes: %d\n", len(meta.CallProbes))
 	cli.Errf("  Dispatch entries: %d\n", len(meta.DispatchTable))
@@ -151,67 +165,9 @@ func cmdFridaExport(args []string) error {
 	cli.Errf("  Generation binding: %s\n", bindingPath)
 
 	if *genScript {
-		cli.Errf("  Frida script: %s\n", *scriptPath)
-		cli.Errf("  Run: frida -H 127.0.0.1:8888 -f com.example.app -l %s\n", *scriptPath)
+		cli.Errf("  Frida script: %s\n", scriptPath)
+		cli.Errf("  Run: frida -H 127.0.0.1:8888 -f com.example.app -l %s\n", scriptPath)
 	}
 
-	return nil
-}
-
-func validateFridaExportDestinations(libPath, dir, metadataPath, scriptPath string, genScript bool) error {
-	bindingPath := filepath.Join(dir, frida.BindingFileName)
-	protected := []string{
-		libPath,
-		bindingPath,
-		filepath.Join(dir, analysis.ProvenanceFileName),
-		filepath.Join(dir, "functions.jsonl"),
-		filepath.Join(dir, "call_edges.jsonl"),
-		filepath.Join(dir, "dispatch_table.jsonl"),
-		filepath.Join(dir, "string_refs.jsonl"),
-		filepath.Join(dir, "evidence.jsonl"),
-	}
-	allowedInStatic := map[string]string{
-		metadataPath: filepath.Join(dir, "frida_metadata.json"),
-	}
-	if genScript {
-		allowedInStatic[scriptPath] = filepath.Join(dir, "frida_hooks.js")
-	}
-	for _, dst := range []string{metadataPath, scriptPath} {
-		if dst == "" {
-			continue
-		}
-		for _, src := range protected {
-			same, err := output.SamePath(dst, src)
-			if err != nil {
-				return fmt.Errorf("compare Frida output/input paths: %w", err)
-			}
-			if same {
-				return fmt.Errorf("frida output %s aliases consumed input %s", dst, src)
-			}
-		}
-		inside, err := output.ContainsPath(dir, dst)
-		if err != nil {
-			return fmt.Errorf("compare Frida output/static generation paths: %w", err)
-		}
-		if inside {
-			allowed := allowedInStatic[dst]
-			same, err := output.SamePath(dst, allowed)
-			if err != nil {
-				return fmt.Errorf("compare Frida output/default paths: %w", err)
-			}
-			if !same {
-				return fmt.Errorf("custom Frida output %s must not overwrite files inside static generation %s", dst, dir)
-			}
-		}
-	}
-	if genScript {
-		same, err := output.SamePath(metadataPath, scriptPath)
-		if err != nil {
-			return fmt.Errorf("compare Frida metadata/script paths: %w", err)
-		}
-		if same {
-			return fmt.Errorf("frida metadata and script outputs must be different files")
-		}
-	}
 	return nil
 }
