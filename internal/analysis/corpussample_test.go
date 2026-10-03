@@ -17,21 +17,21 @@ import (
 // TestBLRResolutionRate, the pipeline regression suite, and every
 // PcDescriptors, instance-field and CHA assertion.
 //
-// A missing sample is now a failure. The corpus is checked in as
-// symlinks and samplecorpus.Path resolves them, so "not set" is not a
-// situation that should exist; if a sample really is gone, the fix is to
-// restore it, not to let the assertions evaporate.
+// A missing sample is now a failure once a local corpus exists. samples/ is a
+// local symlink view of the stable ~/dev/aotopsy_samples store, and
+// samplecorpus.RequireSample resolves it through the central manifest/registry;
+// if a member is gone, the fix is to restore it, not to let assertions evaporate.
 const (
-	// The 3.9.2 ground-truth twin of compare_sample: same app as the
-	// stripped dart-3.9.2-arm64.so but built --no-strip, so it carries a
-	// .symtab. Tests here assert on recovered names, which is exactly
-	// what the unstripped build lets us check.
+	// The canonical stripped 3.9.2 compare_sample. General analysis tests must
+	// exercise production conditions; the -gt symbol oracle is reserved for
+	// TestSymtabDifferential because pipeline.Run can consult .symtab as a
+	// last-resort naming source.
 	//
 	// The older extracted_*/ builds of this app contain no
 	// AntiInlineTools, no safeDivide and no ground_truth.dart at all;
 	// pointing these tests at one of those fails for reasons unrelated to
-	// the code. The corpus entry is the merged_native_libs build.
-	sampleARM64Name = "dart-3.9.2-gt-arm64.so"
+	// the code. The corpus entry is the validated canonical stripped build.
+	sampleARM64Name = "dart-3.9.2-arm64.so"
 
 	// The Dart package the above sample's own libraries live under. The
 	// test app has been rebuilt under different package names over time

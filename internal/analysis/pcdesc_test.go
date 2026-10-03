@@ -93,7 +93,7 @@ func TestTryRegionsForKnownTryCatchFunctions(t *testing.T) {
 	libPath := sampleARM64(t)
 	res := clusterOnly(t, libPath)
 	if len(res.PcDescriptors) == 0 {
-		t.Skip("no PcDescriptors decoded")
+		t.Fatal("canonical compare_sample produced no PcDescriptors")
 	}
 
 	strByRef := map[int]string{}
@@ -176,7 +176,7 @@ func TestTryRegionsForKnownTryCatchFunctions(t *testing.T) {
 		}
 	}
 	if found == 0 {
-		t.Skip("none of the try/catch fixtures are in this sample")
+		t.Fatal("none of the canonical try/catch fixtures were recovered from compare_sample")
 	}
 }
 
@@ -217,16 +217,16 @@ func TestExpandOuterTryRegions_NestedTryCatch(t *testing.T) {
 		}
 	}
 	if fnRef < 0 {
-		t.Skip("nestedTryCatch not in this sample (stale binary? see AGENTS.md)")
+		t.Fatal("nestedTryCatch not found in canonical compare_sample corpus binary")
 	}
 	code, ok := codeByOwner[fnRef]
 	if !ok {
-		t.Skip("no Code for nestedTryCatch")
+		t.Fatal("canonical nestedTryCatch fixture has no Code object")
 	}
 	pd, ok1 := pdByRef[code.PcDescriptorsRef]
 	eh, ok2 := ehByRef[code.ExceptionHandlersRef]
 	if !ok1 || !ok2 {
-		t.Skip("nestedTryCatch has no PcDescriptors/ExceptionHandlers")
+		t.Fatal("canonical nestedTryCatch fixture has no PcDescriptors/ExceptionHandlers")
 	}
 	if len(eh.Handlers) != 2 {
 		t.Fatalf("nestedTryCatch has %d handlers, want 2 (source nests two trys)", len(eh.Handlers))

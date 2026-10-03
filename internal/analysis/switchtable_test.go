@@ -24,13 +24,11 @@ import (
 func TestSwitchJumpTableRecovery(t *testing.T) {
 	samples := []string{
 		"dart-3.12.2-x64.so",
-		"dart-3.9.2-gt-arm64.so",
+		"dart-3.9.2-arm64.so",
 		"dart-2.12.0-arm64.so",
 	}
-	anyRun := false
 	for _, name := range samples {
 		path := corpusSample(t, name)
-		anyRun = true
 		t.Run(name, func(t *testing.T) {
 			ctx, err := LoadContext(path)
 			if err != nil {
@@ -135,8 +133,5 @@ func TestSwitchJumpTableRecovery(t *testing.T) {
 			t.Logf("%d functions with a recovered jump table, %d emitted a switch",
 				withTable, emittedSwitch)
 		})
-	}
-	if !anyRun {
-		t.Skip("no samples/ directory in this checkout")
 	}
 }

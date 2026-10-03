@@ -93,15 +93,12 @@ func TestArchAuditCorpusARM64ChunksStayInstructionAligned(t *testing.T) {
 
 	var samples, badSamples, badChunks int
 	for _, s := range samplecorpus.Registry {
-		if s.Arch != "arm64" || s.GroundTruth {
+		if s.Arch != "arm64" || s.SymbolOracle {
 			continue
 		}
 		path, err := samplecorpus.RequireSample(s.FileName())
 		if err != nil {
 			t.Fatal(err)
-		}
-		if _, err := samplecorpus.ValidateSample(path, s); err != nil {
-			t.Fatalf("validate %s: %v", s.FileName(), err)
 		}
 		ef, err := elfx.Open(path)
 		if err != nil {

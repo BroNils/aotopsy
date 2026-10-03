@@ -33,9 +33,10 @@ import (
 // So: the tests are driven by samplecorpus.Registry, and every per-binary
 // number lives in a committed record keyed by the input's SHA-256 -- the same
 // arrangement internal/analysis's golden test uses, for the same reason. A
-// different local binary skips rather than fails, because a different input is
-// not a regression. A MISSING record fails, because self-recording baselines
-// cannot catch anything.
+// different local binary FAILS: once a canonical corpus is populated, changing
+// the input under a stable filename is fixture drift, not a legitimate skip. A
+// MISSING record also fails, because self-recording baselines cannot catch
+// anything.
 //
 //	AOTOPSY_UPDATE_CORPUS=1 go test ./internal/cluster/ -run Corpus
 
@@ -94,15 +95,12 @@ func eachCorpusSample(t *testing.T, fn func(t *testing.T, s corpusSample)) {
 				t.Fatalf("resolve %s: %v", entry.FileName(), err)
 			}
 			present++
-			if entry.ProfileIncomplete != "" {
-				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
-			}
-			if entry.GroundTruth {
-				// An unstripped twin is the same program as its stripped
-				// counterpart, so its cluster facts are already pinned by that
-				// sample's record. Recording them twice would double the
-				// corpus for no extra coverage. See Sample.GroundTruth.
-				t.Skipf("%s: kembaran ground-truth, fakta cluster-nya sudah dijamin sampel terstripnya", entry.FileName())
+			if entry.SymbolOracle {
+				// Symbol-oracle builds exist to provide an ELF .symtab ground truth,
+				// not a second cluster baseline. True twins declare TwinOf; the
+				// standalone 3.10.7/3.11.0 oracles deliberately do not pretend their
+				// different-source stripped sample pins these facts.
+				t.Skipf("%s: symbol-oracle build; cluster corpus records cover analysis samples only", entry.FileName())
 			}
 			info := openSample(t, path)
 			if info.Version == nil || info.Version.DartVersion != entry.DartVersion {
@@ -340,7 +338,7 @@ func fileSHA256(t *testing.T, path string) string {
 func TestCorpusRecordManifest(t *testing.T) {
 	want := make(map[string]struct{})
 	for _, s := range samplecorpus.Registry {
-		if !s.GroundTruth {
+		if !s.SymbolOracle {
 			want[s.FileName()+".json"] = struct{}{}
 		}
 	}

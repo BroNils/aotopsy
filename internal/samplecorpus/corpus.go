@@ -37,6 +37,7 @@ package samplecorpus
 import (
 	"debug/elf"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -50,8 +51,9 @@ import (
 )
 
 var (
-	ErrNoCorpus      = errors.New("samplecorpus: no samples directory in this checkout")
-	ErrSampleMissing = errors.New("samplecorpus: required sample missing")
+	ErrNoCorpus           = errors.New("samplecorpus: no samples directory in this checkout")
+	ErrSampleMissing      = errors.New("samplecorpus: required sample missing")
+	ErrSampleUnregistered = errors.New("samplecorpus: sample is not registered")
 )
 
 const ExpectedSampleCount = 93
@@ -62,6 +64,14 @@ const ExpectedSampleCount = 93
 //
 //go:embed corpus_manifest.txt
 var corpusManifest string
+
+// corpusSHA256Manifest pins the exact bytes behind every gitignored corpus
+// filename. Version/arch validation alone is not enough: two different builds
+// from the same Dart release can both satisfy those claims while exercising
+// different source or carrying different symbol/debug assistance.
+//
+//go:embed corpus_sha256.txt
+var corpusSHA256Manifest string
 
 // Extract opens a sample and parses its snapshot headers. It is the lightweight
 // version-only helper; ValidateSample additionally checks registry identity.
@@ -90,11 +100,11 @@ type Sample struct {
 	// reconstruct the corpus on a new machine.
 	Note string
 
-	// SourceSet names the Dart PROGRAM this binary was compiled from.
-	// Samples sharing a non-empty SourceSet were built from byte-identical
-	// lib/*.dart by different SDKs, so any difference in what the analyser
-	// recovers from them is a version-specific defect rather than a property
-	// of the app.
+	// SourceSet names the Dart PROGRAM family this binary was compiled from.
+	// Differential members sharing a SourceSet keep ground_truth.dart and
+	// signal_ground_truth.dart byte-identical. The main set deliberately has a
+	// syntax-only main.dart lowering on Dart 2.14-2.16 because super-parameters
+	// do not exist there; that file is not the source of the differential metrics.
 	//
 	// That control is what no other gate in this project provides. The golden
 	// records compare a version against its own previous output, so a version
@@ -105,20 +115,12 @@ type Sample struct {
 	// arrangement that can say "this one recovers sixty times less".
 	SourceSet string
 
-	// ProfileIncomplete marks a sample whose Dart version has a VersionProfile
-	// that cannot yet parse it. The sample is registered because it exists and
-	// is correct; what is not yet correct is this project's profile for that
-	// version. Tests skip it with this reason rather than failing forever or,
-	// worse, being left unregistered so the gap goes unrecorded.
-	ProfileIncomplete string
-
 	// FileSuffix distinguishes samples that share a Dart version and
 	// architecture with another entry but were built from a different source
 	// set, e.g. "-pre214".
 	FileSuffix string
 
-	// GroundTruth marks an UNSTRIPPED twin: the same program as the analysis
-	// sample for this version, built with
+	// SymbolOracle marks an UNSTRIPPED sample built with
 	//
 	//	flutter build apk --release --extra-gen-snapshot-options=--no-strip
 	//
@@ -130,18 +132,24 @@ type Sample struct {
 	// It is a SEPARATE sample rather than a replacement, deliberately. The
 	// corpus has to keep representing stripped production binaries, because
 	// that is the condition the tool actually runs in -- recovering names
-	// without symbols is the whole point. So these twins are excluded from the
-	// corpus cluster-fact records and from the cross-version differential:
-	// they would duplicate facts their stripped counterparts already pin, and
-	// double the differential's runtime for nothing.
+	// without symbols is the whole point. Symbol-oracle samples are excluded
+	// from corpus cluster-fact records and from the cross-version differential:
+	// their purpose is the ELF symbol-table oracle, not another analysis baseline.
 	//
-	// Their honesty was measured, not assumed. LoadContext -- the path the
+	// When TwinOf is non-empty, the oracle is also a true unstripped twin of the
+	// named stripped registry entry. TwinOf is explicit because the 3.10.7 and
+	// 3.11.0 symbol oracles come from sample_dart_* while those versions' stripped
+	// corpus entries come from sample_310/sample_311; calling those four files
+	// twins was false even though they are valid symbol oracles.
+	//
+	// The true twins' honesty was measured, not assumed. LoadContext -- the path the
 	// symtab gate reads names from -- never consults .symtab; only
 	// pipeline.Run does, via elfStubName, and only as a last resort for Codes
 	// the snapshot could not name at all. Proven on 3.9.2 arm64 by loading a
 	// stripped binary and its unstripped twin and diffing the recovered names:
 	// 8220 names, ZERO differences. The gate is not validating itself.
-	GroundTruth bool
+	SymbolOracle bool
+	TwinOf       string
 }
 
 // FileName is the name this sample must have under samples/.
@@ -152,17 +160,19 @@ func (s Sample) FileName() string {
 	return fmt.Sprintf("dart-%s%s-%s.so", s.DartVersion, s.FileSuffix, s.Arch)
 }
 
-// comparesample is the source set every deliberately-built sample uses: the
-// lib/*.dart of ~/dev/compare_sample, copied verbatim into each new project so
-// the only variable between those binaries is the Dart SDK that compiled them.
+// comparesample is the main deliberately-built source family. Its two
+// metric-bearing files are byte-identical in every differential member. Dart
+// 2.14-2.16 only use the syntax-equivalent pre-super-parameter spelling in
+// main.dart.
 const comparesample = "compare_sample"
 
 // comparesamplePre214 is a SECOND source set, for the Dart versions that
 // cannot compile the first one.
 //
-// signal_ground_truth.dart uses the >>> operator, which does not exist before
-// Dart 2.14, and it is the file every metric in the differential is derived
-// from. Downlevelling it inside the main set would have quietly changed the
+// signal_ground_truth.dart uses the >>> operator. Dart 2.13 contains the
+// implementation but keeps it behind the triple-shift experiment; Dart 2.14
+// is the first default-language side used by these samples. Downlevelling it
+// inside the main set would have quietly changed the
 // control that makes the whole comparison meaningful, so the pre-2.14 samples
 // get their own set instead: >>> replaced by an _ushr helper that is exactly
 // equivalent for 1 <= n <= 63, applied identically to every member.
@@ -276,12 +286,12 @@ var Registry = []Sample{
 	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_310 x86_64"},
 	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_311"},
 	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_311 x86_64"},
-	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312"},
-	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64"},
+	{DartVersion: "3.12.2", Arch: "arm64", Note: "sample_312 stripped_native_libs"},
+	{DartVersion: "3.12.2", Arch: "x64", Note: "sample_312 x86_64 stripped_native_libs"},
 	// sample_313's lib/ IS byte-identical to compare_sample's, so unlike
 	// sample_310/311 this pair can carry its weight in the differential.
-	{DartVersion: "3.13.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.13.0, Flutter 3.47.0"},
-	{DartVersion: "3.13.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.13.0 x86_64"},
+	{DartVersion: "3.13.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.13.0, Flutter 3.47.0, stripped_native_libs"},
+	{DartVersion: "3.13.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.13.0 x86_64, stripped_native_libs"},
 
 	// The versions whose ObjectStoreAOTFieldCount had only ever been counted
 	// from object_store.h, never confirmed against a binary. 2.15.0 is why
@@ -305,13 +315,15 @@ var Registry = []Sample{
 	// sample rather than folded into 3.12.2's because it is a different
 	// binary from a different Flutter release, and the corpus records are
 	// keyed by input sha256.
-	{DartVersion: "3.12.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.12.0, Flutter 3.44.0 -- Dart 3.12.0 stable, 3.12.2 format", FileSuffix: "-f3440"},
-	{DartVersion: "3.12.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.12.0 x86_64, Flutter 3.44.0", FileSuffix: "-f3440"},
+	{DartVersion: "3.12.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.12.0, Flutter 3.44.0 -- Dart 3.12.0 stable, 3.12.2 format, stripped_native_libs", FileSuffix: "-f3440"},
+	{DartVersion: "3.12.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.12.0 x86_64, Flutter 3.44.0, stripped_native_libs", FileSuffix: "-f3440"},
 
-	// Unstripped ground-truth twins -- see Sample.GroundTruth. Built from the
-	// SAME project as the version's analysis sample, so the source is
-	// identical (including the downlevelled sources of the pre-2.14 and
-	// pre-null-safety sets), with
+	// Unstripped symbol oracles -- see Sample.SymbolOracle. Most are true twins
+	// of a stripped corpus sample and declare that relation in TwinOf. The
+	// 3.10.7/3.11.0 oracles are intentionally standalone: their sample_dart_*
+	// source is the compare_sample family, while the stripped 3.10.7/3.11.0
+	// corpus entries are sample_310/sample_311 and have different source.
+	// All are built with
 	// --extra-gen-snapshot-options=--no-strip added.
 	//
 	// The flag is missing from `flutter build apk --help` on every release
@@ -326,53 +338,54 @@ var Registry = []Sample{
 	// exists in flutter_tools/lib/src/flutter_command.dart at that era but is
 	// not plumbed through to the AOT assemble step. Flutter 2.2.0 (Dart 2.13)
 	// is where it starts working, so that is the floor for ground truth.
-	{DartVersion: "2.13.0", Arch: "arm64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.13.0", Arch: "x64", Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.14.0", Arch: "arm64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.14.0", Arch: "x64", Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.15.0", Arch: "arm64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.15.0", Arch: "x64", Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.16.0", Arch: "arm64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.16.0", Arch: "x64", Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.17.6", Arch: "arm64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.17.6", Arch: "x64", Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.18.0", Arch: "arm64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.18.0", Arch: "x64", Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.19.0", Arch: "arm64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "2.19.0", Arch: "x64", Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.0.5", Arch: "arm64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.0.5", Arch: "x64", Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.1.0", Arch: "arm64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.1.0", Arch: "x64", Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.2.5", Arch: "arm64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.2.5", Arch: "x64", Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.3.0", Arch: "arm64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.3.0", Arch: "x64", Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.4.3", Arch: "arm64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.4.3", Arch: "x64", Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.5.0", Arch: "arm64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.5.0", Arch: "x64", Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.6.2", Arch: "arm64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.6.2", Arch: "x64", Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.7.0", Arch: "arm64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.7.0", Arch: "x64", Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.8.1", Arch: "arm64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.8.1", Arch: "x64", Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.9.2", Arch: "arm64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.9.2", Arch: "x64", Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.10.7", Arch: "arm64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.10.7", Arch: "x64", Note: "sample_dart_3.10.7 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.11.0", Arch: "arm64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
-	{DartVersion: "3.11.0", Arch: "x64", Note: "sample_dart_3.11.0 --no-strip", FileSuffix: "-gt", GroundTruth: true},
+	{DartVersion: "2.13.0", Arch: "arm64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.13.0-prenn-arm64.so"},
+	{DartVersion: "2.13.0", Arch: "x64", SourceSet: comparesamplePreNNBD, Note: "sample_prenn_2.13.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.13.0-prenn-x64.so"},
+	{DartVersion: "2.14.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.14.0-arm64.so"},
+	{DartVersion: "2.14.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.14.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.14.0-x64.so"},
+	{DartVersion: "2.15.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.15.0-arm64.so"},
+	{DartVersion: "2.15.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.15.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.15.0-x64.so"},
+	{DartVersion: "2.16.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.16.0-arm64.so"},
+	{DartVersion: "2.16.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.16.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.16.0-x64.so"},
+	{DartVersion: "2.17.6", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.17.6-arm64.so"},
+	{DartVersion: "2.17.6", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.17.6 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.17.6-x64.so"},
+	{DartVersion: "2.18.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.18.0-arm64.so"},
+	{DartVersion: "2.18.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.18.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.18.0-x64.so"},
+	{DartVersion: "2.19.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.19.0-arm64.so"},
+	{DartVersion: "2.19.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_2.19.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-2.19.0-x64.so"},
+	{DartVersion: "3.0.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.0.5-arm64.so"},
+	{DartVersion: "3.0.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.0.5 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.0.5-x64.so"},
+	{DartVersion: "3.1.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.1.0-arm64.so"},
+	{DartVersion: "3.1.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.1.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.1.0-x64.so"},
+	{DartVersion: "3.2.5", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.2.5-arm64.so"},
+	{DartVersion: "3.2.5", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.2.5 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.2.5-x64.so"},
+	{DartVersion: "3.3.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.3.0-arm64.so"},
+	{DartVersion: "3.3.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.3.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.3.0-x64.so"},
+	{DartVersion: "3.4.3", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.4.3-arm64.so"},
+	{DartVersion: "3.4.3", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.4.3 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.4.3-x64.so"},
+	{DartVersion: "3.5.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.5.0-arm64.so"},
+	{DartVersion: "3.5.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.5.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.5.0-x64.so"},
+	{DartVersion: "3.6.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.6.2-arm64.so"},
+	{DartVersion: "3.6.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.6.2 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.6.2-x64.so"},
+	{DartVersion: "3.7.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.7.0-arm64.so"},
+	{DartVersion: "3.7.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.7.0 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.7.0-x64.so"},
+	{DartVersion: "3.8.1", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.8.1-arm64.so"},
+	{DartVersion: "3.8.1", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.8.1 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.8.1-x64.so"},
+	{DartVersion: "3.9.2", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.9.2-arm64.so"},
+	{DartVersion: "3.9.2", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.9.2 --no-strip", FileSuffix: "-gt", SymbolOracle: true, TwinOf: "dart-3.9.2-x64.so"},
+	{DartVersion: "3.10.7", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.10.7 --no-strip; standalone symbol oracle (stripped 3.10.7 is different source)", FileSuffix: "-gt", SymbolOracle: true},
+	{DartVersion: "3.10.7", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.10.7 --no-strip; standalone symbol oracle (stripped 3.10.7 is different source)", FileSuffix: "-gt", SymbolOracle: true},
+	{DartVersion: "3.11.0", Arch: "arm64", SourceSet: comparesample, Note: "sample_dart_3.11.0 --no-strip; standalone symbol oracle (stripped 3.11.0 is different source)", FileSuffix: "-gt", SymbolOracle: true},
+	{DartVersion: "3.11.0", Arch: "x64", SourceSet: comparesample, Note: "sample_dart_3.11.0 --no-strip; standalone symbol oracle (stripped 3.11.0 is different source)", FileSuffix: "-gt", SymbolOracle: true},
 }
 
-// SourceSets groups the registry by SourceSet. Singleton sets are retained: a
-// singleton is a registry invariant failure, not something callers may silently
-// erase before deciding whether a differential has enough members.
-func SourceSets() map[string][]Sample {
+// DifferentialSourceSets groups analysis samples by SourceSet. Symbol-oracle
+// builds are deliberately excluded: even when they share source, their role is
+// an ELF-symbol oracle and including them would double-count a source/version.
+// Singleton sets are retained so callers cannot silently erase a broken set.
+func DifferentialSourceSets() map[string][]Sample {
 	bySet := map[string][]Sample{}
 	for _, s := range Registry {
-		if s.SourceSet == "" {
+		if s.SourceSet == "" || s.SymbolOracle {
 			continue
 		}
 		bySet[s.SourceSet] = append(bySet[s.SourceSet], s)
@@ -391,6 +404,37 @@ func ExpectedFiles() []string {
 		}
 	}
 	return out
+}
+
+func expectedSHA256s() (map[string]string, error) {
+	lines := strings.Split(strings.TrimSpace(corpusSHA256Manifest), "\n")
+	out := make(map[string]string, len(lines))
+	lastName := ""
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("samplecorpus: corpus_sha256.txt row %d has %d fields, want sha256 + filename", i+1, len(fields))
+		}
+		sum, name := fields[0], fields[1]
+		if len(sum) != 64 || sum != strings.ToLower(sum) {
+			return nil, fmt.Errorf("samplecorpus: corpus_sha256.txt row %d has malformed sha256 %q", i+1, sum)
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			return nil, fmt.Errorf("samplecorpus: corpus_sha256.txt row %d has invalid sha256 %q: %w", i+1, sum, err)
+		}
+		if err := validateSampleName(name); err != nil {
+			return nil, fmt.Errorf("samplecorpus: corpus_sha256.txt row %d: %w", i+1, err)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("samplecorpus: duplicate sha256 manifest entry %q", name)
+		}
+		if lastName != "" && name <= lastName {
+			return nil, fmt.Errorf("samplecorpus: corpus_sha256.txt is not sorted by filename")
+		}
+		lastName = name
+		out[name] = sum
+	}
+	return out, nil
 }
 
 // CorpusRoot returns the nearest samples/ directory walking upward from the
@@ -439,10 +483,20 @@ func validateSampleName(fileName string) error {
 	return nil
 }
 
-// RequireSample resolves one corpus member from the authoritative nearest root.
-// ErrNoCorpus means a fresh checkout may skip the whole corpus gate;
-// ErrSampleMissing means a populated corpus is incomplete and must fail.
-func RequireSample(fileName string) (string, error) {
+func registeredSample(fileName string) (Sample, bool) {
+	for _, s := range Registry {
+		if s.FileName() == fileName {
+			return s, true
+		}
+	}
+	return Sample{}, false
+}
+
+// resolveSamplePath resolves one corpus member from the authoritative nearest
+// root without interpreting its bytes. It is intentionally private: production
+// test callers must go through RequireSample so a convenient regular file cannot
+// bypass registry/version/arch/symbol-role validation.
+func resolveSamplePath(fileName string) (string, error) {
 	if err := validateSampleName(fileName); err != nil {
 		return "", err
 	}
@@ -462,6 +516,25 @@ func RequireSample(fileName string) (string, error) {
 		return "", fmt.Errorf("samplecorpus: %s is not a regular file", p)
 	}
 	return resolved, nil
+}
+
+// RequireSample resolves and validates one REGISTERED corpus member.
+// ErrNoCorpus means a fresh checkout may skip the whole corpus gate;
+// ErrSampleMissing means a populated corpus is incomplete and must fail;
+// ErrSampleUnregistered means the caller attempted to bypass the registry.
+func RequireSample(fileName string) (string, error) {
+	s, ok := registeredSample(fileName)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrSampleUnregistered, fileName)
+	}
+	p, err := resolveSamplePath(fileName)
+	if err != nil {
+		return "", err
+	}
+	if _, err := ValidateSample(p, s); err != nil {
+		return "", fmt.Errorf("samplecorpus: validate %s: %w", fileName, err)
+	}
+	return p, nil
 }
 
 // ValidateRegistry checks the in-code registry against the independent corpus
@@ -487,13 +560,40 @@ func ValidateRegistry() error {
 			return fmt.Errorf("samplecorpus: corpus_manifest.txt is not sorted")
 		}
 	}
+	hashes, err := expectedSHA256s()
+	if err != nil {
+		return err
+	}
+	if len(hashes) != ExpectedSampleCount {
+		return fmt.Errorf("samplecorpus: sha256 manifest has %d entries, want %d", len(hashes), ExpectedSampleCount)
+	}
+	for name := range manifestSet {
+		if _, ok := hashes[name]; !ok {
+			return fmt.Errorf("samplecorpus: manifest entry %q has no pinned sha256", name)
+		}
+	}
+	for name := range hashes {
+		if _, ok := manifestSet[name]; !ok {
+			return fmt.Errorf("samplecorpus: sha256 entry %q is absent from corpus manifest", name)
+		}
+	}
 
 	supported := make(map[string]struct{})
 	for _, v := range snapshot.SupportedVersions() {
 		supported[v] = struct{}{}
 	}
+	knownSourceSets := map[string]struct{}{
+		comparesample:        {},
+		comparesamplePre214:  {},
+		comparesamplePreNNBD: {},
+	}
 	registrySet := make(map[string]struct{}, len(Registry))
+	byName := make(map[string]Sample, len(Registry))
 	sourceCounts := make(map[string]int)
+	type sourceVariant struct {
+		set, version, suffix string
+	}
+	sourceArches := make(map[sourceVariant]map[string]struct{})
 	for _, s := range Registry {
 		name := s.FileName()
 		if _, dup := registrySet[name]; dup {
@@ -509,8 +609,42 @@ func ValidateRegistry() error {
 		if _, ok := supported[s.DartVersion]; !ok {
 			return fmt.Errorf("samplecorpus: %s uses unsupported Dart version %s", name, s.DartVersion)
 		}
+		if strings.TrimSpace(s.Note) == "" {
+			return fmt.Errorf("samplecorpus: %s has no origin/note", name)
+		}
+		if s.FileSuffix != "" && !strings.HasPrefix(s.FileSuffix, "-") {
+			return fmt.Errorf("samplecorpus: %s has malformed file suffix %q", name, s.FileSuffix)
+		}
 		if s.SourceSet != "" {
-			sourceCounts[s.SourceSet]++
+			if _, ok := knownSourceSets[s.SourceSet]; !ok {
+				return fmt.Errorf("samplecorpus: %s uses unknown source set %q", name, s.SourceSet)
+			}
+		}
+		if s.SymbolOracle {
+			if s.FileSuffix != "-gt" {
+				return fmt.Errorf("samplecorpus: symbol oracle %s must use the -gt suffix", name)
+			}
+			if s.SourceSet == "" {
+				return fmt.Errorf("samplecorpus: symbol oracle %s must identify its source set", name)
+			}
+		} else {
+			if s.FileSuffix == "-gt" {
+				return fmt.Errorf("samplecorpus: %s uses the -gt suffix but is not a symbol oracle", name)
+			}
+			if s.TwinOf != "" {
+				return fmt.Errorf("samplecorpus: non-oracle %s declares TwinOf %q", name, s.TwinOf)
+			}
+		}
+		byName[name] = s
+		if s.SourceSet != "" {
+			if !s.SymbolOracle {
+				sourceCounts[s.SourceSet]++
+				key := sourceVariant{set: s.SourceSet, version: s.DartVersion, suffix: s.FileSuffix}
+				if sourceArches[key] == nil {
+					sourceArches[key] = make(map[string]struct{}, 2)
+				}
+				sourceArches[key][s.Arch] = struct{}{}
+			}
 		}
 	}
 	if len(registrySet) != len(manifestSet) {
@@ -524,6 +658,32 @@ func ValidateRegistry() error {
 	for name, count := range sourceCounts {
 		if count < 2 {
 			return fmt.Errorf("samplecorpus: source set %q has only %d member", name, count)
+		}
+	}
+	for key, arches := range sourceArches {
+		if _, arm64 := arches["arm64"]; !arm64 {
+			return fmt.Errorf("samplecorpus: source set %q Dart %s%s has no arm64 member", key.set, key.version, key.suffix)
+		}
+		if _, x64 := arches["x64"]; !x64 {
+			return fmt.Errorf("samplecorpus: source set %q Dart %s%s has no x64 member", key.set, key.version, key.suffix)
+		}
+	}
+	for _, s := range Registry {
+		if !s.SymbolOracle || s.TwinOf == "" {
+			continue
+		}
+		if s.TwinOf == s.FileName() {
+			return fmt.Errorf("samplecorpus: symbol oracle %s points TwinOf at itself", s.FileName())
+		}
+		twin, ok := byName[s.TwinOf]
+		if !ok {
+			return fmt.Errorf("samplecorpus: symbol oracle %s names missing twin %q", s.FileName(), s.TwinOf)
+		}
+		if twin.SymbolOracle {
+			return fmt.Errorf("samplecorpus: symbol oracle %s points TwinOf at another oracle %s", s.FileName(), s.TwinOf)
+		}
+		if twin.DartVersion != s.DartVersion || twin.Arch != s.Arch || twin.SourceSet != s.SourceSet {
+			return fmt.Errorf("samplecorpus: symbol oracle %s is not source/version/arch-identical to declared twin %s", s.FileName(), s.TwinOf)
 		}
 	}
 	return nil
@@ -577,8 +737,9 @@ func RequireCompleteCorpus() error {
 	return nil
 }
 
-// ValidateSample checks both architecture and snapshot-version identity against
-// the registry metadata. Callers may use the returned snapshot info directly.
+// ValidateSample checks exact SHA-256, architecture, snapshot-version and symbol
+// role against the independent corpus contract + registry metadata. Callers may
+// use the returned snapshot info directly.
 func ValidateSample(path string, s Sample) (*snapshot.Info, error) {
 	ef, err := elfx.Open(path)
 	if err != nil {
@@ -594,6 +755,21 @@ func ValidateSample(path string, s Sample) (*snapshot.Info, error) {
 	if ef.Machine() != wantMachine {
 		return nil, fmt.Errorf("samplecorpus: %s claims %s but ELF machine is %s", s.FileName(), s.Arch, ef.Machine())
 	}
+	hashes, err := expectedSHA256s()
+	if err != nil {
+		return nil, err
+	}
+	wantHash, ok := hashes[s.FileName()]
+	if !ok {
+		return nil, fmt.Errorf("samplecorpus: %s has no pinned sha256", s.FileName())
+	}
+	gotHash, err := ef.SHA256()
+	if err != nil {
+		return nil, fmt.Errorf("samplecorpus: sha256 %s: %w", s.FileName(), err)
+	}
+	if gotHash != wantHash {
+		return nil, fmt.Errorf("samplecorpus: %s sha256 = %s, want %s; exact corpus binary drifted", s.FileName(), gotHash, wantHash)
+	}
 	info, err := snapshot.Extract(ef, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
 		return nil, err
@@ -604,6 +780,17 @@ func ValidateSample(path string, s Sample) (*snapshot.Info, error) {
 	}
 	if got != s.DartVersion {
 		return nil, errors.New(VersionMismatch(s, got))
+	}
+	syms, err := ef.FuncSymbols()
+	if err != nil {
+		return nil, fmt.Errorf("samplecorpus: inspect .symtab for %s: %w", s.FileName(), err)
+	}
+	if s.SymbolOracle {
+		if len(syms) == 0 {
+			return nil, fmt.Errorf("samplecorpus: %s is registered as a symbol oracle but has no defined function symbols", s.FileName())
+		}
+	} else if len(syms) != 0 {
+		return nil, fmt.Errorf("samplecorpus: %s is an analysis sample but carries %d defined .symtab function symbols; use the stripped_native_libs build", s.FileName(), len(syms))
 	}
 	return info, nil
 }

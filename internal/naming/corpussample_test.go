@@ -13,14 +13,14 @@ import (
 // skipped when unset, which meant they never ran -- the same silent-skip
 // problem the analysis package had.
 const (
-	sampleARM64Name   = "dart-3.9.2-gt-arm64.so"
+	sampleARM64Name   = "dart-3.9.2-arm64.so"
 	sample312X64Name  = "dart-3.12.2-x64.so"
 	sampleDart212Name = "dart-2.12.0-arm64.so"
 )
 
 // corpusSample resolves a sample by file name. No samples/ directory at
 // all (fresh clone, CI) skips; a corpus that has one but not this sample
-// fails. See samplecorpus.Available for why those are different.
+// fails. RequireSample/CorpusRoot deliberately preserve that distinction.
 func corpusSample(t *testing.T, name string) string {
 	t.Helper()
 	p, err := samplecorpus.RequireSample(name)

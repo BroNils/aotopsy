@@ -1,6 +1,6 @@
 {
   "sample": "dart-3.12.2-arm64.so",
-  "input_sha256": "6641603a5f3d233883e59e525e2727b15f75237fa67d4a88c23890a73ff09ff2",
+  "input_sha256": "d581eb45dfbc11fc25c88ef60982d56da5de04f1e1e7f1db12f70b478d2bccd9",
   "dart_version": "3.12.2",
   "unified_snapshot": false,
   "vm_clusters": 6,

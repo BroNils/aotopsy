@@ -23,7 +23,7 @@ import (
 // still a test failure rather than an OOM.
 const perFunctionSourceCeiling = 2 << 20
 
-// TestFullCorpusSweep decompiles EVERY function of EVERY sample.
+// TestFullCorpusSweep decompiles EVERY function of EVERY analysis sample.
 //
 // It exists because of what the 400-function cap hid. Every other decompiler
 // check in this project -- the fidelity census, the golden record, the quality
@@ -39,8 +39,9 @@ const perFunctionSourceCeiling = 2 << 20
 //
 // None of the three is exotic. All three sat in functions numbered past 400.
 //
-// Opt-in because it is slow (the corpus is 93 binaries and some hold ~38 000
-// functions):
+// Opt-in because it is slow (the registry contains 55 analysis binaries, plus
+// symbol-oracle fixtures that are deliberately not duplicated here, and some
+// analysis samples hold ~38 000 functions):
 //
 //	AOTOPSY_SWEEP=1 go test ./internal/analysis/ -run TestFullCorpusSweep -v -timeout 180m
 //
@@ -63,6 +64,9 @@ func TestFullCorpusSweep(t *testing.T) {
 	start := time.Now()
 
 	for _, s := range samplecorpus.Registry {
+		if s.SymbolOracle {
+			continue
+		}
 		name := s.FileName()
 		if filter != "" && !strings.Contains(name, filter) {
 			continue
@@ -137,7 +141,10 @@ func TestFullCorpusSweep(t *testing.T) {
 	}
 
 	if totalSamples == 0 {
-		t.Skip("no samples/ directory in this checkout")
+		if filter != "" {
+			t.Fatalf("AOTOPSY_SWEEP_SAMPLE=%q matched no registered analysis sample", filter)
+		}
+		t.Fatal("complete corpus contains no analysis samples")
 	}
 	sort.Slice(biggest, func(i, j int) bool { return biggest[i].bytes > biggest[j].bytes })
 	var b strings.Builder

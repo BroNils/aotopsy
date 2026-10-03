@@ -28,6 +28,12 @@ import (
 // claims, which pins the same mapping and cannot rot into a magic number.
 func eachSample(t *testing.T, fn func(t *testing.T, s samplecorpus.Sample, info *snapshot.Info)) {
 	t.Helper()
+	if err := samplecorpus.RequireCompleteCorpus(); err != nil {
+		if errors.Is(err, samplecorpus.ErrNoCorpus) {
+			t.Skip("no samples/ directory in this checkout")
+		}
+		t.Fatalf("sample corpus is incomplete or inconsistent: %v", err)
+	}
 	for _, entry := range samplecorpus.Registry {
 		entry := entry
 		t.Run(entry.FileName(), func(t *testing.T) {
@@ -37,9 +43,6 @@ func eachSample(t *testing.T, fn func(t *testing.T, s samplecorpus.Sample, info 
 			}
 			if err != nil {
 				t.Fatalf("resolve sample: %v", err)
-			}
-			if entry.ProfileIncomplete != "" {
-				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
 			}
 			ef, err := elfx.Open(path)
 			if err != nil {

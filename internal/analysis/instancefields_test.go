@@ -54,8 +54,8 @@ func TestInstanceFieldOffsets_ConfigData(t *testing.T) {
 		}
 	}
 	if configCID < 0 {
-		t.Skip("ConfigData not in this sample (stale binary? see AGENTS.md " +
-			"-- the extracted_* libapp.so files predate ground_truth.dart)")
+		t.Fatal("ConfigData not found in canonical compare_sample corpus binary; " +
+			"this usually means stale source/binary identity or failed class-name recovery")
 	}
 
 	var insts []cluster.InstanceInfo
@@ -138,7 +138,7 @@ func TestInstanceFieldRefsNeverExceedSlots(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			res := clusterOnly(t, libPath)
 			if len(res.Instances) == 0 {
-				t.Skip("no instances captured")
+				t.Fatal("canonical corpus sample produced zero captured instances")
 			}
 			wordSizes := map[int]bool{4: true, 8: true}
 			for _, ii := range res.Instances {
