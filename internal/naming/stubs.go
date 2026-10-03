@@ -195,22 +195,9 @@ func BuildDiscardedFunctionSymbols(named []cluster.NamedObject, ct *snapshot.CID
 		if idx < 0 || idx >= firstEntryWithCode || idx >= len(table.Entries) {
 			continue // not a discarded entry (or out of range) -- already handled by the normal Code cluster path
 		}
-		name := pl.resolveIsolateName(no)
+		name := pl.functionDisplayName(no)
 		if name == "" {
 			continue
-		}
-		// X-4: Prefix constructors with "new ", mirroring BuildPoolLookups'
-		// handling of non-discarded Codes (helpers.go). Without this, a
-		// discarded constructor's instructions render as "MyClass.myMethod"
-		// instead of "new MyClass.myMethod", making it indistinguishable from
-		// an ordinary method — the exact gap measured in the session handoff:
-		// 520 Function objects have kind=constructor, but only 306 own a Code
-		// directly (handled by BuildPoolLookups); the remaining 214 have
-		// discarded Code and were named here without the "new " prefix.
-		if no.IsConstructor() && name != "" {
-			name = "new " + name
-		} else if owner := pl.ResolveOwnerName(no); owner != "" {
-			name = owner + "." + name
 		}
 		funcVA, ok := cluster.CodeImage{CodeVA: codeVA, CodeOff: codeOff}.VAAt(table.Entries[idx].PCOffset)
 		if !ok {
@@ -297,7 +284,7 @@ func buildTypeNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTabl
 		if !ok {
 			continue
 		}
-		name := l.resolveIsolateName(no)
+		name := l.ResolveIsolateName(no)
 		if name != "" {
 			classNames[ci.ClassID] = name
 		}

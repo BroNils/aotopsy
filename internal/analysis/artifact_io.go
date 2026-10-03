@@ -1,8 +1,6 @@
 package analysis
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +8,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 	"aotopsy/internal/strutil"
 )
 
@@ -45,24 +44,7 @@ func readFileBounded(path string, limit int64) ([]byte, error) {
 }
 
 func readJSONBounded[T any](path string, limit int64) (T, error) {
-	var out T
-	b, err := readFileBounded(path, limit)
-	if err != nil {
-		return out, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&out); err != nil {
-		return out, fmt.Errorf("decode %s: %w", path, err)
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return out, fmt.Errorf("decode %s: multiple JSON values", path)
-		}
-		return out, fmt.Errorf("decode trailing data in %s: %w", path, err)
-	}
-	return out, nil
+	return jsonutil.ReadJSONFile[T](path, limit)
 }
 
 // DisasmArtifactFiles binds functions.jsonl to index.jsonl by the producer-owned

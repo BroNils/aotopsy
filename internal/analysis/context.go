@@ -386,19 +386,7 @@ func (c *AnalysisContext) ensureDecompileMaps() error {
 		}
 		names := make([]string, len(arr.ElementRefIDs))
 		for i, fnRef := range arr.ElementRefIDs {
-			if no, ok := pl.RefToNamed[fnRef]; ok {
-				owner := pl.ResolveOwnerName(no)
-				name := pl.ResolveName(no)
-				if name == "" {
-					name = pl.ResolveVMName(no)
-				}
-				switch {
-				case owner != "" && name != "":
-					names[i] = owner + "." + name
-				case name != "":
-					names[i] = name
-				}
-			}
+			names[i] = pl.FunctionDisplayName(fnRef)
 		}
 		c.Enrichment.InlinedFuncNamesByCodeRef[ce.RefID] = names
 	}
@@ -926,6 +914,15 @@ func (c *AnalysisContext) FindStringRefs(substr string) []int {
 		}
 	}
 	for refID, s := range c.Pool.VmRefToStr {
+		// Only the VM base-object prefix is addressable from the app snapshot's
+		// ref namespace. A numerically-equal VM string above that prefix is an
+		// unrelated object and must not be turned into an app pool xref.
+		if refID <= cluster.RefNull || refID >= c.Pool.BaseObjLimit {
+			continue
+		}
+		if _, appOwnsRef := c.Pool.RefToStr[refID]; appOwnsRef {
+			continue
+		}
 		if strings.Contains(strings.ToLower(s), needle) {
 			refs = append(refs, refID)
 		}

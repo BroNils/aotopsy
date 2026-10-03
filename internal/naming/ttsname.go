@@ -6,6 +6,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
 // ttsNameContext contains the snapshot facts needed to reproduce a
@@ -21,22 +22,29 @@ type ttsNameContext struct {
 	// C1X0 spelling is an identity, not a declared identifier) and a legacy
 	// nullability marker is dropped (`String*` is not Dart syntax; a legacy
 	// library simply writes `String`).
-	forSource      bool
-	classNames     map[int32]string
-	typeByRef      map[int]*cluster.TypeInfo
-	typeArgsByRef  map[int]*cluster.TypeArgumentsInfo
-	ownParamsByCID map[int32]int
+	forSource            bool
+	classNames           map[int32]string
+	typeByRef            map[int]*cluster.TypeInfo
+	recordTypeByRef      map[int]*cluster.RecordTypeInfo
+	typeArgsByRef        map[int]*cluster.TypeArgumentsInfo
+	arrayByRef           map[int]*cluster.ArrayInfo
+	mintValues           map[int]int64
+	recordFieldNamesRoot int
+	ownParamsByCID       map[int32]int
 }
 
 func newTTSNameContext(result *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, dartVersion string) *ttsNameContext {
 	c := &ttsNameContext{
-		pl:             pl,
-		ct:             ct,
-		dartVersion:    dartVersion,
-		classNames:     make(map[int32]string, len(result.Classes)),
-		typeByRef:      make(map[int]*cluster.TypeInfo, len(result.Types)),
-		typeArgsByRef:  make(map[int]*cluster.TypeArgumentsInfo, len(result.TypeArguments)),
-		ownParamsByCID: make(map[int32]int, len(result.Classes)),
+		pl:              pl,
+		ct:              ct,
+		dartVersion:     dartVersion,
+		classNames:      make(map[int32]string, len(result.Classes)),
+		typeByRef:       make(map[int]*cluster.TypeInfo, len(result.Types)),
+		recordTypeByRef: make(map[int]*cluster.RecordTypeInfo, len(result.RecordTypes)),
+		typeArgsByRef:   make(map[int]*cluster.TypeArgumentsInfo, len(result.TypeArguments)),
+		arrayByRef:      make(map[int]*cluster.ArrayInfo, len(result.Arrays)),
+		mintValues:      result.MintValues,
+		ownParamsByCID:  make(map[int32]int, len(result.Classes)),
 	}
 	for i := range result.Types {
 		t := &result.Types[i]
@@ -46,21 +54,27 @@ func newTTSNameContext(result *cluster.Result, pl *PoolLookups, ct *snapshot.CID
 		ta := &result.TypeArguments[i]
 		c.typeArgsByRef[ta.RefID] = ta
 	}
+	for i := range result.RecordTypes {
+		rt := &result.RecordTypes[i]
+		c.recordTypeByRef[rt.RefID] = rt
+	}
 	tpByRef := make(map[int]*cluster.TypeParametersInfo, len(result.TypeParameters))
 	for i := range result.TypeParameters {
 		tp := &result.TypeParameters[i]
 		tpByRef[tp.RefID] = tp
 	}
-	arrayByRef := make(map[int]*cluster.ArrayInfo, len(result.Arrays))
 	for i := range result.Arrays {
 		a := &result.Arrays[i]
-		arrayByRef[a.RefID] = a
+		c.arrayByRef[a.RefID] = a
+	}
+	if idx, ok := vmtables.ObjectStoreRecordFieldNamesIndex(dartVersion); ok && idx >= 0 && idx < len(result.ObjectStoreRefs) {
+		c.recordFieldNamesRoot = result.ObjectStoreRefs[idx]
 	}
 	for i := range result.Classes {
 		ci := &result.Classes[i]
 		if pl != nil {
 			if no, ok := pl.RefToNamed[ci.RefID]; ok {
-				name := ScrubDartPrivateKeys(pl.resolveIsolateName(no))
+				name := ScrubDartPrivateKeys(pl.ResolveIsolateName(no))
 				if name != "" {
 					c.classNames[ci.ClassID] = name
 				}
@@ -78,7 +92,7 @@ func newTTSNameContext(result *cluster.Result, pl *PoolLookups, ct *snapshot.CID
 			c.ownParamsByCID[ci.ClassID] = 0
 		case ref > cluster.RefNull:
 			if tp, ok := tpByRef[ref]; ok {
-				if names, ok := arrayByRef[tp.NamesArrayRef]; ok {
+				if names, ok := c.arrayByRef[tp.NamesArrayRef]; ok {
 					c.ownParamsByCID[ci.ClassID] = len(names.ElementRefIDs)
 				}
 			} else if ta, ok := c.typeArgsByRef[ref]; ok {
@@ -160,7 +174,7 @@ func (c *ttsNameContext) typeParameterTTSName(no *cluster.NamedObject) (string, 
 	if c.pl == nil || no == nil || no.NameRefID <= cluster.RefNull {
 		return "", false
 	}
-	name := c.pl.resolveIsolateName(no)
+	name := c.pl.ResolveIsolateName(no)
 	return name, name != ""
 }
 
@@ -246,6 +260,9 @@ func (c *ttsNameContext) readableRef(ref int, path map[int]bool) (string, bool) 
 	if t, ok := c.typeByRef[ref]; ok {
 		return c.readableType(t, path)
 	}
+	if rt, ok := c.recordTypeByRef[ref]; ok {
+		return c.readableRecordType(rt, path)
+	}
 	if no, ok := c.typeParameterForRef(ref); ok {
 		if c.forSource {
 			return "", false
@@ -263,6 +280,96 @@ func (c *ttsNameContext) readableRef(ref int, path map[int]bool) (string, bool) 
 	// dynamic and void are VM-isolate base objects on the versions where they
 	// can appear here, so they have no TypeInfo in the app snapshot.
 	return singletonTypeName(snapshot.BaseObjectName(c.dartVersion, ref))
+}
+
+// recordComponents resolves the two pieces encoded by RecordShape: the exact
+// field type refs and the ordered named-field strings. SDK 3.0+ reserves shape
+// index 0 for records without named fields; non-zero indices address
+// ObjectStore.record_field_names, whose serialized root index is generated
+// from the exact SDK ObjectStore field list.
+func (c *ttsNameContext) recordComponents(rt *cluster.RecordTypeInfo) ([]int, []string, bool) {
+	if c == nil || rt == nil || rt.ShapeRef <= cluster.RefNull || rt.FieldTypesArrayRef <= cluster.RefNull {
+		return nil, nil, false
+	}
+	shape, ok := c.mintValues[rt.ShapeRef]
+	if !ok || shape < 0 {
+		return nil, nil, false
+	}
+	numFields := int(uint64(shape) & 0xffff)
+	fieldNamesIndex := int(uint64(shape) >> 16)
+	fields, ok := c.arrayByRef[rt.FieldTypesArrayRef]
+	if !ok || fields == nil || len(fields.ElementRefIDs) != numFields {
+		return nil, nil, false
+	}
+	types := append([]int(nil), fields.ElementRefIDs...)
+	if fieldNamesIndex == 0 {
+		return types, nil, true
+	}
+	if c.recordFieldNamesRoot <= cluster.RefNull {
+		return nil, nil, false
+	}
+	table, ok := c.arrayByRef[c.recordFieldNamesRoot]
+	if !ok || table == nil || fieldNamesIndex >= len(table.ElementRefIDs) {
+		return nil, nil, false
+	}
+	nameArrayRef := table.ElementRefIDs[fieldNamesIndex]
+	nameArray, ok := c.arrayByRef[nameArrayRef]
+	if !ok || nameArray == nil || len(nameArray.ElementRefIDs) > numFields {
+		return nil, nil, false
+	}
+	names := make([]string, 0, len(nameArray.ElementRefIDs))
+	for _, ref := range nameArray.ElementRefIDs {
+		name, ok := c.pl.StringForRef(ref)
+		if !ok || name == "" {
+			return nil, nil, false
+		}
+		names = append(names, name)
+	}
+	return types, names, true
+}
+
+func (c *ttsNameContext) readableRecordType(rt *cluster.RecordTypeInfo, path map[int]bool) (string, bool) {
+	if rt == nil || path[rt.RefID] {
+		return "", false
+	}
+	path[rt.RefID] = true
+	defer delete(path, rt.RefID)
+	fieldRefs, fieldNames, ok := c.recordComponents(rt)
+	if !ok {
+		return "", false
+	}
+	positional := len(fieldRefs) - len(fieldNames)
+	if positional < 0 {
+		return "", false
+	}
+	pos := make([]string, 0, positional)
+	named := make([]string, 0, len(fieldNames))
+	for i, ref := range fieldRefs {
+		name, ok := c.readableRef(ref, path)
+		if !ok {
+			return "", false
+		}
+		if i < positional {
+			pos = append(pos, name)
+			continue
+		}
+		named = append(named, name+" "+fieldNames[i-positional])
+	}
+	var body string
+	switch {
+	case len(named) == 0:
+		body = strings.Join(pos, ", ")
+	case len(pos) == 0:
+		body = "{" + strings.Join(named, ", ") + "}"
+	default:
+		body = strings.Join(pos, ", ") + ", {" + strings.Join(named, ", ") + "}"
+	}
+	name := "(" + body + ")"
+	suffix, ok := c.nullabilitySuffix(rt.Nullability, name)
+	if !ok {
+		return "", false
+	}
+	return name + suffix, true
 }
 
 // singletonTypeName maps the VM-isolate base-object labels of the two singleton
@@ -314,7 +421,7 @@ func (c *ttsNameContext) readableType(t *cluster.TypeInfo, path map[int]bool) (s
 // Map<String, Foo>?). It is exact-or-absent like the stub identities, but a type
 // that mentions a type parameter is absent: a signature cannot name X0.
 func buildExactSourceTypeNames(result *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	if result == nil || len(result.Types) == 0 {
+	if result == nil || (len(result.Types) == 0 && len(result.RecordTypes) == 0) {
 		return nil
 	}
 	c := newTTSNameContext(result, pl, ct, dartVersion)
@@ -326,6 +433,12 @@ func buildExactSourceTypeNames(result *cluster.Result, pl *PoolLookups, ct *snap
 			out[t.RefID] = name
 		}
 	}
+	for i := range result.RecordTypes {
+		rt := &result.RecordTypes[i]
+		if name, ok := c.readableRecordType(rt, make(map[int]bool)); ok {
+			out[rt.RefID] = name
+		}
+	}
 	if len(out) == 0 {
 		return nil
 	}
@@ -333,7 +446,7 @@ func buildExactSourceTypeNames(result *cluster.Result, pl *PoolLookups, ct *snap
 }
 
 func buildExactTypeTestingStubNames(result *cluster.Result, pl *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	if result == nil || len(result.Types) == 0 {
+	if result == nil || (len(result.Types) == 0 && len(result.RecordTypes) == 0) {
 		return nil
 	}
 	c := newTTSNameContext(result, pl, ct, dartVersion)
@@ -342,6 +455,12 @@ func buildExactTypeTestingStubNames(result *cluster.Result, pl *PoolLookups, ct 
 		t := &result.Types[i]
 		if name, ok := c.readableType(t, make(map[int]bool)); ok {
 			out[t.RefID] = "TypeTestingStub_" + name
+		}
+	}
+	for i := range result.RecordTypes {
+		rt := &result.RecordTypes[i]
+		if name, ok := c.readableRecordType(rt, make(map[int]bool)); ok {
+			out[rt.RefID] = "TypeTestingStub_" + name
 		}
 	}
 	if len(out) == 0 {

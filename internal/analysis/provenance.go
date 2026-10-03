@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -32,7 +33,7 @@ type Provenance struct {
 	SHA256             string    `json:"sha256"`
 	Size               int64     `json:"size"`
 	Arch               string    `json:"arch"`
-	DartVersion        string    `json:"dart_version,omitempty"`
+	DartVersion        string    `json:"dart_version"`
 	CompressedPointers bool      `json:"compressed_pointers"`
 	Build              BuildMode `json:"build"`
 }
@@ -127,8 +128,12 @@ func ReadProvenance(dir string) (p Provenance, ok bool, err error) {
 	if err != nil {
 		return Provenance{}, false, err
 	}
-	if p.SourceName == "" {
-		return Provenance{}, false, fmt.Errorf("%s: missing source_name", ProvenanceFileName)
+	if p.Source == "" || !filepath.IsAbs(p.Source) || p.SourceName == "" || p.Size <= 0 ||
+		(p.Arch != "arm64" && p.Arch != "x64") || p.DartVersion == "" || len(p.SHA256) != 64 {
+		return Provenance{}, false, fmt.Errorf("%s: incomplete provenance identity", ProvenanceFileName)
+	}
+	if _, err := hex.DecodeString(p.SHA256); err != nil {
+		return Provenance{}, false, fmt.Errorf("%s: invalid sha256: %w", ProvenanceFileName, err)
 	}
 	return p, true, nil
 }

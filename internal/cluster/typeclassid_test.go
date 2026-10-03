@@ -217,6 +217,26 @@ func TestReadTypeParameterScalarVersionedLayouts(t *testing.T) {
 	})
 }
 
+func TestTypeParameterSerializedNameBoundary(t *testing.T) {
+	legacy := snapshot.ProfileForVersion("2.13.0")
+	if legacy == nil || legacy.CIDs == nil {
+		t.Fatal("missing Dart 2.13.0 profile")
+	}
+	legacySpec := GetFillSpec(legacy.CIDs.TypeParameter, &ClusterMeta{CID: legacy.CIDs.TypeParameter}, legacy)
+	if legacySpec.NumRefs != 5 || legacySpec.NameIdx != 1 {
+		t.Fatalf("2.13 TypeParameter spec = refs=%d nameIdx=%d, want 5/1", legacySpec.NumRefs, legacySpec.NameIdx)
+	}
+
+	modern := snapshot.ProfileForVersion("2.14.0")
+	if modern == nil || modern.CIDs == nil {
+		t.Fatal("missing Dart 2.14.0 profile")
+	}
+	modernSpec := GetFillSpec(modern.CIDs.TypeParameter, &ClusterMeta{CID: modern.CIDs.TypeParameter}, modern)
+	if modernSpec.NumRefs != 3 || modernSpec.NameIdx != -1 {
+		t.Fatalf("2.14 TypeParameter spec = refs=%d nameIdx=%d, want 3/-1", modernSpec.NumRefs, modernSpec.NameIdx)
+	}
+}
+
 // TestSpecTypeCapturesEveryEra pins which layouts produce a capturable
 // TypeInfo. Result.Types being empty is not a loud failure -- it makes every
 // declared field type unresolvable and leaves the analyser quietly weaker --

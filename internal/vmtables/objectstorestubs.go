@@ -1521,3 +1521,23 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 		{234, "slow_tts_stub"},
 	},
 }
+
+// objectStoreRecordFieldNamesIndex is the serialized ObjectStore root
+// containing RecordShape's field-name arrays. Absent means the field is
+// outside the Full-AOT root range or does not exist in that SDK.
+var objectStoreRecordFieldNamesIndex = map[string]int{
+	"3.0.5": 127,
+	"3.1.0": 127,
+	"3.10.7": 132,
+	"3.11.0": 133,
+	"3.12.2": 134,
+	"3.13.0": 136,
+	"3.2.5": 128,
+	"3.3.0": 129,
+	"3.4.3": 127,
+	"3.5.0": 122,
+	"3.6.2": 126,
+	"3.7.0": 126,
+	"3.8.1": 126,
+	"3.9.2": 126,
+}

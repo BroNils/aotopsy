@@ -1,8 +1,6 @@
 package analysis
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/hex"
@@ -127,7 +125,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: functions: %w", err)
 	}
-	funcs, err := decodeFridaJSONLBytes[disasm.FuncRecord](funcBytes)
+	funcs, err := jsonutil.DecodeJSONL[disasm.FuncRecord](funcBytes, jsonutil.StandardLimits)
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: functions: %w", err)
 	}
@@ -142,7 +140,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: call edges: %w", err)
 	}
-	edges, err := decodeFridaJSONLBytes[disasm.CallEdgeRecord](edgeBytes)
+	edges, err := jsonutil.DecodeJSONL[disasm.CallEdgeRecord](edgeBytes, jsonutil.StandardLimits)
 	if err != nil {
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: call edges: %w", err)
 	}
@@ -172,7 +170,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 	}
 	var dispatch []fridaDispatchRecord
 	if dispatchDigest.Present {
-		dispatch, err = decodeFridaJSONLBytes[fridaDispatchRecord](dispatchBytes)
+		dispatch, err = jsonutil.DecodeJSONL[fridaDispatchRecord](dispatchBytes, jsonutil.StandardLimits)
 		if err != nil {
 			return frida.FridaMetadata{}, fmt.Errorf("frida metadata: dispatch table: %w", err)
 		}
@@ -189,7 +187,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 	}
 	var refs []disasm.StringRefRecord
 	if refDigest.Present {
-		refs, err = decodeFridaJSONLBytes[disasm.StringRefRecord](refBytes)
+		refs, err = jsonutil.DecodeJSONL[disasm.StringRefRecord](refBytes, jsonutil.StandardLimits)
 		if err != nil {
 			return frida.FridaMetadata{}, fmt.Errorf("frida metadata: string refs: %w", err)
 		}
@@ -205,7 +203,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: evidence: %w", err)
 	}
 	if evidenceDigest.Present {
-		records, err := decodeFridaJSONLBytes[evidence.Evidence](evidenceBytes)
+		records, err := jsonutil.DecodeJSONL[evidence.Evidence](evidenceBytes, jsonutil.StandardLimits)
 		if err != nil {
 			return frida.FridaMetadata{}, fmt.Errorf("frida metadata: evidence: %w", err)
 		}
@@ -341,38 +339,4 @@ func readFridaGenerationArtifact(path, name string, limit int64, required bool) 
 		return nil, frida.ArtifactDigest{}, fmt.Errorf("%s exceeds byte limit %d", path, limit)
 	}
 	return b, frida.DigestArtifact(name, b, true), nil
-}
-
-func decodeFridaJSONLBytes[T any](b []byte) ([]T, error) {
-	limits := jsonutil.StandardLimits
-	if int64(len(b)) > limits.MaxBytes {
-		return nil, fmt.Errorf("input is %d bytes, exceeds limit %d", len(b), limits.MaxBytes)
-	}
-	s := bufio.NewScanner(bytes.NewReader(b))
-	initial := 64 << 10
-	if limits.MaxRecordBytes < initial {
-		initial = limits.MaxRecordBytes
-	}
-	s.Buffer(make([]byte, initial), limits.MaxRecordBytes+1)
-	var out []T
-	lineNo := 0
-	for s.Scan() {
-		lineNo++
-		line := append([]byte(nil), s.Bytes()...)
-		if len(bytes.TrimSpace(line)) == 0 {
-			return nil, fmt.Errorf("blank record at line %d", lineNo)
-		}
-		if len(out) >= limits.MaxRecords {
-			return nil, fmt.Errorf("record limit %d exceeded at line %d", limits.MaxRecords, lineNo)
-		}
-		rec, err := jsonutil.DecodeStrictObject[T](line)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		out = append(out, rec)
-	}
-	if err := s.Err(); err != nil {
-		return nil, fmt.Errorf("read line %d: %w", lineNo+1, err)
-	}
-	return out, nil
 }

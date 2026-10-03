@@ -74,15 +74,10 @@ func writeXrefJSONL(outDir string, clResult *cluster.Result, pl *naming.PoolLook
 				continue
 			}
 			if pl.CT != nil {
-				cid, ok := pl.RefCID[pe.RefID]
-				if !ok {
-					cid, ok = pl.VmRefCID[pe.RefID]
-				}
+				cid, ok := pl.CIDForRef(pe.RefID)
 				isString := ok && (cid == pl.CT.String || cid == pl.CT.OneByteString || cid == pl.CT.TwoByteString)
 				if isString {
-					if s, ok := pl.RefToStr[pe.RefID]; ok {
-						poolStrings[pe.Index] = s
-					} else if s, ok := pl.VmRefToStr[pe.RefID]; ok {
+					if s, ok := pl.StringForRef(pe.RefID); ok {
 						poolStrings[pe.Index] = s
 					}
 				}

@@ -55,15 +55,21 @@ import (
 // includes every required generic argument and library prefix; classes whose
 // SDK name would depend on the runtime `nolib<n>` nonce are omitted.
 func buildTypeTestingStubSDKNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	if len(result.Types) == 0 {
+	if len(result.Types) == 0 && len(result.RecordTypes) == 0 {
 		return nil
 	}
 	b := newTTSSDKBuilder(result, l, ct, dartVersion)
-	out := make(map[int]string, len(result.Types))
+	out := make(map[int]string, len(result.Types)+len(result.RecordTypes))
 	for i := range result.Types {
 		t := &result.Types[i]
 		if s := b.stringifyType(t, make(map[int]bool)); s != "" {
 			out[t.RefID] = "TypeTestingStub_" + s
+		}
+	}
+	for i := range result.RecordTypes {
+		rt := &result.RecordTypes[i]
+		if s := b.stringifyRecordType(rt, make(map[int]bool)); s != "" {
+			out[rt.RefID] = "TypeTestingStub_" + s
 		}
 	}
 	return out
@@ -82,11 +88,8 @@ func newTTSSDKBuilder(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTa
 	for i := range result.Classes {
 		ci := &result.Classes[i]
 		if ci.LibraryRefID >= 0 {
-			if lo, ok := l.RefToNamed[ci.LibraryRefID]; ok {
-				url := l.resolveIsolateName(lo)
-				if url != "" {
-					b.libURLs[ci.ClassID] = url
-				}
+			if url := l.ResolveObjectName(ci.LibraryRefID); url != "" {
+				b.libURLs[ci.ClassID] = url
 			}
 		}
 	}
@@ -136,6 +139,9 @@ func (b *ttsSDKBuilder) stringifyRef(ref int, path map[int]bool) string {
 	if t, ok := b.names.typeByRef[ref]; ok {
 		return b.stringifyType(t, path)
 	}
+	if rt, ok := b.names.recordTypeByRef[ref]; ok {
+		return b.stringifyRecordType(rt, path)
+	}
 	if no, ok := b.names.typeParameterForRef(ref); ok {
 		if name, ok := b.names.typeParameterTTSName(no); ok {
 			// TypeTestingStubNamer uses the TypeParameter's source name through
@@ -145,6 +151,37 @@ func (b *ttsSDKBuilder) stringifyRef(ref int, path map[int]bool) string {
 		}
 	}
 	return ""
+}
+
+// stringifyRecordType mirrors the RecordType branch in
+// TypeTestingStubNamer::StringifyTypeTo (Dart 3.0+): "Record", then one
+// "__<field-type>" per field and "_<field-name>" on named fields.
+func (b *ttsSDKBuilder) stringifyRecordType(rt *cluster.RecordTypeInfo, path map[int]bool) string {
+	if rt == nil || path[rt.RefID] {
+		return ""
+	}
+	path[rt.RefID] = true
+	defer delete(path, rt.RefID)
+	fieldRefs, fieldNames, ok := b.names.recordComponents(rt)
+	if !ok {
+		return ""
+	}
+	positional := len(fieldRefs) - len(fieldNames)
+	if positional < 0 {
+		return ""
+	}
+	s := "Record"
+	for i, ref := range fieldRefs {
+		field := b.stringifyRef(ref, path)
+		if field == "" {
+			return ""
+		}
+		s += "__" + field
+		if i >= positional {
+			s += "_" + assemblerSafeName(fieldNames[i-positional])
+		}
+	}
+	return assemblerSafeName(s)
 }
 
 // assemblerSafeName is TypeTestingStubNamer::AssemblerSafeName: every byte

@@ -114,14 +114,7 @@ func BuildDecompileNativeDeps(libapp string) (*DecompileNativeDeps, error) {
 		if !ok || classInfo.LibraryRefID < 0 {
 			return ""
 		}
-		libObj, ok := pl.RefToNamed[classInfo.LibraryRefID]
-		if !ok {
-			return ""
-		}
-		if url := pl.ResolveName(libObj); url != "" {
-			return url
-		}
-		return pl.ResolveVMName(libObj)
+		return pl.ResolveObjectName(classInfo.LibraryRefID)
 	}
 	libraryURLForCodeRef := func(codeRef int) string {
 		funcRef, ok := codeOwnerFunc[codeRef]

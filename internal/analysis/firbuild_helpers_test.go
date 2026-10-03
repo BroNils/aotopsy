@@ -104,6 +104,38 @@ func TestBuildClassLayoutsExcludesCompressedObjectHeader(t *testing.T) {
 	}
 }
 
+func TestNamingConsumersUseGuardedVMBaseStrings(t *testing.T) {
+	ct := &snapshot.CIDTable{OneByteString: 70}
+	pl := &naming.PoolLookups{
+		CT:           ct,
+		RefToStr:     map[int]string{},
+		VmRefToStr:   map[int]string{7: "Widget", 8: "package:app/widget.dart", 99: "WrongHighName"},
+		VmRefCID:     map[int]int{7: ct.OneByteString, 8: ct.OneByteString, 99: ct.OneByteString},
+		BaseObjLimit: 50,
+	}
+
+	result := &cluster.Result{
+		Classes: []cluster.ClassInfo{
+			{RefID: 10, NameRefID: 7, ClassID: 42, InstanceSize: 4, NextFieldOff: 4, TypeArgsOff: cluster.NoTypeArguments},
+			{RefID: 11, NameRefID: 99, ClassID: 43, InstanceSize: 4, NextFieldOff: 4, TypeArgsOff: cluster.NoTypeArguments},
+		},
+		Scripts: []cluster.ScriptInfo{
+			{RefID: 20, URLRef: 8},
+			{RefID: 21, URLRef: 99},
+		},
+	}
+
+	layouts := BuildClassLayouts(result, pl, true)
+	if len(layouts) != 1 || layouts[0].ClassName != "Widget" {
+		t.Fatalf("class layouts from VM-base names = %+v, want only Widget", layouts)
+	}
+
+	scripts := BuildScripts(result, pl)
+	if len(scripts) != 2 || scripts[0].URL != "package:app/widget.dart" || scripts[1].URL != "" {
+		t.Fatalf("script URL guarded VM fallback = %+v", scripts)
+	}
+}
+
 func TestBuildFieldTypeByClassOffsetResolvesHostOffsetReference(t *testing.T) {
 	result := &cluster.Result{
 		Classes: []cluster.ClassInfo{{RefID: 10, ClassID: 42}},

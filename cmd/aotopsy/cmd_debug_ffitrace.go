@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/ffitrace"
+	"aotopsy/internal/jsonutil"
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
@@ -48,23 +49,12 @@ func cmdFFITrace(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	w := os.Stdout
-	if *out != "" {
-		f, err := os.Create(*out)
-		if err != nil {
-			return fmt.Errorf("create %s: %w", *out, err)
-		}
-		defer func() { _ = f.Close() }()
-		w = f
+	if traceResult.ScanLimitReached {
+		return fmt.Errorf("ffi-trace: incomplete result: function scan cap reached; raise --max-scan or use --allow-unbounded")
 	}
 
-	enc := json.NewEncoder(w)
 	dynCalls, nativeCalls, resolved := 0, 0, 0
 	for _, f := range traceResult.Findings {
-		if err := enc.Encode(f); err != nil {
-			return err
-		}
 		switch f.Kind {
 		case "dynamic_library_call":
 			dynCalls++
@@ -75,10 +65,19 @@ func cmdFFITrace(args []string) error {
 			nativeCalls++
 		}
 	}
+	if *out != "" {
+		if _, err := jsonutil.WriteJSONLFile(*out, traceResult.Findings); err != nil {
+			return fmt.Errorf("write %s: %w", *out, err)
+		}
+	} else {
+		enc := json.NewEncoder(os.Stdout)
+		for i := range traceResult.Findings {
+			if err := enc.Encode(&traceResult.Findings[i]); err != nil {
+				return fmt.Errorf("encode finding %d: %w", i, err)
+			}
+		}
+	}
 	cli.Errf("ffi-trace: attempted %d function(s), scanned %d, %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
 		traceResult.Attempted, traceResult.Scanned, dynCalls, resolved, nativeCalls, len(traceResult.Findings))
-	if traceResult.ScanLimitReached {
-		return fmt.Errorf("ffi-trace: incomplete result: function scan cap reached; raise --max-scan or use --allow-unbounded")
-	}
 	return nil
 }

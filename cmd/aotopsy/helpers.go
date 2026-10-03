@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -80,16 +79,4 @@ func parseInterspersed(fs *flag.FlagSet, args []string) error {
 		flags = append(flags, args[i])
 	}
 	return fs.Parse(append(flags, positionals...))
-}
-
-// splitLines splits byte data into non-empty trimmed lines.
-func splitLines(data []byte) [][]byte {
-	var lines [][]byte
-	for _, l := range bytes.Split(data, []byte("\n")) {
-		l = bytes.TrimSpace(l)
-		if len(l) > 0 {
-			lines = append(lines, l)
-		}
-	}
-	return lines
 }

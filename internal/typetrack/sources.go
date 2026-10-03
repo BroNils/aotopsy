@@ -467,20 +467,19 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 		if no == nil || no.CID != pl.CT.Function {
 			continue
 		}
-		if no.NameRefID >= 0 {
-			if name, ok := pl.RefToStr[no.NameRefID]; ok && name != "" {
-				// Add bare method name
-				m[name] = append(m[name], refID)
-				// Q10: Also add qualified "Owner.method" name if owner is resolvable
-				if no.OwnerRefID >= 0 {
-					if ownerNo, ok2 := pl.RefToNamed[no.OwnerRefID]; ok2 && ownerNo != nil {
-						if ownerName, ok3 := pl.RefToStr[ownerNo.NameRefID]; ok3 && ownerName != "" {
-							qualified := ownerName + "." + name
-							m[qualified] = append(m[qualified], refID)
-						}
-					}
-				}
-			}
+		// The naming package already resolved VM-base strings, PatchClass hops,
+		// closure parents, constructor spelling and top-level owners. Rebuilding a
+		// name here from RefToStr silently discarded those semantics. Index each
+		// Function under its exact semantic identity and its selector/leaf spelling
+		// (when distinct) so interproc can use the precise key first and retain the
+		// existing bare-name fallback for ambiguous call sites.
+		semantic := pl.FunctionRefToName[refID]
+		leaf := pl.FunctionRefToLeafName[refID]
+		if semantic != "" {
+			m[semantic] = append(m[semantic], refID)
+		}
+		if leaf != "" && leaf != semantic {
+			m[leaf] = append(m[leaf], refID)
 		}
 	}
 	return m
@@ -489,16 +488,18 @@ func buildMethodNameToRefIDs(pl *PoolLookupData) map[string][]int {
 // PoolLookupData is the subset of pipeline.PoolLookups needed by typetrack.
 // Passed as a struct to avoid importing the pipeline package (import cycle).
 type PoolLookupData struct {
-	RefToStr             map[int]string               // ref ID → string value
-	RefToNamed           map[int]*cluster.NamedObject // ref ID → NamedObject
-	RefCID               map[int]int                  // ref ID → CID (class ID of the object)
-	CT                   *snapshot.CIDTable           // CID table (for Class/Function CID checks)
-	CodeRefToName        map[int]string               // code ref ID → function name
-	VmRefToStr           map[int]string               // VM snapshot strings by ref ID
-	VmRefToNamed         map[int]*cluster.NamedObject // VM snapshot NamedObjects by ref ID
-	VmRefCID             map[int]int                  // VM snapshot CID by ref ID
-	PoolCodeNames        map[int]string               // PP index → function name for Code objects
-	TypeTestingStubNames map[int]string               // Type ref ID → type testing stub name
+	RefToNamed            map[int]*cluster.NamedObject // ref ID → NamedObject
+	RefCID                map[int]int                  // ref ID → CID (class ID of the object)
+	CT                    *snapshot.CIDTable           // CID table (for Class/Function CID checks)
+	BaseObjLimit          int                          // first isolate-only ref; VM fallback is legal only below this
+	CodeRefToName         map[int]string               // code ref ID → function name
+	VmRefCID              map[int]int                  // VM snapshot CID by ref ID
+	PoolCodeNames         map[int]string               // PP index → function name for Code objects
+	TypeTestingStubNames  map[int]string               // Type ref ID → type testing stub name
+	FunctionRefToName     map[int]string               // Function ref ID → semantic display name from naming.PoolLookups
+	FunctionRefToLeafName map[int]string               // Function ref ID → raw selector/leaf name, with guarded VM-string fallback
+	ObjectRefToName       map[int]string               // named object ref ID → guarded semantic leaf name
+	ClassIDToName         map[int]string               // runtime ClassID → class name resolved by naming layer
 	// VmFields and VmTypes give access to the VM snapshot's Field and
 	// Type objects, enabling declared field type resolution for framework
 	// classes (String, List, Map, etc.) whose Fields live in the VM
@@ -512,7 +513,8 @@ type PoolLookupData struct {
 // pool lookup data, dispatch table entries, and version profile.
 //
 // clResult must have Fields, Classes, Types, FuncTypes, Named, Pool populated.
-// pl provides RefToStr, RefToNamed, and CT for name/CID resolution.
+// pl provides centralized semantic/leaf names plus ref/CID metadata. Typetrack
+// intentionally does not rebuild callable identities from raw string tables.
 // dispatchEntries come from cluster.ParseDispatchTable.
 // byCodeIndex comes from pipeline.CodeIndexToFunc.
 // kOriginElement is the dispatch table origin offset (ARM64=4096, x86_64=16).

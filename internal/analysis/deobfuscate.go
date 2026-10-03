@@ -33,7 +33,7 @@ func BuildDeobfuscationMap(cl *cluster.Result, pl *naming.PoolLookups, stringRef
 	// every other class with the same obfuscated name.
 	classNameCount := make(map[string]int, len(cl.Classes))
 	for _, ci := range cl.Classes {
-		if name := pl.RefToStr[ci.NameRefID]; name != "" {
+		if name, ok := pl.StringForRef(ci.NameRefID); ok && name != "" {
 			classNameCount[name]++
 		}
 	}
@@ -60,7 +60,7 @@ func BuildDeobfuscationMap(cl *cluster.Result, pl *naming.PoolLookups, stringRef
 
 	var records []DeobfuscatedClassRecord
 	for _, ci := range cl.Classes {
-		name := pl.RefToStr[ci.NameRefID]
+		name, _ := pl.StringForRef(ci.NameRefID)
 		if name == "" {
 			continue
 		}

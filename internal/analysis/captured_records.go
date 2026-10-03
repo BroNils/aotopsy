@@ -17,7 +17,7 @@ type ScriptRecord struct {
 func BuildScripts(result *cluster.Result, pl *naming.PoolLookups) []ScriptRecord {
 	var records []ScriptRecord
 	for _, si := range result.Scripts {
-		url := pl.RefToStr[si.URLRef]
+		url, _ := pl.StringForRef(si.URLRef)
 		rec := ScriptRecord{
 			RefID:             si.RefID,
 			URL:               url,

@@ -209,7 +209,7 @@ func TestIsolateNameAndOwnerDoNotCrossIntoHighVMRefs(t *testing.T) {
 		VmRefCID:     map[int]int{100: ct.OneByteString, 101: ct.OneByteString},
 	}
 
-	if got := pl.resolveIsolateName(appField); got != "" {
+	if got := pl.ResolveIsolateName(appField); got != "" {
 		t.Fatalf("high isolate NameRef crossed into VM namespace: %q", got)
 	}
 	if got := pl.ResolveOwnerName(appField); got != "" {
