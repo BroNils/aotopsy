@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"aotopsy/internal/snapshot"
+	"aotopsy/internal/sdk"
 )
 
 const (
@@ -70,17 +70,29 @@ func DigestArtifact(name string, data []byte, present bool) ArtifactDigest {
 	return ArtifactDigest{Name: name, Present: true, Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}
 }
 
-// DispatchClassIDRegister returns a register only when the raw class ID is
-// still live at the indirect-call instruction. ARM64 Dart before 2.13 reused
-// cid_reg while adding the selector offset, so recording x0 there would label a
-// dispatch-table index as a class ID. x64 keeps RCX as the raw CID.
-func DispatchClassIDRegister(architecture, dartVersion string) string {
+// DispatchClassIDRegister returns the register that still contains the raw
+// class ID at a dispatch-table call. ARM64 before 2.13 mutates the arbitrary
+// cid_reg in place while adding the selector offset, so the raw value is no
+// longer available at the call instruction. x64 address generation leaves the
+// observed index register unchanged; in 2.10/2.12 that observed register is the
+// only exact answer because the ABI does not fix one. From 2.13 onward both
+// architectures have a fixed DispatchTableNullErrorABI::kClassIdReg.
+func DispatchClassIDRegister(architecture, dartVersion, observedIndexReg string) string {
 	switch architecture {
 	case "x64":
-		return "rcx"
+		observedIndexReg = strings.ToLower(strings.TrimSpace(observedIndexReg))
+		for reg := 0; reg < 16; reg++ {
+			if sdk.X86RegName(reg) != observedIndexReg {
+				continue
+			}
+			if sdk.IsDispatchTableClassIDReg(dartVersion, sdk.ArchX86, reg) {
+				return observedIndexReg
+			}
+			return ""
+		}
 	case "arm64":
-		if snapshot.VersionAtLeast(dartVersion, "2.13.0") {
-			return "x0"
+		if name, ok := sdk.ClassIdRegName(dartVersion, sdk.ArchARM64); ok {
+			return name
 		}
 	}
 	return ""

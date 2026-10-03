@@ -8,6 +8,7 @@ import (
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/snapshot"
 )
 
 // ARM64 Dart AOT reserved-register roles are now defined in internal/sdk,
@@ -20,7 +21,7 @@ import (
 // arch-neutral FuncIR the pseudocode emitter consumes. cc is deliberately a
 // per-function input: a global SDK register table does not prove that this
 // particular Function uses it.
-func BuildARM64IR(name, dartVersion string, insts []disasm.Inst, cc sdk.RegisterCallingConvention) *FuncIR {
+func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []disasm.Inst, cc sdk.RegisterCallingConvention) *FuncIR {
 	if len(insts) == 0 {
 		fir := newFuncIR(name, 0)
 		fir.DartVersion = dartVersion
@@ -38,13 +39,13 @@ func BuildARM64IR(name, dartVersion string, insts []disasm.Inst, cc sdk.Register
 	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
 	fir.ThreadReg = sdk.ARM64ThreadRegStr
 	fir.NullReg = sdk.ARM64NullRegStr
-	fir.HeapBitsReg, fir.HeapBaseReg, fir.BarrierMaskReg = sdk.ARM64HeapRegisterRoles(dartVersion)
+	fir.HeapBitsReg, fir.HeapBaseReg, fir.BarrierMaskReg = sdk.ARM64HeapRegisterRoles(dartVersion, compressedPointers)
 	fir.StackReg = sdk.ARM64StackRegStr
 	fir.CodeReg = sdk.ARM64CodeRegStr
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
 	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
 	fir.FpuReturnReg = cc.FPUReturn
-	fir.TypeTestABIRegs = sdk.TypeTestRegNames(true)
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(dartVersion, true)
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
@@ -374,7 +375,8 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			// The well-known Dart object class-id bitfield idiom
 			// (lsb=12 / 0xc, width=20 / 0x14 on ARM64) renders directly as
 			// classId(...) instead of the generic bitField(...) form.
-			if ok1 && ok2 && pos == sdk.ClassIdTagPosV3 && width == sdk.ClassIdTagSizeV3 {
+			classIDPos, classIDSize, layoutOK := snapshot.ClassIdTagLayout(fir.DartVersion)
+			if ok1 && ok2 && layoutOK && pos == int64(classIDPos) && width == int64(classIDSize) {
 				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
 			}
 			s.setReg(dst, expr)

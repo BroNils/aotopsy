@@ -37,6 +37,7 @@ func TestVerifyProvenanceBinaryRejectsDifferentBytes(t *testing.T) {
 	sum := sha256.Sum256(b)
 	dir := t.TempDir()
 	p := Provenance{
+		Source:      lib,
 		SourceName:  "libapp.so",
 		SHA256:      hex.EncodeToString(sum[:]),
 		Size:        int64(len(b)),

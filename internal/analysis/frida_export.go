@@ -74,14 +74,22 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 		}
 	}
 
-	bitOffset, bitWidth := snapshot.ClassIdTagLayout(ctx.DartVersion)
+	bitOffset, bitWidth, ok := snapshot.ClassIdTagLayout(ctx.DartVersion)
+	if !ok {
+		return frida.FridaMetadata{}, fmt.Errorf("frida metadata: unsupported Dart class-id tag layout %q", ctx.DartVersion)
+	}
 	heapMode, heapReg, heapTHRField := "none", "", ""
 	if ctx.Info.Version.CompressedPointers {
 		if isARM64 {
-			if snapshot.VersionAtLeast(ctx.DartVersion, "2.14.0") {
-				heapMode, heapReg = "heap_bits", sdk.ARM64HeapBitsStr
+			reg, shift, ok := sdk.ARM64PointerDecompressionSpec(ctx.DartVersion)
+			if !ok {
+				return frida.FridaMetadata{}, fmt.Errorf("frida metadata: no verified ARM64 compressed-pointer ABI for Dart %s", ctx.DartVersion)
+			}
+			heapReg = sdk.ARM64RegName(reg)
+			if shift == 32 {
+				heapMode = "heap_bits"
 			} else {
-				heapMode, heapReg = "register", sdk.ARM64HeapBaseLegacyStr
+				heapMode = "register"
 			}
 		} else {
 			heapMode, heapTHRField = "thread_field", "heap_base"
@@ -159,7 +167,7 @@ func BuildFridaMetadata(ctx *AnalysisContext, dir string) (frida.FridaMetadata, 
 			continue // unsupported target recipe: fail closed, not wrong probe.
 		}
 		if p.Via == "dispatch_table" {
-			p.ClassIDReg = frida.DispatchClassIDRegister(arch, ctx.DartVersion)
+			p.ClassIDReg = frida.DispatchClassIDRegister(arch, ctx.DartVersion, p.IndexReg)
 		}
 		meta.CallProbes = append(meta.CallProbes, p)
 	}

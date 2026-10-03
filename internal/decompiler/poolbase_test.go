@@ -37,7 +37,7 @@ func TestLiftPoolLoadViaAddBase(t *testing.T) {
 		inst(0x1004, rawLdrViaBase, "ldr", "x3, [x2, #0x10]"),
 		inst(0x1008, 0xD65F03C0, "ret", ""),
 	}
-	fir := BuildARM64IR("f", "3.12.2", insts, sdk.RegisterCallingConvention{})
+	fir := BuildARM64IR("f", "3.12.2", false, insts, sdk.RegisterCallingConvention{})
 
 	var got *Instr
 	for i := range fir.Blocks {
@@ -74,7 +74,7 @@ func TestLiftPoolBaseInvalidatedByRedefine(t *testing.T) {
 		inst(0x1008, rawLdrViaBase, "ldr", "x3, [x2, #0x10]"),
 		inst(0x100c, 0xD65F03C0, "ret", ""),
 	}
-	fir := BuildARM64IR("f", "3.12.2", insts, sdk.RegisterCallingConvention{})
+	fir := BuildARM64IR("f", "3.12.2", false, insts, sdk.RegisterCallingConvention{})
 	for i := range fir.Blocks {
 		for _, in := range fir.Blocks[i].Instrs {
 			if in.Addr == 0x1008 && in.Op == OpLoadPool {
@@ -91,7 +91,7 @@ func TestLiftPoolLoadDirect(t *testing.T) {
 		inst(0x1000, rawLdrDirect, "ldr", "x4, [x27, #0x18]"),
 		inst(0x1004, 0xD65F03C0, "ret", ""),
 	}
-	fir := BuildARM64IR("f", "3.12.2", insts, sdk.RegisterCallingConvention{})
+	fir := BuildARM64IR("f", "3.12.2", false, insts, sdk.RegisterCallingConvention{})
 	found := false
 	for i := range fir.Blocks {
 		for _, in := range fir.Blocks[i].Instrs {

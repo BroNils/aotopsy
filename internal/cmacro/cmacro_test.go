@@ -245,6 +245,29 @@ func TestObjectLikeMacroStillExpandsWhenFollowedByParens(t *testing.T) {
 	}
 }
 
+func TestObjectLikeListWithExplicitCallback(t *testing.T) {
+	src := `
+#define SUB(V) V(Object) V(String)
+#define AS_CID(name) CID(name)
+#define CLASS_ID_LIST CID(IllegalCid) SUB(AS_CID) CID(NullCid)
+`
+	got, err := ColumnWithCallback(mustParseMacros(t, src), "CLASS_ID_LIST", "CID", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"IllegalCid", "Object", "String", "NullCid"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit callback expansion = %q, want %q", got, want)
+	}
+}
+
+func TestObjectLikeListRejectsInvalidExplicitCallback(t *testing.T) {
+	macros := mustParseMacros(t, `#define LIST CID(A)`)
+	if _, err := ExpandRawWithCallback(macros, "LIST", "not valid!"); err == nil {
+		t.Fatal("invalid explicit callback identifier was accepted")
+	}
+}
+
 func TestSubstitutionHonorsByteBudgetBeforeAmplification(t *testing.T) {
 	// A repeated formal is the dangerous shape: one modest actual argument can
 	// be copied hundreds of times before the step/depth limits advance at all.

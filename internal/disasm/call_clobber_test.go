@@ -32,7 +32,7 @@ func TestX86CallClobbersTrackedProvenance(t *testing.T) {
 		0x41, 0xff, 0xd3,
 		0xc3,
 	}
-	res := ScanX86FunctionCFG(code, 0x2000, nil, map[int]string{0: "CodeTarget"}, "call_clobber", nil)
+	res := ScanX86FunctionCFG("3.12.2", code, 0x2000, nil, map[int]string{0: "CodeTarget"}, "call_clobber", nil)
 	if len(res.Edges) != 2 {
 		t.Fatalf("edges = %+v, want direct and indirect CALL", res.Edges)
 	}

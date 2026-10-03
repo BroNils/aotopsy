@@ -1,6 +1,10 @@
 package sdk
 
-import "strings"
+import (
+	"strings"
+
+	"aotopsy/internal/snapshot"
+)
 
 // ── Stub role classification ──────────────────────────────────────────
 //
@@ -74,9 +78,13 @@ func HasSegmentPair(name, a, b string) bool {
 	return false
 }
 
-// ClassifyStubRole classifies a call target or THR stub name into its role.
-// Returns StubRoleNone for anything that is not a recognized VM stub.
-func ClassifyStubRole(name string) StubRole {
+// ClassifyStubRole classifies a call target or THR stub name into its role for
+// an exact Dart version. Suspendable-function roles are versioned because the
+// compact SuspendStubABI and its stub vocabulary do not exist before 2.18.0.
+func ClassifyStubRole(dartVersion, name string) StubRole {
+	if !isSupportedDartVersion(dartVersion) {
+		return StubRoleNone
+	}
 	// Dart-side helpers and named stubs use a finite SDK vocabulary. Match the
 	// terminal symbol exactly rather than looking for an async substring: an app
 	// function named MyInitAsyncCache is ordinary user code, not a VM stub.
@@ -88,28 +96,8 @@ func ClassifyStubRole(name string) StubRole {
 		leaf = leaf[i+1:]
 	}
 	leaf = strings.TrimSuffix(leaf, "Stub")
-	switch leaf {
-	case "InitAsync", "_initAsync":
-		return StubRoleAsyncInit
-	case "Await", "AwaitWithTypeCheck", "_await", "_awaitWithTypeCheck":
-		return StubRoleAsyncAwait
-	case "ReturnAsync", "ReturnAsyncNotFuture", "_returnAsync", "_returnAsyncNotFuture":
-		return StubRoleAsyncReturn
-	case "InitAsyncStar", "_initAsyncStar":
-		return StubRoleAsyncStarInit
-	case "YieldAsyncStar", "_yieldAsyncStar":
-		return StubRoleAsyncStarYield
-	case "ReturnAsyncStar", "_returnAsyncStar":
-		return StubRoleAsyncStarReturn
-	case "InitSyncStar", "_initSyncStar":
-		return StubRoleSyncStarInit
-	case "YieldSyncStar", "SuspendSyncStarAtStart", "SuspendSyncStarAtYield",
-		"_yieldSyncStar", "_suspendSyncStarAtStart", "_suspendSyncStarAtYield":
-		return StubRoleSyncStarSuspend
-	case "ReturnSyncStar", "_returnSyncStar":
-		return StubRoleSyncStarReturn
-	case "Resume", "_resume":
-		return StubRoleSuspendResume
+	if role, ok := classifySuspendableLeaf(dartVersion, leaf); ok {
+		return role
 	}
 
 	// VM stub slots require a terminator.
@@ -118,35 +106,77 @@ func ClassifyStubRole(name string) StubRole {
 		return classifyMundanePattern(name)
 	}
 
-	// Suspendable-function stubs. The SDK deliberately has separate async,
-	// async*, and sync* entry points. Keeping those roles separate matters to
-	// the decompiler: YieldAsyncStar and SuspendSyncStarAtYield are `yield`
-	// machinery, not `await` machinery.
-	switch {
-	case HasSegmentPair(name, "state", "await") || HasSegmentPair(name, "suspend", "await"):
-		return StubRoleAsyncAwait
-	case HasSegmentPair(name, "yield", "async"):
-		return StubRoleAsyncStarYield
-	case HasSegmentPair(name, "init", "async") && strings.Contains(name, "async_star"):
-		return StubRoleAsyncStarInit
-	case HasSegmentPair(name, "return", "async") && strings.Contains(name, "async_star"):
-		return StubRoleAsyncStarReturn
-	case HasSegmentPair(name, "init", "async"):
-		return StubRoleAsyncInit
-	case HasSegmentPair(name, "return", "async"):
-		return StubRoleAsyncReturn
-	case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
-		return StubRoleSyncStarInit
-	case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "yield", "sync"):
-		return StubRoleSyncStarSuspend
-	case HasSegmentPair(name, "return", "sync"):
-		return StubRoleSyncStarReturn
-	case name == "resume_stub":
-		return StubRoleSuspendResume
+	if isSupportedDartVersion(dartVersion) && snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		// Thread-slot spellings. These names come from the exact Thread table, so
+		// broad segment matching is acceptable only after the version proves the
+		// SuspendStubABI exists.
+		switch {
+		case HasSegmentPair(name, "state", "await") || HasSegmentPair(name, "suspend", "await"):
+			return StubRoleAsyncAwait
+		case HasSegmentPair(name, "yield", "async"):
+			return StubRoleAsyncStarYield
+		case HasSegmentPair(name, "init", "async") && strings.Contains(name, "async_star"):
+			return StubRoleAsyncStarInit
+		case HasSegmentPair(name, "return", "async") && strings.Contains(name, "async_star"):
+			return StubRoleAsyncStarReturn
+		case HasSegmentPair(name, "init", "async"):
+			return StubRoleAsyncInit
+		case HasSegmentPair(name, "return", "async"):
+			return StubRoleAsyncReturn
+		case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
+			return StubRoleSyncStarInit
+		case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "yield", "sync"):
+			return StubRoleSyncStarSuspend
+		case HasSegmentPair(name, "return", "sync"):
+			return StubRoleSyncStarReturn
+		case name == "resume_stub":
+			return StubRoleSuspendResume
+		}
 	}
 
 	// Other VM stub roles.
 	return classifyMundanePattern(name)
+}
+
+func classifySuspendableLeaf(dartVersion, leaf string) (StubRole, bool) {
+	if !isSupportedDartVersion(dartVersion) || !snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		return StubRoleNone, false
+	}
+	switch leaf {
+	case "InitAsync", "_initAsync":
+		return StubRoleAsyncInit, true
+	case "Await", "_await":
+		return StubRoleAsyncAwait, true
+	case "AwaitWithTypeCheck", "_awaitWithTypeCheck":
+		if snapshot.VersionAtLeast(dartVersion, "3.0.5") {
+			return StubRoleAsyncAwait, true
+		}
+	case "ReturnAsync", "ReturnAsyncNotFuture", "_returnAsync", "_returnAsyncNotFuture":
+		return StubRoleAsyncReturn, true
+	case "InitAsyncStar", "_initAsyncStar":
+		return StubRoleAsyncStarInit, true
+	case "YieldAsyncStar", "_yieldAsyncStar":
+		return StubRoleAsyncStarYield, true
+	case "ReturnAsyncStar", "_returnAsyncStar":
+		return StubRoleAsyncStarReturn, true
+	case "InitSyncStar", "_initSyncStar":
+		return StubRoleSyncStarInit, true
+	case "YieldSyncStar", "_yieldSyncStar":
+		if dartVersion == "2.18.0" {
+			return StubRoleSyncStarSuspend, true
+		}
+	case "SuspendSyncStarAtStart", "SuspendSyncStarAtYield", "_suspendSyncStarAtStart", "_suspendSyncStarAtYield":
+		if snapshot.VersionAtLeast(dartVersion, "2.19.0") {
+			return StubRoleSyncStarSuspend, true
+		}
+	case "ReturnSyncStar", "_returnSyncStar":
+		if dartVersion == "2.18.0" {
+			return StubRoleSyncStarReturn, true
+		}
+	case "Resume", "_resume":
+		return StubRoleSuspendResume, true
+	}
+	return StubRoleNone, false
 }
 
 // classifyMundanePattern classifies names by the same patterns signal's
@@ -214,8 +244,8 @@ func classifyMundanePattern(name string) StubRole {
 // async or async* function. sync* and the kind-neutral Resume stub deliberately
 // return false: both use the same suspension machinery but are not async Dart
 // functions.
-func IsAsyncStubName(name string) bool {
-	role := ClassifyStubRole(name)
+func IsAsyncStubName(dartVersion, name string) bool {
+	role := ClassifyStubRole(dartVersion, name)
 	switch role {
 	case StubRoleAsyncInit, StubRoleAsyncAwait, StubRoleAsyncReturn,
 		StubRoleAsyncStarInit, StubRoleAsyncStarYield, StubRoleAsyncStarReturn:
@@ -229,8 +259,8 @@ func IsAsyncStubName(name string) bool {
 // (allocation, write barrier, stack overflow, type test, deoptimization, etc.)
 // that carries no source-level meaning. This is the shared replacement for
 // signal.IsMundaneTHR.
-func IsMundaneStub(name string) bool {
-	role := ClassifyStubRole(name)
+func IsMundaneStub(dartVersion, name string) bool {
+	role := ClassifyStubRole(dartVersion, name)
 	switch role {
 	case StubRoleAllocate, StubRoleWriteBarrier, StubRoleStackOverflow,
 		StubRoleTypeTest, StubRoleSafepoint, StubRoleRuntime, StubRoleError,

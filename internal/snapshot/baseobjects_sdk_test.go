@@ -1,7 +1,7 @@
 package snapshot
 
 import (
-	"os"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -27,6 +27,12 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 	for _, tag := range SupportedVersions() {
 		got := BaseObjectNames(tag)
 		if got == nil {
+			// 2.10 predates the verified base-object naming table. Every later
+			// supported release is claimed by baseObjectLayouts and must never
+			// disappear from this gate just because a row was omitted.
+			if tag != "2.10.0" {
+				t.Errorf("supported Dart %s has no verified base-object layout", tag)
+			}
 			continue
 		}
 		checked++
@@ -101,37 +107,53 @@ var quotedRe = regexp.MustCompile(`"([^"]*)"`)
 // the display names in reference order.
 func sdkBaseObjectNames(tag string) ([]string, error) {
 	// The function moved file in 2.13; try both names.
-	var lastErr error
-	for _, path := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
-		src, err := sdktest.SDKFileAtTag(path, tag)
-		if err != nil {
-			lastErr = err
-			continue
+	src, err := sdktest.SDKFileAtTagAny(tag,
+		"runtime/vm/app_snapshot.cc",
+		"runtime/vm/clustered_snapshot.cc",
+	)
+	if err != nil {
+		return nil, err
+	}
+	flat := regexp.MustCompile(`\n\s+`).ReplaceAllString(src, " ")
+	i := strings.Index(flat, "void AddBaseObjects(Serializer* s)")
+	if i < 0 {
+		return nil, fmt.Errorf("AddBaseObjects(Serializer* s) not found at %s", tag)
+	}
+	seg, err := cxxFunctionBody(flat[i:])
+	if err != nil {
+		return nil, fmt.Errorf("AddBaseObjects at %s: %w", tag, err)
+	}
+	var out []string
+	for _, m := range addBaseObjectRe.FindAllStringSubmatch(seg, -1) {
+		q := quotedRe.FindAllStringSubmatch(m[1], -1)
+		if len(q) >= 2 {
+			out = append(out, q[1][1])
+		} else {
+			out = append(out, "?")
 		}
-		flat := regexp.MustCompile(`\n\s+`).ReplaceAllString(src, " ")
-		i := strings.Index(flat, "void AddBaseObjects(Serializer* s)")
-		if i < 0 {
-			continue
-		}
-		seg := flat[i:]
-		if len(seg) > 4000 {
-			seg = seg[:4000]
-		}
-		var out []string
-		for _, m := range addBaseObjectRe.FindAllStringSubmatch(seg, -1) {
-			q := quotedRe.FindAllStringSubmatch(m[1], -1)
-			if len(q) >= 2 {
-				out = append(out, q[1][1])
-			} else {
-				out = append(out, "?")
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("AddBaseObjects at %s contained no AddBaseObject rows", tag)
+	}
+	return out, nil
+}
+
+func cxxFunctionBody(src string) (string, error) {
+	open := strings.IndexByte(src, '{')
+	if open < 0 {
+		return "", fmt.Errorf("opening brace not found")
+	}
+	depth := 0
+	for i := open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[open+1 : i], nil
 			}
 		}
-		if len(out) > 0 {
-			return out, nil
-		}
 	}
-	if lastErr == nil {
-		lastErr = os.ErrNotExist
-	}
-	return nil, lastErr
+	return "", fmt.Errorf("unterminated function body")
 }

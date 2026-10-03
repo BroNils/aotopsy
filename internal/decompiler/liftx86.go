@@ -49,11 +49,14 @@ func DecodeX86Range(data []byte, baseVA uint64) ([]x86.Decoded, error) {
 // internal/disasm.BuildCFG (kept as a local, simpler implementation since
 // x86 instructions are variable-length and carry structured Args, unlike
 // ARM64's fixed 4-byte raw-encoding approach).
-func BuildX86IR(name string, insts []x86.Decoded, cc sdk.RegisterCallingConvention) *FuncIR {
+func BuildX86IR(name, dartVersion string, insts []x86.Decoded, cc sdk.RegisterCallingConvention) *FuncIR {
 	if len(insts) == 0 {
-		return newFuncIR(name, 0)
+		fir := newFuncIR(name, 0)
+		fir.DartVersion = dartVersion
+		return fir
 	}
 	fir := newFuncIR(name, insts[0].VA)
+	fir.DartVersion = dartVersion
 	fir.ArgRegs = append([]string(nil), cc.GPRNames...)
 	fir.FrameReg = sdk.X86FrameRegStr
 	fir.ReturnReg = sdk.X86ReturnRegStr
@@ -67,7 +70,7 @@ func BuildX86IR(name string, insts []x86.Decoded, cc sdk.RegisterCallingConventi
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
 	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
 	fir.FpuReturnReg = cc.FPUReturn
-	fir.TypeTestABIRegs = sdk.TypeTestRegNames(false)
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(dartVersion, false)
 
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, in := range insts {

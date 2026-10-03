@@ -7,6 +7,7 @@ import (
 
 	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
+	"aotopsy/internal/snapshot"
 )
 
 // SDK drift gate for the VM native namespace table.
@@ -60,13 +61,10 @@ func sdkNativeNamespaces(t *testing.T, tag string) map[string]bool {
 func TestDartNativeNamespacesMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	// Namespaces come and go: SendPortImpl lost its suffix in the 3.x
-	// cycle, NetworkInterface was removed after 2.x. So a namespace
-	// absent from ONE tag is version evolution and the table keeps both
-	// spellings on purpose; a namespace absent from EVERY tag is a typo,
-	// and nothing at runtime would report it -- the classifier would just
-	// never match.
-	tags := []string{"2.17.6", "3.12.2"}
+	// Namespaces come and go: check the full supported release set so a namespace
+	// that existed only in an unsampled boundary release cannot be mistaken for a
+	// typo (or vice versa).
+	tags := snapshot.SupportedVersions()
 	seen := map[string][]string{}
 	for _, tag := range tags {
 		sdkNS := sdkNativeNamespaces(t, tag)
@@ -96,24 +94,28 @@ func TestDartNativeNamespacesMatchSDK(t *testing.T) {
 // worth having: it must not substring-match. SecurityContext_UsePrivateKeyBytes
 // was read as a blockchain signal by the heuristics it replaces.
 func TestDartNativeCategoryIsExact(t *testing.T) {
-	cases := []struct{ name, want string }{
-		{"SecurityContext_UsePrivateKeyBytes", NativeCatTLS},
-		{"X509_Subject", NativeCatTLS},
-		{"SecureSocket_Connect", NativeCatTLS},
-		{"Socket_CreateConnect", NativeCatNet},
-		{"File_Open", NativeCatFile},
-		{"Isolate_spawnUri", NativeCatIsolate},
-		{"Process_Start", NativeCatProcess},
-		{"Crypto_GetRandomBytes", NativeCatEncryption},
-		{"Filter_CreateZLibInflate", NativeCatCompression},
-		{"Ffi_dl_open", NativeCatDynamicLoad},
-		{"Ffi_asFunctionInternal", NativeCatFFI},
+	cases := []struct{ version, name, want string }{
+		{"3.12.2", "SecurityContext_UsePrivateKeyBytes", NativeCatTLS},
+		{"3.12.2", "X509_Subject", NativeCatTLS},
+		{"3.12.2", "SecureSocket_Connect", NativeCatTLS},
+		{"3.12.2", "Socket_CreateConnect", NativeCatNet},
+		{"3.12.2", "File_Open", NativeCatFile},
+		{"3.12.2", "Isolate_spawnUri", NativeCatIsolate},
+		{"3.12.2", "Process_Start", NativeCatProcess},
+		{"3.12.2", "Crypto_GetRandomBytes", NativeCatEncryption},
+		{"3.12.2", "Filter_CreateZLibInflate", NativeCatCompression},
+		{"3.12.2", "Ffi_dl_open", NativeCatDynamicLoad},
+		// Removed after 3.2.5; category lookup must respect exact membership.
+		{"3.2.5", "Ffi_asFunctionInternal", NativeCatFFI},
 	}
 	for _, c := range cases {
-		got, ok := DartNativeCategory(c.name)
+		got, ok := DartNativeCategory(c.version, c.name)
 		if !ok || got != c.want {
-			t.Errorf("DartNativeCategory(%q) = (%q, %v), want (%q, true)", c.name, got, ok, c.want)
+			t.Errorf("DartNativeCategory(%s, %q) = (%q, %v), want (%q, true)", c.version, c.name, got, ok, c.want)
 		}
+	}
+	if cat, ok := DartNativeCategory("3.12.2", "Ffi_asFunctionInternal"); ok {
+		t.Errorf("removed native classified at 3.12.2 as %q", cat)
 	}
 
 	// Names that merely contain a classified namespace must NOT match:
@@ -129,7 +131,7 @@ func TestDartNativeCategoryIsExact(t *testing.T) {
 		"Socket_",                   // no member
 		"_Socket_Connect",           // empty namespace
 	} {
-		if cat, ok := DartNativeCategory(n); ok {
+		if cat, ok := DartNativeCategory("3.12.2", n); ok {
 			t.Errorf("DartNativeCategory(%q) = %q, want no match", n, cat)
 		}
 	}
@@ -137,7 +139,7 @@ func TestDartNativeCategoryIsExact(t *testing.T) {
 	// Namespaces every Dart program touches carry no signal and must stay
 	// unclassified, or they drown the ones that matter.
 	for _, n := range []string{"Object_toString", "Double_add", "List_getIndexed", "String_charAt"} {
-		if cat, ok := DartNativeCategory(n); ok {
+		if cat, ok := DartNativeCategory("3.12.2", n); ok {
 			t.Errorf("DartNativeCategory(%q) = %q, want no match: it appears in every program", n, cat)
 		}
 	}
@@ -145,13 +147,7 @@ func TestDartNativeCategoryIsExact(t *testing.T) {
 
 func TestKnownNativeMembershipIsSDKBacked(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
-	seen := map[string]bool{}
-	// This is a provenance coverage set, not a version sample: every committed
-	// known native must occur in at least one exact tag below. If a future table
-	// update needs a name that only exists at another supported release, add that
-	// exact release here. Missing membership is always an error.
-	tags := []string{"2.12.0", "2.17.6", "3.12.2", "3.13.0"}
-	for _, tag := range tags {
+	for _, tag := range snapshot.SupportedVersions() {
 		bn, err := sdktest.SDKFileAtTag("runtime/vm/bootstrap_natives.h", tag)
 		if err != nil {
 			t.Fatalf("verify bootstrap natives @%s: %v", tag, err)
@@ -160,19 +156,79 @@ func TestKnownNativeMembershipIsSDKBacked(t *testing.T) {
 		if err != nil {
 			t.Fatalf("verify io natives @%s: %v", tag, err)
 		}
+		actual := map[string]bool{}
 		for _, name := range expandDeclaredNativeLists(t, bn, tag,
 			"BOOTSTRAP_NATIVE_LIST", "BOOTSTRAP_FFI_NATIVE_LIST") {
-			seen[name] = true
+			actual[name] = true
 		}
 		for _, name := range expandDeclaredNativeLists(t, ioSrc, tag, "IO_NATIVE_LIST") {
-			seen[name] = true
+			actual[name] = true
+		}
+		for name := range dartNativeKnown {
+			if got, want := dartNativeExistsAtVersion(tag, name), actual[name]; got != want {
+				t.Errorf("%s native membership for %s = %v, SDK = %v", tag, name, got, want)
+			}
+		}
+		// Reverse direction matters just as much. The old test only iterated the
+		// committed union, so a newly-added SDK native in a behavioral namespace
+		// omitted from dartnatives_known.txt was invisible and the gate still
+		// passed. Mundane namespaces (Object_*, Double_*, List_*...) are excluded
+		// from the classifier by design and therefore are not members of this
+		// committed union.
+		for name := range actual {
+			classified := false
+			if _, ok := dartNativeExact[name]; ok {
+				classified = true
+			} else if i := strings.IndexByte(name, '_'); i > 0 {
+				_, classified = dartNativeNamespaces[name[:i]]
+			}
+			if !classified {
+				continue
+			}
+			if _, ok := dartNativeKnown[name]; !ok {
+				t.Errorf("%s classified SDK native %s is absent from the committed native union", tag, name)
+			}
 		}
 	}
 	for name := range dartNativeKnown {
-		if seen[name] {
+		if _, ok := dartNativeExact[name]; ok {
 			continue
 		}
-		t.Errorf("known native %s is absent from every exact SDK provenance tag (%v)", name, tags)
+		i := strings.IndexByte(name, '_')
+		if i <= 0 {
+			t.Errorf("committed native %s has no namespace separator", name)
+			continue
+		}
+		if _, ok := dartNativeNamespaces[name[:i]]; !ok {
+			t.Errorf("committed native %s belongs to intentionally-unclassified namespace %s", name, name[:i])
+		}
+	}
+	for _, tag := range snapshot.SupportedVersions() {
+		if _, ok := dartNativeVersionBit[tag]; !ok {
+			t.Errorf("supported version %s has no native membership bit", tag)
+		}
+	}
+}
+
+func TestDartNativeVersionBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		version, name string
+		want          bool
+	}{
+		{"2.10.0", "Ffi_sizeOf", true},
+		{"2.12.0", "Ffi_sizeOf", true},
+		{"2.13.0", "Ffi_sizeOf", false},
+		{"3.0.5", "Ffi_dl_close", false},
+		{"3.1.0", "Ffi_dl_close", true},
+		{"2.18.0", "SendPortImpl_get_id", true},
+		{"2.19.0", "SendPortImpl_get_id", false},
+		{"2.18.0", "SendPort_get_id", false},
+		{"2.19.0", "SendPort_get_id", true},
+		{"3.99.0", "Ffi_dl_close", false},
+	} {
+		if got := dartNativeExistsAtVersion(tc.version, tc.name); got != tc.want {
+			t.Errorf("native %s at %s = %v, want %v", tc.name, tc.version, got, tc.want)
+		}
 	}
 }
 

@@ -60,7 +60,7 @@ func writeStaticImportFixture(t *testing.T, dir string, edges []disasm.CallEdgeR
 			continue
 		}
 		if probe.Via == "dispatch_table" {
-			probe.ClassIDReg = DispatchClassIDRegister(p.Arch, p.DartVersion)
+			probe.ClassIDReg = DispatchClassIDRegister(p.Arch, p.DartVersion, probe.IndexReg)
 		}
 		allProbes = append(allProbes, probe)
 	}
@@ -133,7 +133,7 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 	staticDir := t.TempDir()
 	outDir := filepath.Join(t.TempDir(), "merged")
 	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"},
+		{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "[RAX+RCX*8+0x20]", Via: "dispatch_table"},
 		{FromFunc: "G", FromPC: "0x200", Kind: "call_indirect", Reg: "RAX"},
 		{FromFunc: "H", FromPC: "0x300", Kind: "bl", Target: "Known", TargetAddress: "0x40"},
 	}
@@ -255,7 +255,7 @@ func TestRuntimeEventLogRejectsWrongOrMalformedWireFormat(t *testing.T) {
 func TestFridaImportRejectsRuntimeIdentityAndSitePoisoning(t *testing.T) {
 	staticDir := t.TempDir()
 	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"},
+		{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "[RAX+RCX*8+0x20]", Via: "dispatch_table"},
 		{FromFunc: "G", FromPC: "0x200", Kind: "call_indirect", Reg: "RAX"},
 	}
 	binding := writeStaticImportFixture(t, staticDir, edges, []disasm.FuncRecord{
@@ -325,7 +325,7 @@ func TestFridaImportRejectsRuntimeIdentityAndSitePoisoning(t *testing.T) {
 func TestFridaImportRejectsUnexportedSitesAndTargetIdentityPoisoning(t *testing.T) {
 	staticDir := t.TempDir()
 	edges := []disasm.CallEdgeRecord{
-		{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"},
+		{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "[RAX+RCX*8+0x20]", Via: "dispatch_table"},
 		{FromFunc: "Resolved", FromPC: "0x200", Kind: "blr", Reg: "X17", Target: "Known"},
 		{FromFunc: "Unsupported", FromPC: "0x300", Kind: "blr", Reg: "X18", Via: "future_recipe"},
 	}
@@ -482,7 +482,7 @@ func TestFridaImportCanonicalizesOwnModuleTargetFromStaticIdentity(t *testing.T)
 	staticDir := t.TempDir()
 	outDir := filepath.Join(t.TempDir(), "merged")
 	binding := writeStaticImportFixture(t, staticDir,
-		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table", Target: "Known"}},
+		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "[RAX+RCX*8+0x20]", Via: "dispatch_table", Target: "Known"}},
 		[]disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}, {PC: "0x400", Size: 4, Name: "Known"}},
 	)
 	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
@@ -511,7 +511,7 @@ func TestFridaImportFailurePreservesPreviousGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := writeStaticImportFixture(t, staticDir,
-		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "blr", Reg: "X16", Via: "dispatch_table"}},
+		[]disasm.CallEdgeRecord{{FromFunc: "F", FromPC: "0x100", Kind: "call_indirect", Reg: "[RAX+RCX*8+0x20]", Via: "dispatch_table"}},
 		[]disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}},
 	)
 	outDir := filepath.Join(t.TempDir(), "merged")

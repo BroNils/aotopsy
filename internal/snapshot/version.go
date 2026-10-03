@@ -260,7 +260,8 @@ type VersionProfile struct {
 	//	class table                         = (kNumPredefinedCids - kObjectCid)
 	//	                                      - |IsAbsentCid|
 	//
-	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h):
+	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h,
+	// app_snapshot.cc for IsAbsentCid):
 	// 7+35+4+256 = 302, 63+(557+256)+173 = 1049, 6, and (176-4)-11 = 161,
 	// so 1518. Note kNumStubEntries is 173 and not 164: VM_STUB_CODE_LIST
 	// pulls in PROBE_POINT_STUBS_LIST (defined on ONE line, which a
@@ -1360,9 +1361,13 @@ func VersionAtLeast(version, minimum string) bool {
 // has 3 refs; ObjectPool uses v2 type bits" and is set for 2.19.0, 3.0.5 and
 // 3.1.0, three versions whose tag layout is already the 20-bit one. One
 // predicate, in one place, so a fourth cannot appear.
-func ClassIdTagLayout(dartVersion string) (pos, size int) {
-	if VersionAtLeast(dartVersion, "2.19.0") {
-		return 12, 20
+func ClassIdTagLayout(dartVersion string) (pos, size int, ok bool) {
+	p := ProfileForVersion(dartVersion)
+	if p == nil || !p.Supported {
+		return 0, 0, false
 	}
-	return 16, 16
+	if VersionAtLeast(dartVersion, "2.19.0") {
+		return 12, 20, true
+	}
+	return 16, 16, true
 }

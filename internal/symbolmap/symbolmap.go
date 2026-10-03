@@ -631,7 +631,9 @@ func scanX86CallSites(sections []execSection, symbols map[uint64]symbolInfo, sor
 	}
 	var out []CallSite
 	for _, chunk := range buildX86ScanChunks(sections, symbols, sortedVAs) {
-		res := disasm.ScanX86FunctionCFG(chunk.Data, chunk.VA, lookup, nil, chunk.Name, nil)
+		// symbolmap intentionally has no Dart snapshot profile. Pass no version so
+		// the disassembler fails closed and does not assert a dispatch-table ABI.
+		res := disasm.ScanX86FunctionCFG("", chunk.Data, chunk.VA, lookup, nil, chunk.Name, nil)
 		for _, edge := range res.Edges {
 			cs := CallSite{FromVA: edge.FromPC, Kind: SiteCall, Reg: edge.Reg, Via: edge.Via}
 			switch edge.Kind {

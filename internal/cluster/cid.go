@@ -3,7 +3,6 @@
 package cluster
 
 import (
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -108,18 +107,21 @@ const (
 	CidTwoByteString = 95
 )
 
-// Tag bit positions for v3.4.3+ object header tag encoding.
+// Fixed flag bits for the object-header cluster tag encoding. The class-id
+// field itself is versioned and comes from snapshot.ClassIdTagLayout.
 const (
 	tagCanonicalBit = 1
 	tagImmutableBit = 6
-	tagClassIdShift = sdk.ClassIdTagPosV3
-	tagClassIdMask  = (1 << sdk.ClassIdTagSizeV3) - 1
 )
 
 // DecodeTags extracts CID, canonical, and immutable flags from v3.4.3+
 // object header tag encoding. For old-style encoding, use DecodeTagsOld.
-func DecodeTags(tags uint32) (cid int, isCanonical, isImmutable bool) {
-	cid = int((tags >> tagClassIdShift) & tagClassIdMask)
+func DecodeTags(tags uint32, dartVersion string) (cid int, isCanonical, isImmutable bool) {
+	pos, size, ok := snapshot.ClassIdTagLayout(dartVersion)
+	if !ok {
+		return 0, false, false
+	}
+	cid = int((tags >> pos) & ((1 << size) - 1))
 	isCanonical = (tags>>tagCanonicalBit)&1 != 0
 	isImmutable = (tags>>tagImmutableBit)&1 != 0
 	return

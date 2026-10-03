@@ -136,7 +136,7 @@ func cmdX64Refs(args []string) error {
 				return fmt.Errorf("no range contains VA 0x%x", targetVA)
 			}
 		}
-		calls, err := frida.ScanIndirectCalls(scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
+			calls, err := frida.ScanIndirectCalls(info.Version.DartVersion, scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
 		if err != nil {
 			return err
 		}

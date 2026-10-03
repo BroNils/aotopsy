@@ -2,9 +2,13 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"aotopsy/internal/snapshot"
+	"aotopsy/internal/vmtables"
 )
 
 func TestEveryCommittedTHRTableHasTarget(t *testing.T) {
@@ -30,6 +34,33 @@ func TestEveryCommittedTHRTableHasTarget(t *testing.T) {
 	}
 }
 
+func TestEverySupportedVersionHasProductTHRTargets(t *testing.T) {
+	supported := map[string]bool{}
+	for _, version := range snapshot.SupportedVersions() {
+		supported[version] = true
+		seen := map[vmtables.Architecture]bool{}
+		for _, target := range allTargets {
+			if target.tag != version || !target.product {
+				continue
+			}
+			profile := vmTargetProfile(target)
+			if len(vmtables.THRFields(profile)) != 0 {
+				seen[profile.Architecture] = true
+			}
+		}
+		for _, arch := range []vmtables.Architecture{vmtables.ArchitectureARM64, vmtables.ArchitectureX64} {
+			if !seen[arch] {
+				t.Errorf("supported Dart %s has no committed PRODUCT THR target for architecture %v", version, arch)
+			}
+		}
+	}
+	for _, target := range allTargets {
+		if !supported[target.tag] {
+			t.Errorf("allTargets contains unsupported Dart version %s", target.tag)
+		}
+	}
+}
+
 func TestDart2176ARM64NonCompressedUsesExactCommittedName(t *testing.T) {
 	const want = "thrV2176_nocompress"
 	if got := mapName("2.17.6", "arm64", false, true); got != want {
@@ -37,13 +68,14 @@ func TestDart2176ARM64NonCompressedUsesExactCommittedName(t *testing.T) {
 	}
 }
 
-func TestObjectStoreFieldsUsesSharedSDKFetcherCache(t *testing.T) {
-	cacheDir := t.TempDir()
-	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+func TestObjectStoreFieldsUsesSharedSDKFetcherExactLocalTag(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("AOTOPSY_DART_SDK_REPO", repo)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", t.TempDir())
 	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
 	const tag = "9.9.9"
-	cachePath := filepath.Join(cacheDir, tag, "runtime", "vm", "object_store.h")
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	sdkPath := filepath.Join(repo, "runtime", "vm", "object_store.h")
+	if err := os.MkdirAll(filepath.Dir(sdkPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	const src = `#define OBJECT_STORE_FIELD_LIST(R_, RW) \
@@ -63,8 +95,25 @@ class ObjectStore {
   }
 };
 `
-	if err := os.WriteFile(cachePath, []byte(src), 0o600); err != nil {
+	if err := os.WriteFile(sdkPath, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git unavailable")
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "sdk-test@example.invalid"},
+		{"config", "user.name", "SDK Test"},
+		{"add", "runtime/vm/object_store.h"},
+		{"commit", "-q", "-m", "fixture"},
+		{"tag", tag},
+	} {
+		cmd := exec.Command(git, append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
 
 	got, desc, err := objectStoreFields(tag)

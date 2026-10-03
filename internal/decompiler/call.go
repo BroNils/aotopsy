@@ -56,13 +56,16 @@ func (e *emitter) callArgExprs(n int, calleeVA uint64) []string {
 	// samples by zero bytes, so it was machinery with no effect to keep.
 	//
 	// An indirect call is a switchable/dynamic call, and those pass their
-	// arguments on the STACK. The register at sdk.ICDataArgRegIndex holds the
+	// arguments on the STACK. The register at the index returned by
+	// sdk.ICDataArgRegIndex holds the
 	// UnlinkedCall/MegamorphicCache the call sequence just loaded, so it is
 	// provably not an argument -- and arguments being positional, nothing above
 	// it is either. See sdk.ICDataArgRegIndex for the SDK sequence and for why
 	// this hurt x86_64 far more than ARM64.
-	if calleeVA == 0 && len(out) > sdk.ICDataArgRegIndex {
-		out = out[:sdk.ICDataArgRegIndex]
+	if calleeVA == 0 {
+		if idx, ok := sdk.ICDataArgRegIndex(e.fir.DartVersion, e.fir.LinkReg != ""); ok && len(out) > idx {
+			out = out[:idx]
+		}
 	}
 	// D2: Truncate trailing unassigned argument registers (where lookupReg(reg) == reg or argN)
 	for len(out) > 0 {
@@ -246,9 +249,9 @@ func (e *emitter) emitAsyncStubSemantics(role sdk.StubRole, tmpName, argsText st
 		// latter are R1... / RDI..., so using generic argsText here reads the
 		// wrong machine value. AwaitWithTypeCheck has an additional kTypeArgsReg
 		// (R1 / RDX), but the source `await` operand is still kArgumentReg. SDK
-		// constants_{arm64,x64}.h SuspendStubABI, read at 2.18.0, 3.4.3 and
-		// 3.12.2; AwaitWithTypeCheckStub is absent at 2.18.0 and 2.19.0 and
-		// present at 3.0.5 (by grep only; versions between were not checked).
+		// constants_{arm64,x64}.h SuspendStubABI. The exact-source SDK drift
+		// gate checks every supported release: AwaitWithTypeCheckStub is absent
+		// before 3.0.5 and present from that supported release onward.
 		awaited := e.state.lookupReg(e.fir.ReturnReg)
 		if awaited == "" {
 			awaited = e.fir.ReturnReg
@@ -284,7 +287,7 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	//
 	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
 	// pre-pass in emit.go so the two cannot drift apart.
-	if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(name), tmpName, argsText, indent); handled {
+	if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(e.fir.DartVersion, name), tmpName, argsText, indent); handled {
 		return bound
 	}
 	intent := resolveCallIntent(name, selectorHint)
@@ -330,7 +333,7 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
 		// snake_case Thread-table spellings.
-		if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(stubName), tmpName, argsText, indent); handled {
+		if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(e.fir.DartVersion, stubName), tmpName, argsText, indent); handled {
 			return bound
 		}
 		e.stats.SemanticIndirectCalls++

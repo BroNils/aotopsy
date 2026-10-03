@@ -43,8 +43,10 @@ Ffi_asExternalTypedDataUint64
 Ffi_asExternalTypedDataUint8
 Ffi_asFunctionInternal
 Ffi_createNativeCallableIsolateGroupBound
+Ffi_createNativeCallableIsolateGroupShared
 Ffi_createNativeCallableIsolateLocal
 Ffi_createNativeCallableListener
+Ffi_deleteAsyncFunctionPointer
 Ffi_deleteIsolateGroupNativeCallable
 Ffi_deleteNativeCallable
 Ffi_dl_close
@@ -73,6 +75,7 @@ Ffi_loadUint64
 Ffi_loadUint8
 Ffi_nativeCallbackFunction
 Ffi_pointerFromFunction
+Ffi_pointerAsyncFromFunction
 Ffi_sizeOf
 Ffi_storeAbiSpecificInt
 Ffi_storeAbiSpecificIntAtIndex
@@ -191,6 +194,7 @@ RawReceivePort_closeInternal
 RawReceivePort_factory
 RawReceivePort_getActive
 RawReceivePort_get_id
+RawReceivePort_get_sendport
 RawReceivePort_setActive
 RawSocketOption_GetOptionValue
 ResourceHandleImpl_toFile

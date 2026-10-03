@@ -118,7 +118,7 @@ func TestX86DirectCallToZeroStillGetsArgMask(t *testing.T) {
 	// mov rdi,rax ; call rel32 -> VA 0. Target address zero is a valid direct
 	// target value and must not be confused with the indirect-call zero value.
 	code := []byte{0x48, 0x89, 0xc7, 0xe8, 0xf8, 0xff, 0xff, 0xff}
-	res := ScanX86FunctionCFG(code, 0, nil, nil, "target_zero", nil)
+	res := ScanX86FunctionCFG("3.12.2", code, 0, nil, nil, "target_zero", nil)
 	if len(res.Edges) != 1 || res.Edges[0].Kind != "call" || res.Edges[0].TargetPC != 0 || !res.Edges[0].TargetValid {
 		t.Fatalf("edge = %+v, want direct call to VA 0", res.Edges)
 	}
@@ -136,7 +136,7 @@ func TestOverflowingDirectCallsStayCallsWithoutFakeZeroTarget(t *testing.T) {
 
 	// CALL rel32 +16 whose end-relative target overflows MaxUint64.
 	xinst := x86asm.Inst{Op: x86asm.CALL, Len: 5, Args: [4]x86asm.Arg{x86asm.Rel(16)}}
-	xedge := classifyX86Call(xinst, math.MaxUint64-2, 5, nil, &x86RegTracker{}, nil, nil)
+	xedge := classifyX86Call("3.12.2", xinst, math.MaxUint64-2, 5, nil, &x86RegTracker{}, nil, nil)
 	if xedge.Kind != "call" || xedge.TargetValid || xedge.TargetPC != 0 {
 		t.Fatalf("overflowing x86 CALL = %+v, want direct unresolved call", xedge)
 	}

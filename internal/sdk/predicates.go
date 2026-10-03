@@ -177,7 +177,7 @@ func itoa(n int64) string {
 // LSL amount used by pointer decompression for an exact Dart version. ok=false
 // means that version has no supported ARM64 register decompression form.
 func ARM64PointerDecompressionSpec(dartVersion string) (srcReg, lslAmount int, ok bool) {
-	if dartVersion == "" {
+	if !isSupportedDartVersion(dartVersion) {
 		return 0, 0, false
 	}
 	if snapshot.VersionAtLeast(dartVersion, "2.14.0") {
@@ -237,21 +237,20 @@ func IsX86PointerDecompression(baseReg string, disp int64, thrFieldNames map[int
 // arithmetic on null rather than a boolean literal.
 
 const (
-	// TrueOffsetFromNull is the byte offset of the canonical true object
-	// from the null object on 64-bit builds.
-	TrueOffsetFromNull = 32
-	// FalseOffsetFromNull is the byte offset of the canonical false object
-	// from the null object on 64-bit builds.
-	FalseOffsetFromNull = 48
+	trueOffsetFromNull  = 32
+	falseOffsetFromNull = 48
 )
 
 // BoolFromNullOffset maps an offset from null to the Dart boolean literal
 // it represents, reporting ok=false when the offset is not a bool.
-func BoolFromNullOffset(off int64) (value string, ok bool) {
+func BoolFromNullOffset(dartVersion string, off int64) (value string, ok bool) {
+	if !isSupportedDartVersion(dartVersion) {
+		return "", false
+	}
 	switch off {
-	case TrueOffsetFromNull:
+	case trueOffsetFromNull:
 		return "true", true
-	case FalseOffsetFromNull:
+	case falseOffsetFromNull:
 		return "false", true
 	}
 	return "", false

@@ -25,7 +25,7 @@ func TestIndexedPPCallDoesNotResolveConstantPoolSlot(t *testing.T) {
 	inst := x86asm.Inst{Op: x86asm.CALL, Len: 7, Args: [4]x86asm.Arg{
 		x86asm.Mem{Base: x86asm.R15, Index: x86asm.RCX, Scale: 8, Disp: 0xf},
 	}}
-	e := classifyX86Call(inst, 0x1000, 7, nil, &x86RegTracker{}, map[int]string{0: "FakeTarget"}, nil)
+	e := classifyX86Call("3.12.2", inst, 0x1000, 7, nil, &x86RegTracker{}, map[int]string{0: "FakeTarget"}, nil)
 	if e.Kind != "call_indirect" || e.Via != "" {
 		t.Fatalf("indexed PP call fabricated exact pool provenance: %+v", e)
 	}

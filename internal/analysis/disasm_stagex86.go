@@ -136,7 +136,7 @@ func RunDisasmStageX86(
 		funcRecs = append(funcRecs, fRec)
 
 		var fnEdgeRecs []disasm.CallEdgeRecord
-		scan := disasm.ScanX86FunctionCFG(funcCode, funcVA, lookup, poolDisplay, name, thrFields)
+		scan := disasm.ScanX86FunctionCFG(info.Version.DartVersion, funcCode, funcVA, lookup, poolDisplay, name, thrFields)
 		for _, e := range scan.Edges {
 			rec := disasm.CallEdgeRecord{
 				FromFunc: name, FromPC: fmt.Sprintf("0x%x", e.FromPC),

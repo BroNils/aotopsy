@@ -230,12 +230,16 @@ type cidError string
 
 func (e cidError) Error() string { return string(e) }
 
-// cidTags maps each committed table to the SDK tag it was derived from.
-// Every table gets probed: a row nobody checked is the whole failure mode.
-var cidTags = []struct {
+type cidCase struct {
 	tag   string
 	table *CIDTable
-}{
+}
+
+// cidTags keeps one canonical release per distinct committed table for local
+// invariants. Source drift tests do NOT iterate this list: releases such as
+// 3.1.0 alias cidsV325, but that alias itself must be proved against 3.1.0's
+// exact source rather than inherited from the 3.2.5 proof.
+var cidTags = []cidCase{
 	{"2.10.0", &cidsV210},
 	{"2.12.0", &cidsV212},
 	{"2.13.0", &cidsV213},
@@ -251,6 +255,20 @@ var cidTags = []struct {
 	{"3.6.2", &cidsV362},
 	{"3.9.2", &cidsV392},
 	{"3.13.0", &cidsV3130},
+}
+
+func supportedCIDCases(t *testing.T) []cidCase {
+	t.Helper()
+	versions := SupportedVersions()
+	out := make([]cidCase, 0, len(versions))
+	for _, tag := range versions {
+		profile := ProfileForVersion(tag)
+		if profile == nil || profile.CIDs == nil {
+			t.Fatalf("supported Dart %s has no CID table", tag)
+		}
+		out = append(out, cidCase{tag: tag, table: profile.CIDs})
+	}
+	return out
 }
 
 // cidFieldClass maps a CIDTable field to the SDK class whose enum
@@ -287,7 +305,7 @@ var cidFieldFallback = map[string][]string{
 func TestCIDTablesMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	for _, c := range cidTags {
+	for _, c := range supportedCIDCases(t) {
 		t.Run(c.tag, func(t *testing.T) {
 			enum, stride, err := cidEnum(c.tag)
 			if err != nil {
@@ -436,12 +454,10 @@ func lookupCID(enum map[string]int, field string) (int, bool) {
 //   - the range is the macro's expansion, whose first and last entries (and
 //     length) change between releases.
 func ffiMarkerRange(tag string, enum map[string]int) (first, last int, err error) {
-	var snap string
-	for _, name := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
-		if snap, err = sdktest.SDKFileAtTag(name, tag); err == nil {
-			break
-		}
-	}
+	snap, err := sdktest.SDKFileAtTagAny(tag,
+		"runtime/vm/app_snapshot.cc",
+		"runtime/vm/clustered_snapshot.cc",
+	)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -491,7 +507,7 @@ func ffiMarkerRange(tag string, enum map[string]int) (first, last int, err error
 // TagStyle probe depend on.
 func TestNumPredefinedCidsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
-	for _, c := range cidTags {
+	for _, c := range supportedCIDCases(t) {
 		t.Run(c.tag, func(t *testing.T) {
 			enum, _, err := cidEnum(c.tag)
 			if err != nil {

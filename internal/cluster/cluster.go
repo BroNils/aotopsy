@@ -366,7 +366,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 				tagErr = err
 				break
 			}
-			cid, canonical, immutable = DecodeTags(tags)
+				cid, canonical, immutable = DecodeTags(tags, profile.DartVersion)
 		case snapshot.TagStyleCidInt32:
 			// v2.10-2.13: Read<int32_t>(cid). Signed VLE (endMarker=192), value = CID directly.
 			// Canonical determined by cluster loop position (first NumCanonicalClusters are canonical).

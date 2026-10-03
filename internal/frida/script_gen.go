@@ -183,9 +183,11 @@ function offsetToName(offset) {
 
 // extractClassId used to live here, reading a heap header out of what the
 // dispatch probe called the "receiver register". Its only caller now takes
-// the class id straight from DispatchTableNullErrorABI::kClassIdReg, which
-// already holds it as an integer, so the header read is gone rather than
-// left behind unused. META.headerBitOffset / headerBitWidth stay in the
+// the class id straight from the dispatch CID register, which already holds it
+// as an integer, so the header read is gone rather than left behind unused.
+// That register is the fixed DispatchTableNullErrorABI register from 2.13+;
+// on x64 2.10/2.12 it is the actual index register encoded by the call site.
+// META.headerBitOffset / headerBitWidth stay in the
 // emitted metadata block -- they describe the object header layout and are
 // part of the exported JSON that external scripts read -- but nothing in
 // this generated script uses them any more.

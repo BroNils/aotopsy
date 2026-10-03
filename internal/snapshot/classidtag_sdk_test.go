@@ -60,11 +60,14 @@ func TestClassIdTagLayoutBoundary(t *testing.T) {
 		{"3.0.5", 12, 20},
 		{"3.13.0", 12, 20},
 	} {
-		pos, size := ClassIdTagLayout(tc.version)
-		if pos != tc.pos || size != tc.size {
+		pos, size, ok := ClassIdTagLayout(tc.version)
+		if !ok || pos != tc.pos || size != tc.size {
 			t.Errorf("ClassIdTagLayout(%s) = (%d, %d), want (%d, %d)",
 				tc.version, pos, size, tc.pos, tc.size)
 		}
+	}
+	if _, _, ok := ClassIdTagLayout("3.99.0"); ok {
+		t.Error("unknown future version inherited a class-id tag layout")
 	}
 }
 

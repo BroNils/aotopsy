@@ -86,7 +86,10 @@ func readFillStrings(s *dartfmt.Stream, cm *ClusterMeta, oldFormat bool, ct *sna
 //   - CID decode: uses DecodeTags (bits 12-31, 20-bit mask) for v3.x+
 //     (was hardcoded >> 16 & 0xFFFF, wrong for CIDs > 65535 — P0-4/D-002)
 func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, dataImageObjStart int64, profile *snapshot.VersionProfile, isVM bool) []ParsedString {
-	classIDTagPos, classIDTagSize := snapshot.ClassIdTagLayout(profile.DartVersion)
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 {
 		return nil
 	}

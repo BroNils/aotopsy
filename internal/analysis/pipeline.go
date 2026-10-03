@@ -716,7 +716,7 @@ func runPipeline(opts Opts) (*Result, error) {
 	// VM natives the snapshot can reach. Read from the pool rather than
 	// from string_refs: nothing in generated code loads these names, so
 	// the reference path never sees them.
-	if caps := BuildNativeCapabilities(clResult, sc.VMResult); len(caps) > 0 {
+	if caps := BuildNativeCapabilities(info.Version.DartVersion, clResult, sc.VMResult); len(caps) > 0 {
 		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "native_capabilities.jsonl"), caps); err != nil {
 			return nil, fmt.Errorf("native capabilities: %w", err)
 		}

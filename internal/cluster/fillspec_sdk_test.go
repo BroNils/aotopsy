@@ -21,23 +21,20 @@ import (
 // Everything below comes from runtime/vm/raw_object.h (pointer-field extents)
 // and the serializer source (scalar widths, which clusters exist).
 
-var fillLayoutTags = []string{
-	"2.10.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0", "2.16.0", "2.17.6",
-	"2.18.0", "2.19.0", "3.0.5", "3.1.0", "3.2.5", "3.3.0", "3.4.3", "3.5.0",
-	"3.6.2", "3.7.0", "3.8.1", "3.9.2", "3.10.7", "3.11.0", "3.12.2", "3.13.0",
-}
+var fillLayoutTags = snapshot.SupportedVersions()
 
 // sdkSerializerSource returns the file holding the snapshot clusters: it was
 // clustered_snapshot.cc up to 2.14 and app_snapshot.cc from 2.15.
 func sdkSerializerSource(t *testing.T, tag string) string {
 	t.Helper()
-	for _, name := range []string{"runtime/vm/app_snapshot.cc", "runtime/vm/clustered_snapshot.cc"} {
-		if src, err := sdktest.SDKFileAtTag(name, tag); err == nil {
-			return src
-		}
+	src, err := sdktest.SDKFileAtTagAny(tag,
+		"runtime/vm/app_snapshot.cc",
+		"runtime/vm/clustered_snapshot.cc",
+	)
+	if err != nil {
+		t.Fatalf("snapshot serializer source at %s: %v", tag, err)
 	}
-	t.Fatalf("no snapshot serializer source at %s", tag)
-	return ""
+	return src
 }
 
 // sdkClassBody returns the text of `class <one of names> ... };` at column 0.

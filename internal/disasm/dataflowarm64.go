@@ -244,7 +244,7 @@ func touchInstrEffect(inst Inst, regs *noWindowRegs, annotators []Annotator, poo
 		}
 		// A Code entry-point load inherits its base's provenance: the entry
 		// point OF Code X is X. See IsCodeEntryPointDisp.
-		if IsCodeEntryPointDisp(off) && base >= 0 && base < len(regs) && regs[base] != "" {
+		if sdk.IsCodeEntryPointDisp(off) && base >= 0 && base < len(regs) && regs[base] != "" {
 			defineReg(regs, touched, dstR, regs[base])
 			return
 		}

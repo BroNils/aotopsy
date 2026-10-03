@@ -122,7 +122,11 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 	}
 
 	// Build signal graph.
-	g := signal.BuildSignalGraph(funcs, edges, stringRefs, k, rootSet)
+	dartVersion := ""
+	if hasProv {
+		dartVersion = prov.DartVersion
+	}
+	g := signal.BuildSignalGraph(dartVersion, funcs, edges, stringRefs, k, rootSet)
 	stagef("signal", "%s%d%s signal + %s%d%s context, %s%d%s call sites / %s%d%s static relations",
 		cli.Gold, g.Stats.SignalFuncs, cli.Reset,
 		cli.Gold, g.Stats.ContextFuncs, cli.Reset,
