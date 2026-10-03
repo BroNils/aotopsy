@@ -14,6 +14,7 @@ type Theme struct {
 	EdgeObject     string // object_field (vtable/closure)
 	EdgeDirect     string // BL direct calls
 	EdgeUnresolved string // unannotated BLR
+	EdgeRuntime    string // runtime-only observation overlay
 
 	// Node accents.
 	StubFill     string // runtime stubs (sub_xxx)
@@ -37,6 +38,7 @@ var NASA = Theme{
 	EdgeObject:     "#E65100", // deep orange
 	EdgeDirect:     "#424242", // dark gray
 	EdgeUnresolved: "#FC3D21", // NASA red
+	EdgeRuntime:    "#6A1B9A", // purple
 
 	StubFill:     "#ECEFF1", // blue-gray 50
 	ExternalText: "#9E9E9E",

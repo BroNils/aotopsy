@@ -66,15 +66,17 @@ func TestCFGDOTWithoutEdges(t *testing.T) {
 	}
 }
 
-// TestCFGDOTUnresolvedCallDrawsNothing: an edge with no resolved target is
-// not a callee we can name, and inventing a node for it would be the same
-// fabrication the pool-index fallback was removed for.
-func TestCFGDOTUnresolvedCallDrawsNothing(t *testing.T) {
+// TestCFGDOTUnresolvedCallDrawsCallSiteEvidence keeps an unresolved call
+// visible without fabricating a callee identity.
+func TestCFGDOTUnresolvedCallDrawsCallSiteEvidence(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{
 		{FromFunc: "Foo.bar", FromPC: "0x1008", Kind: "blr"},
 	}
 	dot := CFGDOT(twoBlockCFG(), edges, NASA)
-	if strings.Contains(dot, "style=dashed") {
-		t.Errorf("unresolved call must not draw a callee edge:\n%s", dot)
+	if !strings.Contains(dot, "unresolved indirect @ 0x1008") {
+		t.Errorf("unresolved call-site evidence missing:\n%s", dot)
+	}
+	if strings.Contains(dot, "unresolved_blr") {
+		t.Errorf("unresolved call was collapsed into a fake callee:\n%s", dot)
 	}
 }

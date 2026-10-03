@@ -117,7 +117,7 @@ func TestBuildPlatformChannels(t *testing.T) {
 		{Func: "package:my_app/pay.dart::sendPayment", Value: "com.example.app/payments"},
 	}
 
-	channels := BuildPlatformChannels(cl, pl, edges, stringRefs)
+	channels := BuildPlatformChannels(cl, pl, nil, edges, stringRefs)
 	if len(channels) != 2 {
 		t.Fatalf("expected 2 platform channels, got %d", len(channels))
 	}
@@ -148,9 +148,24 @@ func TestBuildPlatformChannelsDoesNotTreatViaAsAPIIdentity(t *testing.T) {
 	}}
 	refs := []disasm.StringRefRecord{{Func: "caller", Value: "plugins.flutter.io/example"}}
 
-	channels := BuildPlatformChannels(cl, pl, edges, refs)
+	channels := BuildPlatformChannels(cl, pl, nil, edges, refs)
 	if len(channels) != 0 {
 		t.Fatalf("Via provenance fabricated platform API call: %+v", channels)
+	}
+}
+
+func TestBuildPlatformChannelsResolvesDirectTargetAddressThroughFunctions(t *testing.T) {
+	cl := &cluster.Result{Pool: []cluster.PoolEntry{{Index: 0, Kind: cluster.PoolTagged, RefID: 10}}}
+	pl := &naming.PoolLookups{RefToStr: map[int]string{10: "plugins.flutter.io/example"}}
+	funcs := []disasm.FuncRecord{{Name: "package:flutter/services.dart::MethodChannel.invokeMethod", PC: "0x2000"}}
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "caller", FromPC: "0x1000", Kind: "bl", TargetAddress: "0x2000",
+	}}
+	refs := []disasm.StringRefRecord{{Func: "caller", Value: "plugins.flutter.io/example"}}
+
+	channels := BuildPlatformChannels(cl, pl, funcs, edges, refs)
+	if len(channels) != 1 || len(channels[0].ChannelTypes) != 1 || channels[0].ChannelTypes[0] != "method_channel" {
+		t.Fatalf("direct-address channel binding = %+v", channels)
 	}
 }
 

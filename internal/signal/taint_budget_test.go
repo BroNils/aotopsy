@@ -42,7 +42,7 @@ func TestTaintBudgetTruncatesExplicitlyAndDeterministically(t *testing.T) {
 	var files [2][]byte
 	for run := range files {
 		dir := t.TempDir()
-		if err := WriteTaintFindings(dir, refs, nil); err != nil {
+		if err := WriteTaintFindings(dir, nil, refs, nil); err != nil {
 			t.Fatalf("budget overflow failed the stage: %v", err)
 		}
 		s := readTaintSummary(t, dir)
@@ -62,7 +62,7 @@ func TestTaintBudgetTruncatesExplicitlyAndDeterministically(t *testing.T) {
 
 func TestTaintSummaryReportsCompleteRun(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteTaintFindings(dir, taintRefs(3), nil); err != nil {
+	if err := WriteTaintFindings(dir, nil, taintRefs(3), nil); err != nil {
 		t.Fatal(err)
 	}
 	if s := readTaintSummary(t, dir); s.Truncated || s.Findings != 3 {

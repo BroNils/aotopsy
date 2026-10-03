@@ -22,7 +22,7 @@ type PlatformChannelRecord struct {
 // exact string, and the same function calls a Flutter channel API. Only joined
 // records are emitted; a reverse-domain string by itself is not proof that it is
 // a platform channel.
-func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) []PlatformChannelRecord {
+func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) []PlatformChannelRecord {
 	if cl == nil || pl == nil {
 		return nil
 	}
@@ -67,12 +67,15 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, edges []d
 	}
 
 	// Bind those strings to concrete channel API calls from the same function.
+	// Direct calls whose recovered symbolic identity is absent are resolved from
+	// their exact TargetAddress only when functions.jsonl proves that PC.
+	namesByPC := functionNamesByPC(funcs)
 	for _, edge := range edges {
 		channels := funcChannels[edge.FromFunc]
 		if len(channels) == 0 {
 			continue
 		}
-		for _, target := range edge.ResolvedTargets() {
+		for _, target := range resolvedFunctionTargets(edge, namesByPC) {
 			chType := platformChannelTypeFromTarget(target)
 			if chType == "" {
 				continue
