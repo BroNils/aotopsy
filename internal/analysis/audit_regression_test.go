@@ -387,20 +387,23 @@ func TestBuildFridaMetadataUsesVersionedDispatchCIDRegister(t *testing.T) {
 	}{
 		{"arm64 2.12 mutates cid register", "2.12.0", "", true},
 		{"arm64 2.13 preserves cid register", "2.13.0", "x0", true},
-		{"x64 2.12 preserves cid register", "2.12.0", "rcx", false},
+		{"x64 2.12 preserves observed cid register", "2.12.0", "rdx", false},
+		{"x64 2.13 uses fixed cid register", "2.13.0", "rcx", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			ef := writeFridaTestProvenance(t, dir, tt.version, tt.arm64, true)
+			ef := writeFridaTestProvenance(t, dir, tt.version, tt.arm64, false)
 			if err := os.WriteFile(filepath.Join(dir, "functions.jsonl"), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			reg := "RAX"
+			reg := "[RAX+RDX*8+0x20]"
 			kind := "call_indirect"
 			if tt.arm64 {
 				reg = "X16"
 				kind = "blr"
+			} else if tt.version != "2.12.0" {
+				reg = "[RAX+RCX*8+0x20]"
 			}
 			edge := disasm.CallEdgeRecord{Kind: kind, FromFunc: "F", FromPC: "0x100", Reg: reg, Via: "dispatch_table"}
 			b, err := json.Marshal(edge)
@@ -412,7 +415,7 @@ func TestBuildFridaMetadataUsesVersionedDispatchCIDRegister(t *testing.T) {
 			}
 			ctx := &AnalysisContext{
 				Info: &snapshot.Info{Version: &snapshot.VersionProfile{
-					DartVersion: tt.version, CompressedPointers: true,
+					DartVersion: tt.version, CompressedPointers: false,
 				}},
 				DartVersion: tt.version,
 				IsARM64:     tt.arm64,

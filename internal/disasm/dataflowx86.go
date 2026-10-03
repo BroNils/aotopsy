@@ -26,7 +26,7 @@ import (
 // with ARM64 through PartitionBlocks, so the architecture rules themselves are
 // not duplicated here.
 // H-3 fix: thrFields parameter added to annotate THR loads with field names.
-func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
+func ScanX86FunctionCFG(dartVersion string, funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
 	insts := decodeX86Flat(funcCode, funcVA)
 	if len(insts) == 0 {
 		return X86ScanResult{}
@@ -88,7 +88,7 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		for i := blk.Start; i < blk.End; i++ {
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
-				e := classifyX86Call(d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
+				e := classifyX86Call(dartVersion, d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
 				if e.Kind == "call" {
 					argMask := inferX86CallArgRegMaskLocal(insts, i, blk.Start)
 					e.ArgRegMask = argMask
@@ -321,7 +321,7 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 				// A Code entry-point load inherits its base's provenance --
 				// the entry point OF Code X is X. Same rule as ARM64's
 				// touchInstrEffect; see IsCodeEntryPointDisp.
-				if mem.Index == 0 && IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
+				if mem.Index == 0 && sdk.IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
 					x86Define(regs, touched, dstIdx, regs[baseIdx])
 				} else if mem.Index != 0 {
 					// The displacement is only one term of the effective address;

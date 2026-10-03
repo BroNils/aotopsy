@@ -251,16 +251,19 @@ func TestGenerateFridaScriptQuotesMetadataAndRejectsUnsafeOffsets(t *testing.T) 
 
 func TestDispatchClassIDRegisterUsesVersionedABI(t *testing.T) {
 	tests := []struct {
-		arch, version, want string
+		arch, version, indexReg, want string
 	}{
-		{"arm64", "2.12.0", ""},
-		{"arm64", "2.13.0", "x0"},
-		{"arm64", "3.12.2", "x0"},
-		{"x64", "2.12.0", "rcx"},
+		{"arm64", "2.12.0", "", ""},
+		{"arm64", "2.13.0", "", "x0"},
+		{"arm64", "3.12.2", "", "x0"},
+		{"x64", "2.12.0", "rdx", "rdx"},
+		{"x64", "2.13.0", "rcx", "rcx"},
+		{"x64", "2.13.0", "rdx", ""},
+		{"x64", "3.99.0", "rcx", ""},
 	}
 	for _, tt := range tests {
-		if got := DispatchClassIDRegister(tt.arch, tt.version); got != tt.want {
-			t.Errorf("DispatchClassIDRegister(%q,%q)=%q, want %q", tt.arch, tt.version, got, tt.want)
+		if got := DispatchClassIDRegister(tt.arch, tt.version, tt.indexReg); got != tt.want {
+			t.Errorf("DispatchClassIDRegister(%q,%q,%q)=%q, want %q", tt.arch, tt.version, tt.indexReg, got, tt.want)
 		}
 	}
 }

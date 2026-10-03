@@ -25,7 +25,7 @@ func TestX86THRCallIsAStubNotADispatchTableCall(t *testing.T) {
 	inst := decodeOne(t, []byte{0x41, 0xff, 0x96, 0x40, 0x02, 0x00, 0x00})
 	thrFields := map[int]string{0x240: "stack_overflow_shared_without_fpu_regs_entry_point"}
 
-	e := classifyX86Call(inst, 0x136289, inst.Len, nil, &x86RegTracker{}, nil, thrFields)
+	e := classifyX86Call("3.12.2", inst, 0x136289, inst.Len, nil, &x86RegTracker{}, nil, thrFields)
 	if want := "THR.stack_overflow_shared_without_fpu_regs_entry_point"; e.Via != want {
 		t.Errorf("Via = %q, want %q", e.Via, want)
 	}
@@ -37,7 +37,7 @@ func TestX86THRCallIsAStubNotADispatchTableCall(t *testing.T) {
 func TestX86THRCallWithUnknownOffsetNamesNoCategory(t *testing.T) {
 	inst := decodeOne(t, []byte{0x41, 0xff, 0x96, 0x40, 0x02, 0x00, 0x00})
 
-	e := classifyX86Call(inst, 0x136289, inst.Len, nil, &x86RegTracker{}, nil, map[int]string{})
+	e := classifyX86Call("3.12.2", inst, 0x136289, inst.Len, nil, &x86RegTracker{}, nil, map[int]string{})
 	if e.Via == "dispatch_table" {
 		t.Error("an unknown Thread offset must not be claimed as the dispatch table")
 	}
@@ -60,7 +60,7 @@ func TestX86DispatchCallIndexesTheLoadedTable(t *testing.T) {
 	rt := &x86RegTracker{}
 	rt.defs[0] = x86RegProvenance{note: "THR.dispatch_table_array"} // RAX
 
-	e := classifyX86Call(inst, 0x13626c, inst.Len, nil, rt, nil, nil)
+	e := classifyX86Call("3.12.2", inst, 0x13626c, inst.Len, nil, rt, nil, nil)
 	if e.Via != "THR.dispatch_table_array" {
 		t.Errorf("Via = %q; the dispatch call must keep the provenance of the loaded table", e.Via)
 	}

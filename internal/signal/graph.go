@@ -92,6 +92,7 @@ type SignalStats struct {
 // rootCandidates is the structural source-component set from render's static
 // call graph (may be nil). It is not a language-level entry-point claim.
 func BuildSignalGraph(
+	dartVersion string,
 	funcs []disasm.FuncRecord,
 	edges []disasm.CallEdgeRecord,
 	stringRefs []disasm.StringRefRecord,
@@ -117,7 +118,7 @@ func BuildSignalGraph(
 			continue
 		}
 		validStringRefCount++
-		cats := ClassifyString(sr.Value)
+		cats := ClassifyString(dartVersion, sr.Value)
 		if len(cats) == 0 {
 			continue
 		}
@@ -156,13 +157,13 @@ func BuildSignalGraph(
 			continue
 		}
 		thrName := e.Via[4:]
-		if sdk.IsMundaneStub(thrName) {
+		if sdk.IsMundaneStub(dartVersion, thrName) {
 			continue
 		}
 		// Recognized suspendable-function stubs carry source-level kind
 		// evidence; unknown names remain CatTHR as a table-coverage gap.
 		cat := CatTHR
-		switch sdk.ClassifyStubRole(thrName) {
+		switch sdk.ClassifyStubRole(dartVersion, thrName) {
 		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
 			cat = CatAsync
 		case sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn,
@@ -206,7 +207,7 @@ func BuildSignalGraph(
 			continue
 		}
 		// Skip mundane THR stubs (same filter as allEdges).
-		if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
+		if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(dartVersion, e.Via[4:]) {
 			continue
 		}
 		targets := signalStaticTargets(e)
@@ -354,7 +355,7 @@ func BuildSignalGraph(
 		}
 		if e.Kind == "blr" || e.Kind == "call_indirect" {
 			// Skip mundane THR.
-			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(e.Via[4:]) {
+			if strings.HasPrefix(e.Via, "THR.") && sdk.IsMundaneStub(dartVersion, e.Via[4:]) {
 				continue
 			}
 		}

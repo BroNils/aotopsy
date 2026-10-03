@@ -12,7 +12,7 @@ func TestBuildSignalGraphExpandsPolymorphicTargets(t *testing.T) {
 		FromFunc: "caller", Kind: "call_indirect", Via: "dispatch_table",
 		Targets: []string{"Impl.a", "Impl.b"}, Candidates: 2,
 	}}
-	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 1, nil)
 	got := make(map[string]SignalEdge)
 	for _, e := range g.Edges {
 		got[e.To] = e
@@ -37,7 +37,7 @@ func TestBuildSignalGraphTreatsMissingPolymorphicCandidateCountAsUnknown(t *test
 		FromFunc: "caller", FromPC: "0x1000", Kind: "call_indirect", Via: "dispatch_table",
 		Targets: []string{"Impl.a", "Impl.b"},
 	}}
-	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 1, nil)
 	if g.Stats.UnknownCandidateCountSites != 1 || g.Stats.IncompletePolymorphicSites != 0 {
 		t.Fatalf("unknown candidate count stats = %+v", g.Stats)
 	}
@@ -53,7 +53,7 @@ func TestBuildSignalGraphDoesNotPromoteViaToCallee(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{{
 		FromFunc: "caller", Kind: "call_indirect", Via: "dispatch_table",
 	}}
-	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 1, nil)
 	if len(g.Edges) != 1 || g.Edges[0].To != "" || g.Edges[0].Resolution != ResolutionUnresolved {
 		t.Fatalf("unresolved call-site evidence was not preserved distinctly: %+v", g.Edges)
 	}
@@ -74,7 +74,7 @@ func TestBuildSignalGraphPreservesIncompletePolymorphicAndRuntimeEvidence(t *tes
 			Targets: []disasm.RuntimeTargetObservation{{Target: "Runtime.only", Count: 3}},
 		},
 	}}
-	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 1, nil)
 	if g.Stats.IncompletePolymorphicSites != 1 || g.Stats.StaticRelations != 2 || g.Stats.RuntimeObservedSites != 1 || g.Stats.RuntimeRelations != 1 {
 		t.Fatalf("signal graph stats lost call-site semantics: %+v", g.Stats)
 	}
@@ -105,7 +105,7 @@ func TestBuildSignalGraphDoesNotCountExternalContextOrUnknownSignalFunctions(t *
 		{Func: "known", Value: "https://example.com"},
 		{Func: "ghost", Value: "https://ghost.example.com"},
 	}
-	g := BuildSignalGraph(funcs, edges, refs, 2, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, refs, 2, nil)
 	if g.Stats.SignalFuncs != 1 || g.Stats.ContextFuncs != 0 || g.Stats.StringRefCount != 1 {
 		t.Fatalf("unknown functions inflated signal/context population: %+v", g.Stats)
 	}
@@ -120,7 +120,7 @@ func TestBuildSignalGraphKeepsRawDirectAddressOutOfFunctionRelations(t *testing.
 		FromFunc: "caller", FromPC: "0x1000", Kind: "bl",
 		Target: "0x1234", TargetAddress: "0x1234",
 	}}
-	g := BuildSignalGraph(funcs, edges, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 1, nil)
 	if g.Stats.StaticRelations != 0 || len(g.Edges) != 1 {
 		t.Fatalf("raw address became a static function relation: stats=%+v edges=%+v", g.Stats, g.Edges)
 	}
@@ -135,7 +135,7 @@ func TestBuildSignalGraphDeduplicatesCodeAliasesByFunctionIdentity(t *testing.T)
 		{Name: "Alias.same", Owner: "Alias", PC: "0x1000", Size: 16, RefID: 1},
 		{Name: "Alias.same", Owner: "Alias", PC: "0x1000", Size: 16, RefID: 2},
 	}
-	g := BuildSignalGraph(funcs, nil, []disasm.StringRefRecord{{Func: "Alias.same", Value: "https://example.com"}}, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, nil, []disasm.StringRefRecord{{Func: "Alias.same", Value: "https://example.com"}}, 1, nil)
 	if g.Stats.TotalFuncs != 1 || g.Stats.SignalFuncs != 1 || len(g.Funcs) != 1 {
 		t.Fatalf("code alias inflated signal graph function population: stats=%+v funcs=%+v", g.Stats, g.Funcs)
 	}
@@ -144,7 +144,7 @@ func TestBuildSignalGraphDeduplicatesCodeAliasesByFunctionIdentity(t *testing.T)
 func TestBuildSignalGraphStatsMatchDeduplicatedEdges(t *testing.T) {
 	funcs := []disasm.FuncRecord{{Name: "caller"}, {Name: "callee"}}
 	edge := disasm.CallEdgeRecord{FromFunc: "caller", FromPC: "0x1000", Kind: "bl", Target: "callee", TargetAddress: "0x2000"}
-	g := BuildSignalGraph(funcs, []disasm.CallEdgeRecord{edge, edge}, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, []disasm.CallEdgeRecord{edge, edge}, nil, 1, nil)
 	if g.Stats.CallSites != 1 || g.Stats.StaticRelations != 1 || len(g.Edges) != 1 {
 		t.Fatalf("duplicate record inflated signal stats: stats=%+v edges=%+v", g.Stats, g.Edges)
 	}
@@ -153,7 +153,7 @@ func TestBuildSignalGraphStatsMatchDeduplicatedEdges(t *testing.T) {
 func TestBuildSignalGraphPreservesUnsupportedCallKindAsEvidence(t *testing.T) {
 	funcs := []disasm.FuncRecord{{Name: "caller"}, {Name: "callee"}}
 	edge := disasm.CallEdgeRecord{FromFunc: "caller", FromPC: "0x1000", Kind: "future_call_kind", Target: "callee"}
-	g := BuildSignalGraph(funcs, []disasm.CallEdgeRecord{edge}, nil, 1, nil)
+	g := BuildSignalGraph("3.12.2", funcs, []disasm.CallEdgeRecord{edge}, nil, 1, nil)
 	if g.Stats.CallSites != 1 || g.Stats.UnsupportedCallSites != 1 || g.Stats.StaticRelations != 0 || len(g.Edges) != 1 {
 		t.Fatalf("unsupported kind was dropped or traversed: stats=%+v edges=%+v", g.Stats, g.Edges)
 	}

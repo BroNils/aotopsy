@@ -36,13 +36,17 @@ func TestIndirectCallDoesNotDumpICDataRegister(t *testing.T) {
 			// calleeVA 0 == indirect.
 			got := e.callArgExprs(len(tc.fir.ArgRegs), 0)
 
-			if len(got) > sdk.ICDataArgRegIndex {
+			idx, ok := sdk.ICDataArgRegIndex(tc.fir.DartVersion, tc.fir.LinkReg != "")
+			if !ok {
+				t.Fatal("IC_DATA_REG position unavailable for test profile")
+			}
+			if len(got) > idx {
 				t.Errorf("indirect call kept %d args, want at most %d: %v",
-					len(got), sdk.ICDataArgRegIndex, got)
+					len(got), idx, got)
 			}
 			// The IC data register's value must not appear at all.
 			for _, a := range got {
-				if a == "V"+string(rune('0'+sdk.ICDataArgRegIndex)) {
+				if a == "V"+string(rune('0'+idx)) {
 					t.Errorf("IC_DATA_REG value presented as an argument: %v", got)
 				}
 			}
@@ -59,7 +63,11 @@ func TestDirectCallKeepsItsArguments(t *testing.T) {
 		e.state.setReg(fir.ArgRegs[i], "V"+string(rune('0'+i)))
 	}
 	got := e.callArgExprs(len(fir.ArgRegs), 0x1000)
-	if len(got) <= sdk.ICDataArgRegIndex {
+	idx, ok := sdk.ICDataArgRegIndex(fir.DartVersion, false)
+	if !ok {
+		t.Fatal("IC_DATA_REG position unavailable for test profile")
+	}
+	if len(got) <= idx {
 		t.Errorf("direct call truncated to %d args: %v", len(got), got)
 	}
 	if !strings.Contains(strings.Join(got, ","), "V4") {
@@ -100,20 +108,22 @@ func containsString(xs []string, want string) bool {
 func firX64() *FuncIR {
 	cc, _ := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchX86)
 	return &FuncIR{
-		ArgRegs:   cc.GPRNames,
-		FrameReg:  "rbp",
-		ReturnReg: "rax",
-		StackReg:  "rsp",
+		DartVersion: "3.12.2",
+		ArgRegs:     cc.GPRNames,
+		FrameReg:    "rbp",
+		ReturnReg:   "rax",
+		StackReg:    "rsp",
 	}
 }
 
 func firARM64() *FuncIR {
 	cc, _ := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchARM64)
 	return &FuncIR{
-		ArgRegs:   cc.GPRNames,
-		FrameReg:  sdk.ARM64FrameRegStr,
-		ReturnReg: sdk.ARM64ReturnRegStr,
-		StackReg:  sdk.ARM64StackRegStr,
-		NullReg:   sdk.ARM64NullRegStr,
+		DartVersion: "3.12.2",
+		ArgRegs:     cc.GPRNames,
+		FrameReg:    sdk.ARM64FrameRegStr,
+		ReturnReg:   sdk.ARM64ReturnRegStr,
+		StackReg:    sdk.ARM64StackRegStr,
+		NullReg:     sdk.ARM64NullRegStr,
 	}
 }

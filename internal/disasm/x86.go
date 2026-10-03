@@ -80,13 +80,14 @@ type X86ScanResult struct {
 // R8=8, R9=9). This is Dart's OWN convention
 // (DartCallingConvention::kCpuRegistersForArgs in constants_x64.h), NOT
 // the SysV C ABI — the C ABI's 4th arg is RCX, but Dart uses RBX.
-// RCX is kClassIdReg, not an argument register.
+// On every release that has this register calling convention, RCX is the
+// fixed dispatch kClassIdReg, not an argument register.
 // Shared via sdk.DartRegisterCallingConvention at the first SDK version that
 // actually has the convention. This table only maps hardware registers to mask
 // positions; callers must still decide whether the analyzed function/version
 // uses register arguments at all.
 var x86ArgRegCanon = func() [6]int {
-	cc, ok := sdk.DartRegisterCallingConvention(sdk.FirstRegisterCallingConventionVersion, sdk.ArchX86)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.RegisterCallingConventionReferenceVersion, sdk.ArchX86)
 	if !ok {
 		panic("sdk: x86_64 register calling convention missing at first supported version")
 	}
@@ -147,7 +148,7 @@ func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx, blockStart int) u
 	return mask
 }
 
-func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
+func classifyX86Call(dartVersion string, inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
 	e := CallEdge{FromPC: addr, Kind: "call"}
 	for _, arg := range inst.Args {
 		if arg == nil {
@@ -237,7 +238,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			default:
 				baseNote = rt.lookup(x86.CanonReg(mem.Base))
 			}
-			if x86.CanonReg(mem.Index) == sdk.X86ClassIdReg && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if sdk.IsDispatchTableClassIDReg(dartVersion, sdk.ArchX86, x86.CanonReg(mem.Index)) && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote

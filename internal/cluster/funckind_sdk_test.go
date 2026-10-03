@@ -34,16 +34,15 @@ import (
 func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	// Every version the table claims, not a sample of them: a row nobody
-	// checked is exactly how 2.10 and 2.18 went wrong.
-	versions := make([]string, 0, len(funcKindLayouts))
-	for v := range funcKindLayouts {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
-
-	for _, v := range versions {
+	// Every supported release, not merely every committed row. Iterating the
+	// table itself lets a newly-supported version with a missing row disappear
+	// from the drift gate entirely.
+	for _, v := range snapshot.SupportedVersions() {
 		t.Run(v, func(t *testing.T) {
+			layout, ok := funcKindLayouts[v]
+			if !ok {
+				t.Fatalf("supported Dart %s has no FunctionKind layout", v)
+			}
 			kinds, err := sdkFunctionKinds(v)
 			if err != nil {
 				t.Fatalf("could not read FOR_EACH_RAW_FUNCTION_KIND at %s: %v", v, err)
@@ -51,8 +50,6 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 			if len(kinds) == 0 {
 				t.Fatalf("no kinds parsed at %s", v)
 			}
-			layout := funcKindLayouts[v]
-
 			// KindBits width is BitLength(last ordinal).
 			wantMask := uint32(1)<<bits.Len(uint(len(kinds)-1)) - 1
 			if layout.mask != wantMask {
@@ -60,14 +57,25 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 					layout.mask, len(kinds), kinds[len(kinds)-1], wantMask)
 			}
 
-			// Every sparse ordinal the table claims must name the kind the SDK
-			// has at that index.
+			// The production layout intentionally carries every raw SDK kind:
+			// downstream calling-convention decisions need to distinguish the
+			// stack-only kinds from register-eligible ones. Exact cardinality is
+			// therefore part of the contract; checking only the sparse ordinals
+			// already present would let a newly-added SDK kind disappear from the
+			// gate while the mask still happened to remain the same width.
+			if len(layout.known) != len(kinds) {
+				t.Fatalf("known FunctionKind rows = %d, SDK has %d exact-order kinds: %v",
+					len(layout.known), len(kinds), kinds)
+			}
 			ordinals := make([]int, 0, len(layout.known))
 			for i := range layout.known {
 				ordinals = append(ordinals, i)
 			}
 			sort.Ints(ordinals)
-			for _, i := range ordinals {
+			for wantOrdinal, i := range ordinals {
+				if i != wantOrdinal {
+					t.Fatalf("FunctionKind ordinal coverage is not contiguous: sorted ordinals=%v", ordinals)
+				}
 				want := layout.known[i]
 				if i >= len(kinds) {
 					t.Errorf("table claims ordinal %d but the SDK only has %d kinds", i, len(kinds))
@@ -90,14 +98,11 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 func TestFunctionKindTagFlagLayoutsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	versions := make([]string, 0, len(funcKindLayouts))
-	for v := range funcKindLayouts {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
-
-	for _, v := range versions {
+	for _, v := range snapshot.SupportedVersions() {
 		t.Run(v, func(t *testing.T) {
+			if _, ok := funcKindLayouts[v]; !ok {
+				t.Fatalf("supported Dart %s has no FunctionKind layout", v)
+			}
 			src, err := sdktest.SDKFileAtTag("runtime/vm/object.h", v)
 			if err != nil {
 				t.Fatalf("fetch object.h: %v", err)

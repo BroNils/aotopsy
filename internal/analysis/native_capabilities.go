@@ -34,7 +34,7 @@ type NativeCapability struct {
 // Both snapshots are scanned. Most native names live in the VM snapshot's
 // string pool, not the isolate's: reading only the isolate found 20 of the
 // 105 that a raw `strings` sweep shows.
-func BuildNativeCapabilities(isolate, vm *cluster.Result) []NativeCapability {
+func BuildNativeCapabilities(dartVersion string, isolate, vm *cluster.Result) []NativeCapability {
 	seen := make(map[string]bool, 128)
 	var out []NativeCapability
 	for _, res := range []*cluster.Result{vm, isolate} {
@@ -45,7 +45,7 @@ func BuildNativeCapabilities(isolate, vm *cluster.Result) []NativeCapability {
 			if seen[ps.Value] {
 				continue
 			}
-			cat, ok := sdk.DartNativeCategory(ps.Value)
+			cat, ok := sdk.DartNativeCategory(dartVersion, ps.Value)
 			if !ok {
 				continue
 			}

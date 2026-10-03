@@ -1212,8 +1212,5 @@ func boolFromNullOffset(fir *FuncIR, mnemonic, lhs, imm string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return sdk.BoolFromNullOffset(v)
+	return sdk.BoolFromNullOffset(fir.DartVersion, v)
 }
-
-// kTrueOffsetFromNull / kFalseOffsetFromNull moved to internal/sdk
-// (TrueOffsetFromNull / FalseOffsetFromNull).

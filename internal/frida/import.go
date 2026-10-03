@@ -580,7 +580,7 @@ func readStaticGeneration(dir string) (staticGeneration, error) {
 			continue
 		}
 		if p.Via == "dispatch_table" {
-			p.ClassIDReg = DispatchClassIDRegister(binding.Architecture, binding.DartVersion)
+			p.ClassIDReg = DispatchClassIDRegister(binding.Architecture, binding.DartVersion, p.IndexReg)
 		}
 		allProbes = append(allProbes, p)
 	}

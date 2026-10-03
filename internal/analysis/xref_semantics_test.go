@@ -42,11 +42,12 @@ func TestWriteXrefFallbackIncludesVMOnlyPoolStrings(t *testing.T) {
 	ct := &snapshot.CIDTable{String: 10, OneByteString: 11, TwoByteString: 12}
 	cl := &cluster.Result{Pool: []cluster.PoolEntry{{Index: 7, Kind: cluster.PoolTagged, RefID: 41}}}
 	pl := &naming.PoolLookups{
-		CT:         ct,
-		RefCID:     map[int]int{},
-		VmRefCID:   map[int]int{41: ct.OneByteString},
-		RefToStr:   map[int]string{},
-		VmRefToStr: map[int]string{41: "vm-shared-string"},
+		CT:           ct,
+		RefCID:       map[int]int{},
+		VmRefCID:     map[int]int{41: ct.OneByteString},
+		RefToStr:     map[int]string{},
+		VmRefToStr:   map[int]string{41: "vm-shared-string"},
+		BaseObjLimit: 100,
 	}
 	if err := writeXrefJSONL(dir, cl, pl, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)

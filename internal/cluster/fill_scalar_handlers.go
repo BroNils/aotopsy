@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"aotopsy/internal/dartfmt"
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -261,7 +260,7 @@ func readFieldScalar(s *dartfmt.Stream, si int, ref int, nameRef, ownerRef, sigR
 // the version-specific fields needed for both class id and nullability have
 // been consumed: scalar 1 in the 2.15-2.18 split layout, scalar 0 in the packed
 // 2.19+ layout.
-func readTypeScalar(s *dartfmt.Stream, si int, ref int, state *scalarState, i, count int, op ScalarOp, classIDIsScalar0 bool, classIDShift uint) (*TypeInfo, error) {
+func readTypeScalar(s *dartfmt.Stream, si int, ref int, state *scalarState, i, count int, op ScalarOp, classIDIsScalar0 bool, classIDShift uint, dartVersion string) (*TypeInfo, error) {
 	if classIDShift == 0 {
 		classIDShift = 3
 	}
@@ -291,12 +290,16 @@ func readTypeScalar(s *dartfmt.Stream, si int, ref int, state *scalarState, i, c
 		// 2.19.0+: the scalar is the packed flags word. type_class_id and
 		// nullability are independent bit fields in the same value.
 		v, err := s.ReadUnsigned()
-		if err != nil {
-			return nil, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
-		}
-		return &TypeInfo{
-			RefID:       ref,
-			ClassID:     int32((v >> classIDShift) & ((1 << sdk.ClassIdTagSizeV3) - 1)),
+			if err != nil {
+				return nil, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
+			}
+			_, classIDWidth, ok := snapshot.ClassIdTagLayout(dartVersion)
+			if !ok {
+				return nil, fmt.Errorf("unsupported class-id tag layout for Dart %s", dartVersion)
+			}
+			return &TypeInfo{
+				RefID:       ref,
+				ClassID:     int32((v >> classIDShift) & ((1 << classIDWidth) - 1)),
 			Nullability: decodeTypeNullability(uint64(v), classIDShift),
 		}, nil
 	}

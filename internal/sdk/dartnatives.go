@@ -124,10 +124,13 @@ var dartNativeExact = map[string]string{
 	"Ffi_createNativeCallableListener": NativeCatFFI,
 }
 
-// dartnatives_known.txt is generated from the exact native lists in the local
-// dart-lang/sdk release tags supported by this project. Namespace membership
-// alone is not evidence that an arbitrary application string is a VM native:
-// `Socket_NotARealNative` has the right prefix but the VM will never resolve it.
+// dartnatives_known.txt is the cross-version union of exact SDK natives whose
+// namespaces this classifier intentionally assigns behavioral signal (plus any
+// exact-name overrides). It is NOT the union of every mundane VM native:
+// Object_*, Double_*, List_* and similar high-frequency namespaces are excluded
+// deliberately. Namespace membership alone is not evidence that an arbitrary
+// application string is a VM native: `Socket_NotARealNative` has the right
+// prefix but the VM will never resolve it.
 //
 //go:embed dartnatives_known.txt
 var dartNativeKnownText string
@@ -141,13 +144,16 @@ var dartNativeKnown = func() map[string]struct{} {
 	return out
 }()
 
-// DartNativeCategory classifies a VM native function name.
+// DartNativeCategory classifies a VM native function name for an exact
+// supported Dart version.
 //
 // The match is exact-then-namespace, never substring: a substring match
 // is what turned SecurityContext_UsePrivateKeyBytes into a blockchain
-// signal.
-func DartNativeCategory(name string) (string, bool) {
-	if _, ok := dartNativeKnown[name]; !ok {
+// signal. The known-name file is a cross-version union, so version membership
+// is checked separately: 123 of the 304 known names are not present in every
+// supported SDK release.
+func DartNativeCategory(dartVersion, name string) (string, bool) {
+	if !dartNativeExistsAtVersion(dartVersion, name) {
 		return "", false
 	}
 	if cat, ok := dartNativeExact[name]; ok {
@@ -163,6 +169,20 @@ func DartNativeCategory(name string) (string, bool) {
 	ns := name[:i]
 	cat, ok := dartNativeNamespaces[ns]
 	return cat, ok
+}
+
+func dartNativeExistsAtVersion(dartVersion, name string) bool {
+	if _, ok := dartNativeKnown[name]; !ok {
+		return false
+	}
+	bit, ok := dartNativeVersionBit[dartVersion]
+	if !ok {
+		return false
+	}
+	if mask, varies := dartNativeVersionOverrides[name]; varies {
+		return mask&bit != 0
+	}
+	return true
 }
 
 // DartNativeNamespaces returns the namespaces this table classifies, for

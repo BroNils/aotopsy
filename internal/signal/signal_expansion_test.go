@@ -394,8 +394,8 @@ func TestSecurityCategoriesFireOnRealStrings(t *testing.T) {
 		{"android.os.Debug", CatAntiAnalysis},
 	}
 	for _, tt := range tests {
-		if !containsCat(ClassifyString(tt.value), tt.want) {
-			t.Errorf("ClassifyString(%q) = %v, want it to contain %q", tt.value, ClassifyString(tt.value), tt.want)
+		if !containsCat(ClassifyString("3.12.2", tt.value), tt.want) {
+				t.Errorf("ClassifyString(3.12.2, %q) = %v, want it to contain %q", tt.value, ClassifyString("3.12.2", tt.value), tt.want)
 		}
 	}
 }
@@ -408,10 +408,10 @@ func TestSecurityCategoriesNoFalsePositives(t *testing.T) {
 		"serialize", "deserializer", "allocation", "relocation", "tokenizer",
 	}
 	for _, v := range clean {
-		cats := ClassifyString(v)
+		cats := ClassifyString("3.12.2", v)
 		for _, bad := range []string{CatCovertChannel, CatFraud, CatIPC, CatObfuscation, CatDynamicLoad} {
 			if containsCat(cats, bad) {
-				t.Errorf("ClassifyString(%q) = %v, must not contain %q", v, cats, bad)
+					t.Errorf("ClassifyString(3.12.2, %q) = %v, must not contain %q", v, cats, bad)
 			}
 		}
 	}

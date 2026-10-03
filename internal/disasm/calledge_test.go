@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/vmtables"
 )
 
@@ -174,12 +175,12 @@ func TestInferCallArgRegMaskDoesNotCrossBasicBlockStart(t *testing.T) {
 
 func TestCodeEntryPointDispAOTOnly(t *testing.T) {
 	for _, off := range []int{0x7, 0xf, 0x17, 0x1f} {
-		if !IsCodeEntryPointDisp(off) {
+		if !sdk.IsCodeEntryPointDisp(off) {
 			t.Errorf("AOT Code entry-point displacement %#x rejected", off)
 		}
 	}
 	for _, off := range []int{0x3, 0xb} {
-		if IsCodeEntryPointDisp(off) {
+		if sdk.IsCodeEntryPointDisp(off) {
 			t.Errorf("non-AOT compressed-layout displacement %#x accepted", off)
 		}
 	}

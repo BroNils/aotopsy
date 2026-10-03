@@ -421,7 +421,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 				}
 				if va, ok := parseHexVA(ins.Target); ok {
 					if name, ok2 := e.symbols(va); ok2 && name != "" {
-						markSuspendableStubRole(fir, sdk.ClassifyStubRole(name))
+							markSuspendableStubRole(fir, sdk.ClassifyStubRole(fir.DartVersion, name))
 					}
 				}
 			}

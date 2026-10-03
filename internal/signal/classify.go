@@ -250,7 +250,7 @@ var (
 
 // ClassifyString returns the set of signal categories matching the value.
 // Returns nil if the string carries no signal.
-func ClassifyString(value string) []string {
+func ClassifyString(dartVersion, value string) []string {
 	if len(value) < 2 {
 		return nil
 	}
@@ -263,7 +263,7 @@ func ClassifyString(value string) []string {
 	//
 	// This is also where most native names get classified at all: of 20
 	// representative ones the heuristics matched 4.
-	if cat, ok := sdk.DartNativeCategory(value); ok {
+	if cat, ok := sdk.DartNativeCategory(dartVersion, value); ok {
 		return []string{cat}
 	}
 

@@ -408,11 +408,13 @@ func runTypeInference(
 		}
 	}
 
-	// Compute kOriginElement: ARM64=4096, x86_64=16.
-	// These are compile-time constants in the Dart SDK (dispatch_table.h).
-	kOriginElement := 4096
-	if !isARM64 {
-		kOriginElement = 16
+	// The dispatch origin is stable across supported releases, but its source
+	// spelling changes: OriginElement() through 2.18 and kOriginElement from
+	// 2.19. A populated table without a verified exact-version fact is still a
+	// profile inconsistency rather than a reason to guess.
+	kOriginElement, hasDispatchOrigin := sdk.DispatchTableOriginElement(info.Version.DartVersion, isARM64)
+	if len(dispatchEntries) > 0 && !hasDispatchOrigin {
+		return BLRBreakdown{}, nil, nil, fmt.Errorf("Dart %s has dispatch entries but no verified dispatch-table origin", info.Version.DartVersion)
 	}
 
 	// Get allocation stub offsets from the exact snapshot profile. Pointer
@@ -467,10 +469,13 @@ func runTypeInference(
 	} else {
 		funcInstsX86 = make(map[string][]x86.Decoded, len(ranges))
 	}
-	// DartCallingConvention (kCpuRegistersForArgs) first appears in
 	// One source for the ClassIdTag layout: snapshot.ClassIdTagLayout, which
 	// is also what fill_strings.go reads and what the SDK drift gate checks.
-	ctx.SetClassIDTagLayout(snapshot.ClassIdTagLayout(info.Version.DartVersion))
+	classIDPos, classIDSize, ok := snapshot.ClassIdTagLayout(info.Version.DartVersion)
+	if !ok {
+		return BLRBreakdown{}, nil, nil, fmt.Errorf("unsupported class-id tag layout for Dart %s", info.Version.DartVersion)
+	}
+	ctx.SetClassIDTagLayout(classIDPos, classIDSize)
 	blEdges := make(map[string][]typetrack.BLEdge)
 
 	// Build address → function name lookup for BL/CALL target resolution.
@@ -524,7 +529,7 @@ func runTypeInference(
 		// multi-call-site register-setup evidence.
 		receiverDefinitelyOnStack := codeName.MustUseStackCC
 		legacyStaticReceiverSlot := receiverDefinitelyOnStack &&
-			!snapshot.VersionAtLeast(info.Version.DartVersion, sdk.FirstRegisterCallingConventionVersion)
+			!sdk.HasDartRegisterCallingConvention(info.Version.DartVersion)
 
 		// Map INSTANCE function name → owner class ID for receiver init. A static
 		// method is class-owned too, so OwnerName alone is not receiver evidence.
@@ -565,7 +570,7 @@ func runTypeInference(
 			})
 			funcInstsARM64[name] = insts
 			if _, isInstance := ctx.FuncOwnerClass[name]; hasRegisterCC && codeName.MayUseRegisterCC && isInstance {
-				fir := decompiler.BuildARM64IR(name, info.Version.DartVersion, insts, registerCC)
+				fir := decompiler.BuildARM64IR(name, info.Version.DartVersion, info.Version.CompressedPointers, insts, registerCC)
 				for _, pos := range decompiler.LiveInArgIndices(fir) {
 					if pos == 0 {
 						ctx.FuncReceiverInRegister[name] = true
@@ -623,7 +628,7 @@ func runTypeInference(
 			insts := typetrack.DecodeX86Function(funcCode, funcVA)
 			funcInstsX86[name] = insts
 			if _, isInstance := ctx.FuncOwnerClass[name]; hasRegisterCC && codeName.MayUseRegisterCC && isInstance {
-				fir := decompiler.BuildX86IR(name, insts, registerCC)
+				fir := decompiler.BuildX86IR(name, info.Version.DartVersion, insts, registerCC)
 				for _, pos := range decompiler.LiveInArgIndices(fir) {
 					if pos == 0 {
 						ctx.FuncReceiverInRegister[name] = true

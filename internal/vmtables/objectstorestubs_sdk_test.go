@@ -7,6 +7,7 @@ import (
 
 	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
+	"aotopsy/internal/snapshot"
 )
 
 // TestObjectStoreStubFieldsMatchSDK regenerates the committed table from
@@ -26,7 +27,12 @@ import (
 func TestObjectStoreStubFieldsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	for version, want := range objectStoreStubFields {
+	for _, version := range snapshot.SupportedVersions() {
+		want, ok := objectStoreStubFields[version]
+		if !ok {
+			t.Errorf("supported Dart %s has no committed ObjectStore stub table", version)
+			continue
+		}
 		src, err := sdktest.SDKFileAtTag("runtime/vm/object_store.h", version)
 		if err != nil {
 			t.Fatalf("%s: fetch object_store.h: %v", version, err)
@@ -86,6 +92,22 @@ func TestObjectStoreStubFieldsMatchSDK(t *testing.T) {
 				t.Errorf("%s: entry %d: SDK {%d,%q}, table {%d,%q}",
 					version, i, got[i].Index, got[i].Name, want[i].Index, want[i].Name)
 			}
+		}
+
+		wantRecordIdx := -1
+		for i, n := range sel {
+			if n == "record_field_names" {
+				wantRecordIdx = i
+				break
+			}
+		}
+		gotRecordIdx, gotRecord := objectStoreRecordFieldNamesIndex[version]
+		if wantRecordIdx < 0 {
+			if gotRecord {
+				t.Errorf("%s: record_field_names absent from SDK root range but committed at index %d", version, gotRecordIdx)
+			}
+		} else if !gotRecord || gotRecordIdx != wantRecordIdx {
+			t.Errorf("%s: record_field_names index = (%d,%v), SDK = (%d,true)", version, gotRecordIdx, gotRecord, wantRecordIdx)
 		}
 	}
 }

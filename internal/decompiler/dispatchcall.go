@@ -14,15 +14,15 @@ import (
 //
 //	x86_64 (flow_graph_compiler_x64.cc)
 //	  const Register table_reg = RAX;
-//	  const intptr_t offset = (selector_offset - DispatchTable::kOriginElement)
+//	  const intptr_t offset = (selector_offset - DispatchTable origin)
 //	                          * compiler::target::kWordSize;
 //	  __ LoadDispatchTable(table_reg);
 //	  __ call(compiler::Address(table_reg, cid_reg, TIMES_8, offset));
 //
 //	ARM64 (flow_graph_compiler_arm64.cc)
-//	  const intptr_t offset = selector_offset - DispatchTable::kOriginElement;
-//	  __ AddImmediate(LR, cid_reg, offset);
-//	  __ Call(compiler::Address(DISPATCH_TABLE_REG, LR, UXTX, Address::Scaled));
+//	  const intptr_t offset = selector_offset - DispatchTable origin;
+//	  2.10/2.12: AddImmediate(cid_reg, cid_reg, offset); load via cid_reg
+//	  2.13+:     AddImmediate(LR, cid_reg, offset); load via LR
 //
 // So the SELECTOR is in the instruction stream on both targets -- scaled into
 // the call's displacement on x86_64, and into the immediate of the `add`/`sub`
@@ -43,20 +43,19 @@ var (
 	// `[rax+8*rcx+0x200a8]`, `[rax+8*rcx-0x80]`, `[rax+8*rcx]` -- the x86_64
 	// shape. The displacement is signed because the GDT register points at a
 	// biased origin element; selectors below that origin use a negative offset.
-	// The index
-	// register is DispatchTableNullErrorABI::kClassIdReg and is not fixed by
-	// the SDK, so it is matched loosely; the table register is RAX by
-	// construction (`const Register table_reg = RAX`).
-	x64DispatchCallRe = regexp.MustCompile(`^\[rax\+8\*[a-z0-9]+(?:([+-])0x([0-9a-f]+))?\]$`)
-	// `add x30, x0, #0x1234` / `sub x30, x0, #0x1234`, the instruction that
-	// computes LR before the ARM64 dispatch call.
-	arm64LRAddRe = regexp.MustCompile(`^(add|sub)\s+x30,\s*[a-z0-9]+,\s*#(?:0x([0-9a-f]+)|(\d+))`)
-	// `ldr x30, [x21,x30,lsl #3]` -- the dispatch-table load itself. x21 is
+	// The index register is caller-selected in Dart 2.10/2.12 and fixed by
+	// DispatchTableNullErrorABI from 2.13 onward. Capture it so the exact SDK
+	// predicate can reject a modern call using a legacy-only register shape.
+	// The table register is RAX by construction (`const Register table_reg = RAX`).
+	x64DispatchCallRe = regexp.MustCompile(`^\[rax\+8\*([a-z0-9]+)(?:([+-])0x([0-9a-f]+))?\]$`)
+	// `add/sub Xindex, Xcid, #imm`, the instruction that computes the ARM64
+	// dispatch index. Xindex is LR from 2.13 onward but is the incoming cid_reg
+	// itself in 2.10/2.12.
+	arm64IndexAddRe = regexp.MustCompile(`^(add|sub)\s+(x[0-9]+),\s*(x[0-9]+),\s*#(?:0x([0-9a-f]+)|(\d+))`)
+	// `ldr x30, [x21,xN,lsl #3]` -- the dispatch-table load itself. x21 is
 	// DISPATCH_TABLE_REG (constants_arm64.h), indexed by LR and scaled by the
-	// word size, which is what `Call(Address(DISPATCH_TABLE_REG, LR, UXTX,
-	// Scaled))` assembles to: a load followed by `blr`. This instruction alone
-	// identifies the call; the `add`/`sub` above it supplies the selector.
-	arm64DispatchLoadRe = regexp.MustCompile(`^ldr\s+x30,\s*\[x21,\s*x30,\s*lsl\s*#3\]`)
+	// word size. The loaded target always lands in LR before `blr x30`.
+	arm64DispatchLoadRe = regexp.MustCompile(`^ldr\s+x30,\s*\[x21,\s*(x[0-9]+),\s*lsl\s*#3\]`)
 )
 
 // dispatchSelectorUnknown marks a call recognised as a dispatch-table call
@@ -73,14 +72,18 @@ const dispatchSelectorUnknown = -1
 // stream in hand is simpler than threading a predecessor through both.
 func annotateDispatchCalls(fir *FuncIR) {
 	isARM64 := fir.LinkReg != ""
-	origin := sdk.DispatchTableOriginElement(isARM64)
+	origin, ok := sdk.DispatchTableOriginElement(fir.DartVersion, isARM64)
+	if !ok {
+		return
+	}
 
 	for bi := range fir.Blocks {
 		blk := &fir.Blocks[bi]
-		// lastLRImm is the offset most recently written into LR by an
-		// add/sub, or none. Reset per block: a value flowing in from a
+		// lastIndexImm is the offset most recently written into the register used
+		// as the dispatch-table index by an add/sub, or none. Reset per block: a value flowing in from a
 		// predecessor is not something this pass can claim to know.
-		lastLRImm, haveLR := 0, false
+		lastIndexImm, haveIndex := 0, false
+		lastIndexReg := ""
 		dispatchLoadSeen := false
 		for i := range blk.Instrs {
 			ins := &blk.Instrs[i]
@@ -89,18 +92,27 @@ func annotateDispatchCalls(fir *FuncIR) {
 					switch {
 					case arm64DispatchLoadRe.MatchString(ins.Src):
 						// The load reads LR and writes it back; it consumes
-						// the offset rather than destroying it.
-						dispatchLoadSeen = true
-					case arm64LRAddRe.MatchString(ins.Src):
-						m := arm64LRAddRe.FindStringSubmatch(ins.Src)
-						v := parseImmDec(m[2], m[3])
+						// the index rather than destroying it. If an add/sub was
+						// recovered, require the load to use its destination.
+						m := arm64DispatchLoadRe.FindStringSubmatch(ins.Src)
+						idxReg, regOK := arm64RegNumber(m[1])
+						dispatchLoadSeen = regOK && sdk.IsARM64DispatchTableIndexReg(fir.DartVersion, idxReg) && (!haveIndex || m[1] == lastIndexReg)
+					case arm64IndexAddRe.MatchString(ins.Src):
+						m := arm64IndexAddRe.FindStringSubmatch(ins.Src)
+						dstReg, dstOK := arm64RegNumber(m[2])
+						srcReg, srcOK := arm64RegNumber(m[3])
+						if !dstOK || !srcOK || !sdk.IsARM64DispatchTableIndexComputation(fir.DartVersion, dstReg, srcReg) {
+							haveIndex, dispatchLoadSeen = false, false
+							break
+						}
+						v := parseImmDec(m[4], m[5])
 						if m[1] == "sub" {
 							v = -v
 						}
-						lastLRImm, haveLR = v, true
+						lastIndexImm, lastIndexReg, haveIndex = v, m[2], true
 					case strings.Contains(ins.Src, "x30"):
 						// Any other write to LR invalidates both.
-						haveLR, dispatchLoadSeen = false, false
+						haveIndex, dispatchLoadSeen = false, false
 					}
 				}
 				continue
@@ -108,21 +120,25 @@ func annotateDispatchCalls(fir *FuncIR) {
 			if isARM64 {
 				if ins.Target == fir.LinkReg && dispatchLoadSeen {
 					ins.IsDispatchCall = true
-					if haveLR {
-						ins.DispatchSelector = lastLRImm + origin
+					if haveIndex {
+						ins.DispatchSelector = lastIndexImm + origin
 					} else {
 						ins.DispatchSelector = dispatchSelectorUnknown
 					}
 				}
-				haveLR, dispatchLoadSeen = false, false
+				haveIndex, dispatchLoadSeen = false, false
 				continue
 			}
 			if m := x64DispatchCallRe.FindStringSubmatch(ins.Target); m != nil {
+				idxReg, regOK := x86RegNumber(m[1])
+				if !regOK || !sdk.IsDispatchTableClassIDReg(fir.DartVersion, sdk.ArchX86, idxReg) {
+					continue
+				}
 				disp := 0
-				if m[2] != "" {
-					if v, err := strconv.ParseInt(m[2], 16, 64); err == nil {
+				if m[3] != "" {
+					if v, err := strconv.ParseInt(m[3], 16, 64); err == nil {
 						disp = int(v)
-						if m[1] == "-" {
+						if m[2] == "-" {
 							disp = -disp
 						}
 					}
@@ -153,4 +169,21 @@ func parseImmDec(hex, dec string) int {
 		return v
 	}
 	return 0
+}
+
+func arm64RegNumber(name string) (int, bool) {
+	if !strings.HasPrefix(name, "x") {
+		return 0, false
+	}
+	reg, err := strconv.Atoi(strings.TrimPrefix(name, "x"))
+	return reg, err == nil && reg >= 0 && reg <= 30
+}
+
+func x86RegNumber(name string) (int, bool) {
+	for reg := 0; reg < 16; reg++ {
+		if sdk.X86RegName(reg) == name {
+			return reg, true
+		}
+	}
+	return 0, false
 }

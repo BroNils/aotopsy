@@ -13,8 +13,7 @@ import (
 // The ones below are typetrack-specific (not in the SDK's reserved-register
 // set, but used by the type lattice for class-id and allocation tracking).
 const (
-	x86RegRCX = sdk.X86ClassIdReg // kClassIdReg (DispatchTableNullErrorABI)
-	x86RegRAX = 0                 // return value / allocation result
+	x86RegRAX = 0 // return value / allocation result
 )
 
 // x86RegRDI is deliberately absent. It was defined here as "SysV arg 0
@@ -32,13 +31,14 @@ const (
 //	DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
 //
 // The previous value used RCX (1) for parameter 3 instead of RBX (3) —
-// the SysV C ABI order. RCX is DispatchTableNullErrorABI::kClassIdReg
-// in Dart, not an argument register. killX86ArgRegs was killing RCX
+// the SysV C ABI order. On releases that have this register calling
+// convention, RCX is DispatchTableNullErrorABI::kClassIdReg, not an argument
+// register. killX86ArgRegs was killing RCX
 // (losing class-id type info needed for dispatch resolution) and NOT
 // killing RBX (leaving stale type info after calls that could propagate
 // incorrect types).
 var x86ArgRegCanon = func() [6]int {
-	cc, ok := sdk.DartRegisterCallingConvention(sdk.FirstRegisterCallingConventionVersion, sdk.ArchX86)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.RegisterCallingConventionReferenceVersion, sdk.ArchX86)
 	if !ok {
 		panic("sdk: x86_64 register calling convention missing at first supported version")
 	}
@@ -63,7 +63,8 @@ func AnalyzeFunctionX86(
 	// Pre-scan: find x86_64 dispatch table call patterns.
 	// Pattern from SDK (flow_graph_compiler_x64.cc):
 	//   MOV RAX, [R14 + dispatch_table_array_offset]  (LoadDispatchTable)
-	//   CALL [RAX + RCX*8 + disp32]                    (dispatch table call)
+	//   CALL [RAX + cid_reg*8 + disp32]                (dispatch table call)
+	// cid_reg is caller-selected in 2.10/2.12 and fixed to RCX from 2.13.
 	// disp32 = (selector_offset - kOriginElement) * kWordSize
 	//
 	// SelectorOffsets stores the SELECTOR IMMEDIATE -- the same quantity the
@@ -90,8 +91,11 @@ func AnalyzeFunctionX86(
 		}
 		baseReg := x86.CanonReg(mem.Base)
 		idxReg := x86.CanonReg(mem.Index)
-		// Check: CALL [RAX + RCX*8 + disp32]
-		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
+		// Dart 2.10/2.12 pass cid_reg as an arbitrary register parameter to
+		// EmitDispatchTableCall. From 2.13 onward the SDK fixes it to RCX via
+		// DispatchTableNullErrorABI. Accept exactly the register shape valid for
+		// this version instead of projecting RCX backwards.
+		if baseReg == x86RegRAX && sdk.IsDispatchTableClassIDReg(ctx.DartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8 {
 			ctx.SelectorOffsets[inst.VA] = int(mem.Disp / 8)
 		}
 	}
@@ -790,17 +794,22 @@ func handleX86Call(tc *transferCtxX86) bool {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			idxReg := x86.CanonReg(mem.Index)
 			baseReg := x86.CanonReg(mem.Base)
-			if idxReg == x86RegRCX && mem.Scale == 8 {
+			isDispatchCID := sdk.IsDispatchTableClassIDReg(tc.ctx.DartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8
+			if isDispatchCID {
 				tc.ctx.X86DispatchShape++
 				tableKnown := baseReg >= 0 && baseReg < 31 &&
 					tc.state[baseReg].Kind == LatticeKnownDispatchIndex
-				classKnown := tc.state[x86RegRCX].Kind == LatticeKnownClass
+				classKnown := idxReg >= 0 && idxReg < len(tc.state) && tc.state[idxReg].Kind == LatticeKnownClass
 				switch {
 				case tableKnown && classKnown:
 					tc.ctx.X86DispatchResolved++
 				case !classKnown:
 					tc.ctx.X86DispatchNoClass++
-					switch tc.state[x86RegRCX].Kind {
+					if idxReg < 0 || idxReg >= len(tc.state) {
+						tc.ctx.X86DispatchClassOther++
+						break
+					}
+					switch tc.state[idxReg].Kind {
 					case LatticeTop:
 						tc.ctx.X86DispatchClassTop++
 					case LatticeBottom:
@@ -813,16 +822,16 @@ func handleX86Call(tc *transferCtxX86) bool {
 				}
 			}
 			if baseReg >= 0 && baseReg < 31 && tc.state[baseReg].Kind == LatticeKnownDispatchIndex {
-				if idxReg == x86RegRCX && tc.state[x86RegRCX].Kind == LatticeKnownClass {
-					slot := int(tc.state[x86RegRCX].ClassID) + int(mem.Disp/8)
-					resolveX86Dispatch(tc.state, slot, tc.inst, tc.ctx, tc.result)
-				} else if idxReg == x86RegRCX {
+				if isDispatchCID && tc.state[idxReg].Kind == LatticeKnownClass {
+					slot := int(tc.state[idxReg].ClassID) + int(mem.Disp/8)
+					resolveX86Dispatch(tc.state, idxReg, slot, tc.inst, tc.ctx, tc.result)
+				} else if isDispatchCID {
 					resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result)
 				}
-			} else if idxReg == x86RegRCX && tc.state[x86RegRCX].Kind == LatticeKnownClass {
-				slot := int(tc.state[x86RegRCX].ClassID) + int(mem.Disp/8)
-				resolveX86Dispatch(tc.state, slot, tc.inst, tc.ctx, tc.result)
-			} else if idxReg == x86RegRCX && mem.Scale == 8 {
+			} else if isDispatchCID && tc.state[idxReg].Kind == LatticeKnownClass {
+				slot := int(tc.state[idxReg].ClassID) + int(mem.Disp/8)
+				resolveX86Dispatch(tc.state, idxReg, slot, tc.inst, tc.ctx, tc.result)
+			} else if isDispatchCID {
 				resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result)
 			}
 			tc.state[x86RegRAX] = Top()
@@ -845,7 +854,9 @@ func handleX86Call(tc *transferCtxX86) bool {
 			// materialises the tags word itself.
 			if cid, ok := tc.ctx.AllocationStubCID[callTarget]; ok {
 				tc.ctx.AllocStubHits++
-				tc.state[sdk.X86AllocResultReg] = KnownClass(cid)
+				if allocABI, abiOK := sdk.AllocateObjectRegs(tc.ctx.DartVersion, sdk.ArchX86); abiOK {
+					tc.state[allocABI.ResultReg] = KnownClass(cid)
+				}
 				killX86ArgRegs(tc.state)
 				return true
 			}
@@ -962,6 +973,7 @@ func transferInstructionX86(
 // resolveX86Dispatch resolves a dispatch table call to a target function.
 func resolveX86Dispatch(
 	state *[31]TypeLattice,
+	classReg int,
 	slot int,
 	inst x86.Decoded,
 	ctx *TypeContext,
@@ -980,8 +992,8 @@ func resolveX86Dispatch(
 		ctx.DispatchHits++
 	} else {
 		// When selector offset is known, check CHA first for receiver class
-		if selectorImm, ok := ctx.SelectorOffsets[inst.VA]; ok && state[x86RegRCX].Kind == LatticeKnownClass {
-			chaTargets := ctx.ResolveDispatchCHA(state[x86RegRCX].ClassID, selectorImm)
+		if selectorImm, ok := ctx.SelectorOffsets[inst.VA]; ok && classReg >= 0 && classReg < len(state) && state[classReg].Kind == LatticeKnownClass {
+			chaTargets := ctx.ResolveDispatchCHA(state[classReg].ClassID, selectorImm)
 			if len(chaTargets) > 0 {
 				applySelectorCandidates(&res, chaTargets)
 				if res.Polymorphic {

@@ -112,9 +112,9 @@ func cappedCandidates(targets []string) []string {
 //
 // The SDK emits (flow_graph_compiler_arm64.cc, EmitDispatchTableCall):
 //
-//	const intptr_t offset = selector_offset - DispatchTable::kOriginElement;
-//	__ AddImmediate(LR, cid_reg, offset);
-//	__ Call(Address(DISPATCH_TABLE_REG, LR, UXTX, Scaled));
+//	const intptr_t offset = selector_offset - DispatchTable origin;
+//	2.10/2.12: add the offset to cid_reg in place and index with cid_reg
+//	2.13+:     add the offset into LR and index with LR
 //
 // so the runtime index off DISPATCH_TABLE_REG is `cid + imm`, where imm is the
 // signed immediate passed here. DispatchBySlot is keyed by that same
@@ -325,19 +325,18 @@ func AnalyzeFunction(
 	}
 
 	// Pre-scan: find dispatch table call patterns and record selector offsets.
-	// Three patterns exist depending on Dart version:
+	// The index computation is versioned by the exact SDK:
 	//
-	// 3.x (Dart 2.16+): ADD/SUB X30, X0, #imm → LDR X30, [X21, X30, LSL #3] → BLR X30
-	//   SDK: AddImmediate(LR, cid_reg, offset) — LR = X30 as temp
+	// 2.13+: ADD/SUB X30, X0, #imm → LDR X30, [X21, X30, LSL #3] → BLR X30
+	//   SDK: AddImmediate(LR, cid_reg, offset), with cid_reg fixed to R0
 	//
-	// 2.x pattern A: ADD/SUB X0, X0, #imm → LDR X30, [X21, X0, LSL #3] → BLR X30
-	//   SDK: AddImmediate(cid_reg, cid_reg, offset) — cid_reg = X0, in-place
-	//
-	// 2.x pattern B: LDURH Wn, [Xobj, #1] → SUB Xn, Xn, #imm → LDR X30, [X21, Xn, LSL #3] → BLR X30
-	//   Class ID extracted via 16-bit load, then SUB in-place on any register,
-	//   then LDR uses that register as index.
+	// 2.10/2.12: ADD/SUB Xn, Xn, #imm → LDR X30, [X21, Xn, LSL #3] → BLR X30
+	//   SDK: AddImmediate(cid_reg, cid_reg, offset), with caller-selected cid_reg
 	//
 	// The imm gives the selector offset (in slot units, relative to kOriginElement).
+	_, dispatchSupported := sdk.DispatchTableOriginElement(ctx.DartVersion, sdk.ArchARM64)
+	_, fixedDispatchCID := sdk.DispatchTableClassIDReg(ctx.DartVersion, sdk.ArchARM64)
+	legacyDispatch := dispatchSupported && !fixedDispatchCID
 	for i := 0; i < len(insts)-2; i++ {
 		if insts[i].Bad {
 			continue
@@ -347,43 +346,16 @@ func AnalyzeFunction(
 		var slotReg int // register used as dispatch table index
 		var found bool
 
-		// Pattern 3.x: ADD/SUB X30, X0, #imm (rd=30, rn=0)
-		if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == sdk.ARM64LinkReg && rn == sdk.ARM64ReturnReg {
+		if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && sdk.IsARM64DispatchTableIndexComputation(ctx.DartVersion, rd, rn) {
 			selectorOffset = imm
-			slotReg = sdk.ARM64LinkReg
+			slotReg = rd
 			found = true
-		} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == sdk.ARM64LinkReg && rn == sdk.ARM64ReturnReg {
+		} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && sdk.IsARM64DispatchTableIndexComputation(ctx.DartVersion, rd, rn) {
 			selectorOffset = -imm
-			slotReg = sdk.ARM64LinkReg
+			slotReg = rd
 			found = true
 		}
-		// Pattern 2.x A: ADD/SUB X0, X0, #imm (rd=0, rn=0)
-		if !found {
-			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == sdk.ARM64ReturnReg && rn == sdk.ARM64ReturnReg {
-				selectorOffset = imm
-				slotReg = sdk.ARM64ReturnReg
-				found = true
-			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == sdk.ARM64ReturnReg && rn == sdk.ARM64ReturnReg {
-				selectorOffset = -imm
-				slotReg = sdk.ARM64ReturnReg
-				found = true
-			}
-		}
-		// Pattern 2.x B: ADD/SUB Xn, Xn, #imm (rd==rn, any register)
-		// This catches the case where LDURH loads class ID into Wn,
-		// then SUB Xn, Xn, #imm computes the slot in-place.
-		if !found {
-			if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd == rn && rd < 31 {
-				selectorOffset = imm
-				slotReg = rd
-				found = true
-			} else if rd, rn, imm, ok := arm64.SUB64Immediate(raw); ok && rd == rn && rd < 31 {
-				selectorOffset = -imm
-				slotReg = rd
-				found = true
-			}
-		}
-		// Pattern D: MOV X30, Xn (register-register move). The SDK emits this
+		// Modern zero-offset form: MOV X30, X0. The SDK emits this
 		// instead of an ADD when `selector_offset - kOriginElement == 0`, so
 		// the immediate is ZERO and the runtime index is the class ID itself.
 		//
@@ -392,18 +364,18 @@ func AnalyzeFunction(
 		// pattern stores the raw ADD/SUB immediate. The consumer subtracts
 		// that immediate from the slot key, so the mismatch shifted every
 		// implied class ID by kOriginElement.)
-		// Pattern: MOV X30, Xn → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
+		// Pattern: MOV X30, X0 → ... → LDR X30, [X21, X30, LSL #3] → BLR X30
 		if !found {
-			if rd, _, ok := arm64.MOVOrr(raw); ok && rd == sdk.ARM64LinkReg {
+			if rd, rm, ok := arm64.MOVOrr(raw); ok && fixedDispatchCID && sdk.IsARM64DispatchTableIndexComputation(ctx.DartVersion, rd, rm) {
 				for j := i + 1; j < len(insts)-1 && j <= i+4; j++ {
 					if insts[j].Bad || insts[j+1].Bad {
 						break
 					}
 					ldrRaw := insts[j].Raw
-					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm2 == sdk.ARM64LinkReg {
+					if base, rm2, rt, ok := arm64.LDRRegExtended(ldrRaw); ok && base == sdk.ARM64DT && rt == sdk.ARM64LinkReg && rm2 == rd {
 						if blrReg, ok := arm64.BLR(insts[j+1].Raw); ok && blrReg == sdk.ARM64LinkReg {
 							selectorOffset = 0
-							slotReg = sdk.ARM64LinkReg
+							slotReg = rd
 							found = true
 							ctx.SelectorOffsets[insts[j+1].Addr] = selectorOffset
 							break
@@ -429,11 +401,12 @@ func AnalyzeFunction(
 		}
 	}
 
-	// Pattern 2.x C: MOV Xn, #imm → ADD Xd, Xm, Xn → LDR X30, [X21, Xd, LSL #3] → BLR X30
+	// Dart 2.10/2.12 alternate form: MOV Xn, #imm → ADD Xd, Xm, Xn →
+	// LDR X30, [X21, Xd, LSL #3] → BLR X30.
 	// The 2.x compiler sometimes loads the selector offset into a register
 	// via MOVZ, then uses register-register ADD instead of ADD with immediate.
 	// This pattern is NOT caught by the ADD/SUB #imm scan above.
-	for i := 0; i < len(insts)-3; i++ {
+	for i := 0; legacyDispatch && i < len(insts)-3; i++ {
 		if insts[i].Bad || insts[i+1].Bad || insts[i+2].Bad || insts[i+3].Bad {
 			continue
 		}
@@ -467,14 +440,15 @@ func AnalyzeFunction(
 		}
 	}
 
-	// Pattern 2.x D: LDURH Wn, [Xm,#1] → ... → LDR X30, [X21, Xp, LSL #3] → BLR X30
+	// Dart 2.10/2.12 zero-offset form: LDURH Wn, [Xm,#1] → ... →
+	// LDR X30, [X21, Xp, LSL #3] → BLR X30.
 	// When selector_offset == kOriginElement, the ADD/SUB is a no-op (offset=0)
 	// and the compiler omits it entirely. The class ID from LDURH goes directly
 	// into the dispatch table LDR without any arithmetic. selectorOffset = 0.
 	// There may be intervening instructions (PP loads, STP pushes, MOV) between
 	// the LDURH and the LDR. The MOV bridges the register: LDURH writes Wn,
 	// MOV Xp, Xn copies it, LDR uses Xp.
-	for i := 0; i < len(insts)-2; i++ {
+	for i := 0; legacyDispatch && i < len(insts)-2; i++ {
 		if insts[i].Bad {
 			continue
 		}

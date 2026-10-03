@@ -118,6 +118,7 @@ func TestGeneratorStubsSetGeneratorModifierWithoutAwait(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fir := newFuncIR("generator", 0x1000)
+			fir.DartVersion = "3.12.2"
 			fir.ThreadReg, fir.PoolReg = sdk.ARM64ThreadRegStr, sdk.ARM64PoolRegStr
 			fir.ReturnReg = sdk.ARM64ReturnRegStr
 			fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{

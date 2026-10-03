@@ -196,6 +196,52 @@ func ExpandRaw(macros Macros, name string) ([][]string, error) {
 	return out, nil
 }
 
+// ExpandRawWithCallback expands a list using callback as the row callback
+// identifier. This is required for object-like X-macro catalogs whose callback
+// is fixed by the SDK instead of being a formal parameter, e.g.
+// `#define CLASS_ID_LIST ... CID(Foo) ...`. ExpandRaw deliberately defaults
+// object-like lists to the conventional V; callers that know the exact source
+// callback should use this function rather than rewriting the source text.
+func ExpandRawWithCallback(macros Macros, name, callback string) ([][]string, error) {
+	if !validMacroParam(callback) {
+		return nil, Error("invalid callback identifier " + callback)
+	}
+	m, err := expansionMacro(macros, name)
+	if err != nil {
+		return nil, err
+	}
+	callbacks := map[string]bool{callback: true}
+	state := &expansionState{}
+	if err := chargeExpansionBytes(state, len(m.Body)); err != nil {
+		return nil, err
+	}
+	var out [][]string
+	if err := expandBody(macros, m.Body, callbacks, map[string]bool{name: true}, state, 0, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ColumnWithCallback is Column for an object-like list with an explicit row
+// callback identifier.
+func ColumnWithCallback(macros Macros, name, callback string, i int) ([]string, error) {
+	if i < 0 {
+		return nil, Error(fmt.Sprintf("column index %d is negative", i))
+	}
+	rows, err := ExpandRawWithCallback(macros, name, callback)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for row, r := range rows {
+		if i >= len(r) {
+			return nil, Error(fmt.Sprintf("macro %s row %d has %d columns; need column %d", name, row, len(r), i))
+		}
+		out = append(out, r[i])
+	}
+	return out, nil
+}
+
 // ExpandRawAllCallbacks expands a list whose root macro has more than one row
 // callback formal. Calls to any root formal are returned in exact source order.
 // This matches Dart's OBJECT_STORE_FIELD_LIST shape, where R_, RW, ARW_* and

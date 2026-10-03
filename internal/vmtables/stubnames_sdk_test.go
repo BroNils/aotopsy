@@ -5,6 +5,7 @@ import (
 
 	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
+	"aotopsy/internal/snapshot"
 )
 
 // TestVMStubNamesMatchSDK re-derives every VM stub table from
@@ -32,15 +33,7 @@ import (
 func TestVMStubNamesMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	// Every version VMStubNames claims to know. Keep in sync with the
-	// switch there; a version with a table but no probe here is untested.
-	tags := []string{
-		"2.10.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0", "2.16.0", "2.17.6", "2.18.0", "2.19.0", "3.0.5", "3.1.0", "3.2.5", "3.3.0",
-		"3.4.3", "3.5.0", "3.6.2", "3.7.0", "3.8.1", "3.9.2", "3.10.7",
-		"3.11.0", "3.12.2", "3.13.0",
-	}
-
-	for _, tag := range tags {
+	for _, tag := range snapshot.SupportedVersions() {
 		t.Run(tag, func(t *testing.T) {
 			ours := VMStubNames(tag)
 			if ours == nil {
@@ -101,12 +94,7 @@ func TestVMStubNamesRefusesUnknownVersions(t *testing.T) {
 // duplicate means an entry was pasted twice or a nested macro was
 // expanded into a list that already contained it.
 func TestVMStubTablesHaveNoDuplicates(t *testing.T) {
-	tags := []string{
-		"2.10.0", "2.12.0", "2.13.0", "2.17.6", "3.0.5", "3.1.0", "3.2.5", "3.3.0",
-		"3.4.3", "3.5.0", "3.6.2", "3.7.0", "3.8.1", "3.9.2", "3.10.7",
-		"3.11.0", "3.12.2", "3.13.0",
-	}
-	for _, tag := range tags {
+	for _, tag := range snapshot.SupportedVersions() {
 		for _, list := range [][]string{VMStubNames(tag), VMStubNamesInClusterOrder(tag), VMStubNamesInImageOrder(tag)} {
 			seen := make(map[string]int, len(list))
 			for i, n := range list {

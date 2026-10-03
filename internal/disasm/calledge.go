@@ -45,7 +45,7 @@ type CallEdge struct {
 // from internal/arm64.
 
 var arm64ArgRegCanon = func() [6]int {
-	cc, ok := sdk.DartRegisterCallingConvention(sdk.FirstRegisterCallingConventionVersion, sdk.ArchARM64)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.RegisterCallingConventionReferenceVersion, sdk.ArchARM64)
 	if !ok {
 		panic("sdk: ARM64 register calling convention missing at first supported version")
 	}
@@ -126,40 +126,6 @@ func popcount8(m uint8) int {
 // still short by kHeapObjectTag -- the same convention every other field
 // offset in this codebase uses before FieldValueClass adds the tag back.
 const ObjectFieldVia = "object_field"
-
-// Code entry-point displacements, as an instruction encodes them (byte offset
-// minus kHeapObjectTag).
-//
-// UntaggedCode opens with four generated-code entry-point uwords right after
-// the object header:
-//
-//	uword entry_point_;                       // offset 8  -> displacement 0x7
-//	uword monomorphic_entry_point_;           // offset 16 -> displacement 0xf
-//	uword unchecked_entry_point_;             // offset 24 -> displacement 0x17
-//	uword monomorphic_unchecked_entry_point_; // offset 32 -> displacement 0x1f
-//
-// (raw_object.h, verified at 2.12.0 and 3.13.0; the entry-point caches are
-// uwords, so compressed heap pointers do not shrink these fields.)
-// IsCodeEntryPointDisp reports whether a load displacement reads one of a Code
-// object's entry points across compressed and uncompressed modes.
-//
-// This matters because such a load is not really an "object field" at all: the
-// entry point OF Code X is X, so a call through it calls X. Wherever the base
-// register's provenance is known, the loaded value inherits it rather than
-// becoming anonymous.
-//
-// AOT Code objects keep these entry-point uwords at word-sized offsets even
-// when heap pointers are compressed. The 0x3/0xb displacements belong to a
-// compressed-pointer layout assumption that is not the AOT Code layout and
-// caused arbitrary object fields to inherit Code provenance.
-func IsCodeEntryPointDisp(off int) bool {
-	switch off {
-	case 0x7, 0xf, 0x17, 0x1f:
-		return true
-	default:
-		return false
-	}
-}
 
 // ObjectFieldViaAt formats the provenance for an object-field load at off.
 func ObjectFieldViaAt(off int) string {

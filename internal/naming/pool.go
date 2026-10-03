@@ -74,7 +74,7 @@ type CodeNameInfo struct {
 }
 
 func functionCallConventionDisposition(dartVersion string, owner *cluster.NamedObject, ft *cluster.FuncTypeInfo) (mayRegister, mustStack bool) {
-	if !snapshot.VersionAtLeast(dartVersion, sdk.FirstRegisterCallingConventionVersion) {
+	if !sdk.HasDartRegisterCallingConvention(dartVersion) {
 		return false, true
 	}
 	if owner != nil && owner.HasKindTag {

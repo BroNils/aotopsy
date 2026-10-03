@@ -3,6 +3,7 @@ package frida
 import (
 	"aotopsy/internal/arch/x86"
 	"fmt"
+	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
 
@@ -24,12 +25,13 @@ import (
 //	runtime/vm/compiler/assembler/assembler_x64.cc, LoadDispatchTable():
 //	    movq(dst, Address(THR, Thread::dispatch_table_array_offset()));
 //
-//	runtime/vm/constants_x64.h: DispatchTableNullErrorABI::kClassIdReg = RCX
+// Dart 2.10/2.12 pass cid_reg as a Register parameter. From 2.13 onward
+// constants_x64.h fixes DispatchTableNullErrorABI::kClassIdReg = RCX.
 //
 // So the concrete instruction sequence is:
 //
 //	mov  <table_reg>, [r14 + dispatch_table_array_offset]   ; THR field load
-//	call [<table_reg> + rcx*8 + disp]                       ; indirect, Mem operand
+//	call [<table_reg> + cid_reg*8 + disp]                   ; indirect, Mem operand
 //
 // x64refs.go's existing findCallersOf only matches `CALL` with a Rel
 // (rip-relative immediate) operand -- direct calls. A GDT call is a CALL
@@ -112,7 +114,7 @@ type IndirectCall struct {
 // every CALL whose operand is a Reg or Mem (never a Rel), classifying GDT
 // calls per the exact pattern above and annotating pool/THR-sourced
 // register calls where the provenance is still in the tracking window.
-func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, poolDisplay map[int]string, maxHits int) ([]IndirectCall, error) {
+func ScanIndirectCalls(dartVersion string, ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, poolDisplay map[int]string, maxHits int) ([]IndirectCall, error) {
 	var out []IndirectCall
 	hits := 0
 
@@ -167,9 +169,10 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					if mem, ok := arg.(x86asm.Mem); ok {
 						baseNote := rt.lookup(x86.CanonReg(mem.Base))
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
-						if x86.CanonReg(mem.Index) == sdk.X86ClassIdReg && mem.Scale == 8 && baseNote == "dispatch_table" {
+						idxReg := x86.CanonReg(mem.Index)
+						if sdk.IsDispatchTableClassIDReg(dartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8 && baseNote == "dispatch_table" {
 							ic.Kind = "gdt"
-							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via RCX)", mem.Disp)
+							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via %s)", mem.Disp, strings.ToUpper(sdk.X86RegName(idxReg)))
 						} else if baseNote != "" {
 							ic.Kind = "pool-indirect"
 							ic.Detail = fmt.Sprintf("base=%s", baseNote)

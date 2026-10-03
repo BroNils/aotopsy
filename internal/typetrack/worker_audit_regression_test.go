@@ -7,6 +7,7 @@ import (
 	archx86 "aotopsy/internal/arch/x86"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -32,7 +33,11 @@ func minimalTypeContext() *TypeContext {
 
 func TestResolveDispatchCHAUsesOriginRelativeSelectorImmediate(t *testing.T) {
 	ctx := minimalTypeContext()
-	ctx.KOriginElement = 4096
+	origin, ok := sdk.DispatchTableOriginElement("3.12.2", sdk.ArchARM64)
+	if !ok {
+		t.Fatal("supported ARM64 dispatch origin unavailable")
+	}
+	ctx.KOriginElement = origin
 	ctx.Subclasses = map[int][]int{}
 	const (
 		classID    = 42
@@ -49,8 +54,11 @@ func TestResolveDispatchCHAUsesOriginRelativeSelectorImmediate(t *testing.T) {
 }
 
 func TestBuildDispatchTablesDerivesSelectorImmFromFunctionOwner(t *testing.T) {
+	origin, ok := sdk.DispatchTableOriginElement("3.12.2", sdk.ArchARM64)
+	if !ok {
+		t.Fatal("supported ARM64 dispatch origin unavailable")
+	}
 	const (
-		origin       = 4096
 		classRef     = 300
 		functionRef  = 100
 		functionName = 200

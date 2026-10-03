@@ -12,7 +12,7 @@ func TestBuildSignalGraphSeparatesGeneratorAndAsyncTHRStubs(t *testing.T) {
 		{FromFunc: "syncGen", Kind: "blr", Via: "THR.suspend_state_init_sync_star_entry_point"},
 		{FromFunc: "asyncFn", Kind: "blr", Via: "THR.suspend_state_await_entry_point"},
 	}
-	g := BuildSignalGraph(funcs, edges, nil, 0, nil)
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 0, nil)
 	got := make(map[string][]string)
 	for _, f := range g.Funcs {
 		got[f.Name] = f.Categories

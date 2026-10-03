@@ -407,6 +407,7 @@ func TestAwaitStubUsesSuspendABIArgumentRegister(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fir := newFuncIR("caller", 0x1000)
+			fir.DartVersion = "3.12.2"
 			fir.ReturnReg = tt.returnReg
 			fir.ArgRegs = tt.argRegs
 			e := &emitter{
@@ -434,6 +435,7 @@ func TestAwaitStubUsesSuspendABIArgumentRegister(t *testing.T) {
 
 func TestReturnAsyncCallIsNotFabricatedAsSourceReturn(t *testing.T) {
 	fir := newFuncIR("caller", 0x1000)
+	fir.DartVersion = "3.12.2"
 	fir.ReturnReg = sdk.ARM64ReturnRegStr
 	fir.ArgRegs = arm64ArgRegs
 	e := &emitter{

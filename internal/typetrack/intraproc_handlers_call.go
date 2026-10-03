@@ -127,7 +127,9 @@ func handleBL(tc *transferCtx) bool {
 		// takes precedence over any inferred exit type for the callee.
 		if cid, ok := tc.ctx.AllocationStubCID[target]; ok {
 			tc.ctx.AllocStubHits++
-			tc.state[sdk.ARM64AllocResultReg] = KnownClass(cid)
+			if allocABI, abiOK := sdk.AllocateObjectRegs(tc.ctx.DartVersion, sdk.ArchARM64); abiOK {
+				tc.state[allocABI.ResultReg] = KnownClass(cid)
+			}
 			for r := 1; r <= 7; r++ {
 				tc.state[r] = Top()
 			}
