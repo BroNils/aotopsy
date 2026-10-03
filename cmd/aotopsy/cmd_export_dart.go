@@ -263,12 +263,8 @@ func cmdExportDart(args []string) error {
 		relPath := strutil.SanitizeLibraryPath(url)
 		fullPath := filepath.Join(stageOutDir, relPath)
 
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			return fmt.Errorf("creating directory for %s: %w", fullPath, err)
-		}
-
 		content := decompiler.SynthesizeLibrary(lib)
-		if err := output.WriteFileAtomic(fullPath, []byte(content), 0644); err != nil {
+		if err := output.WriteArtifactFile(stageOutDir, filepath.ToSlash(relPath), []byte(content), 0o644); err != nil {
 			return fmt.Errorf("writing library %s: %w", fullPath, err)
 		}
 		totalFiles++

@@ -69,17 +69,19 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 	}
 	for _, f := range entropy {
 		out = append(out, output.SignalFinding{
-			Category:    "entropy",
-			StringValue: fmt.Sprintf("%s section %s: entropy %.3f, size %d", f.Verdict, f.Section, f.Entropy, f.Size),
-			RuleID:      "signal.entropy.section_threshold",
+			Category:         "entropy",
+			StringValue:      fmt.Sprintf("%s section %s: entropy %.3f, size %d", f.Verdict, f.Section, f.Entropy, f.Size),
+			RuleID:           "signal.entropy.section_threshold",
+			FingerprintParts: []string{"entropy-section", f.Section},
 		})
 	}
 
 	for _, f := range crypto {
 		out = append(out, output.SignalFinding{
-			Category:    signal.CatCryptoConst,
-			StringValue: fmt.Sprintf("%s (%s, pool=%d)", f.Algorithm, f.Constant, f.PoolIndex),
-			RuleID:      "signal.crypto.constant",
+			Category:         signal.CatCryptoConst,
+			StringValue:      fmt.Sprintf("%s (%s, pool=%d)", f.Algorithm, f.Constant, f.PoolIndex),
+			RuleID:           "signal.crypto.constant",
+			FingerprintParts: []string{"crypto-constant", f.Algorithm, f.Constant},
 		})
 	}
 
@@ -98,6 +100,9 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			Function:           fn,
 			RuleID:             "signal.taint.flow",
 			ProducerConfidence: f.Confidence,
+			FingerprintParts: []string{
+				"taint-flow", f.Source, f.Sink, f.FlowType, f.SourceFn, f.SinkFn,
+			},
 		})
 	}
 
@@ -111,10 +116,11 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			fn = f.Functions[0]
 		}
 		out = append(out, output.SignalFinding{
-			Category:    "yara",
-			StringValue: fmt.Sprintf("%s/%s matched %s", f.RuleName, f.Category, strings.Join(f.Strings, ", ")),
-			Function:    fn,
-			RuleID:      "signal.yara." + f.RuleName,
+			Category:         "yara",
+			StringValue:      fmt.Sprintf("%s/%s matched %s", f.RuleName, f.Category, strings.Join(f.Strings, ", ")),
+			Function:         fn,
+			RuleID:           "signal.yara." + f.RuleName,
+			FingerprintParts: []string{"yara-rule", f.RuleName},
 		})
 	}
 
@@ -133,6 +139,7 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			Function:           fn,
 			RuleID:             "signal.behavioral." + f.Pattern,
 			ProducerConfidence: f.Confidence,
+			FingerprintParts:   []string{"behavioral-pattern", f.Pattern},
 		})
 	}
 	return out, nil

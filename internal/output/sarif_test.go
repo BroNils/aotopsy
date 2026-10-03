@@ -81,17 +81,18 @@ func TestWriteSARIF(t *testing.T) {
 		t.Errorf("len(results) = %d, want 3", len(run.Results))
 	}
 
-	// Verify error level for rooting
-	if run.Results[0].Level != "error" {
-		t.Errorf("result[0].Level = %q, want error", run.Results[0].Level)
+	byRule := make(map[string]sarifResult, len(run.Results))
+	for _, result := range run.Results {
+		byRule[result.RuleID] = result
 	}
-	// Verify warning level for ssl_pinning
-	if run.Results[1].Level != "warning" {
-		t.Errorf("result[1].Level = %q, want warning", run.Results[1].Level)
+	if got := byRule["signal.category.rooting"].Level; got != "error" {
+		t.Errorf("rooting level = %q, want error", got)
 	}
-	// Verify default fallback level 'note' for unknown category
-	if run.Results[2].Level != "note" {
-		t.Errorf("result[2].Level = %q, want note", run.Results[2].Level)
+	if got := byRule["signal.category.ssl_pinning"].Level; got != "warning" {
+		t.Errorf("ssl_pinning level = %q, want warning", got)
+	}
+	if got := byRule["signal.category.custom_unknown_cat"].Level; got != "note" {
+		t.Errorf("unknown category level = %q, want note", got)
 	}
 
 	// The analysed binary must be described, or the report is about a
@@ -115,7 +116,7 @@ func TestWriteSARIF(t *testing.T) {
 	// forbids a text region in a binary artifact, and every result used
 	// to carry region.startLine = 1 -- pointing at line 1 of a file with
 	// no lines, with the real address buried in a snippet string.
-	loc := run.Results[0].Locations[0].PhysicalLocation
+	loc := byRule["signal.category.rooting"].Locations[0].PhysicalLocation
 	if loc.Address == nil {
 		t.Fatal("result has no address")
 	}
@@ -167,6 +168,126 @@ func TestWriteSARIFBinaryLevelFinding(t *testing.T) {
 	}
 	if _, ok := res[0].PartialFingerprints["aotopsyFindingV2"]; ok {
 		t.Error("fingerprint version is embedded in one component instead of SARIF's /vN version component")
+	}
+}
+
+func TestWriteSARIFUsesProducerRuleIDsDeduplicatesAndIsDeterministic(t *testing.T) {
+	findings := []SignalFinding{
+		{Category: "yara", RuleID: "signal.yara.rule_b", StringValue: "b", Function: "f", PC: "0X0020"},
+		{Category: "taint", RuleID: "signal.taint.flow", StringValue: "flow", Function: "g", ProducerConfidence: "high"},
+		{Category: "yara", RuleID: "signal.yara.rule_a", StringValue: "a", Function: "f", PC: "0x10"},
+		{Category: "yara", RuleID: "signal.yara.rule_a", StringValue: "a", Function: "f", PC: "0x0010"}, // exact emitted duplicate
+	}
+	dirA := t.TempDir()
+	if err := WriteSARIF(dirA, findings, "dev", ArtifactIdentity{URI: "app #1.so"}); err != nil {
+		t.Fatal(err)
+	}
+	reversed := append([]SignalFinding(nil), findings...)
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	dirB := t.TempDir()
+	if err := WriteSARIF(dirB, reversed, "dev", ArtifactIdentity{URI: "app #1.so"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.ReadFile(filepath.Join(dirA, "aotopsy.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dirB, "aotopsy.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Fatal("SARIF bytes depend on producer finding order")
+	}
+	var log sarifLog
+	if err := json.Unmarshal(a, &log); err != nil {
+		t.Fatal(err)
+	}
+	run := log.Runs[0]
+	if got := len(run.Results); got != 3 {
+		t.Fatalf("results = %d, want 3 after exact dedupe", got)
+	}
+	if got := len(run.Tool.Driver.Rules); got != 3 {
+		t.Fatalf("rules = %d, want 3 producer rules", got)
+	}
+	if run.Tool.Driver.Rules[0].ID != "signal.taint.flow" || run.Tool.Driver.Rules[1].ID != "signal.yara.rule_a" || run.Tool.Driver.Rules[2].ID != "signal.yara.rule_b" {
+		t.Fatalf("rules are not stable-sorted producer IDs: %#v", run.Tool.Driver.Rules)
+	}
+	if got := run.Results[0].Properties["producerConfidence"]; got != "high" {
+		t.Fatalf("producer confidence = %q, want high", got)
+	}
+	if got := run.Artifacts[0].Location.URI; got != "app%20%231.so" {
+		t.Fatalf("escaped artifact URI = %q", got)
+	}
+}
+
+func TestWriteSARIFPartialFingerprintIsStableAcrossAddressAndConfidenceChanges(t *testing.T) {
+	findings := []SignalFinding{
+		{
+			Category:           "taint",
+			RuleID:             "signal.taint.flow",
+			StringValue:        "device_id -> network (flow, confidence=medium)",
+			Function:           "sendDeviceInfo",
+			PC:                 "0x1000",
+			AddressKind:        "instruction",
+			ProducerConfidence: "medium",
+			FingerprintParts:   []string{"taint-flow", "device_id", "network", "flow", "readDeviceInfo", "sendDeviceInfo"},
+		},
+		{
+			Category:           "taint",
+			RuleID:             "signal.taint.flow",
+			StringValue:        "device_id -> network (flow, confidence=high)",
+			Function:           "sendDeviceInfo",
+			PC:                 "0x2000",
+			AddressKind:        "instruction",
+			ProducerConfidence: "high",
+			FingerprintParts:   []string{"taint-flow", "device_id", "network", "flow", "readDeviceInfo", "sendDeviceInfo"},
+		},
+	}
+	dir := t.TempDir()
+	if err := WriteSARIF(dir, findings, "dev", ArtifactIdentity{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "aotopsy.sarif"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log sarifLog
+	if err := json.Unmarshal(data, &log); err != nil {
+		t.Fatal(err)
+	}
+	results := log.Runs[0].Results
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2 distinct emitted occurrences", len(results))
+	}
+	a := results[0].PartialFingerprints[sarifFindingFingerprintKey]
+	b := results[1].PartialFingerprints[sarifFindingFingerprintKey]
+	if a == "" || b == "" {
+		t.Fatal("result is missing a partial fingerprint")
+	}
+	if a != b {
+		t.Fatalf("logical finding fingerprint changed with address/confidence: %q != %q", a, b)
+	}
+}
+
+func TestWriteSARIFRejectsRuleIDCategoryConflictWithoutReplacingReport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aotopsy.sarif")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteSARIF(dir, []SignalFinding{
+		{Category: "url", RuleID: "same.rule"},
+		{Category: "host", RuleID: "same.rule"},
+	}, "dev", ArtifactIdentity{})
+	if err == nil {
+		t.Fatal("conflicting rule/category mapping was accepted")
+	}
+	b, readErr := os.ReadFile(path)
+	if readErr != nil || string(b) != "old\n" {
+		t.Fatalf("rejected SARIF input changed current report: %q, %v", b, readErr)
 	}
 }
 

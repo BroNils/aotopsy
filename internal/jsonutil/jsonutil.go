@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"aotopsy/internal/artifactfs"
 )
 
 // Limits bounds hostile or accidentally huge artifact inputs before they can
@@ -604,99 +605,51 @@ func WriteJSONLFile[T any](path string, records []T) (int, error) {
 // publishing it, so callers never expose a truncated object after a failed
 // encode/write.
 func WriteJSONFile(path string, value any) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir for %s: %w", path, err)
-	}
-	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp for %s: %w", path, err)
-	}
-	tmp := f.Name()
-	tmpInfo, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("stat temp for %s: %w", path, err)
-	}
-	committed := false
-	defer func() {
-		_ = f.Close()
-		if !committed {
-			_, _ = removeFileIfSame(tmp, tmpInfo)
+	return artifactfs.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(value); err != nil {
+			return fmt.Errorf("encode %s: %w", path, err)
 		}
-	}()
-	if err := f.Chmod(0o644); err != nil {
-		return fmt.Errorf("chmod temp for %s: %w", path, err)
-	}
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(value); err != nil {
-		return fmt.Errorf("encode %s: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
-	}
-	exists, same, err := filePathHasIdentity(tmp, tmpInfo)
-	if err != nil {
-		return fmt.Errorf("verify temp for %s: %w", path, err)
-	}
-	if !exists || !same {
-		return fmt.Errorf("temp for %s changed before publication", path)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("publish %s: %w", path, err)
-	}
-	committed = true
-	return nil
+		return nil
+	})
 }
 
 // JSONLWriter streams records into a same-directory temporary file and commits
 // by rename on Close. Write takes a pointer so pointer-receiver MarshalJSON /
 // TextMarshaler methods are never accidentally bypassed.
 type JSONLWriter[T any] struct {
-	file      *os.File
+	atomic    *artifactfs.AtomicFile
 	enc       *json.Encoder
-	path      string
-	tempPath  string
-	tempInfo  os.FileInfo
 	failed    bool
 	committed bool
 }
 
 func NewJSONLWriter[T any](path string) (*JSONLWriter[T], error) {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir for %s: %w", path, err)
-	}
-	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	f, err := artifactfs.NewAtomicFile(path, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("create temp for %s: %w", path, err)
-	}
-	if err := f.Chmod(0o644); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return nil, fmt.Errorf("chmod temp for %s: %w", path, err)
-	}
-	tempInfo, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return nil, fmt.Errorf("stat temp for %s: %w", path, err)
+		return nil, err
 	}
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
-	return &JSONLWriter[T]{file: f, enc: enc, path: path, tempPath: f.Name(), tempInfo: tempInfo}, nil
+	return &JSONLWriter[T]{atomic: f, enc: enc}, nil
+}
+
+// NewJSONLWriterUnder is the root-relative form for artifact names that must
+// stay inside a pinned generation even if path components are raced or replaced.
+func NewJSONLWriterUnder[T any](root, rel string) (*JSONLWriter[T], error) {
+	f, err := artifactfs.NewAtomicFileUnder(root, rel, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	return &JSONLWriter[T]{atomic: f, enc: enc}, nil
 }
 
 func (w *JSONLWriter[T]) Write(rec *T) error {
-	if w == nil || w.file == nil || w.committed {
+	if w == nil || w.atomic == nil || w.committed {
 		return fmt.Errorf("jsonl writer is closed")
 	}
 	if w.failed {
@@ -718,15 +671,11 @@ func (w *JSONLWriter[T]) Abort() error {
 		return nil
 	}
 	w.failed = true
-	var err error
-	if w.file != nil {
-		err = w.file.Close()
-		w.file = nil
+	if w.atomic == nil {
+		return nil
 	}
-	if w.tempPath != "" {
-		_, removeErr := removeFileIfSame(w.tempPath, w.tempInfo)
-		err = errors.Join(err, removeErr)
-	}
+	err := w.atomic.Abort()
+	w.atomic = nil
 	return err
 }
 
@@ -737,69 +686,15 @@ func (w *JSONLWriter[T]) Close() error {
 	if w.failed {
 		return w.Abort()
 	}
-	if w.file == nil {
+	if w.atomic == nil {
 		return fmt.Errorf("jsonl writer has no file")
 	}
-	if err := w.file.Sync(); err != nil {
+	if err := w.atomic.Commit(); err != nil {
 		w.failed = true
-		_ = w.Abort()
+		w.atomic = nil
 		return err
 	}
-	if err := w.file.Close(); err != nil {
-		w.file = nil
-		w.failed = true
-		_, _ = removeFileIfSame(w.tempPath, w.tempInfo)
-		return err
-	}
-	w.file = nil
-	exists, same, err := filePathHasIdentity(w.tempPath, w.tempInfo)
-	if err != nil {
-		w.failed = true
-		return err
-	}
-	if !exists || !same {
-		w.failed = true
-		return fmt.Errorf("jsonl writer temp changed before publication")
-	}
-	if err := os.Rename(w.tempPath, w.path); err != nil {
-		w.failed = true
-		_, _ = removeFileIfSame(w.tempPath, w.tempInfo)
-		return err
-	}
+	w.atomic = nil
 	w.committed = true
 	return nil
-}
-
-func filePathHasIdentity(path string, want os.FileInfo) (exists bool, same bool, err error) {
-	if path == "" || want == nil {
-		return false, false, nil
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, false, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return true, false, nil
-	}
-	return true, os.SameFile(info, want), nil
-}
-
-func removeFileIfSame(path string, want os.FileInfo) (bool, error) {
-	exists, same, err := filePathHasIdentity(path, want)
-	if err != nil {
-		return false, err
-	}
-	if !exists {
-		return false, nil
-	}
-	if !same {
-		return false, fmt.Errorf("refusing to remove changed temp file %s", path)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	return true, nil
 }

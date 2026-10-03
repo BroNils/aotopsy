@@ -1,6 +1,7 @@
 package output
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,7 +14,7 @@ import (
 // replace.
 func markGeneration(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, GenerationMarker), []byte("test\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, GenerationMarker), []byte(generationMarkerData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -358,6 +359,86 @@ func TestDirTransactionAbortDoesNotRemoveSubstitutedStage(t *testing.T) {
 	}
 }
 
+func TestDirTransactionCommitRejectsSubstitutedStageBeforeTouchingTarget(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "out")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markGeneration(t, target)
+	if err := os.WriteFile(filepath.Join(target, "old.txt"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := BeginDirTransaction(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	stage := tx.StageDir()
+	if err := os.WriteFile(filepath.Join(stage, "new.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(stage, stage+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(stage, "external")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err == nil {
+		t.Fatal("commit accepted a substituted staging pathname")
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "old.txt")); err != nil || string(b) != "old" {
+		t.Fatalf("rejected commit changed previous generation: %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(sentinel); err != nil || string(b) != "keep" {
+		t.Fatalf("rejected commit changed substituted stage: %q, %v", b, err)
+	}
+}
+
+func TestDirTransactionDirectorySyncFailureRollsBackPreviousGeneration(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "out")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markGeneration(t, target)
+	if err := os.WriteFile(filepath.Join(target, "old.txt"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := BeginDirTransaction(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	if err := os.WriteFile(filepath.Join(tx.StageDir(), "new.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalSync := syncDirectory
+	defer func() { syncDirectory = originalSync }()
+	injected := errors.New("injected directory sync failure")
+	calls := 0
+	syncDirectory = func(root *os.Root) error {
+		calls++
+		if calls == 2 { // stage sync succeeded; backup rename durability fails
+			return injected
+		}
+		return originalSync(root)
+	}
+	if err := tx.Commit(); !errors.Is(err, injected) {
+		t.Fatalf("Commit error = %v, want injected sync failure", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "old.txt")); err != nil || string(b) != "old" {
+		t.Fatalf("sync failure did not restore previous generation: %q, %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("failed generation became current: %v", err)
+	}
+}
+
 func TestRestoreDirectoryBackupRejectsSubstitution(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "out")
@@ -540,6 +621,47 @@ func TestBeginDirTransactionRejectsForgedMarker(t *testing.T) {
 				t.Fatalf("a %s marker was accepted as proof of ownership", kind)
 			}
 		})
+	}
+}
+
+func TestBeginDirTransactionRejectsRegularMarkerWithWrongContent(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "out")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, GenerationMarker), []byte("forged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "precious"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tx, err := BeginDirTransaction(target); err == nil {
+		tx.Abort()
+		t.Fatal("regular marker with invalid contents was accepted as ownership proof")
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "precious")); err != nil || string(b) != "keep" {
+		t.Fatalf("rejected forged generation changed user data: %q, %v", b, err)
+	}
+}
+
+func TestDirTransactionRejectsNonPortableStagedArtifactName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses the reserved name before the transaction gate")
+	}
+	target := filepath.Join(t.TempDir(), "out")
+	tx, err := BeginDirTransaction(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	if err := os.WriteFile(filepath.Join(tx.StageDir(), "NUL"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err == nil {
+		t.Fatal("transaction published a Windows-reserved artifact name")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("invalid generation became current: %v", err)
 	}
 }
 

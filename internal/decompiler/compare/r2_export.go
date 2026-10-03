@@ -2,11 +2,12 @@ package compare
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"aotopsy/internal/artifactfs"
 	"aotopsy/internal/strutil"
 )
 
@@ -86,7 +87,10 @@ func (r *R2Export) AddStringRef(va uint64, value string) {
 func (r *R2Export) Write(path string) error {
 	sort.Strings(r.Lines)
 	content := strings.Join(r.Lines, "\n") + "\n"
-	return os.WriteFile(path, []byte(content), 0644)
+	return artifactfs.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, content)
+		return err
+	})
 }
 
 // WriteToDir writes the r2 script to outDir/aotopsy.r2.

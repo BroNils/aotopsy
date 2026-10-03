@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"aotopsy/internal/artifactfs"
 )
 
 const (
@@ -18,6 +20,7 @@ const (
 	tempNameAttempts     = 128
 	dirStagePrefix       = ".aotopsy-dir-stage-"
 	dirBackupPrefix      = ".aotopsy-dir-previous-"
+	generationMarkerData = "aotopsy-output-generation/v1\n"
 
 	// GenerationMarker is written into every directory generation this package
 	// publishes. Commit replaces the WHOLE previous directory, so it may only
@@ -26,6 +29,10 @@ const (
 	// files.
 	GenerationMarker = ".aotopsy-generation"
 )
+
+// syncDirectory is a test seam for directory-transaction durability failures.
+// Production always points at artifactfs.SyncRoot.
+var syncDirectory = artifactfs.SyncRoot
 
 // DirTransaction publishes a complete artifact generation with one directory
 // rename. The target parent is held open for the lifetime of the transaction so
@@ -54,6 +61,9 @@ func BeginDirTransaction(target string) (*DirTransaction, error) {
 		return nil, fmt.Errorf("resolve output directory: %w", err)
 	}
 	absTarget = filepath.Clean(absTarget)
+	if base := filepath.Base(absTarget); base == "." || artifactfs.ValidateRelativePath(base) != nil {
+		return nil, fmt.Errorf("unsafe output directory name %q", base)
+	}
 	parentInput := filepath.Dir(absTarget)
 	if err := os.MkdirAll(parentInput, 0o755); err != nil {
 		return nil, fmt.Errorf("create output parent: %w", err)
@@ -137,7 +147,30 @@ func requireReplaceableGeneration(root *os.Root, display string) error {
 	}
 	info, err := root.Lstat(GenerationMarker)
 	if err == nil && info.Mode().IsRegular() {
-		return nil
+		f, openErr := root.Open(GenerationMarker)
+		if openErr != nil {
+			return fmt.Errorf("open %s in %q: %w", GenerationMarker, display, openErr)
+		}
+		opened, statErr := f.Stat()
+		if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+			_ = f.Close()
+			if statErr == nil {
+				statErr = fmt.Errorf("marker identity changed")
+			}
+			return fmt.Errorf("verify %s in %q: %w", GenerationMarker, display, statErr)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, int64(len(generationMarkerData)+1)))
+		closeErr := f.Close()
+		if readErr != nil {
+			return errors.Join(fmt.Errorf("read %s in %q: %w", GenerationMarker, display, readErr), closeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %s in %q: %w", GenerationMarker, display, closeErr)
+		}
+		if string(data) == generationMarkerData {
+			return nil
+		}
+		return fmt.Errorf("output directory %q has an invalid %s ownership marker; refusing to replace it", display, GenerationMarker)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat %s in %q: %w", GenerationMarker, display, err)
@@ -152,7 +185,7 @@ func (tx *DirTransaction) stampGeneration() error {
 	if err != nil {
 		return fmt.Errorf("write %s: %w", GenerationMarker, err)
 	}
-	if _, err := io.WriteString(f, "aotopsy output generation\n"); err != nil {
+	if _, err := io.WriteString(f, generationMarkerData); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write %s: %w", GenerationMarker, err)
 	}
@@ -166,11 +199,121 @@ func (tx *DirTransaction) stampGeneration() error {
 	return nil
 }
 
+// validateAndSyncGeneration is the durability gate before publication. A
+// directory transaction cannot assume every caller used output.WriteAtomic:
+// external renderers and legacy callers may have populated StageDir directly.
+// Commit therefore rejects links/special files, pins every regular file before
+// syncing it, then syncs every directory from leaves to the stage root.
+func validateAndSyncGeneration(root *os.Root) error {
+	if root == nil {
+		return fmt.Errorf("output staging root is nil")
+	}
+	type dirEntry struct {
+		path string
+		info os.FileInfo
+	}
+	dirs := []dirEntry{{path: "."}}
+	err := fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == "." {
+			return nil
+		}
+		if err := artifactfs.ValidateRelativePath(filepath.FromSlash(path)); err != nil {
+			return fmt.Errorf("staged generation contains non-portable artifact path %s: %w", path, err)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("staged generation contains symlink %s", path)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat staged artifact %s: %w", path, err)
+		}
+		if info.IsDir() {
+			dirs = append(dirs, dirEntry{path: path, info: info})
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("staged generation contains non-regular artifact %s (%s)", path, info.Mode().Type())
+		}
+		if err := artifactfs.SyncRegularFile(root, path, info); err != nil {
+			return fmt.Errorf("sync staged artifact %s: %w", path, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if dirs[i].path == "." {
+			if err := syncDirectory(root); err != nil {
+				return fmt.Errorf("sync staged generation root: %w", err)
+			}
+			continue
+		}
+		current, err := root.Lstat(dirs[i].path)
+		if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(current, dirs[i].info) {
+			if err == nil {
+				err = fmt.Errorf("directory identity changed")
+			}
+			return fmt.Errorf("verify staged directory %s: %w", dirs[i].path, err)
+		}
+		sub, err := root.OpenRoot(dirs[i].path)
+		if err != nil {
+			return fmt.Errorf("pin staged directory %s: %w", dirs[i].path, err)
+		}
+		pinned, statErr := sub.Stat(".")
+		if statErr != nil || !os.SameFile(current, pinned) {
+			_ = sub.Close()
+			if statErr == nil {
+				statErr = fmt.Errorf("directory identity changed while being pinned")
+			}
+			return fmt.Errorf("verify pinned staged directory %s: %w", dirs[i].path, statErr)
+		}
+		syncErr := syncDirectory(sub)
+		closeErr := sub.Close()
+		if syncErr != nil {
+			return errors.Join(fmt.Errorf("sync staged directory %s: %w", dirs[i].path, syncErr), closeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close staged directory %s: %w", dirs[i].path, closeErr)
+		}
+	}
+	return nil
+}
+
 func (tx *DirTransaction) StageDir() string {
 	if tx == nil {
 		return ""
 	}
 	return tx.stage
+}
+
+// RemoveStageFile removes one top-level managed artifact from the unpublished
+// generation. The pinned stage root keeps removal independent of pathname
+// replacement outside the transaction; directories are deliberately refused.
+func (tx *DirTransaction) RemoveStageFile(name string) error {
+	if tx == nil || tx.stageRoot == nil || tx.stageName == "" {
+		return fmt.Errorf("output transaction is not active")
+	}
+	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\`) || artifactfs.ValidateRelativePath(name) != nil {
+		return fmt.Errorf("unsafe staged artifact name %q", name)
+	}
+	info, err := tx.stageRoot.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat staged artifact %q: %w", name, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("staged artifact %q is a directory", name)
+	}
+	if err := tx.stageRoot.Remove(name); err != nil {
+		return fmt.Errorf("remove staged artifact %q: %w", name, err)
+	}
+	return nil
 }
 
 func (tx *DirTransaction) Abort() {
@@ -197,6 +340,9 @@ func (tx *DirTransaction) Commit() error {
 	if err := tx.stampGeneration(); err != nil {
 		return err
 	}
+	if err := validateAndSyncGeneration(tx.stageRoot); err != nil {
+		return fmt.Errorf("validate staged generation: %w", err)
+	}
 
 	stageInfo, err := tx.stageRoot.Stat(".")
 	if err != nil {
@@ -204,6 +350,11 @@ func (tx *DirTransaction) Commit() error {
 	}
 	if tx.stageInfo == nil || !os.SameFile(tx.stageInfo, stageInfo) {
 		return fmt.Errorf("output staging directory identity changed during transaction")
+	}
+	if same, err := tx.nameMatchesInfo(tx.stageName, tx.stageInfo); err != nil {
+		return fmt.Errorf("verify staging directory pathname before commit: %w", err)
+	} else if !same {
+		return fmt.Errorf("output staging directory pathname changed during transaction")
 	}
 	currentInfo, currentExists, err := inspectDirectoryEntry(tx.parentRoot, tx.targetName, tx.target)
 	if err != nil {
@@ -233,6 +384,9 @@ func (tx *DirTransaction) Commit() error {
 			return fmt.Errorf("move previous output aside: %w", err)
 		}
 		tx.backupName = backupName
+		if err := syncDirectory(tx.parentRoot); err != nil {
+			return errors.Join(fmt.Errorf("sync previous-output backup: %w", err), tx.restoreDirectoryBackup())
+		}
 		// On WSL DrvFS, keeping an os.Root open on a directory after moving it
 		// can make statat/openat report ENOENT for the directory's new name even
 		// though ReadDir already observes the rename. Preserve the inode identity
@@ -260,6 +414,11 @@ func (tx *DirTransaction) Commit() error {
 	} else if exists {
 		return errors.Join(fmt.Errorf("output directory %q appeared before publication", tx.target), tx.restoreDirectoryBackup())
 	}
+	if same, err := tx.nameMatchesInfo(tx.stageName, tx.stageInfo); err != nil {
+		return errors.Join(fmt.Errorf("verify staging directory pathname before publication: %w", err), tx.restoreDirectoryBackup())
+	} else if !same {
+		return errors.Join(fmt.Errorf("output staging directory pathname changed before publication"), tx.restoreDirectoryBackup())
+	}
 	if err := tx.parentRoot.Rename(tx.stageName, tx.targetName); err != nil {
 		return errors.Join(fmt.Errorf("publish output: %w", err), tx.restoreDirectoryBackup())
 	}
@@ -281,6 +440,9 @@ func (tx *DirTransaction) Commit() error {
 	if closeStageErr != nil {
 		return errors.Join(fmt.Errorf("close published staging directory: %w", closeStageErr), tx.restorePublishedDirectory())
 	}
+	if err := syncDirectory(tx.parentRoot); err != nil {
+		return errors.Join(fmt.Errorf("sync published output directory entry: %w", err), tx.restorePublishedDirectory())
+	}
 
 	if tx.backupName != "" {
 		same, err := tx.nameMatchesInfo(tx.backupName, tx.targetInfo)
@@ -294,6 +456,9 @@ func (tx *DirTransaction) Commit() error {
 			return fmt.Errorf("output published but remove previous generation %q: %w", filepath.Join(tx.parentPath, tx.backupName), err)
 		}
 		tx.backupName = ""
+		if err := syncDirectory(tx.parentRoot); err != nil {
+			return fmt.Errorf("output published but previous-generation cleanup was not synced: %w", err)
+		}
 	}
 	tx.closeRoots()
 	return nil
@@ -319,6 +484,9 @@ func (tx *DirTransaction) restoreDirectoryBackup() error {
 		return fmt.Errorf("restore previous output: %w", err)
 	}
 	tx.backupName = ""
+	if err := syncDirectory(tx.parentRoot); err != nil {
+		return fmt.Errorf("sync restored previous output: %w", err)
+	}
 	return nil
 }
 
@@ -343,6 +511,9 @@ func (tx *DirTransaction) restorePublishedDirectory() error {
 	}
 	if err := tx.restoreDirectoryBackup(); err != nil {
 		errs = append(errs, err)
+	}
+	if err := syncDirectory(tx.parentRoot); err != nil {
+		errs = append(errs, fmt.Errorf("sync rollback of published output: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -541,9 +712,9 @@ func canonicalPath(path string) (string, error) {
 }
 
 // CloneTree copies one complete reusable artifact generation into an
-// unpublished staging directory. The source root is pinned, symlinks and
-// special files are rejected, and the byte budget is enforced on bytes
-// actually read rather than on mutable directory metadata alone.
+// unpublished staging directory. Both roots are pinned, symlinks and special
+// files are rejected, and the byte budget is enforced on bytes actually read
+// rather than on mutable directory metadata alone.
 func CloneTree(src, dst string) error {
 	srcAbs, err := filepath.Abs(src)
 	if err != nil {
@@ -568,6 +739,37 @@ func CloneTree(src, dst string) error {
 	if !os.SameFile(srcInfo, pinned) {
 		return fmt.Errorf("artifact tree root changed while being opened")
 	}
+	dstAbs, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
+	dstAbs = filepath.Clean(dstAbs)
+	overlap, err := PathsOverlap(srcAbs, dstAbs)
+	if err != nil {
+		return fmt.Errorf("compare clone roots: %w", err)
+	}
+	if overlap {
+		return fmt.Errorf("artifact clone source and destination overlap")
+	}
+	dstInfo, err := os.Lstat(dstAbs)
+	if err != nil {
+		return err
+	}
+	if dstInfo.Mode()&os.ModeSymlink != 0 || !dstInfo.IsDir() {
+		return fmt.Errorf("artifact clone destination is not a regular directory")
+	}
+	dstRoot, err := os.OpenRoot(dstAbs)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+	dstPinned, err := dstRoot.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(dstInfo, dstPinned) {
+		return fmt.Errorf("artifact clone destination changed while being opened")
+	}
 
 	var files int
 	var total int64
@@ -579,12 +781,11 @@ func CloneTree(src, dst string) error {
 			return nil
 		}
 		rel := filepath.FromSlash(path)
-		out := filepath.Join(dst, rel)
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("artifact tree contains symlink %s", rel)
 		}
 		if entry.IsDir() {
-			return os.MkdirAll(out, 0o755)
+			return dstRoot.MkdirAll(rel, 0o755)
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -600,8 +801,10 @@ func CloneTree(src, dst string) error {
 		if info.Size() < 0 || info.Size() > maxClonedOutputBytes-total {
 			return fmt.Errorf("artifact tree exceeds %d-byte clone limit", maxClonedOutputBytes)
 		}
-		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-			return err
+		if parent := filepath.Dir(rel); parent != "." {
+			if err := dstRoot.MkdirAll(parent, 0o755); err != nil {
+				return err
+			}
 		}
 
 		in, err := root.Open(path)
@@ -617,7 +820,7 @@ func CloneTree(src, dst string) error {
 			_ = in.Close()
 			return fmt.Errorf("artifact source %s changed while being opened", rel)
 		}
-		outFile, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		outFile, err := dstRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
 			_ = in.Close()
 			return err

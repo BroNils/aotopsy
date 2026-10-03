@@ -62,6 +62,13 @@ func cmdFindLibappBatch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	containsInput, err := output.ContainsPath(*outDir, *dir)
+	if err != nil {
+		return fmt.Errorf("compare find-libapp batch input/output paths: %w", err)
+	}
+	if containsInput {
+		return fmt.Errorf("find-libapp batch output directory must not contain the input archive directory")
+	}
 
 	entries, err := os.ReadDir(*dir)
 	if err != nil {

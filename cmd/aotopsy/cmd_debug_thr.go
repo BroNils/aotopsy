@@ -168,26 +168,45 @@ func cmdTHRCluster(args []string) error {
 		return fmt.Errorf("cluster records: %w", err)
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
+	containsInput, err := output.ContainsPath(*outDir, *inputPath)
+	if err != nil {
+		return fmt.Errorf("compare thr-cluster input/output paths: %w", err)
 	}
+	if containsInput {
+		return fmt.Errorf("thr-cluster output directory must not contain its input file")
+	}
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return fmt.Errorf("begin thr-cluster output generation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stageOutDir := tx.StageDir()
 
-	jsonPath := filepath.Join(*outDir, "bands.json")
+	jsonPath := filepath.Join(stageOutDir, "bands.json")
 	if err := output.WriteJSONFile(jsonPath, br); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 
-	mdPath := filepath.Join(*outDir, "bands.md")
+	mdPath := filepath.Join(stageOutDir, "bands.md")
 	if err := output.WriteAtomic(mdPath, 0o644, func(w io.Writer) error {
 		return thraudit.WriteBandsMD(w, br)
 	}); err != nil {
 		return fmt.Errorf("write markdown: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish thr-cluster output generation: %w", err)
+	}
+	committed = true
 
 	cli.Errf("%s: %d bands from %d unresolved accesses\n",
 		br.Sample, len(br.Bands), br.TotalUnresolved)
-	cli.Errf("wrote %s\n", jsonPath)
-	cli.Errf("wrote %s\n", mdPath)
+	cli.Errf("wrote %s\n", filepath.Join(*outDir, "bands.json"))
+	cli.Errf("wrote %s\n", filepath.Join(*outDir, "bands.md"))
 
 	return nil
 }

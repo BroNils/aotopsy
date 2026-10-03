@@ -79,11 +79,7 @@ func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 		rel := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
-		path, err := output.ArtifactPath(dartDir, rel+".dart")
-		if err != nil {
-			return written, fmt.Errorf("decompile artifact path: %w", err)
-		}
-		if err := writeDartFile(path, art.Source); err != nil {
+		if err := writeDartFile(opts.OutDir, "dart/"+rel+".dart", art.Source); err != nil {
 			return written, err
 		}
 		written++
@@ -98,8 +94,8 @@ func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
 	return written, nil
 }
 
-func writeDartFile(path, source string) error {
-	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
+func writeDartFile(root, rel, source string) error {
+	return output.WriteArtifactAtomic(root, rel, 0o644, func(w io.Writer) error {
 		_, err := io.WriteString(w, source)
 		return err
 	})

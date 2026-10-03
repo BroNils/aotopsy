@@ -41,10 +41,24 @@ func cmdDump(args []string) error {
 		opts.Mode = dartfmt.ModeStrict
 	}
 
-	// Create output directory.
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
+	containsSource, err := output.ContainsPath(*outDir, *libapp)
+	if err != nil {
+		return fmt.Errorf("compare dump output/source paths: %w", err)
 	}
+	if containsSource {
+		return fmt.Errorf("dump output directory must not contain the source binary")
+	}
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return fmt.Errorf("begin dump generation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stageOutDir := tx.StageDir()
 
 	// Open ELF + extract snapshots.
 	ef, info, err := analysis.LoadSnapshotRaw(*libapp, opts)
@@ -56,7 +70,7 @@ func cmdDump(args []string) error {
 	logger := cli.NewLogger(os.Stderr, false)
 
 	// Write parser/debug snapshot metadata separately from pipeline provenance.
-	if err := output.WriteSnapshotInfoJSON(*outDir, info); err != nil {
+	if err := output.WriteSnapshotInfoJSON(stageOutDir, info); err != nil {
 		return fmt.Errorf("write snapshot_info.json: %w", err)
 	}
 	logger.Printf("wrote %s/snapshot_info.json\n", *outDir)
@@ -86,7 +100,7 @@ func cmdDump(args []string) error {
 	}
 
 	// Write symbols.json.
-	if err := output.WriteSymbolsJSON(*outDir, symList); err != nil {
+	if err := output.WriteSymbolsJSON(stageOutDir, symList); err != nil {
 		return fmt.Errorf("write symbols.json: %w", err)
 	}
 	logger.Printf("wrote %s/symbols.json (%d entries)\n", *outDir, len(symList))
@@ -110,7 +124,7 @@ func cmdDump(args []string) error {
 				MaxSteps: opts.EffectiveMaxSteps(),
 				Symbols:  lookup,
 			})
-			if err := output.WriteASMSingle(*outDir, insts, lookup); err != nil {
+			if err := output.WriteASMSingle(stageOutDir, insts, lookup); err != nil {
 				return fmt.Errorf("write asm.txt: %w", err)
 			}
 			logger.Printf("wrote %s/asm.txt (%d instructions)\n", *outDir, len(insts))
@@ -128,7 +142,7 @@ func cmdDump(args []string) error {
 				BaseAddr: codeVA,
 				MaxSteps: opts.EffectiveMaxSteps(),
 			})
-			if err := output.WriteASM(*outDir, "vm_stubs", insts, lookup); err != nil {
+			if err := output.WriteASM(stageOutDir, "vm_stubs", insts, lookup); err != nil {
 				return fmt.Errorf("write asm/vm_stubs.txt: %w", err)
 			}
 			logger.Printf("wrote %s/asm/vm_stubs.txt (%d instructions)\n", *outDir, len(insts))
@@ -145,7 +159,7 @@ func cmdDump(args []string) error {
 			codeVA := info.IsolateInstructions.VA + codeOff
 			logger.Printf("disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
 				len(code), codeVA, payloadLen)
-			n, err := writeX86ASMBlob(filepath.Join(*outDir, "asm.txt"), code, codeVA, lookup, opts.EffectiveMaxSteps())
+			n, err := writeX86ASMBlob(filepath.Join(stageOutDir, "asm.txt"), code, codeVA, lookup, opts.EffectiveMaxSteps())
 			if err != nil {
 				return fmt.Errorf("write asm.txt: %w", err)
 			}
@@ -160,10 +174,10 @@ func cmdDump(args []string) error {
 				codeOff = 0
 			}
 			codeVA := info.VmInstructions.VA + codeOff
-			if err := os.MkdirAll(filepath.Join(*outDir, "asm"), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(stageOutDir, "asm"), 0o755); err != nil {
 				return fmt.Errorf("mkdir asm: %w", err)
 			}
-			n, err := writeX86ASMBlob(filepath.Join(*outDir, "asm", "vm_stubs.txt"), code, codeVA, lookup, opts.EffectiveMaxSteps())
+			n, err := writeX86ASMBlob(filepath.Join(stageOutDir, "asm", "vm_stubs.txt"), code, codeVA, lookup, opts.EffectiveMaxSteps())
 			if err != nil {
 				return fmt.Errorf("write asm/vm_stubs.txt: %w", err)
 			}
@@ -177,6 +191,10 @@ func cmdDump(args []string) error {
 			logger.Printf("  %s\n", d)
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish dump generation: %w", err)
+	}
+	committed = true
 
 	return nil
 }

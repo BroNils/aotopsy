@@ -221,6 +221,9 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 					PC:          ref.PC,
 					AddressKind: "instruction",
 					RuleID:      "signal.category." + cat,
+					FingerprintParts: []string{
+						"category-string", cat, sf.Name, ref.Value,
+					},
 				})
 			}
 		}
@@ -234,6 +237,9 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 					PC:          sf.PC,
 					AddressKind: "function",
 					RuleID:      "signal.category." + cat,
+					FingerprintParts: []string{
+						"category-function", cat, sf.Name,
+					},
 				})
 			}
 		}
@@ -254,6 +260,9 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 				Category:    signal.CatObfuscation,
 				StringValue: fmt.Sprintf("%.0f%% of %d identifier-like strings look obfuscated", ratio*100, considered),
 				RuleID:      "signal.obfuscation.ratio",
+				FingerprintParts: []string{
+					"obfuscation-ratio",
+				},
 			})
 		}
 	}

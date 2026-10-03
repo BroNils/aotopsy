@@ -125,7 +125,7 @@ func cmdRender(args []string) error {
 	reachDOT := render.ReachabilityDOT(funcs, edges, reachable, entryPoints,
 		*title+" (reachable)", render.NASA)
 	reachDotPath := filepath.Join(renderDir, "reachable.dot")
-	if err := os.WriteFile(reachDotPath, []byte(reachDOT), 0o644); err != nil {
+	if err := output.WriteArtifactFile(renderDir, "reachable.dot", []byte(reachDOT), 0o644); err != nil {
 		return fmt.Errorf("write reachable.dot: %w", err)
 	}
 	logger.Printf("wrote %s (%d bytes)\n", reachDotPath, len(reachDOT))
@@ -133,7 +133,7 @@ func cmdRender(args []string) error {
 	// Generate callgraph DOT.
 	dot := render.CallgraphDOT(funcs, edges, *title, render.NASA, *maxNodes)
 	dotPath := filepath.Join(renderDir, "callgraph.dot")
-	if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
+	if err := output.WriteArtifactFile(renderDir, "callgraph.dot", []byte(dot), 0o644); err != nil {
 		return fmt.Errorf("write callgraph.dot: %w", err)
 	}
 	logger.Printf("wrote %s (%d bytes)\n", dotPath, len(dot))
@@ -141,7 +141,7 @@ func cmdRender(args []string) error {
 	// Generate classgraph DOT.
 	classDOT := render.ClassgraphDOT(funcs, edges, *title+" (class level)", render.NASA, *maxNodes)
 	classDotPath := filepath.Join(renderDir, "classgraph.dot")
-	if err := os.WriteFile(classDotPath, []byte(classDOT), 0o644); err != nil {
+	if err := output.WriteArtifactFile(renderDir, "classgraph.dot", []byte(classDOT), 0o644); err != nil {
 		return fmt.Errorf("write classgraph.dot: %w", err)
 	}
 	logger.Printf("wrote %s (%d bytes)\n", classDotPath, len(classDOT))
@@ -288,10 +288,7 @@ func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.
 		}
 		dotRel := strings.TrimSuffix(underAsm, filepath.Ext(underAsm)) + ".dot"
 		dotPath := filepath.Join(cfgDir, dotRel)
-		if err := os.MkdirAll(filepath.Dir(dotPath), 0o755); err != nil {
-			return count, cfgLinks, fmt.Errorf("mkdir CFG path for %s: %w", f.Name, err)
-		}
-		if err := os.WriteFile(dotPath, []byte(dot), 0o644); err != nil {
+		if err := output.WriteArtifactFile(cfgDir, filepath.ToSlash(dotRel), []byte(dot), 0o644); err != nil {
 			return count, cfgLinks, fmt.Errorf("write %s: %w", dotPath, err)
 		}
 

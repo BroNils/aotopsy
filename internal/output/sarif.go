@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -89,6 +90,7 @@ type sarifResult struct {
 	Message             sarifDescription  `json:"message"`
 	Locations           []sarifLocation   `json:"locations"`
 	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
+	Properties          map[string]string `json:"properties,omitempty"`
 }
 
 type sarifLocation struct {
@@ -174,6 +176,11 @@ type SignalFinding struct {
 	AddressKind        string `json:"address_kind,omitempty"`
 	RuleID             string `json:"rule_id,omitempty"`
 	ProducerConfidence string `json:"producer_confidence,omitempty"`
+	// FingerprintParts are stable, producer-owned identity components for
+	// SARIF partialFingerprints. They deliberately exclude presentation text,
+	// absolute addresses, confidence scores, and other values that can change
+	// without changing the logical finding.
+	FingerprintParts []string `json:"-"`
 }
 
 // ArtifactIdentity is immutable provenance captured when the input was opened.
@@ -185,7 +192,21 @@ type ArtifactIdentity struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 
-const sarifFindingFingerprintKey = "aotopsyFinding/v2"
+const sarifFindingFingerprintKey = "aotopsyFinding/v4"
+
+type normalizedFinding struct {
+	Category           string
+	StringValue        string
+	Function           string
+	PC                 string
+	AddressKind        string
+	RuleID             string
+	ProducerConfidence string
+	FingerprintParts   []string
+	Address            uint64
+	HasAddress         bool
+	identity           string
+}
 
 func describeArtifact(identity ArtifactIdentity) sarifArtifact {
 	a := sarifArtifact{
@@ -240,6 +261,87 @@ func validateArtifactIdentity(identity ArtifactIdentity) error {
 	return nil
 }
 
+func normalizeFinding(f SignalFinding) (normalizedFinding, error) {
+	n := normalizedFinding{
+		Category:           strings.TrimSpace(f.Category),
+		StringValue:        f.StringValue,
+		Function:           f.Function,
+		ProducerConfidence: strings.TrimSpace(f.ProducerConfidence),
+		FingerprintParts:   f.FingerprintParts,
+	}
+	if n.Category == "" {
+		return normalizedFinding{}, fmt.Errorf("empty category")
+	}
+	n.RuleID = strings.TrimSpace(f.RuleID)
+	if n.RuleID == "" {
+		n.RuleID = "signal.category." + n.Category
+	}
+	pc := strings.TrimSpace(f.PC)
+	if pc != "" {
+		addr, ok := parseAddress(pc)
+		if !ok {
+			return normalizedFinding{}, fmt.Errorf("invalid address %q", f.PC)
+		}
+		n.Address = addr
+		n.HasAddress = true
+		n.PC = fmt.Sprintf("0x%x", addr)
+		n.AddressKind = strings.TrimSpace(f.AddressKind)
+		if n.AddressKind == "" {
+			n.AddressKind = "instruction"
+		}
+	}
+	identityTuple := [7]string{
+		n.RuleID,
+		n.Category,
+		n.Function,
+		n.PC,
+		n.StringValue,
+		n.AddressKind,
+		n.ProducerConfidence,
+	}
+	b, _ := json.Marshal(identityTuple)
+	n.identity = string(b)
+	return n, nil
+}
+
+// partialFingerprintIdentity intentionally excludes the absolute address and
+// producer confidence. SARIF result management is expected to survive binary
+// layout shifts, and Appendix B specifically warns against absolute binary
+// locations in fingerprint computation. Confidence is result metadata rather
+// than part of the finding's logical identity.
+//
+// Keep this separate from normalizedFinding.identity: the latter describes the
+// exact emitted occurrence and is therefore still appropriate for exact
+// deduplication within one report.
+func partialFingerprintIdentity(f normalizedFinding) string {
+	if len(f.FingerprintParts) > 0 {
+		parts := make([]string, 0, len(f.FingerprintParts)+1)
+		parts = append(parts, f.RuleID)
+		parts = append(parts, f.FingerprintParts...)
+		b, _ := json.Marshal(parts)
+		return string(b)
+	}
+	b, _ := json.Marshal([5]string{
+		f.RuleID,
+		f.Category,
+		f.Function,
+		f.StringValue,
+		f.AddressKind,
+	})
+	return string(b)
+}
+
+func findingMessage(f normalizedFinding) string {
+	msg := fmt.Sprintf("%s: %q", f.Category, f.StringValue)
+	if f.Function != "" {
+		msg += " in " + f.Function
+	}
+	if f.PC != "" {
+		msg += " at " + f.PC
+	}
+	return msg
+}
+
 // WriteSARIF writes a SARIF 2.1.0 report from signal findings.
 //
 // identity is captured provenance for the analysed binary. A zero identity
@@ -248,36 +350,67 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identi
 	if err := validateArtifactIdentity(identity); err != nil {
 		return err
 	}
+	normalized := make([]normalizedFinding, 0, len(findings))
+	seenFindings := make(map[string]struct{}, len(findings))
+	ruleCategory := make(map[string]string)
 	for i, f := range findings {
-		if strings.TrimSpace(f.Category) == "" {
-			return fmt.Errorf("sarif: finding %d has empty category", i)
+		n, err := normalizeFinding(f)
+		if err != nil {
+			return fmt.Errorf("sarif: finding %d: %w", i, err)
 		}
-		if strings.TrimSpace(f.PC) != "" {
-			if _, ok := parseAddress(f.PC); !ok {
-				return fmt.Errorf("sarif: finding %d has invalid address %q", i, f.PC)
-			}
+		if prior, ok := ruleCategory[n.RuleID]; ok && prior != n.Category {
+			return fmt.Errorf("sarif: rule %q is used with conflicting categories %q and %q", n.RuleID, prior, n.Category)
 		}
-	}
-	// Build unique rules from findings
-	ruleSet := map[string]bool{}
-	rules := make([]sarifRule, 0)
-	for _, f := range findings {
-		if ruleSet[f.Category] {
+		ruleCategory[n.RuleID] = n.Category
+		if _, duplicate := seenFindings[n.identity]; duplicate {
 			continue
 		}
-		ruleSet[f.Category] = true
-		level := sarifLevel(f.Category)
-		desc := ruleDescription[f.Category]
+		seenFindings[n.identity] = struct{}{}
+		normalized = append(normalized, n)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		a, b := normalized[i], normalized[j]
+		if a.RuleID != b.RuleID {
+			return a.RuleID < b.RuleID
+		}
+		if a.HasAddress != b.HasAddress {
+			return !a.HasAddress
+		}
+		if a.Address != b.Address {
+			return a.Address < b.Address
+		}
+		if a.Function != b.Function {
+			return a.Function < b.Function
+		}
+		if a.StringValue != b.StringValue {
+			return a.StringValue < b.StringValue
+		}
+		if a.AddressKind != b.AddressKind {
+			return a.AddressKind < b.AddressKind
+		}
+		return a.ProducerConfidence < b.ProducerConfidence
+	})
+
+	ruleIDs := make([]string, 0, len(ruleCategory))
+	for id := range ruleCategory {
+		ruleIDs = append(ruleIDs, id)
+	}
+	sort.Strings(ruleIDs)
+	rules := make([]sarifRule, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		category := ruleCategory[ruleID]
+		level := sarifLevel(category)
+		desc := ruleDescription[category]
 		if desc == "" {
-			desc = "Security finding: " + f.Category
+			desc = "Security finding: " + category
 		}
 		rules = append(rules, sarifRule{
-			ID:               "AOTOPSY_" + f.Category,
-			Name:             f.Category,
+			ID:               ruleID,
+			Name:             ruleID,
 			ShortDescription: sarifDescription{Text: desc},
 			HelpURI:          "https://github.com/BroNils/aotopsy",
 			DefaultConfig:    sarifRuleConfig{Level: level},
-			Properties:       map[string]string{"category": f.Category},
+			Properties:       map[string]string{"category": category},
 		})
 	}
 
@@ -285,8 +418,8 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identi
 	artifactIndex := 0
 
 	// Build results
-	results := make([]sarifResult, 0)
-	for _, f := range findings {
+	results := make([]sarifResult, 0, len(normalized))
+	for _, f := range normalized {
 		level := sarifLevel(f.Category)
 		loc := sarifLocation{
 			PhysicalLocation: sarifPhysicalLocation{
@@ -296,26 +429,25 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identi
 				},
 			},
 		}
-		if addr, ok := parseAddress(f.PC); ok {
-			kind := f.AddressKind
-			if kind == "" {
-				kind = "instruction"
-			}
+		if f.HasAddress {
 			loc.PhysicalLocation.Address = &sarifAddress{
-				AbsoluteAddress: addr,
-				Kind:            kind,
+				AbsoluteAddress: f.Address,
+				Kind:            f.AddressKind,
 				Name:            f.Function,
 			}
 		}
-		results = append(results, sarifResult{
-			RuleID: "AOTOPSY_" + f.Category,
-			Level:  level,
-			Message: sarifDescription{
-				Text: fmt.Sprintf("%s: %q in %s at %s", f.Category, f.StringValue, f.Function, f.PC),
-			},
+		result := sarifResult{
+			RuleID:              f.RuleID,
+			Level:               level,
+			Message:             sarifDescription{Text: findingMessage(f)},
 			Locations:           []sarifLocation{loc},
-			PartialFingerprints: map[string]string{sarifFindingFingerprintKey: findingFingerprint(f)},
-		})
+			PartialFingerprints: map[string]string{sarifFindingFingerprintKey: fingerprintIdentity(partialFingerprintIdentity(f))},
+			Properties:          map[string]string{"category": f.Category},
+		}
+		if f.ProducerConfidence != "" {
+			result.Properties["producerConfidence"] = f.ProducerConfidence
+		}
+		results = append(results, result)
 	}
 
 	log := sarifLog{
@@ -347,21 +479,26 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identi
 }
 
 func findingFingerprint(f SignalFinding) string {
-	// JSON's array framing is injective for strings, unlike colon joining where
-	// field-boundary shifts can map distinct findings to the same byte sequence.
-	pc := strings.TrimSpace(f.PC)
-	kind := f.AddressKind
-	if addr, ok := parseAddress(pc); ok {
-		pc = fmt.Sprintf("0x%x", addr)
-		if kind == "" {
-			kind = "instruction"
+	n, err := normalizeFinding(f)
+	if err != nil {
+		// WriteSARIF rejects malformed findings. Keep this helper total for tests
+		// and diagnostics by hashing the untrusted tuple without interpreting it.
+		ruleID := strings.TrimSpace(f.RuleID)
+		if ruleID == "" {
+			ruleID = "signal.category." + strings.TrimSpace(f.Category)
 		}
-	} else if pc == "" {
-		// AddressKind has no effect on the emitted SARIF when there is no
-		// address, so it must not perturb the identity of that result.
-		kind = ""
+		kind := strings.TrimSpace(f.AddressKind)
+		pc := strings.TrimSpace(f.PC)
+		if pc == "" {
+			kind = ""
+		}
+		b, _ := json.Marshal([5]string{ruleID, strings.TrimSpace(f.Category), f.Function, f.StringValue, kind})
+		return fingerprintIdentity(string(b))
 	}
-	b, _ := json.Marshal([5]string{f.Category, f.Function, pc, f.StringValue, kind})
-	sum := sha256.Sum256(b)
+	return fingerprintIdentity(partialFingerprintIdentity(n))
+}
+
+func fingerprintIdentity(identity string) string {
+	sum := sha256.Sum256([]byte(identity))
 	return hex.EncodeToString(sum[:])
 }

@@ -10,6 +10,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/output"
 )
 
 // cmdIDA handles "aotopsy ida <libapp.so>" — full pipeline + IDA decompilation.
@@ -119,26 +120,40 @@ func cmdIDA(args []string) error {
 
 	// Step 5: Run idalib.
 	decompDir := filepath.Join(pipeResult.OutDir, "decompiled")
+	decompTx, err := output.BeginDirTransaction(decompDir)
+	if err != nil {
+		return fmt.Errorf("begin IDA decompile generation: %w", err)
+	}
+	decompCommitted := false
+	defer func() {
+		if !decompCommitted {
+			decompTx.Abort()
+		}
+	}()
 	absMetaPath, _ := filepath.Abs(metaPath)
-	absDecompDir, _ := filepath.Abs(decompDir)
+	absDecompStage, _ := filepath.Abs(decompTx.StageDir())
 
 	if *all {
 		cli.Errf("running IDA idalib analysis (decompiling ALL functions)...\n")
 	} else {
 		cli.Errf("running IDA idalib analysis (signal functions only, use --all for everything)...\n")
 	}
-	cli.Errf("  decompile output: %s\n", absDecompDir)
+	cli.Errf("  decompile output: %s\n", decompDir)
 
-	cmd := exec.Command(python, scriptPath, absLibPath, absMetaPath, absDecompDir)
+	cmd := exec.Command(python, scriptPath, absLibPath, absMetaPath, absDecompStage)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ida script failed: %w", err)
 	}
+	if err := decompTx.Commit(); err != nil {
+		return fmt.Errorf("publish IDA decompile generation: %w", err)
+	}
+	decompCommitted = true
 
-	cCount := analysis.CountDecompiledFiles(absDecompDir)
-	cli.Errf("decompiled %d functions → %s\n", cCount, absDecompDir)
+	cCount := analysis.CountDecompiledFiles(decompDir)
+	cli.Errf("decompiled %d functions → %s\n", cCount, decompDir)
 
 	return nil
 }

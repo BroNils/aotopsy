@@ -31,7 +31,7 @@ func TestRenderUsesCanonicalArtifactPathX64AndRemovesStaleCFG(t *testing.T) {
 	if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "call_edges.jsonl"), []disasm.CallEdgeRecord{}); err != nil {
 		t.Fatal(err)
 	}
-	prov := analysis.Provenance{Source: filepath.Join(dir, "libapp.so"), SourceName: "libapp.so", SHA256: string(make([]byte, 64)), Size: 1, Arch: "x64", DartVersion: "3.12.2"}
+	prov := analysis.Provenance{Source: filepath.Join(dir, "libapp.so"), SourceName: "libapp.so", SHA256: strings.Repeat("0", 64), Size: 1, Arch: "x64", DartVersion: "3.12.2"}
 	if err := output.WriteJSONFile(filepath.Join(dir, analysis.ProvenanceFileName), prov); err != nil {
 		t.Fatal(err)
 	}
