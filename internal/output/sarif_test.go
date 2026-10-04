@@ -14,17 +14,19 @@ func TestWriteSARIF(t *testing.T) {
 
 	findings := []SignalFinding{
 		{
-			Category:    "rooting",
-			StringValue: "su",
-			Function:    "isRooted",
-			PC:          "0x1000",
-			AddressKind: "function",
+			Category:           "rooting",
+			StringValue:        "su",
+			Function:           "isRooted",
+			PC:                 "0x1000",
+			AddressKind:        "function",
+			ProducerConfidence: "high",
 		},
 		{
-			Category:    "ssl_pinning",
-			StringValue: "sha256/cert",
-			Function:    "checkCert",
-			PC:          "0x2000",
+			Category:           "ssl_pinning",
+			StringValue:        "sha256/cert",
+			Function:           "checkCert",
+			PC:                 "0x2000",
+			ProducerConfidence: "high",
 		},
 		{
 			Category:    "custom_unknown_cat",
@@ -174,7 +176,7 @@ func TestWriteSARIFBinaryLevelFinding(t *testing.T) {
 func TestWriteSARIFUsesProducerRuleIDsDeduplicatesAndIsDeterministic(t *testing.T) {
 	findings := []SignalFinding{
 		{Category: "yara", RuleID: "signal.yara.rule_b", StringValue: "b", Function: "f", PC: "0X0020"},
-		{Category: "taint", RuleID: "signal.taint.flow", StringValue: "flow", Function: "g", ProducerConfidence: "high"},
+		{Category: "source_sink", RuleID: "signal.source_sink.proximity", StringValue: "proximity", Function: "g", ProducerConfidence: "high"},
 		{Category: "yara", RuleID: "signal.yara.rule_a", StringValue: "a", Function: "f", PC: "0x10"},
 		{Category: "yara", RuleID: "signal.yara.rule_a", StringValue: "a", Function: "f", PC: "0x0010"}, // exact emitted duplicate
 	}
@@ -212,7 +214,7 @@ func TestWriteSARIFUsesProducerRuleIDsDeduplicatesAndIsDeterministic(t *testing.
 	if got := len(run.Tool.Driver.Rules); got != 3 {
 		t.Fatalf("rules = %d, want 3 producer rules", got)
 	}
-	if run.Tool.Driver.Rules[0].ID != "signal.taint.flow" || run.Tool.Driver.Rules[1].ID != "signal.yara.rule_a" || run.Tool.Driver.Rules[2].ID != "signal.yara.rule_b" {
+	if run.Tool.Driver.Rules[0].ID != "signal.source_sink.proximity" || run.Tool.Driver.Rules[1].ID != "signal.yara.rule_a" || run.Tool.Driver.Rules[2].ID != "signal.yara.rule_b" {
 		t.Fatalf("rules are not stable-sorted producer IDs: %#v", run.Tool.Driver.Rules)
 	}
 	if got := run.Results[0].Properties["producerConfidence"]; got != "high" {
@@ -226,24 +228,24 @@ func TestWriteSARIFUsesProducerRuleIDsDeduplicatesAndIsDeterministic(t *testing.
 func TestWriteSARIFPartialFingerprintIsStableAcrossAddressAndConfidenceChanges(t *testing.T) {
 	findings := []SignalFinding{
 		{
-			Category:           "taint",
-			RuleID:             "signal.taint.flow",
-			StringValue:        "device_id -> network (flow, confidence=medium)",
+			Category:           "source_sink",
+			RuleID:             "signal.source_sink.proximity",
+			StringValue:        "device_id -> network (direct_static_call, confidence=medium)",
 			Function:           "sendDeviceInfo",
 			PC:                 "0x1000",
 			AddressKind:        "instruction",
 			ProducerConfidence: "medium",
-			FingerprintParts:   []string{"taint-flow", "device_id", "network", "flow", "readDeviceInfo", "sendDeviceInfo"},
+			FingerprintParts:   []string{"source-sink-proximity", "device_id", "network", "direct_static_call", "readDeviceInfo", "sendDeviceInfo"},
 		},
 		{
-			Category:           "taint",
-			RuleID:             "signal.taint.flow",
-			StringValue:        "device_id -> network (flow, confidence=high)",
+			Category:           "source_sink",
+			RuleID:             "signal.source_sink.proximity",
+			StringValue:        "device_id -> network (direct_static_call, confidence=high)",
 			Function:           "sendDeviceInfo",
 			PC:                 "0x2000",
 			AddressKind:        "instruction",
 			ProducerConfidence: "high",
-			FingerprintParts:   []string{"taint-flow", "device_id", "network", "flow", "readDeviceInfo", "sendDeviceInfo"},
+			FingerprintParts:   []string{"source-sink-proximity", "device_id", "network", "direct_static_call", "readDeviceInfo", "sendDeviceInfo"},
 		},
 	}
 	dir := t.TempDir()
@@ -312,6 +314,26 @@ func TestWriteSARIFEmptyResultsAreArrays(t *testing.T) {
 	driver := run["tool"].(map[string]any)["driver"].(map[string]any)
 	if _, ok := driver["rules"].([]any); !ok {
 		t.Fatalf("rules encoded as %T, want JSON array", driver["rules"])
+	}
+}
+
+func TestFindingSARIFLevelCapsImpactByProducerConfidence(t *testing.T) {
+	for _, tc := range []struct {
+		confidence string
+		want       string
+	}{
+		{confidence: "low", want: "note"},
+		{confidence: "medium", want: "warning"},
+		{confidence: "high", want: "error"},
+		{confidence: "", want: "note"},
+		{confidence: "unknown-vocabulary", want: "note"},
+	} {
+		if got := findingSARIFLevel("anti_analysis", tc.confidence); got != tc.want {
+			t.Errorf("anti_analysis confidence %q => %q, want %q", tc.confidence, got, tc.want)
+		}
+	}
+	if got := findingSARIFLevel("url", "low"); got != "note" {
+		t.Errorf("low-confidence URL = %q, want note", got)
 	}
 }
 

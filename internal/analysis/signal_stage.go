@@ -132,9 +132,9 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 		cli.Gold, g.Stats.ContextFuncs, cli.Reset,
 		cli.Gold, g.Stats.CallSites, cli.Reset,
 		cli.Gold, g.Stats.StaticRelations, cli.Reset)
-	if g.Stats.IncompletePolymorphicSites > 0 || g.Stats.UnknownCandidateCountSites > 0 || g.Stats.UnresolvedIndirectSites > 0 || g.Stats.RuntimeObservedSites > 0 {
-		logf("  %sgraph completeness:%s %d incomplete polymorphic, %d unknown candidate-count, %d unresolved indirect, %d runtime-observed site(s)\n",
-			cli.Muted, cli.Reset, g.Stats.IncompletePolymorphicSites, g.Stats.UnknownCandidateCountSites, g.Stats.UnresolvedIndirectSites, g.Stats.RuntimeObservedSites)
+	if g.Stats.IncompletePolymorphicSites > 0 || g.Stats.UnknownCandidateCountSites > 0 || g.Stats.UnresolvedIndirectSites > 0 || g.Stats.RuntimeObservedSites > 0 || g.Stats.UnclassifiedTHRSites > 0 {
+		logf("  %sgraph completeness:%s %d incomplete polymorphic, %d unknown candidate-count, %d unresolved indirect, %d runtime-observed, %d unclassified THR site(s)\n",
+			cli.Muted, cli.Reset, g.Stats.IncompletePolymorphicSites, g.Stats.UnknownCandidateCountSites, g.Stats.UnresolvedIndirectSites, g.Stats.RuntimeObservedSites, g.Stats.UnclassifiedTHRSites)
 	}
 	categories := make([]string, 0, len(g.Stats.Categories))
 	for cat := range g.Stats.Categories {
@@ -227,37 +227,45 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 	// Write SARIF report.
 	var findings []output.SignalFinding
 	for _, sf := range g.Funcs {
+		representedCategories := make(map[string]bool)
 		// String-based findings
 		for _, ref := range sf.StringRefs {
 			for _, cat := range ref.Categories {
+				representedCategories[cat] = true
 				findings = append(findings, output.SignalFinding{
-					Category:    cat,
-					StringValue: ref.Value,
-					Function:    sf.Name,
-					PC:          ref.PC,
-					AddressKind: "instruction",
-					RuleID:      "signal.category." + cat,
+					Category:           cat,
+					StringValue:        ref.Value,
+					Function:           sf.Name,
+					PC:                 ref.PC,
+					AddressKind:        "instruction",
+					RuleID:             "signal.category." + cat,
+					ProducerConfidence: ref.Confidence,
 					FingerprintParts: []string{
 						"category-string", cat, sf.Name, ref.Value,
 					},
 				})
 			}
 		}
-		// Category-based findings (e.g. THR calls) without string refs
-		if len(sf.StringRefs) == 0 && len(sf.Categories) > 0 {
-			for _, cat := range sf.Categories {
-				findings = append(findings, output.SignalFinding{
-					Category:    cat,
-					StringValue: "",
-					Function:    sf.Name,
-					PC:          sf.PC,
-					AddressKind: "function",
-					RuleID:      "signal.category." + cat,
-					FingerprintParts: []string{
-						"category-function", cat, sf.Name,
-					},
-				})
+		// Structural categories (async/generator runtime stubs) may coexist with
+		// lexical findings in the same function. Emit every category not already
+		// represented by a string witness instead of dropping it wholesale when a
+		// function happens to reference any string.
+		for _, cat := range sf.Categories {
+			if representedCategories[cat] {
+				continue
 			}
+			findings = append(findings, output.SignalFinding{
+				Category:           cat,
+				StringValue:        "",
+				Function:           sf.Name,
+				PC:                 sf.PC,
+				AddressKind:        "function",
+				RuleID:             "signal.category." + cat,
+				ProducerConfidence: "high",
+				FingerprintParts: []string{
+					"category-function", cat, sf.Name,
+				},
+			})
 		}
 	}
 	// Binary-level obfuscation measure. Reported once for the whole binary
@@ -273,9 +281,10 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 			logf("  %sobfuscated identifiers:%s %.0f%% of %d name-like strings (e.g. %s)\n",
 				cli.Muted, cli.Reset, ratio*100, considered, strings.Join(samples, ", "))
 			findings = append(findings, output.SignalFinding{
-				Category:    signal.CatObfuscation,
-				StringValue: fmt.Sprintf("%.0f%% of %d identifier-like strings look obfuscated", ratio*100, considered),
-				RuleID:      "signal.obfuscation.ratio",
+				Category:           signal.CatObfuscation,
+				StringValue:        fmt.Sprintf("%.0f%% of %d identifier-like strings look obfuscated", ratio*100, considered),
+				RuleID:             "signal.obfuscation.ratio",
+				ProducerConfidence: "medium",
 				FingerprintParts: []string{
 					"obfuscation-ratio",
 				},
@@ -291,6 +300,34 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 	// invisible while both wrote the same call-edge-only content; it stops
 	// being invisible the moment either side gains a source.
 	if writeEvidence {
+		// The standalone/from-artifacts path can recompute graph-based detectors
+		// from the current functions/calls/string refs, but it cannot recompute
+		// binary-only entropy/crypto or cluster-backed channel/native artifacts.
+		// Remove those stale outputs and regenerate every detector it can prove
+		// from this generation before publishing SARIF/evidence.
+		if err := removeSignalDetectorArtifacts(outDir); err != nil {
+			return nil, err
+		}
+		for _, name := range []string{"platform_channels.jsonl", "native_capabilities.jsonl", "deobfuscate_map.jsonl"} {
+			if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("remove stale %s: %w", name, err)
+			}
+		}
+		if err := signal.WriteSourceSinkFindings(outDir, funcs, stringRefs, edges); err != nil {
+			return nil, fmt.Errorf("source/sink proximity: %w", err)
+		}
+		if err := signal.WriteYaraFindings(outDir, stringRefs); err != nil {
+			return nil, fmt.Errorf("yara: %w", err)
+		}
+		if err := signal.WriteBehavioralFindings(outDir, funcs, edges); err != nil {
+			return nil, fmt.Errorf("behavioral: %w", err)
+		}
+		extended, err := collectExtendedSARIF(outDir, nil)
+		if err != nil {
+			return nil, err
+		}
+		findings = append(findings, extended...)
+
 		identity := output.ArtifactIdentity{}
 		if hasProv {
 			identity = output.ArtifactIdentity{URI: prov.SourceName, Size: prov.Size, SHA256: prov.SHA256}
@@ -502,7 +539,7 @@ func BuildSignalContent(
 			if len(sr.Categories) > 0 {
 				cat = sr.Categories[0]
 			}
-			strs = append(strs, render.ClassifiedString{Value: sr.Value, Category: cat})
+			strs = append(strs, render.ClassifiedString{Value: sr.Value, Category: cat, Confidence: sr.Confidence})
 		}
 
 		if len(calls) > 0 || len(strs) > 0 {

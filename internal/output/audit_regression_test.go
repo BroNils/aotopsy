@@ -223,7 +223,7 @@ func TestWriteSARIFRejectsMalformedIdentityAndAddressWithoutReplacingReport(t *t
 func TestSignalCategorySARIFLevelsTrackSignalSeverity(t *testing.T) {
 	want := map[string]string{
 		"url": "warning", "host": "warning", "file": "note", "cloaking": "error",
-		"thr": "note", "async": "note", "generator": "note", "encryption": "error", "auth": "error",
+		"async": "note", "generator": "note", "encryption": "error", "auth": "error",
 		"sim": "error", "sms": "error", "contacts": "error", "data": "error",
 		"webview": "error", "blockchain": "error", "gambling": "error",
 	}

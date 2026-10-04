@@ -169,6 +169,24 @@ func TestBuildPlatformChannelsResolvesDirectTargetAddressThroughFunctions(t *tes
 	}
 }
 
+func TestBuildNativeCapabilitiesDoesNotClaimUsageFromSnapshotName(t *testing.T) {
+	vm := &cluster.Result{Strings: []cluster.ParsedString{
+		{RefID: 10, Value: "Socket_CreateConnect"},
+		{RefID: 11, Value: "not_a_native"},
+	}}
+	got := BuildNativeCapabilities("3.12.2", nil, vm)
+	if len(got) != 1 {
+		t.Fatalf("native inventory = %+v, want one exact SDK-native name", got)
+	}
+	rec := got[0]
+	if rec.Name != "Socket_CreateConnect" || rec.Evidence != "snapshot_native_name" || rec.IdentityConfidence != "high" {
+		t.Fatalf("native identity evidence = %+v", rec)
+	}
+	if rec.UsageEvidence != "not_established" {
+		t.Fatalf("snapshot-name inventory claimed native usage: %+v", rec)
+	}
+}
+
 func TestBuildDeobfuscationMap(t *testing.T) {
 	cl := &cluster.Result{
 		Classes: []cluster.ClassInfo{

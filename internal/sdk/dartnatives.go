@@ -7,11 +7,11 @@ import (
 
 // VM native function names.
 //
-// Every Dart AOT snapshot carries the names of the VM natives its code
-// can reach, as ordinary strings in the object pool: Ffi_dl_open,
-// File_Open, Socket_CreateConnect, Isolate_spawnUri. They are the most
-// reliable behavioural evidence a stripped binary offers -- they survive
-// obfuscation, because the VM resolves them by name at runtime.
+// Dart AOT snapshots can carry VM-native names as ordinary strings:
+// Ffi_dl_open, File_Open, Socket_CreateConnect, Isolate_spawnUri. An exact
+// name is reliable native-identity evidence and survives obfuscation because
+// the VM resolves natives by name at runtime. Presence in snapshot inventory
+// alone is not evidence that application code calls or reaches that native.
 //
 // Measured before this table existed: of 20 representative native names,
 // the string heuristics classified 4, and one of those four was wrong
@@ -19,11 +19,10 @@ import (
 // contains "PrivateKey"). A stripped 3.9.2 sample carries 105 such names;
 // a production app carries 1286.
 //
-// The classification is by NAMESPACE -- the part before the first
-// underscore -- because that is how the SDK groups natives, and it is
-// what carries the meaning: every File_* native is file I/O whichever one
-// it is. Matching whole names would need all ~570 of them and would go
-// stale on every SDK release; matching the namespace does not.
+// The semantic category is by NAMESPACE -- the part before the first
+// underscore -- after exact SDK membership has been established. Every
+// File_* native is a file-I/O native whichever member it is. The category
+// describes the native capability, not proof of target behavior.
 //
 // Sources, both re-derived by TestDartNativeNamespacesMatchSDK:
 //
@@ -47,8 +46,8 @@ const (
 	NativeCatCompression = "compression"
 )
 
-// dartNativeNamespaces maps a native's namespace to what reaching it
-// means. Namespaces with no behavioural signal (Object_, Double_,
+// dartNativeNamespaces maps a native's namespace to the capability it
+// represents. Namespaces with no useful security/reversing signal (Object_, Double_,
 // Float32x4_, List_, String_ ...) are deliberately absent: they appear in
 // every Dart program and classifying them would drown the interesting
 // ones.
@@ -76,8 +75,8 @@ var dartNativeNamespaces = map[string]string{
 	"ResourceHandleImpl":       NativeCatNet,
 	"SocketControlMessageImpl": NativeCatNet,
 
-	// TLS. Distinct from "net": reaching these means the app terminates
-	// or inspects TLS itself, which is where pinning and MITM live.
+	// TLS. Distinct from "net" because these are TLS/context/certificate
+	// primitives. Inventory membership still does not prove they are used.
 	"SecureSocket":    NativeCatTLS,
 	"SecurityContext": NativeCatTLS,
 	"X509":            NativeCatTLS,
@@ -102,8 +101,7 @@ var dartNativeNamespaces = map[string]string{
 
 	"Platform": NativeCatDeviceInfo,
 
-	// Observability. Interesting mainly because a release build that
-	// still reaches these is unusual.
+	// Observability-related native capabilities.
 	"Developer": NativeCatVMService,
 	"VMService": NativeCatVMService,
 	"Timeline":  NativeCatVMService,

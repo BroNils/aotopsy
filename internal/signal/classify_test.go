@@ -16,6 +16,29 @@ func TestClassifyURL(t *testing.T) {
 	}
 }
 
+func TestClassifyURLRejectsSchemeOnlyAndMalformedCandidates(t *testing.T) {
+	for _, value := range []string{
+		"http://",
+		"https://",
+		"ws://",
+		"ftp://",
+		"diagnostic says https:// then stops",
+	} {
+		if cats := ClassifyString("3.12.2", value); containsCat(cats, CatURL) {
+			t.Errorf("malformed URL candidate %q should not be URL evidence: %v", value, cats)
+		}
+	}
+	for _, value := range []string{
+		"https://api.example.com/v1",
+		"ws://localhost:8080/socket",
+		"ftp://mirror.example.org/pub/file",
+	} {
+		if cats := ClassifyString("3.12.2", value); !containsCat(cats, CatURL) {
+			t.Errorf("valid URL candidate %q was not classified: %v", value, cats)
+		}
+	}
+}
+
 func TestClassifyCrypto(t *testing.T) {
 	for _, s := range []string{
 		"AES/CBC/PKCS7PADDING", "sha256", "HMAC-SHA1", "encrypt",
@@ -79,7 +102,7 @@ func TestClassifyFileExt(t *testing.T) {
 }
 
 func TestClassifyBase64Key(t *testing.T) {
-	cats := ClassifyString("3.12.2", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==")
+	cats := ClassifyString("3.12.2", "aHR0cHM6Ly9leGFtcGxlLmNvbQ==")
 	if !containsCat(cats, CatBase64Key) {
 		t.Errorf("expected base64_key, got %v", cats)
 	}
@@ -107,6 +130,28 @@ func TestClassifyIP(t *testing.T) {
 	cats := ClassifyString("3.12.2", "192.168.1.1:8080")
 	if !containsCat(cats, CatHost) {
 		t.Errorf("expected host category for IP literal, got %v", cats)
+	}
+	for _, value := range []string{"999.999.999.999", "127.0.0.2", "0.0.0.0"} {
+		if cats := ClassifyString("3.12.2", value); containsCat(cats, CatHost) {
+			t.Errorf("invalid/non-routable IP %q should not be host evidence: %v", value, cats)
+		}
+	}
+}
+
+func TestClassifyBase64RejectsIdentifierShape(t *testing.T) {
+	for _, value := range []string{"abcdefghijklmnop", "MissingPluginException"} {
+		if cats := ClassifyString("3.12.2", value); containsCat(cats, CatBase64Key) {
+			t.Errorf("ordinary identifier %q should not be base64 evidence: %v", value, cats)
+		}
+	}
+}
+
+func TestStringClassificationConfidenceSeparatesSDKFactsFromLexicalIndicators(t *testing.T) {
+	if got := StringClassificationConfidence("3.12.2", "Socket_CreateConnect"); got != "high" {
+		t.Fatalf("exact SDK native confidence = %q, want high", got)
+	}
+	if got := StringClassificationConfidence("3.12.2", "frida-server"); got != "low" {
+		t.Fatalf("lexical indicator confidence = %q, want low", got)
 	}
 }
 

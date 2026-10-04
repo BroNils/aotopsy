@@ -10,13 +10,14 @@ import (
 	"aotopsy/internal/jsonutil"
 )
 
-// EntropyFinding is a packed/encrypted section detection finding.
+// EntropyFinding is a high-entropy section observation. Entropy alone cannot
+// distinguish encryption from compression, dense code/data, or packing.
 type EntropyFinding struct {
-	Section string  `json:"section"`
-	Offset  uint64  `json:"offset"`
-	Size    uint64  `json:"size"`
-	Entropy float64 `json:"entropy"`
-	Verdict string  `json:"verdict"` // "packed", "encrypted", "normal"
+	Section     string  `json:"section"`
+	Offset      uint64  `json:"offset"`
+	Size        uint64  `json:"size"`
+	Entropy     float64 `json:"entropy"`
+	Observation string  `json:"observation"` // "high_entropy" or "very_high_entropy"
 }
 
 const maxEntropyScanBytes = uint64(256 << 20)
@@ -43,12 +44,13 @@ func ShannonEntropy(data []byte) float64 {
 	return entropy
 }
 
-// AnalyzeEntropy analyzes validated ELF sections for high-entropy
-// (packed/encrypted) regions. ELF parsing and range/resource policy belong to
+// AnalyzeEntropy analyzes validated ELF sections for high-entropy regions.
+// ELF parsing and range/resource policy belong to
 // elfx; this detector must not maintain a second, weaker parser for untrusted
 // input. The aggregate materialized section budget also bounds alias-induced
 // repeated work even when multiple non-allocated sections share file bytes.
-// Sections with entropy > 7.0 are flagged as "packed" or "encrypted".
+// Sections with entropy > 7.0 are surfaced as observations only; downstream
+// consumers must not infer a packing/encryption mechanism from this statistic.
 func AnalyzeEntropy(ef *elfx.File) ([]EntropyFinding, error) {
 	if ef == nil {
 		return nil, fmt.Errorf("entropy: nil ELF source")
@@ -74,20 +76,20 @@ func AnalyzeEntropy(ef *elfx.File) ([]EntropyFinding, error) {
 		entropyBytes += s.Size
 		entropy := ShannonEntropy(sectionData)
 
-		verdict := "normal"
+		observation := ""
 		if entropy > 7.5 {
-			verdict = "encrypted"
+			observation = "very_high_entropy"
 		} else if entropy > 7.0 {
-			verdict = "packed"
+			observation = "high_entropy"
 		}
 
-		if verdict != "normal" {
+		if observation != "" {
 			findings = append(findings, EntropyFinding{
-				Section: name,
-				Offset:  s.Offset,
-				Size:    s.Size,
-				Entropy: entropy,
-				Verdict: verdict,
+				Section:     name,
+				Offset:      s.Offset,
+				Size:        s.Size,
+				Entropy:     entropy,
+				Observation: observation,
 			})
 		}
 	}

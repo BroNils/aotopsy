@@ -914,6 +914,35 @@ func TestRunFromExistingCarriesProvenanceIdentityIntoResult(t *testing.T) {
 	}
 }
 
+func TestRunFromExistingWithoutSignalDropsStaleSignalGeneration(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "out")
+	for _, name := range []string{"functions.jsonl", "call_edges.jsonl"} {
+		if err := os.WriteFile(filepath.Join(src, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := append([]string{}, signalGenerationArtifacts...)
+	stale = append(stale, signalDetectorArtifacts...)
+	for _, name := range stale {
+		if err := os.WriteFile(filepath.Join(src, name), []byte("stale generation\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := Run(Opts{FromDir: src, OutDir: dst, Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(dst, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale signal artifact %s survived no-signal --from generation: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(src, name)); err != nil {
+			t.Fatalf("source artifact %s was mutated while cleaning destination: %v", name, err)
+		}
+	}
+}
+
 func TestRunSignalStageLegacyArtifactsDoNotGuessArchitecture(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
@@ -955,6 +984,23 @@ func TestRunSignalStageLegacyArtifactsDoNotGuessArchitecture(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, "signal_cfg.dot")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("architecture-dependent CFG should be omitted without provenance, stat err=%v", err)
+	}
+}
+
+func TestRemoveSignalDetectorArtifactsClearsCompleteGeneration(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range signalDetectorArtifacts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeSignalDetectorArtifacts(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range signalDetectorArtifacts {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale detector artifact %s survived cleanup: %v", name, err)
+		}
 	}
 }
 

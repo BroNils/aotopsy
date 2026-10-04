@@ -101,19 +101,19 @@ func TestSignalEvidencePreservesRuleAndProducerConfidenceSeparately(t *testing.T
 	c := NewCollector(evidenceTestDartVersion)
 	c.FromSignalFindings([]output.SignalFinding{{
 		Category:           "behavioral",
-		StringValue:        "credential_to_network",
+		StringValue:        "credential_function_calls_network_function",
 		Function:           "F",
-		RuleID:             "signal.behavioral.credential_to_network",
-		ProducerConfidence: "medium",
+		RuleID:             "signal.behavioral.credential_function_calls_network_function",
+		ProducerConfidence: "low",
 	}})
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	got := c.Records()[0]
-	if got.Source != SourceSignal || got.Confidence != ConfHeuristic || got.Rule != "signal.behavioral.credential_to_network" {
+	if got.Source != SourceSignal || got.Confidence != ConfHeuristic || got.Rule != "signal.behavioral.credential_function_calls_network_function" {
 		t.Fatalf("signal evidence = %+v", got)
 	}
-	if got.Result["producer_confidence"] != "medium" {
+	if got.Result["producer_confidence"] != "low" {
 		t.Fatalf("producer confidence lost: %+v", got.Result)
 	}
 }

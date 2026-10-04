@@ -25,10 +25,24 @@ func TestBuildSignalGraphSeparatesGeneratorAndAsyncTHRStubs(t *testing.T) {
 		}
 		return false
 	}
-	if !has(got["syncGen"], CatGenerator) || has(got["syncGen"], CatAsync) || has(got["syncGen"], CatTHR) {
+	if !has(got["syncGen"], CatGenerator) || has(got["syncGen"], CatAsync) {
 		t.Fatalf("sync* categories = %v, want generator only", got["syncGen"])
 	}
 	if !has(got["asyncFn"], CatAsync) || has(got["asyncFn"], CatGenerator) {
 		t.Fatalf("async categories = %v, want async only", got["asyncFn"])
+	}
+}
+
+func TestBuildSignalGraphTreatsUnknownTHRAsAnalyzerGap(t *testing.T) {
+	funcs := []disasm.FuncRecord{{Name: "caller"}}
+	edges := []disasm.CallEdgeRecord{{
+		FromFunc: "caller", FromPC: "0x1000", Kind: "blr", Via: "THR.future_sdk_field_entry_point",
+	}}
+	g := BuildSignalGraph("3.12.2", funcs, edges, nil, 0, nil)
+	if g.Stats.SignalFuncs != 0 || g.Stats.UnclassifiedTHRSites != 1 {
+		t.Fatalf("unknown THR became target behavior: stats=%+v", g.Stats)
+	}
+	if len(g.Funcs) != 1 || g.Funcs[0].Role != "" || len(g.Funcs[0].Categories) != 0 {
+		t.Fatalf("unknown THR marked caller as signal: %+v", g.Funcs)
 	}
 }

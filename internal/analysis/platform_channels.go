@@ -15,6 +15,7 @@ type PlatformChannelRecord struct {
 	ChannelName  string   `json:"channel_name"`
 	ChannelTypes []string `json:"channel_types"` // method_channel, event_channel, basic_message_channel
 	CallSites    []string `json:"call_sites"`
+	Confidence   string   `json:"confidence"`
 }
 
 // BuildPlatformChannels joins three independent facts instead of guessing from
@@ -32,7 +33,7 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, funcs []d
 		if rec, ok := channelMap[name]; ok {
 			return rec
 		}
-		rec := &PlatformChannelRecord{ChannelName: name}
+		rec := &PlatformChannelRecord{ChannelName: name, Confidence: "medium"}
 		channelMap[name] = rec
 		return rec
 	}

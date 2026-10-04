@@ -17,6 +17,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	type funcInfo struct {
 		role       string
 		severity   string
+		confidence string
 		isRoot     bool
 		categories []string
 		owner      string
@@ -27,6 +28,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		funcMap[f.Name] = &funcInfo{
 			role:       f.Role,
 			severity:   f.Severity,
+			confidence: f.Confidence,
 			isRoot:     f.IsRootCandidate,
 			categories: f.Categories,
 			owner:      f.Owner,
@@ -58,10 +60,13 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		})
 	}
 
-	// Find high+medium severity signal functions.
+	// Focus on functions whose confidence-capped alert severity is high/medium.
+	// Potential impact alone is insufficient: lexical indicators are low
+	// confidence even when their category would be high impact if confirmed.
 	signalSet := make(map[string]bool)
 	for _, f := range g.Funcs {
-		if f.Role == "signal" && (f.Severity == "high" || f.Severity == "medium") {
+		effective := effectiveSignalSeverity(f.Severity, f.Confidence)
+		if f.Role == "signal" && (effective == "high" || effective == "medium") {
 			signalSet[f.Name] = true
 		}
 	}
@@ -173,9 +178,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	// Collect string ref nodes for signal functions in the path.
 	// Deduplicate by value per function, cap at 5 strings per function.
 	type strNode struct {
-		id    string // unique DOT id
-		label string
-		cat   string // primary category
+		id         string // unique DOT id
+		label      string
+		cat        string // primary category
+		confidence string
 	}
 	const maxStrPerFunc = 5
 	var strNodes []strNode
@@ -208,7 +214,10 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			if len(sr.Categories) > 0 {
 				cat = sr.Categories[0]
 			}
-			strNodes = append(strNodes, strNode{id: sid, label: label, cat: cat})
+			if sr.Confidence != "" {
+				label += " [confidence: " + sr.Confidence + "]"
+			}
+			strNodes = append(strNodes, strNode{id: sid, label: label, cat: cat, confidence: sr.Confidence})
 			strEdges[[2]string{dotID(name), sid}] = true
 		}
 		if uniqueCount > count {
@@ -258,7 +267,7 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 		attrs := ""
 
 		if signalSet[name] {
-			switch fi.severity {
+			switch effectiveSignalSeverity(fi.severity, fi.confidence) {
 			case "high":
 				attrs = `, fillcolor="#FCE4EC", color="#C62828", penwidth=1.5, fontcolor="#C62828"`
 			case "medium":
@@ -269,6 +278,12 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 			if len(fi.categories) > 0 {
 				cats := truncLabel(strings.Join(fi.categories, ","), 30)
 				label += "\\n" + cats
+			}
+			if fi.severity != "" {
+				label += "\\nimpact: " + fi.severity
+			}
+			if fi.confidence != "" {
+				label += "\\nconfidence: " + fi.confidence
 			}
 		} else if fi != nil && fi.isRoot {
 			attrs = fmt.Sprintf(`, fillcolor="#E8F5E9", color="%s", penwidth=1.2`, t.EdgeTHR)
@@ -313,16 +328,13 @@ func SignalDOT(g *signal.SignalGraph, title string, t Theme) string {
 	if len(strNodes) > 0 {
 		b.WriteString("  // String literals\n")
 		for _, sn := range strNodes {
-			color := "#C2185B" // pink
-			switch sn.cat {
-			case "crypto", "encryption":
-				color = "#C62828" // red
-			case "auth":
-				color = "#AD1457" // dark pink
-			case "url", "host":
-				color = "#0B3D91" // blue
-			case "cloaking", "sim", "sms", "contacts":
-				color = "#C62828" // red
+			color := "#1565C0" // low/default
+			effective := effectiveSignalSeverity(signal.CategorySeverity(sn.cat), sn.confidence)
+			switch effective {
+			case "high":
+				color = "#C62828"
+			case "medium":
+				color = "#E65100"
 			}
 			fmt.Fprintf(&b, "  %s [shape=rect, style=\"filled,rounded\", fillcolor=\"#FFF8E1\", color=%q, penwidth=0.3, fontsize=7, fontcolor=%q, fontname=\"Courier,monospace\", margin=\"0.06,0.03\", height=0.2, label=%q];\n",
 				sn.id, color, color, sn.label)
@@ -367,11 +379,11 @@ func writeSignalCompletenessNote(b *strings.Builder, g *signal.SignalGraph, t Th
 		return
 	}
 	stats := g.Stats
-	if stats.IncompletePolymorphicSites == 0 && stats.UnknownCandidateCountSites == 0 && stats.UnresolvedIndirectSites == 0 && stats.RuntimeObservedSites == 0 {
+	if stats.IncompletePolymorphicSites == 0 && stats.UnknownCandidateCountSites == 0 && stats.UnresolvedIndirectSites == 0 && stats.RuntimeObservedSites == 0 && stats.UnclassifiedTHRSites == 0 {
 		return
 	}
-	label := fmt.Sprintf("static signal graph: %d incomplete polymorphic site(s), %d unknown candidate-count site(s), %d unresolved indirect site(s); runtime evidence on %d site(s) is not promoted to static reachability",
-		stats.IncompletePolymorphicSites, stats.UnknownCandidateCountSites, stats.UnresolvedIndirectSites, stats.RuntimeObservedSites)
+	label := fmt.Sprintf("static signal graph: %d incomplete polymorphic site(s), %d unknown candidate-count site(s), %d unresolved indirect site(s), %d unclassified THR site(s); runtime evidence on %d site(s) is not promoted to static reachability",
+		stats.IncompletePolymorphicSites, stats.UnknownCandidateCountSites, stats.UnresolvedIndirectSites, stats.UnclassifiedTHRSites, stats.RuntimeObservedSites)
 	fmt.Fprintf(b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
 		dotID("\x00signal-completeness"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
 }

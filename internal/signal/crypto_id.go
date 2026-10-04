@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -177,17 +179,44 @@ func IdentifyCryptoFromPoolImmediates(inDir string) ([]CryptoFinding, error) {
 		return nil, fmt.Errorf("read pool immediates: %w", err)
 	}
 
-	var findings []CryptoFinding
+	type candidate struct {
+		finding   CryptoFinding
+		family    string
+		printable bool
+	}
+	var candidates []candidate
+	familyConstants := map[string]map[string]bool{}
 	for _, rec := range records {
 		hex := strings.ToLower(rec.Hex)
-		if algo, ok := cryptoAlgorithmID[hex]; ok {
-			findings = append(findings, CryptoFinding{
+		algo, ok := cryptoAlgorithmID[hex]
+		if !ok || !isDistinctiveConstant(hex) {
+			continue
+		}
+		family := algorithmFamily(algo)
+		if familyConstants[family] == nil {
+			familyConstants[family] = map[string]bool{}
+		}
+		familyConstants[family][hex] = true
+		candidates = append(candidates, candidate{
+			finding: CryptoFinding{
 				Algorithm: algo,
 				Constant:  hex,
 				PoolIndex: rec.Index,
 				Value:     rec.Hex,
-			})
+			},
+			family:    family,
+			printable: isPrintableASCIIConstant(hex),
+		})
+	}
+	findings := make([]CryptoFinding, 0, len(candidates))
+	for _, c := range candidates {
+		// Printable constants such as ChaCha20's "expa" are ordinary text in
+		// isolation. Require a second distinct constant from the same family,
+		// matching the executable-section scanner's corroboration rule.
+		if c.printable && len(familyConstants[c.family]) < 2 {
+			continue
 		}
+		findings = append(findings, c.finding)
 	}
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].Algorithm != findings[j].Algorithm {
@@ -392,8 +421,9 @@ func isPrintableASCIIConstant(hex string) bool {
 
 // MethodChannelFinding is a Flutter MethodChannel enumeration finding.
 type MethodChannelFinding struct {
-	Channel   string   `json:"channel"`
-	Functions []string `json:"functions,omitempty"`
+	Channel    string   `json:"channel"`
+	Functions  []string `json:"functions,omitempty"`
+	Confidence string   `json:"confidence"`
 }
 
 var methodChannelRe = regexp.MustCompile(`MethodChannel\s*\(\s*["']([^"']+)["']\s*\)`)
@@ -402,7 +432,8 @@ var methodChannelRe = regexp.MustCompile(`MethodChannel\s*\(\s*["']([^"']+)["']\
 // and also detects Flutter platform channel names by pattern matching.
 func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFinding {
 	funcsByChannel := map[string]map[string]bool{}
-	add := func(channel, fn string) {
+	confidenceByChannel := map[string]string{}
+	add := func(channel, fn, confidence string) {
 		if channel == "" {
 			return
 		}
@@ -412,6 +443,9 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 		if fn != "" {
 			funcsByChannel[channel][fn] = true
 		}
+		if confidenceRank(confidence) > confidenceRank(confidenceByChannel[channel]) {
+			confidenceByChannel[channel] = confidence
+		}
 	}
 	for _, sr := range stringRefs {
 		if sr.Value == "" {
@@ -420,13 +454,13 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 		// Pattern 1: MethodChannel("name") — Dart source pattern
 		matches := methodChannelRe.FindStringSubmatch(sr.Value)
 		if len(matches) >= 2 {
-			add(matches[1], sr.Func)
+			add(matches[1], sr.Func, "medium")
 			continue
 		}
 		// Pattern 2: Explicit MethodChannel references
 		if strings.Contains(sr.Value, "methodChannel") || strings.Contains(sr.Value, "MethodChannel") {
 			if len(sr.Value) > 5 && len(sr.Value) < 200 {
-				add(sr.Value, sr.Func)
+				add(sr.Value, sr.Func, "low")
 			}
 			continue
 		}
@@ -443,18 +477,18 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 			strings.Contains(sr.Value, "flutter/sensors") ||
 			strings.Contains(sr.Value, "flutter/settings") ||
 			strings.Contains(sr.Value, "flutter/lifecycle") {
-			add(sr.Value, sr.Func)
+			add(sr.Value, sr.Func, "medium")
 		}
 		// Pattern 4: BinaryMessenger / platform channel infrastructure
 		if strings.Contains(sr.Value, "BinaryMessenger") ||
 			strings.Contains(sr.Value, "PlatformChannel") ||
 			strings.Contains(sr.Value, "BasicMessageChannel") {
-			add(sr.Value, sr.Func)
+			add(sr.Value, sr.Func, "low")
 		}
 	}
 	findings := make([]MethodChannelFinding, 0, len(funcsByChannel))
 	for channel, set := range funcsByChannel {
-		findings = append(findings, MethodChannelFinding{Channel: channel, Functions: sortedSet(set)})
+		findings = append(findings, MethodChannelFinding{Channel: channel, Functions: sortedSet(set), Confidence: confidenceByChannel[channel]})
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Channel < findings[j].Channel })
 	return findings
@@ -462,20 +496,21 @@ func EnumerateMethodChannels(stringRefs []StringRefRecord) []MethodChannelFindin
 
 // PluginFinding is a Flutter plugin enumeration finding.
 type PluginFinding struct {
-	Plugin    string   `json:"plugin"`
-	Functions []string `json:"functions,omitempty"`
+	Plugin     string   `json:"plugin"`
+	Functions  []string `json:"functions,omitempty"`
+	Confidence string   `json:"confidence"`
 }
 
 // Known Flutter plugin package name patterns.
 var pluginPatterns = []string{
 	"flutter_plugin_", "_plugin", "plugin_android", "plugin_ios",
-	"MissingPluginException", "package:", "video_player", "path_provider",
+	"missingpluginexception", "video_player", "path_provider",
 	"shared_preferences", "url_launcher", "image_picker", "file_picker",
-	"camera", "geolocator", "permission_handler", "firebase_",
-	"google_maps", "webview", "local_auth", "connectivity",
-	"device_info", "package_info", "flutter_local_notifications",
+	"camera_android", "camera_avfoundation", "camera_web", "geolocator", "permission_handler", "firebase_",
+	"google_maps_flutter", "webview_flutter", "local_auth", "connectivity_plus",
+	"device_info_plus", "package_info_plus", "flutter_local_notifications",
 	"flutter_push", "jpush", "umeng", "tencent_", "aliyun_",
-	"bytedance_", "huawei_", "xiaomi_", "PluginRegistry", "FlutterPlugin",
+	"bytedance_", "huawei_", "xiaomi_", "pluginregistry", "flutterplugin",
 }
 
 // EnumeratePlugins scans string refs for Flutter plugin package names.
@@ -500,7 +535,7 @@ func EnumeratePlugins(stringRefs []StringRefRecord) []PluginFinding {
 	}
 	findings := make([]PluginFinding, 0, len(funcsByPlugin))
 	for plugin, set := range funcsByPlugin {
-		findings = append(findings, PluginFinding{Plugin: plugin, Functions: sortedSet(set)})
+		findings = append(findings, PluginFinding{Plugin: plugin, Functions: sortedSet(set), Confidence: "low"})
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Plugin < findings[j].Plugin })
 	return findings
@@ -508,9 +543,10 @@ func EnumeratePlugins(stringRefs []StringRefRecord) []PluginFinding {
 
 // NetworkEndpointFinding is a network endpoint extraction finding.
 type NetworkEndpointFinding struct {
-	Type      string   `json:"type"` // "url", "ip", "domain"
-	Value     string   `json:"value"`
-	Functions []string `json:"functions,omitempty"`
+	Type       string   `json:"type"` // "url", "ip", "domain"
+	Value      string   `json:"value"`
+	Functions  []string `json:"functions,omitempty"`
+	Confidence string   `json:"confidence"`
 }
 
 var (
@@ -581,13 +617,17 @@ func isNotADomain(m string) bool {
 func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFinding {
 	type endpointKey struct{ typ, value string }
 	funcsByEndpoint := map[endpointKey]map[string]bool{}
-	add := func(typ, value, fn string) {
+	confidenceByEndpoint := map[endpointKey]string{}
+	add := func(typ, value, fn, confidence string) {
 		key := endpointKey{typ: typ, value: value}
 		if funcsByEndpoint[key] == nil {
 			funcsByEndpoint[key] = map[string]bool{}
 		}
 		if fn != "" {
 			funcsByEndpoint[key][fn] = true
+		}
+		if confidenceRank(confidence) > confidenceRank(confidenceByEndpoint[key]) {
+			confidenceByEndpoint[key] = confidence
 		}
 	}
 	for _, sr := range stringRefs {
@@ -596,14 +636,20 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 		}
 		// URLs
 		for _, m := range urlRe.FindAllString(sr.Value, -1) {
-			add("url", m, sr.Func)
+			m = strings.TrimRight(m, ".,;")
+			parsed, err := url.Parse(m)
+			if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				continue
+			}
+			add("url", m, sr.Func, "medium")
 		}
 		// IPs (skip 0.0.0.0, 127.0.0.1, 255.x)
 		for _, m := range ipRe.FindAllString(sr.Value, -1) {
-			if m == "0.0.0.0" || m == "127.0.0.1" || strings.HasPrefix(m, "255.") {
+			ip := net.ParseIP(m)
+			if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || strings.HasPrefix(m, "255.") {
 				continue
 			}
-			add("ip", m, sr.Func)
+			add("ip", m, sr.Func, "medium")
 		}
 		// Domains (must have at least one dot, not start with a number)
 		for _, m := range domainRe.FindAllString(sr.Value, -1) {
@@ -614,12 +660,12 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 			if isNotADomain(m) {
 				continue
 			}
-			add("domain", m, sr.Func)
+			add("domain", m, sr.Func, "low")
 		}
 	}
 	findings := make([]NetworkEndpointFinding, 0, len(funcsByEndpoint))
 	for key, set := range funcsByEndpoint {
-		findings = append(findings, NetworkEndpointFinding{Type: key.typ, Value: key.value, Functions: sortedSet(set)})
+		findings = append(findings, NetworkEndpointFinding{Type: key.typ, Value: key.value, Functions: sortedSet(set), Confidence: confidenceByEndpoint[key]})
 	}
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].Type != findings[j].Type {
@@ -642,6 +688,19 @@ func sortedSet(set map[string]bool) []string {
 	return out
 }
 
+func confidenceRank(confidence string) int {
+	switch confidence {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
 // DeobfuscationFinding is a string deobfuscation detection finding.
 type DeobfuscationFinding struct {
 	Type       string `json:"type"` // "base64", "xor_pattern", "rc4_pattern"
@@ -662,20 +721,20 @@ func DetectObfuscatedStrings(stringRefs []StringRefRecord) []DeobfuscationFindin
 		if sr.Value == "" || len(sr.Value) < 8 {
 			continue
 		}
-		// Base64 pattern: long alphanumeric string ending with = or ==
+		// Base64-shaped text is common in identifiers and random tokens. Only
+		// report it when decoding succeeds to mostly printable text; shape alone
+		// is not evidence of encoding or obfuscation.
 		if base64Re.MatchString(sr.Value) && len(sr.Value) >= 16 {
-			// Try to decode as base64
 			decoded := tryBase64Decode(sr.Value)
-			confidence := "medium"
-			if decoded != "" {
-				confidence = "high"
+			if decoded == "" {
+				continue
 			}
 			findings = append(findings, DeobfuscationFinding{
 				Type:       "base64",
 				Value:      sr.Value,
 				Func:       sr.Func,
 				Decoded:    decoded,
-				Confidence: confidence,
+				Confidence: "medium",
 			})
 			continue
 		}

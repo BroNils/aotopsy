@@ -69,39 +69,41 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 	}
 	for _, f := range entropy {
 		out = append(out, output.SignalFinding{
-			Category:         "entropy",
-			StringValue:      fmt.Sprintf("%s section %s: entropy %.3f, size %d", f.Verdict, f.Section, f.Entropy, f.Size),
-			RuleID:           "signal.entropy.section_threshold",
-			FingerprintParts: []string{"entropy-section", f.Section},
+			Category:           "entropy",
+			StringValue:        fmt.Sprintf("%s section %s: entropy %.3f, size %d", f.Observation, f.Section, f.Entropy, f.Size),
+			RuleID:             "signal.entropy.high_section",
+			ProducerConfidence: "low",
+			FingerprintParts:   []string{"entropy-section", f.Section},
 		})
 	}
 
 	for _, f := range crypto {
 		out = append(out, output.SignalFinding{
-			Category:         signal.CatCryptoConst,
-			StringValue:      fmt.Sprintf("%s (%s, pool=%d)", f.Algorithm, f.Constant, f.PoolIndex),
-			RuleID:           "signal.crypto.constant",
-			FingerprintParts: []string{"crypto-constant", f.Algorithm, f.Constant},
+			Category:           signal.CatCryptoConst,
+			StringValue:        fmt.Sprintf("%s (%s, pool=%d)", f.Algorithm, f.Constant, f.PoolIndex),
+			RuleID:             "signal.crypto.constant",
+			ProducerConfidence: "medium",
+			FingerprintParts:   []string{"crypto-constant", f.Algorithm, f.Constant},
 		})
 	}
 
-	taint, err := readOptionalJSONL[signal.TaintFinding](filepath.Join(outDir, "taint_findings.jsonl"))
+	sourceSink, err := readOptionalJSONL[signal.SourceSinkFinding](filepath.Join(outDir, "source_sink_findings.jsonl"))
 	if err != nil {
-		return nil, fmt.Errorf("read taint findings for SARIF: %w", err)
+		return nil, fmt.Errorf("read source/sink findings for SARIF: %w", err)
 	}
-	for _, f := range taint {
+	for _, f := range sourceSink {
 		fn := f.SourceFn
 		if fn == "" {
 			fn = f.SinkFn
 		}
 		out = append(out, output.SignalFinding{
-			Category:           "taint",
-			StringValue:        fmt.Sprintf("%s -> %s (%s, confidence=%s)", f.Source, f.Sink, f.FlowType, f.Confidence),
+			Category:           "source_sink",
+			StringValue:        fmt.Sprintf("source/sink proximity: %s -> %s (%s, confidence=%s)", f.Source, f.Sink, f.Relation, f.Confidence),
 			Function:           fn,
-			RuleID:             "signal.taint.flow",
+			RuleID:             "signal.source_sink.proximity",
 			ProducerConfidence: f.Confidence,
 			FingerprintParts: []string{
-				"taint-flow", f.Source, f.Sink, f.FlowType, f.SourceFn, f.SinkFn,
+				"source-sink-proximity", f.Source, f.Sink, f.Relation, f.SourceFn, f.SinkFn,
 			},
 		})
 	}
@@ -116,11 +118,12 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 			fn = f.Functions[0]
 		}
 		out = append(out, output.SignalFinding{
-			Category:         "yara",
-			StringValue:      fmt.Sprintf("%s/%s matched %s", f.RuleName, f.Category, strings.Join(f.Strings, ", ")),
-			Function:         fn,
-			RuleID:           "signal.yara." + f.RuleName,
-			FingerprintParts: []string{"yara-rule", f.RuleName},
+			Category:           "yara",
+			StringValue:        fmt.Sprintf("%s/%s matched %s", f.RuleName, f.Category, strings.Join(f.Strings, ", ")),
+			Function:           fn,
+			RuleID:             "signal.yara." + f.RuleName,
+			ProducerConfidence: f.Confidence,
+			FingerprintParts:   []string{"yara-rule", f.RuleName},
 		})
 	}
 
@@ -143,6 +146,60 @@ func collectExtendedSARIF(outDir string, crypto []signal.CryptoFinding) ([]outpu
 		})
 	}
 	return out, nil
+}
+
+var signalDetectorArtifacts = []string{
+	"entropy_findings.jsonl",
+	"crypto_findings.jsonl",
+	"source_sink_findings.jsonl",
+	"source_sink_summary.json",
+	"yara_findings.jsonl",
+	"behavioral_findings.jsonl",
+}
+
+// signalGenerationArtifacts are outputs whose meaning depends on running the
+// signal/security stage for the current generation. `run --from` clones an
+// existing directory before applying requested stages; when signal analysis is
+// disabled, carrying these files through would make old findings look current.
+// evidence.jsonl is included because a cloned unified evidence file can contain
+// signal rows that cannot be separated safely without rerunning its producers.
+var signalGenerationArtifacts = []string{
+	"signal_graph.json",
+	"signal.html",
+	"signal.dot",
+	"signal.svg",
+	"signal_cfg.dot",
+	"signal_cfg.svg",
+	"method_channels.jsonl",
+	"plugins.jsonl",
+	"deobfuscation.jsonl",
+	"network_endpoints.jsonl",
+	"platform_channels.jsonl",
+	"native_capabilities.jsonl",
+	"deobfuscate_map.jsonl",
+	"aotopsy.sarif",
+	"evidence.jsonl",
+}
+
+func removeSignalDetectorArtifacts(outDir string) error {
+	for _, name := range signalDetectorArtifacts {
+		if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func removeSignalGenerationArtifacts(outDir string) error {
+	if err := removeSignalDetectorArtifacts(outDir); err != nil {
+		return err
+	}
+	for _, name := range signalGenerationArtifacts {
+		if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func readOptionalJSONL[T any](path string) ([]T, error) {
@@ -596,13 +653,11 @@ func runPipeline(opts Opts) (*Result, error) {
 		// Every optional detector owns a file whose absence means "no current
 		// findings". Remove any prior-run file before running it so a clean rerun
 		// cannot retain stale security evidence.
-		for _, name := range []string{"entropy_findings.jsonl", "crypto_findings.jsonl", "taint_findings.jsonl", "yara_findings.jsonl", "behavioral_findings.jsonl"} {
-			if err := os.Remove(filepath.Join(opts.OutDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, fmt.Errorf("remove stale %s: %w", name, err)
-			}
+		if err := removeSignalDetectorArtifacts(opts.OutDir); err != nil {
+			return nil, err
 		}
 
-		// Step 5.1: Entropy analysis (packed/encrypted section detection).
+		// Step 5.1: High-entropy section observations.
 		if err := signal.WriteEntropyFindings(opts.OutDir, ef); err != nil {
 			return nil, fmt.Errorf("entropy: %w", err)
 		}
@@ -626,10 +681,10 @@ func runPipeline(opts Opts) (*Result, error) {
 			}
 		}
 
-		// Step 5.2: Data flow / taint analysis (simplified).
-		// Identifies potential source→sink flows based on string patterns.
-		if err := signal.WriteTaintFindings(opts.OutDir, funcs, stringRefs, edges); err != nil {
-			return nil, fmt.Errorf("taint: %w", err)
+		// Step 5.2: Source/sink lexical proximity analysis.
+		// This does not claim value-level taint propagation.
+		if err := signal.WriteSourceSinkFindings(opts.OutDir, funcs, stringRefs, edges); err != nil {
+			return nil, fmt.Errorf("source/sink proximity: %w", err)
 		}
 
 		// Step 5.3: YARA-style malware matching.
@@ -707,28 +762,23 @@ func runPipeline(opts Opts) (*Result, error) {
 	// Step 10: Platform channels endpoint extraction.
 	// Scans for Flutter MethodChannel, BasicMessageChannel, and EventChannel endpoints.
 	channels := BuildPlatformChannels(clResult, pl, funcs, edges, stringRefs)
-	if len(channels) > 0 {
-		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "platform_channels.jsonl"), channels); err != nil {
-			return nil, fmt.Errorf("platform channels: %w", err)
-		}
+	if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "platform_channels.jsonl"), channels); err != nil {
+		return nil, fmt.Errorf("platform channels: %w", err)
 	}
 
-	// VM natives the snapshot can reach. Read from the pool rather than
-	// from string_refs: nothing in generated code loads these names, so
-	// the reference path never sees them.
-	if caps := BuildNativeCapabilities(info.Version.DartVersion, clResult, sc.VMResult); len(caps) > 0 {
-		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "native_capabilities.jsonl"), caps); err != nil {
-			return nil, fmt.Errorf("native capabilities: %w", err)
-		}
+	// Exact VM-native names present in snapshot inventory. Read from the pool
+	// rather than string_refs: nothing in generated code loads these names, so
+	// this artifact describes available native identities, not app call usage.
+	caps := BuildNativeCapabilities(info.Version.DartVersion, clResult, sc.VMResult)
+	if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "native_capabilities.jsonl"), caps); err != nil {
+		return nil, fmt.Errorf("native capabilities: %w", err)
 	}
 
 	// Step 11: Semantic topology de-obfuscation map.
 	// Infers class roles for obfuscated binaries based on superclass hierarchy and string accesses.
 	deobfMap := BuildDeobfuscationMap(clResult, pl, stringRefs)
-	if len(deobfMap) > 0 {
-		if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "deobfuscate_map.jsonl"), deobfMap); err != nil {
-			return nil, fmt.Errorf("write deobfuscate_map.jsonl: %w", err)
-		}
+	if _, err := jsonutil.WriteJSONLFile(filepath.Join(opts.OutDir, "deobfuscate_map.jsonl"), deobfMap); err != nil {
+		return nil, fmt.Errorf("write deobfuscate_map.jsonl: %w", err)
 	}
 
 	// Step 12: Dart pseudocode. Off by default because it roughly triples
@@ -925,6 +975,13 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
 		result.SignalCount = sigResult.SignalCount
+	} else {
+		// The transaction cloned the previous generation verbatim. A caller that
+		// explicitly omits signal analysis must not publish cloned SARIF/evidence
+		// or optional signal artifacts as though they were regenerated now.
+		if err := removeSignalGenerationArtifacts(outDir); err != nil {
+			return nil, err
+		}
 	}
 
 	if opts.Meta != MetaDisabled {

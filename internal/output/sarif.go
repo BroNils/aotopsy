@@ -111,10 +111,10 @@ type sarifArtifactLocation struct {
 // All ordinary signal-category severities come from signal.CategorySARIFLevel
 // so JSON and SARIF cannot drift independently.
 var reportOnlyRuleLevel = map[string]string{
-	"entropy":    "warning",
-	"taint":      "warning",
-	"yara":       "error",
-	"behavioral": "warning",
+	"entropy":     "note",
+	"source_sink": "warning",
+	"yara":        "warning",
+	"behavioral":  "warning",
 }
 
 func sarifLevel(category string) string {
@@ -124,47 +124,73 @@ func sarifLevel(category string) string {
 	return signal.CategorySARIFLevel(category)
 }
 
+// findingSARIFLevel caps category impact by the producer's epistemic
+// confidence. A high-impact category can describe what a confirmed behavior
+// would mean, but a lexical or proximity heuristic must not become an
+// error-level assertion merely because its category is severe.
+func findingSARIFLevel(category, confidence string) string {
+	base := sarifLevel(category)
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "high", "exact":
+		return base
+	case "medium":
+		if base == "error" {
+			return "warning"
+		}
+		return base
+	case "low", "info", "heuristic":
+		return "note"
+	case "":
+		// Missing confidence is missing evidence metadata, not permission to
+		// inherit the category's maximum impact. Producers must opt into stronger
+		// result levels with an explicit confidence value.
+		return "note"
+	default:
+		// Unknown producer vocabulary is not grounds to inflate certainty.
+		return "note"
+	}
+}
+
 // ruleDescription maps categories to human-readable descriptions.
 var ruleDescription = map[string]string{
-	"rooting":        "Root/jailbreak detection or bypass code found",
-	"anti_analysis":  "Anti-debugging, anti-frida, or emulator detection found",
-	"ssl_pinning":    "SSL/TLS certificate pinning implementation detected",
-	"accessibility":  "Accessibility service abuse — potential keylogger or screen capture",
-	"fraud":          "Fraud, phishing, or banking-related patterns detected",
-	"dynamic_load":   "Dynamic code loading via DynamicLibrary or reflection",
+	"rooting":        "Root/jailbreak-related indicator",
+	"anti_analysis":  "Anti-debugging, anti-frida, or emulator-related indicator",
+	"ssl_pinning":    "SSL/TLS certificate-pinning-related indicator",
+	"accessibility":  "Accessibility, input-observation, or screen-capture-related indicator",
+	"fraud":          "Fraud, phishing, banking, or credential-related indicator",
+	"dynamic_load":   "Dynamic-loading or reflection-related indicator",
 	"ipc":            "Android IPC usage — Binder, ServiceManager, ContentProvider",
-	"covert_channel": "Covert communication channel — Tor, proxy, DNS tunnel",
-	"drm_bypass":     "DRM bypass or circumvention code detected",
-	"obfuscation":    "Code obfuscation detected — short meaningless identifiers",
-	"crypto_const":   "Known cryptographic algorithm constants detected",
+	"covert_channel": "Tor, proxy, tunneling, or covert-channel-related indicator",
+	"drm":            "DRM or media-key-related indicator",
+	"obfuscation":    "Identifier population is consistent with code obfuscation",
+	"crypto_const":   "Distinctive cryptographic algorithm constant observed",
 	"method_channel": "Flutter MethodChannel usage detected",
 	"plugin":         "Flutter plugin integration detected",
 	"url":            "URL reference detected",
 	"host":           "Network host or IP literal detected",
 	"file":           "File/path reference detected",
-	"cloaking":       "Conditional cloaking or redirect behavior detected",
-	"thr":            "Interesting Dart Thread/runtime call detected",
-	"async":          "Async/generator runtime behavior detected",
-	"generator":      "Generator suspension/runtime behavior detected",
-	"encryption":     "Encryption-related keyword detected",
-	"auth":           "Authentication-related keyword detected",
-	"net":            "Network communication detected",
-	"base64":         "High-entropy string — potential API key or secret",
-	"sim":            "SIM card or telephony access",
-	"sms":            "SMS read or send capability",
-	"contacts":       "Contact list access",
-	"location":       "Location or GPS access",
-	"device":         "Device fingerprinting or identification",
-	"data":           "Bulk data collection pattern",
-	"camera":         "Camera access",
-	"webview":        "WebView usage with JavaScript bridge",
-	"blockchain":     "Blockchain or cryptocurrency wallet",
-	"gambling":       "Gambling or betting patterns",
-	"attribution":    "Install attribution or campaign tracking",
-	"entropy":        "High-entropy or packed/encrypted binary section detected",
-	"taint":          "Potential sensitive-data source-to-sink flow detected",
-	"yara":           "Malware-oriented rule matched recovered program evidence",
-	"behavioral":     "Suspicious call-graph behavioral pattern detected",
+	"cloaking":       "Conditional-gating or redirect-related indicator",
+	"async":          "SDK-defined async suspension/runtime behavior",
+	"generator":      "SDK-defined generator suspension/runtime behavior",
+	"encryption":     "Encryption-related lexical indicator",
+	"auth":           "Authentication-related lexical indicator",
+	"net":            "Network-related lexical indicator",
+	"base64":         "Printable Base64 payload indicator",
+	"sim":            "SIM or telephony-related indicator",
+	"sms":            "SMS-related indicator",
+	"contacts":       "Contacts or address-book-related indicator",
+	"location":       "Location or GPS-related indicator",
+	"device":         "Device-identification-related indicator",
+	"data":           "Bulk-data-collection-related indicator",
+	"camera":         "Camera-related indicator",
+	"webview":        "WebView or JavaScript-bridge-related indicator",
+	"blockchain":     "Blockchain or cryptocurrency-wallet-related indicator",
+	"gambling":       "Gambling or betting-related indicator",
+	"attribution":    "Install-attribution or campaign-tracking-related indicator",
+	"entropy":        "High-entropy binary section observed; entropy alone does not identify packing or encryption",
+	"source_sink":    "Sensitive-source and sink indicators occur in the same or nearby statically resolved functions",
+	"yara":           "Security-oriented string rule matched recovered lexical evidence",
+	"behavioral":     "Heuristic call-graph behavior pattern matched",
 }
 
 // SignalFinding is a single security finding from signal analysis.
@@ -420,7 +446,7 @@ func WriteSARIF(dir string, findings []SignalFinding, toolVersion string, identi
 	// Build results
 	results := make([]sarifResult, 0, len(normalized))
 	for _, f := range normalized {
-		level := sarifLevel(f.Category)
+		level := findingSARIFLevel(f.Category, f.ProducerConfidence)
 		loc := sarifLocation{
 			PhysicalLocation: sarifPhysicalLocation{
 				ArtifactLocation: sarifArtifactLocation{

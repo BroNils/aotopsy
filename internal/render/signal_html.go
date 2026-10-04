@@ -262,13 +262,14 @@ h1 { font-size: var(--fs); font-weight: 600; color: var(--bright); margin-bottom
 	<span><b>%d</b> unknown candidate count</span>
 		<span><b>%d</b> unresolved indirect</span>
 		<span><b>%d</b> unsupported call kind</span>
+		<span><b>%d</b> unclassified THR</span>
 		<span><b>%d</b> runtime-observed sites</span>
 </div>
-		`, graph.Stats.SignalFuncs, graph.Stats.ContextFuncs,
+			`, graph.Stats.SignalFuncs, graph.Stats.ContextFuncs,
 		graph.Stats.TotalFuncs,
 		graph.Stats.StringRefCount, graph.Stats.CallSites, graph.Stats.StaticRelations,
 		graph.Stats.IncompletePolymorphicSites, graph.Stats.UnknownCandidateCountSites, graph.Stats.UnresolvedIndirectSites,
-		graph.Stats.UnsupportedCallSites, graph.Stats.RuntimeObservedSites)
+		graph.Stats.UnsupportedCallSites, graph.Stats.UnclassifiedTHRSites, graph.Stats.RuntimeObservedSites)
 
 	// Toolbar.
 	_, _ = fmt.Fprint(w, `<div class="toolbar">
@@ -476,13 +477,22 @@ function fmtName(name) {
   return name.replace(/_([0-9a-f]{4,})$/i, function(m, h) { return "_" + h.toUpperCase(); });
 }
 
+function effectiveSeverity(impact, confidence) {
+  impact = String(impact || "").toLowerCase();
+  confidence = String(confidence || "").toLowerCase();
+  if (confidence === "high" || confidence === "exact") return impact;
+  if (confidence === "medium") return impact === "high" ? "medium" : impact;
+  return "low";
+}
+
 function neighborClass(name) {
   const idx = nameIdx[name];
   if (idx === undefined) return "";
   const f = G.funcs[idx];
   if (!f) return "";
-  if (f.severity === "high") return " nb-high";
-  if (f.severity === "medium") return " nb-med";
+	const sev = effectiveSeverity(f.severity, f.confidence);
+	if (sev === "high") return " nb-high";
+	if (sev === "medium") return " nb-med";
   if (f.role === "signal") return " nb-sig";
   return "";
 }
@@ -575,11 +585,14 @@ function renderCard(f, i) {
   if (isSignal) cls += " open"; // signal cards expanded by default
   if (role === "context") cls += " context";
   if (role === "") cls += " other";
-  let html = '<div class="' + cls + '" id="card-' + i + '" data-name="' + esc(f.name) + '" data-role="' + esc(role) + '" data-sev="' + esc(f.severity||"") + '" data-cats="' + esc((f.categories||[]).join(",")) + '" data-strings="' + esc((f.string_refs||[]).map(r=>r.value).join("|")) + '" data-owner="' + esc(f.owner||"") + '">';
-  html += '<div class="card-header" onclick="toggle(' + i + ')">';
-  if (f.is_root_candidate) html += '<span class="sev-badge ep">ROOT</span>';
-  if (f.severity === "high") html += '<span class="sev-badge high">HIGH</span>';
-  else if (f.severity === "medium") html += '<span class="sev-badge medium">MED</span>';
+	const alertSeverity = effectiveSeverity(f.severity, f.confidence);
+	let html = '<div class="' + cls + '" id="card-' + i + '" data-name="' + esc(f.name) + '" data-role="' + esc(role) + '" data-sev="' + esc(alertSeverity) + '" data-cats="' + esc((f.categories||[]).join(",")) + '" data-strings="' + esc((f.string_refs||[]).map(r=>r.value).join("|")) + '" data-owner="' + esc(f.owner||"") + '">';
+	html += '<div class="card-header" onclick="toggle(' + i + ')">';
+	if (f.is_root_candidate) html += '<span class="sev-badge ep">ROOT</span>';
+	if (alertSeverity === "high") html += '<span class="sev-badge high">HIGH</span>';
+	else if (alertSeverity === "medium") html += '<span class="sev-badge medium">MED</span>';
+	if (f.severity) html += '<span class="owner-name">impact: ' + esc(f.severity) + '</span>';
+	if (f.confidence) html += '<span class="owner-name">confidence: ' + esc(f.confidence) + '</span>';
   html += '<span class="func-name">' + esc(fmtName(f.name)) + '</span>';
   if (ASM[f.name] && ASM_LINKS[f.name]) html += '<a class="asm-link" href="' + esc(ASM_LINKS[f.name]) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">asm</a>';
   if (f.owner) html += ' <span class="owner-name">' + esc(fmtName(f.owner)) + '</span>';
@@ -604,6 +617,7 @@ function renderCard(f, i) {
       html += '<tr>';
       html += '<td class="sig-pc"><a href="#" data-scroll-card="' + i + '" data-scroll-pc="' + esc(r.pc) + '">' + esc(pcDisp) + '</a>';
       if (primary) html += '<span class="sig-cat ' + esc(colorCls) + '">' + esc(primary) + '</span>';
+	  if (r.confidence) html += '<span class="owner-name">' + esc(r.confidence) + '</span>';
       html += '</td>';
       html += '<td class="sig-val">"' + esc(r.value) + '"';
       if (count > 1) html += ' <span class="owner-name">\u00d7' + count + '</span>';
@@ -663,6 +677,7 @@ G.funcs.forEach((f, i) => {
       owner: f.owner || "",
       role: f.role || "",
       severity: f.severity || "",
+	  confidence: r.confidence || "",
       categories: strCats
     });
   });
@@ -692,9 +707,9 @@ function renderStrings() {
     if (!catGroups[cat]) { catGroups[cat] = []; catOrder.push(cat); }
     catGroups[cat].push(s);
   });
-  const sevOrder = {"high": 0, "medium": 1, "low": 2, "": 3};
-	const groupSeverity = items => items.reduce((best, item) => {
-	  const rank = sevOrder[item.severity] ?? 3;
+	const sevOrder = {"high": 0, "medium": 1, "low": 2, "": 3};
+		const groupSeverity = items => items.reduce((best, item) => {
+		  const rank = sevOrder[effectiveSeverity(item.severity, item.confidence)] ?? 3;
 	  return Math.min(best, rank);
 	}, 3);
   catOrder.sort((a, b) => {
@@ -726,18 +741,20 @@ function renderStrings() {
   // Single table, category headers as spanning rows.
   let html = '<table class="str-table"><thead><tr>';
   html += '<th onclick="sortStrings(\'pc\')" style="width:10%">Address' + sortArrow("pc") + '</th>';
-  html += '<th onclick="sortStrings(\'value\')" style="width:52%">Value' + sortArrow("value") + '</th>';
-  html += '<th onclick="sortStrings(\'func\')" style="width:38%">Function' + sortArrow("func") + '</th>';
+	  html += '<th onclick="sortStrings(\'value\')" style="width:45%">Value' + sortArrow("value") + '</th>';
+	  html += '<th style="width:10%">Confidence</th>';
+	  html += '<th onclick="sortStrings(\'func\')" style="width:35%">Function' + sortArrow("func") + '</th>';
   html += '</tr></thead><tbody>';
 
   catOrder.forEach(cat => {
     const items = catGroups[cat];
-	html += '<tr class="str-cat-row"><td colspan="3"><span class="' + esc(catClass(cat)) + '">' + esc(cat) + '</span> <span class="owner-name">' + items.length + '</span></td></tr>';
+		html += '<tr class="str-cat-row"><td colspan="4"><span class="' + esc(catClass(cat)) + '">' + esc(cat) + '</span> <span class="owner-name">' + items.length + '</span></td></tr>';
     items.forEach(s => {
       const addr = s.pc.startsWith("0x") ? s.pc.substring(2).toUpperCase() : s.pc;
       html += '<tr>';
 	  html += '<td class="str-pc-cell">' + esc(addr) + '</td>';
       html += '<td class="str-val-cell">"' + esc(s.value) + '"</td>';
+	  html += '<td class="owner-name">' + esc(s.confidence || "") + '</td>';
 	  html += '<td class="str-func-cell"><a href="#" data-view-reveal="' + esc(s.funcName) + '">' + esc(fmtName(s.funcName)) + '</a></td>';
       html += '</tr>';
     });

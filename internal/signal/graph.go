@@ -17,6 +17,7 @@ type ClassifiedStringRef struct {
 	PoolIdx    int      `json:"pool_idx"`
 	Value      string   `json:"value"`
 	Categories []string `json:"categories,omitempty"`
+	Confidence string   `json:"confidence"`
 }
 
 // SignalFunc is a function in the signal graph.
@@ -28,7 +29,8 @@ type SignalFunc struct {
 	StringRefs      []ClassifiedStringRef `json:"string_refs,omitempty"`
 	Categories      []string              `json:"categories"`
 	Severity        string                `json:"severity"` // "high", "medium", "low"
-	Role            string                `json:"role"`     // "signal", "context", ""
+	Confidence      string                `json:"confidence,omitempty"`
+	Role            string                `json:"role"` // "signal", "context", ""
 	IsRootCandidate bool                  `json:"is_root_candidate,omitempty"`
 }
 
@@ -83,6 +85,7 @@ type SignalStats struct {
 	RuntimeObservedSites       int            `json:"runtime_observed_sites"`
 	RuntimeRelations           int            `json:"runtime_relations"`
 	UnsupportedCallSites       int            `json:"unsupported_call_sites"`
+	UnclassifiedTHRSites       int            `json:"unclassified_thr_sites"`
 	StringRefCount             int            `json:"string_ref_count"`
 	Categories                 map[string]int `json:"categories"`
 }
@@ -134,6 +137,7 @@ func BuildSignalGraph(
 			PoolIdx:    sr.PoolIdx,
 			Value:      sr.Value,
 			Categories: cats,
+			Confidence: StringClassificationConfidence(dartVersion, sr.Value),
 		}
 		fs.refs = append(fs.refs, csr)
 		for _, c := range cats {
@@ -144,9 +148,10 @@ func BuildSignalGraph(
 		}
 	}
 
-	// Also mark functions with non-mundane THR calls.
+	// Also mark functions with recognized source-level suspendable THR calls.
 	// H-3 fix: also check "call_indirect" for x86_64 (was only "blr" for ARM64).
-	for _, e := range edges {
+	unclassifiedTHRSites := make(map[string]bool)
+	for edgeIndex, e := range edges {
 		if !funcSet[e.FromFunc] {
 			continue
 		}
@@ -160,15 +165,21 @@ func BuildSignalGraph(
 		if sdk.IsMundaneStub(dartVersion, thrName) {
 			continue
 		}
-		// Recognized suspendable-function stubs carry source-level kind
-		// evidence; unknown names remain CatTHR as a table-coverage gap.
-		cat := CatTHR
+		// Recognized suspendable-function stubs carry source-level kind evidence.
+		// An unknown THR name is a coverage gap in AOTopsy's tables, not behavior
+		// of the target. Preserve that distinction as a completeness counter and
+		// do not turn the caller into a signal function.
+		cat := ""
 		switch sdk.ClassifyStubRole(dartVersion, thrName) {
 		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
 			cat = CatAsync
 		case sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn,
 			sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn:
 			cat = CatGenerator
+		}
+		if cat == "" {
+			unclassifiedTHRSites[signalCallSiteKey(e, edgeIndex)] = true
+			continue
 		}
 		// Mark the calling function as signal.
 		fs, ok := funcSignals[e.FromFunc]
@@ -302,6 +313,7 @@ func BuildSignalGraph(
 			}
 			sort.Strings(sf.Categories)
 			sf.Severity = MaxSeverity(sf.Categories)
+			sf.Confidence = functionSignalConfidence(fs.refs, sf.Categories)
 		}
 		allFuncs = append(allFuncs, sf)
 	}
@@ -468,10 +480,33 @@ func BuildSignalGraph(
 			RuntimeObservedSites:       len(runtimeObservedSiteSet),
 			RuntimeRelations:           runtimeRelations,
 			UnsupportedCallSites:       len(unsupportedSiteSet),
+			UnclassifiedTHRSites:       len(unclassifiedTHRSites),
 			StringRefCount:             validStringRefCount,
 			Categories:                 catCounts,
 		},
 	}
+}
+
+func functionSignalConfidence(refs []ClassifiedStringRef, categories []string) string {
+	for _, category := range categories {
+		if category == CatAsync || category == CatGenerator {
+			return "high"
+		}
+	}
+	best := ""
+	for _, ref := range refs {
+		switch ref.Confidence {
+		case "high":
+			return "high"
+		case "medium":
+			best = "medium"
+		case "low":
+			if best == "" {
+				best = "low"
+			}
+		}
+	}
+	return best
 }
 
 func signalCallSiteKey(e disasm.CallEdgeRecord, ordinal int) string {

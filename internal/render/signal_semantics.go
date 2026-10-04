@@ -9,6 +9,26 @@ import (
 	"aotopsy/internal/signal"
 )
 
+// effectiveSignalSeverity is the presentation-level alert severity. SignalFunc
+// severity describes potential impact if the classification is correct; the
+// producer confidence describes how strongly the evidence supports that
+// classification. Renderers must use both so a high-impact lexical keyword is
+// not painted as a high-certainty red alert.
+func effectiveSignalSeverity(impact, confidence string) string {
+	impact = strings.ToLower(strings.TrimSpace(impact))
+	switch strings.ToLower(strings.TrimSpace(confidence)) {
+	case "high", "exact":
+		return impact
+	case "medium":
+		if impact == "high" {
+			return "medium"
+		}
+		return impact
+	default:
+		return "low"
+	}
+}
+
 // signalRenderableEdges keeps every call-site record whose caller is a real
 // function in the signal graph. The target may be external, absent (unresolved),
 // or runtime-only; those distinctions are rendered as evidence rather than

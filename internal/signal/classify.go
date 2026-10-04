@@ -4,6 +4,8 @@
 package signal
 
 import (
+	"net"
+	neturl "net/url"
 	"regexp"
 	"strings"
 
@@ -36,21 +38,17 @@ const (
 	CatAttribution = "attribution" // Install referrer, campaign, organic, SDK tracking
 
 	// Security analysis categories (gap-analysis §4.1).
-	CatRooting       = "rooting"        // Root/jailbreak: magisk, supersu, xposed, frida-server
+	CatRooting       = "rooting"        // Root/jailbreak: magisk, supersu, xposed, su paths
 	CatAntiAnalysis  = "anti_analysis"  // Anti-debug, anti-VM, anti-frida, emulator detection
-	CatSSLPinning    = "ssl_pinning"    // Certificate pinning, X509TrustManager
+	CatSSLPinning    = "ssl_pinning"    // Certificate/SPKI pinning indicators
 	CatAccessibility = "accessibility"  // AccessibilityService, keylogger, screenCapture
 	CatFraud         = "fraud"          // Phishing, OTP, banking, card numbers
 	CatDynamicLoad   = "dynamic_load"   // DynamicLibrary.open, loadLibrary, mirrorSystem
 	CatIPC           = "ipc"            // Binder, ServiceManager, AIDL, ContentProvider
 	CatCovertChannel = "covert_channel" // Tor, socks5, proxychain, DNS tunnel
-	CatDRMBypass     = "drm_bypass"     // Widevine, FairPlay, PlayReady
+	CatDRM           = "drm"            // Widevine, FairPlay, PlayReady, MediaDrm
 	CatObfuscation   = "obfuscation"    // Short meaningless names, identifier entropy
 	CatCryptoConst   = "crypto_const"   // AES S-box, SHA-256 K, crypto magic numbers
-	// CatTHR marks a call to a Thread-cached stub we cannot name. It is a
-	// gap in our own tables, not a property of the binary, and it is kept
-	// separate from CatAsync for exactly that reason.
-	CatTHR = "thr"
 	// CatAsync marks a function that enters, suspends at, or completes an
 	// async body -- structural evidence that survives obfuscation, since
 	// the async stubs are reached through the Thread table by address.
@@ -62,7 +60,7 @@ const (
 )
 
 var (
-	reURL       = regexp.MustCompile(`(?i)(https?|wss?|ftp)://`)
+	reURL       = regexp.MustCompile(`(?i)\b(?:https?|wss?|ftp)://[^\s"'<>]+`)
 	reIPLiteral = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 	reBase64    = regexp.MustCompile(`^[A-Za-z0-9+/=]{16,}$`)
 
@@ -167,8 +165,9 @@ var (
 		"mnemonic", "seedphrase", "bip39", "bip44", "bip32",
 		"recoveryphrase", "backupphrase", "secretphrase",
 		"wordlist", "passphrase", "derivepath",
-		// Wallet core
-		"privatek", "publickey", "keystore", "keychain",
+		// Wallet core. Generic key-management words (privateKey, publicKey,
+		// keystore, keychain) are intentionally excluded: they are common TLS and
+		// application-security vocabulary without blockchain context.
 		"hdwallet", "coldwallet", "hotwallet",
 		"walletconnect", "walletaddress", "walletbalance",
 		"walletprovider", "walletadapter",
@@ -185,7 +184,7 @@ var (
 		// NFT
 		"nftmint", "nftmarket", "tokenuri", "tokenmeta",
 	}
-	reWallet = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(wallet|mnemonic|seed.?phrase|private.?key|web3|dapp|nft|defi|swap|stake|airdrop|bitcoin|ether|crypto.?currency|token.?transfer)([^a-zA-Z]|$)`)
+	reWallet = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(wallet|mnemonic|seed.?phrase|web3|dapp|nft|defi|swap|stake|airdrop|bitcoin|ether|crypto.?currency|token.?transfer)([^a-zA-Z]|$)`)
 
 	gamblingKeywords = []string{
 		// Casino / slots
@@ -198,14 +197,12 @@ var (
 		"lottery", "lotto", "lucknumber", "drawresult",
 		// Poker / card games
 		"pokerroom", "pokertable", "texasholdem",
-		// Money flow
-		"placewager", "payout", "cashout",
-		"topup", "recharge",
+		"placewager",
 	}
 	// NOTE: "slot" (singular) is absent on purpose -- it is Flutter framework
 	// vocabulary (Element.slot, insertRenderObjectChild(child, slot)), and it
 	// tagged _OverlayPortalElement as gambling code. "slots" is kept.
-	reGambling = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(bet|wager|casino|slots|gamble|lottery|lotto|poker|roulette|jackpot|withdraw|deposit|reward|bonus|payout|cashout|spin)([^a-zA-Z]|$)`)
+	reGambling = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(bet|wager|casino|slots|gamble|lottery|lotto|poker|roulette|jackpot)([^a-zA-Z]|$)`)
 
 	attributionKeywords = []string{
 		// Install attribution
@@ -233,19 +230,11 @@ var (
 		"webchromeclient", "inappwebview", "inappbrowser",
 		"shouldoverrideurlloading", "shouldinterceptrequest",
 		"webmessagelistener", "onpagestarted", "onpagefinished",
-		// Chrome / custom tabs
-		"customtab", "opencustomtab", "chrometab", "chromeclient",
-		// Intent / deep linking
-		"startactivity", "intentfilter", "deeplink", "applink",
-		"launchurl", "canlaunch", "urlscheme",
 		// Java bridge / JNI
 		"javabridge", "jsbridge", "nativebridge",
 		"javascriptinterface", "postmessage",
-		// Cookies
-		"cookiemanager", "setcookie", "getcookie", "clearcookie",
-		"cookiejar", "cookiestore",
 	}
-	reWebView = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(webview|loadurl|cookie|intent|jsbridge)([^a-zA-Z]|$)`)
+	reWebView = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(webview|loadurl|jsbridge)([^a-zA-Z]|$)`)
 )
 
 // ClassifyString returns the set of signal categories matching the value.
@@ -270,13 +259,16 @@ func ClassifyString(dartVersion, value string) []string {
 	var cats []string
 	lower := strings.ToLower(value)
 
-	// URL
-	if reURL.MatchString(value) {
+	// URL. A scheme token by itself is not an endpoint: require net/url to
+	// recover a host from a bounded candidate before calling it URL evidence.
+	if containsValidURL(value) {
 		cats = append(cats, CatURL)
 	}
 
-	// Host (IP literal)
-	if reIPLiteral.MatchString(value) {
+	// Host (validated IPv4 literal). The regex is only a candidate extractor;
+	// it must not turn syntactically dotted numbers such as 999.999.999.999
+	// into network evidence.
+	if containsRoutableIPv4Literal(value) {
 		cats = append(cats, CatHost)
 	}
 
@@ -314,10 +306,11 @@ func ClassifyString(dartVersion, value string) []string {
 		}
 	}
 
-	// Base64/hex key (high-entropy, standalone).
-	// Exclude camelCase identifiers which match the character set but aren't keys.
+	// Base64-shaped text is only useful when it decodes to plausible text. A
+	// long identifier is also syntactically valid base64, so alphabet/entropy
+	// alone cannot establish an encoding signal.
 	trimmed := strings.TrimSpace(value)
-	if reBase64.MatchString(trimmed) && ShannonEntropy([]byte(value)) > 3.5 && !isCamelCase(trimmed) {
+	if reBase64.MatchString(trimmed) && ShannonEntropy([]byte(value)) > 3.5 && tryBase64Decode(trimmed) != "" {
 		cats = append(cats, CatBase64Key)
 	}
 
@@ -421,9 +414,9 @@ func ClassifyString(dartVersion, value string) []string {
 		cats = append(cats, CatCovertChannel)
 	}
 
-	// DRM bypass
-	if containsKeyword(value, drmBypassKeywords) {
-		cats = append(cats, CatDRMBypass)
+	// DRM / media-key APIs. Presence does not imply bypass or circumvention.
+	if containsKeyword(value, drmKeywords) {
+		cats = append(cats, CatDRM)
 	}
 
 	// Crypto constants (AES S-box, SHA-256 K)
@@ -452,6 +445,46 @@ func ClassifyString(dartVersion, value string) []string {
 	// measurement is ObfuscationRatio, applied by the signal stage.
 
 	return cats
+}
+
+func containsRoutableIPv4Literal(value string) bool {
+	for _, candidate := range reIPLiteral.FindAllString(value, -1) {
+		ip := net.ParseIP(candidate)
+		if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func containsValidURL(value string) bool {
+	for _, candidate := range reURL.FindAllString(value, -1) {
+		// Punctuation commonly follows an endpoint in diagnostics/prose but is
+		// not part of the URL. Keep path/query punctuation intact and trim only
+		// unambiguous sentence/closing delimiters from the right edge.
+		candidate = strings.TrimRight(candidate, ".,;)]}")
+		u, err := neturl.Parse(candidate)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.Hostname() == "" {
+			continue
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "ws", "wss", "ftp":
+			return true
+		}
+	}
+	return false
+}
+
+// StringClassificationConfidence describes the provenance of ClassifyString's
+// result. Exact VM-native names come from versioned SDK tables. Everything else
+// in ClassifyString is lexical evidence and must stay advisory even when the
+// category itself has high security impact.
+func StringClassificationConfidence(dartVersion, value string) string {
+	if _, ok := sdk.DartNativeCategory(dartVersion, value); ok {
+		return "high"
+	}
+	return "low"
 }
 
 // IsInterestingCallee returns true if the callee name represents a real named
@@ -491,9 +524,9 @@ func CategorySeverity(cat string) string {
 		CatAccessibility, CatFraud, CatCovertChannel:
 		return SeverityHigh
 	case CatURL, CatHost, CatBase64Key, CatLocation, CatDeviceInfo, CatCamera,
-		CatAttribution, CatSSLPinning, CatDynamicLoad, CatDRMBypass, CatObfuscation:
+		CatAttribution, CatSSLPinning, CatDynamicLoad, CatDRM, CatObfuscation:
 		return SeverityMedium
-	case CatNet, CatFileExt, CatTHR, CatAsync, CatGenerator, CatIPC, CatCryptoConst,
+	case CatNet, CatFileExt, CatAsync, CatGenerator, CatIPC, CatCryptoConst,
 		CatMethodChannel, CatPlugin:
 		return SeverityLow
 	default:
@@ -533,17 +566,6 @@ func MaxSeverity(categories []string) string {
 		return SeverityLow
 	}
 	return best
-}
-
-// isCamelCase returns true if the string looks like a camelCase/PascalCase identifier.
-// It checks for lowercase-to-uppercase transitions (e.g. "checkSimCard").
-func isCamelCase(s string) bool {
-	for i := 1; i < len(s); i++ {
-		if s[i-1] >= 'a' && s[i-1] <= 'z' && s[i] >= 'A' && s[i] <= 'Z' {
-			return true
-		}
-	}
-	return false
 }
 
 // normalizeForMatch strips underscores, hyphens, spaces, and dots from a
@@ -587,8 +609,8 @@ func containsCat(cats []string, cat string) bool {
 //
 // containsKeyword matches against normalizeForMatch(value), which strips
 // '_', '-', ' ' and '.'. A keyword that still CONTAINS one of those
-// characters can therefore never match: "frida-server", "ro.debuggable",
-// "which su" and "network_security_config" were all dead on arrival.
+// characters can therefore never match: "frida-gadget", "ro.debuggable",
+// "which su" and "ssl_pinning" were all dead on arrival.
 // normalizeSecurityKeywords (init below) normalizes every list in place so a
 // keyword written with separators still works; the entries are also kept in
 // normalized form here to match the convention documented above.
@@ -596,7 +618,7 @@ func init() {
 	for _, list := range [][]string{
 		rootingKeywords, antiAnalysisKeywords, sslPinningKeywords,
 		accessibilityKeywords, fraudKeywords, dynamicLoadKeywords,
-		ipcKeywords, covertChannelKeywords, drmBypassKeywords, pluginKeywords,
+		ipcKeywords, covertChannelKeywords, drmKeywords, pluginKeywords,
 	} {
 		for i, kw := range list {
 			list[i] = normalizeForMatch(kw)
@@ -605,7 +627,7 @@ func init() {
 }
 
 var rootingKeywords = []string{
-	"magisk", "supersu", "superuser", "xposed", "frida-server", "frida_server",
+	"magisk", "supersu", "superuser", "xposed",
 	"substrate", "riru", "zygisk", "busybox", "superuser.apk",
 	"/system/xbin/su", "/system/bin/su", "/sbin/su", "which su",
 	"chainfire", "kingroot", "kingoroot", "towelroot",
@@ -629,12 +651,9 @@ var antiAnalysisKeywords = []string{
 var sslPinningKeywords = []string{
 	"certificatepinner", "certificate_pinner", "certificatepinning",
 	"ssl_pinning", "sslpinning", "certpinning", "cert_pinning",
-	"x509trustmanager", "x509_trust_manager", "trustmanager",
 	"okhttp3.cert", "okhttp.cert", "certificatepinnercallback",
 	"sha256/", "sha1/", "publickeyhash", "public_key_hash",
 	"spki-pin", "spki_pin", "pins-sha256",
-	"network_security_config", "networksecurityconfig",
-	"cleartexttraffic", "cleartext_traffic",
 }
 
 var accessibilityKeywords = []string{
@@ -708,7 +727,7 @@ var covertChannelKeywords = []string{
 
 var reCovertShort = regexp.MustCompile(`(?i)(^|[^a-zA-Z])(tor)([^a-zA-Z]|$)`)
 
-var drmBypassKeywords = []string{
+var drmKeywords = []string{
 	"widevine", "fairplay", "playready",
 	"drm_info", "drminfo", "drm_session", "drmsession",
 	"media_drm", "mediadrm", "mediadrmmanager",

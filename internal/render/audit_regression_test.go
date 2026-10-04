@@ -419,6 +419,38 @@ func TestSignalDOTMoreCountUsesUniqueStrings(t *testing.T) {
 	}
 }
 
+func TestEffectiveSignalSeverityCapsImpactByConfidence(t *testing.T) {
+	cases := []struct {
+		impact, confidence, want string
+	}{
+		{"high", "low", "low"},
+		{"high", "medium", "medium"},
+		{"high", "high", "high"},
+		{"medium", "low", "low"},
+		{"medium", "high", "medium"},
+		{"high", "", "low"},
+	}
+	for _, tc := range cases {
+		if got := effectiveSignalSeverity(tc.impact, tc.confidence); got != tc.want {
+			t.Errorf("effectiveSignalSeverity(%q, %q)=%q, want %q", tc.impact, tc.confidence, got, tc.want)
+		}
+	}
+}
+
+func TestSignalDOTDoesNotRenderLowConfidenceHighImpactAsRedAlert(t *testing.T) {
+	g := &signal.SignalGraph{Funcs: []signal.SignalFunc{{
+		Name: "keywordOnly", Role: "signal", Severity: "high", Confidence: "low", IsRootCandidate: true,
+		Categories: []string{signal.CatAntiAnalysis},
+	}}}
+	dot := SignalDOT(g, "", NASA)
+	if strings.Contains(dot, `color="#C62828"`) {
+		t.Fatalf("low-confidence lexical indicator rendered as red high alert:\n%s", dot)
+	}
+	if !strings.Contains(dot, `impact: high`) || !strings.Contains(dot, `confidence: low`) {
+		t.Fatalf("DOT omitted separate impact/confidence labels:\n%s", dot)
+	}
+}
+
 func TestSignalHTMLSerializesEmptyCollectionsAsArrays(t *testing.T) {
 	var out bytes.Buffer
 	if err := WriteSignalHTML(&out, &signal.SignalGraph{}, "title", "file", "digest", nil, nil); err != nil {

@@ -87,8 +87,8 @@ func TestYaraCompositeRulesRequireMultipleDistinctWitnesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "data_exfil_http") {
-		t.Fatalf("one generic URL triggered composite exfiltration rule: %s", b)
+	if strings.Contains(string(b), "sensitive_network_indicators") {
+		t.Fatalf("one generic URL triggered composite source/network rule: %s", b)
 	}
 
 	refs := []disasm.StringRefRecord{
@@ -102,8 +102,75 @@ func TestYaraCompositeRulesRequireMultipleDistinctWitnesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "data_exfil_http") {
-		t.Fatalf("two independent witnesses did not trigger data_exfil_http: %s", b)
+	if !strings.Contains(string(b), "sensitive_network_indicators") {
+		t.Fatalf("two independent witnesses did not trigger sensitive_network_indicators: %s", b)
+	}
+	findings, err := readYaraFindings(filepath.Join(dir, "yara_findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.RuleName == "sensitive_network_indicators" && f.Confidence != "low" {
+			t.Fatalf("cross-function lexical witnesses inflated YARA confidence: %+v", f)
+		}
+	}
+
+	coLocated := []disasm.StringRefRecord{
+		{Value: "android_id", Func: "collectAndSend"},
+		{Value: "http://example.com", Func: "collectAndSend"},
+	}
+	if err := WriteYaraFindings(dir, coLocated); err != nil {
+		t.Fatal(err)
+	}
+	findings, err = readYaraFindings(filepath.Join(dir, "yara_findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.RuleName == "sensitive_network_indicators" {
+			if f.Confidence != "medium" {
+				t.Fatalf("co-located independent witnesses confidence = %q, want medium", f.Confidence)
+			}
+			return
+		}
+	}
+	t.Fatal("co-located sensitive_network_indicators finding missing")
+}
+
+func TestYaraRejectsGenericDebuggerAndHTTPClientNames(t *testing.T) {
+	dir := t.TempDir()
+	refs := []disasm.StringRefRecord{
+		{Value: "debugger", Func: "helpText"},
+		{Value: "OkHttp", Func: "httpClient"},
+	}
+	if err := WriteYaraFindings(dir, refs); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "yara_findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 0 {
+		t.Fatalf("generic debugger/HTTP client names produced YARA findings: %s", b)
+	}
+
+	refs = []disasm.StringRefRecord{
+		{Value: "android.os.Debug", Func: "checkDebug"},
+		{Value: "certificatePinner", Func: "pinTLS"},
+	}
+	if err := WriteYaraFindings(dir, refs); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(filepath.Join(dir, "yara_findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if !strings.Contains(text, "anti_debug_debugger") || !strings.Contains(text, "ssl_pinning_cert") {
+		t.Fatalf("specific anti-debug/pinning witnesses were lost: %s", text)
+	}
+	if !strings.Contains(text, `"confidence":"low"`) {
+		t.Fatalf("single-pattern YARA match is missing low producer confidence: %s", text)
 	}
 }
 
@@ -142,7 +209,7 @@ func TestSecurityCategorySeverityMatchesSARIFPolicy(t *testing.T) {
 		CatDynamicLoad:   "warning",
 		CatIPC:           "note",
 		CatCovertChannel: "error",
-		CatDRMBypass:     "warning",
+		CatDRM:           "warning",
 		CatObfuscation:   "warning",
 		CatCryptoConst:   "note",
 		CatMethodChannel: "note",

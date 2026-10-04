@@ -10,8 +10,9 @@ import (
 
 // ClassifiedString is a string ref with its signal category for rendering.
 type ClassifiedString struct {
-	Value    string
-	Category string // primary category (e.g. "encryption", "auth", "url")
+	Value      string
+	Category   string // primary category (e.g. "encryption", "auth", "url")
+	Confidence string
 }
 
 // SignalFuncContent holds the interesting calls and string refs for one signal function,
@@ -28,6 +29,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 	// Index functions.
 	type funcInfo struct {
 		severity   string
+		confidence string
 		categories []string
 		owner      string
 	}
@@ -36,6 +38,7 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 	for _, f := range g.Funcs {
 		funcMap[f.Name] = &funcInfo{
 			severity:   f.Severity,
+			confidence: f.Confidence,
 			categories: f.Categories,
 			owner:      f.Owner,
 		}
@@ -213,11 +216,12 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		id := dotID(name)
 		label := truncLabel(name, 45)
 
-		// Pick border/header color by severity.
+		// Pick border/header color by confidence-capped alert severity. The raw
+		// severity remains potential impact and is printed separately below.
 		borderColor := "#1565C0" // blue (low/default)
 		headerBG := "#E3F2FD"
 		if fi != nil {
-			switch fi.severity {
+			switch effectiveSignalSeverity(fi.severity, fi.confidence) {
 			case "high":
 				borderColor = "#C62828"
 				headerBG = "#FCE4EC"
@@ -239,6 +243,12 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 		if fi != nil && len(fi.categories) > 0 {
 			cats := truncLabel(strings.Join(fi.categories, ", "), 35)
 			fmt.Fprintf(&tbl, "<BR/><FONT POINT-SIZE=\"7\" COLOR=\"#757575\">%s</FONT>", dotEscape(cats))
+		}
+		if fi != nil && fi.severity != "" {
+			fmt.Fprintf(&tbl, "<BR/><FONT POINT-SIZE=\"7\" COLOR=\"#757575\">impact: %s</FONT>", dotEscape(fi.severity))
+		}
+		if fi != nil && fi.confidence != "" {
+			fmt.Fprintf(&tbl, "<BR/><FONT POINT-SIZE=\"7\" COLOR=\"#757575\">confidence: %s</FONT>", dotEscape(fi.confidence))
 		}
 		tbl.WriteString("</TD></TR>\n")
 
@@ -271,10 +281,13 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 					break
 				}
 				sv := truncLabel(s.Value, 50)
-				color := strCategoryColor(s.Category)
+				color := strCategoryColor(s.Category, s.Confidence)
 				catLabel := ""
 				if s.Category != "" {
 					catLabel = " [" + s.Category + "]"
+				}
+				if s.Confidence != "" {
+					catLabel += " [confidence: " + s.Confidence + "]"
 				}
 				fmt.Fprintf(&tbl, "    <TR><TD ALIGN=\"LEFT\"><FONT POINT-SIZE=\"7\" FACE=\"Courier\" COLOR=%q>\"%s\"%s</FONT></TD></TR>\n",
 					color, dotEscape(sv), dotEscape(catLabel))
@@ -347,19 +360,13 @@ func SignalCFGDOT(g *signal.SignalGraph, content map[string]*SignalFuncContent, 
 }
 
 // strCategoryColor returns a DOT color for a signal string category.
-func strCategoryColor(cat string) string {
-	switch cat {
-	case "crypto", "encryption":
-		return "#C62828" // red
-	case "auth":
-		return "#AD1457" // dark pink
-	case "url", "host":
-		return "#0B3D91" // blue
-	case "cloaking", "sim", "sms", "contacts":
-		return "#C62828" // red
-	case "device", "location":
-		return "#E65100" // orange
+func strCategoryColor(cat, confidence string) string {
+	switch effectiveSignalSeverity(signal.CategorySeverity(cat), confidence) {
+	case "high":
+		return "#C62828"
+	case "medium":
+		return "#E65100"
 	default:
-		return "#C2185B" // pink
+		return "#1565C0"
 	}
 }
