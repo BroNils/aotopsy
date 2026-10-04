@@ -6,6 +6,7 @@ import (
 
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/strutil"
 	"aotopsy/internal/vmtables"
 )
 
@@ -74,7 +75,7 @@ func newTTSNameContext(result *cluster.Result, pl *PoolLookups, ct *snapshot.CID
 		ci := &result.Classes[i]
 		if pl != nil {
 			if no, ok := pl.RefToNamed[ci.RefID]; ok {
-				name := ScrubDartPrivateKeys(pl.ResolveIsolateName(no))
+				name := strutil.ScrubDartPrivateKeys(pl.ResolveIsolateName(no))
 				if name != "" {
 					c.classNames[ci.ClassID] = name
 				}
@@ -176,39 +177,6 @@ func (c *ttsNameContext) typeParameterTTSName(no *cluster.NamedObject) (string, 
 	}
 	name := c.pl.ResolveIsolateName(no)
 	return name, name != ""
-}
-
-// ScrubDartPrivateKeys is the private-key portion of String::ScrubName used by
-// Class::ScrubbedNameCString: each private suffix `@<digits>` is removed, even
-// when a generated name contains several of them. It deliberately does not
-// perform the getter/setter/constructor spelling rewrites that ScrubName also
-// performs; callers choose those separately according to their identity model.
-func ScrubDartPrivateKeys(name string) string {
-	first := -1
-	for i := 0; i+1 < len(name); i++ {
-		if name[i] == '@' && name[i+1] >= '0' && name[i+1] <= '9' {
-			first = i
-			break
-		}
-	}
-	if first < 0 {
-		return name
-	}
-	var b strings.Builder
-	b.Grow(len(name))
-	b.WriteString(name[:first])
-	for i := first; i < len(name); {
-		if name[i] == '@' && i+1 < len(name) && name[i+1] >= '0' && name[i+1] <= '9' {
-			i += 2
-			for i < len(name) && name[i] >= '0' && name[i] <= '9' {
-				i++
-			}
-			continue
-		}
-		b.WriteByte(name[i])
-		i++
-	}
-	return b.String()
 }
 
 func readableNullabilitySuffix(n cluster.TypeNullability, baseName string) (string, bool) {

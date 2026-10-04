@@ -13,3 +13,11 @@ func TestFuncRelPathLongNamesRemainUnique(t *testing.T) {
 		t.Fatalf("distinct functions collided after filename sanitization: %q", a)
 	}
 }
+
+func TestFuncRelPathOwnerComponentsStayPortableAndDistinct(t *testing.T) {
+	a := FuncRelPath("CON", "method", 0x1000)
+	b := FuncRelPath("con", "method", 0x1000)
+	if strings.EqualFold(a, b) {
+		t.Fatalf("Windows-reserved/case-folded owners collided: %q / %q", a, b)
+	}
+}

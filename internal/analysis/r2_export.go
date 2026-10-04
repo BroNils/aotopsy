@@ -38,10 +38,10 @@ func writeR2Export(outDir string, ranges []cluster.CodeRange, pl *naming.PoolLoo
 	return output.WriteAtomic(path, 0o644, func(w io.Writer) error {
 		for _, e := range entries {
 			// r2 flag: f name @ addr
-			// SanitizeR2FlagName returns "" for a name that carries nothing
-			// once the separators are stripped, and guarantees the rest is
-			// accepted by r2's r_name_check.
-			r2Name := strutil.SanitizeR2FlagName(e.name)
+			// SanitizeR2FlagName returns "" for a name that carries no
+			// alphanumeric identity and guarantees the rest is accepted by r2's
+			// r_name_check without collapsing distinct raw-name/VA identities.
+			r2Name := strutil.SanitizeR2FlagName(e.name, e.va)
 			if r2Name == "" {
 				continue
 			}

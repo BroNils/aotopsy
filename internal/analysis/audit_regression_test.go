@@ -30,6 +30,7 @@ import (
 	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
+	"aotopsy/internal/vmtables"
 )
 
 func publishAuditTestGeneration(t *testing.T, target string, files map[string][]byte) {
@@ -1202,6 +1203,7 @@ func TestRunMetaStageRejectsMissingOrMalformedDartMeta(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			writeAuditMetaProvenance(t, dir, "3.9.2", true)
 			for _, name := range []string{"functions.jsonl", "classes.jsonl", "string_refs.jsonl"} {
 				if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
 					t.Fatal(err)
@@ -1220,6 +1222,39 @@ func TestRunMetaStageRejectsMissingOrMalformedDartMeta(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeAuditMetaProvenance(t *testing.T, dir, version string, compressed bool) Provenance {
+	t.Helper()
+	prov := auditFixtureProvenance(t, "arm64", version)
+	prov.CompressedPointers = compressed
+	if err := output.WriteJSONFile(filepath.Join(dir, ProvenanceFileName), prov); err != nil {
+		t.Fatal(err)
+	}
+	return prov
+}
+
+func writeExactAuditDartMeta(t *testing.T, dir string) strutil.DartMetaJSON {
+	t.Helper()
+	p := snapshot.ProfileForVersion("3.9.2")
+	if p == nil {
+		t.Fatal("missing 3.9.2 profile")
+	}
+	p.BuildMode = snapshot.BuildProduct
+	p.CompressedPointers = true
+	target, ok := vmtables.TargetProfileFromVersion(p, true)
+	if !ok {
+		t.Fatal("could not derive exact 3.9.2 ARM64 metadata target")
+	}
+	if err := strutil.WriteDartMeta(dir, target); err != nil {
+		t.Fatal(err)
+	}
+	writeAuditMetaProvenance(t, dir, "3.9.2", true)
+	meta, err := strutil.DartMetaForTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return meta
 }
 
 func TestRunMetaStageWritesValidMetaAtomicallyAndPreservesUTF8(t *testing.T) {
@@ -1245,9 +1280,7 @@ func TestRunMetaStageWritesValidMetaAtomicallyAndPreservesUTF8(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "asm"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "dart_meta.json"), []byte(`{"arch":"arm64","dart_version":"3.9.2","compressed_pointers":true,"pointer_size":4,"thr_fields":[]}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeExactAuditDartMeta(t, dir)
 	path, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -1263,8 +1296,9 @@ func TestRunMetaStageWritesValidMetaAtomicallyAndPreservesUTF8(t *testing.T) {
 	if err := json.Unmarshal(b, &meta); err != nil {
 		t.Fatal(err)
 	}
-	if meta.Version != "2" || meta.Architecture != "arm64" {
-		t.Fatalf("flutter meta identity = version %q arch %q, want version 2 arm64", meta.Version, meta.Architecture)
+	if meta.Version != "3" || meta.Architecture != "arm64" || len(meta.BinarySHA256) != 64 || meta.BinarySize <= 0 {
+		t.Fatalf("flutter meta identity = version %q arch %q sha=%q size=%d, want version 3 arm64 with binary identity",
+			meta.Version, meta.Architecture, meta.BinarySHA256, meta.BinarySize)
 	}
 }
 
@@ -1275,9 +1309,7 @@ func TestRunMetaStageIncludesNestedAsmComments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "dart_meta.json"), []byte(`{"arch":"arm64","dart_version":"3.9.2","compressed_pointers":true,"pointer_size":4,"thr_fields":[]}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeExactAuditDartMeta(t, dir)
 	asmPath := filepath.Join(dir, "asm", "Owner", "method.txt")
 	if err := os.MkdirAll(filepath.Dir(asmPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -1304,7 +1336,7 @@ func TestRunMetaStageIncludesNestedAsmComments(t *testing.T) {
 	}
 }
 
-func TestRunMetaStageSanitizesUntrustedLogArguments(t *testing.T) {
+func TestRunMetaStageRejectsControlBearingDartVersionWithoutLogInjection(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("CLICOLOR", "")
 	t.Setenv("CLICOLOR_FORCE", "1")
@@ -1317,21 +1349,128 @@ func TestRunMetaStageSanitizesUntrustedLogArguments(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "asm"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	meta := `{"arch":"arm64","dart_version":"3.9.2\u001b[8mHIDDEN\u001b[0m\nFORGED","compressed_pointers":true,"pointer_size":4,"thr_fields":[]}`
-	if err := os.WriteFile(filepath.Join(dir, "dart_meta.json"), []byte(meta), 0o644); err != nil {
+	meta := writeExactAuditDartMeta(t, dir)
+	meta.DartVersion = "3.9.2\x1b[8mHIDDEN\x1b[0m\nFORGED"
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dart_meta.json"), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var log bytes.Buffer
-	if _, err := RunMetaStage(dir, dir, "arm64", true, false, &log); err != nil {
-		t.Fatal(err)
+	_, err = RunMetaStage(dir, dir, "arm64", true, false, &log)
+	if err == nil {
+		t.Fatal("control-bearing unknown Dart version was accepted")
 	}
-	got := log.String()
-	if strings.Contains(got, "\x1b[8m") || strings.Contains(got, "\nFORGED") {
-		t.Fatalf("untrusted metadata injected terminal controls/log lines: %q", got)
+	if got := log.String(); strings.Contains(got, "\x1b[8m") || strings.Contains(got, "\nFORGED") {
+		t.Fatalf("rejected metadata still injected terminal controls/log lines: %q", got)
 	}
-	if !strings.Contains(got, "3.9.2HIDDEN FORGED") {
-		t.Fatalf("sanitization lost printable metadata: %q", got)
+	if strings.Contains(err.Error(), "\x1b[8m") || strings.Contains(err.Error(), "\nFORGED") {
+		t.Fatalf("error exposed raw terminal control/newline: %q", err)
 	}
+}
+
+func TestRunMetaStageRejectsAmbiguousAddressesAndIdentityMismatch(t *testing.T) {
+	makeBase := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, name := range []string{"classes.jsonl", "string_refs.jsonl"} {
+			if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Mkdir(filepath.Join(dir, "asm"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExactAuditDartMeta(t, dir)
+		return dir
+	}
+
+	t.Run("duplicate-normalized-function-address", func(t *testing.T) {
+		dir := makeBase(t)
+		rows := []disasm.FuncRecord{
+			{PC: "0x0010", Size: 4, Name: "first"},
+			{PC: "0X10", Size: 4, Name: "second"},
+		}
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "functions.jsonl"), rows); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "duplicate function address") {
+			t.Fatalf("duplicate normalized address error = %v", err)
+		}
+	})
+
+	t.Run("oversized-function-range", func(t *testing.T) {
+		dir := makeBase(t)
+		rows := []disasm.FuncRecord{{PC: "0x10", Size: int(maxFunctionBinBytes + 1), Name: "too_large"}}
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "functions.jsonl"), rows); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "invalid size") {
+			t.Fatalf("oversized function range error = %v", err)
+		}
+	})
+
+	t.Run("dart-meta-provenance-mismatch", func(t *testing.T) {
+		dir := makeBase(t)
+		if err := os.WriteFile(filepath.Join(dir, "functions.jsonl"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prov := writeAuditMetaProvenance(t, dir, "3.12.2", true)
+		_ = prov
+		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "identity disagrees with provenance") {
+			t.Fatalf("metadata identity mismatch error = %v", err)
+		}
+	})
+
+	t.Run("invalid-class-layout", func(t *testing.T) {
+		dir := makeBase(t)
+		if err := os.WriteFile(filepath.Join(dir, "functions.jsonl"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rows := []strutil.FlutterMetaJSONClass{{
+			ClassName:    "Bad",
+			ClassID:      0,
+			InstanceSize: 12,
+			Fields: []strutil.FlutterMetaField{{
+				Name:        "type_arguments_field",
+				ByteOffset:  4,
+				IsReference: false,
+				SlotType:    "type_arguments_field",
+			}},
+		}}
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "classes.jsonl"), rows); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "invalid identity/layout") {
+			t.Fatalf("invalid class layout error = %v", err)
+		}
+	})
+
+	t.Run("invalid-class-slot-semantics", func(t *testing.T) {
+		dir := makeBase(t)
+		if err := os.WriteFile(filepath.Join(dir, "functions.jsonl"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rows := []strutil.FlutterMetaJSONClass{{
+			ClassName:    "BadSlot",
+			ClassID:      42,
+			InstanceSize: 16,
+			Fields: []strutil.FlutterMetaField{{
+				Name:        "type_arguments_field",
+				ByteOffset:  8,
+				IsReference: false,
+				SlotType:    "type_arguments_field",
+			}},
+		}}
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "classes.jsonl"), rows); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "type_arguments_field as non-reference") {
+			t.Fatalf("invalid class slot semantics error = %v", err)
+		}
+	})
 }
 
 func TestPipelineDiagnosticsRemainVisibleBoundedAndSanitizedInQuietMode(t *testing.T) {

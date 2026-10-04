@@ -18,7 +18,7 @@ type TagStyle int
 const (
 	// TagStyleCidShift1 is the v2.14+ / early v3.x format:
 	//   Write<uint64_t>((cid << 1) | canonical)
-	// Used in Dart 2.14.0 through 3.2.5.
+	// Used in the supported profiles from Dart 2.14.0 through 3.3.0.
 	TagStyleCidShift1 TagStyle = iota
 
 	// TagStyleObjectHeader is the v3.4.3+ format:
@@ -51,10 +51,15 @@ const (
 type BuildMode int
 
 const (
+	// BuildUnknown means the snapshot feature string did not prove one of the
+	// three SDK-defined build modes. It must never inherit PRODUCT semantics:
+	// PRODUCT changes the serialized Code shape as well as VM offset tables.
+	BuildUnknown BuildMode = iota
+
 	// BuildProduct is defined(PRODUCT): the mode every shipped release APK
 	// uses, and the only mode this tool fully supports. THR offsets come from
 	// the defined(PRODUCT) blocks of runtime_offsets_extracted.h.
-	BuildProduct BuildMode = iota
+	BuildProduct
 
 	// BuildRelease is the non-PRODUCT, non-DEBUG mode -- what a Flutter
 	// profile build ships. Uses the !defined(PRODUCT) offset blocks.
@@ -83,32 +88,81 @@ func (m BuildMode) String() string {
 // should branch on this rather than on individual offset tables.
 func (m BuildMode) IsProduct() bool { return m == BuildProduct }
 
+// SnapshotSymbolLayout identifies the mutually-exclusive AOT export layouts.
+// SDK @3.12.2 runtime/include/dart_api.h exports separate VM/isolate data and
+// instructions symbols; @3.13.0 exports one data/text pair.
+type SnapshotSymbolLayout uint8
+
+const (
+	SnapshotSymbolsUnknown SnapshotSymbolLayout = iota
+	SnapshotSymbolsLegacy
+	SnapshotSymbolsUnified
+)
+
+// CompressionFeatureStyle records how Dart::FeaturesString encodes pointer
+// compression for this format family. Dart 2.10/2.12 have no compressed-pointer
+// build dimension at all; 2.13-2.14 write only the positive token "compressed";
+// 2.15+ write exactly one of "compressed-pointers" and
+// "no-compressed-pointers". Treating those eras as interchangeable silently
+// chooses the wrong object layout.
+type CompressionFeatureStyle uint8
+
+const (
+	CompressionFeatureUnknown CompressionFeatureStyle = iota
+	CompressionFeatureFixedUncompressed
+	CompressionFeatureLegacyPositiveOnly
+	CompressionFeatureExplicit
+)
+
+// InstructionsImageLayout records the versioned instructions-image header.
+// Dart 2.10's second Image word is a BSS offset and the InstructionsSection
+// starts at Image::kHeaderSize. Dart 2.12+ stores an explicit section offset;
+// its section header is 40 bytes through 3.4 and 64 bytes from 3.5 onward.
+type InstructionsImageLayout uint8
+
+const (
+	InstructionsImageUnknown InstructionsImageLayout = iota
+	InstructionsImageLegacy210
+	InstructionsImageSection40
+	InstructionsImageSection64
+)
+
 // VersionProfile holds format parameters that differ across Dart SDK versions.
 type VersionProfile struct {
-	DartVersion             string   // e.g. "2.17.6", "3.10.7", "" if unknown
-	Supported               bool     // true if full parsing is available (CID table + format flags)
-	HeaderFields            int      // clustered snapshot header field count (5 or 6)
-	Tags                    TagStyle // how cluster tags are encoded
-	CIDs                    *CIDTable
-	CompressedPointers      bool // true if snapshot uses compressed pointers (from features string)
-	FillRefUnsigned         bool // ≤2.17: ReadRef() = ReadUnsigned(); Function has packed_fields
-	CodeIndexOneBased       bool // ≥2.16: Function.code_index is a 1-based InstructionsTable slot (0=LazyCompile stub). ≤2.15: the serialized scalar is an absolute snapshot Code ref ID.
-	PreV32Format            bool // ≤3.1: PatchClass has 3 refs; ObjectPool uses v2 type bits
-	HasTypeParamClassId     bool // ≤3.0: TypeParameter has parameterized_class_id scalar
-	TypeParamByteScalars    bool // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>
-	OldTypeScalars          bool // ≤2.18: Type fill has type_class_id_(unsigned)+combined(uint8) instead of flags(unsigned)
-	TopLevelCid16           bool // ≤2.18: kTopLevelCidOffset = 1<<16 (vs 1<<20 in ≥2.19)
-	OldPoolFormat           bool // ≤3.2: ObjectPool uses 7-bit TypeBits (no SnapshotBehavior)
-	PoolTypeSwapped         bool // ≥3.2: ObjectPool kImmediate=0,kTaggedObject=1 (was swapped in 3.2.0)
-	OldStringFormat         bool // ≤2.14: separate OneByteString/TwoByteString clusters with plain length (no <<1|flag)
-	SplitCanonical          bool // 2.12-2.13: header has separate num_canonical_clusters + num_clusters
-	NoCanonicalSetData      bool // ≤2.12: canonical set rebuilt in-memory post-load, not written to alloc stream (2.13 added CanonicalSetDeserializationCluster/BuildCanonicalSetFromLayout)
-	StringRODataPerSubclass bool // 2.12: OneByteString/TwoByteString clusters each carry their own ROData deltas directly (no abstract kStringCid cluster combining both — that was added in 2.13's NewClusterForClass dispatch)
-	PreCanonicalSplit       bool // ≤2.10: no canonical/non-canonical distinction at all (single cluster loop, no canonical bit)
-	ClassNumRefs            int  // Class pointer field count override. 0 = default (13). v2.10=16, v2.13=15.
-	ClassHasTokenPos        bool // Class fill includes ReadTokenPosition(token_pos) + ReadTokenPosition(end_token_pos)
-	FuncNumRefs             int  // Function pointer field count override. 0 = default (4). v2.10=7, v2.13=5.
-	TypeNumRefs             int  // Type fill ref count override. 0 = default (3). v2.13=4.
+	DartVersion                     string   // e.g. "2.17.6", "3.10.7", "" if unknown
+	Supported                       bool     // true if full parsing is available (CID table + format flags)
+	HeaderFields                    int      // clustered snapshot header field count (5 or 6)
+	Tags                            TagStyle // how cluster tags are encoded
+	CIDs                            *CIDTable
+	SnapshotSymbols                 SnapshotSymbolLayout
+	CompressionFeatures             CompressionFeatureStyle
+	InstructionsImage               InstructionsImageLayout
+	FullAOTKind                     SnapshotKind // exact enum value written into AOT snapshot headers
+	DataImageAlignment              int64        // Snapshot::DataImage RoundUp alignment on 64-bit AOT
+	ImageHeaderSize                 uint64       // exact Image::kHeaderSize in bytes
+	ClassIdTagPos                   int          // exact bit position of ClassIdTag in object header tags
+	ClassIdTagSize                  int          // exact width of ClassIdTag in object header tags
+	RootsHasInitialFieldTable       bool         // Program roots serialize initial_field_table
+	RootsHasSharedInitialFieldTable bool         // Program roots serialize shared_initial_field_table
+	CompressedPointers              bool         // true if snapshot uses compressed pointers (from features string)
+	FillRefUnsigned                 bool         // ≤2.17: ReadRef() = ReadUnsigned(); Function has packed_fields
+	CodeIndexOneBased               bool         // ≥2.16: Function.code_index is a 1-based InstructionsTable slot (0=LazyCompile stub). ≤2.15: the serialized scalar is an absolute snapshot Code ref ID.
+	PreV32Format                    bool         // ≤3.1: PatchClass has 3 refs; ObjectPool uses v2 type bits
+	HasTypeParamClassId             bool         // ≤3.0: TypeParameter has parameterized_class_id scalar
+	TypeParamByteScalars            bool         // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>
+	OldTypeScalars                  bool         // ≤2.18: Type fill has type_class_id_(unsigned)+combined(uint8) instead of flags(unsigned)
+	TopLevelCid16                   bool         // ≤2.18: kTopLevelCidOffset = 1<<16 (vs 1<<20 in ≥2.19)
+	OldPoolFormat                   bool         // ≤3.2: ObjectPool uses 7-bit TypeBits (no SnapshotBehavior)
+	PoolTypeSwapped                 bool         // ≥3.2: ObjectPool kImmediate=0,kTaggedObject=1 (was swapped in 3.2.0)
+	OldStringFormat                 bool         // ≤2.14: separate OneByteString/TwoByteString clusters with plain length (no <<1|flag)
+	SplitCanonical                  bool         // 2.12-2.13: header has separate num_canonical_clusters + num_clusters
+	NoCanonicalSetData              bool         // ≤2.12: canonical set rebuilt in-memory post-load, not written to alloc stream (2.13 added CanonicalSetDeserializationCluster/BuildCanonicalSetFromLayout)
+	StringRODataPerSubclass         bool         // 2.12: OneByteString/TwoByteString clusters each carry their own ROData deltas directly (no abstract kStringCid cluster combining both — that was added in 2.13's NewClusterForClass dispatch)
+	PreCanonicalSplit               bool         // ≤2.10: no canonical/non-canonical distinction at all (single cluster loop, no canonical bit)
+	ClassNumRefs                    int          // Class pointer field count override. 0 = default (13). v2.10=16, v2.13=15.
+	ClassHasTokenPos                bool         // Class fill includes ReadTokenPosition(token_pos) + ReadTokenPosition(end_token_pos)
+	FuncNumRefs                     int          // Function pointer field count override. 0 = default (4). v2.10=7, v2.13=5.
+	TypeNumRefs                     int          // Type fill ref count override. 0 = default (3). v2.13=4.
 	// TypeClassIdIsRef marks the era where UntaggedType.type_class_id is a
 	// COMPRESSED_POINTER_FIELD(SmiPtr, ...) inside the visited range rather
 	// than a scalar written after it. That is **v2.10 through v2.14**.
@@ -129,8 +183,8 @@ type VersionProfile struct {
 	FuncTypeOldScalars bool // FunctionType v2.12-v2.13: 2 scalars (uint8+uint32) rather than the later 3-scalar layout.
 
 	// BuildMode records the build configuration detected from the features
-	// string. Defaults to BuildProduct, which is what every shipped release
-	// APK is, and is the ONLY mode this tool supports end to end.
+	// string. Its zero value is deliberately BuildUnknown; unreadable or malformed
+	// feature evidence must never acquire PRODUCT wire semantics by default.
 	//
 	// A non-PRODUCT snapshot differs in at least two ways, and the second one
 	// is fatal, so do not read a non-zero BuildMode as "supported":
@@ -404,8 +458,18 @@ type CIDTable struct {
 	NumPredefinedCids int
 }
 
-// Known snapshot hashes mapped to Dart SDK versions.
-// Sources: blutter precompiled SDKs + reFlutter enginehash.csv.
+// Known snapshot compatibility hashes mapped to verified parser profiles.
+//
+// This is deliberately not an exact SDK-version identity table: Dart derives
+// SnapshotString from snapshot-format source files, so multiple patch/dev
+// releases can legitimately share one parser shape while carrying distinct
+// hashes. Each target value names the exact profile whose CID/root/fill/image
+// dimensions have been verified for that compatibility family.
+//
+// Canonical hashes for every supported exact local tag were independently
+// re-derived with that tag's tools/make_version.py VM_SNAPSHOT_FILES algorithm.
+// Extra hashes are retained only where a concrete Flutter/Dart build is named;
+// speculative "approximate"/"likely" mappings are not parser evidence.
 var knownHashes = map[string]string{
 	// Dart 2.17.x (Flutter 2.17.0 stable + betas)
 	"1441d6b13b8623fa7fbf61433abebd31": "2.17.6", // Flutter 2.17.0.stable
@@ -413,7 +477,6 @@ var knownHashes = map[string]string{
 	"ded6ef11c73fdc638d6ff6d3ad22a67b": "2.17.6", // Flutter 2.17.0-69.2.beta
 	// Dart 3.0.x (Flutter 3.10.x)
 	"90b56a561f70cd55e972cb49b79b3d8b": "3.0.5", // Flutter 3.10.4
-	"aa64af18e7d086041ac127cc4bc50c5e": "3.0.5", // Flutter 3.10.0 (approximate)
 	// Dart 3.1.x (Flutter 3.13.x)
 	"7dbbeeb8ef7b91338640dca3927636de": "3.1.0", // Flutter 3.13.9
 	// Dart 3.2.x (Flutter 3.16.x)
@@ -425,7 +488,6 @@ var knownHashes = map[string]string{
 	// Dart 3.5.x (Flutter 3.24.x)
 	"80a49c7111088100a233b2ae788e1f48": "3.5.0", // Flutter 3.24.0
 	"cda356e9bae476c70de33809fd92e009": "3.5.0", // Dart 3.5.1 (from blutter SDK v3.5.1/runtime/vm/version.cc)
-	"2858c2c0920495f00b9bce9edf6a8cd9": "3.6.2", // CIDs match v3.6.2 (Mint=61, String=93), likely Dart 3.6.0-dev or 3.5.x+1
 	// Dart 3.6.x (Flutter 3.27.x)
 	"f956f595844a2f845a55707faaaa51e4": "3.6.2", // Flutter 3.27.1
 	// Dart 3.7.x (Flutter 3.29.x)
@@ -1058,123 +1120,145 @@ var versionProfiles = map[string]*VersionProfile{
 	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, RootsPrefixRefCount: 1518, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
 }
 
-// DetectVersion returns a VersionProfile for the given snapshot hash.
-// For supported versions, returns a full profile with Supported=true.
-// For known but unsupported versions (e.g. Dart 2.x without CID tables),
-// returns a minimal profile with Supported=false.
-// For completely unknown hashes, returns a v3.9.2-shaped PLACEHOLDER with
-// DartVersion="" and Supported=false, which callers are expected to refine
-// via ProbeTagStyle (see below).
-func DetectVersion(hash string) *VersionProfile {
-	version := knownHashes[hash]
-	if version == "" {
-		// Unknown hash. Return a v3.9.2-shaped placeholder with an empty
-		// DartVersion so the caller can tell it apart from a real match.
-		//
-		// This deliberately keeps CIDs/HeaderFields/Tags POPULATED. An
-		// earlier revision returned a bare &VersionProfile{Supported:false}
-		// here on the reasoning that the v3.9.2 CID table is wrong for a 2.x
-		// snapshot. That reasoning is right, but a zero-valued profile is
-		// strictly worse than a wrong-but-valid one:
-		//
-		//   - CIDs==nil crashes callers that read a CID field with no nil
-		//     check. cmd/aotopsy/clusters.go:109 is one: it reaches
-		//     DetectVersion("").CIDs exactly when info.Version is nil (no VM
-		//     header, so the !Supported halt above it does not fire) and
-		//     cidNameFromTable then dereferences ct.Class.
-		//   - HeaderFields==0 makes ScanClusters read the wrong number of
-		//     snapshot header words, so a nil profile mis-parses the header
-		//     rather than merely mis-labelling CIDs.
-		//
-		// Supported stays false, unlike the pre-Session-2 code which left the
-		// copied 3.9.2 value of true. That is the intended behaviour change
-		// from the gap-analysis row: an unknown hash now halts rather than
-		// silently analysing with a possibly-wrong CID table. It only halts
-		// when the probe below cannot run -- a successful ProbeTagStyle
-		// replaces this whole profile with a real one.
-		//
-		// The correct place to fix a 2.x mismatch is ProbeTagStyle, which
-		// probes the actual first-cluster tag and swaps in a real profile.
-		// Callers that only have a hash (no snapshot bytes) get a
-		// best-effort table plus Supported=false as the signal to not trust
-		// version-specific behaviour.
-		p := *versionProfiles["3.9.2"]
-		p.DartVersion = ""
-		p.Supported = false
-		return &p
-	}
-	p, ok := versionProfiles[version]
-	if !ok {
-		// Known version but no profile — known but unsupported.
-		return &VersionProfile{
-			DartVersion: version,
-			Supported:   false,
-		}
-	}
-	// P5-4 (G-019/G-035): Return a shallow copy, not the shared pointer.
-	// Callers (e.g., snapshot.go:208) mutate CompressedPointers (a bool,
-	// copied by value) on the returned profile. Without copying, concurrent
-	// calls to DetectVersion with the same version would race on the shared
-	// profile's value fields.
-	//
-	// M-3 (oracle-audit): This is a SHALLOW copy — pointer fields like
-	// CIDs (*CIDTable) still point to the same shared object. Do NOT
-	// mutate CIDs (or any other pointer field) concurrently. If full
-	// thread-safety is needed in the future, deep-copy CIDs here.
-	pCopy := *p
-	return &pCopy
+// verifiedWireDimensions holds format facts that used to be inferred from
+// version comparisons at their consumers. Every supported release has an exact
+// row. This is intentionally a second table instead of broad ranges: the SDK
+// source at each supported tag is the contract, and adding a release without
+// verifying these dimensions must be visible in review.
+//
+// Sources verified locally under ~/dev/dartsdk-research/<tag>/:
+//   - runtime/include/dart_api.h: legacy vs unified exported snapshot symbols.
+//   - runtime/vm/snapshot.h: Snapshot::Kind and DataImage() alignment.
+//   - runtime/vm/dart.cc: pointer-compression feature spelling.
+//   - runtime/vm/image_snapshot.h/object.h/compiler/runtime_api.cc: image layout
+//     and InstructionsSection header size.
+//   - runtime/vm/app_snapshot.cc / clustered_snapshot.cc: roots field tables.
+type wireDimensions struct {
+	symbols                 SnapshotSymbolLayout
+	compression             CompressionFeatureStyle
+	instructionsImage       InstructionsImageLayout
+	fullAOTKind             SnapshotKind
+	dataImageAlignment      int64
+	imageHeaderSize         uint64
+	classIDTagPos           int
+	classIDTagSize          int
+	initialFieldTable       bool
+	sharedInitialFieldTable bool
 }
 
-// ProbeTagStyle reads the first cluster tag using both tag styles and returns
-// the profile that produces a valid CID. clusterStart is the byte offset
-// where clustered data begins. This is used for unknown snapshot hashes.
-//
-// The candidate list covers ALL combinations of tag style × header field
-// count that exist in supported Dart versions:
-//   - ObjectHeader (3.4+): 5 header fields
-//   - CidShift1 (2.14–3.3): 5 or 6 header fields
-//   - CidInt32 (2.10–2.13): 4 (pre-canonical-split), 5 (split-canonical), or 5 (non-split)
-//
-// Previously only 5 candidates were tried, missing 2.16 (HF=6, CidShift1)
-// and 2.18 (HF=5, CidShift1, non-split — different from 2.17.6's HF=6).
-// Now all 7 distinct combinations are probed.
-func ProbeTagStyle(data []byte, clusterStart int) *VersionProfile {
-	// Try each candidate profile and check first-cluster CID plausibility.
-	// Ordered by likelihood (newer versions are more common in the wild).
-	candidates := []*VersionProfile{
-		versionProfiles["3.9.2"],  // TagStyleObjectHeader, 5 fields (3.4+)
-		versionProfiles["3.2.5"],  // TagStyleCidShift1, 5 fields (2.18–3.3, non-split)
-		versionProfiles["2.17.6"], // TagStyleCidShift1, 6 fields (2.16–2.17)
-		versionProfiles["2.14.0"], // TagStyleCidShift1, 5 fields (2.14–2.15, FillRefUnsigned)
-		versionProfiles["2.13.0"], // TagStyleCidInt32, 5 fields (split canonical)
-		versionProfiles["2.12.0"], // TagStyleCidInt32, 5 fields (split canonical, NoCanonicalSetData)
-		versionProfiles["2.10.0"], // TagStyleCidInt32, 4 fields (pre-canonical-split)
-	}
+var verifiedWireDimensions = map[string]wireDimensions{
+	"2.10.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureFixedUncompressed, instructionsImage: InstructionsImageLegacy210, fullAOTKind: KindFullAOTV210, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.12.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureFixedUncompressed, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.13.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureLegacyPositiveOnly, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.14.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureLegacyPositiveOnly, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.15.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.16.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.17.6": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.18.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16, initialFieldTable: true},
+	"2.19.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.0.5":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.1.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.2.5":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.3.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.4.3":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.5.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.6.2":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.7.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.8.1":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.9.2":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.10.7": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.11.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.12.2": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.13.0": {symbols: SnapshotSymbolsUnified, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOTV313, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+}
 
-	for _, prof := range candidates {
-		cid := probeFirstCID(data, clusterStart, prof)
-		if cid > 0 && cid < 200 {
-			// This proves only a FORMAT FAMILY. Several supported releases share
-			// the same tag/header family while differing in CIDs, object-store
-			// counts and even roots/alloc/fill layouts. Never promote that weak
-			// probe into a trusted exact profile.
-			p := *prof
-			p.DartVersion = ""
-			p.Supported = false
-			return &p
+func init() {
+	if len(verifiedWireDimensions) != len(versionProfiles) {
+		panic(fmt.Sprintf("snapshot: wire-dimension rows=%d profiles=%d", len(verifiedWireDimensions), len(versionProfiles)))
+	}
+	for version, p := range versionProfiles {
+		d, ok := verifiedWireDimensions[version]
+		if !ok {
+			panic(fmt.Sprintf("snapshot: supported profile %s has no verified wire dimensions", version))
+		}
+		if p == nil || !p.Supported || p.CIDs == nil {
+			panic(fmt.Sprintf("snapshot: profile %s is incomplete", version))
+		}
+		if d.symbols == SnapshotSymbolsUnknown || d.compression == CompressionFeatureUnknown ||
+			d.instructionsImage == InstructionsImageUnknown || d.dataImageAlignment <= 0 || d.imageHeaderSize == 0 ||
+			d.classIDTagPos <= 0 || d.classIDTagSize <= 0 ||
+			(d.fullAOTKind != KindFullAOT && d.fullAOTKind != KindFullAOTV210) ||
+			(d.sharedInitialFieldTable && !d.initialFieldTable) {
+			panic(fmt.Sprintf("snapshot: profile %s has invalid wire dimensions: %+v", version, d))
+		}
+		p.SnapshotSymbols = d.symbols
+		p.CompressionFeatures = d.compression
+		p.InstructionsImage = d.instructionsImage
+		p.FullAOTKind = d.fullAOTKind
+		p.DataImageAlignment = d.dataImageAlignment
+		p.ImageHeaderSize = d.imageHeaderSize
+		p.ClassIdTagPos = d.classIDTagPos
+		p.ClassIdTagSize = d.classIDTagSize
+		p.RootsHasInitialFieldTable = d.initialFieldTable
+		p.RootsHasSharedInitialFieldTable = d.sharedInitialFieldTable
+	}
+	for version := range verifiedWireDimensions {
+		if _, ok := versionProfiles[version]; !ok {
+			panic(fmt.Sprintf("snapshot: wire dimensions exist for unknown profile %s", version))
 		}
 	}
-	// Fallback to latest known (ObjectHeader, 5 fields) marked unsupported.
-	p := *versionProfiles["3.9.2"]
-	p.DartVersion = ""
-	p.Supported = false
-	return &p
+}
+
+// DetectVersion returns the parser profile associated with a known snapshot
+// compatibility hash. Unknown hashes return nil. A compatibility-family probe
+// may still be useful for diagnostics, but it is never sufficient evidence to
+// select CIDs, roots, image layout, or other wire-format dimensions.
+func DetectVersion(hash string) *VersionProfile {
+	version, ok := knownHashes[hash]
+	if !ok {
+		return nil
+	}
+	return ProfileForVersion(version)
+}
+
+// FormatProbe is diagnostic-only evidence from the first clustered tag. It
+// intentionally contains no CID table or other parser dimensions: multiple SDK
+// releases share the same header/tag family while differing in roots, CIDs and
+// fill layouts.
+type FormatProbe struct {
+	HeaderFields int      `json:"header_fields"`
+	Tags         TagStyle `json:"tags"`
+	Family       string   `json:"family"`
+}
+
+// ProbeTagStyle identifies a coarse header/tag family for an unknown hash. A
+// successful result must never be promoted to VersionProfile.
+func ProbeTagStyle(data []byte, clusterStart int) *FormatProbe {
+	type candidate struct {
+		family string
+		prof   *VersionProfile
+	}
+	candidates := []candidate{
+		{"object-header/hf5", versionProfiles["3.9.2"]},
+		{"cid-shift1/hf5", versionProfiles["3.2.5"]},
+		{"cid-shift1/hf6", versionProfiles["2.17.6"]},
+		{"cid-int32/hf5", versionProfiles["2.13.0"]},
+		{"cid-int32/hf4", versionProfiles["2.10.0"]},
+	}
+
+	for _, c := range candidates {
+		cid := probeFirstCID(data, clusterStart, c.prof)
+		if c.prof.CIDs != nil && cid > 0 && cid < c.prof.CIDs.NumPredefinedCids {
+			return &FormatProbe{HeaderFields: c.prof.HeaderFields, Tags: c.prof.Tags, Family: c.family}
+		}
+	}
+	return nil
 }
 
 // probeFirstCID reads the header and first cluster tag, returning the CID.
 // Returns -1 on any error.
 func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
-	if clusterStart >= len(data)-20 {
+	if prof == nil || clusterStart < 0 || clusterStart >= len(data) {
 		return -1
 	}
 
@@ -1186,16 +1270,18 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 	// use the same terminal condition: byte > 127. They differ only in
 	// value decoding, which we don't need here.
 	for i := 0; i < prof.HeaderFields; i++ {
-		for pos < len(data) {
-			b := data[pos]
-			pos++
-			if b > 127 { // terminal byte
-				break
-			}
+		var ok bool
+		pos, ok = skipProbeVLE(data, pos)
+		if !ok {
+			return -1
 		}
 	}
 
-	if pos >= len(data)-4 {
+	// Cluster tags are VLEs, not fixed 4-byte words. A valid ObjectHeader CID
+	// such as 5 encodes as three bytes (00 20 c1), so requiring four remaining
+	// bytes rejects a complete minimal tag. The bounded decoders below perform
+	// their own exact EOF/width checks.
+	if pos >= len(data) {
 		return -1
 	}
 
@@ -1205,15 +1291,20 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// ReadTagged64: read until byte > 127, subtract 192.
 		var val int64
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 10 && pos < len(data) && shift < 64; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int64(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int64(b) << shift
 			shift += 7
+		}
+		if !terminated {
+			return -1
 		}
 		cid := int(val >> 1)
 		return cid
@@ -1222,15 +1313,20 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// ReadTagged32: read until byte > 127, subtract 192.
 		var val int32
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 5 && pos < len(data) && shift < 32; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int32(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int32(b) << shift
 			shift += 7
+		}
+		if !terminated {
+			return -1
 		}
 		cid := int((uint32(val) >> 12) & 0xFFFFF)
 		return cid
@@ -1239,19 +1335,35 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// Read<int32_t>(cid): signed VLE (endMarker=192), value = CID directly.
 		var val int64
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 5 && pos < len(data) && shift < 32; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int64(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int64(b) << shift
 			shift += 7
 		}
+		if !terminated {
+			return -1
+		}
 		return int(val)
 	}
 	return -1
+}
+
+func skipProbeVLE(data []byte, pos int) (int, bool) {
+	for n := 0; n < 10 && pos < len(data); n++ {
+		b := data[pos]
+		pos++
+		if b > 127 {
+			return pos, true
+		}
+	}
+	return pos, false
 }
 
 // SupportedVersions returns every Dart version this package can analyse
@@ -1326,7 +1438,42 @@ func (t TagStyle) String() string {
 // a snapshot hash, and it never invents a placeholder: callers asking "is this
 // version supported" need a straight no.
 func ProfileForVersion(version string) *VersionProfile {
-	return versionProfiles[version]
+	p := versionProfiles[version]
+	if p == nil {
+		return nil
+	}
+	// Profiles are templates. Extraction attaches per-binary feature state
+	// (CompressedPointers and BuildMode), so callers must never receive the
+	// mutable global row itself.
+	pCopy := *p
+	return &pCopy
+}
+
+// IsExactSupportedProfile reports whether profile is an unmodified static
+// parser profile for one of the repository's exact supported Dart versions.
+// Extraction is allowed to attach only the two per-binary feature dimensions
+// below; every other field is a version-specific wire/layout fact and must still
+// match the verified template exactly. This keeps internal semantic entry points
+// from accepting a caller-fabricated "Supported" profile for a future/unknown
+// Dart version, or a known version with guessed layout dimensions.
+func IsExactSupportedProfile(profile *VersionProfile) bool {
+	if profile == nil || !profile.Supported || profile.DartVersion == "" {
+		return false
+	}
+	template := versionProfiles[profile.DartVersion]
+	if template == nil || !template.Supported {
+		return false
+	}
+
+	got := *profile
+	want := *template
+	// These are the only VersionProfile fields populated from the binary rather
+	// than fixed by the exact SDK version.
+	got.CompressedPointers = false
+	want.CompressedPointers = false
+	got.BuildMode = BuildUnknown
+	want.BuildMode = BuildUnknown
+	return got == want
 }
 
 // VersionAtLeast reports whether a Dart version string is >= minimum,
@@ -1363,11 +1510,8 @@ func VersionAtLeast(version, minimum string) bool {
 // predicate, in one place, so a fourth cannot appear.
 func ClassIdTagLayout(dartVersion string) (pos, size int, ok bool) {
 	p := ProfileForVersion(dartVersion)
-	if p == nil || !p.Supported {
+	if p == nil || !p.Supported || p.ClassIdTagPos <= 0 || p.ClassIdTagSize <= 0 {
 		return 0, 0, false
 	}
-	if VersionAtLeast(dartVersion, "2.19.0") {
-		return 12, 20, true
-	}
-	return 16, 16, true
+	return p.ClassIdTagPos, p.ClassIdTagSize, true
 }

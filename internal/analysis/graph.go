@@ -65,10 +65,13 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 	}
 	defer func() { _ = ef.Close() }()
 
+	if info.Version == nil {
+		return fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
+	}
 	if info.Version != nil && info.Version.DartVersion != "" {
 		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 	}
-	if info.Version != nil && !info.Version.Supported {
+	if !info.Version.Supported {
 		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
 	}
 

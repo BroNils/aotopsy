@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/strutil"
 )
 
 // applyNamingPass replaces raw ABI register tokens that leaked through
@@ -42,16 +43,9 @@ func cleanCalleeName(name string) string {
 	if name == "" {
 		return name
 	}
-	// Strip library hash: ClassName@123456.method -> ClassName.method or ClassName@123456 -> ClassName
-	if atIdx := strings.Index(name, "@"); atIdx >= 0 {
-		rest := name[atIdx+1:]
-		end := strings.IndexAny(rest, "._ \t")
-		if end >= 0 {
-			name = name[:atIdx] + rest[end:]
-		} else {
-			name = name[:atIdx]
-		}
-	}
+	// Exact SDK private-key scrub: only @ followed by decimal digits is VM
+	// mangling. A nonnumeric '@' is not proven to be removable and is preserved.
+	name = strutil.ScrubDartPrivateKeys(name)
 	name = compactMixinOwner(name)
 	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
 	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {

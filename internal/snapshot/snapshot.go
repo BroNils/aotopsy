@@ -228,24 +228,27 @@ var snapshotMagic = [4]byte{0xf5, 0xf5, 0xdc, 0xdc}
 
 // Region describes one snapshot region extracted from libapp.so.
 type Region struct {
-	Name       string `json:"name"`
-	VA         uint64 `json:"va"`
-	FileOffset uint64 `json:"file_offset"`
-	SymSize    uint64 `json:"sym_size"`  // from ELF symbol; 0 if unknown
-	DataSize   uint64 `json:"data_size"` // from snapshot header; 0 if not parsed
-	SHA256     string `json:"sha256"`    // hex; empty if data not extracted
-	Data       []byte `json:"-"`         // raw bytes; not serialized
+	Name         string `json:"name"`
+	VA           uint64 `json:"va"`
+	FileOffset   uint64 `json:"file_offset"`
+	SymSize      uint64 `json:"sym_size"`                         // from ELF symbol; 0 if unknown
+	DataSize     uint64 `json:"data_size"`                        // materialized file-backed bytes
+	DeclaredSize uint64 `json:"declared_snapshot_size,omitempty"` // data-header size; data symbols only
+	SHA256       string `json:"sha256"`                           // hex; empty if data not extracted
+	Data         []byte `json:"-"`                                // raw bytes; not serialized
 }
 
 // SnapshotKind identifies the snapshot type.
 type SnapshotKind int64
 
 const (
-	// Pre-3.13.0 Snapshot::Kind (runtime/vm/snapshot.h)
-	KindFull    SnapshotKind = 0
-	KindCore    SnapshotKind = 1
-	KindFullJIT SnapshotKind = 2
-	KindFullAOT SnapshotKind = 3
+	// Dart 2.12.0 through 3.12.x Snapshot::Kind (runtime/vm/snapshot.h).
+	// Dart 2.10 predates kFullCore, so kFullAOT is still ordinal 2 there.
+	KindFull        SnapshotKind = 0
+	KindCore        SnapshotKind = 1
+	KindFullJIT     SnapshotKind = 2
+	KindFullAOT     SnapshotKind = 3
+	KindFullAOTV210 SnapshotKind = 2
 
 	// Dart 3.13.0+ Snapshot::Kind (kFullCore and kNone removed)
 	// 0=kFull, 1=kFullJIT, 2=kFullAOT, 3=kModule
@@ -259,8 +262,8 @@ func (k SnapshotKind) String() string {
 		return "Full"
 	case KindCore:
 		return "FullCore"
-	case KindFullJIT: // Also FullAOT on 3.13.0+
-		return "FullJIT/FullAOT(v3.13+)"
+	case KindFullJIT: // Also FullAOT on Dart 2.10 and 3.13+.
+		return "FullJIT/FullAOT(v2.10/v3.13+)"
 	case KindFullAOT: // Also Module on 3.13.0+
 		return "FullAOT/Module(v3.13+)"
 	default:
@@ -273,7 +276,7 @@ func (k SnapshotKind) String() string {
 //
 //	+0x00: magic   int32  (0xdcdcf5f5)
 //	+0x04: length  int64  (excludes magic; total = stored + 4)
-//	+0x0c: kind    int64  (0=Full, 1=Core, 2=FullJIT, 3=FullAOT)
+//	+0x0c: kind    int64  (versioned Snapshot::Kind enum; validate via VersionProfile)
 //	+0x14: version hash (32 ASCII hex chars)
 //	+0x34: features (null-terminated string)
 type Header struct {
@@ -319,17 +322,58 @@ func hasFeature(features, name string) bool {
 //
 // Split out of Extract so it is unit-testable: see
 // TestBuildModeFromFeatures, which pins the exact token set Dart emits.
-// Unrecognised or empty input keeps the BuildProduct default.
+// Missing, contradictory, or unrecognised input is BuildUnknown: PRODUCT is a
+// wire-format fact and must never be inferred from popularity.
 func buildModeFromFeatures(features string) BuildMode {
-	switch {
-	case hasFeature(features, "product"):
-		return BuildProduct
-	case hasFeature(features, "release"):
-		return BuildRelease
-	case hasFeature(features, "debug"):
-		return BuildDebug
+	tokens := strings.Split(features, " ")
+	if len(tokens) == 0 {
+		return BuildUnknown
 	}
-	return BuildProduct
+	var mode BuildMode
+	switch tokens[0] {
+	case "product":
+		mode = BuildProduct
+	case "release":
+		mode = BuildRelease
+	case "debug":
+		mode = BuildDebug
+	default:
+		return BuildUnknown
+	}
+	// Dart::FeaturesString writes the build token exactly once, first. A second
+	// mode token later in the string is contradictory evidence, not another flag.
+	for _, token := range tokens[1:] {
+		if token == "product" || token == "release" || token == "debug" {
+			return BuildUnknown
+		}
+	}
+	return mode
+}
+
+func compressedPointersFromFeatures(style CompressionFeatureStyle, features string) (bool, error) {
+	switch style {
+	case CompressionFeatureFixedUncompressed:
+		if hasFeature(features, "compressed") || hasFeature(features, "compressed-pointers") || hasFeature(features, "no-compressed-pointers") {
+			return false, fmt.Errorf("compression token present before compressed-pointer build support")
+		}
+		return false, nil
+	case CompressionFeatureLegacyPositiveOnly:
+		// SDK <=2.14 emits only "compressed" under DART_COMPRESSED_POINTERS.
+		// Absence is therefore the old uncompressed encoding.
+		if hasFeature(features, "compressed-pointers") || hasFeature(features, "no-compressed-pointers") {
+			return false, fmt.Errorf("legacy compression feature vocabulary mixed with modern token")
+		}
+		return hasFeature(features, "compressed"), nil
+	case CompressionFeatureExplicit:
+		positive := hasFeature(features, "compressed-pointers")
+		negative := hasFeature(features, "no-compressed-pointers")
+		if positive == negative {
+			return false, fmt.Errorf("expected exactly one of compressed-pointers/no-compressed-pointers")
+		}
+		return positive, nil
+	default:
+		return false, fmt.Errorf("unverified compression feature vocabulary")
+	}
 }
 
 // Info aggregates all extracted snapshot information.
@@ -342,6 +386,7 @@ type Info struct {
 	VmHeader            *Header         `json:"vm_header,omitempty"`
 	IsolateHeader       *Header         `json:"isolate_header,omitempty"`
 	Version             *VersionProfile `json:"version,omitempty"`
+	FormatProbe         *FormatProbe    `json:"format_probe,omitempty"`
 	Diags               []dartfmt.Diag  `json:"diagnostics,omitempty"`
 }
 
@@ -380,9 +425,8 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	const maxSnapshotRegionBytes = uint64(256 << 20)
 	const maxSnapshotAggregateBytes = uint64(512 << 20)
 	type loadedRegion struct {
+		name      string
 		off, size uint64
-		data      []byte
-		hash      string
 	}
 	var loaded []loadedRegion
 	var aggregateBytes uint64
@@ -429,15 +473,14 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 		}
 		region.FileOffset = off
 
-		// Read region data. Use symbol size if available, else cap at a reasonable max.
+		// Read region data. A non-zero ELF symbol size is authoritative. A zero-size
+		// snapshot symbol is resolved from the snapshot/image wire format itself;
+		// never retain an arbitrary PT_LOAD remainder as if it were one region.
 		readSize := size
 		if readSize == 0 {
-			// For instruction regions, symbol size is often 0. We'll read a
-			// capped amount; the actual size comes from header parsing or
-			// region boundary analysis later.
-			readSize, err = capRegionSize(ef, va)
+			readSize, err = zeroSizeSnapshotRegionSize(ef, t, resolved)
 			if err != nil {
-				return nil, fmt.Errorf("snapshot: bound zero-size symbol %s: %w", t.name, err)
+				return nil, fmt.Errorf("snapshot: size zero-size symbol %s: %w", t.name, err)
 			}
 		}
 		if readSize > 0 {
@@ -445,24 +488,18 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 				return nil, fmt.Errorf("snapshot: symbol %s size 0x%x exceeds per-region limit 0x%x", t.name, readSize, maxSnapshotRegionBytes)
 			}
 
-			// Exact aliases share one backing slice. Partial overlaps are not a
-			// valid way to describe independent snapshot regions and previously
-			// let a tiny ELF retain the same bytes several times.
-			reused := false
+			// Dart's ImageWriter gives each logical snapshot region its own section
+			// symbol/label (legacy VM vs isolate data/text, or unified data vs text).
+			// Therefore exact aliases are just as malformed as partial overlaps:
+			// accepting one would let two identities/images claim the same bytes and
+			// would also evade the aggregate materialization budget.
 			for _, lr := range loaded {
 				if off == lr.off && readSize == lr.size {
-					region.Data = lr.data
-					region.DataSize = uint64(len(lr.data))
-					region.SHA256 = lr.hash
-					reused = true
-					break
+					return nil, fmt.Errorf("snapshot: regions %s and %s alias the same backing range", lr.name, t.name)
 				}
 				if overlaps(off, readSize, lr.off, lr.size) {
-					return nil, fmt.Errorf("snapshot: symbol %s partially overlaps another snapshot region", t.name)
+					return nil, fmt.Errorf("snapshot: regions %s and %s overlap", lr.name, t.name)
 				}
-			}
-			if reused {
-				continue
 			}
 			if aggregateBytes > maxSnapshotAggregateBytes-readSize {
 				return nil, fmt.Errorf("snapshot: aggregate region budget exceeds 0x%x bytes", maxSnapshotAggregateBytes)
@@ -480,13 +517,15 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 				h := sha256.Sum256(data)
 				region.SHA256 = hex.EncodeToString(h[:])
 				aggregateBytes += readSize
-				loaded = append(loaded, loadedRegion{off: off, size: readSize, data: data, hash: region.SHA256})
+				loaded = append(loaded, loadedRegion{name: t.name, off: off, size: readSize})
 			}
 		}
 	}
 
-	// Parse headers from snapshot data regions.
-	if len(info.VmData.Data) >= 64 {
+	// Parse headers from snapshot data regions. The serialized minimum is 0x35,
+	// not 64; refusing a valid short header here made the extractor and
+	// parseHeader disagree about the wire minimum.
+	if len(info.VmData.Data) >= headerMinSize {
 		hdr, err := parseHeader(info.VmData.Data)
 		if err != nil {
 			if opts.Mode == dartfmt.ModeStrict {
@@ -495,9 +534,10 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 			diags.Add(info.VmData.VA, dartfmt.DiagInvalid, fmt.Sprintf("vm header: %v", err))
 		} else {
 			info.VmHeader = hdr
+			info.VmData.DeclaredSize = uint64(hdr.TotalSize)
 		}
 	}
-	if len(info.IsolateData.Data) >= 64 {
+	if len(info.IsolateData.Data) >= headerMinSize {
 		hdr, err := parseHeader(info.IsolateData.Data)
 		if err != nil {
 			if opts.Mode == dartfmt.ModeStrict {
@@ -506,6 +546,7 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 			diags.Add(info.IsolateData.VA, dartfmt.DiagInvalid, fmt.Sprintf("isolate header: %v", err))
 		} else {
 			info.IsolateHeader = hdr
+			info.IsolateData.DeclaredSize = uint64(hdr.TotalSize)
 		}
 	}
 
@@ -536,57 +577,156 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 	}
 	if snapshotHash != "" {
 		info.Version = DetectVersion(snapshotHash)
-
-		// For unknown hashes, probe the data to determine tag style.
-		if info.Version != nil && info.Version.DartVersion == "" && hashRegion.Data != nil {
+		// An unknown compatibility hash may still be classified into a coarse
+		// header/tag family for diagnostics. It must not become a parser profile.
+		if info.Version == nil && hashRegion.Data != nil {
 			if cs, err := FindClusterDataStart(hashRegion.Data); err == nil {
-				info.Version = ProbeTagStyle(hashRegion.Data, cs)
+				info.FormatProbe = ProbeTagStyle(hashRegion.Data, cs)
 			}
+			msg := fmt.Sprintf("unknown snapshot compatibility hash %s; refusing version-specific parse", snapshotHash)
+			if info.FormatProbe != nil {
+				msg += fmt.Sprintf(" (coarse family %s)", info.FormatProbe.Family)
+			}
+			diags.Add(0, dartfmt.DiagInvalid, msg)
 		}
 	}
 
-	// Propagate compressed pointers flag from features to version profile.
-	// Also detect build mode (PRODUCT vs Debug/Profile) from features.
+	// Validate dimensions that are carried outside the clustered stream itself.
+	// A known hash is not enough: a corrupt/fabricated binary can combine that
+	// hash with the wrong symbol era, Snapshot::Kind, or feature vocabulary.
 	if info.Version != nil {
-		if (info.IsolateHeader != nil && info.IsolateHeader.HasFeature("compressed-pointers")) ||
-			(info.VmHeader != nil && info.VmHeader.HasFeature("compressed-pointers")) {
-			info.Version.CompressedPointers = true
-		}
-
-		// Detect build mode from the features string. Dart::FeaturesString
-		// writes exactly one of "debug" / "product" / "release" as the FIRST
-		// token; there is no "profile" token (see BuildMode's doc comment).
-		//
-		// Absence of all three means we could not read a features string at
-		// all, in which case we keep the BuildProduct default rather than
-		// guessing debug -- a release APK is overwhelmingly the common case,
-		// and the previous "anything that isn't product is debug" fallback
-		// mislabelled both "release" builds and unreadable headers.
-		features := ""
-		if info.IsolateHeader != nil {
-			features = info.IsolateHeader.Features
-		} else if info.VmHeader != nil {
-			features = info.VmHeader.Features
-		}
-		info.Version.BuildMode = buildModeFromFeatures(features)
-
-		// Warn loudly on non-PRODUCT: this is not a "reduced fidelity" mode,
-		// it is unsupported. Code objects gain return_address_metadata_ and
-		// comments_ refs that CodeNumRefs does not model, which desyncs the
-		// fill stream at the first Code cluster.
-		if !info.Version.BuildMode.IsProduct() {
-			diags.Addf(0, dartfmt.DiagInvalid,
-				"non-PRODUCT build detected (features mode %q); only PRODUCT "+
-					"snapshots are supported -- Code fill has 2 extra refs in "+
-					"!defined(PRODUCT) builds and will desync",
-				info.Version.BuildMode.String())
-			// This is a wire-format incompatibility, not a fidelity downgrade.
-			// Mark the profile unsupported even in best-effort mode so callers
-			// cannot proceed into PRODUCT cluster layouts after seeing the
-			// diagnostic. Strict mode fails immediately with the same reason.
+		// Preserve the exact static profile before unsupported() can mark the live
+		// per-binary copy unsupported. Best-effort mode should still validate all
+		// remaining image dimensions against the canonical SDK profile after an
+		// earlier independent symbol/kind mismatch has already been diagnosed.
+		imageProfile := *info.Version
+		unsupported := func(format string, args ...any) error {
+			msg := fmt.Sprintf(format, args...)
+			diags.Add(0, dartfmt.DiagInvalid, msg)
 			info.Version.Supported = false
 			if opts.Mode == dartfmt.ModeStrict {
-				return nil, fmt.Errorf("snapshot: non-PRODUCT %s build is unsupported", info.Version.BuildMode.String())
+				return fmt.Errorf("snapshot: %s", msg)
+			}
+			return nil
+		}
+
+		wantUnified := info.Version.SnapshotSymbols == SnapshotSymbolsUnified
+		if info.Version.SnapshotSymbols == SnapshotSymbolsUnknown || wantUnified != info.UnifiedSnapshot {
+			if err := unsupported("snapshot symbol layout disagrees with format profile %s", info.Version.DartVersion); err != nil {
+				return nil, err
+			}
+		}
+
+		headers := []struct {
+			label string
+			hdr   *Header
+		}{
+			{"vm", info.VmHeader},
+			{"isolate", info.IsolateHeader},
+		}
+		for _, item := range headers {
+			if item.hdr == nil {
+				continue
+			}
+			if item.hdr.Kind != info.Version.FullAOTKind {
+				if err := unsupported("%s header kind %d is not FullAOT kind %d for format profile %s",
+					item.label, item.hdr.Kind, info.Version.FullAOTKind, info.Version.DartVersion); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// Validate image extents at the extraction boundary, not only when a
+		// downstream consumer happens to ask for code/ROData. This catches a
+		// known hash paired with a truncated or wrong-era Image before any
+		// cluster-derived offset can depend on it. Keep an immutable supported
+		// copy for validation because unsupported() deliberately flips the live
+		// profile after the first wire-format error in best-effort mode.
+		dataImages := []struct {
+			label  string
+			region Region
+			hdr    *Header
+		}{
+			{"vm", info.VmData, info.VmHeader},
+			{"isolate", info.IsolateData, info.IsolateHeader},
+		}
+		for _, item := range dataImages {
+			if item.hdr == nil || len(item.region.Data) == 0 {
+				continue
+			}
+			if err := validateDataImageRegion(item.region.Data, item.hdr, &imageProfile); err != nil {
+				if err2 := unsupported("%s data image is incompatible with format profile %s: %v",
+					item.label, info.Version.DartVersion, err); err2 != nil {
+					return nil, err2
+				}
+			}
+		}
+		instructionImages := []struct {
+			label  string
+			region Region
+		}{
+			{"vm", info.VmInstructions},
+			{"isolate", info.IsolateInstructions},
+		}
+		for _, item := range instructionImages {
+			if len(item.region.Data) == 0 {
+				continue
+			}
+			if _, _, _, err := CodeRegion(item.region.Data, &imageProfile); err != nil {
+				if err2 := unsupported("%s instructions image is incompatible with format profile %s: %v",
+					item.label, info.Version.DartVersion, err); err2 != nil {
+					return nil, err2
+				}
+			}
+		}
+
+		type featureState struct {
+			mode       BuildMode
+			compressed bool
+		}
+		var states []featureState
+		for _, item := range headers {
+			if item.hdr == nil {
+				continue
+			}
+			mode := buildModeFromFeatures(item.hdr.Features)
+			if mode == BuildUnknown {
+				if err := unsupported("%s features do not prove exactly one SDK build mode", item.label); err != nil {
+					return nil, err
+				}
+			}
+			compressed, err := compressedPointersFromFeatures(info.Version.CompressionFeatures, item.hdr.Features)
+			if err != nil {
+				if err2 := unsupported("%s compression features are incompatible with format profile %s: %v",
+					item.label, info.Version.DartVersion, err); err2 != nil {
+					return nil, err2
+				}
+			}
+			states = append(states, featureState{mode: mode, compressed: compressed})
+		}
+		if len(states) == 0 {
+			if err := unsupported("no valid snapshot features available for format profile %s", info.Version.DartVersion); err != nil {
+				return nil, err
+			}
+		} else {
+			info.Version.BuildMode = states[0].mode
+			info.Version.CompressedPointers = states[0].compressed
+			for _, st := range states[1:] {
+				if st != states[0] {
+					if err := unsupported("VM/isolate feature dimensions disagree for format profile %s", info.Version.DartVersion); err != nil {
+						return nil, err
+					}
+					break
+				}
+			}
+		}
+
+		// Non-PRODUCT is not a reduced-fidelity mode. Code objects gain extra
+		// refs and the PRODUCT cluster reader would desynchronise.
+		if !info.Version.BuildMode.IsProduct() {
+			if err := unsupported("non-PRODUCT %s build is unsupported; PRODUCT Code layout cannot be used",
+				info.Version.BuildMode.String()); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -614,35 +754,173 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 // 1024-byte bound would have had to land in both, and nothing would have
 // reported it if only one were updated.
 func FindClusterDataStart(data []byte) (int, error) {
-	const minHeader = 0x35 // magic + length + kind + hash
-	if len(data) < minHeader {
-		return 0, fmt.Errorf("snapshot: data too short (%d < %d)", len(data), minHeader)
-	}
-	// Features string starts at offset 0x34, null-terminated.
-	const featStart = 0x34
-	for i := featStart; i < len(data); i++ {
-		if data[i] == 0 {
-			return i + 1, nil // byte after null terminator
-		}
-		if i-featStart > 1024 {
-			return 0, fmt.Errorf("snapshot: features string too long (no null terminator within 1024 bytes)")
-		}
-	}
-	return 0, fmt.Errorf("snapshot: unterminated features string")
-}
-
-// capRegionSize computes a bounded read size for a region whose symbol has size
-// 0, using only the remaining bytes in its validated file-backed PT_LOAD.
-func capRegionSize(ef *elfx.File, va uint64) (uint64, error) {
-	const maxCap = 256 * 1024 * 1024 // 256 MiB hard cap
-	remaining, err := ef.FileBackedRemaining(va)
+	h, err := parseHeader(data)
 	if err != nil {
 		return 0, err
 	}
-	if remaining > maxCap {
-		remaining = maxCap
+	// parseHeader has already proved the terminator exists inside the declared
+	// snapshot length and inside the 1024-byte feature budget.
+	return featuresOffset + len(h.Features) + 1, nil
+}
+
+func nextSnapshotSymbolDelta(va uint64, resolved []resolvedSnapshotSymbol) (uint64, bool) {
+	var best uint64
+	found := false
+	for _, other := range resolved {
+		if other.va <= va {
+			continue
+		}
+		delta := other.va - va
+		if !found || delta < best {
+			best, found = delta, true
+		}
 	}
-	return remaining, nil
+	return best, found
+}
+
+func checkedAddUint64(a, b uint64) (uint64, bool) {
+	if b > math.MaxUint64-a {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func roundUpUint64(value, alignment uint64) (uint64, bool) {
+	if alignment == 0 || alignment&(alignment-1) != 0 {
+		return 0, false
+	}
+	mask := alignment - 1
+	if value > math.MaxUint64-mask {
+		return 0, false
+	}
+	return (value + mask) &^ mask, true
+}
+
+func isSnapshotDataSymbol(name string) bool {
+	return name == SymVmSnapshotData || name == SymIsolateSnapshotData || name == SymUnifiedSnapshotData
+}
+
+func isSnapshotInstructionsSymbol(name string) bool {
+	return name == SymVmSnapshotInstructions || name == SymIsolateSnapshotInstructions || name == SymUnifiedSnapshotText
+}
+
+func validateDataImageRegion(data []byte, hdr *Header, profile *VersionProfile) error {
+	if hdr == nil || hdr.TotalSize <= 0 {
+		return fmt.Errorf("valid snapshot header required")
+	}
+	if !IsExactSupportedProfile(profile) || profile.DataImageAlignment <= 0 || profile.ImageHeaderSize == 0 {
+		return fmt.Errorf("exact supported image profile required")
+	}
+	start, ok := roundUpUint64(uint64(hdr.TotalSize), uint64(profile.DataImageAlignment))
+	if !ok {
+		return fmt.Errorf("snapshot size %d cannot be aligned to %d", hdr.TotalSize, profile.DataImageAlignment)
+	}
+	if start > uint64(len(data)) || uint64(len(data))-start < 8 {
+		return fmt.Errorf("DataImage header at 0x%x exceeds region size 0x%x", start, len(data))
+	}
+	imageSize := binary.LittleEndian.Uint64(data[start : start+8])
+	if imageSize < profile.ImageHeaderSize {
+		return fmt.Errorf("DataImage size %d is smaller than verified Image header %d", imageSize, profile.ImageHeaderSize)
+	}
+	if imageSize > uint64(len(data))-start {
+		return fmt.Errorf("DataImage size 0x%x at 0x%x exceeds region size 0x%x", imageSize, start, len(data))
+	}
+	return nil
+}
+
+// zeroSizeSnapshotRegionSize derives an exact/bounded extent without treating
+// unrelated PT_LOAD bytes as snapshot data. Text images are self-sized by the
+// first Image word. Data regions contain the clustered snapshot followed by a
+// profile-aligned DataImage, whose first word is another exact ImageSize.
+//
+// For an unknown compatibility hash we deliberately refuse to invent the
+// alignment needed to locate DataImage. Such a region is only materializable
+// when the next snapshot symbol provides an unambiguous structural boundary;
+// semantic parsing will still halt because DetectVersion remains nil.
+func zeroSizeSnapshotRegionSize(ef *elfx.File, sym resolvedSnapshotSymbol, resolved []resolvedSnapshotSymbol) (uint64, error) {
+	if ef == nil {
+		return 0, fmt.Errorf("nil ELF")
+	}
+	remaining, err := ef.FileBackedRemaining(sym.va)
+	if err != nil {
+		return 0, err
+	}
+	limit := remaining
+	nextDelta, hasNext := nextSnapshotSymbolDelta(sym.va, resolved)
+	if hasNext && nextDelta < limit {
+		limit = nextDelta
+	}
+
+	if isSnapshotInstructionsSymbol(sym.name) {
+		if limit < imageHeaderSize {
+			return 0, fmt.Errorf("mapped/bounded extent %d is smaller than Image header %d", limit, imageHeaderSize)
+		}
+		prefix, err := ef.ReadBytesAtVA(sym.va, imageHeaderSize)
+		if err != nil {
+			return 0, err
+		}
+		imageSize := binary.LittleEndian.Uint64(prefix[:8])
+		if imageSize < imageHeaderSize {
+			return 0, fmt.Errorf("declared Image size %d is smaller than header %d", imageSize, imageHeaderSize)
+		}
+		if imageSize > limit {
+			return 0, fmt.Errorf("declared Image size %d exceeds bounded extent %d", imageSize, limit)
+		}
+		return imageSize, nil
+	}
+
+	if !isSnapshotDataSymbol(sym.name) {
+		return 0, fmt.Errorf("unrecognised snapshot region %q", sym.name)
+	}
+	const identityBytes = hashOffset + hashLen
+	if limit < identityBytes {
+		return 0, fmt.Errorf("bounded extent %d is smaller than identity header %d", limit, identityBytes)
+	}
+	prefix, err := ef.ReadBytesAtVA(sym.va, identityBytes)
+	if err != nil {
+		return 0, err
+	}
+	hash, err := parseIdentityHash(prefix, 0, limit)
+	if err != nil {
+		return 0, err
+	}
+	profile := DetectVersion(hash)
+	if profile == nil {
+		if hasNext {
+			return nextDelta, nil
+		}
+		return 0, fmt.Errorf("unknown snapshot hash %s has no verified DataImage alignment and no following snapshot-symbol boundary", hash)
+	}
+
+	clusteredSize := binary.LittleEndian.Uint64(prefix[4:12]) + 4 // parseIdentityHash validated overflow.
+	dataImageStart, ok := roundUpUint64(clusteredSize, uint64(profile.DataImageAlignment))
+	if !ok {
+		return 0, fmt.Errorf("clustered size %d cannot be aligned to %d", clusteredSize, profile.DataImageAlignment)
+	}
+	if dataImageStart > limit || limit-dataImageStart < 8 {
+		return 0, fmt.Errorf("DataImage header at 0x%x exceeds bounded extent 0x%x", dataImageStart, limit)
+	}
+	imageVA, ok := checkedAddUint64(sym.va, dataImageStart)
+	if !ok {
+		return 0, fmt.Errorf("DataImage virtual address overflows uint64")
+	}
+	imagePrefix, err := ef.ReadBytesAtVA(imageVA, 8)
+	if err != nil {
+		return 0, err
+	}
+	imageSize := binary.LittleEndian.Uint64(imagePrefix)
+	minImageSize := profile.ImageHeaderSize
+	if imageSize < minImageSize {
+		return 0, fmt.Errorf("DataImage size %d is smaller than verified Image header %d", imageSize, minImageSize)
+	}
+	extent, ok := checkedAddUint64(dataImageStart, imageSize)
+	if !ok {
+		return 0, fmt.Errorf("DataImage extent overflows uint64")
+	}
+	if extent > limit {
+		return 0, fmt.Errorf("DataImage extent 0x%x exceeds bounded region 0x%x", extent, limit)
+	}
+	return extent, nil
 }
 
 // Snapshot data header layout. SDK @2.10.0 runtime/vm/snapshot.h:105-112 and
@@ -695,20 +973,16 @@ func parseHeader(data []byte) (*Header, error) {
 	}
 	h.Kind = SnapshotKind(int64(rawKind))
 
-	// Offset 0x14: 32-char hex snapshot version hash.
-	if len(data) >= hashOffset+hashLen {
-		hashBytes := data[hashOffset : hashOffset+hashLen]
-		validHex := true
-		for _, b := range hashBytes {
-			if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
-				validHex = false
-				break
-			}
-		}
-		if validHex {
-			h.SnapshotHash = string(hashBytes)
+	// Offset 0x14: 32-char lowercase hex snapshot version hash. Identity-only
+	// parsing enforces the same invariant; full parsing must not silently turn a
+	// malformed hash into "unknown" and then continue with weaker evidence.
+	hashBytes := data[hashOffset : hashOffset+hashLen]
+	for _, b := range hashBytes {
+		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
+			return nil, fmt.Errorf("snapshot version hash is not 32 lowercase hex characters")
 		}
 	}
+	h.SnapshotHash = string(hashBytes)
 
 	// Offset 0x34: null-terminated features string.
 	declaredData := data[:int(total)]
@@ -724,7 +998,16 @@ func parseHeader(data []byte) (*Header, error) {
 			return nil, fmt.Errorf("snapshot features string is unterminated")
 		}
 		if featEnd > featuresOffset {
-			h.Features = string(declaredData[featuresOffset:featEnd])
+			featureBytes := declaredData[featuresOffset:featEnd]
+			for _, b := range featureBytes {
+				// Dart::FeaturesString is plain printable ASCII. Reject controls
+				// (especially CR/LF/tab) so malformed headers cannot become log
+				// injection while still satisfying build/compression token checks.
+				if b < 0x20 || b > 0x7e {
+					return nil, fmt.Errorf("snapshot features string contains non-printable byte 0x%02x", b)
+				}
+			}
+			h.Features = string(featureBytes)
 		}
 	}
 

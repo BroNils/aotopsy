@@ -465,9 +465,9 @@ func BuildSignalContent(
 	}
 	edgesByFunc := make(map[string]map[uint64][]disasm.CallEdgeRecord)
 	for _, er := range edgeRecords {
-		pc := strutil.ParseHexAddr(er.FromPC)
-		if pc == 0 {
-			continue
+		pc, err := strutil.ParseHexAddr(er.FromPC)
+		if err != nil {
+			return nil, fmt.Errorf("signal CFG: malformed call-edge PC %q for %q: %w", er.FromPC, er.FromFunc, err)
 		}
 		byPC := edgesByFunc[er.FromFunc]
 		if byPC == nil {
@@ -505,9 +505,9 @@ func BuildSignalContent(
 			return nil, fmt.Errorf("function bytes for %s are truncated: %d bytes", sf.Name, len(data))
 		}
 
-		baseAddr := strutil.ParseHexAddr(fr.PC)
-		if baseAddr == 0 {
-			continue
+		baseAddr, err := strutil.ParseHexAddr(fr.PC)
+		if err != nil {
+			return nil, fmt.Errorf("signal CFG: malformed function PC %q for %q: %w", fr.PC, fr.Name, err)
 		}
 
 		edgeByPC := edgesByFunc[sf.Name]

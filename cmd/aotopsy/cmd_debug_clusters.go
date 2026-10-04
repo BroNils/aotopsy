@@ -41,11 +41,14 @@ func cmdClusters(args []string) error {
 	}
 	defer func() { _ = ef.Close() }()
 
+	if info.Version == nil {
+		return fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
+	}
 	if info.Version != nil && info.Version.DartVersion != "" {
 		fmt.Printf("Dart SDK version: %s (header fields: %d, tag style: %d)\n",
 			info.Version.DartVersion, info.Version.HeaderFields, info.Version.Tags)
 	}
-	if info.Version != nil && !info.Version.Supported {
+	if !info.Version.Supported {
 		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
 	}
 
@@ -108,8 +111,6 @@ func cmdClusters(args []string) error {
 			var name string
 			if ct != nil {
 				name = cluster.CidNameV(c.CID, ct)
-			} else {
-				name = cluster.CidNameV(c.CID, snapshot.DetectVersion("").CIDs)
 			}
 			if name == "" {
 				name = fmt.Sprintf("CID_%d", c.CID)

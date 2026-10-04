@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/strutil"
 )
 
 // namedIndirectTarget maps well-known ABI registers to a readable alias,
@@ -20,7 +21,7 @@ func namedIndirectTarget(reg string, fir *FuncIR) string {
 	case fir.ArgRegAt(2):
 		return "cachedTarget"
 	}
-	return "indirectTarget_" + sanitizeTailCallName(reg)
+	return "indirectTarget_" + strutil.SanitizeDartIdent(reg)
 }
 
 // ArgRegAt returns the i'th calling-convention argument register name,
@@ -366,7 +367,11 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 	intent := resolveCallIntent("", selectorHint)
 	if intent != "" {
 		e.stats.SemanticIndirectCalls++
-		e.emit(indent, "final %s = %s(%s); // %s, indirect via: %s", tmpName, sanitizeCallName(selectorHint), argsText, intent, named)
+		callName := "call"
+		if selectorHint != "" {
+			callName = strutil.SanitizeDartIdent(selectorHint)
+		}
+		e.emit(indent, "final %s = %s(%s); // %s, indirect via: %s", tmpName, callName, argsText, intent, named)
 		return true
 	}
 	if selectorHint != "" {
@@ -401,13 +406,6 @@ func countArgs(argsText string) int {
 		}
 	}
 	return count
-}
-
-func sanitizeCallName(s string) string {
-	if s == "" {
-		return "call"
-	}
-	return safeFuncName(s)
 }
 
 // CallTargetsOf extracts every resolved direct-call target VA from a

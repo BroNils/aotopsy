@@ -8,7 +8,10 @@ import (
 )
 
 func TestParseInstructionsTableRejectsOffsetOverflow(t *testing.T) {
-	profile := &snapshot.VersionProfile{DartVersion: "3.12.2"}
+	profile := snapshot.ProfileForVersion("3.12.2")
+	if profile == nil {
+		t.Fatal("missing exact 3.12.2 profile")
+	}
 	hdr := &Header{InstructionTableDataOffset: math.MaxInt64}
 	isoHeader := &snapshot.Header{TotalSize: 64}
 	if _, err := ParseInstructionsTable(make([]byte, 128), hdr, profile, isoHeader); err == nil {
@@ -17,7 +20,10 @@ func TestParseInstructionsTableRejectsOffsetOverflow(t *testing.T) {
 }
 
 func TestParseInstructionsTableRejectsRoundUpOverflow(t *testing.T) {
-	profile := &snapshot.VersionProfile{DartVersion: "3.12.2"}
+	profile := snapshot.ProfileForVersion("3.12.2")
+	if profile == nil {
+		t.Fatal("missing exact 3.12.2 profile")
+	}
 	hdr := &Header{InstructionTableDataOffset: 1}
 	isoHeader := &snapshot.Header{TotalSize: math.MaxInt64}
 	if _, err := ParseInstructionsTable(make([]byte, 128), hdr, profile, isoHeader); err == nil {

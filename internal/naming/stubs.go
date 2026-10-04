@@ -5,6 +5,7 @@ package naming
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -34,6 +35,12 @@ import (
 func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]string {
 	debug := os.Getenv("AOTOPSY_DEBUG_VMSTUBS") != ""
 	out := make(map[uint64]string)
+	if info == nil || !snapshot.IsExactSupportedProfile(info.Version) {
+		if debug {
+			fmt.Fprintln(os.Stderr, "vmstubs: exact supported snapshot profile unavailable")
+		}
+		return out
+	}
 	names := vmtables.VMStubNamesInImageOrder(info.Version.DartVersion)
 	if names == nil || len(info.VmData.Data) == 0 || info.VmHeader == nil || len(info.VmInstructions.Data) == 0 {
 		if debug {
@@ -86,8 +93,20 @@ func BuildVMStubSymbols(info *snapshot.Info, opts dartfmt.Options) map[uint64]st
 	if debug {
 		fmt.Fprintf(os.Stderr, "vmstubs: codes=%d ranges=%d names=%d\n", len(result.Codes), len(ranges), len(names))
 	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen) //nolint:gosec // codeOff/payloadLen are offsets within one already-loaded snapshot payload, always well under 2^32
+	if codeOff > math.MaxUint32 || payloadLen > math.MaxUint32-codeOff {
+		if debug {
+			fmt.Fprintf(os.Stderr, "vmstubs: code extent overflows uint32: off=%d len=%d\n", codeOff, payloadLen)
+		}
+		return out
+	}
+	codeEndOffset := uint32(codeOff + payloadLen)
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
+	if codeOff > math.MaxUint64-info.VmInstructions.VA {
+		if debug {
+			fmt.Fprintf(os.Stderr, "vmstubs: code VA overflows uint64: base=0x%x off=0x%x\n", info.VmInstructions.VA, codeOff)
+		}
+		return out
+	}
 	codeVA := info.VmInstructions.VA + codeOff
 
 	// Zip names against ranges sorted by ADDRESS, not by Code-cluster index.

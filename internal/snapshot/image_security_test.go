@@ -65,6 +65,15 @@ func TestCodeRegionDoesNotDowngradeCorruptModernImageTo210(t *testing.T) {
 	}
 }
 
+func TestCodeRegionRejectsImageSmallerThanVerifiedImageHeader(t *testing.T) {
+	data := make([]byte, 64)
+	binary.LittleEndian.PutUint64(data[0:8], 32)
+	binary.LittleEndian.PutUint64(data[8:16], 16)
+	if _, _, _, err := CodeRegion(data, ProfileForVersion("3.9.2")); err == nil {
+		t.Fatal("modern image smaller than 64-byte Image header was accepted")
+	}
+}
+
 func TestCodeRegion210LegacyLayoutIsExplicit(t *testing.T) {
 	payload := []byte("12345678")
 	data := make([]byte, 32+len(payload))
@@ -91,18 +100,24 @@ func TestCodeRegion210RejectsTruncatedInstructionsSection(t *testing.T) {
 	}
 }
 
-func TestProbeTagStyleNeverPromotesUnknownHashToSupported(t *testing.T) {
+func TestProbeTagStyleReturnsDiagnosticFamilyOnly(t *testing.T) {
 	// Five one-byte VLE header fields followed by an ObjectHeader-style CID 5.
+	// ClassIdTag::encode(5) = 5<<12 = 0x5000; Dart's signed VLE encoding is
+	// low 7-bit groups 0x00, 0x20 and terminal 0xc1 (= 0xc0 + 1).
 	// The exact release is still ambiguous across the whole 3.4+ family.
-	data := []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xd0, 0x00, 0x80}
+	data := []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x20, 0xc1}
 	p := ProbeTagStyle(data, 0)
 	if p == nil {
-		t.Fatal("nil profile")
+		t.Fatal("nil format probe")
 	}
-	if p.Supported {
-		t.Fatalf("family-only probe promoted unknown release to supported: %+v", *p)
+	if p.Family != "object-header/hf5" || p.HeaderFields != 5 || p.Tags != TagStyleObjectHeader {
+		t.Fatalf("unexpected family probe: %+v", *p)
 	}
-	if p.DartVersion != "" {
-		t.Fatalf("probe invented exact Dart version %q", p.DartVersion)
+}
+
+func TestProbeTagStyleRejectsUnterminatedVLE(t *testing.T) {
+	data := make([]byte, 64)
+	if p := ProbeTagStyle(data, 0); p != nil {
+		t.Fatalf("unterminated VLE produced family probe: %+v", *p)
 	}
 }

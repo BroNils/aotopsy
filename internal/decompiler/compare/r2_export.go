@@ -48,8 +48,9 @@ func (r *R2Export) AddFunction(va uint64, name string) {
 	if name == "" {
 		return
 	}
-	// r2 flag names can't contain dots, @, or spaces.
-	r2Name := strutil.SanitizeR2FlagName(name)
+	// The canonical sanitizer follows r2's actual r_name_check grammar and
+	// binds the flag identity to both the raw semantic name and this VA.
+	r2Name := strutil.SanitizeR2FlagName(name, va)
 	if r2Name == "" {
 		return
 	}

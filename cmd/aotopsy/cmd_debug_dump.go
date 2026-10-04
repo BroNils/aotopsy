@@ -68,6 +68,12 @@ func cmdDump(args []string) error {
 	defer func() { _ = ef.Close() }()
 	isARM64 := ef.IsARM64()
 	logger := cli.NewLogger(os.Stderr, false)
+	if info.Version == nil {
+		return fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
+	}
+	if !info.Version.Supported {
+		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
+	}
 
 	// Write parser/debug snapshot metadata separately from pipeline provenance.
 	if err := output.WriteSnapshotInfoJSON(stageOutDir, info); err != nil {
@@ -111,10 +117,7 @@ func cmdDump(args []string) error {
 		if len(info.IsolateInstructions.Data) > 0 {
 			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
-				logger.Warn("could not parse isolate instructions image header: %v", err)
-				code = info.IsolateInstructions.Data
-				codeOff = 0
-				payloadLen = uint64(len(code))
+				return fmt.Errorf("parse isolate instructions image: %w", err)
 			}
 			codeVA := info.IsolateInstructions.VA + codeOff
 			logger.Printf("disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
@@ -133,9 +136,7 @@ func cmdDump(args []string) error {
 		if len(info.VmInstructions.Data) > 0 {
 			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
-				logger.Warn("could not parse VM instructions image header: %v", err)
-				code = info.VmInstructions.Data
-				codeOff = 0
+				return fmt.Errorf("parse VM instructions image: %w", err)
 			}
 			codeVA := info.VmInstructions.VA + codeOff
 			insts := disasm.Disassemble(code, disasm.Options{
@@ -151,10 +152,7 @@ func cmdDump(args []string) error {
 		if len(info.IsolateInstructions.Data) > 0 {
 			code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 			if err != nil {
-				logger.Warn("could not parse isolate instructions image header: %v", err)
-				code = info.IsolateInstructions.Data
-				codeOff = 0
-				payloadLen = uint64(len(code))
+				return fmt.Errorf("parse isolate instructions image: %w", err)
 			}
 			codeVA := info.IsolateInstructions.VA + codeOff
 			logger.Printf("disassembling isolate code (%d bytes, VA=0x%x, payload=%d)...\n",
@@ -169,9 +167,7 @@ func cmdDump(args []string) error {
 		if len(info.VmInstructions.Data) > 0 {
 			code, codeOff, _, err := snapshot.CodeRegion(info.VmInstructions.Data, info.Version)
 			if err != nil {
-				logger.Warn("could not parse VM instructions image header: %v", err)
-				code = info.VmInstructions.Data
-				codeOff = 0
+				return fmt.Errorf("parse VM instructions image: %w", err)
 			}
 			codeVA := info.VmInstructions.VA + codeOff
 			if err := os.MkdirAll(filepath.Join(stageOutDir, "asm"), 0o755); err != nil {

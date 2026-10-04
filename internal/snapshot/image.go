@@ -44,16 +44,23 @@ const (
 )
 
 // InstructionsSectionHeaderSize returns the exact serialized header size for a
-// supported Dart profile. Dart 3.5.0 raised the payload alignment to 32 bytes,
-// making the five 8-byte fields occupy a 64-byte header instead of 40 bytes.
+// supported Dart profile. The layout is a profile dimension rather than a
+// version comparison so a new compatibility family cannot silently inherit the
+// nearest known image format.
 func InstructionsSectionHeaderSize(profile *VersionProfile) (uint64, error) {
-	if profile == nil || !profile.Supported || profile.DartVersion == "" {
+	if !IsExactSupportedProfile(profile) {
 		return 0, errors.New("image: exact supported Dart profile required")
 	}
-	if VersionAtLeast(profile.DartVersion, "3.5.0") {
+	switch profile.InstructionsImage {
+	case InstructionsImageLegacy210:
+		return instructionsSection210, nil
+	case InstructionsImageSection40:
+		return instructionsSectionFields, nil
+	case InstructionsImageSection64:
 		return instructionsSectionAligned, nil
+	default:
+		return 0, fmt.Errorf("image: unverified instructions image layout for %s", profile.DartVersion)
 	}
-	return instructionsSectionFields, nil
 }
 
 // ParseImageHeader reads the Image header from raw instruction section bytes.
@@ -105,11 +112,15 @@ func CodeRegion(imageData []byte, profile *VersionProfile) (code []byte, codeOff
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	if profile == nil || !profile.Supported || profile.DartVersion == "" {
+	if !IsExactSupportedProfile(profile) {
 		return nil, 0, 0, errors.New("image: exact supported Dart profile required")
 	}
-	if hdr.ImageSize < imageHeaderSize {
-		return nil, 0, 0, fmt.Errorf("image: declared image size %d is smaller than header", hdr.ImageSize)
+	if profile.ImageHeaderSize == 0 {
+		return nil, 0, 0, fmt.Errorf("image: unverified Image header size for %s", profile.DartVersion)
+	}
+	minImageHeader := profile.ImageHeaderSize
+	if hdr.ImageSize < minImageHeader {
+		return nil, 0, 0, fmt.Errorf("image: declared image size %d is smaller than verified header %d", hdr.ImageSize, minImageHeader)
 	}
 	if hdr.ImageSize > uint64(len(imageData)) {
 		return nil, 0, 0, fmt.Errorf("image: declared image size %d exceeds available %d bytes", hdr.ImageSize, len(imageData))
@@ -117,22 +128,28 @@ func CodeRegion(imageData []byte, profile *VersionProfile) (code []byte, codeOff
 	imageData = imageData[:int(hdr.ImageSize)]
 
 	// Dart 2.10 is the only supported format without an Image-header field that
-	// points at InstructionsSection. The object itself still exists at the fixed
-	// Image::kHeaderSize offset; exact 2.10 image_snapshot.h reserves its
-	// HeaderSize() in next_text_offset_ before writing any payload.
-	if profile.DartVersion == "2.10.0" {
+	// points at InstructionsSection. That distinction is carried explicitly by
+	// the profile rather than inferred from a version string.
+	if profile.InstructionsImage == InstructionsImageLegacy210 {
 		sectionOff := uint64(imageHeaderSize)
-		codeStart := sectionOff + instructionsSection210
+		headerSize, err := InstructionsSectionHeaderSize(profile)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		codeStart := sectionOff + headerSize
 		if hdr.ImageSize < codeStart {
-			return nil, 0, 0, fmt.Errorf("image: Dart 2.10 image size %d is too small for InstructionsSection header", hdr.ImageSize)
+			return nil, 0, 0, fmt.Errorf("image: legacy image size %d is too small for InstructionsSection header", hdr.ImageSize)
 		}
 		payloadLen := binary.LittleEndian.Uint64(imageData[sectionOff+8 : sectionOff+16])
 		if payloadLen > hdr.ImageSize-codeStart {
-			return nil, codeStart, 0, fmt.Errorf("image: Dart 2.10 payload length 0x%x exceeds image size 0x%x", payloadLen, hdr.ImageSize)
+			return nil, codeStart, 0, fmt.Errorf("image: legacy payload length 0x%x exceeds image size 0x%x", payloadLen, hdr.ImageSize)
 		}
 		return imageData[int(codeStart):int(codeStart+payloadLen)], codeStart, payloadLen, nil
 	}
-	if hdr.InstructionsSectionOffset == 0 || hdr.InstructionsSectionOffset >= hdr.ImageSize {
+	if profile.InstructionsImage != InstructionsImageSection40 && profile.InstructionsImage != InstructionsImageSection64 {
+		return nil, 0, 0, fmt.Errorf("image: unverified instructions image layout for %s", profile.DartVersion)
+	}
+	if hdr.InstructionsSectionOffset < minImageHeader || hdr.InstructionsSectionOffset >= hdr.ImageSize {
 		return nil, 0, 0, fmt.Errorf("image: invalid InstructionsSection offset 0x%x for image size 0x%x",
 			hdr.InstructionsSectionOffset, hdr.ImageSize)
 	}

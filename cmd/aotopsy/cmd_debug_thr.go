@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -70,6 +71,9 @@ func cmdTHRAudit(args []string) error {
 	}
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
 
+	if codeOff > math.MaxUint64-info.IsolateInstructions.VA {
+		return fmt.Errorf("code virtual address overflows uint64: base=0x%x off=0x%x", info.IsolateInstructions.VA, codeOff)
+	}
 	codeVA := info.IsolateInstructions.VA + codeOff
 
 	return analysis.RunTHRAudit(analysis.THRAuditData{

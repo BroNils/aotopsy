@@ -9,8 +9,11 @@ import (
 )
 
 func TestReadFillRejectsCaptureAboveMaxBytesBeforeParsing(t *testing.T) {
-	const arrayCID = 100
-	profile := &snapshot.VersionProfile{CIDs: &snapshot.CIDTable{Array: arrayCID}}
+	profile := snapshot.ProfileForVersion("3.12.2")
+	if profile == nil || profile.CIDs == nil {
+		t.Fatal("missing exact 3.12.2 profile")
+	}
+	arrayCID := profile.CIDs.Array
 	result := &Result{
 		FillStart:     1,
 		AllocComplete: true,

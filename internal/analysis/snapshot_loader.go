@@ -111,7 +111,11 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
-	if info.Version != nil && !info.Version.Supported {
+	if info.Version == nil {
+		_ = ef.Close()
+		return nil, fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
+	}
+	if !info.Version.Supported {
 		_ = ef.Close()
 		return nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)",
 			info.Version.DartVersion, info.SnapshotHash())
@@ -305,7 +309,11 @@ func LoadSnapshotIsolate(libPath string, opts dartfmt.Options) (*elfx.File, *sna
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if info.Version != nil && !info.Version.Supported {
+	if info.Version == nil {
+		_ = ef.Close()
+		return nil, nil, nil, fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
+	}
+	if !info.Version.Supported {
 		_ = ef.Close()
 		return nil, nil, nil, fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)",
 			info.Version.DartVersion, info.SnapshotHash())

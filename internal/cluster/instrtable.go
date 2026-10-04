@@ -58,18 +58,15 @@ type CodeRange struct {
 //	≤2.18: RoundUp(length(), kMaxObjectAlignment)  → 16 on 64-bit
 //	≥2.19: RoundUp(length(), kObjectStartAlignment) → 64
 //
-// This is a compile-time constant change at Dart 2.19.0, not a per-version
-// value. The cutoff is derived from the DartVersion string, so no per-version
-// field is needed — adding a new version profile automatically gets the
-// correct alignment as long as the version string is set.
-//
-// Verified via gh api at tags 2.12.0, 2.18.0 (kMaxObjectAlignment),
-// and 2.19.0, 3.9.2 (kObjectStartAlignment).
+// This is an explicit VersionProfile dimension because a future compatibility
+// hash must not inherit an alignment from a semver comparison. Verified from
+// local SDK snapshot.h: 2.18 uses kMaxObjectAlignment; 2.19 switches to
+// kObjectStartAlignment.
 func dataImageAlignment(profile *snapshot.VersionProfile) int64 {
-	if snapshot.VersionAtLeast(profile.DartVersion, "2.19.0") {
-		return 64
+	if profile == nil {
+		return 0
 	}
-	return 16
+	return profile.DataImageAlignment
 }
 
 // oneByteStringHeaderSize is the size of a OneByteString object header in the
@@ -86,11 +83,23 @@ const instrTableDataHeaderSize = 16
 // InstructionTableDataOffset, skips its header, and parses the Data header
 // and DataEntry array.
 func ParseInstructionsTable(data []byte, hdr *Header, profile *snapshot.VersionProfile, isoHeader *snapshot.Header) (*InstructionsTable, error) {
+	if hdr == nil {
+		return nil, fmt.Errorf("instrtable: nil cluster header")
+	}
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("instrtable: exact supported Dart profile required")
+	}
+	if isoHeader == nil || isoHeader.TotalSize <= 0 {
+		return nil, fmt.Errorf("instrtable: valid isolate snapshot header required")
+	}
 	if hdr.InstructionTableDataOffset == 0 {
 		return nil, fmt.Errorf("instrtable: no instruction table data offset")
 	}
 
 	align := dataImageAlignment(profile)
+	if align <= 0 {
+		return nil, fmt.Errorf("instrtable: unverified data-image alignment")
+	}
 	// SDK formula (runtime/vm/snapshot.h, verified at tags 2.12.0 and 3.9.2):
 	//
 	//   int64_t large_length() const {

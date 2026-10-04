@@ -220,6 +220,13 @@ type rodataPayload struct {
 // Shared by PcDescriptors and CodeSourceMap because their in-image layout is
 // identical: both are UntaggedObject + a uword length_ + that many bytes.
 func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageObjStart int64, profile *snapshot.VersionProfile) []rodataPayload {
+	if cm == nil || profile == nil || profile.CIDs == nil {
+		return nil
+	}
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 || wantCID == 0 {
 		return nil
 	}
@@ -275,12 +282,7 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 		// Confirm the object really is what we want before trusting the length
 		// word: an ROData cluster can hold other object kinds.
 		tags := binary.LittleEndian.Uint64(data[objPos : objPos+8])
-		var cid int
-		if profile.PreV32Format {
-			cid = int((uint32(tags) >> 16) & 0xFFFF)
-		} else {
-			cid = int((uint32(tags) >> 12) & ((1 << 20) - 1))
-		}
+		cid := int((uint32(tags) >> classIDTagPos) & ((1 << classIDTagSize) - 1))
 		if cid != wantCID {
 			ref++
 			continue
@@ -321,6 +323,10 @@ func extractRODataCompressedStackMaps(data []byte, cm *ClusterMeta, dataImageObj
 		len(cm.Lengths) == 0 || dataImageObjStart <= 0 || profile.CIDs.CompressedStackMaps == 0 {
 		return nil
 	}
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
 
 	const (
 		alignShift  = uint(4) // ROData running-offset units are 16 bytes.
@@ -349,12 +355,7 @@ func extractRODataCompressedStackMaps(data []byte, cm *ClusterMeta, dataImageObj
 		}
 
 		tags := binary.LittleEndian.Uint64(data[objPos : objPos+8])
-		var cid int
-		if profile.PreV32Format {
-			cid = int((uint32(tags) >> 16) & 0xFFFF)
-		} else {
-			cid = int((uint32(tags) >> 12) & ((1 << 20) - 1))
-		}
+		cid := int((uint32(tags) >> classIDTagPos) & ((1 << classIDTagSize) - 1))
 		if cid != profile.CIDs.CompressedStackMaps {
 			ref++
 			continue

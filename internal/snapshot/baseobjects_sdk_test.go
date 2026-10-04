@@ -27,12 +27,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 	for _, tag := range SupportedVersions() {
 		got := BaseObjectNames(tag)
 		if got == nil {
-			// 2.10 predates the verified base-object naming table. Every later
-			// supported release is claimed by baseObjectLayouts and must never
-			// disappear from this gate just because a row was omitted.
-			if tag != "2.10.0" {
-				t.Errorf("supported Dart %s has no verified base-object layout", tag)
-			}
+			t.Errorf("supported Dart %s has no verified base-object layout", tag)
 			continue
 		}
 		checked++
@@ -61,7 +56,7 @@ func TestBaseObjectNamesMatchSDK(t *testing.T) {
 // TestBaseObjectNamesRefusesUnknownVersions guards the deliberate nil: a
 // version outside the verified range must NOT borrow a neighbour's list.
 func TestBaseObjectNamesRefusesUnknownVersions(t *testing.T) {
-	for _, v := range []string{"", "2.11.0", "4.0.0", "3.14.0", "nonsense", "3"} {
+	for _, v := range []string{"", "2.11.0", "3.12.99", "4.0.0", "3.14.0", "nonsense", "3"} {
 		if got := BaseObjectNames(v); got != nil {
 			t.Errorf("BaseObjectNames(%q) = %q, want nil -- an unverified version must stay unnamed", v, got)
 		}
@@ -71,6 +66,7 @@ func TestBaseObjectNamesRefusesUnknownVersions(t *testing.T) {
 // The whole point of the table: `true` and `false` are not at fixed indices.
 func TestBaseObjectBoolIndicesVaryByVersion(t *testing.T) {
 	cases := map[string][2]int{ // version -> {true ref, false ref}
+		"2.10.0": {9, 10},
 		"2.12.0": {9, 10},
 		"2.19.0": {9, 10},
 		"3.1.0":  {10, 11},

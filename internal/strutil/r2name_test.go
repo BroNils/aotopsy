@@ -1,6 +1,9 @@
 package strutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // r2NameCheck is a Go transcription of radare2's r_name_check
 // (libr/util/name.c): a flag name may contain only [A-Za-z0-9_.:], and its
@@ -54,7 +57,7 @@ func TestSanitizeR2FlagNameProducesValidFlags(t *testing.T) {
 		"main",
 	}
 	for _, n := range names {
-		got := SanitizeR2FlagName(n)
+		got := SanitizeR2FlagName(n, 0x1234)
 		if got == "" {
 			t.Errorf("SanitizeR2FlagName(%q) = \"\" -- a real name was dropped entirely", n)
 			continue
@@ -67,29 +70,37 @@ func TestSanitizeR2FlagNameProducesValidFlags(t *testing.T) {
 
 // Names that carry nothing once separators are stripped must come back empty
 // so the caller can skip them, rather than emitting a bare "_" flag.
-func TestSanitizeR2FlagNameDropsEmptyNames(t *testing.T) {
-	for _, n := range []string{"", "___", "...", "@@@", "   ", "-.-"} {
-		if got := SanitizeR2FlagName(n); got != "" {
+func TestSanitizeR2FlagNameDropsOnlyAbsentNames(t *testing.T) {
+	for _, n := range []string{"", "   ", "\t\r\n"} {
+		if got := SanitizeR2FlagName(n, 0x1234); got != "" {
 			t.Errorf("SanitizeR2FlagName(%q) = %q, want \"\"", n, got)
 		}
 	}
 }
 
-func TestSanitizeR2FlagNameSpecifics(t *testing.T) {
-	cases := []struct{ in, want string }{
-		// '@' is spelled out, so Foo@1 and Foo_1 stay distinct flags.
-		{"Foo@1", "Foo_at_1"},
-		{"Foo_1", "Foo_1"},
-		// A leading digit is invalid as a first character.
-		{"9lives", "f_9lives"},
-		// Dots become underscores on purpose: r2 reads a dot as a sub-flag
-		// namespace separator.
-		{"Duration.compareTo", "Duration_compareTo"},
-		{"main", "main"},
-	}
-	for _, c := range cases {
-		if got := SanitizeR2FlagName(c.in); got != c.want {
-			t.Errorf("SanitizeR2FlagName(%q) = %q, want %q", c.in, got, c.want)
+func TestSanitizeR2FlagNameKeepsOperatorAndUnicodeIdentity(t *testing.T) {
+	for _, n := range []string{"[]=", "___", "...", "@@@", "正常中文"} {
+		got := SanitizeR2FlagName(n, 0x1234)
+		if got == "" || !r2NameCheck(got) {
+			t.Errorf("semantic name %q was lost or produced invalid r2 flag %q", n, got)
 		}
+	}
+}
+
+func TestSanitizeR2FlagNamePreservesGrammarAndIdentity(t *testing.T) {
+	if got := SanitizeR2FlagName("Duration.compareTo", 0x1000); !strings.HasPrefix(got, "Duration.compareTo_") {
+		t.Fatalf("r2-accepted dot was unnecessarily destroyed: %q", got)
+	}
+	if got := SanitizeR2FlagName(":namespace:name", 0x1000); !strings.HasPrefix(got, ":namespace:name_") {
+		t.Fatalf("r2-accepted colon was unnecessarily destroyed: %q", got)
+	}
+	a := SanitizeR2FlagName("Foo@1", 0x1000)
+	b := SanitizeR2FlagName("Foo_at_1", 0x1000)
+	c := SanitizeR2FlagName("Foo@1", 0x2000)
+	if a == b || a == c || b == c {
+		t.Fatalf("distinct r2 identities collided: %q %q %q", a, b, c)
+	}
+	if got := SanitizeR2FlagName("9lives", 0x1000); !strings.HasPrefix(got, "f_9lives_") {
+		t.Fatalf("leading digit was not repaired: %q", got)
 	}
 }

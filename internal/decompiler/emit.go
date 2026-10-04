@@ -421,7 +421,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 				}
 				if va, ok := parseHexVA(ins.Target); ok {
 					if name, ok2 := e.symbols(va); ok2 && name != "" {
-							markSuspendableStubRole(fir, sdk.ClassifyStubRole(fir.DartVersion, name))
+						markSuspendableStubRole(fir, sdk.ClassifyStubRole(fir.DartVersion, name))
 					}
 				}
 			}
@@ -432,7 +432,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// recovered: `dynamic foo<T>(...)`. These are type PARAMETERS from
 	// FunctionType.type_parameters, not type arguments -- see
 	// FuncIR.TypeParamNames.
-	sig := safeFuncName(fir.Name)
+	sig := strutil.SanitizeDartIdent(fir.Name)
 	if len(fir.TypeParamNames) > 0 {
 		sig += "<" + strings.Join(fir.TypeParamNames, ", ") + ">"
 	}
@@ -715,12 +715,6 @@ func dropUnusedLabels(source string, preserve map[int]bool) string {
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
-}
-
-func safeFuncName(name string) string {
-	// P4-5: Use shared strutil.SanitizeIdentifier for consistent
-	// identifier sanitization across all packages.
-	return strutil.SanitizeIdentifier(name)
 }
 
 func indentStr(n int) string { return strings.Repeat("  ", n) }

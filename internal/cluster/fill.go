@@ -576,6 +576,12 @@ func classUnboxedBitmaps(result *Result) map[int32]uint64 {
 // DebugFillPositions iterates the fill section and prints the stream position
 // before/after each cluster's fill to w. Used to diagnose fill drift.
 func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, w io.Writer) error {
+	if result == nil {
+		return fmt.Errorf("fill: nil cluster result")
+	}
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return fmt.Errorf("fill: exact supported snapshot profile required")
+	}
 	if result.FillStart <= 0 || result.FillStart >= len(data) {
 		return fmt.Errorf("fill: invalid start offset %d", result.FillStart)
 	}
@@ -640,13 +646,13 @@ func DebugFillPositions(data []byte, result *Result, profile *snapshot.VersionPr
 // snapshotSize is header.TotalSize = header.Length + 4 (includes magic).
 // Returns 0 if ROData string extraction is not applicable.
 func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.VersionProfile) int64 {
-	if snapshotSize <= 0 || profile.CompressedPointers {
+	if snapshotSize <= 0 || profile == nil || profile.CompressedPointers {
 		return 0
 	}
 	// The data image BASE is placed at RoundUp(length(), alignment).
 	// SDK ≤2.18: kMaxObjectAlignment=16; SDK ≥2.19: kObjectStartAlignment=64.
-	// dataImageAlignment() derives this from the DartVersion string (single
-	// cutoff at 2.19.0), verified via gh api against SDK source.
+	// dataImageAlignment() is an explicit VersionProfile dimension, verified
+	// against local SDK snapshot.h at the 2.18/2.19 boundary.
 	// This is the LARGER of the two ROData alignments; the per-object delta
 	// stride uses kObjectAlignment (16) instead — see extractRODataStrings.
 	// Using 16 here (the old hardcoded value) placed the image base too low
@@ -654,7 +660,7 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	// string extraction silently returned nothing.
 	align := dataImageAlignment(profile)
 	if align <= 0 {
-		align = 16
+		return 0
 	}
 	// The SDK's length() INCLUDES the magic (runtime/vm/snapshot.h):
 	//
@@ -671,8 +677,14 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 	if lengthVal <= 0 {
 		return 0
 	}
-	// DataImage = Addr() + RoundUp(length(), align).
-	diStart := (lengthVal + align - 1) &^ (align - 1)
+	// DataImage = Addr() + RoundUp(length(), align). Use checked arithmetic even
+	// though a parsed Header.TotalSize is already bounded by the input slice:
+	// this helper is also directly exercised by tests and callers must not be
+	// able to turn a synthetic near-MaxInt64 size into a wrapped small offset.
+	diStart, ok := roundUpChecked(lengthVal, align)
+	if !ok {
+		return 0
+	}
 	if diStart >= int64(dataLen) {
 		return 0
 	}
@@ -685,6 +697,9 @@ func dataImageObjStart(dataLen int, snapshotSize int64, profile *snapshot.Versio
 func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isVM bool, snapshotSize int64, opts dartfmt.Options) error {
 	if result == nil {
 		return fmt.Errorf("fill: nil cluster result")
+	}
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return fmt.Errorf("fill: exact supported snapshot profile required")
 	}
 	if !result.AllocComplete {
 		return fmt.Errorf("fill: alloc phase incomplete; refusing to treat offset %d as fill start", result.FillStart)

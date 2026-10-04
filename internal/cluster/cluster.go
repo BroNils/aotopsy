@@ -231,14 +231,15 @@ type Result struct {
 // ScanClusters reads the clustered snapshot header and cluster tags from
 // snapshot data. clusterStart is the offset within data where the clustered
 // section begins (after the snapshot header's null-terminated features string).
-// If profile is nil, the v3.x format is assumed. isVM indicates whether this
-// is the VM snapshot (affects canonical set handling for strings).
+// A concrete supported profile is mandatory: a coarse header/tag family is not
+// enough to choose CIDs, alloc/fill layouts or roots. isVM indicates whether
+// this is the VM snapshot (affects canonical set handling for strings).
 func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfile, isVM bool, opts dartfmt.Options) (*Result, error) {
 	if clusterStart < 0 || clusterStart >= len(data) {
 		return nil, fmt.Errorf("cluster: start offset %d beyond data length %d", clusterStart, len(data))
 	}
-	if profile == nil {
-		profile = snapshot.DetectVersion("")
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("cluster: exact supported snapshot profile required")
 	}
 
 	s, err := dartfmt.NewStreamAt(data, clusterStart)
@@ -366,7 +367,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 				tagErr = err
 				break
 			}
-				cid, canonical, immutable = DecodeTags(tags, profile.DartVersion)
+			cid, canonical, immutable = DecodeTags(tags, profile.DartVersion)
 		case snapshot.TagStyleCidInt32:
 			// v2.10-2.13: Read<int32_t>(cid). Signed VLE (endMarker=192), value = CID directly.
 			// Canonical determined by cluster loop position (first NumCanonicalClusters are canonical).

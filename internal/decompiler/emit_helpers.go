@@ -8,10 +8,6 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-func sanitizeTailCallName(target string) string {
-	return safeFuncName(target)
-}
-
 func (e *emitter) emitLoadPool(ins Instr) {
 	if ins.Target == "" {
 		return

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/strutil"
 )
 
 func identifyLoopHeaders(fir *FuncIR, idom []int) map[int]bool {
@@ -670,7 +671,7 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 			e.emit(indent, "return %s(%s);", name, argsText)
 			return
 		}
-		e.emit(indent, "return tailCall_%s();", sanitizeTailCallName(ins.Target))
+		e.emit(indent, "return tailCall_%s();", strutil.SanitizeDartIdent(ins.Target))
 		return
 	}
 	e.emit(indent, "// unresolved jump target")

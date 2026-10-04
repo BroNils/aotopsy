@@ -41,7 +41,7 @@ func TestClassIdTagLayoutMatchesSDK(t *testing.T) {
 			"and nowhere else; three separate predicates for this one fact is the\n"+
 			"state this function was introduced to end.", err)
 	}
-	if !strings.Contains(string(out), "matches SDK for all") {
+	if !strings.Contains(string(out), "matches SDK exactly for all 23 version(s)") {
 		t.Fatalf("gate did not report a clean run:\n%s", out)
 	}
 }

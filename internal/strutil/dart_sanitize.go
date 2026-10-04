@@ -9,14 +9,23 @@ import (
 
 // SanitizeLibraryPath turns a Dart library URL into a safe relative file path.
 func SanitizeLibraryPath(url string) string {
-	url = strings.TrimPrefix(url, "package:")
-	url = strings.TrimPrefix(url, "dart:")
-	url = strings.TrimPrefix(url, "file:///")
+	rawURL := url
 	// Library URLs are snapshot-controlled input. Normalize both slash styles
 	// before cleaning so a Windows build cannot interpret a backslash traversal
 	// that a Unix build would treat as an ordinary character.
 	url = strings.ReplaceAll(url, "\\", "/")
-	url = strings.ReplaceAll(url, ":", "/")
+
+	// Keep the URL scheme as part of the artifact identity. The old code stripped
+	// package:/dart:/file:/// before sanitizing, so `dart:core` and
+	// `package:core` both became core.dart. Clean the remainder under the scheme
+	// namespace so `package:../../x` cannot escape into the unschemed namespace.
+	scheme := ""
+	if colon := strings.IndexByte(url, ':'); colon > 0 && isLibraryURLScheme(url[:colon]) {
+		scheme = strings.ToLower(url[:colon])
+		url = strings.TrimLeft(url[colon+1:], "/")
+	} else {
+		url = strings.ReplaceAll(url, ":", "/")
+	}
 
 	// Prefixing with '/' anchors path.Clean at a synthetic root. Any leading or
 	// embedded '..' components therefore collapse at that root instead of
@@ -32,36 +41,78 @@ func SanitizeLibraryPath(url string) string {
 	parts := strings.Split(clean, "/")
 	for i, part := range parts {
 		parts[i] = SanitizeFilename(part)
-		if parts[i] == "" {
-			parts[i] = "_"
-		}
 	}
+	if scheme != "" {
+		parts = append([]string{SanitizeFilename(scheme)}, parts...)
+	}
+	// path.Clean intentionally removes traversal/dot components. Bind the leaf
+	// artifact to the complete raw URL as well, so two distinct recovered URLs
+	// cannot overwrite each other merely because normalization reaches the same
+	// cleaned path (for example package:a/../b.dart vs package:b.dart).
+	parts[len(parts)-1] = addFilenameIdentitySuffix(parts[len(parts)-1], rawURL)
 	return filepath.FromSlash(strings.Join(parts, "/"))
 }
 
-// DartReservedWords are keywords that cannot appear as a bare identifier in a
-// declaration. Recovered names that collide with one are prefixed so the emitted
-// Dart parses.
-var DartReservedWords = map[string]bool{
-	"new": true, "class": true, "return": true, "if": true, "else": true, "for": true,
-	"while": true, "do": true, "switch": true, "case": true, "default": true, "break": true,
-	"continue": true, "var": true, "final": true, "const": true, "void": true, "null": true,
-	"true": true, "false": true, "this": true, "super": true, "is": true, "as": true,
-	"in": true, "assert": true, "async": true, "await": true, "yield": true, "try": true,
-	"catch": true, "finally": true, "throw": true, "rethrow": true, "with": true,
-	"extends": true, "implements": true, "abstract": true, "static": true, "operator": true,
-	"typedef": true, "enum": true, "mixin": true, "extension": true, "factory": true,
-	"external": true, "part": true, "import": true, "export": true, "library": true,
-	"deferred": true, "covariant": true, "late": true, "required": true,
+func isLibraryURLScheme(s string) bool {
+	if s == "" || !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// dartKeywords is the union of the frontend scanner's Keyword declarations for
+// every exact Dart release supported by this repository. The exact local SDK
+// census is 69 entries in 2.10.0-2.16.0, +augment in 2.17.6, +when in 2.19.0,
+// and +base/+sealed in 3.0.5, with no later removals through 3.13.0.
+//
+// Source of truth: pkg/_fe_analyzer_shared/lib/src/scanner/token.dart at each
+// supported exact release. We conservatively avoid every reserved, built-in and
+// pseudo keyword because this helper emits identifiers into several declaration
+// contexts where those contextual distinctions differ.
+var dartKeywords = map[string]struct{}{
+	"abstract": {}, "as": {}, "assert": {}, "async": {}, "augment": {}, "await": {},
+	"base": {}, "break": {}, "case": {}, "catch": {}, "class": {}, "const": {},
+	"continue": {}, "covariant": {}, "default": {}, "deferred": {}, "do": {},
+	"dynamic": {}, "else": {}, "enum": {}, "export": {}, "extends": {}, "extension": {},
+	"external": {}, "factory": {}, "false": {}, "final": {}, "finally": {}, "for": {},
+	"Function": {}, "get": {}, "hide": {}, "if": {}, "implements": {}, "import": {},
+	"in": {}, "inout": {}, "interface": {}, "is": {}, "late": {}, "library": {},
+	"mixin": {}, "native": {}, "new": {}, "null": {}, "of": {}, "on": {},
+	"operator": {}, "out": {}, "part": {}, "patch": {}, "required": {}, "rethrow": {},
+	"return": {}, "sealed": {}, "set": {}, "show": {}, "source": {}, "static": {},
+	"super": {}, "switch": {}, "sync": {}, "this": {}, "throw": {}, "true": {},
+	"try": {}, "typedef": {}, "var": {}, "void": {}, "when": {}, "while": {},
+	"with": {}, "yield": {},
 }
 
 // SanitizeDartIdent turns a recovered function/class name into a valid Dart
-// identifier for a declaration: it drops the `new ` constructor-marker prefix,
-// replaces every non-identifier rune with `_`, avoids a leading digit, and
-// prefixes reserved words. Without this the exported .dart does not parse.
+// identifier for a declaration. Exact frontend scanner source at Dart 2.10.0
+// and 3.13.0 accepts only ASCII [A-Za-z0-9_$] identifier characters; the same
+// predicate was checked across the supported range. This helper therefore does
+// not invent Unicode identifier support the Dart scanner does not have.
+//
+// Any lossy rewrite gets a stable raw-name hash suffix, so distinct semantic
+// names such as `a-b` and `a_b`, or keyword `class` and raw `_class`, cannot
+// collapse to the same emitted declaration.
 func SanitizeDartIdent(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "new ")
+	raw := s
+	changed := hasGeneratedIdentitySuffix(raw)
+	trimmed := strings.TrimSpace(s)
+	if trimmed != s {
+		changed = true
+	}
+	s = trimmed
+	if strings.HasPrefix(s, "new ") {
+		s = strings.TrimPrefix(s, "new ")
+		changed = true
+	}
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -70,17 +121,24 @@ func SanitizeDartIdent(s string) string {
 			b.WriteRune(r)
 		default:
 			b.WriteRune('_')
+			changed = true
 		}
 	}
 	out := b.String()
 	if out == "" {
-		return "_anon"
+		out = "_anon"
+		changed = true
 	}
 	if out[0] >= '0' && out[0] <= '9' {
 		out = "_" + out
+		changed = true
 	}
-	if DartReservedWords[out] {
+	if _, keyword := dartKeywords[out]; keyword {
 		out = "_" + out
+		changed = true
+	}
+	if changed {
+		out += "_" + shortIdentityHash(raw)
 	}
 	return out
 }
@@ -95,10 +153,6 @@ var placeholderReDart = regexp.MustCompile(`(^|[^\w])<([A-Za-z][^>]*)>`)
 // tokens that CONTAINS the ellipsis. The ellipsis is what distinguishes it from a
 // real bitwise-and expression (`x17 & mask`), which must be left untouched.
 var mixinChainReDart = regexp.MustCompile(`[\w$]+(?:\s*&\s*[\w$\x{2026}]+)+`)
-
-// atHashReDart matches a `@<digits>` PC-offset disambiguator suffix that recovered
-// callee names carry (`method@3099033`); `@` is not valid in a Dart identifier.
-var atHashReDart = regexp.MustCompile(`@\d+`)
 
 // opMethodReplacerDart rewrites operator-method call syntax that does not parse
 // (`x.[]=(...)`, `x.[](...)`) into valid (but undefined) identifier method calls,
@@ -185,18 +239,7 @@ func sanitizeDartCode(body string) string {
 	body = placeholderReDart.ReplaceAllStringFunc(body, func(m string) string {
 		sub := placeholderReDart.FindStringSubmatch(m)
 		prefix, inner := sub[1], sub[2]
-		var b strings.Builder
-		b.WriteString(prefix)
-		b.WriteString("unresolved_")
-		for _, r := range inner {
-			switch {
-			case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
-				b.WriteRune(r)
-			default:
-				b.WriteRune('_')
-			}
-		}
-		return b.String()
+		return prefix + "unresolved_" + SanitizeDartIdent(inner)
 	})
 	// Collapse a compacted mixin owner to its base class (the first token), but
 	// only when the ellipsis marks it as a mixin chain — never a bitwise `&`.
@@ -211,9 +254,46 @@ func sanitizeDartCode(body string) string {
 		return base
 	})
 	body = opMethodReplacerDart.Replace(body)
-	body = atHashReDart.ReplaceAllString(body, "")
+	// VM private-name mangling is a library-scoped identity suffix, not a PC
+	// offset. Source-level rendering removes it exactly as String::ScrubName does:
+	// only '@' immediately followed by one or more decimal digits is stripped.
+	body = ScrubDartPrivateKeys(body)
 	body = strings.ReplaceAll(body, ".(", "(")
 	return body
+}
+
+// ScrubDartPrivateKeys removes Dart VM private-library key suffixes while
+// leaving every other '@' untouched. This is the private-key portion of
+// String::ScrubName, verified in exact local SDK runtime/vm/object.cc at both
+// 2.10.0 and 3.13.0: an '@' is mangling only when the next byte is a decimal
+// digit, and all following decimal digits are skipped. Multiple keys in one
+// generated name are removed independently.
+func ScrubDartPrivateKeys(name string) string {
+	first := -1
+	for i := 0; i+1 < len(name); i++ {
+		if name[i] == '@' && name[i+1] >= '0' && name[i+1] <= '9' {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	b.WriteString(name[:first])
+	for i := first; i < len(name); {
+		if name[i] == '@' && i+1 < len(name) && name[i+1] >= '0' && name[i+1] <= '9' {
+			i += 2
+			for i < len(name) && name[i] >= '0' && name[i] <= '9' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(name[i])
+		i++
+	}
+	return b.String()
 }
 
 func isDartQuote(b byte) bool { return b == '\'' || b == '"' }

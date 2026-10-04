@@ -582,7 +582,7 @@ func runPipeline(opts Opts) (*Result, error) {
 	if isARM64 {
 		targetArch = "arm64"
 	}
-	if err := strutil.WriteDartMeta(opts.OutDir, info.Version.DartVersion, targetArch, info.Version.CompressedPointers, ptrSize, thrFields); err != nil {
+	if err := strutil.WriteDartMeta(opts.OutDir, targetProfile); err != nil {
 		return nil, fmt.Errorf("write dart_meta.json: %w", err)
 	}
 

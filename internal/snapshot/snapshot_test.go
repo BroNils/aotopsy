@@ -50,6 +50,44 @@ func TestParseHeaderRejectsOverflowAndTruncation(t *testing.T) {
 	}
 }
 
+func TestParseHeaderRejectsMalformedSnapshotHash(t *testing.T) {
+	data := make([]byte, 64)
+	copy(data[0:4], snapshotMagic[:])
+	binary.LittleEndian.PutUint64(data[4:12], uint64(len(data)-4))
+	copy(data[hashOffset:hashOffset+hashLen], []byte("abcdef0123456789abcdef012345678G"))
+	data[featuresOffset] = 0
+	if _, err := parseHeader(data); err == nil {
+		t.Fatal("malformed snapshot hash was accepted by full header parser")
+	}
+}
+
+func TestParseHeaderRejectsNonPrintableFeatureBytes(t *testing.T) {
+	data := make([]byte, 96)
+	copy(data[0:4], snapshotMagic[:])
+	binary.LittleEndian.PutUint64(data[4:12], uint64(len(data)-4))
+	copy(data[hashOffset:hashOffset+hashLen], []byte("abcdef0123456789abcdef0123456789"))
+	copy(data[featuresOffset:], []byte("product arm64\nforged\x00"))
+	if _, err := parseHeader(data); err == nil {
+		t.Fatal("non-printable feature byte was accepted")
+	}
+}
+
+func TestFindClusterDataStartCannotEscapeDeclaredSnapshot(t *testing.T) {
+	// Backing bytes contain a later NUL, but the declared snapshot ends before
+	// it. The old duplicate scanner ignored TotalSize and accepted the later byte.
+	data := make([]byte, 96)
+	copy(data[0:4], snapshotMagic[:])
+	binary.LittleEndian.PutUint64(data[4:12], 56) // total size 60
+	copy(data[hashOffset:hashOffset+hashLen], []byte("abcdef0123456789abcdef0123456789"))
+	for i := featuresOffset; i < 60; i++ {
+		data[i] = 'x'
+	}
+	data[80] = 0
+	if _, err := FindClusterDataStart(data); err == nil {
+		t.Fatal("cluster start scanner crossed declared snapshot size")
+	}
+}
+
 func TestParseHeaderBadMagic(t *testing.T) {
 	data := make([]byte, 64)
 	_, err := parseHeader(data)
@@ -108,9 +146,38 @@ func TestConsistentSnapshotHashRejectsLegacyConflict(t *testing.T) {
 	}
 }
 
-func TestCapRegionSizePropagatesELFMappingError(t *testing.T) {
-	if size, err := capRegionSize(nil, 0); err == nil || size != 0 {
-		t.Fatalf("capRegionSize(nil) = %#x,%v; want zero + error", size, err)
+func TestZeroSizeSnapshotRegionRejectsNilELF(t *testing.T) {
+	if size, err := zeroSizeSnapshotRegionSize(nil, resolvedSnapshotSymbol{name: SymUnifiedSnapshotText}, nil); err == nil || size != 0 {
+		t.Fatalf("zeroSizeSnapshotRegionSize(nil) = %#x,%v; want zero + error", size, err)
+	}
+}
+
+func TestRoundUpUint64RejectsOverflowAndBadAlignment(t *testing.T) {
+	if _, ok := roundUpUint64(math.MaxUint64-1, 64); ok {
+		t.Fatal("round-up overflow accepted")
+	}
+	if _, ok := roundUpUint64(64, 48); ok {
+		t.Fatal("non-power-of-two alignment accepted")
+	}
+	if got, ok := roundUpUint64(65, 64); !ok || got != 128 {
+		t.Fatalf("roundUpUint64(65,64) = %d,%v; want 128,true", got, ok)
+	}
+}
+
+func TestValidateDataImageRegionUsesExplicitProfileDimensions(t *testing.T) {
+	p := ProfileForVersion("3.9.2")
+	if p == nil {
+		t.Fatal("missing 3.9.2 profile")
+	}
+	data := make([]byte, 128)
+	h := &Header{TotalSize: 64}
+	binary.LittleEndian.PutUint64(data[64:72], 64)
+	if err := validateDataImageRegion(data, h, p); err != nil {
+		t.Fatalf("valid data image rejected: %v", err)
+	}
+	binary.LittleEndian.PutUint64(data[64:72], 32)
+	if err := validateDataImageRegion(data, h, p); err == nil {
+		t.Fatal("data image smaller than explicit 64-byte Image header was accepted")
 	}
 }
 

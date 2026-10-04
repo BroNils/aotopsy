@@ -48,7 +48,12 @@ type baseObjectLayout struct {
 // the full list would mean tracking entries no pool has been seen to
 // reference.
 var baseObjectLayouts = []baseObjectLayout{
-	{2, 12, 2, 18, []string{
+	// 2.10 has the same leading 13 display names as 2.12-2.18. Verified from
+	// VMSerializationRoots::AddBaseObjects in clustered_snapshot.cc @2.10.0;
+	// serializer and deserializer add them in the same order before cached
+	// descriptors/classes. Unsupported 2.11 cannot inherit this row because
+	// BaseObjectNames first requires an exact supported VersionProfile.
+	{2, 10, 2, 18, []string{
 		"null", "sentinel", "transition_sentinel", "<empty_array>", "<zero_array>",
 		"<dynamic type>", "<void type>", "[]", "true", "false",
 		"<extractor parameter types>", "<extractor parameter names>", "<empty>",
@@ -102,6 +107,14 @@ var baseObjectLayouts = []baseObjectLayout{
 // nearby version's list: the index of `true` moved four times between 2.12
 // and 3.12, so a neighbouring list can name the wrong object.
 func BaseObjectNames(dartVersion string) []string {
+	// The layout table is grouped by minor only after exact support has been
+	// established. Without this gate, a future/unknown patch such as 3.12.99
+	// silently inherits 3.12's ref names even though the compatibility hash and
+	// AddBaseObjects order have not been verified.
+	p := ProfileForVersion(dartVersion)
+	if p == nil || !p.Supported {
+		return nil
+	}
 	major, minor, ok := parseMajorMinor(dartVersion)
 	if !ok {
 		return nil

@@ -28,7 +28,7 @@ type TargetProfile struct {
 // is deliberately rejected: falling back to a default compression mode was
 // the source of confident-but-wrong THR annotations on desktop x64 AOT.
 func TargetProfileFromVersion(profile *snapshot.VersionProfile, isARM64 bool) (TargetProfile, bool) {
-	if profile == nil || profile.DartVersion == "" {
+	if !snapshot.IsExactSupportedProfile(profile) || profile.BuildMode == snapshot.BuildUnknown {
 		return TargetProfile{}, false
 	}
 	arch := ArchitectureX64

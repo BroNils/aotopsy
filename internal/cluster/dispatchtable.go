@@ -88,7 +88,12 @@ const (
 // (unverified for this Dart version) or result.FillEnd is unset (0,
 // meaning ReadFill was never run).
 func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable, opts dartfmt.Options) ([]DispatchTableEntry, error) {
-
+	if result == nil {
+		return nil, fmt.Errorf("dispatch table: nil cluster result")
+	}
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("dispatch table: exact supported snapshot profile required")
+	}
 	if result.FillEnd <= 0 {
 		return nil, fmt.Errorf("dispatch table: ReadFill must run first (FillEnd unset)")
 	}
@@ -102,6 +107,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// We build a refID → CodeEntry lookup from result.Codes.
 	useTextOffsetFallback := table == nil
 	if useTextOffsetFallback {
+		if !profile.CodeTextOffsetDelta {
+			return nil, fmt.Errorf("dispatch table: InstructionsTable required for Dart %s", profile.DartVersion)
+		}
 		if len(result.Codes) == 0 {
 			return nil, fmt.Errorf("dispatch table: no Codes available for Dart %s TextOffset fallback", profile.DartVersion)
 		}
@@ -158,13 +166,11 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// type-inference stage -- no typetrack_report.json and every BLR edge left
 	// unresolved. It went unnoticed because the only samples this was ever run
 	// against were 3.7.0 and 3.10.7, where reading both is correct.
-	readInitial := snapshot.VersionAtLeast(profile.DartVersion, "2.18.0")
-	readShared := snapshot.VersionAtLeast(profile.DartVersion, "3.5.0")
 	tables := make([]string, 0, 2)
-	if readInitial {
+	if profile.RootsHasInitialFieldTable {
 		tables = append(tables, "initial_field_table")
 	}
-	if readShared {
+	if profile.RootsHasSharedInitialFieldTable {
 		tables = append(tables, "shared_initial_field_table")
 	}
 	for _, name := range tables {

@@ -16,6 +16,7 @@ import (
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
+	"aotopsy/internal/strutil"
 )
 
 // FuncDescriptor is the source-identity-shaped bucket for one or more Dart
@@ -102,7 +103,7 @@ type BuildResult struct {
 // Keeping the key makes the same private declaration look added+removed across
 // two builds even though its source identity did not change.
 func stableDescriptorName(s string) string {
-	return naming.ScrubDartPrivateKeys(s)
+	return strutil.ScrubDartPrivateKeys(s)
 }
 
 // Build assembles descriptor -> FuncInfo for every Function NamedObject whose
