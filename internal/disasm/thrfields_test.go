@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"testing"
 
+	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
 
 func TestRuntimeEntryMerge(t *testing.T) {
-	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true})
+	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true, BuildMode: snapshot.BuildProduct})
 
 	// Check a few runtime entry offsets. The suffix is "_entry_point", the
 	// same spelling runtime_offsets_extracted.h uses for the entry-point
@@ -47,7 +48,7 @@ func TestRuntimeEntryMerge(t *testing.T) {
 }
 
 func TestRuntimeEntryV217Merge(t *testing.T) {
-	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "2.17.6", Architecture: vmtables.ArchitectureARM64, CompressedPointers: false})
+	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "2.17.6", Architecture: vmtables.ArchitectureARM64, CompressedPointers: false, BuildMode: snapshot.BuildProduct})
 
 	// v2.17.6 base 0x2d8 = AllocateArray
 	checks := []struct {
@@ -77,7 +78,7 @@ func TestRuntimeEntryV217Merge(t *testing.T) {
 }
 
 func TestTHRContextAnnotator_RuntimeEntry(t *testing.T) {
-	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true})
+	fields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true, BuildMode: snapshot.BuildProduct})
 
 	// LDR X5, [X26,#1128] → 0x468 → ArgumentErrorUnboxedInt64_entry_point
 	// Raw encoding: 45 37 42 f9 = 0xf9423745

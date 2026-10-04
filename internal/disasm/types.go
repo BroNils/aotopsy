@@ -1,5 +1,7 @@
 package disasm
 
+import "aotopsy/internal/thraudit"
+
 // FuncRecord is one line in functions.jsonl.
 type FuncRecord struct {
 	PC         string `json:"pc"`
@@ -93,12 +95,13 @@ type CallEdgeRecord struct {
 
 // UnresolvedTHRRecord is one line in unresolved_thr.jsonl.
 type UnresolvedTHRRecord struct {
-	FuncName  string `json:"func_name"`
-	PC        string `json:"pc"`
-	THROffset string `json:"thr_offset"`
-	Width     int    `json:"width"`
-	IsStore   bool   `json:"is_store,omitempty"`
-	Class     string `json:"class"` // RUNTIME_ENTRY, OBJSTORE, ISO_GROUP, UNKNOWN
+	FuncName       string                      `json:"func_name"`
+	PC             string                      `json:"pc"`
+	THROffset      int64                       `json:"thr_offset"`
+	Width          int                         `json:"width"`
+	Access         thraudit.AccessMode         `json:"access"`
+	HeuristicClass thraudit.THRClass           `json:"heuristic_class"`
+	Confidence     thraudit.EvidenceConfidence `json:"confidence"`
 }
 
 // StringRefRecord is one line in string_refs.jsonl.

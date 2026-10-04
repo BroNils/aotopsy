@@ -68,6 +68,63 @@ func TestDart2176ARM64NonCompressedUsesExactCommittedName(t *testing.T) {
 	}
 }
 
+func TestFillCachedConstantFieldsUsesAnchorsAndDeclarationCount(t *testing.T) {
+	const tag = "unit-cached-constants"
+	cachedConstantFieldCache[tag] = struct {
+		names []string
+		err   error
+	}{names: []string{"object_null", "bool_true", "empty_array", "double_nan_address"}}
+	defer delete(cachedConstantFieldCache, tag)
+
+	m := map[int]string{
+		0x10: "object_null",
+		0x18: "bool_true",
+		0x30: "AllocateArray_entry_point",
+	}
+	if err := fillCachedConstantFields(m, tag, "x64"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m[0x20]; got != "empty_array" {
+		t.Fatalf("derived 0x20 = %q, want empty_array", got)
+	}
+	if got := m[0x28]; got != "double_nan_address" {
+		t.Fatalf("derived 0x28 = %q, want double_nan_address", got)
+	}
+
+	bad := map[int]string{
+		0x10: "object_null",
+		0x18: "wrong_name",
+		0x30: "AllocateArray_entry_point",
+	}
+	if err := fillCachedConstantFields(bad, tag, "x64"); err == nil {
+		t.Fatal("cached constant conflict with exported table fact was silently overwritten")
+	}
+}
+
+func TestFillDeferredMarkingStackBlockUsesExactDeclarationAndAnchors(t *testing.T) {
+	const src = `
+  StoreBufferBlock* store_buffer_block_ = nullptr;
+  MarkingStackBlock* marking_stack_block_ = nullptr;
+  MarkingStackBlock* deferred_marking_stack_block_ = nullptr;
+  uword volatile vm_tag_ = 0;
+`
+	m := map[int]string{
+		0x710: "marking_stack_block",
+		0x720: "vm_tag",
+	}
+	if err := fillDeferredMarkingStackBlockFromSource(m, "3.2.5", "arm64", src); err != nil {
+		t.Fatal(err)
+	}
+	if got := m[0x718]; got != "deferred_marking_stack_block" {
+		t.Fatalf("derived 0x718 = %q, want deferred_marking_stack_block", got)
+	}
+
+	badSpan := map[int]string{0x710: "marking_stack_block", 0x728: "vm_tag"}
+	if err := fillDeferredMarkingStackBlockFromSource(badSpan, "3.2.5", "arm64", src); err == nil {
+		t.Fatal("deferred marking derivation accepted an anchor span with an extra unknown slot")
+	}
+}
+
 func TestObjectStoreFieldsUsesSharedSDKFetcherExactLocalTag(t *testing.T) {
 	repo := t.TempDir()
 	t.Setenv("AOTOPSY_DART_SDK_REPO", repo)

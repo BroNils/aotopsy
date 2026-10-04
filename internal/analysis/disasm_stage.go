@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 
 	"aotopsy/internal/cli"
@@ -19,6 +18,7 @@ import (
 	"aotopsy/internal/render"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
+	"aotopsy/internal/thraudit"
 )
 
 // DisasmResult holds summary stats from the disassembly stage.
@@ -267,31 +267,13 @@ func RunDisasmStage(
 
 		out.stringRefs = ExtractStringRefs(insts, poolDisplay, name)
 
-		for _, a := range disasm.ExtractTHRAccesses(insts, thrFields) {
+		thrAccesses := disasm.ExtractTHRAccesses(insts, thrFields)
+		thrAuditRecords := disasm.BuildAuditRecords(thrAccesses, insts, thraudit.Provenance{Arch: thraudit.ArchARM64}, name)
+		for _, a := range thrAuditRecords {
 			if a.Resolved {
 				continue
 			}
-			rec := disasm.UnresolvedTHRRecord{
-				FuncName:  name,
-				PC:        fmt.Sprintf("0x%x", a.PC),
-				THROffset: fmt.Sprintf("0x%x", a.THROffset),
-				Width:     a.Width,
-				IsStore:   a.IsStore,
-				Class:     "UNKNOWN",
-			}
-			if ann := thrCtxAnn(disasm.Inst{Addr: a.PC, Raw: 0}); ann != "" {
-				switch {
-				case strings.Contains(ann, "RUNTIME_ENTRY"):
-					rec.Class = "RUNTIME_ENTRY"
-				case strings.Contains(ann, "OBJSTORE"):
-					rec.Class = "OBJSTORE"
-				case strings.Contains(ann, "ISO_GROUP"):
-					rec.Class = "ISO_GROUP"
-				case strings.HasPrefix(ann, "THR."):
-					continue
-				}
-			}
-			out.thrRecs = append(out.thrRecs, rec)
+			out.thrRecs = append(out.thrRecs, disasm.UnresolvedRecordFromAudit(a))
 		}
 	}
 

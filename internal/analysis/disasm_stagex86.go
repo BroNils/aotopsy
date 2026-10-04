@@ -17,6 +17,7 @@ import (
 	"aotopsy/internal/render"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strutil"
+	"aotopsy/internal/thraudit"
 )
 
 // RunDisasmStageX86 is RunDisasmStage's x86_64 counterpart: same output
@@ -168,18 +169,13 @@ func RunDisasmStageX86(
 		}
 
 		thrAccs := disasm.ExtractX86THRAccesses(funcCode, funcVA, thrFields)
-		for _, acc := range thrAccs {
-			if !acc.Resolved {
-				rec := disasm.UnresolvedTHRRecord{
-					FuncName:  name,
-					PC:        fmt.Sprintf("0x%x", acc.PC),
-					THROffset: fmt.Sprintf("0x%x", acc.THROffset),
-					Width:     acc.Width,
-					IsStore:   acc.IsStore,
-					Class:     "UNKNOWN",
-				}
-				unresTHRRecs = append(unresTHRRecs, rec)
+		x86Insts := disasm.DecodeX86Simple(funcCode, funcVA)
+		thrAuditRecords := disasm.BuildX86AuditRecords(thrAccs, x86Insts, thraudit.Provenance{Arch: thraudit.ArchX64}, name)
+		for _, acc := range thrAuditRecords {
+			if acc.Resolved {
+				continue
 			}
+			unresTHRRecs = append(unresTHRRecs, disasm.UnresolvedRecordFromAudit(acc))
 		}
 
 		if opts.Graph {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+
+	"aotopsy/internal/thraudit"
 )
 
 // jsonKeys marshals v and returns its top-level key set, sorted.
@@ -67,10 +69,10 @@ func TestJSONLSchema(t *testing.T) {
 		{
 			artifact: "unresolved_thr.jsonl",
 			value: UnresolvedTHRRecord{
-				FuncName: "f", PC: "0x1", THROffset: "0x8", Width: 8,
-				IsStore: true, Class: "UNKNOWN",
+				FuncName: "f", PC: "0x1", THROffset: 8, Width: 8,
+				Access: thraudit.AccessWrite, HeuristicClass: thraudit.ClassUnknown, Confidence: thraudit.ConfidenceUnresolved,
 			},
-			want: []string{"class", "func_name", "is_store", "pc", "thr_offset", "width"},
+			want: []string{"access", "confidence", "func_name", "heuristic_class", "pc", "thr_offset", "width"},
 		},
 	} {
 		got := jsonKeys(t, tc.value)

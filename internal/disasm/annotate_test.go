@@ -139,8 +139,8 @@ func TestTHRContextAnnotator(t *testing.T) {
 
 	ann := THRContextAnnotator(insts, nil)
 	got := ann(insts[0])
-	if got != "THR+0x48 LDR[UNKNOWN]" {
-		t.Errorf("THRContextAnnotator = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
+	if got != "THR+0x48 read8B[UNRESOLVED]" {
+		t.Errorf("THRContextAnnotator = %q, want %q", got, "THR+0x48 read8B[UNRESOLVED]")
 	}
 
 	// With field map.
@@ -164,8 +164,16 @@ func TestTHRContextAnnotatorClassifiesUnresolvedARM64(t *testing.T) {
 	}
 
 	ann := THRContextAnnotator(insts, nil)
-	if got, want := ann(insts[0]), "THR+0x48 LDR[RUNTIME_ENTRY]"; got != want {
+	if got, want := ann(insts[0]), "THR+0x48 read8B[HEURISTIC_INDIRECT_CONTROL_TARGET]"; got != want {
 		t.Fatalf("THRContextAnnotator unresolved ARM64 = %q, want %q", got, want)
+	}
+}
+
+func TestTHRContextAnnotatorPreservesBothLDPExactFields(t *testing.T) {
+	insts := []Inst{{Addr: 0x7000, Raw: 0xa9460740, Text: "LDP X0, X1, [X26,#96]"}}
+	ann := THRContextAnnotator(insts, map[int]string{0x60: "top", 0x68: "end"})
+	if got, want := ann(insts[0]), "THR.top; THR.end"; got != want {
+		t.Fatalf("LDP THR annotation = %q, want %q", got, want)
 	}
 }
 
@@ -221,8 +229,8 @@ func TestPPAnnotator_RealBytes(t *testing.T) {
 
 	thr := THRContextAnnotator([]Inst{{Addr: 0x1000, Raw: raw}}, nil)
 	got := thr(Inst{Addr: 0x1000, Raw: raw})
-	if got != "THR+0x48 LDR[UNKNOWN]" {
-		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
+	if got != "THR+0x48 read8B[UNRESOLVED]" {
+		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48 read8B[UNRESOLVED]")
 	}
 
 	pp := PPAnnotator(pool)

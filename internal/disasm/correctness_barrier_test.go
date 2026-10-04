@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	archx86 "aotopsy/internal/arch/x86"
+	"aotopsy/internal/thraudit"
 	"golang.org/x/arch/x86/x86asm"
 )
 
@@ -92,14 +93,14 @@ func TestX86LEAIsAddressComputationNotMemoryProvenance(t *testing.T) {
 	}
 }
 
-func TestX86THRReadModifyWriteIsStore(t *testing.T) {
+func TestX86THRReadModifyWritePreservesBothDirections(t *testing.T) {
 	// 49 83 46 48 01 = add qword ptr [r14+0x48],1.
 	got := ExtractX86THRAccesses([]byte{0x49, 0x83, 0x46, 0x48, 0x01}, 0x3000, nil)
 	if len(got) != 1 {
 		t.Fatalf("RMW THR access count = %d, want 1: %+v", len(got), got)
 	}
-	if !got[0].IsStore {
-		t.Fatalf("RMW THR access classified as read-only: %+v", got[0])
+	if got[0].Access != thraudit.AccessReadWrite {
+		t.Fatalf("RMW THR access mode = %s, want read_write: %+v", got[0].Access, got[0])
 	}
 }
 

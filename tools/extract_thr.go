@@ -1550,24 +1550,6 @@ var thrTableFiles = []string{
 	"internal/vmtables/thrfieldsx86.go",
 }
 
-// handDerivedFields are Thread fields that runtime_offsets_extracted.h does
-// NOT export, so -check cannot confirm them and must not fail on them.
-//
-// They are real fields -- runtime/vm/thread.h declares them in
-// CACHED_NON_VM_STUB_LIST / CACHED_VM_OBJECTS_LIST, contiguously and in
-// declaration order right after object_null_/bool_true_/bool_false_ -- but
-// the offsets are only exported for fields the compiler needs, so these were
-// derived by hand from that declaration order.
-//
-// Anything NOT on this list must match the SDK exactly.
-var handDerivedFields = map[string]string{
-	"empty_array":                  "thread.h CACHED_NON_VM_STUB_LIST, follows bool_false_",
-	"empty_type_arguments":         "thread.h CACHED_NON_VM_STUB_LIST, follows empty_array_",
-	"dynamic_type":                 "thread.h CACHED_NON_VM_STUB_LIST, follows empty_type_arguments_",
-	"object_sentinel":              "thread.h CACHED_VM_OBJECTS_LIST",
-	"deferred_marking_stack_block": "thread.h, not exported for the compiler",
-}
-
 // committedNameOverrides maps a generated variable name to the name actually
 // used in internal/vmtables. The older ARM64 v2.x tables predate the naming
 // convention generateGoMap follows and omit the "_nocompress" suffix because
@@ -1692,8 +1674,8 @@ func extractAll() (map[string]map[int]string, []string) {
 		for _, e := range entries {
 			m[e.offset] = e.name
 		}
-		if err := fillRuntimeEntries(m, t.tag, t.arch); err != nil {
-			failed = append(failed, fmt.Sprintf("%s %s compressed=%v product=%v: runtime entries: %v",
+		if err := fillDerivedThreadFields(m, t.tag, t.arch); err != nil {
+			failed = append(failed, fmt.Sprintf("%s %s compressed=%v product=%v: derived fields: %v",
 				t.tag, t.arch, t.compressed, t.product, err))
 			continue
 		}
@@ -1760,41 +1742,15 @@ func runWrite() int {
 					skipped++
 					continue
 				}
-				// Preserve hand-derived fields the SDK header never exports.
-				merged := map[int]string{}
-				for off, n := range entries {
-					merged[off] = n
-				}
-				for _, el := range lit.Elts {
-					kv, ok := el.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					kb, kok := kv.Key.(*ast.BasicLit)
-					vb, vok := kv.Value.(*ast.BasicLit)
-					if !kok || !vok {
-						continue
-					}
-					off, err1 := strconv.ParseInt(kb.Value, 0, 64)
-					val, err2 := strconv.Unquote(vb.Value)
-					if err1 != nil || err2 != nil {
-						continue
-					}
-					if _, isHand := handDerivedFields[val]; isHand {
-						if _, taken := merged[int(off)]; !taken {
-							merged[int(off)] = val
-						}
-					}
-				}
-				offs := make([]int, 0, len(merged))
-				for off := range merged {
+				offs := make([]int, 0, len(entries))
+				for off := range entries {
 					offs = append(offs, off)
 				}
 				sort.Ints(offs)
 				var b strings.Builder
 				b.WriteString("map[int]string{\n")
 				for _, off := range offs {
-					fmt.Fprintf(&b, "\t0x%x: %q,\n", off, merged[off])
+					fmt.Fprintf(&b, "\t0x%x: %q,\n", off, entries[off])
 				}
 				b.WriteString("}")
 				edits = append(edits, edit{
@@ -2062,8 +2018,8 @@ func runCheck() int {
 		// tables carry the ~70 runtime entries the header declares only
 		// in RUNTIME_ENTRY_LIST order, and comparing them against the
 		// raw header alone reports every one of them as "extra".
-		if err := fillRuntimeEntries(got, t.tag, t.arch); err != nil {
-			fmt.Fprintf(os.Stderr, "  %-38s ERROR (runtime entries: %v)\n", name, err)
+		if err := fillDerivedThreadFields(got, t.tag, t.arch); err != nil {
+			fmt.Fprintf(os.Stderr, "  %-38s ERROR (derived fields: %v)\n", name, err)
 			bad++
 			checked++
 			continue
@@ -2081,9 +2037,6 @@ func runCheck() int {
 		}
 		for off, repoName := range want {
 			if _, present := got[off]; present {
-				continue
-			}
-			if _, allowed := handDerivedFields[repoName]; allowed {
 				continue
 			}
 			problems = append(problems, fmt.Sprintf("extra 0x%x %q (not in SDK header)", off, repoName))
@@ -2238,8 +2191,8 @@ func main() {
 			for _, e := range entries {
 				complete[e.offset] = e.name
 			}
-			if err := fillRuntimeEntries(complete, t.tag, t.arch); err != nil {
-				fmt.Fprintf(os.Stderr, "  ERROR: runtime entries: %v\n", err)
+			if err := fillDerivedThreadFields(complete, t.tag, t.arch); err != nil {
+				fmt.Fprintf(os.Stderr, "  ERROR: derived fields: %v\n", err)
 				failures++
 				continue
 			}
@@ -2289,8 +2242,8 @@ func main() {
 	for _, e := range entries {
 		complete[e.offset] = e.name
 	}
-	if err := fillRuntimeEntries(complete, *tagFlag, *archFlag); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: runtime entries: %v\n", err)
+	if err := fillDerivedThreadFields(complete, *tagFlag, *archFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: derived fields: %v\n", err)
 		os.Exit(1)
 	}
 	entries = entries[:0]
@@ -2398,6 +2351,180 @@ var runtimeEntryCache = map[string]struct {
 	contiguous    bool
 	err           error
 }{}
+
+var cachedConstantFieldCache = map[string]struct {
+	names []string
+	err   error
+}{}
+
+// sdkCachedConstantFields expands Thread::CACHED_CONSTANTS_LIST in exact SDK
+// declaration order. The list contains cached VM objects/stubs and raw
+// addresses. runtime_offsets_extracted.h intentionally exports only the subset
+// referenced directly by compiler code, so parsing that generated header alone
+// leaves real Thread slots unnamed.
+func sdkCachedConstantFields(tag string) ([]string, error) {
+	if cached, ok := cachedConstantFieldCache[tag]; ok {
+		return cached.names, cached.err
+	}
+	var cached struct {
+		names []string
+		err   error
+	}
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(macros, "CACHED_CONSTANTS_LIST")
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for i, row := range rows {
+		if len(row) != 4 {
+			cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST row %d has %d columns, want 4", tag, i, len(row))
+			cachedConstantFieldCache[tag] = cached
+			return nil, cached.err
+		}
+		name := strings.TrimSuffix(strings.TrimSpace(row[1]), "_")
+		if name == "" || seen[name] {
+			cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST has invalid/duplicate field %q", tag, name)
+			cachedConstantFieldCache[tag] = cached
+			return nil, cached.err
+		}
+		seen[name] = true
+		cached.names = append(cached.names, name)
+	}
+	if len(cached.names) == 0 {
+		cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST expanded to zero fields", tag)
+	}
+	cachedConstantFieldCache[tag] = cached
+	return cached.names, cached.err
+}
+
+// fillCachedConstantFields reconstructs the complete CACHED_CONSTANTS_LIST
+// layout from exact SDK evidence rather than a per-version handwritten list.
+// object_null is the first cached constant and AllocateArray_entry_point is the
+// first field immediately after the block. Both offsets are exported by the SDK
+// for every supported target, so their distance proves the per-field stride.
+// Every header-exported field already present in m is then a conflict check.
+func fillCachedConstantFields(m map[int]string, tag, arch string) error {
+	names, err := sdkCachedConstantFields(tag)
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]int, len(m))
+	for off, name := range m {
+		byName[name] = off
+	}
+	base, ok := byName["object_null"]
+	if !ok {
+		return fmt.Errorf("%s/%s: cached-constant anchor object_null absent from header", tag, arch)
+	}
+	after, ok := byName["AllocateArray_entry_point"]
+	if !ok {
+		return fmt.Errorf("%s/%s: cached-constant end anchor AllocateArray_entry_point absent from header", tag, arch)
+	}
+	span := after - base
+	if span <= 0 || span%len(names) != 0 {
+		return fmt.Errorf("%s/%s: cached constants span %#x..%#x is not divisible by %d declarations", tag, arch, base, after, len(names))
+	}
+	stride := span / len(names)
+	// Every supported target is 64-bit. A different result means declaration
+	// order/layout changed and must be audited rather than silently generalized.
+	if stride != 8 {
+		return fmt.Errorf("%s/%s: cached constants derived stride %d, want 8 for 64-bit target", tag, arch, stride)
+	}
+	for i, name := range names {
+		off := base + i*stride
+		if existing, taken := m[off]; taken && existing != name {
+			return fmt.Errorf("%s/%s: cached-constant conflict at 0x%x: header holds %q, thread.h predicts %q", tag, arch, off, existing, name)
+		}
+		m[off] = name
+	}
+	return nil
+}
+
+var reDeferredMarkingStackBlock = regexp.MustCompile(
+	`(?s)MarkingStackBlock\*\s+([A-Za-z0-9_]+)_\s*(?:=\s*nullptr)?\s*;\s*` +
+		`MarkingStackBlock\*\s+deferred_marking_stack_block_\s*(?:=\s*nullptr)?\s*;\s*` +
+		`uword(?:\s+volatile)?\s+vm_tag_`,
+)
+
+// fillDeferredMarkingStackBlock recovers a Thread field that the compiler
+// offsets header does not export on some releases. This is still an exact SDK
+// fact, not a handwritten exception: thread.h proves the declaration is exactly
+// between another MarkingStackBlock* and vm_tag_, while the generated offsets
+// header exports both surrounding anchors.
+//
+// SDK @3.2.5 runtime/vm/thread.h:1208-1213 declares
+// marking_stack_block_, deferred_marking_stack_block_, vm_tag_ consecutively;
+// runtime/vm/compiler/runtime_offsets_extracted.h:15031,15135 exports the two
+// anchors as 0x710 and 0x720 for the PRODUCT ARM64 compressed target. Later SDKs
+// use the same shape with new_marking_stack_block_ as the preceding anchor.
+func fillDeferredMarkingStackBlock(m map[int]string, tag, arch string) error {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return err
+	}
+	return fillDeferredMarkingStackBlockFromSource(m, tag, arch, src)
+}
+
+func fillDeferredMarkingStackBlockFromSource(m map[int]string, tag, arch, src string) error {
+	if !strings.Contains(src, "deferred_marking_stack_block_") {
+		return nil
+	}
+	match := reDeferredMarkingStackBlock.FindStringSubmatch(src)
+	if match == nil {
+		return fmt.Errorf("%s/%s: deferred_marking_stack_block_ exists but its exact declaration neighborhood is unrecognised", tag, arch)
+	}
+	prevName := match[1]
+	prev, prevOK := -1, false
+	vmTag, vmOK := -1, false
+	for off, name := range m {
+		switch name {
+		case prevName:
+			prev, prevOK = off, true
+		case "vm_tag":
+			vmTag, vmOK = off, true
+		}
+	}
+	if !prevOK || !vmOK {
+		return fmt.Errorf("%s/%s: deferred marking anchors missing: %s=%v vm_tag=%v", tag, arch, prevName, prevOK, vmOK)
+	}
+	span := vmTag - prev
+	if span != 16 {
+		return fmt.Errorf("%s/%s: %s..vm_tag span is %#x, want two 8-byte Thread slots", tag, arch, prevName, span)
+	}
+	off := prev + 8
+	if existing, taken := m[off]; taken && existing != "deferred_marking_stack_block" {
+		return fmt.Errorf("%s/%s: deferred marking conflict at 0x%x: header holds %q", tag, arch, off, existing)
+	}
+	m[off] = "deferred_marking_stack_block"
+	return nil
+}
+
+func fillDerivedThreadFields(m map[int]string, tag, arch string) error {
+	if err := fillCachedConstantFields(m, tag, arch); err != nil {
+		return fmt.Errorf("cached constants: %w", err)
+	}
+	if err := fillRuntimeEntries(m, tag, arch); err != nil {
+		return fmt.Errorf("runtime entries: %w", err)
+	}
+	if err := fillDeferredMarkingStackBlock(m, tag, arch); err != nil {
+		return fmt.Errorf("deferred marking stack: %w", err)
+	}
+	return nil
+}
 
 // fillRuntimeEntries names the runtime-entry and leaf-runtime-entry blocks
 // of a single extracted Thread table.

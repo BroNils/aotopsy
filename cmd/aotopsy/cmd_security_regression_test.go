@@ -108,15 +108,18 @@ func TestTHRClusterPublishesOneFreshGeneration(t *testing.T) {
 	root := t.TempDir()
 	inPath := filepath.Join(root, "thr_loads.jsonl")
 	record := thraudit.THRAuditRecord{
-		Sample:      "sample.so",
-		DartVersion: "3.12.2",
-		Arch:        thraudit.ArchARM64,
-		PC:          "0x1000",
-		Insn:        "LDR X16, [X26,#0x100]",
-		THROffset:   "0x100",
-		Width:       8,
-		FuncName:    "f",
-		Context:     []string{"> 0x1000: LDR X16, [X26,#0x100]"},
+		Provenance: thraudit.Provenance{
+			Sample: "sample.so", SampleSHA256: strings.Repeat("a", 64),
+			DartVersion: "3.12.2", Arch: thraudit.ArchARM64, BuildMode: "product", CompressedPointers: true,
+		},
+		SchemaVersion: thraudit.SchemaV1,
+		PC:            "0x1000",
+		Insn:          "LDR X16, [X26,#0x100]",
+		THROffset:     0x100,
+		Access:        thraudit.AccessRead,
+		Width:         8,
+		FuncName:      "f",
+		Context:       []string{"> 0x1000: LDR X16, [X26,#0x100]"},
 	}
 	if _, err := jsonutil.WriteJSONLFile(inPath, []thraudit.THRAuditRecord{record}); err != nil {
 		t.Fatal(err)

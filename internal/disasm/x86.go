@@ -273,11 +273,11 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 	return out
 }
 
-// ExtractX86THRAccesses scans a function's raw bytes for MOV instructions
-// whose memory operand is THR-relative ([R14+disp]), mirroring
-// ExtractTHRAccesses's ARM64 X26 scan. Load = THR field read into a
-// register; store = register written into a THR field. fields is
-// optional (marks Resolved when the offset has a known name).
+// ExtractX86THRAccesses scans decoded instructions for static THR-relative
+// memory operands ([R14+disp]), mirroring ExtractTHRAccesses's ARM64 X26 scan.
+// Access direction is retained, including read-modify-write operations; GPR
+// roles are recorded only when the instruction semantics actually transfer the
+// memory value to/from that register. fields is optional (marks exact matches).
 func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
 	var out []THRAccess
 	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
@@ -320,31 +320,32 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8
 			}
 
-			disp := int(mem.Disp)
-			_, resolved := fields[disp]
+			disp := mem.Disp
+			fieldName, resolved := resolveTHRField(fields, disp)
 			acc := THRAccess{
 				PC:        addr,
 				InsnText:  inst.String(),
 				THROffset: disp,
+				Access:    thraudit.AccessRead,
 				Width:     width,
 				Resolved:  resolved,
+				FieldName: fieldName,
 			}
 
-			if argIdx == 0 && x86MemOperandWrites(inst.Op) {
-				acc.IsStore = true
-				if len(inst.Args) > 1 {
-					if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
-						if srcIdx := x86.CanonReg(srcReg); srcIdx >= 0 {
-							acc.SrcReg = srcIdx
-						}
-					}
-				}
+			if inst.Op == x86asm.XCHG {
+				// XCHG reads and writes both operands regardless of which operand
+				// happens to be the memory one.
+				acc.Access = thraudit.AccessReadWrite
+			} else if argIdx == 0 {
+				acc.Access = x86MemDestinationAccess(inst.Op)
+			}
+			if acc.Access == thraudit.AccessWrite || acc.Access == thraudit.AccessReadWrite {
+				acc.SrcReg = x86ExplicitGPROtherThanMemory(inst, argIdx)
 			} else {
-				if len(inst.Args) > 0 {
-					if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-						acc.DstReg = x86.CanonReg(dstReg)
-					}
-				}
+				acc.DstReg = x86DirectLoadGPR(inst, argIdx)
+			}
+			if acc.Access == thraudit.AccessReadWrite {
+				acc.DstReg = x86ReadWriteResultGPR(inst, argIdx)
 			}
 
 			out = append(out, acc)
@@ -355,28 +356,89 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 	return out
 }
 
-// x86MemOperandWrites reports opcodes whose first memory operand is written.
-// It includes read-modify-write operations: THR audit cares that Thread state
-// changes, even when the old value is also read.
-func x86MemOperandWrites(op x86asm.Op) bool {
+// x86MemDestinationAccess classifies instructions whose first operand is a THR
+// memory operand. Read-modify-write instructions remain read_write; collapsing
+// them to a store loses the fact that the old Thread value also influenced the
+// instruction.
+func x86MemDestinationAccess(op x86asm.Op) thraudit.AccessMode {
 	switch op {
 	case x86asm.MOV,
-		x86asm.MOVSD_XMM, x86asm.MOVUPS, x86asm.POP,
-		x86asm.ADD, x86asm.ADC, x86asm.SUB, x86asm.SBB,
+		x86asm.MOVSD_XMM, x86asm.MOVSS, x86asm.MOVUPS, x86asm.MOVAPS,
+		x86asm.MOVDQU, x86asm.VMOVDQU, x86asm.POP:
+		return thraudit.AccessWrite
+	case x86asm.ADD, x86asm.ADC, x86asm.SUB, x86asm.SBB,
 		x86asm.AND, x86asm.OR, x86asm.XOR,
 		x86asm.INC, x86asm.DEC, x86asm.NEG, x86asm.NOT,
 		x86asm.XADD, x86asm.XCHG, x86asm.CMPXCHG,
 		x86asm.BTC, x86asm.BTR, x86asm.BTS:
-		return true
+		return thraudit.AccessReadWrite
 	default:
-		return false
+		return thraudit.AccessRead
+	}
+}
+
+func x86ExplicitGPROtherThanMemory(inst x86asm.Inst, memArgIdx int) *int {
+	for i, arg := range inst.Args {
+		if i == memArgIdx || arg == nil {
+			continue
+		}
+		reg, ok := arg.(x86asm.Reg)
+		if !ok {
+			continue
+		}
+		if idx := x86.CanonReg(reg); idx >= 0 {
+			out := idx
+			return &out
+		}
+	}
+	return nil
+}
+
+// x86DirectLoadGPR returns a register only when the instruction copies or
+// extends the THR memory value into operand 0. Comparisons and arithmetic reads
+// intentionally return nil: e.g. ADD RAX,[R14+off] does not make RAX equal to
+// the Thread field and therefore must not seed indirect-call provenance.
+func x86DirectLoadGPR(inst x86asm.Inst, memArgIdx int) *int {
+	if memArgIdx == 0 {
+		return nil
+	}
+	switch inst.Op {
+	case x86asm.MOV, x86asm.MOVSX, x86asm.MOVSXD, x86asm.MOVZX:
+	default:
+		return nil
+	}
+	reg, ok := inst.Args[0].(x86asm.Reg)
+	if !ok {
+		return nil
+	}
+	idx := x86.CanonReg(reg)
+	if idx < 0 {
+		return nil
+	}
+	out := idx
+	return &out
+}
+
+// x86ReadWriteResultGPR records the architectural register that receives the
+// old memory value for RMW instructions. Dart's x64 safepoint transition uses
+// LOCK CMPXCHG on Thread::safepoint_state and immediately consumes RAX, exactly
+// as specified by CMPXCHG (SDK 3.12.2 assembler_x64.cc:155-163,229-239).
+func x86ReadWriteResultGPR(inst x86asm.Inst, memArgIdx int) *int {
+	switch inst.Op {
+	case x86asm.XADD, x86asm.XCHG:
+		return x86ExplicitGPROtherThanMemory(inst, memArgIdx)
+	case x86asm.CMPXCHG:
+		rax := 0
+		return &rax
+	default:
+		return nil
 	}
 }
 
 // BuildX86AuditRecords is ExtractX86THRAccesses's counterpart to
 // BuildAuditRecords, operating on []X86Inst instead of []Inst for
 // context-window lookup.
-func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
+func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, provenance thraudit.Provenance, funcName string) []thraudit.THRAuditRecord {
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
 		pcIdx[inst.VA] = i
@@ -399,14 +461,10 @@ func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dart
 		}
 
 		rec := thraudit.THRAuditRecord{
-			Sample: sample, DartVersion: dartVersion, Arch: thraudit.ArchX64, PC: fmt.Sprintf("0x%x", a.PC),
-			Insn: a.InsnText, THROffset: fmt.Sprintf("0x%x", a.THROffset), IsStore: a.IsStore,
-			Width: a.Width, FuncName: funcName, Resolved: a.Resolved, Context: ctx,
-		}
-		if a.IsStore {
-			rec.SrcReg = a.SrcReg
-		} else {
-			rec.DstReg = a.DstReg
+			Provenance: provenance, SchemaVersion: thraudit.SchemaV1, PC: fmt.Sprintf("0x%x", a.PC),
+			Insn: a.InsnText, THROffset: a.THROffset, Access: a.Access,
+			DstReg: a.DstReg, SrcReg: a.SrcReg, Width: a.Width, FuncName: funcName,
+			Resolved: a.Resolved, FieldName: a.FieldName, Context: ctx,
 		}
 		records = append(records, rec)
 	}

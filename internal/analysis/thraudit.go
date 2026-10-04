@@ -3,6 +3,7 @@ package analysis
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
@@ -16,14 +17,15 @@ import (
 
 // THRAuditData holds the pre-loaded snapshot data needed for THR audit.
 type THRAuditData struct {
-	Info    *snapshot.Info
-	IsARM64 bool
-	Result  *cluster.Result
-	Table   *cluster.InstructionsTable
-	Ranges  []cluster.CodeRange
-	Code    []byte
-	CodeOff uint64
-	CodeVA  uint64
+	Info         *snapshot.Info
+	IsARM64      bool
+	SampleSHA256 string
+	Result       *cluster.Result
+	Table        *cluster.InstructionsTable
+	Ranges       []cluster.CodeRange
+	Code         []byte
+	CodeOff      uint64
+	CodeVA       uint64
 }
 
 // Image returns a CodeImage providing unified function slicing.
@@ -119,6 +121,22 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 		return fmt.Errorf("select THR audit target profile: missing snapshot version profile")
 	}
 	thrFields := vmtables.THRFields(targetProfile)
+	if len(thrFields) == 0 {
+		return fmt.Errorf("select THR audit table: no exact table for Dart %s arch=%v compressed=%v build=%s",
+			targetProfile.DartVersion, targetProfile.Architecture, targetProfile.CompressedPointers, targetProfile.BuildMode.String())
+	}
+	arch := thraudit.ArchX64
+	if isARM64 {
+		arch = thraudit.ArchARM64
+	}
+	provenance := thraudit.Provenance{
+		Sample:             filepath.Base(libapp),
+		SampleSHA256:       data.SampleSHA256,
+		DartVersion:        targetProfile.DartVersion,
+		Arch:               arch,
+		BuildMode:          targetProfile.BuildMode.String(),
+		CompressedPointers: targetProfile.CompressedPointers,
+	}
 
 	writer, err := jsonutil.NewJSONLWriter[thraudit.THRAuditRecord](outPath)
 	if err != nil {
@@ -130,8 +148,6 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 			_ = writer.Abort()
 		}
 	}()
-
-	sample := libapp
 
 	n := len(data.Ranges)
 	if limit > 0 && limit < n {
@@ -161,14 +177,14 @@ func RunTHRAudit(data THRAuditData, libapp, outPath string, limit int) error {
 			if len(accesses) == 0 {
 				continue
 			}
-			records = disasm.BuildAuditRecords(accesses, insts, sample, dartVersion, funcName)
+			records = disasm.BuildAuditRecords(accesses, insts, provenance, funcName)
 		} else {
 			accesses := disasm.ExtractX86THRAccesses(funcCode, funcVA, thrFields)
 			if len(accesses) == 0 {
 				continue
 			}
 			insts := disasm.DecodeX86Simple(funcCode, funcVA)
-			records = disasm.BuildX86AuditRecords(accesses, insts, sample, dartVersion, funcName)
+			records = disasm.BuildX86AuditRecords(accesses, insts, provenance, funcName)
 		}
 		for _, rec := range records {
 			if err := writer.Write(&rec); err != nil {

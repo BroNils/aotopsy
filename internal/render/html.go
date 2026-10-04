@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/thraudit"
 )
 
 // WriteIndexHTML writes a small HTML page summarizing the disasm output.
@@ -240,18 +241,28 @@ a { color: #0B3D91; }
 	// Unresolved THR summary.
 	if len(unresTHR) > 0 {
 		_, _ = fmt.Fprintln(w, "<h2>Unresolved THR Accesses</h2>")
-		// Group by offset.
+		// Group by exact signed offset + evidence shape. Different access modes or
+		// heuristic classes at the same offset must not be silently merged.
 		type offInfo struct {
-			offset string
-			class  string
-			count  int
+			offset     int64
+			access     thraudit.AccessMode
+			class      thraudit.THRClass
+			confidence thraudit.EvidenceConfidence
+			count      int
 		}
-		offMap := make(map[string]*offInfo)
+		type offKey struct {
+			offset     int64
+			access     thraudit.AccessMode
+			class      thraudit.THRClass
+			confidence thraudit.EvidenceConfidence
+		}
+		offMap := make(map[offKey]*offInfo)
 		for _, r := range unresTHR {
-			if oi, ok := offMap[r.THROffset]; ok {
+			key := offKey{r.THROffset, r.Access, r.HeuristicClass, r.Confidence}
+			if oi, ok := offMap[key]; ok {
 				oi.count++
 			} else {
-				offMap[r.THROffset] = &offInfo{r.THROffset, r.Class, 1}
+				offMap[key] = &offInfo{r.THROffset, r.Access, r.HeuristicClass, r.Confidence, 1}
 			}
 		}
 		// Sort by offset for stable output.
@@ -260,13 +271,22 @@ a { color: #0B3D91; }
 			offSlice = append(offSlice, oi)
 		}
 		sort.Slice(offSlice, func(i, j int) bool {
-			return offSlice[i].offset < offSlice[j].offset
+			if offSlice[i].offset != offSlice[j].offset {
+				return offSlice[i].offset < offSlice[j].offset
+			}
+			if offSlice[i].access != offSlice[j].access {
+				return offSlice[i].access < offSlice[j].access
+			}
+			if offSlice[i].class != offSlice[j].class {
+				return offSlice[i].class < offSlice[j].class
+			}
+			return offSlice[i].confidence < offSlice[j].confidence
 		})
 		_, _ = fmt.Fprintln(w, "<table>")
-		_, _ = fmt.Fprintln(w, "<tr><th>Offset</th><th>Class</th><th>Count</th></tr>")
+		_, _ = fmt.Fprintln(w, "<tr><th>Offset</th><th>Access</th><th>Evidence</th><th>Confidence</th><th>Count</th></tr>")
 		for _, oi := range offSlice {
-			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td class=\"num\">%d</td></tr>\n",
-				htmlEscape(oi.offset), htmlEscape(oi.class), oi.count)
+			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%d</td></tr>\n",
+				htmlEscape(thraudit.FormatTHROffset(oi.offset)), htmlEscape(string(oi.access)), htmlEscape(string(oi.class)), htmlEscape(string(oi.confidence)), oi.count)
 		}
 		_, _ = fmt.Fprintln(w, "</table>")
 	}
