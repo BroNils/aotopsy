@@ -254,6 +254,66 @@ func TestLargePoolFallbackInstructionDecoders(t *testing.T) {
 	if base, rm, rt, ok := LDRRegExtended(scaledLDR); !ok || base != 27 || rm != 16 || rt != 16 {
 		t.Fatalf("LDRRegExtended(scaled) = (%d,%d,%d,%v)", base, rm, rt, ok)
 	}
+
+	// Exact StoreWordToPoolIndex large-offset form, assembled as
+	// `str x3, [x27, x16]` -> 0xf8306b63.
+	store := uint32(0xF8306B63)
+	if base, rm, rt, scaled, ok := STR64RegisterOffset(store); !ok || base != 27 || rm != 16 || rt != 3 || scaled {
+		t.Fatalf("STR64RegisterOffset = (%d,%d,%d,%v,%v), want (27,16,3,false,true)", base, rm, rt, scaled, ok)
+	}
+	if _, _, _, _, ok := STR64RegisterOffset(store &^ (1 << 13)); ok {
+		t.Fatal("STR64RegisterOffset accepted an unrelated option encoding")
+	}
+}
+
+func TestFPPoolLoadInstructionDecoders(t *testing.T) {
+	// Replay-assembled exact instructions from LoadS/D/QImmediate lowering.
+	unsigned := []struct {
+		name             string
+		raw              uint32
+		wantReg, wantOff int
+		wantWidth        int
+	}{
+		{"S", 0xBD401360, 0, 16, 4},
+		{"D", 0xFD400B61, 1, 16, 8},
+		{"Q", 0x3DC00762, 2, 16, 16},
+	}
+	for _, tc := range unsigned {
+		base, reg, off, width, ok := FPLoadUnsignedOffset(tc.raw)
+		if !ok || base != 27 || reg != tc.wantReg || off != tc.wantOff || width != tc.wantWidth {
+			t.Errorf("%s unsigned FP load = (%d,%d,%d,%d,%v)", tc.name, base, reg, off, width, ok)
+		}
+	}
+
+	regoff := []struct {
+		name      string
+		raw       uint32
+		wantReg   int
+		wantWidth int
+	}{
+		{"S", 0xBC706B66, 6, 4},
+		{"D", 0xFC706B67, 7, 8},
+		{"Q", 0x3CF06B68, 8, 16},
+	}
+	for _, tc := range regoff {
+		base, rm, reg, width, scaled, ok := FPLoadRegisterOffset(tc.raw)
+		if !ok || base != 27 || rm != 16 || reg != tc.wantReg || width != tc.wantWidth || scaled {
+			t.Errorf("%s register FP load = (%d,%d,%d,%d,%v,%v)", tc.name, base, rm, reg, width, scaled, ok)
+		}
+	}
+}
+
+func TestPoolOffsetImmediateMaterializationDecoders(t *testing.T) {
+	// Replay-assembled forms selected by Assembler::LoadImmediate.
+	if rd, imm, ok := ORR64ImmediateFromZR(0xB27003F0); !ok || rd != 16 || imm != 0x10000 {
+		t.Fatalf("ORR64ImmediateFromZR = (%d,%#x,%v), want (16,0x10000,true)", rd, imm, ok)
+	}
+	if rd, imm, shift, ok := MOVZ64Shifted(0xD2A00031); !ok || rd != 17 || imm != 1 || shift != 16 {
+		t.Fatalf("MOVZ64Shifted = (%d,%#x,%d,%v), want (17,1,16,true)", rd, imm, shift, ok)
+	}
+	if _, _, ok := MOVZ64(0xD2A00031); ok {
+		t.Fatal("narrow MOVZ64 accepted shifted MOVZ")
+	}
 }
 
 // TestDstRegsOfInstStoresDefineNothing pins the load/store split.

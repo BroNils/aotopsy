@@ -44,9 +44,10 @@ type Instr struct {
 	// actual writes rather than guessing from mnemonic text. Names use the same
 	// lowercase 64-bit spelling as FuncIR.ArgRegs (xN / rax..r15).
 	DefRegs []string
-	// PoolIndex is set for OpLoadPool when the pool slot index is known
-	// (ARM64: MOV Xd, [x27/PP, #imm]; x86_64: MOV reg, [r15+imm]). For
-	// OpLoadPool, Target holds the destination register name.
+	// PoolIndex is set for OpLoadPool when the pool slot index is known.
+	// ARM64 uses the canonical SDK LoadWordFromPoolIndex shape extractor
+	// (direct and materialized-address forms); x86_64 uses static MOV loads from
+	// [r15+disp]. For OpLoadPool, Target holds the destination register name.
 	PoolIndex int
 
 	// OpBranch condition classification -- the emitter builds the actual

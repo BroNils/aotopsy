@@ -360,8 +360,10 @@ func IsCodeEntryPointDisp(off int) bool {
 // Source: runtime/vm/object.h, AOT_ObjectPool layout.
 
 const (
-	// PoolElementsStartOffset is the byte offset of the first element in
-	// the AOT object pool from the tagged pool pointer.
+	// PoolElementsStartOffset is the byte offset of the first element in the
+	// 64-bit AOT ObjectPool object layout. Architecture-specific PP tagging is
+	// applied by the consumer: ARM64 PP is untagged; x86_64 PP is tagged and
+	// FieldAddress subtracts HeapObjectTag.
 	PoolElementsStartOffset = 16
 	// PoolElementSize is the size of one pool element in bytes (one word).
 	PoolElementSize = 8

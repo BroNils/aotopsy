@@ -431,6 +431,68 @@ func LDR64RegisterOffset(raw uint32) (base, rm, rt int, scaled bool, ok bool) {
 
 }
 
+// STR64RegisterOffset detects the UXTX register-offset forms of
+// STR Xt, [Xn, Xm] and STR Xt, [Xn, Xm, LSL #3]. The returned scaled flag is
+// false for the byte-offset form and true for the element-scaled form.
+//
+// Dart's large object-pool fallback in Assembler::StoreWordToPoolIndex
+// materializes the byte displacement in a register and uses the unscaled form.
+// Encoding: 11|111|V=0|01|opc=00|1|Rm|option=011|S|10|Rn|Rt
+// Mask ignores S (bit 12), Value has S=0.
+func STR64RegisterOffset(raw uint32) (base, rm, rt int, scaled bool, ok bool) {
+	if raw&0xFFE0EC00 != 0xF8206800 {
+		return 0, 0, 0, false, false
+	}
+	rt = int(raw & 0x1F)
+	base = int((raw >> 5) & 0x1F)
+	rm = int((raw >> 16) & 0x1F)
+	scaled = raw&(1<<12) != 0
+	return base, rm, rt, scaled, true
+}
+
+// FPLoadUnsignedOffset decodes the unsigned-offset SIMD/FP LDR forms used by
+// Dart's LoadSImmediate/LoadDImmediate/LoadQImmediate object-pool paths.
+// width is the number of bytes read (4, 8, or 16).
+func FPLoadUnsignedOffset(raw uint32) (base, rt, byteOffset, width int, ok bool) {
+	var scale uint
+	switch raw & 0xFFC00000 {
+	case 0xBD400000: // LDR St, [Xn,#imm12*4]
+		width, scale = 4, 2
+	case 0xFD400000: // LDR Dt, [Xn,#imm12*8]
+		width, scale = 8, 3
+	case 0x3DC00000: // LDR Qt, [Xn,#imm12*16]
+		width, scale = 16, 4
+	default:
+		return 0, 0, 0, 0, false
+	}
+	base = int((raw >> 5) & 0x1F)
+	rt = int(raw & 0x1F)
+	byteOffset = int((raw>>10)&0xFFF) << scale
+	return base, rt, byteOffset, width, true
+}
+
+// FPLoadRegisterOffset decodes the UXTX register-offset SIMD/FP LDR forms used
+// when PrepareLargeOffset materializes a pool byte displacement in a register.
+// scaled reports the architectural S bit; Dart's pool lowering uses unscaled
+// byte offsets, so pool consumers should reject scaled=true.
+func FPLoadRegisterOffset(raw uint32) (base, rm, rt, width int, scaled bool, ok bool) {
+	switch raw & 0xFFE0EC00 {
+	case 0xBC606800: // LDR St, [Xn,Xm]
+		width = 4
+	case 0xFC606800: // LDR Dt, [Xn,Xm]
+		width = 8
+	case 0x3CE06800: // LDR Qt, [Xn,Xm]
+		width = 16
+	default:
+		return 0, 0, 0, 0, false, false
+	}
+	rt = int(raw & 0x1F)
+	base = int((raw >> 5) & 0x1F)
+	rm = int((raw >> 16) & 0x1F)
+	scaled = raw&(1<<12) != 0
+	return base, rm, rt, width, scaled, true
+}
+
 // LDRRegExtended detects the scaled LDR Xt, [Xn, Xm, LSL #3] form used by
 // dispatch-table indexing. Keep this narrower compatibility helper so callers
 // that require scale-by-eight do not accidentally accept byte-offset loads.
@@ -629,16 +691,25 @@ func SUBS32Immediate(raw uint32) (rd, rn int, immValue int, ok bool) {
 
 // ── Data processing instructions ──────────────────────────────────────
 
-// MOVZ64 detects MOVZ Xd, #imm16 (64-bit, shift=0).
-// Returns dest register and the 16-bit immediate.
-// Encoding: sf=1 | 10 | 100101 | hw=00 | imm16 | Rd
-// Mask: 0xFFE00000, Value: 0xD2800000
-func MOVZ64(raw uint32) (rd int, imm int, ok bool) {
-	if raw&0xFFE00000 != 0xD2800000 {
-		return 0, 0, false
+// MOVZ64Shifted detects MOVZ Xd, #imm16, LSL #shift (64-bit).
+// shift is one of 0, 16, 32, 48.
+func MOVZ64Shifted(raw uint32) (rd int, imm int, shift int, ok bool) {
+	if raw&0xFF800000 != 0xD2800000 {
+		return 0, 0, 0, false
 	}
 	rd = int(raw & 0x1F)
 	imm = int((raw >> 5) & 0xFFFF)
+	shift = int((raw>>21)&0x3) * 16
+	return rd, imm, shift, true
+}
+
+// MOVZ64 detects MOVZ Xd, #imm16 (64-bit, shift=0). Keep this narrower helper
+// for consumers whose semantics require the unshifted form.
+func MOVZ64(raw uint32) (rd int, imm int, ok bool) {
+	rd, imm, shift, ok := MOVZ64Shifted(raw)
+	if !ok || shift != 0 {
+		return 0, 0, false
+	}
 	return rd, imm, true
 }
 
@@ -653,6 +724,59 @@ func MOVK64(raw uint32) (rd int, imm int, shift int, ok bool) {
 	imm = int((raw >> 5) & 0xFFFF)
 	shift = int((raw>>21)&0x3) * 16
 	return rd, imm, shift, true
+}
+
+// ORR64ImmediateFromZR detects the 64-bit logical-immediate form
+// `orr Xd, xzr, #imm`, which is the MOV-immediate alias selected by Dart's
+// Assembler::LoadImmediate when a positive offset is encodable as one logical
+// bitmask immediate. It returns the fully decoded 64-bit immediate.
+func ORR64ImmediateFromZR(raw uint32) (rd int, imm uint64, ok bool) {
+	if raw&0xFF800000 != 0xB2000000 || int((raw>>5)&0x1F) != 31 {
+		return 0, 0, false
+	}
+	n := int((raw >> 22) & 1)
+	immr := int((raw >> 16) & 0x3F)
+	imms := int((raw >> 10) & 0x3F)
+	value, ok := decodeLogicalImmediate64(n, immr, imms)
+	if !ok {
+		return 0, 0, false
+	}
+	return int(raw & 0x1F), value, true
+}
+
+func decodeLogicalImmediate64(n, immr, imms int) (uint64, bool) {
+	pattern := (n << 6) | ((^imms) & 0x3F)
+	length := -1
+	for bit := 6; bit >= 1; bit-- {
+		if pattern&(1<<bit) != 0 {
+			length = bit
+			break
+		}
+	}
+	if length < 1 {
+		return 0, false
+	}
+	levels := (1 << length) - 1
+	s := imms & levels
+	r := immr & levels
+	if s == levels {
+		return 0, false
+	}
+	esize := 1 << length
+	ones := uint64(1)<<(s+1) - 1
+	var elemMask uint64
+	if esize == 64 {
+		elemMask = ^uint64(0)
+	} else {
+		elemMask = uint64(1)<<esize - 1
+	}
+	r %= esize
+	rotated := ((ones >> r) | (ones << (esize - r))) & elemMask
+	var out uint64
+	for pos := 0; pos < 64; pos += esize {
+		out |= rotated << pos
+	}
+	return out, true
 }
 
 // UBFX detects UBFM/UBFX Xt, Xn, #lsb, #width (64-bit).

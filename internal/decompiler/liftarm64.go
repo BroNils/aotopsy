@@ -2,7 +2,6 @@ package decompiler
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"aotopsy/internal/arch/arm64"
@@ -28,6 +27,13 @@ func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []dis
 		return fir
 	}
 	cfg := disasm.BuildCFG(name, insts)
+	poolLoadsByPC := make(map[uint64][]disasm.ARM64PoolAccess)
+	for _, access := range disasm.ExtractARM64PoolAccesses(insts, nil) {
+		if access.Kind != disasm.ARM64PoolAccessLoad || access.RegClass != disasm.ARM64PoolRegGPR {
+			continue
+		}
+		poolLoadsByPC[access.PC] = append(poolLoadsByPC[access.PC], access)
+	}
 	fir := newFuncIR(name, insts[0].Addr)
 	fir.DartVersion = dartVersion
 	fir.ArgRegs = append([]string(nil), cc.GPRNames...)
@@ -52,13 +58,16 @@ func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []dis
 		if bb.Start < len(insts) {
 			blk.StartVA = insts[bb.Start].Addr
 		}
-		// Pool bases established by `add xT, PP, #hi` earlier in this
-		// block, keyed by destination register. Block-local on purpose:
-		// carrying them across a control-flow join would pair an ADD on
-		// one path with an LDR on another.
-		poolBase := map[int]int64{}
 		for i := bb.Start; i < bb.End && i < len(insts); i++ {
-			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i], poolBase))
+			var scalarPoolLoad *disasm.ARM64PoolAccess
+			loads := poolLoadsByPC[insts[i].Addr]
+			// FuncIR has one Op/Target per machine instruction. A scalar LDR
+			// therefore maps exactly; an LDP has two independent destinations
+			// and remains OpOther until the IR grows a multi-result operation.
+			if len(loads) == 1 {
+				scalarPoolLoad = &loads[0]
+			}
+			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i], scalarPoolLoad))
 		}
 		for _, s := range bb.Succs {
 			blk.Succs = append(blk.Succs, Succ{BlockID: s.BlockID, Cond: s.Cond})
@@ -68,10 +77,10 @@ func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []dis
 	return fir
 }
 
-// liftARM64Instr lifts one instruction. poolBase carries the two-instruction
-// object-pool form across the block (see trackARM64PoolBase); it is mutated
-// as instructions define and redefine registers.
-func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
+// liftARM64Instr lifts one instruction. scalarPoolLoad is supplied by the same
+// canonical SDK-shape extractor used by disassembly/dataflow and strxref, so
+// pool provenance cannot drift between those consumers.
+func liftARM64Instr(inst disasm.Inst, scalarPoolLoad *disasm.ARM64PoolAccess) Instr {
 	mnemonic := strings.ToLower(inst.Mnemonic)
 	src := strings.ToLower(inst.Text)
 	ir := Instr{Addr: inst.Addr, Src: src, PoolIndex: -1}
@@ -81,16 +90,10 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 		}
 	}
 
-	// Resolve against the base BEFORE this instruction updates the map:
-	// `add x2, x27, #0x4000; ldr x2, [x2, #8]` reuses the same register,
-	// and the load reads the base the add produced.
-	baseIdx := arm64PoolIndexViaBase(inst, poolBase)
-	defer trackARM64PoolBase(inst, poolBase)
-
-	if baseIdx >= 0 && (mnemonic == "ldr" || mnemonic == "ldur") {
+	if scalarPoolLoad != nil {
 		ir.Op = OpLoadPool
-		ir.PoolIndex = baseIdx
-		ir.Target = firstOperandReg(inst.Operands)
+		ir.PoolIndex = scalarPoolLoad.PoolIndex
+		ir.Target = sdk.ARM64RegName(scalarPoolLoad.Reg)
 		return ir
 	}
 
@@ -170,10 +173,6 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 				}
 			}
 		}
-	case (mnemonic == "ldr" || mnemonic == "ldur") && isARM64PoolLoad(inst.Operands):
-		ir.Op = OpLoadPool
-		ir.PoolIndex = arm64PoolIndex(inst.Operands)
-		ir.Target = firstOperandReg(inst.Operands)
 	}
 	return ir
 }
@@ -244,93 +243,6 @@ func firstOperandToken(operands string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[0])
-}
-
-// trackARM64PoolBase maintains the register -> pool-base map for the
-// two-instruction object-pool form.
-//
-// Dart's LoadWordFromPoolIndex emits a single `ldr xD, [PP, #imm]` only
-// while the displacement fits the 12-bit unsigned-offset field. Past that
-// it emits `add xT, PP, #hi` then `ldr xD, [xT, #lo]`, and the lifter
-// recognised only the first form -- so on a real production binary 38716
-// of 64601 pool loads (60%) produced no OpLoadPool at all, and every
-// string, class and stub reference behind them was invisible to the
-// pseudocode, to strxref, and to anything else reading PoolIndex.
-func trackARM64PoolBase(inst disasm.Inst, poolBase map[int]int64) {
-	if rd, rn, imm, ok := arm64.ADD64Immediate(inst.Raw); ok && rn == sdk.ARM64PP && rd < 31 {
-		poolBase[rd] = int64(imm)
-		return
-	}
-	// Anything else that writes a tracked register invalidates it. A base
-	// that survived its register being overwritten would resolve a later
-	// load against an address that no longer exists.
-	for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
-		delete(poolBase, rd)
-	}
-}
-
-// arm64PoolIndexViaBase resolves `ldr xD, [xT, #lo]` where xT was set by
-// an earlier `add xT, PP, #hi`, returning the pool slot index or -1.
-func arm64PoolIndexViaBase(inst disasm.Inst, poolBase map[int]int64) int {
-	if len(poolBase) == 0 {
-		return -1
-	}
-	base, off, ok := arm64.LDR64UnsignedOffset(inst.Raw)
-	if !ok {
-		b, _, o, uok := arm64.LDUR64(inst.Raw)
-		if !uok {
-			return -1
-		}
-		base, off = b, o
-	}
-	hi, tracked := poolBase[base]
-	if !tracked {
-		return -1
-	}
-	idx, ok := disasm.ARM64PoolIndex(int(hi + int64(off)))
-	if !ok {
-		return -1
-	}
-	return idx
-}
-
-// isARM64PoolLoad recognizes "ldr/ldur xD, [x27, #imm]" (or w-register
-// variants) -- a load from the object pool register.
-func isARM64PoolLoad(operands string) bool {
-	lower := strings.ToLower(operands)
-	return strings.Contains(lower, "["+sdk.ARM64PoolRegStr) || strings.Contains(lower, "[ "+sdk.ARM64PoolRegStr)
-}
-
-// arm64PoolIndex extracts the #imm offset from a "[x27, #imm]" operand
-// and converts it to a pool slot index via disasm.ARM64PoolIndex, which
-// carries the SDK layout constants (elements start at +16, 8 bytes each,
-// PP untagged on ARM64).
-func arm64PoolIndex(operands string) int {
-	i := strings.Index(operands, "#")
-	if i < 0 {
-		return -1
-	}
-	rest := operands[i+1:]
-	end := strings.IndexAny(rest, "] \t")
-	if end >= 0 {
-		rest = rest[:end]
-	}
-	rest = strings.TrimSuffix(rest, "]")
-	var v int64
-	var err error
-	if strings.HasPrefix(rest, "0x") {
-		v, err = strconv.ParseInt(rest[2:], 16, 64)
-	} else {
-		v, err = strconv.ParseInt(rest, 10, 64)
-	}
-	if err != nil || v < 0 {
-		return -1
-	}
-	idx, ok := disasm.ARM64PoolIndex(int(v))
-	if !ok {
-		return -1
-	}
-	return idx
 }
 
 // applyOtherARM64 handles ARM64-only mnemonics in ApplyOther's switch.

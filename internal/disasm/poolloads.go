@@ -7,17 +7,43 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-// ARM64PoolLoad is one statically-identified object-pool word loaded into a
-// register. A single LDP instruction produces two records, one per destination,
-// because the adjacent pool entries are independent values and must never share
-// one provenance label merely because one machine instruction loaded both.
-type ARM64PoolLoad struct {
+// ARM64PoolAccessKind describes whether machine code reads or writes a pool
+// slot. The distinction matters to provenance consumers: a store is a genuine
+// machine-code xref to the slot, but it does not define the source register as
+// containing the pool value.
+type ARM64PoolAccessKind uint8
+
+const (
+	ARM64PoolAccessLoad ARM64PoolAccessKind = iota
+	ARM64PoolAccessStore
+)
+
+// ARM64PoolRegisterClass identifies the register file used by the access.
+// Only GPR loads can establish object-pointer provenance for call/decompiler
+// consumers; FP/SIMD loads are still real pool xrefs but carry immediate data.
+type ARM64PoolRegisterClass uint8
+
+const (
+	ARM64PoolRegGPR ARM64PoolRegisterClass = iota
+	ARM64PoolRegFP
+)
+
+// ARM64PoolAccess is one statically-identified object-pool word access. Reg is
+// interpreted in RegClass: the destination register for loads and the source
+// register for stores. A single LDP produces two load records, and a 16-byte Q
+// load also produces two records for the two physical 8-byte pool entries it
+// spans.
+type ARM64PoolAccess struct {
 	PC        uint64
 	Reg       int
 	PoolIndex int
 	Note      string
-	// Direct is true when PP itself is the memory base. False means the SDK
-	// materialized the byte offset/address in a temporary first.
+	Kind      ARM64PoolAccessKind
+	RegClass  ARM64PoolRegisterClass
+	// Direct is true only for a one-instruction immediate-offset access whose
+	// memory base is PP itself. False includes ADD-derived bases and the large
+	// MOVZ/MOVK register-offset fallback even though that fallback still uses PP
+	// as the architectural memory base.
 	Direct bool
 }
 
@@ -34,47 +60,65 @@ type arm64PoolAddrFact struct {
 	value int64
 }
 
-func poolLoadNote(index int, pool map[int]string) string {
+func poolAccessNote(index int, pool map[int]string) string {
 	if s, ok := pool[index]; ok {
 		return fmt.Sprintf("PP[%d] %s", index, s)
 	}
 	return fmt.Sprintf("PP[%d]", index)
 }
 
-// ExtractARM64PoolLoads recovers the exact pool slot(s) read by ARM64 object-
-// pool load sequences. It follows only constants constructed inside the same
-// basic block, so a branch that bypasses an address-building prefix cannot
-// fabricate a pool fact at a join.
+// ExtractARM64PoolAccesses recovers the exact pool slot(s) addressed by ARM64
+// object-pool load/store sequences. It follows only constants constructed
+// inside the same basic block, so a branch that bypasses an address-building
+// prefix cannot fabricate a pool fact at a join.
 //
-// The handled shapes are the SDK's LoadWordFromPoolIndex and
-// LoadDoubleWordFromPoolIndex lowerings across the supported releases:
-// direct LDR/LDP from PP, ADD-immediate address construction (including two
-// consecutive ADDs), and the large-offset MOVZ/MOVK + register-add/register-
-// offset forms. All instruction semantics come from internal/arch/arm64.
-func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
+// The handled shapes are the SDK's LoadWordFromPoolIndex,
+// StoreWordToPoolIndex, LoadDoubleWordFromPoolIndex, and LoadS/D/QImmediate
+// lowerings across the supported releases: direct LDR/STR/LDP/FP loads from PP,
+// ADD-immediate address construction (including two consecutive ADDs for pair
+// loads), and large-offset materialization followed by register-add or
+// register-offset access. The generic PrepareLargeOffset path can materialize a
+// positive pool displacement with MOVZ/MOVK, shifted MOVZ, or logical-immediate
+// ORR; all are tracked. Register-offset pool accesses are deliberately limited
+// to the SDK's unscaled byte-offset form; scaled [base,index,LSL #N] addressing
+// is a different compiler shape. All instruction semantics come from
+// internal/arch/arm64.
+func ExtractARM64PoolAccesses(insts []Inst, pool map[int]string) []ARM64PoolAccess {
 	if len(insts) == 0 {
 		return nil
 	}
 
-	cfg := BuildCFG("pp-loads", insts)
-	var out []ARM64PoolLoad
+	cfg := BuildCFG("pp-accesses", insts)
+	var out []ARM64PoolAccess
 	maxInt := int64(int(^uint(0) >> 1))
 
-	record := func(pc uint64, reg int, byteOff int64, direct bool) {
-		if reg < 0 || reg >= 31 || byteOff < 0 || byteOff > maxInt {
+	record := func(kind ARM64PoolAccessKind, regClass ARM64PoolRegisterClass, pc uint64, reg int, byteOff int64, width int, direct bool) {
+		if reg < 0 || reg >= 32 || (regClass == ARM64PoolRegGPR && reg >= 31) || byteOff < 0 || byteOff > maxInt || width <= 0 {
 			return
 		}
-		idx, ok := ARM64PoolIndex(int(byteOff))
-		if !ok {
-			return
+		// Pool entries are 8-byte words. A Q load spans two consecutive entries;
+		// S/D/GPR accesses stay within one. Record one physical xref per touched
+		// slot so strxref can target either half of an Immediate128 entry.
+		slots := (width + sdk.PoolElementSize - 1) / sdk.PoolElementSize
+		for slot := 0; slot < slots; slot++ {
+			off, ok := addInt64(byteOff, int64(slot*sdk.PoolElementSize))
+			if !ok || off > maxInt {
+				return
+			}
+			idx, ok := ARM64PoolIndex(int(off))
+			if !ok {
+				return
+			}
+			out = append(out, ARM64PoolAccess{
+				PC:        pc,
+				Reg:       reg,
+				PoolIndex: idx,
+				Note:      poolAccessNote(idx, pool),
+				Kind:      kind,
+				RegClass:  regClass,
+				Direct:    direct,
+			})
 		}
-		out = append(out, ARM64PoolLoad{
-			PC:        pc,
-			Reg:       reg,
-			PoolIndex: idx,
-			Note:      poolLoadNote(idx, pool),
-			Direct:    direct,
-		})
 	}
 
 	for _, blk := range cfg.Blocks {
@@ -109,13 +153,7 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 			}
 		}
 		add := func(a, b int64) (int64, bool) {
-			if b > 0 && a > (1<<63-1)-b {
-				return 0, false
-			}
-			if b < 0 && a < (-1<<63)-b {
-				return 0, false
-			}
-			return a + b, true
+			return addInt64(a, b)
 		}
 
 		for i := blk.Start; i < blk.End && i < len(insts); i++ {
@@ -130,7 +168,7 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 			if base, low, ok := arm64.LDR64UnsignedOffset(inst.Raw); ok {
 				if upper, known, direct := baseOffset(base); known {
 					if total, ok := add(upper, int64(low)); ok {
-						record(inst.Addr, int(inst.Raw&0x1f), total, direct)
+						record(ARM64PoolAccessLoad, ARM64PoolRegGPR, inst.Addr, int(inst.Raw&0x1f), total, 8, direct)
 					}
 				}
 				killDefs(inst.Raw)
@@ -138,23 +176,14 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 			}
 
 			// Register-offset LDR. Large pool offsets are materialized as an
-			// absolute byte count and then used unscaled against PP.
+			// absolute byte count and then used unscaled against PP. Reject the
+			// scaled form: it is not emitted by LoadWordFromPoolIndex.
 			if base, rm, rt, scaled, ok := arm64.LDR64RegisterOffset(inst.Raw); ok {
-				baseOff, baseKnown, direct := baseOffset(base)
+				baseOff, baseKnown, _ := baseOffset(base)
 				idxFact := factFor(rm)
-				if baseKnown && idxFact.kind == arm64PoolAddrAbsolute {
-					idxOff := idxFact.value
-					if scaled {
-						if idxOff < 0 || idxOff > (1<<63-1)/8 {
-							idxOff = -1
-						} else {
-							idxOff *= 8
-						}
-					}
-					if idxOff >= 0 {
-						if total, ok := add(baseOff, idxOff); ok {
-							record(inst.Addr, rt, total, direct)
-						}
+				if !scaled && baseKnown && idxFact.kind == arm64PoolAddrAbsolute && idxFact.value >= 0 {
+					if total, ok := add(baseOff, idxFact.value); ok {
+						record(ARM64PoolAccessLoad, ARM64PoolRegGPR, inst.Addr, rt, total, 8, false)
 					}
 				}
 				killDefs(inst.Raw)
@@ -167,14 +196,62 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 				if pair.Mode == arm64.PairOffset {
 					if upper, known, direct := baseOffset(pair.BaseReg); known {
 						if first, ok := add(upper, int64(pair.ByteOffset)); ok {
-							record(inst.Addr, pair.Reg1, first, direct)
+							record(ARM64PoolAccessLoad, ARM64PoolRegGPR, inst.Addr, pair.Reg1, first, 8, direct)
 							if second, ok := add(first, 8); ok {
-								record(inst.Addr, pair.Reg2, second, direct)
+								record(ARM64PoolAccessLoad, ARM64PoolRegGPR, inst.Addr, pair.Reg2, second, 8, direct)
 							}
 						}
 					}
 				}
 				killDefs(inst.Raw)
+				continue
+			}
+
+			// StoreWordToPoolIndex mirrors the scalar load lowering: direct
+			// unsigned-offset STR, ADD-derived base + STR, or a materialized
+			// byte displacement used as an unscaled register offset.
+			if base, low, src, ok := arm64.STR64UnsignedOffset(inst.Raw); ok {
+				if upper, known, direct := baseOffset(base); known {
+					if total, ok := add(upper, int64(low)); ok {
+						record(ARM64PoolAccessStore, ARM64PoolRegGPR, inst.Addr, src, total, 8, direct)
+					}
+				}
+				killDefs(inst.Raw)
+				continue
+			}
+
+			if base, rm, src, scaled, ok := arm64.STR64RegisterOffset(inst.Raw); ok {
+				baseOff, baseKnown, _ := baseOffset(base)
+				idxFact := factFor(rm)
+				if !scaled && baseKnown && idxFact.kind == arm64PoolAddrAbsolute && idxFact.value >= 0 {
+					if total, ok := add(baseOff, idxFact.value); ok {
+						record(ARM64PoolAccessStore, ARM64PoolRegGPR, inst.Addr, src, total, 8, false)
+					}
+				}
+				killDefs(inst.Raw)
+				continue
+			}
+
+			// LoadS/D/QImmediate uses the same PrepareLargeOffset address
+			// construction as scalar GPR loads, but reads FP/SIMD immediates.
+			// Q is 16 bytes and therefore references two adjacent pool slots.
+			if base, rt, low, width, ok := arm64.FPLoadUnsignedOffset(inst.Raw); ok {
+				if upper, known, direct := baseOffset(base); known {
+					if total, ok := add(upper, int64(low)); ok {
+						record(ARM64PoolAccessLoad, ARM64PoolRegFP, inst.Addr, rt, total, width, direct)
+					}
+				}
+				continue
+			}
+
+			if base, rm, rt, width, scaled, ok := arm64.FPLoadRegisterOffset(inst.Raw); ok {
+				baseOff, baseKnown, _ := baseOffset(base)
+				idxFact := factFor(rm)
+				if !scaled && baseKnown && idxFact.kind == arm64PoolAddrAbsolute && idxFact.value >= 0 {
+					if total, ok := add(baseOff, idxFact.value); ok {
+						record(ARM64PoolAccessLoad, ARM64PoolRegFP, inst.Addr, rt, total, width, false)
+					}
+				}
 				continue
 			}
 
@@ -185,8 +262,21 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 			}
 
 			// Large-offset fallback materializes a 32-bit byte displacement.
-			if rd, imm, ok := arm64.MOVZ64(inst.Raw); ok {
-				setFact(rd, arm64PoolAddrFact{kind: arm64PoolAddrAbsolute, value: int64(imm)})
+			if rd, imm, shift, ok := arm64.MOVZ64Shifted(inst.Raw); ok {
+				value := uint64(imm) << uint(shift)
+				if value > uint64(1<<63-1) {
+					setFact(rd, arm64PoolAddrFact{})
+				} else {
+					setFact(rd, arm64PoolAddrFact{kind: arm64PoolAddrAbsolute, value: int64(value)})
+				}
+				continue
+			}
+			if rd, imm, ok := arm64.ORR64ImmediateFromZR(inst.Raw); ok {
+				if imm > uint64(1<<63-1) {
+					setFact(rd, arm64PoolAddrFact{})
+				} else {
+					setFact(rd, arm64PoolAddrFact{kind: arm64PoolAddrAbsolute, value: int64(imm)})
+				}
 				continue
 			}
 			if rd, imm, shift, ok := arm64.MOVK64(inst.Raw); ok {
@@ -250,18 +340,31 @@ func ExtractARM64PoolLoads(insts []Inst, pool map[int]string) []ARM64PoolLoad {
 	return out
 }
 
-func arm64PoolNotesByPC(loads []ARM64PoolLoad) map[uint64]map[int]string {
-	if len(loads) == 0 {
+func arm64PoolNotesByPC(accesses []ARM64PoolAccess) map[uint64]map[int]string {
+	if len(accesses) == 0 {
 		return nil
 	}
 	out := make(map[uint64]map[int]string)
-	for _, load := range loads {
-		m := out[load.PC]
+	for _, access := range accesses {
+		if access.Kind != ARM64PoolAccessLoad || access.RegClass != ARM64PoolRegGPR {
+			continue
+		}
+		m := out[access.PC]
 		if m == nil {
 			m = make(map[int]string)
-			out[load.PC] = m
+			out[access.PC] = m
 		}
-		m[load.Reg] = load.Note
+		m[access.Reg] = access.Note
 	}
 	return out
+}
+
+func addInt64(a, b int64) (int64, bool) {
+	if b > 0 && a > (1<<63-1)-b {
+		return 0, false
+	}
+	if b < 0 && a < (-1<<63)-b {
+		return 0, false
+	}
+	return a + b, true
 }

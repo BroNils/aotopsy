@@ -113,6 +113,101 @@ func TestARM64LargePoolFallbackReachesIndirectCall(t *testing.T) {
 	}
 }
 
+func TestARM64PoolStoreIsReferenceButNotLoadProvenance(t *testing.T) {
+	// Exact StoreWordToPoolIndex direct form. The slot access is real, but STR
+	// reads X3; it must not define X3 as containing PP[1].
+	insts := []Inst{
+		{Addr: 0x1900, Raw: 0xF9000F63, Text: "str x3, [x27, #0x18]"},
+		{Addr: 0x1904, Raw: uint32(0xD63F0000 | (3 << 5)), Text: "blr x3"},
+	}
+	accesses := ExtractARM64PoolAccesses(insts, map[int]string{1: "cached"})
+	if len(accesses) != 1 || accesses[0].Kind != ARM64PoolAccessStore || accesses[0].PoolIndex != 1 || accesses[0].Reg != 3 {
+		t.Fatalf("pool store access = %+v, want one store to pool[1] from x3", accesses)
+	}
+	edges := ExtractCallEdgesCFG("pool_store", insts, nil, nil, map[int]string{1: "cached"})
+	if len(edges) != 1 || edges[0].Via != "" {
+		t.Fatalf("pool store fabricated load provenance: %+v", edges)
+	}
+}
+
+func TestARM64ScaledRegisterOffsetIsNotPoolHelperAccess(t *testing.T) {
+	// LoadWordFromPoolIndex's materialized-offset fallback uses [PP, Xm]
+	// unscaled. A scaled [PP, Xm, LSL #3] is a different addressing shape and
+	// must not be accepted merely because Xm happens to hold a constant that
+	// would numerically land on an aligned pool slot.
+	movzX16Two := uint32(0xD2800000 | (2 << 5) | 16)
+	scaledLDR := uint32(0xF8606800 | (16 << 16) | (1 << 12) | (27 << 5))
+	insts := []Inst{
+		{Addr: 0x1a00, Raw: movzX16Two, Text: "movz x16, #2"},
+		{Addr: 0x1a04, Raw: scaledLDR, Text: "ldr x0, [x27, x16, lsl #3]"},
+	}
+	if accesses := ExtractARM64PoolAccesses(insts, nil); len(accesses) != 0 {
+		t.Fatalf("scaled non-pool-helper addressing fabricated pool access: %+v", accesses)
+	}
+}
+
+func TestARM64FPPoolImmediateAccessShapes(t *testing.T) {
+	// Replay-assembled LoadS/D/QImmediate addressing families: direct PP,
+	// ADD-derived base, and the large materialized register-offset fallback.
+	// Q reads 16 bytes and therefore contributes two physical pool-slot xrefs.
+	insts := []Inst{
+		{Addr: 0x1b00, Raw: 0xBD401360, Text: "ldr s0, [x27, #0x10]"},
+		{Addr: 0x1b04, Raw: 0xFD400B61, Text: "ldr d1, [x27, #0x10]"},
+		{Addr: 0x1b08, Raw: 0x3DC00762, Text: "ldr q2, [x27, #0x10]"},
+		{Addr: 0x1b0c, Raw: 0x91401370, Text: "add x16, x27, #0x4000"},
+		{Addr: 0x1b10, Raw: 0xBD401203, Text: "ldr s3, [x16, #0x10]"},
+		{Addr: 0x1b14, Raw: 0xFD400A04, Text: "ldr d4, [x16, #0x10]"},
+		{Addr: 0x1b18, Raw: 0x3DC00605, Text: "ldr q5, [x16, #0x10]"},
+		{Addr: 0x1b1c, Raw: 0xD2800210, Text: "movz x16, #0x10"},
+		{Addr: 0x1b20, Raw: 0xF2A02010, Text: "movk x16, #0x100, lsl #16"},
+		{Addr: 0x1b24, Raw: 0xBC706B66, Text: "ldr s6, [x27, x16]"},
+		{Addr: 0x1b28, Raw: 0xFC706B67, Text: "ldr d7, [x27, x16]"},
+		{Addr: 0x1b2c, Raw: 0x3CF06B68, Text: "ldr q8, [x27, x16]"},
+	}
+	accesses := ExtractARM64PoolAccesses(insts, nil)
+	if len(accesses) != 12 {
+		t.Fatalf("FP pool accesses = %+v, want 12 slot xrefs", accesses)
+	}
+	wantIdx := []int{0, 0, 0, 1, 2048, 2048, 2048, 2049, 0x200000, 0x200000, 0x200000, 0x200001}
+	for i, access := range accesses {
+		if access.Kind != ARM64PoolAccessLoad || access.RegClass != ARM64PoolRegFP || access.PoolIndex != wantIdx[i] {
+			t.Fatalf("FP access[%d] = %+v, want FP load pool[%d]", i, access, wantIdx[i])
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if !accesses[i].Direct {
+			t.Fatalf("direct FP access[%d] marked materialized: %+v", i, accesses[i])
+		}
+	}
+	for i := 4; i < len(accesses); i++ {
+		if accesses[i].Direct {
+			t.Fatalf("materialized FP access[%d] marked direct: %+v", i, accesses[i])
+		}
+	}
+}
+
+func TestARM64FPPoolImmediateGenericLoadImmediateFallbacks(t *testing.T) {
+	// PrepareLargeOffset falls back to Assembler::LoadImmediate for offsets that
+	// cannot use ADD-immediate. LoadImmediate can choose either logical-immediate
+	// ORR or a shifted MOVZ for positive pool offsets, not only MOVZ+MOVK.
+	insts := []Inst{
+		{Addr: 0x1c00, Raw: 0xB26703F2, Text: "orr x18, xzr, #0x2000000"},
+		{Addr: 0x1c04, Raw: 0xFC726B60, Text: "ldr d0, [x27, x18]"},
+		{Addr: 0x1c08, Raw: 0xD2A02473, Text: "movz x19, #0x123, lsl #16"},
+		{Addr: 0x1c0c, Raw: 0xFC736B61, Text: "ldr d1, [x27, x19]"},
+	}
+	accesses := ExtractARM64PoolAccesses(insts, nil)
+	if len(accesses) != 2 {
+		t.Fatalf("generic LoadImmediate FP accesses = %+v, want two", accesses)
+	}
+	want := []int{0x3ffffe, 0x245ffe}
+	for i, access := range accesses {
+		if access.RegClass != ARM64PoolRegFP || access.PoolIndex != want[i] || access.Direct {
+			t.Fatalf("fallback access[%d] = %+v, want materialized FP pool[%#x]", i, access, want[i])
+		}
+	}
+}
+
 func TestARM64PairPoolLoadKeepsDistinctRegisterProvenance(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -166,20 +261,26 @@ func TestARM64PairPoolLoadKeepsDistinctRegisterProvenance(t *testing.T) {
 				Text: "blr x24",
 			})
 
-			loads := ExtractARM64PoolLoads(insts, pool)
-			if len(loads) != 2 {
-				t.Fatalf("pool loads = %+v, want two LDP destinations", loads)
+			loads := ExtractARM64PoolAccesses(insts, pool)
+			var loadOnly []ARM64PoolAccess
+			for _, access := range loads {
+				if access.Kind == ARM64PoolAccessLoad && access.RegClass == ARM64PoolRegGPR {
+					loadOnly = append(loadOnly, access)
+				}
 			}
-			if loads[0].Reg != 5 || loads[0].PoolIndex != tc.firstIndex ||
-				loads[1].Reg != 24 || loads[1].PoolIndex != tc.firstIndex+1 {
-				t.Fatalf("pair pool slots = %+v", loads)
+			if len(loadOnly) != 2 {
+				t.Fatalf("pool loads = %+v, want two LDP destinations", loadOnly)
 			}
-			if loads[0].Note == loads[1].Note {
-				t.Fatalf("two LDP destinations shared one provenance note: %+v", loads)
+			if loadOnly[0].Reg != 5 || loadOnly[0].PoolIndex != tc.firstIndex ||
+				loadOnly[1].Reg != 24 || loadOnly[1].PoolIndex != tc.firstIndex+1 {
+				t.Fatalf("pair pool slots = %+v", loadOnly)
+			}
+			if loadOnly[0].Note == loadOnly[1].Note {
+				t.Fatalf("two LDP destinations shared one provenance note: %+v", loadOnly)
 			}
 
 			edges := ExtractCallEdgesCFG("pair_pool", insts, nil, nil, pool)
-			if len(edges) != 1 || edges[0].Via != poolLoadNote(tc.firstIndex+1, pool) {
+			if len(edges) != 1 || edges[0].Via != poolAccessNote(tc.firstIndex+1, pool) {
 				t.Fatalf("BLR through second LDP destination = %+v", edges)
 			}
 		})

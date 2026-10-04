@@ -23,7 +23,7 @@ func cmdStrings(args []string) error {
 	maxLen := fs.Int("max-len", 200, "max display length per string (0 = unlimited)")
 	names := fs.Bool("names", false, "extract and display named objects (Function, Class, Library, Script)")
 	find := fs.String("find", "", "only show strings containing this substring (case-insensitive)")
-	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) load it from the object pool")
+	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) reference its object-pool slot")
 	xrefMaxScan := fs.Int("xref-max-scan", 0, fmt.Sprintf("cap how many functions --xref scans (0 = safe default %d)", strxref.DefaultMaxScan))
 	xrefMaxRefs := fs.Int("xref-max-refs", 0, fmt.Sprintf("cap retained --xref matches (0 = safe default %d)", strxref.DefaultMaxRefs))
 	xrefUnbounded := fs.Bool("xref-unbounded", false, "allow --xref to scan an unbounded number of functions (retained matches remain capped)")
@@ -242,7 +242,7 @@ func cmdStrings(args []string) error {
 			cli.Errf("\n--xref: no strings matched %q, nothing to cross-reference\n", *find)
 			return nil
 		}
-		cli.Errf("\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
+		cli.Errf("\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool references...\n", len(matchedRefIDs))
 
 		ctx, err := analysis.LoadContext(*libapp)
 		if err != nil {
@@ -274,9 +274,13 @@ func cmdStrings(args []string) error {
 		if err != nil {
 			return fmt.Errorf("--xref: %w", err)
 		}
-		cli.Errf("--xref: attempted %d function(s), scanned %d, found %d reference(s)\n\n", res.Attempted, res.Scanned, len(res.References))
+		status := "complete"
+		if !res.Complete() {
+			status = "INCOMPLETE"
+		}
+		cli.Errf("--xref: attempted %d function(s), scanned %d, found %d reference(s), status=%s\n\n", res.Attempted, res.Scanned, len(res.References), status)
 		for _, r := range res.References {
-			fmt.Printf("  used in: %s @ 0x%x (pool load @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
+			fmt.Printf("  used in: %s @ 0x%x (pool reference @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
 		}
 		if res.ScanLimitReached {
 			return fmt.Errorf("--xref: incomplete result: function scan cap reached; raise --xref-max-scan or use --xref-unbounded")

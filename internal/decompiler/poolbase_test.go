@@ -11,11 +11,9 @@ import (
 // while the displacement fits the 12-bit unsigned-offset field. Past that
 // it emits `add xT, PP, #hi` then `ldr xD, [xT, #lo]`.
 //
-// The lifter recognised the one-instruction form only, so on a real
-// production binary 60% of pool loads produced no OpLoadPool -- and every
-// string, class and stub reference behind them was invisible to the
-// pseudocode and to strxref. Recognising the pair took string
-// cross-references on dart-3.9.2-arm64 from 716 to 1154.
+// Pool-load provenance is recovered by disasm.ExtractARM64PoolAccesses, shared
+// with analysis and strxref; these tests pin the lifter's consumption of that
+// canonical result rather than a second local address tracker.
 
 func inst(addr uint64, raw uint32, mnem, ops string) disasm.Inst {
 	return disasm.Inst{Addr: addr, Raw: raw, Size: 4, Mnemonic: mnem, Operands: ops,
@@ -108,5 +106,84 @@ func TestLiftPoolLoadDirect(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("instruction not lifted")
+	}
+}
+
+func TestLiftPoolLoadLargeMOVZMOVKFallback(t *testing.T) {
+	// Exact SDK fallback for offset 0x01000010 / pool[0x200000]. This shape
+	// used to be understood by disasm but not by the decompiler's local tracker.
+	movz := uint32(0xD2800000 | (0x10 << 5) | 16)
+	movk := uint32(0xF2800000 | (1 << 21) | (0x100 << 5) | 16)
+	ldr := uint32(0xF8606800 | (16 << 16) | (27 << 5) | 16)
+	insts := []disasm.Inst{
+		inst(0x2000, movz, "movz", "x16, #0x10"),
+		inst(0x2004, movk, "movk", "x16, #0x100, lsl #16"),
+		inst(0x2008, ldr, "ldr", "x16, [x27, x16]"),
+		inst(0x200c, 0xD65F03C0, "ret", ""),
+	}
+	fir := BuildARM64IR("f", "3.13.0", false, insts, sdk.RegisterCallingConvention{})
+	for i := range fir.Blocks {
+		for _, in := range fir.Blocks[i].Instrs {
+			if in.Addr != 0x2008 {
+				continue
+			}
+			if in.Op != OpLoadPool || in.PoolIndex != 0x200000 || in.Target != "x16" {
+				t.Fatalf("large fallback lift = %+v, want OpLoadPool pool[0x200000] -> x16", in)
+			}
+			return
+		}
+	}
+	t.Fatal("large fallback LDR not found in lifted IR")
+}
+
+func TestLiftPoolLoadDoesNotCrossJoin(t *testing.T) {
+	bEqToLdr := uint32(0x54000000 | (2 << 5))
+	addX0PP := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
+	ldrX16X0 := uint32(0xF9400010)
+	insts := []disasm.Inst{
+		inst(0x3000, bEqToLdr, "b", "eq, .+0x8"),
+		inst(0x3004, addX0PP, "add", "x0, x27, #0x4000"),
+		inst(0x3008, ldrX16X0, "ldr", "x16, [x0]"),
+		inst(0x300c, 0xD65F03C0, "ret", ""),
+	}
+	fir := BuildARM64IR("f", "3.13.0", false, insts, sdk.RegisterCallingConvention{})
+	for i := range fir.Blocks {
+		for _, in := range fir.Blocks[i].Instrs {
+			if in.Addr == 0x3008 && in.Op == OpLoadPool {
+				t.Fatalf("join-bypassed ADD fabricated OpLoadPool: %+v", in)
+			}
+		}
+	}
+}
+
+func TestLiftPoolStoreIsNotLoadProvenance(t *testing.T) {
+	// StoreWordToPoolIndex is a pool xref, but it writes the slot; it must not
+	// become OpLoadPool or claim that x3 now contains the pool value.
+	insts := []disasm.Inst{
+		inst(0x4000, 0xF9000F63, "str", "x3, [x27, #0x18]"),
+		inst(0x4004, 0xD65F03C0, "ret", ""),
+	}
+	fir := BuildARM64IR("f", "3.13.0", false, insts, sdk.RegisterCallingConvention{})
+	for i := range fir.Blocks {
+		for _, in := range fir.Blocks[i].Instrs {
+			if in.Addr == 0x4000 && in.Op == OpLoadPool {
+				t.Fatalf("pool store was lifted as a load: %+v", in)
+			}
+		}
+	}
+}
+
+func TestLiftFPPoolLoadIsNotGPRPoolLoad(t *testing.T) {
+	insts := []disasm.Inst{
+		inst(0x4100, 0x3DC00762, "ldr", "q2, [x27, #0x10]"),
+		inst(0x4104, 0xD65F03C0, "ret", ""),
+	}
+	fir := BuildARM64IR("f", "3.13.0", false, insts, sdk.RegisterCallingConvention{})
+	for i := range fir.Blocks {
+		for _, in := range fir.Blocks[i].Instrs {
+			if in.Addr == 0x4100 && in.Op == OpLoadPool {
+				t.Fatalf("FP/SIMD immediate load was lifted as GPR pool object load: %+v", in)
+			}
+		}
 	}
 }

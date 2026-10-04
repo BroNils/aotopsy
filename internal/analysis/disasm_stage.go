@@ -416,8 +416,11 @@ func RunDisasmStage(
 // ExtractStringRefs scans instructions for PP loads that resolve to string values.
 func ExtractStringRefs(insts []disasm.Inst, poolDisplay map[int]string, funcName string) []disasm.StringRefRecord {
 	var refs []disasm.StringRefRecord
-	for _, load := range disasm.ExtractARM64PoolLoads(insts, poolDisplay) {
-		s, found := poolDisplay[load.PoolIndex]
+	for _, access := range disasm.ExtractARM64PoolAccesses(insts, poolDisplay) {
+		if access.Kind != disasm.ARM64PoolAccessLoad || access.RegClass != disasm.ARM64PoolRegGPR {
+			continue
+		}
+		s, found := poolDisplay[access.PoolIndex]
 		if !found || len(s) == 0 || s[0] != '"' {
 			continue
 		}
@@ -426,14 +429,14 @@ func ExtractStringRefs(insts []disasm.Inst, poolDisplay map[int]string, funcName
 			continue
 		}
 		kind := "PP_peep"
-		if load.Direct {
+		if access.Direct {
 			kind = "PP"
 		}
 		refs = append(refs, disasm.StringRefRecord{
 			Func:    funcName,
-			PC:      fmt.Sprintf("0x%x", load.PC),
+			PC:      fmt.Sprintf("0x%x", access.PC),
 			Kind:    kind,
-			PoolIdx: load.PoolIndex,
+			PoolIdx: access.PoolIndex,
 			Value:   val,
 		})
 	}

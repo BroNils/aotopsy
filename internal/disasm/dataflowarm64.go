@@ -35,7 +35,7 @@ func ExtractCallEdgesCFG(name string, insts []Inst, symbols SymbolLookup, annota
 	if len(cfg.Blocks) == 0 {
 		return nil
 	}
-	poolNotes := arm64PoolNotesByPC(ExtractARM64PoolLoads(insts, poolDisplay))
+	poolNotes := arm64PoolNotesByPC(ExtractARM64PoolAccesses(insts, poolDisplay))
 
 	// Precompute each block's local effect: which registers it touches
 	// (defines or kills) and what they end up as, replaying the block's

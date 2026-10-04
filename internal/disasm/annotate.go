@@ -157,15 +157,18 @@ func thrAnnotationLabel(byteOff int, isStore bool, width int, cls thraudit.THRCl
 }
 
 // PPContextAnnotator renders the canonical per-register pool-load facts from
-// ExtractARM64PoolLoads. Scalar loads keep the historical single-note format;
+// ExtractARM64PoolAccesses. Scalar loads keep the historical single-note format;
 // an LDP with two independent pool slots renders both registers explicitly so
 // one inline comment can never imply that both destination registers hold the
 // same object.
 func PPContextAnnotator(insts []Inst, pool map[int]string) Annotator {
 	anns := make(map[uint64]string)
-	byPC := make(map[uint64][]ARM64PoolLoad)
-	for _, load := range ExtractARM64PoolLoads(insts, pool) {
-		byPC[load.PC] = append(byPC[load.PC], load)
+	byPC := make(map[uint64][]ARM64PoolAccess)
+	for _, access := range ExtractARM64PoolAccesses(insts, pool) {
+		if access.Kind != ARM64PoolAccessLoad || access.RegClass != ARM64PoolRegGPR {
+			continue
+		}
+		byPC[access.PC] = append(byPC[access.PC], access)
 	}
 	for pc, group := range byPC {
 		if len(group) == 1 {
@@ -173,11 +176,11 @@ func PPContextAnnotator(insts []Inst, pool map[int]string) Annotator {
 			continue
 		}
 		text := ""
-		for i, load := range group {
+		for i, access := range group {
 			if i != 0 {
 				text += ", "
 			}
-			text += fmt.Sprintf("X%d=%s", load.Reg, load.Note)
+			text += fmt.Sprintf("X%d=%s", access.Reg, access.Note)
 		}
 		anns[pc] = text
 	}

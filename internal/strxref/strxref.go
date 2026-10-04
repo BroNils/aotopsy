@@ -6,11 +6,9 @@ package strxref
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"aotopsy/internal/analysis"
-	arm64arch "aotopsy/internal/arch/arm64"
 	x86arch "aotopsy/internal/arch/x86"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
@@ -19,10 +17,8 @@ import (
 )
 
 const (
-	// DefaultMaxScan is deliberately high enough to cover the largest real
-	// corpus/app measured during this audit (129k functions), while still making
-	// a corrupt/malicious range table finite by default. Callers that truly want
-	// an unbounded function count must opt in explicitly.
+	// DefaultMaxScan keeps a corrupt/malicious range table finite by default.
+	// Callers that truly want an unbounded function count must opt in explicitly.
 	DefaultMaxScan = 250_000
 	// DefaultMaxRefs bounds retained output independently of scan cost. A single
 	// synthetic function can contain tens of thousands of references, so a
@@ -31,8 +27,8 @@ const (
 )
 
 // Reference is one machine-code instruction that references one target pool
-// index. Pair loads can therefore contribute two References at the same
-// InstrAddr, one for each adjacent pool slot.
+// index. Pair loads and 16-byte SIMD loads can therefore contribute two
+// References at the same InstrAddr, one for each adjacent pool slot.
 type Reference struct {
 	FuncName  string `json:"func_name"`
 	FuncVA    uint64 `json:"func_va"`
@@ -61,11 +57,24 @@ type Options struct {
 // as complete: ScanLimitReached / ReferenceLimitReached identify the exact
 // reason scanning stopped.
 type Result struct {
-	References            []Reference
-	Attempted             int
-	Scanned               int
+	References []Reference
+	// Attempted counts eligible functions whose machine code scan was started.
+	// A decode failure or reference-cap stop therefore increments Attempted.
+	Attempted int
+	// Scanned counts eligible functions whose complete declared byte range was
+	// decoded and exhausted. A function stopped by MaxRefs is attempted but not
+	// scanned completely.
+	Scanned int
+
 	ScanLimitReached      bool
 	ReferenceLimitReached bool
+}
+
+// Complete reports whether the scan exhausted every eligible function and
+// retained every matching reference. Decode/range failures are returned as an
+// error instead of being represented as a successful-but-incomplete Result.
+func (r Result) Complete() bool {
+	return !r.ScanLimitReached && !r.ReferenceLimitReached
 }
 
 type refKey struct {
@@ -113,6 +122,10 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 		maxRefs = DefaultMaxRefs
 	}
 
+	// A reference is a physical machine-code fact: one instruction addresses one
+	// pool slot. Duplicate target indices or duplicate/overlapping CodeRange rows
+	// must not duplicate that physical xref merely because it was encountered
+	// through two logical records.
 	seen := make(map[refKey]struct{})
 	emit := func(funcName string, funcVA, pc uint64, idx int) bool {
 		if _, wanted := target[idx]; !wanted {
@@ -141,6 +154,14 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 		if r.Size == 0 || r.RefID < 0 {
 			continue
 		}
+		// With no name filter every structurally eligible range would be scanned,
+		// so enforce MaxScan before even slicing the next function. Otherwise a
+		// corrupt out-of-range record beyond the requested cap could turn a bounded
+		// partial result into an unrelated range error.
+		if opts.Filter == "" && !opts.AllowUnbounded && maxScan > 0 && result.Attempted >= maxScan {
+			result.ScanLimitReached = true
+			break
+		}
 		fs, ok := image.SliceExact(r)
 		if !ok {
 			return result, fmt.Errorf("strxref: invalid function range ref=%d pc_off=0x%x size=%d", r.RefID, r.PCOffset, r.Size)
@@ -158,20 +179,25 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 		}
 		result.Attempted++
 
-		var err error
+		var (
+			scanComplete bool
+			err          error
+		)
 		if ctx.IsARM64 {
-			err = scanARM64(fs.Code, fs.VA, func(pc uint64, idx int) bool {
+			scanComplete, err = scanARM64(fs.Code, fs.VA, func(pc uint64, idx int) bool {
 				return emit(name, fs.VA, pc, idx)
 			})
 		} else {
-			err = scanX64(fs.Code, fs.VA, func(pc uint64, idx int) bool {
+			scanComplete, err = scanX64(fs.Code, fs.VA, func(pc uint64, idx int) bool {
 				return emit(name, fs.VA, pc, idx)
 			})
 		}
 		if err != nil {
 			return result, fmt.Errorf("strxref: scan %s @ 0x%x: %w", name, fs.VA, err)
 		}
-		result.Scanned++
+		if scanComplete {
+			result.Scanned++
+		}
 		if result.ReferenceLimitReached {
 			break
 		}
@@ -180,9 +206,15 @@ func FindPoolReferences(ctx *analysis.AnalysisContext, poolIndices []int, opts O
 }
 
 // scanX64 records every statically-addressable memory operand based directly
-// on PP. This includes MOV loads, CALL/JMP through pool slots, and importantly
-// direct comparisons such as Dart's CompareObject `cmp reg, [PP+disp]`.
-func scanX64(code []byte, baseVA uint64, emit func(pc uint64, idx int) bool) error {
+// on PP. This includes MOV loads/stores, CALL/JMP through pool slots, direct
+// comparisons such as Dart's CompareObject `cmp reg, [PP+disp]`, and wide SIMD
+// operands. A memory operand wider than one 8-byte pool entry emits one xref per
+// touched slot (notably LoadQImmediate's 16-byte MOVUPS).
+// It returns complete=false only when the caller deliberately stops emission
+// (currently the retained-reference cap). Bad decoding is an error: resuming at
+// the next byte would lose instruction-boundary proof and can invent xrefs.
+func scanX64(code []byte, baseVA uint64, emit func(pc uint64, idx int) bool) (complete bool, err error) {
+	complete = true
 	var decodeErr error
 	x86arch.Walk(code, baseVA, func(d x86arch.Decoded) bool {
 		if d.Bad {
@@ -191,101 +223,63 @@ func scanX64(code []byte, baseVA uint64, emit func(pc uint64, idx int) bool) err
 		}
 		for _, arg := range d.Inst.Args {
 			mem, ok := arg.(x86asm.Mem)
-			if !ok || x86arch.CanonReg(mem.Base) != sdk.X86PP || x86arch.CanonReg(mem.Index) >= 0 {
+			if !ok {
 				continue
 			}
-			idx, ok := disasm.X64PoolIndex(mem.Disp)
-			if ok && !emit(d.VA, idx) {
-				return false
+			disp, static := x86arch.StaticBaseDisp(mem, sdk.X86PP)
+			if !static {
+				continue
+			}
+			idx, ok := disasm.X64PoolIndex(disp)
+			if !ok {
+				continue
+			}
+			slots := 1
+			if d.Inst.MemBytes > sdk.PoolElementSize {
+				slots = (d.Inst.MemBytes + sdk.PoolElementSize - 1) / sdk.PoolElementSize
+			}
+			maxInt := int(^uint(0) >> 1)
+			for slot := 0; slot < slots; slot++ {
+				if idx > maxInt-slot || !emit(d.VA, idx+slot) {
+					complete = false
+					return false
+				}
 			}
 		}
 		return true
 	})
-	return decodeErr
+	if decodeErr != nil {
+		return false, decodeErr
+	}
+	return complete, nil
 }
 
-// scanARM64 tracks the PP-relative base forms emitted by Dart's
-// LoadWordFromPoolIndex / LoadDoubleWordFromPoolIndex. Direct LDR/LDP reads are
-// recognized as well as the common `add tmp, PP, #hi; ldr/ldp [...,#lo]`
-// forms. Unknown instruction words are errors, not transparent provenance.
-func scanARM64(code []byte, baseVA uint64, emit func(pc uint64, idx int) bool) error {
+// scanARM64 delegates pool-address provenance to disasm.ExtractARM64PoolAccesses,
+// the canonical implementation also used by call-edge/dataflow analysis. That
+// extractor models the exact SDK LoadWordFromPoolIndex, StoreWordToPoolIndex,
+// LoadDoubleWordFromPoolIndex, and FP/SIMD LoadS/D/QImmediate lowerings in the
+// supported releases, including wide Q loads spanning two pool entries and all
+// positive-offset materialization forms used by PrepareLargeOffset. Keeping this
+// package's old second provenance engine caused both missed large-pool refs and
+// false facts across control-flow joins.
+func scanARM64(code []byte, baseVA uint64, emit func(pc uint64, idx int) bool) (complete bool, err error) {
 	if len(code)%4 != 0 {
-		return fmt.Errorf("truncated ARM64 function: %d bytes", len(code))
+		return false, fmt.Errorf("truncated ARM64 function: %d bytes", len(code))
 	}
 	insts := disasm.Disassemble(code, disasm.Options{BaseAddr: baseVA, MaxSteps: len(code) / 4})
 	if len(insts) != len(code)/4 {
-		return fmt.Errorf("ARM64 decode stopped early: decoded=%d words=%d", len(insts), len(code)/4)
+		return false, fmt.Errorf("ARM64 decode stopped early: decoded=%d words=%d", len(insts), len(code)/4)
 	}
-
-	// Register -> byte offset relative to the untagged object-pool base.
-	ppOffset := map[int]int64{sdk.ARM64PP: 0}
 	for _, inst := range insts {
 		if inst.Bad {
-			return fmt.Errorf("invalid ARM64 instruction word at 0x%x", inst.Addr)
-		}
-
-		if base, off, ok := arm64arch.LDR64UnsignedOffset(inst.Raw); ok {
-			if hi, tracked := ppOffset[base]; tracked {
-				if idx, ok := poolIndex64(hi, int64(off)); ok && !emit(inst.Addr, idx) {
-					return nil
-				}
-			}
-		} else if base, off, _, ok := arm64arch.LDR32UnsignedOffset(inst.Raw); ok {
-			if hi, tracked := ppOffset[base]; tracked {
-				if idx, ok := poolIndex64(hi, int64(off)); ok && !emit(inst.Addr, idx) {
-					return nil
-				}
-			}
-		} else if base, _, off, ok := arm64arch.LDUR64(inst.Raw); ok {
-			if hi, tracked := ppOffset[base]; tracked {
-				if idx, ok := poolIndex64(hi, int64(off)); ok && !emit(inst.Addr, idx) {
-					return nil
-				}
-			}
-		} else if base, _, off, ok := arm64arch.LDUR32(inst.Raw); ok {
-			if hi, tracked := ppOffset[base]; tracked {
-				if idx, ok := poolIndex64(hi, int64(off)); ok && !emit(inst.Addr, idx) {
-					return nil
-				}
-			}
-		} else if base, _, _, off, ok := arm64arch.LDP64UnsignedOffset(inst.Raw); ok {
-			if hi, tracked := ppOffset[base]; tracked {
-				if idx, ok := poolIndex64(hi, int64(off)); ok {
-					if !emit(inst.Addr, idx) || !emit(inst.Addr, idx+1) {
-						return nil
-					}
-				}
-			}
-		}
-
-		if rd, rn, imm, ok := arm64arch.ADD64Immediate(inst.Raw); ok {
-			if base, tracked := ppOffset[rn]; tracked {
-				next := base + int64(imm)
-				if next >= base { // immediates are non-negative; reject signed wrap.
-					ppOffset[rd] = next
-				} else {
-					delete(ppOffset, rd)
-				}
-			} else {
-				delete(ppOffset, rd)
-			}
-			continue
-		}
-
-		for _, rd := range arm64arch.DstRegsOfInst(inst.Raw) {
-			delete(ppOffset, rd)
+			return false, fmt.Errorf("invalid ARM64 instruction word at 0x%x", inst.Addr)
 		}
 	}
-	return nil
-}
 
-func poolIndex64(base, off int64) (int, bool) {
-	if (off > 0 && base > math.MaxInt64-off) || (off < 0 && base < math.MinInt64-off) {
-		return 0, false
+	for _, access := range disasm.ExtractARM64PoolAccesses(insts, nil) {
+		if !emit(access.PC, access.PoolIndex) {
+			return false, nil
+		}
 	}
-	total := base + off
-	if total < 0 || int64(int(total)) != total {
-		return 0, false
-	}
-	return disasm.ARM64PoolIndex(int(total))
+	return true, nil
 }
