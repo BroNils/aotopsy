@@ -19,7 +19,7 @@ import (
 // Synthesizes the full decompiled project into organized, idiomatic .dart files
 // grouped by class, library, and package hierarchy.
 func cmdExportDart(args []string) error {
-	fs := flag.NewFlagSet("export-dart", flag.ExitOnError)
+	fs := flag.NewFlagSet("export-dart", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	outDir := fs.String("out", "", "output directory for synthesized Dart source files")
 	appOnly := fs.Bool("app-only", false, "export only user app code (skip dart:* and package:flutter* libraries)")
@@ -27,7 +27,10 @@ func cmdExportDart(args []string) error {
 	maxFuncs := fs.Int("max", 500, "max methods/functions to decompile (0 = unlimited)")
 	strict := fs.Bool("strict", false, "abort on the first function that cannot be decompiled (default: skip it and list it in "+analysis.DecompileFailuresFile+")")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max", *maxFuncs); err != nil {
 		return err
 	}
 

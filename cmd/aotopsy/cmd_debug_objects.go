@@ -23,12 +23,15 @@ type poolRecord struct {
 }
 
 func cmdObjects(args []string) error {
-	fs := flag.NewFlagSet("objects", flag.ExitOnError)
+	fs := flag.NewFlagSet("objects", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	jsonOut := fs.Bool("json", false, "output JSONL instead of text")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 	if *libapp == "" {

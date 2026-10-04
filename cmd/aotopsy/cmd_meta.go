@@ -12,24 +12,30 @@ import (
 
 // cmdMeta handles "aotopsy meta <libapp.so>" — full pipeline producing flutter_meta.json.
 func cmdMeta(args []string) error {
-	fs := flag.NewFlagSet("meta", flag.ExitOnError)
+	fs := flag.NewFlagSet("meta", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	all := fs.Bool("all", false, "include all functions in focus list")
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
 
 	// If --from is set, skip ELF parse and just regenerate meta.
 	if *from != "" {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("meta --from does not accept a libapp.so positional argument")
+		}
+		if flagWasSet(fs, "max-steps") {
+			return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
+		}
 		prov, ok, err := analysis.ReadProvenance(*from)
 		if err != nil {
 			return fmt.Errorf("read --from provenance: %w", err)

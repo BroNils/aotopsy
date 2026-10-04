@@ -958,6 +958,10 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 			result.Arch = prov.Arch
 		}
 		result.DartVersion = prov.DartVersion
+		result.PointerSize = 8
+		if prov.CompressedPointers {
+			result.PointerSize = 4
+		}
 	}
 
 	// Count existing functions.

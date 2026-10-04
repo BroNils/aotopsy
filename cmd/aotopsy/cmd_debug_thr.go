@@ -19,17 +19,30 @@ import (
 
 // cmdTHRAudit implements "aotopsy _debug thr-audit" for auditing THR-relative memory accesses.
 func cmdTHRAudit(args []string) error {
-	fs := flag.NewFlagSet("thr-audit", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-audit", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	outPath := fs.String("out", "", "output JSONL path")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	limit := fs.Int("limit", 0, "max functions to scan (0 = all)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("limit", *limit); err != nil {
 		return err
 	}
 	if *libapp == "" || *outPath == "" {
 		return fmt.Errorf("--lib and --out are required")
+	}
+	same, err := output.SamePath(*libapp, *outPath)
+	if err != nil {
+		return fmt.Errorf("compare THR audit input/output paths: %w", err)
+	}
+	if same {
+		return fmt.Errorf("thr-audit output must not replace the input binary")
 	}
 
 	opts := dartfmt.Options{
@@ -94,13 +107,16 @@ func cmdTHRAudit(args []string) error {
 
 // cmdTHRClassify implements "aotopsy _debug thr-classify" for classifying unresolved THR offsets.
 func cmdTHRClassify(args []string) error {
-	fs := flag.NewFlagSet("thr-classify", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-classify", flag.ContinueOnError)
 	inputPath := fs.String("in", "", "input thr_loads.jsonl path")
 	outDir := fs.String("out", "", "output directory")
 	maxGap := fs.Int64("max-gap", 0x18, "max byte gap between signed offsets before splitting bands")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if *maxGap < 0 {
+		return fmt.Errorf("--max-gap must be >= 0")
 	}
 	if *inputPath == "" || *outDir == "" {
 		return fmt.Errorf("--in and --out are required")
@@ -173,13 +189,16 @@ func cmdTHRClassify(args []string) error {
 
 // cmdTHRCluster implements "aotopsy _debug thr-cluster" for clustering unresolved THR offsets into bands.
 func cmdTHRCluster(args []string) error {
-	fs := flag.NewFlagSet("thr-cluster", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-cluster", flag.ContinueOnError)
 	inputPath := fs.String("in", "", "input thr_loads.jsonl path")
 	outDir := fs.String("out", "", "output directory for bands.json and bands.md")
 	maxGap := fs.Int64("max-gap", 0x18, "max byte gap between signed offsets before splitting bands")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if *maxGap < 0 {
+		return fmt.Errorf("--max-gap must be >= 0")
 	}
 	if *inputPath == "" || *outDir == "" {
 		return fmt.Errorf("--in and --out are required")

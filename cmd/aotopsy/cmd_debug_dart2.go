@@ -9,6 +9,7 @@ import (
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 type dart2Bucket struct {
@@ -21,15 +22,22 @@ type dart2Bucket struct {
 
 // cmdDart2Buckets implements "aotopsy _debug dart2-buckets": Dart 2.x bucket analysis.
 func cmdDart2Buckets(args []string) error {
-	fs := flag.NewFlagSet("dart2-buckets", flag.ExitOnError)
+	fs := flag.NewFlagSet("dart2-buckets", flag.ContinueOnError)
 	inventoryPath := fs.String("inventory", "", "path to flutter_inventory.jsonl")
 	outPath := fs.String("out", "", "output JSONL path")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *inventoryPath == "" || *outPath == "" {
 		return fmt.Errorf("--inventory and --out are required")
+	}
+	same, err := output.SamePath(*inventoryPath, *outPath)
+	if err != nil {
+		return fmt.Errorf("compare dart2-buckets input/output paths: %w", err)
+	}
+	if same {
+		return fmt.Errorf("dart2-buckets output must not replace its inventory input")
 	}
 
 	rows, err := jsonutil.ReadJSONL[analysis.InventoryRow](*inventoryPath, jsonutil.StandardLimits)

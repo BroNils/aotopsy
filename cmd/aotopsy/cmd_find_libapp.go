@@ -18,10 +18,10 @@ import (
 
 // cmdFindLibapp finds Dart libapp.so in a single APK/ZIP.
 func cmdFindLibapp(args []string) error {
-	fs := flag.NewFlagSet("find-libapp", flag.ExitOnError)
+	fs := flag.NewFlagSet("find-libapp", flag.ContinueOnError)
 	apk := fs.String("apk", "", "Path to APK/zip file")
 	outDir := fs.String("out", "", "Output directory for find_libapp.json")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *apk == "" {
@@ -56,10 +56,10 @@ func cmdFindLibapp(args []string) error {
 
 // cmdFindLibappBatch processes a directory of APK/ZIP files and produces batch summaries.
 func cmdFindLibappBatch(args []string) error {
-	fs := flag.NewFlagSet("find-libapp-batch", flag.ExitOnError)
+	fs := flag.NewFlagSet("find-libapp-batch", flag.ContinueOnError)
 	dir := fs.String("dir", "samples/flutter", "Directory containing zip files")
 	outDir := fs.String("out", "out/find-libapp", "Output directory")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	containsInput, err := output.ContainsPath(*outDir, *dir)

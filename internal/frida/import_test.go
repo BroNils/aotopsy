@@ -166,8 +166,8 @@ func TestFridaImportEventLogMergesOmittedTargetsAndPolymorphism(t *testing.T) {
 	}
 	logPath := writeRuntimeLog(t, binding, events)
 
-	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
-		t.Fatalf("CmdFridaImport: %v", err)
+	if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err != nil {
+		t.Fatalf("Import: %v", err)
 	}
 	got, err := readCallEdgesStrict(filepath.Join(outDir, "call_edges.jsonl"))
 	if err != nil {
@@ -312,7 +312,7 @@ func TestFridaImportRejectsRuntimeIdentityAndSitePoisoning(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logPath := writeRuntimeLog(t, binding, []runtimeEvent{tt.ev})
 			outDir := filepath.Join(t.TempDir(), "merged")
-			if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+			if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 				t.Fatal("poisoned runtime evidence was accepted")
 			}
 			if _, err := os.Stat(outDir); !os.IsNotExist(err) {
@@ -376,7 +376,7 @@ func TestFridaImportRejectsUnexportedSitesAndTargetIdentityPoisoning(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			logPath := writeRuntimeLog(t, binding, []runtimeEvent{tt.ev})
 			outDir := filepath.Join(t.TempDir(), "merged")
-			if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+			if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 				t.Fatal("poisoned or non-exportable runtime site was accepted")
 			}
 		})
@@ -399,7 +399,7 @@ func TestFridaImportRejectsEligibleButUninstalledSites(t *testing.T) {
 			TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
 		}})
 		outDir := filepath.Join(t.TempDir(), "merged")
-		if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+		if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 			t.Fatal("runtime event for an eligible but uninstalled probe was accepted")
 		}
 	})
@@ -416,7 +416,7 @@ func TestFridaImportRejectsEligibleButUninstalledSites(t *testing.T) {
 			Type: "function_enter", Name: uninstalled.Name, FunctionVA: uninstalled.PC,
 		}})
 		outDir := filepath.Join(t.TempDir(), "merged")
-		if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+		if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 			t.Fatal("runtime event for an eligible but uninstalled function hook was accepted")
 		}
 	})
@@ -436,7 +436,7 @@ func TestFridaImportRejectsStaticGenerationDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	outDir := filepath.Join(t.TempDir(), "merged")
-	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+	if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 		t.Fatal("mixed static generation was accepted after a bound artifact changed")
 	}
 	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
@@ -466,7 +466,7 @@ func TestFridaImportRejectsInputInsideOutputWithoutDeletingIt(t *testing.T) {
 	if err := os.WriteFile(inPath, logBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CmdFridaImport([]string{"--in", inPath, "--static", staticDir, "--out", outDir}); err == nil {
+	if err := Import(ImportOptions{InPath: inPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 		t.Fatal("runtime log inside replacement output directory was accepted")
 	}
 	got, err := os.ReadFile(inPath)
@@ -489,7 +489,7 @@ func TestFridaImportCanonicalizesOwnModuleTargetFromStaticIdentity(t *testing.T)
 		SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
 		CallAddr: "0x100", FromFunc: "F", TargetVA: "0x0400", TargetModule: "libapp.so", ClassID: 7,
 	}})
-	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
+	if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err != nil {
 		t.Fatal(err)
 	}
 	edges, err := readCallEdgesStrict(filepath.Join(outDir, "call_edges.jsonl"))
@@ -526,7 +526,7 @@ func TestFridaImportFailurePreservesPreviousGeneration(t *testing.T) {
 		SchemaVersion: MetadataSchemaVersion, SourceSHA256: testSourceSHA256, Type: "dispatch",
 		CallAddr: "0x100", FromFunc: "F", TargetName: "Target", ClassID: 10,
 	}})
-	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err == nil {
+	if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err == nil {
 		t.Fatal("expected malformed evidence to fail import")
 	}
 	b, err := os.ReadFile(sentinel)
@@ -571,7 +571,7 @@ func TestFridaImportRejectsRuntimeEnrichedStaticGeneration(t *testing.T) {
 			logPath := writeRuntimeLog(t, binding, []runtimeEvent{{
 				Type: "dispatch", CallAddr: "0x100", FromFunc: "F", TargetVA: "libother.so+0x44", TargetModule: "libother.so", ClassID: -1,
 			}})
-			if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", filepath.Join(t.TempDir(), "merged")}); err == nil {
+			if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: filepath.Join(t.TempDir(), "merged")}); err == nil {
 				t.Fatal("runtime-enriched static generation was accepted")
 			}
 		})
@@ -586,7 +586,7 @@ func TestFridaImportRemovesStaleRuntimeCoverageWhenNoDispatchWasObserved(t *test
 	binding := writeStaticImportFixture(t, staticDir, nil, []disasm.FuncRecord{{PC: "0x10", Size: 4, Name: "F"}})
 	logPath := writeRuntimeLog(t, binding, []runtimeEvent{{Type: "function_enter", Name: "F", FunctionVA: "0x10"}})
 	outDir := filepath.Join(t.TempDir(), "merged")
-	if err := CmdFridaImport([]string{"--in", logPath, "--static", staticDir, "--out", outDir}); err != nil {
+	if err := Import(ImportOptions{InPath: logPath, StaticDir: staticDir, OutDir: outDir}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "runtime_coverage.json")); !os.IsNotExist(err) {

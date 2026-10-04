@@ -37,6 +37,7 @@ func TestSingleLibraryCommandsRejectSurplusPositionals(t *testing.T) {
 		"run":    cmdRun,
 		"meta":   cmdMeta,
 		"signal": cmdSignalPipeline,
+		"doctor": cmdDoctor,
 		"ida":    cmdIDA,
 		"ghidra": cmdGhidra,
 	}
@@ -47,6 +48,167 @@ func TestSingleLibraryCommandsRejectSurplusPositionals(t *testing.T) {
 				t.Fatalf("surplus positional was not rejected with a usage error: %v", err)
 			}
 		})
+	}
+}
+
+func TestFlagOnlyCommandsRejectSurplusPositionalsBeforeIO(t *testing.T) {
+	cmds := map[string]func([]string) error{
+		"parity":            cmdParity,
+		"inventory":         cmdInventory,
+		"clusters":          cmdClusters,
+		"refinfo":           cmdRefInfo,
+		"dump":              cmdDump,
+		"objects":           cmdObjects,
+		"strings":           cmdStrings,
+		"graph":             cmdGraph,
+		"render":            cmdRender,
+		"thr-audit":         cmdTHRAudit,
+		"thr-classify":      cmdTHRClassify,
+		"thr-cluster":       cmdTHRCluster,
+		"dart2-buckets":     cmdDart2Buckets,
+		"find-libapp":       cmdFindLibapp,
+		"find-libapp-batch": cmdFindLibappBatch,
+		"x64refs":           cmdX64Refs,
+		"fingerprint":       cmdFingerprint,
+		"symbolmap":         cmdSymbolMap,
+		"funcdiff":          cmdFuncDiff,
+		"decompile-native":  cmdDecompileNative,
+		"ffi-trace":         cmdFFITrace,
+		"dispatch-table":    cmdDispatchTable,
+		"frida-export":      cmdFridaExport,
+		"frida-import":      cmdFridaImport,
+		"reflutter-import":  cmdReflutterImport,
+		"sdk-check":         cmdSDKCheck,
+	}
+	for name, fn := range cmds {
+		t.Run(name, func(t *testing.T) {
+			err := fn([]string{"surplus"})
+			if err == nil || !strings.Contains(err.Error(), "does not accept positional arguments") {
+				t.Fatalf("surplus positional was not rejected before I/O: %v", err)
+			}
+		})
+	}
+}
+
+func TestFromModesRejectIgnoredInputsBeforeIO(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func([]string) error
+		args []string
+		want string
+	}{
+		{"run positional", cmdRun, []string{"libapp.so", "--from", "missing"}, "does not accept a libapp.so"},
+		{"run graph", cmdRun, []string{"--from", "missing", "--graph"}, "--graph cannot be used with --from"},
+		{"run limit", cmdRun, []string{"--from", "missing", "--limit", "1"}, "--limit cannot be used with --from"},
+		{"signal positional", cmdSignalPipeline, []string{"libapp.so", "--from", "missing"}, "does not accept a libapp.so"},
+		{"signal max steps", cmdSignalPipeline, []string{"--from", "missing", "--max-steps", "1"}, "--max-steps cannot be used with --from"},
+		{"meta positional", cmdMeta, []string{"libapp.so", "--from", "missing"}, "does not accept a libapp.so"},
+		{"meta max steps", cmdMeta, []string{"--from", "missing", "--max-steps", "1"}, "--max-steps cannot be used with --from"},
+		{"ghidra max steps", cmdGhidra, []string{"libapp.so", "--from", "missing", "--max-steps", "1"}, "--max-steps cannot be used with --from"},
+		{"ida max steps", cmdIDA, []string{"libapp.so", "--from", "missing", "--max-steps", "1"}, "--max-steps cannot be used with --from"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestResourceFlagsRejectNegativeValuesBeforeIO(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func([]string) error
+		args []string
+		want string
+	}{
+		{"run max steps", cmdRun, []string{"--max-steps", "-1"}, "--max-steps must be >= 0"},
+		{"run limit", cmdRun, []string{"--limit", "-1"}, "--limit must be >= 0"},
+		{"strings max len", cmdStrings, []string{"--max-len", "-1"}, "--max-len must be >= 0"},
+		{"ffi max scan", cmdFFITrace, []string{"--max-scan", "-1"}, "--max-scan must be >= 0"},
+		{"decompile max", cmdDecompileNative, []string{"--max", "-1"}, "--max must be >= 0"},
+		{"thr limit", cmdTHRAudit, []string{"--limit", "-1"}, "--limit must be >= 0"},
+		{"funcdiff top", cmdFuncDiff, []string{"--top", "-1"}, "--top must be >= 0"},
+		{"export dart max", cmdExportDart, []string{"--max", "-1"}, "--max must be >= 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecompileNativeRejectsConflictingModesBeforeIO(t *testing.T) {
+	for _, args := range [][]string{
+		{"--lib", "missing.so", "--func", "0x100", "--all"},
+		{"--lib", "missing.so", "--find", "Foo", "--from-main"},
+	} {
+		err := cmdDecompileNative(args)
+		if err == nil || !strings.Contains(err.Error(), "exactly one of") {
+			t.Fatalf("conflicting mode was not rejected: args=%q err=%v", args, err)
+		}
+	}
+	if err := cmdDecompileNative([]string{"--lib", "missing.so", "--func", "0x100", "--gen-frida-out", "hooks.js"}); err == nil || !strings.Contains(err.Error(), "require --gen-frida") {
+		t.Fatalf("orphan Frida modifier was accepted: %v", err)
+	}
+}
+
+func TestImportDarterRejectsSurplusPositionalsBeforeIO(t *testing.T) {
+	if err := cmdImportDarter([]string{"in.json", "out.r2", "surplus"}); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("surplus positional was accepted: %v", err)
+	}
+}
+
+func TestFileOutputsCannotReplaceTheirInputsBeforeParsing(t *testing.T) {
+	root := t.TempDir()
+	inputA := filepath.Join(root, "input-a.bin")
+	inputB := filepath.Join(root, "input-b.bin")
+	for _, path := range []string{inputA, inputB} {
+		if err := os.WriteFile(path, []byte("not valid input; alias guard must fire first"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name string
+		fn   func([]string) error
+		args []string
+		want string
+	}{
+		{"import-darter", cmdImportDarter, []string{inputA, inputA}, "must not replace"},
+		{"dart2-buckets", cmdDart2Buckets, []string{"--inventory", inputA, "--out", inputA}, "must not replace"},
+		{"fingerprint", cmdFingerprint, []string{"--lib", inputA, "--out", inputA}, "must not replace"},
+		{"ffi-trace", cmdFFITrace, []string{"--lib", inputA, "--out", inputA}, "must not replace"},
+		{"thr-audit", cmdTHRAudit, []string{"--lib", inputA, "--out", inputA}, "must not replace"},
+		{"funcdiff-old", cmdFuncDiff, []string{"--old", inputA, "--new", inputB, "--out", inputA}, "must not replace the old"},
+		{"funcdiff-new", cmdFuncDiff, []string{"--old", inputA, "--new", inputB, "--out", inputB}, "must not replace the new"},
+		{"symbolmap", cmdSymbolMap, []string{"--stripped", inputA, "--unstripped", inputB, "--out", root}, "must not contain the stripped"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestExportDartParsesFlagsAfterPositionals(t *testing.T) {
+	err := cmdExportDart([]string{"missing.so", "out", "--max", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "--max must be >= 0") {
+		t.Fatalf("interspersed --max was ignored: %v", err)
+	}
+}
+
+func TestFridaExportRejectsFreshOnlyCapWithFromBeforeIO(t *testing.T) {
+	err := cmdFridaExport([]string{"--from", "missing", "--max-steps", "1"})
+	if err == nil || !strings.Contains(err.Error(), "--max-steps cannot be used with --from") {
+		t.Fatalf("frida-export silently ignored --max-steps in --from mode: %v", err)
 	}
 }
 
@@ -357,6 +519,12 @@ func TestRunSummaryDoesNotRecommendARM64OnlyToolsForX64(t *testing.T) {
 	}
 	if !strings.Contains(got, "decompile-native") {
 		t.Fatalf("x64 run summary omitted supported native decompiler: %s", got)
+	}
+	if !strings.Contains(got, "arch:") || !strings.Contains(got, "x64") {
+		t.Fatalf("run summary omitted known architecture: %s", got)
+	}
+	if strings.Contains(got, "ptr_size:") || strings.Contains(got, "classes:") {
+		t.Fatalf("run summary printed unknown zero-valued metrics: %s", got)
 	}
 }
 

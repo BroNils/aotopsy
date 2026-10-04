@@ -44,11 +44,18 @@ func cmdCompareBlutter(args []string) error {
 // cmdImportDarter imports darter output for older Dart versions.
 // Usage: aotopsy import-darter <darter.json> <output.r2>
 func cmdImportDarter(args []string) error {
-	if len(args) < 2 {
+	if len(args) != 2 {
 		return fmt.Errorf("usage: aotopsy import-darter <darter.json> <output.r2>")
 	}
 	darterPath := args[0]
 	outputPath := args[1]
+	same, err := output.SamePath(darterPath, outputPath)
+	if err != nil {
+		return fmt.Errorf("compare darter input/output paths: %w", err)
+	}
+	if same {
+		return fmt.Errorf("import-darter output must not replace its input JSON")
+	}
 	const maxDarterImportBytes = int64(64 << 20)
 	snap, err := jsonutil.ReadJSONFile[compare.DarterSnapshot](darterPath, maxDarterImportBytes)
 	if err != nil {

@@ -11,65 +11,47 @@ import (
 	"aotopsy/internal/cli"
 )
 
-// cmdSignal handles "aotopsy signal" when `--in` is passed (inspecting existing disasm output).
-func cmdSignal(args []string) error {
-	fs := flag.NewFlagSet("signal", flag.ExitOnError)
-	inDir := fs.String("in", "", "input directory (disasm output)")
-	k := fs.Int("k", 2, "context hops from signal functions")
-	noAsm := fs.Bool("no-asm", false, "skip loading asm snippets")
-	var quiet bool
-	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
-	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *inDir == "" {
-		return fmt.Errorf("--in is required")
-	}
-
-	_, err := analysis.Run(analysis.Opts{
-		FromDir:     *inDir,
-		OutDir:      *inDir,
-		Signal:      true,
-		SignalK:     *k,
-		SignalNoAsm: *noAsm,
-		Quiet:       quiet,
-		Log:         os.Stderr,
-	})
-	return err
-}
-
-// cmdSignalPipeline handles "aotopsy signal <libapp.so>" — full pipeline through signal.
+// cmdSignalPipeline handles either a fresh "aotopsy signal <libapp.so>" run or
+// regeneration from an existing analysis directory via --from.
 func cmdSignalPipeline(args []string) error {
-	fs := flag.NewFlagSet("signal", flag.ExitOnError)
+	fs := flag.NewFlagSet("signal", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	k := fs.Int("k", 2, "context hops from signal functions")
+	noAsm := fs.Bool("no-asm", false, "with --from, skip loading asm snippets")
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if *k <= 0 {
+		return fmt.Errorf("--k must be > 0")
+	}
 
-	// If --from is set, skip ELF parse and just run signal.
 	if *from != "" {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("signal --from does not accept a libapp.so positional argument")
+		}
+		if flagWasSet(fs, "max-steps") {
+			return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
+		}
 		if *outDir == "" {
 			*outDir = *from
 		}
 		result, err := analysis.Run(analysis.Opts{
-			FromDir: *from,
-			OutDir:  *outDir,
-			Signal:  true,
-			SignalK: *k,
-			Quiet:   quiet,
-			Log:     os.Stderr,
+			FromDir:     *from,
+			OutDir:      *outDir,
+			Signal:      true,
+			SignalK:     *k,
+			SignalNoAsm: *noAsm,
+			Quiet:       quiet,
+			Log:         os.Stderr,
 		})
 		if err != nil {
 			return err
@@ -77,9 +59,12 @@ func cmdSignalPipeline(args []string) error {
 		printSignalSummary(&analysis.SignalResult{SignalCount: result.SignalCount}, result.OutDir, "", result.Arch)
 		return nil
 	}
+	if *noAsm {
+		return fmt.Errorf("--no-asm requires --from")
+	}
 
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: aotopsy signal <libapp.so> [flags]")
+		return fmt.Errorf("usage: aotopsy signal <libapp.so> [flags] or aotopsy signal --from <dir> [flags]")
 	}
 
 	libPath := fs.Arg(0)

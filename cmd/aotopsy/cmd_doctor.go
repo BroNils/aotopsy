@@ -12,13 +12,16 @@ import (
 
 // cmdDoctor handles "aotopsy doctor <libapp.so>" — diagnostic scan.
 func cmdDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy doctor <libapp.so>")
 	}
 

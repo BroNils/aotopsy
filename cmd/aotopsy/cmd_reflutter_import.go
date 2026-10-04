@@ -8,12 +8,12 @@ import (
 )
 
 func cmdReflutterImport(args []string) error {
-	fs := flag.NewFlagSet("reflutter-import", flag.ExitOnError)
+	fs := flag.NewFlagSet("reflutter-import", flag.ContinueOnError)
 	dumpPath := fs.String("dump", "", "path to reFlutter's dump.dart")
 	staticDir := fs.String("static", "", "aotopsy static output directory")
 	libPath := fs.String("lib", "", "path to the original libapp.so (needed to convert reFlutter's snapshot-relative offsets to aotopsy's absolute VAs)")
 	outDir := fs.String("out", "", "output directory for merged results (default: <static>_reflutter)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 

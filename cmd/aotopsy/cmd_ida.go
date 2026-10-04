@@ -15,7 +15,7 @@ import (
 
 // cmdIDA handles "aotopsy ida <libapp.so>" — full pipeline + IDA decompilation.
 func cmdIDA(args []string) error {
-	fs := flag.NewFlagSet("ida", flag.ExitOnError)
+	fs := flag.NewFlagSet("ida", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	all := fs.Bool("all", false, "decompile ALL functions")
 	pythonBin := fs.String("python", "", "python3 binary (default: auto-detect)")
@@ -23,16 +23,19 @@ func cmdIDA(args []string) error {
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy ida <libapp.so> [flags]")
+	}
+	if *from != "" && flagWasSet(fs, "max-steps") {
+		return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
 	}
 
 	libPath := fs.Arg(0)

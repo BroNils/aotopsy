@@ -18,14 +18,16 @@ import (
 
 // cmdDump handles "aotopsy _debug dump" for low-level sequential disassembly and placeholder symbol dumping.
 func cmdDump(args []string) error {
-	fs := flag.NewFlagSet("dump", flag.ExitOnError)
+	fs := flag.NewFlagSet("dump", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	outDir := fs.String("out", "", "output directory")
-	_ = fs.String("profile", "", "override version profile (not yet implemented)")
 	strict := fs.Bool("strict", false, "fail on first structural error")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 

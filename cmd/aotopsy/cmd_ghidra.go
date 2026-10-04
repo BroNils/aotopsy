@@ -15,7 +15,7 @@ import (
 
 // cmdGhidra handles "aotopsy ghidra <libapp.so>" — full pipeline + Ghidra decompilation.
 func cmdGhidra(args []string) error {
-	fs := flag.NewFlagSet("ghidra", flag.ExitOnError)
+	fs := flag.NewFlagSet("ghidra", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	ghidraHome := fs.String("ghidra-home", "", "Ghidra installation directory")
 	all := fs.Bool("all", false, "decompile ALL functions")
@@ -24,17 +24,23 @@ func cmdGhidra(args []string) error {
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	projectDir := fs.String("projects", "scratch/ghidra-projects", "Ghidra project directory")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy ghidra <libapp.so> [flags]")
+	}
+	if *gui && flagWasSet(fs, "projects") {
+		return fmt.Errorf("--projects cannot be used with --gui because GUI mode does not create a headless project")
+	}
+	if *from != "" && flagWasSet(fs, "max-steps") {
+		return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
 	}
 
 	libPath := fs.Arg(0)

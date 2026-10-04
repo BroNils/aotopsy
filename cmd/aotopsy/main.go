@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -19,12 +21,20 @@ func main() {
 
 	// Help flags.
 	if cmd == "help" || cmd == "-h" || cmd == "--help" {
+		if len(rest) != 0 {
+			cli.Errf("error: top-level help does not accept positional arguments: %q\n", rest)
+			os.Exit(2)
+		}
 		printPrimaryUsage()
 		os.Exit(0)
 	}
 
 	// Version flags.
 	if cmd == "version" || cmd == "--version" || cmd == "-V" {
+		if len(rest) != 0 {
+			cli.Errf("error: version does not accept positional arguments: %q\n", rest)
+			os.Exit(2)
+		}
 		fmt.Printf("aotopsy %s (commit %s, built %s)\n",
 			cli.SafeLine(cli.Version), cli.SafeLine(cli.Commit), cli.SafeLine(cli.Date))
 		os.Exit(0)
@@ -32,19 +42,13 @@ func main() {
 
 	// Look up in the primary command registry.
 	if c := findCommand(primaryCommands, cmd); c != nil {
-		var err error
-		if c.Special != nil {
-			var handled bool
-			handled, err = c.Special(cmd, os.Args[1:])
-			if !handled {
-				err = fmt.Errorf("command %s did not handle its args", cmd)
-			}
-		} else {
-			err = c.Run(rest)
+		err := c.Run(rest)
+		if errors.Is(err, flag.ErrHelp) {
+			return
 		}
 		if err != nil {
 			cli.Errf("error: %s\n", err)
-			os.Exit(1)
+			os.Exit(commandErrorExitCode(err))
 		}
 		return
 	}
@@ -52,9 +56,12 @@ func main() {
 	// Default: if the first arg is a file on disk, treat as "aotopsy <libapp.so>".
 	if resolvePositionalLib(cmd) != "" {
 		err := cmdRun(os.Args[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		if err != nil {
 			cli.Errf("error: %s\n", err)
-			os.Exit(1)
+			os.Exit(commandErrorExitCode(err))
 		}
 		return
 	}
@@ -62,9 +69,12 @@ func main() {
 	// Flags before file path: pass all args to cmdRun which will reorder.
 	if strings.HasPrefix(cmd, "-") {
 		err := cmdRun(os.Args[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		if err != nil {
 			cli.Errf("error: %s\n", err)
-			os.Exit(1)
+			os.Exit(commandErrorExitCode(err))
 		}
 		return
 	}
@@ -74,14 +84,13 @@ func main() {
 	os.Exit(1)
 }
 
-// hasFlag checks if any arg matches one of the given flag names.
-func hasFlag(args []string, names ...string) bool {
-	for _, a := range args {
-		for _, n := range names {
-			if a == n || strings.HasPrefix(a, n+"=") {
-				return true
-			}
-		}
+func commandErrorExitCode(err error) int {
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return 0
 	}
-	return false
+	var usageErr *cliUsageError
+	if errors.As(err, &usageErr) {
+		return 2
+	}
+	return 1
 }

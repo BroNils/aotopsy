@@ -16,7 +16,7 @@ import (
 
 // cmdStrings implements "aotopsy _debug strings" for searching and xref'ing strings in snapshots.
 func cmdStrings(args []string) error {
-	fs := flag.NewFlagSet("strings", flag.ExitOnError)
+	fs := flag.NewFlagSet("strings", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	which := fs.String("which", "both", "which snapshot: vm, isolate, or both")
@@ -28,8 +28,18 @@ func cmdStrings(args []string) error {
 	xrefMaxRefs := fs.Int("xref-max-refs", 0, fmt.Sprintf("cap retained --xref matches (0 = safe default %d)", strxref.DefaultMaxRefs))
 	xrefUnbounded := fs.Bool("xref-unbounded", false, "allow --xref to scan an unbounded number of functions (retained matches remain capped)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	for name, value := range map[string]int{
+		"max-steps":     *maxSteps,
+		"max-len":       *maxLen,
+		"xref-max-scan": *xrefMaxScan,
+		"xref-max-refs": *xrefMaxRefs,
+	} {
+		if err := requireNonNegativeFlag(name, value); err != nil {
+			return err
+		}
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
@@ -78,6 +88,9 @@ func cmdStrings(args []string) error {
 		}
 		targets = []target{{"Unified", info.IsolateData.Data, h.TotalSize}}
 	} else {
+		if *names && flagWasSet(fs, "which") && *which != "both" {
+			return fmt.Errorf("--names requires --which both on legacy split snapshots because owner/name resolution spans VM and isolate snapshots")
+		}
 		if info.VmHeader == nil || info.IsolateHeader == nil {
 			return fmt.Errorf("legacy snapshot is missing VM or isolate header")
 		}
@@ -107,26 +120,22 @@ func cmdStrings(args []string) error {
 
 	for _, t := range targets {
 		if len(t.data) < 64 {
-			cli.Errf("%s: data too short (%d bytes)\n", t.name, len(t.data))
-			continue
+			return fmt.Errorf("%s: data too short (%d bytes)", t.name, len(t.data))
 		}
 
 		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
-			cli.Errf("%s: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s cluster start: %w", t.name, err)
 		}
 
 		isVM := t.name == "VM"
 		result, err := cluster.ScanClusters(t.data, clusterStart, info.Version, isVM, opts)
 		if err != nil {
-			cli.Errf("%s: scan error: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s scan: %w", t.name, err)
 		}
 
 		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize, opts); err != nil {
-			cli.Errf("%s: fill error: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s fill: %w", t.name, err)
 		}
 
 		parsed = append(parsed, parsedTarget{name: t.name, result: result})

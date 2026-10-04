@@ -22,13 +22,16 @@ import (
 
 // cmdGraph implements "aotopsy _debug graph" for extracting named object graphs.
 func cmdGraph(args []string) error {
-	fs := flag.NewFlagSet("graph", flag.ExitOnError)
+	fs := flag.NewFlagSet("graph", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	which := fs.String("which", "isolate", "which snapshot: vm, isolate, or both")
 	outDir := fs.String("out", "", "output directory for JSONL files")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 	if *libapp == "" {
@@ -43,7 +46,7 @@ func cmdGraph(args []string) error {
 
 // cmdRender implements "aotopsy _debug render" for rendering DOT and HTML from JSONL output.
 func cmdRender(args []string) error {
-	fs := flag.NewFlagSet("render", flag.ExitOnError)
+	fs := flag.NewFlagSet("render", flag.ContinueOnError)
 	inDir := fs.String("in", "", "input directory (disasm output)")
 	maxNodes := fs.Int("max-nodes", 0, "max function nodes in callgraph (0 = all)")
 	title := fs.String("title", "", "title for callgraph and HTML (auto-detected from dir name)")
@@ -51,7 +54,10 @@ func cmdRender(args []string) error {
 	cfgFlag := fs.Bool("cfg", false, "generate per-function CFGs for reachable functions")
 	asmDir := fs.String("asm", "", "directory with per-function .bin files (defaults to <in>/asm)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-nodes", *maxNodes); err != nil {
 		return err
 	}
 	if *inDir == "" {
@@ -200,19 +206,22 @@ func cmdRender(args []string) error {
 		if !ok || (prov.Arch != "arm64" && prov.Arch != "x64") {
 			return fmt.Errorf("--cfg requires provenance.json with arch arm64 or x64")
 		}
-		if _, err := os.Stat(*asmDir); err != nil {
-			logger.Warn("--cfg requires asm directory at %s", *asmDir)
-		} else {
-			cfgDir := filepath.Join(renderDir, "cfg")
-			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-				return fmt.Errorf("mkdir cfg: %w", err)
-			}
-			cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reach.Functions, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
-			if err != nil {
-				return fmt.Errorf("generate CFGs: %w", err)
-			}
-			logger.Printf("generated %d CFGs in %s\n", cfgFuncs, cfgDir)
+		asmInfo, err := os.Stat(*asmDir)
+		if err != nil {
+			return fmt.Errorf("--cfg requires asm directory at %s: %w", *asmDir, err)
 		}
+		if !asmInfo.IsDir() {
+			return fmt.Errorf("--cfg requires --asm to name a directory: %s", *asmDir)
+		}
+		cfgDir := filepath.Join(renderDir, "cfg")
+		if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir cfg: %w", err)
+		}
+		cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reach.Functions, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
+		if err != nil {
+			return fmt.Errorf("generate CFGs: %w", err)
+		}
+		logger.Printf("generated %d CFGs in %s\n", cfgFuncs, cfgDir)
 	}
 
 	// Generate index.html.

@@ -13,11 +13,11 @@ import (
 // cmdDispatchTable implements "aotopsy _debug dispatch-table --lib <path>":
 // statically recovers real function/stub names for the AOT snapshot's DispatchTable.
 func cmdDispatchTable(args []string) error {
-	fs := flag.NewFlagSet("dispatch-table", flag.ExitOnError)
+	fs := flag.NewFlagSet("dispatch-table", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	filter := fs.String("filter", "", "only print entries whose resolved name contains this substring")
 	showAll := fs.Bool("all", false, "print every entry, including null/unresolved (default: only entries with a resolved name)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *libapp == "" {

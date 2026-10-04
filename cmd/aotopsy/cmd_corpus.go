@@ -17,11 +17,11 @@ import (
 
 // cmdParity runs parity checks across sample subdirectories.
 func cmdParity(args []string) error {
-	fs := flag.NewFlagSet("parity", flag.ExitOnError)
+	fs := flag.NewFlagSet("parity", flag.ContinueOnError)
 	samplesDir := fs.String("samples", "", "directory containing sample subdirs (each with libapp.so)")
 	outDir := fs.String("out", "", "output directory for parity.csv and summary")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *samplesDir == "" || *outDir == "" {
@@ -33,10 +33,10 @@ func cmdParity(args []string) error {
 
 // cmdInventory inventories sample ZIP/APK files and extracts version/snapshot metadata.
 func cmdInventory(args []string) error {
-	fs := flag.NewFlagSet("inventory", flag.ExitOnError)
+	fs := flag.NewFlagSet("inventory", flag.ContinueOnError)
 	dir := fs.String("dir", "samples/flutter", "Directory containing zip files")
 	outPath := fs.String("out", "", "Output JSONL file (default: stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 

@@ -23,7 +23,7 @@ import (
 //	aotopsy sdk-check --stubs      # VM stub names only
 //	aotopsy sdk-check --roots      # Roots prefix count only
 func cmdSDKCheck(args []string) error {
-	fs := flag.NewFlagSet("sdk-check", flag.ExitOnError)
+	fs := flag.NewFlagSet("sdk-check", flag.ContinueOnError)
 	thrOnly := fs.Bool("thr", false, "check THR field tables only")
 	objectStoreOnly := fs.Bool("objectstore", false, "check ObjectStore field count only")
 	stubsOnly := fs.Bool("stubs", false, "check VM stub names only")
@@ -31,11 +31,8 @@ func cmdSDKCheck(args []string) error {
 	classIDOnly := fs.Bool("classid-tag", false, "check versioned object-header class-id layout only")
 	runtimeEntriesOnly := fs.Bool("runtime-entries", false, "check runtime-entry THR naming coverage only")
 	stubOffsetsOnly := fs.Bool("stub-offsets", false, "check Thread-cached stub offsets only")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("sdk-check does not accept positional arguments")
 	}
 
 	all := !*thrOnly && !*objectStoreOnly && !*stubsOnly && !*rootsOnly && !*classIDOnly && !*runtimeEntriesOnly && !*stubOffsetsOnly

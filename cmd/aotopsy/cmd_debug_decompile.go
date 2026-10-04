@@ -20,7 +20,7 @@ import (
 
 // cmdDecompileNative implements "aotopsy _debug decompile-native" for Dart-AOT-aware pseudocode generation.
 func cmdDecompileNative(args []string) error {
-	fs := flag.NewFlagSet("decompile-native", flag.ExitOnError)
+	fs := flag.NewFlagSet("decompile-native", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	funcVAStr := fs.String("func", "", "hex VA of any address inside the target function")
 	all := fs.Bool("all", false, "decompile every function, writing one combined.dart file under --out")
@@ -36,22 +36,60 @@ func cmdDecompileNative(args []string) error {
 	maxStepsFlag := fs.Int("max-steps", 0, "override the per-function emitter step budget")
 	filterSubstr := fs.String("filter", "", "modifier for --all ONLY: restricts --all to functions whose name contains this substring")
 	strict := fs.Bool("strict", false, "abort on the first function that cannot be decompiled (default: skip it and list it in "+analysis.DecompileFailuresFile+")")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
-	decompiler.SetMaxStepsPerEmitter(*maxStepsFlag)
+	for name, value := range map[string]int{
+		"max":                   *maxFuncs,
+		"skip":                  *skipFuncs,
+		"max-steps":             *maxStepsFlag,
+		"gen-frida-stalker-min": *genFridaStalkerMin,
+	} {
+		if err := requireNonNegativeFlag(name, value); err != nil {
+			return err
+		}
+	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
 	}
-	if *funcVAStr == "" && !*all && !*fromMain && *findSubstr == "" {
-		return fmt.Errorf("--func <hex VA>, --find <substring>, --all, or --from-main is required")
+	actions := 0
+	if *funcVAStr != "" {
+		actions++
 	}
-	if *all && *fromMain {
-		return fmt.Errorf("--all and --from-main are mutually exclusive -- pick one traversal mode")
+	if *findSubstr != "" {
+		actions++
+	}
+	if *all {
+		actions++
+	}
+	if *fromMain {
+		actions++
+	}
+	if actions != 1 {
+		return fmt.Errorf("exactly one of --func <hex VA>, --find <substring>, --all, or --from-main is required")
 	}
 	if *filterSubstr != "" && !*all {
 		return fmt.Errorf("--filter only applies to --all (did you mean --all --filter %q?)", *filterSubstr)
 	}
+	if *skipFuncs != 0 && !*all {
+		return fmt.Errorf("--skip only applies to --all")
+	}
+	if flagWasSet(fs, "max") && !*all && !*fromMain {
+		return fmt.Errorf("--max only applies to --all/--from-main")
+	}
+	if *outDir != "" && !*all && !*fromMain {
+		return fmt.Errorf("--out only applies to --all/--from-main")
+	}
+	if *strict && !*all && !*fromMain {
+		return fmt.Errorf("--strict only applies to --all/--from-main")
+	}
+	if *findSubstr != "" && *genFrida {
+		return fmt.Errorf("--gen-frida cannot be used with --find because --find only lists matches")
+	}
+	if !*genFrida && (*genFridaOut != "" || *genFridaStalker || flagWasSet(fs, "gen-frida-stalker-min")) {
+		return fmt.Errorf("--gen-frida-out/--gen-frida-stalker options require --gen-frida")
+	}
+	decompiler.SetMaxStepsPerEmitter(*maxStepsFlag)
 
 	deps, err := analysis.BuildDecompileNativeDeps(*libapp)
 	if err != nil {
@@ -66,12 +104,9 @@ func cmdDecompileNative(args []string) error {
 	}
 
 	if !*all && !*fromMain {
-		var targetVA uint64
-		_, scanErr := fmt.Sscanf(*funcVAStr, "0x%x", &targetVA)
-		if scanErr != nil || targetVA == 0 {
-			if _, err := fmt.Sscanf(*funcVAStr, "%x", &targetVA); err != nil || targetVA == 0 {
-				return fmt.Errorf("--func %q: not a valid hex address", *funcVAStr)
-			}
+		targetVA, err := parseHexAddress("func", *funcVAStr)
+		if err != nil {
+			return err
 		}
 		found := cluster.FindRangeContainingVA(deps.Ctx.Ranges, deps.Ctx.CodeVA, deps.Ctx.CodeOff, targetVA)
 		if found == nil {

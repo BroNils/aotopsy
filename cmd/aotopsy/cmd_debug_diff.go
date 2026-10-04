@@ -8,23 +8,38 @@ import (
 	"aotopsy/internal/cli"
 	"aotopsy/internal/funcdiff"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/symbolmap"
 )
 
 // cmdSymbolMap implements "aotopsy _debug symbolmap": resolves stripped binary direct call targets against unstripped build.
 func cmdSymbolMap(args []string) error {
-	fs := flag.NewFlagSet("symbolmap", flag.ExitOnError)
+	fs := flag.NewFlagSet("symbolmap", flag.ContinueOnError)
 	strippedPath := fs.String("stripped", "", "path to the stripped libapp.so")
 	unstrippedPath := fs.String("unstripped", "", "path to an unstripped/debug build of the SAME libapp.so")
 	outDir := fs.String("out", "", "output directory for symbolmap artifacts (default: stdout summary only)")
 	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest FUNC/IFUNC match within its proven executable extent (0 disables nearest matching)")
 	includeBranches := fs.Bool("include-branches", false, "also scan unconditional direct branches/jumps, not just calls")
 	importSymbols := fs.Bool("import-symbols", false, "import the full executable symbol table from the verified unstripped twin")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *strippedPath == "" || *unstrippedPath == "" {
 		return fmt.Errorf("--stripped and --unstripped are required")
+	}
+	if *outDir != "" {
+		for _, input := range []struct {
+			label string
+			path  string
+		}{{"stripped", *strippedPath}, {"unstripped", *unstrippedPath}} {
+			contains, err := output.ContainsPath(*outDir, input.path)
+			if err != nil {
+				return fmt.Errorf("symbolmap: compare output/%s input paths: %w", input.label, err)
+			}
+			if contains {
+				return fmt.Errorf("symbolmap output directory must not contain the %s input binary", input.label)
+			}
+		}
 	}
 
 	rep, err := symbolmap.Compare(*strippedPath, *unstrippedPath, symbolmap.Options{
@@ -60,16 +75,33 @@ func cmdSymbolMap(args []string) error {
 // cmdFuncDiff implements "aotopsy _debug funcdiff": compares source-identity-
 // shaped Function descriptors and, separately, raw instruction bytes.
 func cmdFuncDiff(args []string) error {
-	fs := flag.NewFlagSet("funcdiff", flag.ExitOnError)
+	fs := flag.NewFlagSet("funcdiff", flag.ContinueOnError)
 	oldPath := fs.String("old", "", "path to the OLD build's libapp.so")
 	newPath := fs.String("new", "", "path to the NEW build's libapp.so")
 	topN := fs.Int("top", 200, "max identity-added/removed and instruction-byte different/indeterminate entries to report each (0 = unlimited)")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("top", *topN); err != nil {
 		return err
 	}
 	if *oldPath == "" || *newPath == "" {
 		return fmt.Errorf("--old and --new are required")
+	}
+	if *out != "" {
+		for _, input := range []struct {
+			label string
+			path  string
+		}{{"old", *oldPath}, {"new", *newPath}} {
+			same, err := output.SamePath(input.path, *out)
+			if err != nil {
+				return fmt.Errorf("funcdiff: compare %s input/output paths: %w", input.label, err)
+			}
+			if same {
+				return fmt.Errorf("funcdiff output must not replace the %s input binary", input.label)
+			}
+		}
 	}
 
 	rep, err := funcdiff.Diff(*oldPath, *newPath, *topN)

@@ -14,13 +14,16 @@ import (
 
 // cmdClusters implements "aotopsy _debug clusters" for decoding snapshot clusters.
 func cmdClusters(args []string) error {
-	fs := flag.NewFlagSet("clusters", flag.ExitOnError)
+	fs := flag.NewFlagSet("clusters", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	which := fs.String("which", "both", "which snapshot: vm, isolate, or both")
 	debugFill := fs.Bool("debug-fill", false, "print fill position per cluster")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 	if *libapp == "" {
@@ -78,21 +81,18 @@ func cmdClusters(args []string) error {
 
 	for _, t := range targets {
 		if len(t.data) < 64 {
-			cli.Errf("%s: data too short (%d bytes)\n", t.name, len(t.data))
-			continue
+			return fmt.Errorf("%s: data too short (%d bytes)", t.name, len(t.data))
 		}
 
 		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
-			cli.Errf("%s: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s cluster start: %w", t.name, err)
 		}
 
 		isVM := t.name == "VM"
 		result, err := cluster.ScanClusters(t.data, clusterStart, info.Version, isVM, opts)
 		if err != nil {
-			cli.Errf("%s: scan error: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s scan: %w", t.name, err)
 		}
 
 		fmt.Printf("\n%s Snapshot Clusters:\n", t.name)
@@ -137,7 +137,7 @@ func cmdClusters(args []string) error {
 			fmt.Printf("\n  Fill Positions (%s, fill_start=0x%x):\n", t.name, result.FillStart)
 			err := cluster.DebugFillPositions(t.data, result, info.Version, isVM, os.Stdout)
 			if err != nil {
-				cli.Errf("  fill debug error: %v\n", err)
+				return fmt.Errorf("%s fill debug: %w", t.name, err)
 			}
 		}
 	}
@@ -147,7 +147,7 @@ func cmdClusters(args []string) error {
 
 // cmdRefInfo implements "aotopsy _debug refinfo" for inspecting raw ref IDs / owner chains.
 func cmdRefInfo(args []string) error {
-	fs := flag.NewFlagSet("refinfo", flag.ExitOnError)
+	fs := flag.NewFlagSet("refinfo", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	refsFlag := fs.String("refs", "", "comma-separated ref IDs to inspect")
 	codeRefFlag := fs.Int("find-owner-of-code-ref", -1, "given a Code cluster's own ref ID, find its owning Function via code_index cross-reference")
@@ -155,8 +155,17 @@ func cmdRefInfo(args []string) error {
 	listToplevel := fs.Bool("list-toplevel", false, "list every Function whose effective owner is a \"::\" class")
 	fieldsOfCID := fs.Int("fields-of-instance-cid", -1, "find Class with this CID, list its Field records")
 	walk := fs.Bool("walk", true, "follow OwnerRefID chain until it terminates")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	for name, value := range map[string]int{
+		"find-owner-of-code-ref": *codeRefFlag,
+		"siblings-of-owner":      *siblingsOfFlag,
+		"fields-of-instance-cid": *fieldsOfCID,
+	} {
+		if value < -1 {
+			return fmt.Errorf("--%s must be >= -1", name)
+		}
 	}
 	if *libapp == "" || (*refsFlag == "" && *codeRefFlag < 0 && *siblingsOfFlag < 0 && !*listToplevel && *fieldsOfCID < 0) {
 		return fmt.Errorf("--lib and one of --refs/--find-owner-of-code-ref/--siblings-of-owner/--list-toplevel/--fields-of-instance-cid are required")

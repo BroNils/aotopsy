@@ -10,23 +10,39 @@ import (
 	"aotopsy/internal/cli"
 	"aotopsy/internal/ffitrace"
 	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
 // static detection of dart:ffi DynamicLibrary.open/lookup call sites and
 // compiler-generated Dart-to-native FFI wrappers.
 func cmdFFITrace(args []string) error {
-	fs := flag.NewFlagSet("ffi-trace", flag.ExitOnError)
+	fs := flag.NewFlagSet("ffi-trace", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	out := fs.String("out", "", "write findings as JSONL to this path (default: stdout)")
 	filter := fs.String("filter", "", "restrict to functions whose resolved name contains this substring")
 	maxScan := fs.Int("max-scan", 0, "cap how many functions ffi-trace processes (0 = package default of 500)")
 	allowUnbounded := fs.Bool("allow-unbounded", false, "scan EVERY function, no cap")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if err := requireNonNegativeFlag("max-scan", *maxScan); err != nil {
+		return err
+	}
+	if *allowUnbounded && flagWasSet(fs, "max-scan") {
+		return fmt.Errorf("--allow-unbounded and --max-scan are mutually exclusive")
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
+	}
+	if *out != "" {
+		same, err := output.SamePath(*libapp, *out)
+		if err != nil {
+			return fmt.Errorf("ffi-trace: compare input/output paths: %w", err)
+		}
+		if same {
+			return fmt.Errorf("ffi-trace output must not replace the input binary")
+		}
 	}
 
 	ctx, err := analysis.LoadContext(*libapp)

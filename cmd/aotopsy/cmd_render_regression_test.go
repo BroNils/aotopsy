@@ -62,6 +62,14 @@ func TestRenderUsesCanonicalArtifactPathX64AndRemovesStaleCFG(t *testing.T) {
 		t.Fatalf("render linked an SVG CFG even though --no-dot suppressed SVG generation: %s", indexHTML)
 	}
 
+	missingAsm := filepath.Join(dir, "missing-asm")
+	if err := cmdRender([]string{"--in", dir, "--cfg", "--asm", missingAsm}); err == nil || !strings.Contains(err.Error(), "requires asm directory") {
+		t.Fatalf("requested CFG stage silently skipped a missing asm directory: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("failed CFG rerender damaged the previous render generation: %v", err)
+	}
+
 	if err := cmdRender([]string{"--in", dir}); err != nil {
 		t.Fatal(err)
 	}

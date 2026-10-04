@@ -19,11 +19,15 @@ func cmdFridaExport(args []string) error {
 	libPath := fs.String("lib", "", "path to libapp.so")
 	fromDir := fs.String("from", "", "reuse existing aotopsy output directory")
 	genScript := fs.Bool("gen-script", false, "also generate a ready-to-run Frida JS script")
-	if err := fs.Parse(args); err != nil {
+	maxSteps := fs.Int("max-steps", 0, "global loop cap for a fresh --lib analysis (0 = default)")
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: aotopsy frida-export (--lib <libapp.so> | --from <aotopsy_dir>) [--gen-script]")
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if *fromDir != "" && flagWasSet(fs, "max-steps") {
+		return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
 	}
 
 	dir := *fromDir
@@ -45,7 +49,7 @@ func cmdFridaExport(args []string) error {
 			Quiet:    true,
 			Signal:   true,
 			SignalK:  2,
-			MaxSteps: 100000,
+			MaxSteps: *maxSteps,
 		}
 		cli.Errf("Running full analysis...\n")
 		_, err := analysis.Run(opts)
