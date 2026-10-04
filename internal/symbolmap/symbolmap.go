@@ -11,6 +11,7 @@ package symbolmap
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -24,18 +25,19 @@ import (
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/arch/x86"
-	"aotopsy/internal/disasm"
 	"aotopsy/internal/elfx"
 	"aotopsy/internal/output"
+	"aotopsy/internal/snapshot"
 )
 
 // MatchKind classifies how a call-site's target VA was resolved.
 type MatchKind string
 
 const (
-	MatchExact      MatchKind = "exact"
-	MatchNearest    MatchKind = "nearest"
-	MatchUnresolved MatchKind = "unresolved"
+	MatchExact          MatchKind = "exact"
+	MatchNearest        MatchKind = "nearest"
+	MatchUnresolved     MatchKind = "unresolved"
+	ReportSchemaVersion           = 1
 )
 
 type SiteKind string
@@ -101,27 +103,36 @@ type Options struct {
 
 // Report is the full comparison result.
 type Report struct {
-	StrippedPath     string          `json:"stripped_path"`
-	UnstrippedPath   string          `json:"unstripped_path"`
-	Machine          string          `json:"machine"`
-	ExecLayoutMatch  bool            `json:"exec_layout_match"`
-	ExecBytesMatch   bool            `json:"exec_bytes_match"`
-	UnstrippedSymCnt int             `json:"unstripped_symbol_count"`
-	Symbols          []SymbolRecord  `json:"symbols,omitempty"`
-	CallSites        []CallSite      `json:"call_sites"`
-	Targets          []TargetSummary `json:"targets"`
-	ExactCount       int             `json:"exact_count"`
-	NearestCount     int             `json:"nearest_count"`
-	UnresolvedCount  int             `json:"unresolved_count"`
-	IndirectCount    int             `json:"indirect_count,omitempty"`
-	Notes            []string        `json:"notes,omitempty"`
+	SchemaVersion     int             `json:"schema_version"`
+	StrippedPath      string          `json:"stripped_path"`
+	UnstrippedPath    string          `json:"unstripped_path"`
+	Machine           string          `json:"machine"`
+	StrippedBuildID   string          `json:"stripped_build_id"`
+	UnstrippedBuildID string          `json:"unstripped_build_id"`
+	BuildIDMatch      bool            `json:"build_id_match"`
+	ExecLayoutMatch   bool            `json:"exec_layout_match"`
+	ExecBytesMatch    bool            `json:"exec_bytes_match"`
+	UnstrippedSymCnt  int             `json:"unstripped_symbol_count"`
+	Symbols           []SymbolRecord  `json:"symbols,omitempty"`
+	CallSites         []CallSite      `json:"call_sites"`
+	Targets           []TargetSummary `json:"targets"`
+	ExactCount        int             `json:"exact_count"`
+	NearestCount      int             `json:"nearest_count"`
+	UnresolvedCount   int             `json:"unresolved_count"`
+	IndirectCount     int             `json:"indirect_count"`
+	Notes             []string        `json:"notes,omitempty"`
 }
 
 type execSection struct {
-	Name string
-	Addr uint64
-	Size uint64
-	Data []byte
+	Index  int
+	Name   string
+	Type   elf.SectionType
+	Addr   uint64
+	Size   uint64
+	Offset uint64
+	Flags  elf.SectionFlag
+	Align  uint64
+	Data   []byte
 }
 
 type symbolInfo struct {
@@ -132,6 +143,7 @@ type symbolInfo struct {
 	Binding     elf.SymBind
 	Section     elf.SectionIndex
 	SectionName string
+	SectionEnd  uint64
 	Aliases     []string
 	Category    string
 }
@@ -154,11 +166,32 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	if sf.Machine() != uf.Machine() {
 		return nil, fmt.Errorf("symbolmap: machine mismatch: stripped=%s unstripped=%s", sf.Machine(), uf.Machine())
 	}
+	if sf.StaticSymbolsPresent() {
+		return nil, fmt.Errorf("symbolmap: stripped input still carries a static .symtab; refusing to use it as the recovery side")
+	}
+	if !uf.StaticSymbolsPresent() {
+		return nil, fmt.Errorf("symbolmap: unstripped input has no static .symtab ground truth")
+	}
 
 	rep := &Report{
+		SchemaVersion:  ReportSchemaVersion,
 		StrippedPath:   strippedPath,
 		UnstrippedPath: unstrippedPath,
 		Machine:        sf.Machine().String(),
+	}
+	strippedBuildID, err := sf.GNUBuildID()
+	if err != nil {
+		return nil, fmt.Errorf("symbolmap: stripped GNU build-id: %w", err)
+	}
+	unstrippedBuildID, err := uf.GNUBuildID()
+	if err != nil {
+		return nil, fmt.Errorf("symbolmap: unstripped GNU build-id: %w", err)
+	}
+	rep.StrippedBuildID = strippedBuildID.ID
+	rep.UnstrippedBuildID = unstrippedBuildID.ID
+	rep.BuildIDMatch = strippedBuildID.ID == unstrippedBuildID.ID
+	if err := requireSameBuildID(strippedBuildID, unstrippedBuildID); err != nil {
+		return nil, err
 	}
 
 	strippedExec, err := collectExecSections(sf)
@@ -173,8 +206,12 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	if !rep.ExecLayoutMatch || !rep.ExecBytesMatch {
 		return nil, fmt.Errorf("symbolmap: executable layout/bytes differ; inputs are not a verified stripped/unstripped pair of the same build")
 	}
+	strippedCode, err := snapshotCodeSections(sf, strippedExec)
+	if err != nil {
+		return nil, err
+	}
 
-	symbols, symVAs, err := collectSymbols(uf)
+	symbols, symVAs, nearestVAs, err := collectSymbols(uf, unstrippedExec)
 	if err != nil {
 		return nil, err
 	}
@@ -186,11 +223,14 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	var callSites []CallSite
 	switch sf.Machine() {
 	case elf.EM_AARCH64:
-		callSites = scanARM64CallSites(strippedExec, symbols, symVAs, opts.IncludeBranches)
+		callSites, err = scanARM64CallSites(strippedCode, opts.IncludeBranches)
 	case elf.EM_X86_64:
-		callSites = scanX86CallSites(strippedExec, symbols, symVAs, opts.IncludeBranches)
+		callSites, err = scanX86CallSites(strippedCode, opts.IncludeBranches)
 	default:
 		return nil, fmt.Errorf("symbolmap: unsupported machine %s", sf.Machine())
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	targetCalls := make(map[uint64]int, len(callSites))
@@ -205,7 +245,7 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 			rep.UnresolvedCount++
 			continue
 		}
-		kind, name, symVA, off := resolveTarget(symbols, symVAs, cs.TargetVA, opts.NearestMaxDistance)
+		kind, name, symVA, off := resolveTarget(symbols, nearestVAs, cs.TargetVA, opts.NearestMaxDistance)
 		cs.Match = kind
 		cs.SymbolName = name
 		cs.SymbolVA = symVA
@@ -259,6 +299,111 @@ func Compare(strippedPath, unstrippedPath string, opts Options) (*Report, error)
 	return rep, nil
 }
 
+// snapshotCodeSections narrows executable Images to the actual machine-code
+// payload using only mapped metadata from the stripped side. This is the
+// oracle-independent replacement for the old .symtab-driven function chunking:
+// x86 in particular must not start decoding at Image/InstructionsSection header
+// bytes, because those bytes can form a syntactically valid false CALL.
+func snapshotCodeSections(f *elfx.File, sections []execSection) ([]execSection, error) {
+	identity, err := snapshot.ExtractIdentity(f)
+	if err != nil {
+		return nil, fmt.Errorf("symbolmap: stripped snapshot identity: %w", err)
+	}
+	profile := snapshot.DetectVersion(identity.SnapshotHash)
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("symbolmap: snapshot hash %s has no exact supported instructions-image profile", identity.SnapshotHash)
+	}
+
+	names := []string{snapshot.SymVmSnapshotInstructions, snapshot.SymIsolateSnapshotInstructions}
+	if identity.Unified {
+		names = []string{snapshot.SymUnifiedSnapshotText}
+	}
+	out := make([]execSection, 0, len(names))
+	matchedSections := make(map[int]bool, len(sections))
+	type snapshotRange struct{ lo, hi uint64 }
+	var ranges []snapshotRange
+	for _, name := range names {
+		addr, size, err := f.DynamicSnapshotSymbol(name)
+		if err != nil {
+			return nil, fmt.Errorf("symbolmap: stripped snapshot text %s: %w", name, err)
+		}
+		if size == 0 {
+			return nil, fmt.Errorf("symbolmap: stripped snapshot text %s has zero size", name)
+		}
+		symEnd, ok := checkedAdd64(addr, size)
+		if !ok {
+			return nil, fmt.Errorf("symbolmap: stripped snapshot text %s range overflows", name)
+		}
+		for _, r := range ranges {
+			if addr < r.hi && r.lo < symEnd {
+				return nil, fmt.Errorf("symbolmap: snapshot text %s overlaps another snapshot text range", name)
+			}
+		}
+		ranges = append(ranges, snapshotRange{lo: addr, hi: symEnd})
+		var sec *execSection
+		for i := range sections {
+			candidate := &sections[i]
+			secEnd, ok := checkedAdd64(candidate.Addr, candidate.Size)
+			if ok && addr >= candidate.Addr && symEnd <= secEnd {
+				if sec != nil {
+					return nil, fmt.Errorf("symbolmap: snapshot text %s matches multiple executable sections", name)
+				}
+				sec = candidate
+			}
+		}
+		if sec == nil {
+			return nil, fmt.Errorf("symbolmap: snapshot text %s [0x%x,+0x%x) is not contained in one executable section", name, addr, size)
+		}
+		matchedSections[sec.Index] = true
+		delta := addr - sec.Addr
+		if delta > uint64(len(sec.Data)) || size > uint64(len(sec.Data))-delta {
+			return nil, fmt.Errorf("symbolmap: snapshot text %s exceeds executable section bytes", name)
+		}
+		image := sec.Data[int(delta):int(delta+size)]
+		code, codeOff, payloadLen, err := snapshot.CodeRegion(image, profile)
+		if err != nil {
+			return nil, fmt.Errorf("symbolmap: snapshot code region %s: %w", name, err)
+		}
+		if payloadLen == 0 || uint64(len(code)) != payloadLen || codeOff > size || payloadLen > size-codeOff {
+			return nil, fmt.Errorf("symbolmap: invalid snapshot code bounds for %s: offset=0x%x payload=0x%x image=0x%x", name, codeOff, payloadLen, size)
+		}
+		codeVA, ok := checkedAdd64(addr, codeOff)
+		if !ok {
+			return nil, fmt.Errorf("symbolmap: snapshot code VA overflows for %s", name)
+		}
+		imageFileOff, ok := checkedAdd64(sec.Offset, delta)
+		if !ok {
+			return nil, fmt.Errorf("symbolmap: snapshot image file offset overflows for %s", name)
+		}
+		codeFileOff, ok := checkedAdd64(imageFileOff, codeOff)
+		if !ok {
+			return nil, fmt.Errorf("symbolmap: snapshot code file offset overflows for %s", name)
+		}
+		out = append(out, execSection{
+			Index: sec.Index, Name: sec.Name, Type: sec.Type, Addr: codeVA, Size: payloadLen,
+			Offset: codeFileOff, Flags: sec.Flags, Align: sec.Align, Data: code,
+		})
+	}
+	if len(matchedSections) != len(sections) {
+		return nil, fmt.Errorf("symbolmap: executable section set contains %d section(s) with no snapshot text identity; refusing unclassified code scan", len(sections)-len(matchedSections))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Addr < out[j].Addr })
+	return out, nil
+}
+
+func requireSameBuildID(stripped, unstripped elfx.BuildIDEvidence) error {
+	if len(stripped.Conflicts) != 0 || stripped.ID == "" {
+		return fmt.Errorf("symbolmap: stripped input has no unique GNU build-id: %s", strings.Join(stripped.Conflicts, "; "))
+	}
+	if len(unstripped.Conflicts) != 0 || unstripped.ID == "" {
+		return fmt.Errorf("symbolmap: unstripped input has no unique GNU build-id: %s", strings.Join(unstripped.Conflicts, "; "))
+	}
+	if stripped.ID != unstripped.ID {
+		return fmt.Errorf("symbolmap: GNU build-id mismatch: stripped=%s unstripped=%s", stripped.ID, unstripped.ID)
+	}
+	return nil
+}
+
 func collectExecSections(f *elfx.File) ([]execSection, error) {
 	sections, err := f.ExecutableSections(maxExecBytes)
 	if err != nil {
@@ -266,27 +411,28 @@ func collectExecSections(f *elfx.File) ([]execSection, error) {
 	}
 	out := make([]execSection, 0, len(sections))
 	for _, s := range sections {
-		out = append(out, execSection{Name: s.Name, Addr: s.Addr, Size: s.Size, Data: s.Data})
+		out = append(out, execSection{
+			Index: s.Index, Name: s.Name, Type: s.Type, Addr: s.Addr, Size: s.Size,
+			Offset: s.Offset, Flags: s.Flags, Align: s.Addralign, Data: s.Data,
+		})
 	}
 	return out, nil
 }
 
-// compareExecLayouts checks whether the stripped side's exec sections
-// exist at the exact same (addr, size) in the unstripped side, and if so
-// whether the raw bytes match exactly.
+// compareExecLayouts requires the executable section map itself to match, not
+// merely a bag of same-sized byte ranges. Section name, type, VA, size, file
+// offset, flags and alignment are part of the verified-build boundary; only
+// after that structural identity is established are the raw bytes compared.
 func compareExecLayouts(stripped, unstripped []execSection) (layoutMatch, bytesMatch bool) {
 	if len(stripped) == 0 || len(stripped) != len(unstripped) {
 		return false, false
 	}
-	byKey := make(map[[2]uint64]execSection, len(unstripped))
-	for _, s := range unstripped {
-		byKey[[2]uint64{s.Addr, s.Size}] = s
-	}
 	layoutMatch = true
 	bytesMatch = true
-	for _, s := range stripped {
-		u, ok := byKey[[2]uint64{s.Addr, s.Size}]
-		if !ok {
+	for i, s := range stripped {
+		u := unstripped[i]
+		if s.Name != u.Name || s.Type != u.Type || s.Addr != u.Addr || s.Size != u.Size ||
+			s.Offset != u.Offset || s.Flags != u.Flags || s.Align != u.Align {
 			layoutMatch = false
 			bytesMatch = false
 			continue
@@ -313,15 +459,34 @@ func isUsefulSymbolName(name string) bool {
 	return true
 }
 
-// collectSymbols gathers executable function-like symbols from .symtab and
-// .dynsym.  Same-VA names are aliases, not collisions to discard.  The primary
-// name prefers a real function/IFUNC over STT_NOTYPE and otherwise uses a stable
-// lexical tie-break so output is deterministic.
-func collectSymbols(f *elfx.File) (map[uint64]symbolInfo, []uint64, error) {
+// collectSymbols gathers executable function-like symbols from the verified
+// unstripped twin's static .symtab only. Same-VA names are aliases, not
+// collisions to discard. Terminal zero-size labels at the end of an executable
+// section are excluded because they name no executable byte.
+//
+// allVAs drives deterministic export. nearestVAs contains only FUNC/IFUNC
+// starts: STT_NOTYPE labels may be exact branch targets, but must never make an
+// unrelated following address look like a high-confidence function match.
+func collectSymbols(f *elfx.File, execSections []execSection) (map[uint64]symbolInfo, []uint64, []uint64, error) {
 	byVA := make(map[uint64]symbolInfo)
+	sectionEnds := make(map[elf.SectionIndex]uint64, len(execSections))
+	for _, sec := range execSections {
+		end, ok := checkedAdd64(sec.Addr, sec.Size)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("symbolmap: executable section %q overflows VA space", sec.Name)
+		}
+		sectionEnds[elf.SectionIndex(sec.Index)] = end
+	}
 	add := func(syms []elfx.ExecutableSymbol) error {
 		for _, s := range syms {
 			if !isUsefulSymbolName(s.Name) {
+				continue
+			}
+			sectionEnd, ok := sectionEnds[s.Section]
+			if !ok {
+				return fmt.Errorf("symbolmap: symbol %q references executable section %d absent from verified layout", s.Name, s.Section)
+			}
+			if s.Addr >= sectionEnd {
 				continue
 			}
 			candidate := symbolInfo{
@@ -332,6 +497,7 @@ func collectSymbols(f *elfx.File) (map[uint64]symbolInfo, []uint64, error) {
 				Binding:     s.Binding,
 				Section:     s.Section,
 				SectionName: s.SectionName,
+				SectionEnd:  sectionEnd,
 				Category:    symbolCategory(s.Name),
 			}
 			if existing, ok := byVA[s.Addr]; ok {
@@ -351,19 +517,72 @@ func collectSymbols(f *elfx.File) (map[uint64]symbolInfo, []uint64, error) {
 		}
 		return nil
 	}
-	syms, err := f.ExecutableSymbols()
+	syms, err := f.StaticExecutableSymbols()
 	if err != nil {
-		return nil, nil, fmt.Errorf("symbolmap: executable symbols: %w", err)
+		return nil, nil, nil, fmt.Errorf("symbolmap: static executable symbols: %w", err)
 	}
 	if err := add(syms); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	vas := make([]uint64, 0, len(byVA))
+	allVAs := make([]uint64, 0, len(byVA))
 	for va := range byVA {
-		vas = append(vas, va)
+		allVAs = append(allVAs, va)
 	}
-	sort.Slice(vas, func(i, j int) bool { return vas[i] < vas[j] })
-	return byVA, vas, nil
+	sort.Slice(allVAs, func(i, j int) bool { return allVAs[i] < allVAs[j] })
+	nearestVAs := make([]uint64, 0, len(allVAs))
+	for _, va := range allVAs {
+		s := byVA[va]
+		if isCallableSymbol(s) {
+			nearestVAs = append(nearestVAs, va)
+		}
+	}
+	nextSymbolInSection := make(map[uint64]uint64, len(allVAs))
+	nextBySection := make(map[elf.SectionIndex]uint64, len(execSections))
+	for i := len(allVAs) - 1; i >= 0; i-- {
+		va := allVAs[i]
+		s := byVA[va]
+		if next, ok := nextBySection[s.Section]; ok {
+			nextSymbolInSection[va] = next
+		}
+		nextBySection[s.Section] = va
+	}
+	for _, va := range nearestVAs {
+		s := byVA[va]
+		if s.Size > 0 {
+			end, ok := checkedAdd64(s.VA, s.Size)
+			if !ok || end > s.SectionEnd {
+				return nil, nil, nil, fmt.Errorf("symbolmap: symbol %q exceeds verified executable section", s.Name)
+			}
+			s.SectionEnd = end
+		} else {
+			end := s.SectionEnd
+			if next, ok := nextSymbolInSection[va]; ok && next < end {
+				end = next
+			}
+			s.SectionEnd = end
+		}
+		byVA[va] = s
+	}
+	return byVA, allVAs, nearestVAs, nil
+}
+
+func isCallableSymbol(s symbolInfo) bool {
+	if s.Type != elf.STT_FUNC && s.Type != elf.STT_GNU_IFUNC {
+		return false
+	}
+	return !isSnapshotContainerSymbol(s)
+}
+
+func isSnapshotContainerSymbol(s symbolInfo) bool {
+	switch s.Name {
+	case snapshot.SymVmSnapshotInstructions, snapshot.SymIsolateSnapshotInstructions, snapshot.SymUnifiedSnapshotText:
+		// Older Dart ELF writers encode whole snapshot instruction Images as
+		// STT_FUNC. They are containers whose leading bytes are object headers,
+		// not callable functions; retain them in reverse-map metadata only.
+		return true
+	default:
+		return false
+	}
 }
 
 func betterPrimarySymbol(a, b symbolInfo) bool {
@@ -423,8 +642,6 @@ func symbolCategory(name string) string {
 		return "cast"
 	case strings.Contains(name, "Trampoline"):
 		return "trampoline"
-	case strings.Contains(name, "Padding"):
-		return "padding"
 	default:
 		return ""
 	}
@@ -451,22 +668,22 @@ func exportSymbols(symbols map[uint64]symbolInfo, sortedVAs []uint64) []SymbolRe
 // resolveTarget implements exact-match-then-nearest-below-within-distance,
 // via binary search over the sorted VA slice (Go equivalent of Rust's
 // BTreeMap::range(..=target).next_back()).
-func resolveTarget(symbols map[uint64]symbolInfo, sortedVAs []uint64, targetVA uint64, nearestMaxDistance uint64) (MatchKind, string, uint64, uint64) {
-	if sym, ok := symbols[targetVA]; ok {
+func resolveTarget(symbols map[uint64]symbolInfo, nearestVAs []uint64, targetVA uint64, nearestMaxDistance uint64) (MatchKind, string, uint64, uint64) {
+	if sym, ok := symbols[targetVA]; ok && !isSnapshotContainerSymbol(sym) {
 		return MatchExact, sym.Name, targetVA, 0
 	}
-	if nearestMaxDistance == 0 || len(sortedVAs) == 0 {
+	if nearestMaxDistance == 0 || len(nearestVAs) == 0 {
 		return MatchUnresolved, "", 0, 0
 	}
-	// Largest VA <= targetVA.
-	idx := sort.Search(len(sortedVAs), func(i int) bool { return sortedVAs[i] > targetVA })
+	// Largest function/IFUNC VA <= targetVA.
+	idx := sort.Search(len(nearestVAs), func(i int) bool { return nearestVAs[i] > targetVA })
 	if idx == 0 {
 		return MatchUnresolved, "", 0, 0
 	}
-	symVA := sortedVAs[idx-1]
+	symVA := nearestVAs[idx-1]
 	sym := symbols[symVA]
 	delta := targetVA - symVA
-	if sym.Size > 0 && delta >= sym.Size {
+	if targetVA >= sym.SectionEnd {
 		return MatchUnresolved, "", 0, 0
 	}
 	if delta > nearestMaxDistance {
@@ -477,43 +694,35 @@ func resolveTarget(symbols map[uint64]symbolInfo, sortedVAs []uint64, targetVA u
 
 // --- call/branch scanning ---
 
-// scanChunk is a disjoint executable byte range. Ranges are partitioned at
-// verified function symbols, then split to keep disassembly memory bounded.
+// scanChunk is a disjoint executable byte range. It is derived exclusively
+// from the stripped executable sections; unstripped .symtab addresses are not
+// allowed to influence decode boundaries or provenance on the side being
+// measured.
 type scanChunk struct {
-	Name string
 	VA   uint64
 	Data []byte
 }
 
 const maxScanChunkBytes = 1 << 20
 
-func buildARM64ScanChunks(sections []execSection, symbols map[uint64]symbolInfo, sortedVAs []uint64) []scanChunk {
-	return buildScanChunksWithSplitter(sections, symbols, sortedVAs, nil)
+func buildARM64ScanChunks(sections []execSection) []scanChunk {
+	return buildScanChunksWithSplitter(sections, nil)
 }
 
 // buildX86ScanChunks keeps every arbitrary size-budget split on an x86
 // instruction boundary. x86 instructions are variable length; cutting at a raw
 // byte offset can turn the tail of one instruction into an opcode in the next
 // chunk and can silently drop a CALL/JMP that straddles the boundary.
-func buildX86ScanChunks(sections []execSection, symbols map[uint64]symbolInfo, sortedVAs []uint64) []scanChunk {
-	return buildScanChunksWithSplitter(sections, symbols, sortedVAs, x86.SplitAtInstructionBoundary)
+func buildX86ScanChunks(sections []execSection) []scanChunk {
+	return buildScanChunksWithSplitter(sections, x86.SplitAtInstructionBoundary)
 }
 
 func buildScanChunksWithSplitter(
 	sections []execSection,
-	symbols map[uint64]symbolInfo,
-	sortedVAs []uint64,
 	split func([]byte, int) int,
 ) []scanChunk {
-	var funcs []symbolInfo
-	for _, va := range sortedVAs {
-		s := symbols[va]
-		if s.Type == elf.STT_FUNC || s.Type == elf.STT_GNU_IFUNC {
-			funcs = append(funcs, s)
-		}
-	}
 	var out []scanChunk
-	appendRange := func(sec execSection, name string, start, end uint64) {
+	appendRange := func(sec execSection, start, end uint64) {
 		if start >= end || start < sec.Addr {
 			return
 		}
@@ -539,7 +748,7 @@ func buildScanChunksWithSplitter(
 			}
 			chunkEnd := start + uint64(chunkLen)
 			hi := chunkEnd - sec.Addr
-			out = append(out, scanChunk{Name: name, VA: start, Data: sec.Data[int(lo):int(hi)]})
+			out = append(out, scanChunk{VA: start, Data: sec.Data[int(lo):int(hi)]})
 			start = chunkEnd
 		}
 	}
@@ -549,37 +758,7 @@ func buildScanChunksWithSplitter(
 		if !ok {
 			continue
 		}
-		var inSec []symbolInfo
-		for _, s := range funcs {
-			if s.VA >= sec.Addr && s.VA < secEnd {
-				inSec = append(inSec, s)
-			}
-		}
-		cursor := sec.Addr
-		for i, s := range inSec {
-			if s.VA > cursor {
-				appendRange(sec, "", cursor, s.VA)
-			}
-			if s.VA < cursor {
-				continue
-			}
-			end := secEnd
-			if s.Size > 0 {
-				if sizedEnd, ok := checkedAdd64(s.VA, s.Size); ok && sizedEnd < end {
-					end = sizedEnd
-				}
-			}
-			if i+1 < len(inSec) && inSec[i+1].VA < end {
-				end = inSec[i+1].VA
-			}
-			appendRange(sec, s.Name, s.VA, end)
-			if end > cursor {
-				cursor = end
-			}
-		}
-		if cursor < secEnd {
-			appendRange(sec, "", cursor, secEnd)
-		}
+		appendRange(sec, sec.Addr, secEnd)
 	}
 	return out
 }
@@ -591,73 +770,69 @@ func checkedAdd64(a, b uint64) (uint64, bool) {
 	return a + b, true
 }
 
-func scanARM64CallSites(sections []execSection, symbols map[uint64]symbolInfo, sortedVAs []uint64, includeBranches bool) []CallSite {
-	lookup := func(addr uint64) (string, bool) {
-		s, ok := symbols[addr]
-		return s.Name, ok
+func scanARM64CallSites(sections []execSection, includeBranches bool) ([]CallSite, error) {
+	for _, sec := range sections {
+		if sec.Addr&3 != 0 || len(sec.Data)%4 != 0 {
+			return nil, fmt.Errorf("symbolmap: ARM64 executable section %q is not 4-byte aligned/bounded", sec.Name)
+		}
 	}
 	var out []CallSite
-	for _, chunk := range buildARM64ScanChunks(sections, symbols, sortedVAs) {
-		insts := disasm.Disassemble(chunk.Data, disasm.Options{BaseAddr: chunk.VA, MaxSteps: len(chunk.Data)/4 + 1})
-		for _, edge := range disasm.ExtractCallEdgesCFG(chunk.Name, insts, lookup, nil, nil) {
-			cs := CallSite{FromVA: edge.FromPC, Kind: SiteCall, Reg: edge.Reg, Via: edge.Via}
-			switch edge.Kind {
-			case "bl":
-				cs.TargetVA, cs.TargetValid = edge.TargetPC, edge.TargetValid
-			case "blr":
-				cs.Indirect = true
-			default:
+	for _, chunk := range buildARM64ScanChunks(sections) {
+		for off := 0; off < len(chunk.Data); off += 4 {
+			pc := chunk.VA + uint64(off)
+			raw := binary.LittleEndian.Uint32(chunk.Data[off : off+4])
+			if arm64.IsBLEncoding(raw) {
+				target, valid := arm64.BL(raw, pc)
+				out = append(out, CallSite{FromVA: pc, TargetVA: target, TargetValid: valid, Kind: SiteCall})
 				continue
 			}
-			out = append(out, cs)
-		}
-		if includeBranches {
-			for _, inst := range insts {
-				if arm64.IsBEncoding(inst.Raw) {
-					target, valid := arm64.B(inst.Raw, inst.Addr)
-					out = append(out, CallSite{FromVA: inst.Addr, TargetVA: target, TargetValid: valid, Kind: SiteBranch})
+			if rn, ok := arm64.BLR(raw); ok {
+				out = append(out, CallSite{FromVA: pc, Kind: SiteCall, Indirect: true, Reg: fmt.Sprintf("X%d", rn)})
+				continue
+			}
+			if includeBranches {
+				if target, ok := arm64.B(raw, pc); ok {
+					out = append(out, CallSite{FromVA: pc, TargetVA: target, TargetValid: true, Kind: SiteBranch})
 				}
 			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FromVA < out[j].FromVA })
-	return out
+	return out, nil
 }
 
-func scanX86CallSites(sections []execSection, symbols map[uint64]symbolInfo, sortedVAs []uint64, includeBranches bool) []CallSite {
-	lookup := func(addr uint64) (string, bool) {
-		s, ok := symbols[addr]
-		return s.Name, ok
-	}
+func scanX86CallSites(sections []execSection, includeBranches bool) ([]CallSite, error) {
 	var out []CallSite
-	for _, chunk := range buildX86ScanChunks(sections, symbols, sortedVAs) {
-		// symbolmap intentionally has no Dart snapshot profile. Pass no version so
-		// the disassembler fails closed and does not assert a dispatch-table ABI.
-		res := disasm.ScanX86FunctionCFG("", chunk.Data, chunk.VA, lookup, nil, chunk.Name, nil)
-		for _, edge := range res.Edges {
-			cs := CallSite{FromVA: edge.FromPC, Kind: SiteCall, Reg: edge.Reg, Via: edge.Via}
-			switch edge.Kind {
-			case "call":
-				cs.TargetVA, cs.TargetValid = edge.TargetPC, edge.TargetValid
-			case "call_indirect":
-				cs.Indirect = true
-			default:
-				continue
-			}
-			out = append(out, cs)
-		}
-		if includeBranches {
-			x86.Walk(chunk.Data, chunk.VA, func(d x86.Decoded) bool {
-				if !d.Bad && d.Inst.Op == x86asm.JMP {
-					target, valid := x86.RelTarget(d.Inst, d.VA, d.Len)
-					out = append(out, CallSite{FromVA: d.VA, TargetVA: target, TargetValid: valid, Kind: SiteBranch})
-				}
+	for _, chunk := range buildX86ScanChunks(sections) {
+		x86.Walk(chunk.Data, chunk.VA, func(d x86.Decoded) bool {
+			if d.Bad {
 				return true
-			})
-		}
+			}
+			if d.Inst.Op == x86asm.CALL {
+				if _, direct := d.Inst.Args[0].(x86asm.Rel); direct {
+					target, valid := x86.RelTarget(d.Inst, d.VA, d.Len)
+					out = append(out, CallSite{FromVA: d.VA, TargetVA: target, TargetValid: valid, Kind: SiteCall})
+					return true
+				}
+				cs := CallSite{FromVA: d.VA, Kind: SiteCall, Indirect: true}
+				if mem, ok := d.Inst.Args[0].(x86asm.Mem); ok {
+					cs.Reg = x86.FormatMemoryTarget(mem)
+				} else if d.Inst.Args[0] != nil {
+					cs.Reg = d.Inst.Args[0].String()
+				}
+				out = append(out, cs)
+				return true
+			}
+			if includeBranches && d.Inst.Op == x86asm.JMP {
+				if target, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
+					out = append(out, CallSite{FromVA: d.VA, TargetVA: target, TargetValid: true, Kind: SiteBranch})
+				}
+			}
+			return true
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FromVA < out[j].FromVA })
-	return out
+	return out, nil
 }
 
 // WriteCallSitesTSV writes one row per call site (matching flutterdec's
@@ -710,6 +885,9 @@ func encodeCallSitesTSV(sites []CallSite) ([]byte, error) {
 func WriteArtifacts(dir string, rep *Report) error {
 	if rep == nil {
 		return fmt.Errorf("symbolmap: nil report")
+	}
+	if rep.SchemaVersion != ReportSchemaVersion {
+		return fmt.Errorf("symbolmap: report schema version %d, want %d", rep.SchemaVersion, ReportSchemaVersion)
 	}
 	tsv, err := encodeCallSitesTSV(rep.CallSites)
 	if err != nil {

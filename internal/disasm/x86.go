@@ -181,7 +181,7 @@ func classifyX86Call(dartVersion string, inst x86asm.Inst, addr uint64, length i
 		}
 		if mem, ok := arg.(x86asm.Mem); ok {
 			e.Kind = "call_indirect"
-			e.Reg = formatX86MemoryTarget(mem)
+			e.Reg = x86.FormatMemoryTarget(mem)
 			// CALL [reg+disp] can address the dispatch table / object pool
 			// directly as the call's own memory operand -- e.g. `call
 			// [r14+0x238]` -- with no prior MOV loading it into a plain
@@ -247,20 +247,6 @@ func classifyX86Call(dartVersion string, inst x86asm.Inst, addr uint64, length i
 		}
 	}
 	return e
-}
-
-func formatX86MemoryTarget(mem x86asm.Mem) string {
-	base := mem.Base.String()
-	index := ""
-	if mem.Index != 0 {
-		index = fmt.Sprintf("+%s*%d", mem.Index, mem.Scale)
-	}
-	if mem.Disp >= 0 {
-		return fmt.Sprintf("[%s%s+0x%x]", base, index, uint64(mem.Disp))
-	}
-	// Avoid -MinInt64 overflow while preserving the exact displacement bits.
-	mag := uint64(-(mem.Disp + 1)) + 1
-	return fmt.Sprintf("[%s%s-0x%x]", base, index, mag)
 }
 
 // X86Inst is a minimal decoded-instruction record (address + text) used

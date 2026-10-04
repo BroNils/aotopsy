@@ -8,8 +8,6 @@ import (
 	"bytes"
 	"debug/dwarf"
 	"debug/elf"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -86,12 +84,13 @@ func Run(path string) (*Report, error) {
 		return nil, fmt.Errorf("fingerprint: hash file: %w", err)
 	}
 
-	var buildConflicts []string
-	rep.BuildID, rep.BuildIDSource, buildConflicts, err = extractBuildID(ef)
+	buildID, err := ef.GNUBuildID()
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: build-id: %w", err)
 	}
-	rep.EvidenceConflicts = append(rep.EvidenceConflicts, buildConflicts...)
+	rep.BuildID = buildID.ID
+	rep.BuildIDSource = buildID.Source
+	rep.EvidenceConflicts = append(rep.EvidenceConflicts, buildID.Conflicts...)
 
 	identity, identityErr := snapshot.ExtractIdentity(ef)
 	switch {
@@ -318,227 +317,10 @@ func className(c elf.Class) string {
 	}
 }
 
-// extractBuildID hand-parses the ELF note format looking for NT_GNU_BUILD_ID
-// (type 3, owner "GNU"). PT_NOTE is the primary ET_DYN source. A SHT_NOTE
-// corroborator/fallback is accepted only when SHF_ALLOC metadata and the
-// section's VA/offset/size agree with a unique file-backed PT_LOAD mapping.
-// Conflicting primary/corroborating IDs are reported instead of choosing one.
-// Dead section-table bytes are never identity evidence.
-//
-// Dart emits this exact GNU-note shape and exposes the same allocated note as
-// _kDartSnapshotBuildId: SDK @2.10.0 runtime/vm/elf.cc:1183-1197,
-// 1246-1264,1294-1324; @3.13.0 runtime/vm/elf.cc:1525-1529,
-// 1696-1758. Descriptor length is intentionally not fixed here because the SDK
-// has changed the build-id hash composition while retaining valid GNU-note
-// framing.
-
 const (
-	maxNoteBytes        = 1 << 20
-	maxNoteRegions      = 128
 	maxMarkersPerFamily = 4096
 	maxMarkerScanBytes  = 512 << 20
 )
-
-func extractBuildID(ef *elfx.File) (id, source string, conflicts []string, err error) {
-	ptIDs := make(map[string]bool, 2)
-	mappedSectionIDs := make(map[string]bool, 2)
-	addIDs := func(dst map[string]bool, found []string) {
-		for _, id := range found {
-			if id == "" || dst[id] {
-				continue
-			}
-			if len(dst) < 2 {
-				dst[id] = true
-			}
-		}
-	}
-	progRegions := 0
-	for _, p := range ef.Programs() {
-		if p.Type != elf.PT_NOTE || p.Filesz == 0 {
-			continue
-		}
-		progRegions++
-		if progRegions > maxNoteRegions {
-			return "", "", nil, fmt.Errorf("PT_NOTE count exceeds limit %d", maxNoteRegions)
-		}
-		if p.Filesz > maxNoteBytes {
-			return "", "", nil, fmt.Errorf("PT_NOTE %d size %d exceeds limit %d", p.Index, p.Filesz, maxNoteBytes)
-		}
-		data, err := ef.ReadProgram(p.Index, maxNoteBytes)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("read PT_NOTE %d: %w", p.Index, err)
-		}
-		found, err := parseBuildIDNotes(data, binary.LittleEndian)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("parse PT_NOTE %d: %w", p.Index, err)
-		}
-		addIDs(ptIDs, found)
-	}
-
-	// Corroborate PT_NOTE with only note sections that are themselves
-	// runtime-mapped. If PT_NOTE is absent this also serves as the bounded
-	// fallback. Arbitrary section-table-only notes are an attacker-controlled
-	// append surface and are intentionally ignored.
-	sectionRegions := 0
-	for _, s := range ef.Sections() {
-		if s.Type != elf.SHT_NOTE || s.Size == 0 || strings.HasPrefix(s.Name, ".zdebug_") {
-			continue
-		}
-		if !sectionIsMappedFileBacked(ef, s) {
-			continue
-		}
-		sectionRegions++
-		if sectionRegions > maxNoteRegions {
-			return "", "", nil, fmt.Errorf("mapped SHT_NOTE count exceeds limit %d", maxNoteRegions)
-		}
-		if s.Size > maxNoteBytes {
-			return "", "", nil, fmt.Errorf("mapped SHT_NOTE %q size %d exceeds limit %d", s.Name, s.Size, maxNoteBytes)
-		}
-		data, err := ef.ReadSection(s.Index, maxNoteBytes)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("read mapped SHT_NOTE %q: %w", s.Name, err)
-		}
-		found, err := parseBuildIDNotes(data, binary.LittleEndian)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("parse mapped SHT_NOTE %q: %w", s.Name, err)
-		}
-		addIDs(mappedSectionIDs, found)
-	}
-	return resolveBuildIDEvidence(ptIDs, mappedSectionIDs)
-}
-
-func sectionIsMappedFileBacked(ef *elfx.File, s elfx.SectionInfo) bool {
-	if ef == nil || s.Flags&elf.SHF_ALLOC == 0 || s.Type == elf.SHT_NOBITS || s.Size == 0 {
-		return false
-	}
-	off, err := ef.VAToFileOffset(s.Addr)
-	if err != nil || off != s.Offset {
-		return false
-	}
-	remaining, err := ef.FileBackedRemaining(s.Addr)
-	return err == nil && s.Size <= remaining
-}
-
-func sortedBuildIDs(ids map[string]bool) []string {
-	keys := make([]string, 0, len(ids))
-	for id := range ids {
-		keys = append(keys, id)
-	}
-	sort.Strings(keys)
-	return keys
-
-}
-
-func resolveBuildIDEvidence(ptIDs, mappedSectionIDs map[string]bool) (string, string, []string, error) {
-	pt := sortedBuildIDs(ptIDs)
-	sht := sortedBuildIDs(mappedSectionIDs)
-	var conflicts []string
-	if len(pt) > 1 {
-		conflicts = append(conflicts, fmt.Sprintf("conflicting GNU build-id notes from pt_note: %s", strings.Join(pt, ", ")))
-	}
-	if len(sht) > 1 {
-		conflicts = append(conflicts, fmt.Sprintf("conflicting GNU build-id notes from mapped_sht_note: %s", strings.Join(sht, ", ")))
-	}
-	if len(conflicts) != 0 {
-		return "", "", conflicts, nil
-	}
-	switch {
-	case len(pt) == 1 && len(sht) == 1:
-		if pt[0] != sht[0] {
-			return "", "", []string{fmt.Sprintf("conflicting GNU build-id evidence: pt_note=%s mapped_sht_note=%s", pt[0], sht[0])}, nil
-		}
-		return pt[0], "pt_note+mapped_sht_note", nil, nil
-	case len(pt) == 1:
-		return pt[0], "pt_note", nil, nil
-	case len(sht) == 1:
-		return sht[0], "mapped_sht_note", nil, nil
-	default:
-		return "", "", nil, nil
-	}
-}
-
-// parseBuildIDNotes walks a raw ELF note-section byte stream (repeated
-// namesz/descsz/type u32 triples, name padded to 4-byte alignment,
-// descriptor padded to 4-byte alignment) looking for name=="GNU" type==3.
-// The caller supplies byte order explicitly. AOTopsy's trust boundary accepts
-// only little-endian ELF, so production calls use binary.LittleEndian.
-func parseBuildIDNotes(data []byte, bo binary.ByteOrder) ([]string, error) {
-	off := 0
-	var ids []string
-	for off < len(data) {
-		if len(data)-off < 12 {
-			if allZeroBytes(data[off:]) {
-				return ids, nil
-			}
-			return nil, fmt.Errorf("truncated ELF note header at offset %d", off)
-		}
-		namesz := bo.Uint32(data[off:])
-		descsz := bo.Uint32(data[off+4:])
-		ntype := bo.Uint32(data[off+8:])
-		off += 12
-
-		if uint64(namesz) > uint64(len(data)-off) {
-			return nil, fmt.Errorf("ELF note name at offset %d exceeds region", off)
-		}
-		nameEnd := off + int(namesz)
-		name := ""
-		exactGNUOwner := false
-		if namesz > 0 {
-			// namesz includes the trailing NUL.
-			raw := data[off:nameEnd]
-			exactGNUOwner = namesz == 4 && bytes.Equal(raw, []byte{'G', 'N', 'U', 0})
-			if i := bytes.IndexByte(raw, 0); i >= 0 {
-				name = string(raw[:i])
-			} else {
-				name = string(raw)
-			}
-		}
-		off = align4(nameEnd)
-
-		if off > len(data) {
-			return nil, fmt.Errorf("ELF note name padding exceeds region")
-		}
-		if uint64(descsz) > uint64(len(data)-off) {
-			return nil, fmt.Errorf("ELF note descriptor at offset %d exceeds region", off)
-		}
-		descEnd := off + int(descsz)
-		desc := data[off:descEnd]
-		off = align4(descEnd)
-		if off > len(data) {
-			return nil, fmt.Errorf("ELF note descriptor padding exceeds region")
-		}
-
-		if exactGNUOwner && name == "GNU" && ntype == 3 { // NT_GNU_BUILD_ID
-			id := hex.EncodeToString(desc)
-			if id != "" && !slicesContains(ids, id) && len(ids) < 2 {
-				ids = append(ids, id)
-			}
-		}
-	}
-	return ids, nil
-}
-
-func allZeroBytes(data []byte) bool {
-	for _, b := range data {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func slicesContains(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
-}
-
-func align4(n int) int {
-	return (n + 3) &^ 3
-}
 
 // scanEngineMarkers streams printable-ASCII runs from r. Generic Dart strings
 // (dart: URIs, "Dart SDK", snapshot labels) are retained as diagnostic markers,

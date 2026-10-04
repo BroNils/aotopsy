@@ -27,7 +27,13 @@ import "debug/elf"
 // tables are errors and must never be disguised as "stripped", because callers
 // use this API as an external naming ground-truth gate.
 func (f *File) FuncSymbols() (map[uint64]string, error) {
-	if f == nil || !f.symtabPresent || len(f.symtab) == 0 {
+	if f == nil || !f.symtabPresent {
+		return nil, nil
+	}
+	if err := f.ensureStaticSymbolTable(); err != nil {
+		return nil, err
+	}
+	if len(f.symtab) == 0 {
 		return nil, nil
 	}
 	out := make(map[uint64]string, len(f.symtab))

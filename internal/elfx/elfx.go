@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 )
 
 var (
@@ -68,6 +69,9 @@ type File struct {
 	dynsymPresent bool
 	symtab        []elf.Symbol
 	dynsym        []elf.Symbol
+	symtabMu      sync.Mutex
+	symtabLoaded  bool
+	symtabErr     error
 }
 
 type fileStamp struct {
@@ -198,7 +202,13 @@ func Open(path string) (*File, error) {
 		elfFile: ef, raw: f, closer: f, size: info.Size(),
 		stamp: openStamp,
 	}
-	if err := out.loadSymbolTables(); err != nil {
+	out.symtabPresent, err = out.symbolTablePresent(elf.SHT_SYMTAB, ".symtab")
+	if err != nil {
+		_ = out.Close()
+		return nil, err
+	}
+	out.dynsym, out.dynsymPresent, err = out.loadSymbolTable(elf.SHT_DYNSYM, ".dynsym")
+	if err != nil {
 		_ = out.Close()
 		return nil, err
 	}
@@ -687,13 +697,51 @@ func (f *File) SHA256() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (f *File) loadSymbolTables() error {
-	var err error
-	f.symtab, f.symtabPresent, err = f.loadSymbolTable(elf.SHT_SYMTAB, ".symtab")
-	if err != nil {
+func (f *File) symbolTablePresent(typ elf.SectionType, label string) (bool, error) {
+	if f == nil || f.elfFile == nil {
+		return false, fmt.Errorf("elfx: unavailable ELF")
+	}
+	found := false
+	for _, sec := range f.elfFile.Sections {
+		if sec == nil || sec.Type != typ {
+			continue
+		}
+		if found {
+			return true, malformedf("multiple %s sections", label)
+		}
+		found = true
+	}
+	return found, nil
+}
+
+// ensureStaticSymbolTable materializes and validates .symtab only on demand.
+// Pairing/security callers can therefore inspect architecture, mapped identity,
+// executable layout and executable bytes before any ground-truth symbol names or
+// records are imported from the unstripped side.
+func (f *File) ensureStaticSymbolTable() error {
+	if f == nil || f.elfFile == nil {
+		return fmt.Errorf("elfx: unavailable ELF")
+	}
+	if !f.symtabPresent {
+		return fmt.Errorf("elfx: static .symtab is not present")
+	}
+	if err := f.checkStable(); err != nil {
 		return err
 	}
-	f.dynsym, f.dynsymPresent, err = f.loadSymbolTable(elf.SHT_DYNSYM, ".dynsym")
+	f.symtabMu.Lock()
+	defer f.symtabMu.Unlock()
+	if f.symtabLoaded {
+		return f.symtabErr
+	}
+	syms, present, err := f.loadSymbolTable(elf.SHT_SYMTAB, ".symtab")
+	if err == nil && !present {
+		err = malformedf("static .symtab disappeared after ELF open")
+	}
+	if err == nil {
+		f.symtab = syms
+	}
+	f.symtabLoaded = true
+	f.symtabErr = err
 	return err
 }
 
@@ -928,10 +976,11 @@ func (f *File) validateExecutableSymbol(s elf.Symbol) error {
 	return nil
 }
 
-// ExecutableSymbols returns validated function-like symbols from both static
-// and dynamic tables. Invalid executable claims are errors; non-executable
-// symbols are simply irrelevant to this API.
-func (f *File) ExecutableSymbols() ([]ExecutableSymbol, error) {
+// StaticExecutableSymbols returns validated function-like symbols from the
+// static .symtab only. This is intentionally distinct from dynamic exports:
+// callers using an unstripped binary as ground truth must not silently promote
+// the smaller .dynsym surface when .symtab is absent or malformed.
+func (f *File) StaticExecutableSymbols() ([]ExecutableSymbol, error) {
 	if f == nil || f.elfFile == nil {
 		return nil, fmt.Errorf("elfx: unavailable ELF")
 	}
@@ -967,10 +1016,13 @@ func (f *File) ExecutableSymbols() ([]ExecutableSymbol, error) {
 		}
 		return nil
 	}
-	if err := add(f.symtab, false); err != nil {
+	if !f.symtabPresent {
+		return nil, fmt.Errorf("elfx: static .symtab is not present")
+	}
+	if err := f.ensureStaticSymbolTable(); err != nil {
 		return nil, err
 	}
-	if err := add(f.dynsym, true); err != nil {
+	if err := add(f.symtab, false); err != nil {
 		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -988,7 +1040,9 @@ func (f *File) ExecutableSymbols() ([]ExecutableSymbol, error) {
 	return out, nil
 }
 
-// StaticSymbolsPresent reports whether a validated .symtab was present.
+// StaticSymbolsPresent reports whether one static .symtab section was present
+// in the already-validated section table. Its contents are deliberately not
+// materialized or trusted until StaticExecutableSymbols/FuncSymbols is called.
 func (f *File) StaticSymbolsPresent() bool { return f != nil && f.symtabPresent }
 
 // VAToFileOffset converts a VA to a unique file-backed PT_LOAD offset.

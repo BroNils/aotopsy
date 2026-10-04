@@ -19,10 +19,28 @@ package x86
 
 import (
 	"aotopsy/internal/sdk"
+	"fmt"
 	"math"
 
 	"golang.org/x/arch/x86/x86asm"
 )
+
+// FormatMemoryTarget renders an indirect memory branch/call operand without
+// relying on x86asm.Mem.String(), whose zero Index register is printed as
+// Reg(0). Keeping the exact signed displacement matters for reproducible
+// metadata and for distinguishing indexed from direct static operands.
+func FormatMemoryTarget(mem x86asm.Mem) string {
+	base := mem.Base.String()
+	index := ""
+	if mem.Index != 0 {
+		index = fmt.Sprintf("+%s*%d", mem.Index, mem.Scale)
+	}
+	if mem.Disp >= 0 {
+		return fmt.Sprintf("[%s%s+0x%x]", base, index, uint64(mem.Disp))
+	}
+	mag := uint64(-(mem.Disp + 1)) + 1 // avoid -MinInt64 overflow
+	return fmt.Sprintf("[%s%s-0x%x]", base, index, mag)
+}
 
 // CanonReg maps any width of an x86_64 general-purpose register to its
 // canonical number 0..15 (RAX=0 .. R15=15), or -1 for anything else.

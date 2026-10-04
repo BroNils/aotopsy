@@ -552,7 +552,7 @@ func TestFuncSymbolsPreservesZeroSizeAddressZeroAndChoosesStableAlias(t *testing
 			Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC | elf.SHF_EXECINSTR, Addr: 0, Size: 0x100}}},
 			Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
 		},
-		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true,
+		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true, symtabLoaded: true,
 		symtab: []elf.Symbol{
 			{Name: "zeta", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0, Size: 0},
 			{Name: "alpha", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0, Size: 0},
@@ -574,7 +574,7 @@ func TestFuncSymbolsAllowsZeroSizeTerminalLabel(t *testing.T) {
 			Sections: []*elf.Section{{}, {SectionHeader: elf.SectionHeader{Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC | elf.SHF_EXECINSTR, Addr: 0x4000, Size: 0x100}}},
 			Progs:    []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD, Vaddr: 0x4000, Memsz: 0x100, Filesz: 0x100, Off: 0}}},
 		},
-		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true,
+		raw: bytes.NewReader(data), size: int64(len(data)), symtabPresent: true, symtabLoaded: true,
 		symtab: []elf.Symbol{{
 			Name: "terminal", Info: byte(elf.STB_GLOBAL)<<4 | byte(elf.STT_FUNC), Section: 1, Value: 0x4100, Size: 0,
 		}},
@@ -601,7 +601,7 @@ func TestOpenRejectsOverlongSymbolName(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsCompressedSymbolTable(t *testing.T) {
+func TestStaticSymbolsRejectCompressedSymbolTableWhenRequested(t *testing.T) {
 	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size), []byte("\x00"))
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -612,11 +612,16 @@ func TestOpenRejectsCompressedSymbolTable(t *testing.T) {
 	if err := os.WriteFile(p, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := Open(p); !errors.Is(err, ErrMalformed) {
-		if f != nil {
-			_ = f.Close()
-		}
-		t.Fatalf("Open(compressed .symtab) = %v, want ErrMalformed", err)
+	f, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open(compressed .symtab) imported static ground truth eagerly: %v", err)
+	}
+	defer f.Close()
+	if !f.StaticSymbolsPresent() {
+		t.Fatal("compressed .symtab presence was not detected")
+	}
+	if _, err := f.StaticExecutableSymbols(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("StaticExecutableSymbols(compressed .symtab) = %v, want ErrMalformed", err)
 	}
 }
 
@@ -721,27 +726,46 @@ func TestFuncSymbolsSurfacesMalformedSymtab(t *testing.T) {
 	// 25 bytes is deliberately not a multiple of the 24-byte ELF64 symbol
 	// record size. This must be corruption, not "stripped".
 	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size+1), []byte("\x00name\x00"))
-	if f, err := Open(p); err == nil {
-		_ = f.Close()
-		t.Fatal("malformed .symtab crossed the Open trust boundary")
+	f, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open imported malformed static ground truth eagerly: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.FuncSymbols(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("FuncSymbols(malformed .symtab) = %v, want ErrMalformed", err)
 	}
 }
 
-func TestOpenRejectsMalformedPresentSymtabAtTrustBoundary(t *testing.T) {
+func TestOpenDefersMalformedPresentSymtabUntilStaticImport(t *testing.T) {
 	p := writeELF64SymbolFixture(t, elf.SHT_SYMTAB, make([]byte, elf.Sym64Size+1), []byte("\x00name\x00"))
-	if ef, err := Open(p); err == nil {
-		_ = ef.Close()
-		t.Fatal("Open accepted malformed present .symtab")
+	ef, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open parsed .symtab before the pairing gate: %v", err)
+	}
+	defer ef.Close()
+	if !ef.StaticSymbolsPresent() {
+		t.Fatal("Open lost .symtab presence while deferring contents")
+	}
+	if _, err := ef.StaticExecutableSymbols(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("StaticExecutableSymbols(malformed .symtab) = %v, want ErrMalformed", err)
 	}
 }
 
 func TestOpenRejectsZeroLengthSymbolTables(t *testing.T) {
-	for _, typ := range []elf.SectionType{elf.SHT_DYNSYM, elf.SHT_SYMTAB} {
-		p := writeELF64SymbolFixture(t, typ, nil, []byte("\x00"))
-		if f, err := Open(p); err == nil {
-			_ = f.Close()
-			t.Fatalf("Open accepted zero-length %s", typ)
-		}
+	p := writeELF64SymbolFixture(t, elf.SHT_DYNSYM, nil, []byte("\x00"))
+	if f, err := Open(p); err == nil {
+		_ = f.Close()
+		t.Fatal("Open accepted zero-length SHT_DYNSYM")
+	}
+
+	p = writeELF64SymbolFixture(t, elf.SHT_SYMTAB, nil, []byte("\x00"))
+	f, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open imported zero-length .symtab eagerly: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.StaticExecutableSymbols(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("StaticExecutableSymbols(zero-length .symtab) = %v, want ErrMalformed", err)
 	}
 }
 
@@ -770,9 +794,13 @@ func TestSymbolTablesRejectZeroEntrySize(t *testing.T) {
 	if err := os.WriteFile(p, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := Open(p); err == nil {
-		_ = f.Close()
-		t.Fatal("Open accepted zero symbol sh_entsize")
+	f, err := Open(p)
+	if err != nil {
+		t.Fatalf("Open imported zero-entsize .symtab eagerly: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.StaticExecutableSymbols(); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("StaticExecutableSymbols(zero sh_entsize) = %v, want ErrMalformed", err)
 	}
 }
 
@@ -826,5 +854,8 @@ func TestFuncSymbolsStrippedIsNotError(t *testing.T) {
 	defer f.Close()
 	if syms, err := f.FuncSymbols(); err != nil || syms != nil {
 		t.Fatalf("stripped FuncSymbols = %#v,%v; want nil,nil", syms, err)
+	}
+	if syms, err := f.StaticExecutableSymbols(); err == nil || syms != nil {
+		t.Fatalf("dynsym-only StaticExecutableSymbols = %#v,%v; want nil,error", syms, err)
 	}
 }

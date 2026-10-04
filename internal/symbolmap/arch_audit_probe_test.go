@@ -1,7 +1,6 @@
 package symbolmap
 
 import (
-	"debug/elf"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -19,10 +18,10 @@ func TestArchAuditX86ScannerPreservesCallAcrossBudgetBoundary(t *testing.T) {
 	callOff := maxScanChunkBytes - 2
 	copy(data[callOff:], []byte{0xE8, 0, 0, 0, 0}) // CALL next instruction
 	sec := execSection{Name: ".text", Addr: 0x400000, Size: uint64(len(data)), Data: data}
-	syms := map[uint64]symbolInfo{
-		sec.Addr: {Name: "entry", VA: sec.Addr, Size: sec.Size, Type: elf.STT_FUNC},
+	sites, err := scanX86CallSites([]execSection{sec}, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	sites := scanX86CallSites([]execSection{sec}, syms, []uint64{sec.Addr}, false)
 	if len(sites) != 1 {
 		t.Fatalf("x86 scanner found %d call sites, want 1 complete boundary CALL: %+v", len(sites), sites)
 	}
@@ -41,10 +40,10 @@ func TestArchAuditARM64ScannerKeepsFourByteAlignmentAcrossBudgetBoundary(t *test
 	blOff := maxScanChunkBytes + 4
 	binary.LittleEndian.PutUint32(data[blOff:], 0x94000001) // BL +4
 	sec := execSection{Name: ".text", Addr: 0x800000, Size: uint64(len(data)), Data: data}
-	syms := map[uint64]symbolInfo{
-		sec.Addr: {Name: "entry", VA: sec.Addr, Size: sec.Size, Type: elf.STT_FUNC},
+	sites, err := scanARM64CallSites([]execSection{sec}, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	sites := scanARM64CallSites([]execSection{sec}, syms, []uint64{sec.Addr}, false)
 	if len(sites) != 1 {
 		t.Fatalf("ARM64 scanner found %d call sites, want 1 aligned BL: %+v", len(sites), sites)
 	}
@@ -110,7 +109,7 @@ func TestArchAuditCorpusARM64ChunksStayInstructionAligned(t *testing.T) {
 			t.Fatalf("exec sections %s: %v", s.FileName(), err)
 		}
 		samples++
-		aligned := count(buildARM64ScanChunks(secs, nil, nil))
+		aligned := count(buildARM64ScanChunks(secs))
 		if aligned.misaligned > 0 {
 			badSamples++
 			badChunks += aligned.misaligned

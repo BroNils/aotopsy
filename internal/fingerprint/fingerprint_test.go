@@ -244,52 +244,6 @@ func TestBuildIDConflictDoesNotMislabelVersionConfidence(t *testing.T) {
 	}
 }
 
-func TestBuildIDEvidenceConflictAcrossSourcesIsNotChosen(t *testing.T) {
-	id, source, conflicts, err := resolveBuildIDEvidence(
-		map[string]bool{"01020304": true},
-		map[string]bool{"05060708": true},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "" || source != "" || len(conflicts) != 1 {
-		t.Fatalf("cross-source build-id conflict = id=%q source=%q conflicts=%q", id, source, conflicts)
-	}
-	if !strings.Contains(conflicts[0], "pt_note=01020304") || !strings.Contains(conflicts[0], "mapped_sht_note=05060708") {
-		t.Fatalf("cross-source conflict lost provenance: %q", conflicts)
-	}
-}
-
-func TestBuildIDRequiresExactGNUOwnerEncoding(t *testing.T) {
-	note := buildIDNote([]byte{1, 2, 3, 4})
-	binary.LittleEndian.PutUint32(note[0:4], 3) // malformed: GNU owner size must include trailing NUL
-	ids, err := parseBuildIDNotes(note, binary.LittleEndian)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ids) != 0 {
-		t.Fatalf("malformed GNU owner produced build IDs %q", ids)
-	}
-}
-
-func TestDuplicateBuildIDsCollapseWithoutConflict(t *testing.T) {
-	notes := append(buildIDNote([]byte{1, 2, 3, 4}), buildIDNote([]byte{1, 2, 3, 4})...)
-	ids, err := parseBuildIDNotes(notes, binary.LittleEndian)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ids) != 1 || ids[0] != "01020304" {
-		t.Fatalf("duplicate build IDs = %q, want one 01020304", ids)
-	}
-}
-
-func TestBuildIDNotesRejectMalformedRecordAfterValidID(t *testing.T) {
-	note := append(buildIDNote([]byte{1, 2, 3, 4}), []byte{1, 2, 3}...)
-	if ids, err := parseBuildIDNotes(note, binary.LittleEndian); err == nil {
-		t.Fatalf("trailing malformed note was ignored after build-id %q", ids)
-	}
-}
-
 func TestLegacyZdebugNoteIsNotDecompressedForBuildID(t *testing.T) {
 	path := writeSectionELF(t, ".zdebug.note.gnu.build-id", elf.SHT_NOTE, buildIDNote([]byte{1, 2, 3, 4}))
 	rep, err := Run(path)

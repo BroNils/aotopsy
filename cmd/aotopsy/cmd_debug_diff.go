@@ -17,7 +17,7 @@ func cmdSymbolMap(args []string) error {
 	strippedPath := fs.String("stripped", "", "path to the stripped libapp.so")
 	unstrippedPath := fs.String("unstripped", "", "path to an unstripped/debug build of the SAME libapp.so")
 	outDir := fs.String("out", "", "output directory for symbolmap artifacts (default: stdout summary only)")
-	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest-symbol-below match (0 disables nearest matching)")
+	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest FUNC/IFUNC match within its proven executable extent (0 disables nearest matching)")
 	includeBranches := fs.Bool("include-branches", false, "also scan unconditional direct branches/jumps, not just calls")
 	importSymbols := fs.Bool("import-symbols", false, "import the full executable symbol table from the verified unstripped twin")
 	if err := fs.Parse(args); err != nil {
@@ -36,10 +36,10 @@ func cmdSymbolMap(args []string) error {
 		return err
 	}
 
-	cli.Errf("machine=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
-		rep.Machine, rep.ExecLayoutMatch, rep.ExecBytesMatch, rep.UnstrippedSymCnt)
-	cli.Errf("call sites: %d (exact=%d nearest=%d unresolved=%d), unique targets=%d\n",
-		len(rep.CallSites), rep.ExactCount, rep.NearestCount, rep.UnresolvedCount, len(rep.Targets))
+	cli.Errf("machine=%s build_id_match=%v build_id=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
+		rep.Machine, rep.BuildIDMatch, rep.StrippedBuildID, rep.ExecLayoutMatch, rep.ExecBytesMatch, rep.UnstrippedSymCnt)
+	cli.Errf("sites: %d (exact=%d nearest=%d unresolved=%d indirect=%d), unique direct targets=%d\n",
+		len(rep.CallSites), rep.ExactCount, rep.NearestCount, rep.UnresolvedCount, rep.IndirectCount, len(rep.Targets))
 	for _, n := range rep.Notes {
 		cli.Errf("note: %s\n", n)
 	}
