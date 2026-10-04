@@ -148,7 +148,7 @@ func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeCon
 			}
 		}
 		c := candidates[bestIdx]
-		if x86RegUsedAsOwnerFieldBaseAfter(insts, c.at+1, c.reg, ownerCID, ctx) {
+		if x86RegUsedAsOwnerFieldBaseAfter(insts, c.at+1, x86.CanonReg(c.reg), ownerCID, ctx) {
 			return c.slot, true
 		}
 		candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
@@ -156,8 +156,10 @@ func RecoverReceiverStackSlotX86(insts []x86.Decoded, ownerCID int, ctx *TypeCon
 	return 0, false
 }
 
-func x86RegUsedAsOwnerFieldBaseAfter(insts []x86.Decoded, start int, reg x86asm.Reg, ownerCID int, ctx *TypeContext) bool {
-	rc := x86.CanonReg(reg)
+func x86RegUsedAsOwnerFieldBaseAfter(insts []x86.Decoded, start, rc, ownerCID int, ctx *TypeContext) bool {
+	if rc < 0 {
+		return false
+	}
 	for i := start; i < len(insts); i++ {
 		if insts[i].Bad {
 			return false

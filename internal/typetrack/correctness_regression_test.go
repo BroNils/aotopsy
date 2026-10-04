@@ -90,7 +90,7 @@ func TestShadowStackPrePostIndexUsesStableFrameRelativeSlots(t *testing.T) {
 	for i := range state {
 		state[i] = Top()
 	}
-	state[1] = KnownClass(42)
+	state[1] = ExactClass(42)
 	stack := make(map[int]TypeLattice)
 	shadow := shadowSPState{}
 	ctx := &TypeContext{}
@@ -108,16 +108,16 @@ func TestShadowStackPrePostIndexUsesStableFrameRelativeSlots(t *testing.T) {
 	if !shadow.Known || shadow.RelFP != -8 {
 		t.Fatalf("after push shadow relation = %+v, want -8", shadow)
 	}
-	if got := stack[shadowStackKey(-8)]; !got.Equal(KnownClass(42)) {
-		t.Fatalf("pushed slot = %+v, want KnownClass(42)", got)
+	if got := stack[shadowStackKey(-8)]; !got.Equal(ExactClass(42)) {
+		t.Fatalf("pushed slot = %+v, want ExactClass(42)", got)
 	}
 
 	state[1] = Top()
 	// Real Dart Pop shape: LDR X1,[X15],#8. It reads the SAME canonical slot
 	// before restoring X15 to frame-relative zero.
 	transferInstruction(&state, disasm.Inst{Addr: 0x1008, Raw: 0xF84085E1, Size: 4}, 0, ctx, result, nil, stack, &shadow)
-	if !state[1].Equal(KnownClass(42)) {
-		t.Fatalf("post-index pop recovered %+v, want KnownClass(42)", state[1])
+	if !state[1].Equal(ExactClass(42)) {
+		t.Fatalf("post-index pop recovered %+v, want ExactClass(42)", state[1])
 	}
 	if !shadow.Known || shadow.RelFP != 0 {
 		t.Fatalf("after pop shadow relation = %+v, want zero", shadow)
@@ -129,8 +129,8 @@ func TestShadowStackPairPrePostIndexAndNonTemporalModes(t *testing.T) {
 	for i := range state {
 		state[i] = Top()
 	}
-	state[2] = KnownClass(7)
-	state[3] = KnownClass(8)
+	state[2] = ExactClass(7)
+	state[3] = ExactClass(8)
 	stack := make(map[int]TypeLattice)
 	shadow := shadowSPState{Known: true, RelFP: 0}
 	ctx := &TypeContext{}
@@ -139,7 +139,7 @@ func TestShadowStackPairPrePostIndexAndNonTemporalModes(t *testing.T) {
 	// STP X2,X3,[X15,#-16]!
 	pushPair := uint32(0xA9BF0DE2)
 	transferInstruction(&state, disasm.Inst{Addr: 0x2000, Raw: pushPair, Size: 4}, 0, ctx, result, nil, stack, &shadow)
-	if shadow.RelFP != -16 || !stack[shadowStackKey(-16)].Equal(KnownClass(7)) || !stack[shadowStackKey(-8)].Equal(KnownClass(8)) {
+	if shadow.RelFP != -16 || !stack[shadowStackKey(-16)].Equal(ExactClass(7)) || !stack[shadowStackKey(-8)].Equal(ExactClass(8)) {
 		t.Fatalf("pair push relation=%+v slots=%v", shadow, stack)
 	}
 
@@ -147,13 +147,13 @@ func TestShadowStackPairPrePostIndexAndNonTemporalModes(t *testing.T) {
 	// LDP X2,X3,[X15],#16
 	popPair := uint32(0xA8C10DE2)
 	transferInstruction(&state, disasm.Inst{Addr: 0x2004, Raw: popPair, Size: 4}, 0, ctx, result, nil, stack, &shadow)
-	if !state[2].Equal(KnownClass(7)) || !state[3].Equal(KnownClass(8)) || shadow.RelFP != 0 {
+	if !state[2].Equal(ExactClass(7)) || !state[3].Equal(ExactClass(8)) || shadow.RelFP != 0 {
 		t.Fatalf("pair pop state2=%+v state3=%+v shadow=%+v", state[2], state[3], shadow)
 	}
 
 	// STNP is no-writeback: the old hand mask mistook this family for post-index.
 	shadow.RelFP = 24
-	state[0], state[1] = KnownClass(1), KnownClass(2)
+	state[0], state[1] = ExactClass(1), ExactClass(2)
 	transferInstruction(&state, disasm.Inst{Addr: 0x2008, Raw: 0xA80005E0, Size: 4}, 0, ctx, result, nil, stack, &shadow) // STNP X0,X1,[X15]
 	if shadow.RelFP != 24 {
 		t.Fatalf("STNP changed shadow SP: %+v", shadow)
@@ -190,7 +190,7 @@ func TestBLCallSiteTypesKeyIsCallSitePC(t *testing.T) {
 		BLCallSiteTypes: make(map[uint64][31]TypeLattice),
 	}
 	var state [31]TypeLattice
-	state[1] = KnownClass(42) // arg0 = class 42
+	state[1] = ExactClass(42) // arg0 = exact runtime class 42
 	tc := &transferCtx{
 		inst:   disasm.Inst{Addr: pc, Raw: rawBL},
 		state:  &state,
@@ -213,7 +213,7 @@ func TestUBFXTypePropagationRequiresClassIDBitfield(t *testing.T) {
 	ctx := &TypeContext{}
 	ctx.SetClassIDTagLayout(12, 20)
 	var state [31]TypeLattice
-	state[1] = KnownClass(42)
+	state[1] = ExactHeaderTags(42)
 
 	// UBFX X2,X1,#12,#20 is exactly the Dart 3.x ClassIdTag extraction.
 	tc := &transferCtx{
@@ -221,13 +221,13 @@ func TestUBFXTypePropagationRequiresClassIDBitfield(t *testing.T) {
 		inst:  disasm.Inst{Raw: 0xD34C7C22},
 		ctx:   ctx,
 	}
-	if !handleUBFX(tc) || !state[2].Equal(KnownClass(42)) {
-		t.Fatalf("class-id UBFX did not propagate KnownClass: got %+v", state[2])
+	if !handleUBFX(tc) || !state[2].Equal(ExactClassID(42)) {
+		t.Fatalf("class-id UBFX did not produce exact CID scalar: got %+v", state[2])
 	}
 
 	// LSR X4,X1,#12 is the same UBFM family but extracts 52 bits, not the
 	// 20-bit class-id field. It must not be consumed as type propagation.
-	state[4] = KnownClass(99)
+	state[4] = ExactClass(99)
 	tc.inst = disasm.Inst{Raw: 0xD34CFC24}
 	if handleUBFX(tc) {
 		t.Fatal("generic UBFM/LSR was consumed as class-id extraction")
@@ -245,8 +245,8 @@ func TestBadDecodeIsHardDataflowBarrier(t *testing.T) {
 		t.Fatalf("ARM bad-byte CFG = %#v, want two blocks and no edge across bad decode", armBlocks)
 	}
 	var armState [31]TypeLattice
-	armState[0] = KnownClass(42)
-	armStack := map[int]TypeLattice{8: KnownClass(7)}
+	armState[0] = ExactClass(42)
+	armStack := map[int]TypeLattice{8: ExactClass(7)}
 	transferInstruction(&armState, arm[1], 0, nil, nil, nil, armStack, nil)
 	if armState[0].Kind != LatticeTop || len(armStack) != 0 {
 		t.Fatalf("ARM bad decode retained facts: r0=%+v stack=%v", armState[0], armStack)
@@ -262,8 +262,8 @@ func TestBadDecodeIsHardDataflowBarrier(t *testing.T) {
 		t.Fatalf("x86 bad-byte CFG has edge across failed decode: %+v", x86Blocks)
 	}
 	var x86State [31]TypeLattice
-	x86State[0] = KnownClass(42)
-	x86Stack := map[int]TypeLattice{8: KnownClass(7)}
+	x86State[0] = ExactClass(42)
+	x86Stack := map[int]TypeLattice{8: ExactClass(7)}
 	transferInstructionX86(&x86State, x86insts[1], nil, nil, nil, nil, x86Stack)
 	if x86State[0].Kind != LatticeTop || len(x86Stack) != 0 {
 		t.Fatalf("x86 bad decode retained facts: rax=%+v stack=%v", x86State[0], x86Stack)
@@ -281,8 +281,8 @@ func TestArchitecturalTrapIsHardDataflowBarrier(t *testing.T) {
 		t.Fatalf("ARM trap CFG = %#v, want two blocks and no edge across BRK", armBlocks)
 	}
 	var armState [31]TypeLattice
-	armState[0] = KnownClass(42)
-	armStack := map[int]TypeLattice{8: KnownClass(7)}
+	armState[0] = ExactClass(42)
+	armStack := map[int]TypeLattice{8: ExactClass(7)}
 	transferInstruction(&armState, arm[1], 0, nil, nil, nil, armStack, nil)
 	if armState[0].Kind != LatticeTop || len(armStack) != 0 {
 		t.Fatalf("ARM trap retained facts: r0=%+v stack=%v", armState[0], armStack)
@@ -298,8 +298,8 @@ func TestArchitecturalTrapIsHardDataflowBarrier(t *testing.T) {
 		t.Fatalf("x86 trap CFG = %+v, want two blocks and no edge across UD2", x86Blocks)
 	}
 	var x86State [31]TypeLattice
-	x86State[0] = KnownClass(42)
-	x86Stack := map[int]TypeLattice{8: KnownClass(7)}
+	x86State[0] = ExactClass(42)
+	x86Stack := map[int]TypeLattice{8: ExactClass(7)}
 	transferInstructionX86(&x86State, x86insts[1], nil, nil, nil, nil, x86Stack)
 	if x86State[0].Kind != LatticeTop || len(x86Stack) != 0 {
 		t.Fatalf("x86 trap retained facts: rax=%+v stack=%v", x86State[0], x86Stack)
@@ -318,7 +318,7 @@ func TestX86DirectCallTargetOverflowCannotResolveMetadata(t *testing.T) {
 	}
 	ctx := &TypeContext{AllocationStubCID: map[uint64]int{18: 42}}
 	var state [31]TypeLattice
-	state[x86RegRAX] = KnownClass(7)
+	state[x86RegRAX] = ExactClass(7)
 	tc := &transferCtxX86{
 		state:      &state,
 		inst:       inst,
@@ -343,7 +343,7 @@ func TestShiftedADDOnlyDecompressesExactHeapBitsShape(t *testing.T) {
 
 	// ADD X0,X1,X28,LSR #7 must not be mistaken for HEAP_BITS decompression.
 	var state [31]TypeLattice
-	state[1] = KnownClass(42)
+	state[1] = ExactClass(42)
 	badShape := uint32(0x8B000000 | (1 << 22) | (28 << 16) | (7 << 10) | (1 << 5))
 	transferInstruction(&state, disasm.Inst{Raw: badShape}, 0, ctx, result, nil, map[int]TypeLattice{}, nil)
 	if state[0].Kind != LatticeTop {
@@ -351,25 +351,25 @@ func TestShiftedADDOnlyDecompressesExactHeapBitsShape(t *testing.T) {
 	}
 
 	state = [31]TypeLattice{}
-	state[1] = KnownClass(42)
+	state[1] = ExactClass(42)
 	goodShape := uint32(0x8B000000 | (sdk.ARM64HeapBits << 16) | (32 << 10) | (1 << 5))
 	transferInstruction(&state, disasm.Inst{Raw: goodShape}, 0, ctx, result, nil, map[int]TypeLattice{}, nil)
-	if !state[0].Equal(KnownClass(42)) {
+	if !state[0].Equal(ExactClass(42)) {
 		t.Fatalf("exact LSL #32 decompression lost type: %+v", state[0])
 	}
 
 	// Dart 2.13 uses the dedicated HEAP_BASE register R23 with no shift.
 	legacyCtx := &TypeContext{DartVersion: "2.13.0"}
 	state = [31]TypeLattice{}
-	state[1] = KnownClass(77)
+	state[1] = ExactClass(77)
 	legacyShape := uint32(0x8B000000 | (sdk.ARM64HeapBaseLegacy << 16) | (1 << 5))
 	transferInstruction(&state, disasm.Inst{Raw: legacyShape}, 0, legacyCtx, result, nil, map[int]TypeLattice{}, nil)
-	if !state[0].Equal(KnownClass(77)) {
+	if !state[0].Equal(ExactClass(77)) {
 		t.Fatalf("Dart 2.13 HEAP_BASE decompression lost type: %+v", state[0])
 	}
 
 	state = [31]TypeLattice{}
-	state[1] = KnownClass(77)
+	state[1] = ExactClass(77)
 	lateShapeOnLegacy := uint32(0x8B000000 | (sdk.ARM64HeapBits << 16) | (32 << 10) | (1 << 5))
 	transferInstruction(&state, disasm.Inst{Raw: lateShapeOnLegacy}, 0, legacyCtx, result, nil, map[int]TypeLattice{}, nil)
 	if state[0].Kind != LatticeTop {
@@ -394,14 +394,14 @@ func TestX86ClassIDPropagationRequiresExactHeaderShift(t *testing.T) {
 		prev *archx86.Decoded
 		want TypeLatticeKind
 	}{
-		{"exact SDK SHR", x86asm.SHR, 12, &header, LatticeBottom},
+		{"exact SDK SHR", x86asm.SHR, 12, &header, LatticeUnknownClassID},
 		{"wrong shift", x86asm.SHR, 7, &header, LatticeTop},
 		{"missing header producer", x86asm.SHR, 12, nil, LatticeTop},
 		{"generic AND", x86asm.AND, 0xfffff, &header, LatticeTop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var state [31]TypeLattice
-			state[9] = Bottom()
+			state[9] = UnknownHeaderTags()
 			inst := archx86.Decoded{
 				VA:   0x1004,
 				Len:  4,
@@ -412,5 +412,33 @@ func TestX86ClassIDPropagationRequiresExactHeaderShift(t *testing.T) {
 				t.Fatalf("state kind = %v, want %v", state[9].Kind, tc.want)
 			}
 		})
+	}
+}
+
+func TestDartCallClobberedGPRsARM64HeapBaseBoundary(t *testing.T) {
+	contains := func(regs []int, want int) bool {
+		for _, r := range regs {
+			if r == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tc := range []struct {
+		version string
+		wantR23 bool
+	}{
+		{"2.12.0", true},
+		{"2.13.0", false}, // R23 is reserved HEAP_BASE only on this supported line.
+		{"3.12.2", true},
+	} {
+		regs, ok := sdk.DartCallClobberedGPRs(tc.version, sdk.ArchARM64)
+		if !ok {
+			t.Fatalf("DartCallClobberedGPRs(%s) unavailable", tc.version)
+		}
+		if got := contains(regs, 23); got != tc.wantR23 {
+			t.Fatalf("DartCallClobberedGPRs(%s) contains R23=%v, want %v; regs=%v", tc.version, got, tc.wantR23, regs)
+		}
 	}
 }

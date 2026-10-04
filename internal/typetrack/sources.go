@@ -32,25 +32,18 @@ type TypeContext struct {
 	// Xm's type (the receiver).
 	FieldByOwnerOffset map[int]map[int32]int
 
-	// poolClassByIndex[poolIndex] = ClassID loaded from PP[poolIndex].
-	// PP loads (LDR Xt, [X27, #imm]) where the pool entry is a Type
-	// or Class give us a KnownClass directly.
+	// poolClassByIndex[poolIndex] = runtime ClassID of the OBJECT stored at
+	// PP[poolIndex]. A Type object remains kTypeCid; the class described by the
+	// Type is metadata, not the runtime class of the loaded heap object.
 	PoolClassByIndex map[int]int
 
 	// dispatchBySlot[slot] = DispatchTableEntry for that slot.
 	// Maps a dispatch table slot index to its target (Code/Stub/Null).
 	DispatchBySlot map[int]cluster.DispatchTableEntry
 
-	// superClass[classID] = superclassID (or -1).
-	// Used by LCA for meetType on conflicting KnownClass values.
+	// superClass[classID] = superclassID (or -1). Besides object-bound joins,
+	// its keys form the structural runtime-CID universe for selector scans.
 	SuperClass map[int]int
-
-	// codeIndexToFunc[clusterIndex] = function NamedObject.
-	// Used to resolve DispatchCode entries to function names.
-	CodeIndexToFunc map[int]*cluster.NamedObject
-
-	// codeRefToName[codeRefID] = qualified function name.
-	CodeRefToName map[int]string
 
 	// dispatchCodeIndexToName[clusterIndex] = function name.
 	// Direct lookup from dispatch table ClusterIndex to resolved name.
@@ -58,9 +51,6 @@ type TypeContext struct {
 
 	// classIDToName[classID] = class name (for debugging/reporting).
 	ClassIDToName map[int]string
-
-	// funcParamCount[funcRefID] = number of parameters (from FuncTypeInfo).
-	FuncParamCount map[int]int
 
 	// funcIsInstance[funcRefID] = true if instance method (has 'this').
 	FuncIsInstance map[int]bool
@@ -74,10 +64,6 @@ type TypeContext struct {
 	// unboxing metadata can still force the stack); RunInterprocedural further
 	// requires independent multi-call-site register-setup evidence.
 	FuncMayUseRegisterCC map[string]bool
-	// FuncMustUseStackCC is true where the SDK rule is definitive (pre-3.4.3,
-	// generic, closure/tear-off, FFI trampoline). Unknown kinds keep both flags
-	// false rather than being guessed.
-	FuncMustUseStackCC map[string]bool
 	// FuncReceiverInRegister is callee-side machine-code evidence that the SDK
 	// convention's receiver register is live on function entry. This is separate
 	// from call-site masks because virtual methods can have zero direct callers --
@@ -133,17 +119,13 @@ type TypeContext struct {
 
 	// FuncReturnType maps function NamedObject refID → return type ClassID.
 	// Built from FunctionType.result_type (AbstractType → Type → ClassID).
-	// Used to seed CalleeExitTypes for BL return value propagation:
-	// if a function's declared return type is KnownClass, X0 after BL
-	// to that function is set to KnownClass, enabling type chains
-	// across function calls (e.g., getList() returns List → .first
-	// loads List element type).
+	// Used to seed CalleeExitTypes as ClassBound. A declaration constrains the
+	// returned object to that class/subclasses; it is not an exact runtime class.
 	FuncReturnType map[int]int
 
 	// RefToType maps Type ref ID → TypeInfo, including both isolate
-	// and VM snapshot Types. Built once in BuildTypeContext and shared
-	// across buildFieldTypes, buildPoolClassByIndex, and
-	// buildFuncParamTypes — previously each rebuilt the same map.
+	// and VM snapshot Types. Built once in BuildTypeContext and shared across
+	// buildFieldTypes and buildFuncParamTypes.
 	RefToType map[int]*cluster.TypeInfo
 
 	// KOriginElement is the dispatch table origin element offset.
@@ -168,17 +150,11 @@ type TypeContext struct {
 	// to X0 after a BL call, enabling type chain across function calls.
 	CalleeExitTypes map[uint64]TypeLattice
 
-	// CalleeAllExitTypes maps BL target address → callee's full ExitTypes
-	// array (all 31 registers). This enables propagating not just the
-	// return value (X0) but also any other registers the callee preserves
-	// or produces (e.g., allocation results in X0, class ID in R0 for
-	// dispatch table calls, etc.).
+	// CalleeAllExitTypes maps BL target address → the callee analysis's full exit
+	// array for fixed-point comparison/debugging. Call transfer functions consume
+	// ONLY the ABI return register; callee-local register facts never cross a
+	// Dart call boundary.
 	CalleeAllExitTypes map[uint64][31]TypeLattice
-
-	// MinAppClassID is the first app-defined class ID (NumPredefinedCids).
-	// Used to filter parameter types: only app-defined classes have dispatch
-	// methods worth tracking. Set from version profile's CID table.
-	MinAppClassID int
 
 	// MethodNameToRefIDs maps method name (e.g., "adoptChild") → list of
 	// Function NamedObject refIDs. Used by interproc to look up
@@ -227,8 +203,8 @@ type TypeContext struct {
 	// kTypeOffsetReg). The class actually reaches the stub in the tags word,
 	// which the per-class stub materialises internally
 	// (stub_code_compiler_x64.cc:2355-2362), so the caller carries it in no
-	// register at all. The guess produced KnownClass, which is authoritative
-	// downstream -- it selects dispatch targets.
+	// register at all. The old guess produced an exact object-class fact that
+	// downstream code could use to select a dispatch target.
 	//
 	// Measured on 3.12.2: 918 allocation stubs, reached by 3202 of 35060
 	// direct calls on ARM64 and 3202 of 28828 on x64. ARM64 had no allocation
@@ -241,63 +217,10 @@ type TypeContext struct {
 	// pointer on non-compressed builds).
 	TypeTestingStubNames map[int]string
 
-	// InstanceFieldTypes is the observed (class, byte offset) -> value class
-	// map recovered from const Instance objects serialized in the snapshot:
-	// classID -> byteOffset -> classID of the stored value.
-	//
-	// This is the consumer for the Instance capture and the seed of the
-	// gap-analysis §3.1 "(class, offset) -> type map". It is *observed* type
-	// information, complementary to FieldByOwnerOffset/FieldTypes which give
-	// the *declared* type: it can type a field declared `dynamic`/`Object?`
-	// whose canonicalized const instances all hold one concrete class.
-	//
-	// Only unanimous offsets are recorded. If two instances of the same class
-	// store different concrete classes at the same offset, the entry is
-	// dropped rather than picking one -- a wrong concrete type is worse than
-	// no type, because callers treat KnownClass as authoritative. Null values
-	// (RefNull) are ignored: null constrains nothing.
-	//
-	// Note two earlier maps here (ICDataByOwner/ICDataByPPIndex and
-	// ContextVariables) were removed rather than fixed, because ICData and
-	// Context are absent from AOT snapshots so both were always empty.
-	InstanceFieldTypes map[int]map[int32]int
-
-	// FieldStoreTypes is the whole-program (class, byte offset) → value class
-	// map recovered from field STORE instructions in function bodies:
-	// classID → byteOffset → classID of the stored value.
-	// This is the interprocedural field-store → field-load tracking (gap-analysis §3.1).
-	// When a STR Xt, [Xn, #offset] is encountered and both Xn (receiver) and
-	// Xt (value) have KnownClass, we record (Xn.ClassID, offset) → Xt.ClassID.
-	// This information is used by FieldValueClass as a third source (after
-	// declared type and observed instance type) to type field loads.
-	FieldStoreTypes map[int]map[int32]int
-
-	// AllocationSites maps allocation site PC → classID.
-	// Distinguishes same class allocated at different sites (gap-analysis §3.1).
-	// When an allocation stub call is detected, the site (call PC) and class
-	// (from the stub or from RDI/X0 before the call) are recorded.
-	AllocationSites map[uint64]int
-
-	// InstantiatedClasses is the set of class IDs that are instantiated
-	// (allocated) anywhere in the program. Used by RTA (gap-analysis §3.1).
+	// InstantiatedClasses is the set of classes observed in serialized instances
+	// or pool objects. It is a population metric only, not an exhaustive
+	// candidate filter.
 	InstantiatedClasses map[int]bool
-
-	// ClosureDataByClosure maps closure ref ID → parent function ref ID.
-	// In AOT, Context objects are not serialized, but ClosureData IS.
-	// Each ClosureData has parent_function and closure refs, enabling
-	// closure → parent function resolution without Context data.
-	ClosureDataByClosure map[int]int
-
-	// ClosureDataByParent maps parent function ref ID → list of closure ref IDs.
-	// Reverse mapping of ClosureDataByClosure for lookup by parent function.
-	ClosureDataByParent map[int][]int
-
-	// PoolClosureClass maps PP pool index → owner class ID for Closure objects.
-	// When a PP load fetches a Closure, the Closure's ClosureData.parent_function
-	// gives us the declaring function, whose owner class determines the dispatch
-	// table slot for any BLR through that closure. This enables BLR resolution
-	// for closure calls that would otherwise be Top (no type info).
-	PoolClosureClass map[int]int
 
 	// SelectorOffsets maps BLR instruction address → selector offset
 	// (in dispatch table slot units). Pre-scanned from the instruction
@@ -305,12 +228,6 @@ type TypeContext struct {
 	// gives the selector offset. Used to resolve dispatch table calls
 	// even when the receiver class ID is unknown (Top).
 	SelectorOffsets map[uint64]int
-
-	// Subclasses maps class ID → list of direct subclass IDs.
-	// Built as the inverse of SuperClass, this is the Class Hierarchy Analysis
-	// (CHA) structure: for a given receiver class, enumerate all subclasses
-	// that might override a method, then collect their dispatch targets.
-	Subclasses map[int][]int
 
 	// SelectorCache caches selectorCandidates results per selector immediate.
 	// Keyed by selector imm, value is the sorted unique function name list.
@@ -320,26 +237,17 @@ type TypeContext struct {
 	// DispatchBySlot map (potentially hundreds of thousands of entries)
 	// for every BLR site.
 	//
-	// The cache is invalidated and rebuilt when InstantiatedClasses changes
-	// significantly (new allocation sites discovered). In practice the RTA
-	// set converges after 2-3 iterations, so the cache stabilizes.
 	SelectorCache map[int][]string
 
-	// SelectorMonomorphic maps selector imm → single function name, for
-	// selectors where exactly one unique implementation exists across all
-	// instantiated classes. These are the CHA win: regardless of receiver
-	// class, the call target is known. Built at the same time as
-	// SelectorCache.
+	// SelectorMonomorphic maps selector imm → single function name when every
+	// structural runtime CID represented by SuperClass maps that selector either
+	// to that implementation or to no code entry.
 	SelectorMonomorphic map[int]string
 
 	// Debug counters.
-	// InstanceFieldHits counts field loads typed from observed const-instance
-	// data that the declared field type could not resolve.
-	InstanceFieldHits int
-
-	// PPHits counts object-pool loads that RESOLVED to something: a
-	// KnownClass, or a KnownStub for a Code / type-testing-stub / unlinked-call
-	// / closure entry. PPLoads counts every pool load the transfer function
+	// PPHits counts object-pool loads that RESOLVED to something: an exact runtime
+	// object class, or a KnownStub for Code/type-testing/unlinked-call/closure
+	// entries. PPLoads counts every pool load the transfer function
 	// saw, resolved or not, so PPHits/PPLoads is a rate rather than a bare
 	// count.
 	//
@@ -359,8 +267,8 @@ type TypeContext struct {
 	// from any register the caller set up. Both architectures.
 	AllocStubHits int
 	// NarrowHits counts flow-sensitive narrowings actually applied: a
-	// `CMP class_id, #N` whose equality edge turned the compared register
-	// into KnownClass(N). Both ARM64 and x86_64 implement narrowing.
+	// `CMP class_id, #N` whose equality edge turned the compared CID scalar
+	// into ExactClassID(N). Both ARM64 and x86_64 implement narrowing.
 	NarrowHits int
 	// NarrowShape / NarrowNoType diagnose why narrowing does or does not
 	// fire: how many block edges had the right shape (a CMP against an
@@ -378,56 +286,46 @@ type TypeContext struct {
 	// leaving the 39x dispatch_hits gap against ARM64 unexplained.
 	X86DispatchShape    int // CALL [base + cid_reg*8 + disp] matched
 	X86DispatchNoTable  int // ...but the base register is not a known dispatch table
-	X86DispatchNoClass  int // ...but cid_reg does not hold a KnownClass
+	X86DispatchNoClass  int // ...but cid_reg does not hold an exact class-ID scalar
 	X86DispatchResolved int // ...and both were known
-	// Splitting NoClass by WHY tells apart two different problems that a
-	// single counter conflates: Top means the receiver was never typed
-	// anywhere on the path (missing producer), Bottom means it was typed
-	// and then contradicted (a merge killed it). Chasing the wrong one
-	// wastes the effort -- the same mistake as reading one ratio without
-	// checking both sides measure the same population.
-	X86DispatchClassTop    int
-	X86DispatchClassBottom int
-	X86DispatchClassOther  int
+	// Splitting NoClass by WHY distinguishes no CID producer (Top) from a proven
+	// class-ID scalar whose numeric value is unknown.
+	X86DispatchClassTop        int
+	X86DispatchClassUnknownCID int
+	X86DispatchClassOther      int
 	// Debug: BL return value propagation stats.
 	BLTotal       int
 	BLHasExitType int
 	BLExitKnown   int
-	BLExitBottom  int
 	// BLR lattice state distribution at the BLR point. Counts which
 	// lattice kind the BLR register has when resolveBLR is called,
 	// diagnosing why monomorphic rate is what it is.
 	BLRAtKnownDispatch    int // direct slot lookup possible
 	BLRAtKnownDispatchSel int // SelectorOnly — selector scan
-	BLRAtKnownClass       int // scan 128 slots for this class
+	BLRAtObject           int // object value reached a control-target register
 	BLRAtStub             int // KnownStub
 	BLRAtTop              int // no info at all
-	BLRAtBottom           int // conflicting info
+	BLRAtUnreachable      int // invariant violation: Bottom reached executable BLR
 	BLRAtOther            int // anything else
-	// Field type source breakdown: which of the 3 sources in
-	// FieldValueClass actually produced a hit. Diagnoses whether
-	// the bottleneck is declared types, instance types, or store types.
+	// Field type source count. Only declared types are authoritative bounds.
 	FieldTypeDeclaredHits int // FieldByOwnerOffset + FieldTypes
 	// ArgsDescReceiverHits counts parameter-0 loads typed from the
-	// ArgumentsDescriptor pattern. See RecoverArgsDescReceiverARM64.
-	ArgsDescReceiverHits  int
-	FieldTypeInstanceHits int // InstanceFieldTypes (already counted in InstanceFieldHits)
-	FieldTypeStoreHits    int // FieldStoreTypes
-	// Field type map sizes: how many classes have entries in each map.
-	FieldTypeDeclaredClasses int // len(FieldByOwnerOffset)
-	FieldTypeStoreClasses    int // len(FieldStoreTypes)
-	// Diagnostic: how many fields had their declared type resolved
-	// to a ClassID in buildFieldTypes. If this is 0, the declared
-	// field type source is completely dead.
-	FieldTypesResolvedCount int `json:"-"`
-	// CHA diagnostics: how many unique selector imms were found to
-	// be monomorphic (1 unique implementation across all instantiated
-	// classes). These are the CHA wins — selectors that resolve to
-	// a single target regardless of receiver class.
-	SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
-	// FuncReturnType diagnostics.
-	FuncReturnTypeCount int `json:"func_return_type_count,omitempty"`
-	FuncReturnTypeSeeds int `json:"func_return_type_seeds,omitempty"`
+	// ArgumentsDescriptor pattern on either architecture.
+	ArgsDescReceiverHits int
+	// Fixed-point telemetry. If InterConverged is false, the configured
+	// propagation budget was exhausted and the engine discarded propagated
+	// exact facts in favor of a conservative declared-types-only fallback pass.
+	InterIterations int
+	InterConverged  bool
+	// Private per-PC telemetry state. These maps make counters describe code-site
+	// populations/final categories instead of CFG worklist or interproc revisit
+	// counts.
+	metricSites           map[string]map[uint64]struct{}
+	x86DispatchMetricByPC map[uint64]x86DispatchMetricState
+	blrMetricByPC         map[uint64]blrMetricState
+	narrowMetricByPC      map[uint64]narrowMetricState
+	blReturnMetricByPC    map[uint64]blReturnMetricState
+	FuncReturnTypeSeeds   int `json:"func_return_type_seeds,omitempty"`
 
 	// MintValues maps ref IDs to Smi/Mint integer values, used to
 	// convert Field.HostOffset (a ref ID) to the actual word offset.
@@ -538,17 +436,13 @@ func BuildTypeContext(
 		FieldByOwnerOffset:      make(map[int]map[int32]int),
 		PoolClassByIndex:        make(map[int]int),
 		DispatchBySlot:          make(map[int]cluster.DispatchTableEntry, len(dispatchEntries)),
-		CodeIndexToFunc:         byCodeIndex,
-		CodeRefToName:           make(map[int]string),
 		DispatchCodeIndexToName: make(map[int]string),
 		ClassIDToName:           make(map[int]string),
 		MintValues:              clResult.MintValues,
 		WordSize:                8,
-		FuncParamCount:          make(map[int]int),
 		FuncIsInstance:          make(map[int]bool),
 		FuncOwnerClass:          make(map[string]int),
 		FuncMayUseRegisterCC:    make(map[string]bool),
-		FuncMustUseStackCC:      make(map[string]bool),
 		FuncReceiverInRegister:  make(map[string]bool),
 		FuncReceiverStackSlot:   make(map[string]int),
 		ReceiverLoadAtPC:        make(map[uint64]ReceiverLoad),
@@ -560,19 +454,11 @@ func BuildTypeContext(
 		AllocationStubCID:       allocationStubCID,
 		CalleeExitTypes:         make(map[uint64]TypeLattice),
 		CalleeAllExitTypes:      make(map[uint64][31]TypeLattice),
-		MinAppClassID:           minAppClassIDSafe(pl.CT),
 		MethodNameToRefIDs:      buildMethodNameToRefIDs(pl),
-		InstanceFieldTypes:      make(map[int]map[int32]int),
-		FieldStoreTypes:         make(map[int]map[int32]int),
-		AllocationSites:         make(map[uint64]int),
 		InstantiatedClasses:     make(map[int]bool),
-		ClosureDataByClosure:    make(map[int]int),
-		ClosureDataByParent:     make(map[int][]int),
-		PoolClosureClass:        make(map[int]int),
 		PoolCodeNames:           make(map[int]string),
 		TypeTestingStubNames:    pl.TypeTestingStubNames,
 		SelectorOffsets:         make(map[uint64]int),
-		Subclasses:              make(map[int][]int),
 		SelectorCache:           make(map[int][]string),
 		SelectorMonomorphic:     make(map[int]string),
 	}
@@ -600,10 +486,10 @@ func BuildTypeContext(
 	}
 
 	// 1. Class hierarchy + subclasses + instantiated classes.
-	buildClassHierarchy(ctx, clResult, pl, dispatchEntries)
+	buildClassHierarchy(ctx, clResult, pl)
 
 	// 2. classID → name.
-	buildClassIDToName(ctx, clResult, pl)
+	buildClassIDToName(ctx, pl)
 
 	// 3+4. Field types + fieldByOwnerOffset.
 	buildFieldTypes(ctx, clResult, pl)
@@ -621,42 +507,28 @@ func BuildTypeContext(
 		ctx.PoolCodeNames = pl.PoolCodeNames
 	}
 
-	// 8. FuncParamTypes + FuncParamCount + FuncIsInstance.
+	// 8. FuncParamTypes + FuncIsInstance + declared return bounds.
 	buildFuncParamTypes(ctx, clResult, pl)
 
-	// Phase 3: observed instance field types.
-	buildInstanceFieldTypes(ctx, clResult, pl)
-
-	// ClosureData + PoolClosureClass.
-	buildClosureData(ctx, clResult)
-	buildPoolClosureClass(ctx, clResult, pl)
+	// Population telemetry only: observed instances/value classes are not a
+	// candidate-elimination or field-type source.
+	buildObservedInstantiationPopulation(ctx, clResult, pl)
 
 	return ctx
 }
 
-// FieldValueClass resolves a field load `base.<byteOff>` on a receiver of class
-// receiverCID to the class of the loaded value.
+// FieldValueType resolves the declared static bound of a field load. A declared
+// field type is not an exact runtime class, so the result is ClassBound.
 //
-// Three sources, in precedence order:
-//
-//  1. The DECLARED field type -- FieldByOwnerOffset gives the Field object at
-//     that offset and FieldTypes its resolved type class. Authoritative when
-//     present.
-//  2. The OBSERVED type from const Instance objects in the snapshot
-//     (InstanceFieldTypes), used only when every observed instance of the
-//     class agrees.
-//  3. The STORED type from field-store instructions in function bodies
-//     (FieldStoreTypes), recovered from interprocedural analysis. This types
-//     fields that neither declared nor observed types can (e.g., fields set
-//     at runtime to objects of a known class).
-//
-// Both ARM64 and x86_64 field-load handlers call this, so the precedence rule
-// lives in exactly one place.
+// Snapshot const-instance observations and scanned stores deliberately do NOT
+// produce a type here. They are samples of values, not an exhaustive proof of
+// all values the mutable field can hold; treating unanimity in those samples as
+// exact previously let a partial observation choose a concrete dispatch callee.
 //
 // IMPORTANT: byteOff from the caller is the raw instruction's displacement,
 // which is field_offset - kHeapObjectTag (kHeapObjectTag = 1 for both ARM64
-// and x86_64 compressed-pointer builds). The maps (FieldByOwnerOffset,
-// InstanceFieldTypes, FieldStoreTypes) are keyed by field_offset (from object
+// and x86_64 compressed-pointer builds). FieldByOwnerOffset is keyed by
+// field_offset (from object
 // start, without kHeapObjectTag subtraction). So we add kHeapObjectTag back
 // before lookup.
 // SetClassIDTagLayout records the ClassIdTag bitfield layout and derives the
@@ -683,60 +555,49 @@ func (ctx *TypeContext) HalfWordClassIDDisp() (int64, bool) {
 	return ctx.halfWordClassIDDisp, ctx.halfWordClassID
 }
 
-func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bool) {
-	// kHeapObjectTag = 1: raw instruction offset = field_offset - 1,
-	// map key = field_offset. Add 1 to align.
-	lookupOff := byteOff + 1
-	// Walk the superclass chain: FieldByOwnerOffset is keyed by the
-	// DECLARING class's CID, but receiverCID is the receiver's actual
-	// (possibly subclass) CID. A field declared in class A is inherited
-	// by subclass B, so when accessing it on a B instance, we must look
-	// up A's entry. Without this walk, declared field types never hit
-	// for any subclass — measured: 369 fields resolved, 89 declaring
-	// classes, but 0 hits because every receiver was a subclass.
+func (ctx *TypeContext) FieldValueType(receiverCID int, byteOff int32, pc uint64) (TypeLattice, bool) {
+	_, fieldRefID, ok := ctx.DeclaredFieldOwner(receiverCID, byteOff)
+	if !ok {
+		return Top(), false
+	}
+	if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
+		ctx.hitMetric(metricFieldDeclared, pc, &ctx.FieldTypeDeclaredHits)
+		return ClassBound(classID), true
+	}
+	return Top(), false
+}
+
+// DeclaredFieldOwner returns the class that actually declares the field at the
+// tagged-pointer-relative machine offset. receiverCID can be an exact runtime
+// class or a static receiver bound; inherited fields are found by walking the
+// superclass chain. No observed-instance layout is accepted here: field xrefs
+// must not manufacture a declaring class from a partial runtime sample.
+func (ctx *TypeContext) DeclaredFieldOwner(receiverCID int, rawOff int32) (ownerCID, fieldRefID int, ok bool) {
+	lookupOff := rawOff + sdk.HeapObjectTag
 	cid := receiverCID
 	seen := make(map[int]bool)
 	for cid >= 0 && !seen[cid] {
 		seen[cid] = true
-		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
-			if fieldRefID, ok := fields[lookupOff]; ok {
-				if classID, ok := ctx.FieldTypes[fieldRefID]; ok && classID >= 0 {
-					ctx.FieldTypeDeclaredHits++
-					return classID, true
-				}
+		if fields := ctx.FieldByOwnerOffset[cid]; fields != nil {
+			if refID, found := fields[lookupOff]; found {
+				return cid, refID, true
 			}
 		}
-		// Walk up to superclass: FieldByOwnerOffset is keyed by the
-		// declaring class, but the receiver may be a subclass.
 		if ctx.SuperClass == nil {
 			break
 		}
-		next, ok := ctx.SuperClass[cid]
-		if !ok || next < 0 || next == cid {
+		next, found := ctx.SuperClass[cid]
+		if !found || next < 0 || next == cid {
 			break
 		}
 		cid = next
 	}
-	if byOff, ok := ctx.InstanceFieldTypes[receiverCID]; ok {
-		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
-			ctx.InstanceFieldHits++
-			ctx.FieldTypeInstanceHits++
-			return classID, true
-		}
-	}
-	// P1.3: Field-store → field-load tracking.
-	if byOff, ok := ctx.FieldStoreTypes[receiverCID]; ok {
-		if classID, ok := byOff[lookupOff]; ok && classID > 0 {
-			ctx.FieldTypeStoreHits++
-			return classID, true
-		}
-	}
-	return 0, false
+	return 0, 0, false
 }
 
 // OwnerHasFieldAt reports whether class receiverCID (or any superclass) declares
 // an instance field at the raw instruction offset rawOff (i.e. field_offset - 1,
-// the form that appears in `ldr Wt, [base, #rawOff]`). Unlike FieldValueClass it
+// the form that appears in `ldr Wt, [base, #rawOff]`). Unlike FieldValueType it
 // does not require the field's TYPE to be known -- it only confirms a field
 // exists there. This is the validator for CODE-based receiver recovery: a
 // register loaded from the candidate receiver slot is the receiver only if it is
@@ -744,31 +605,8 @@ func (ctx *TypeContext) FieldValueClass(receiverCID int, byteOff int32) (int, bo
 // rules out static methods (whose parameter 0 is not an owner instance) and so
 // prevents fabricating owner field names for a non-receiver value.
 func (ctx *TypeContext) OwnerHasFieldAt(ownerCID int, rawOff int32) bool {
-	lookupOff := rawOff + 1
-	cid := ownerCID
-	seen := make(map[int]bool)
-	for cid >= 0 && !seen[cid] {
-		seen[cid] = true
-		if fields, ok := ctx.FieldByOwnerOffset[cid]; ok {
-			if _, ok := fields[lookupOff]; ok {
-				return true
-			}
-		}
-		if ctx.SuperClass == nil {
-			break
-		}
-		next, ok := ctx.SuperClass[cid]
-		if !ok || next < 0 || next == cid {
-			break
-		}
-		cid = next
-	}
-	if byOff, ok := ctx.InstanceFieldTypes[ownerCID]; ok {
-		if _, ok := byOff[lookupOff]; ok {
-			return true
-		}
-	}
-	return false
+	_, _, ok := ctx.DeclaredFieldOwner(ownerCID, rawOff)
+	return ok
 }
 
 // ResolveDispatchTarget resolves a dispatch table slot to a function name.
@@ -791,63 +629,4 @@ func (ctx *TypeContext) ResolveDispatchTarget(slot int) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// AllSubclasses returns all transitive subclass IDs of the given class,
-// including the class itself. Used by CHA to enumerate all possible
-// dispatch targets for a virtual call on a known receiver class.
-func (ctx *TypeContext) AllSubclasses(classID int) []int {
-	seen := map[int]bool{classID: true}
-	var out []int
-	var walk func(int)
-	walk = func(cid int) {
-		out = append(out, cid)
-		for _, sub := range ctx.Subclasses[cid] {
-			if !seen[sub] {
-				seen[sub] = true
-				walk(sub)
-			}
-		}
-	}
-	walk(classID)
-	return out
-}
-
-// ResolveDispatchCHA enumerates all dispatch targets for a virtual call
-// on a receiver of classID at the given selector offset. Returns all
-// distinct target function names found across the class and its subclasses.
-//
-// This is the CHA consumer: when resolveBLR knows the receiver class
-// (LatticeKnownClass) and the selector offset is known (from a preceding
-// ADD/SUB), it can enumerate all possible targets instead of giving up.
-func (ctx *TypeContext) ResolveDispatchCHA(classID, selectorImm int) []string {
-	// Both quantities are already origin-relative: DispatchBySlot is keyed by
-	// `entry.Index-kOriginElement`, and selectorImm is exactly
-	// `selector_offset-kOriginElement` from the generated call. The lookup is
-	// therefore cid+imm. Subtracting the origin here again shifts ARM64 by 4096
-	// slots and x64 by 16.
-	slot := classID + selectorImm
-	var targets []string
-	seen := map[string]bool{}
-	for _, cid := range ctx.AllSubclasses(classID) {
-		s := cid + selectorImm
-		if name, ok := ctx.ResolveDispatchTarget(s); ok && !seen[name] {
-			seen[name] = true
-			targets = append(targets, name)
-		}
-	}
-	// Also check the original slot directly.
-	if name, ok := ctx.ResolveDispatchTarget(slot); ok && !seen[name] {
-		seen[name] = true
-		targets = append(targets, name)
-	}
-	return targets
-}
-
-// minAppClassIDSafe returns NumPredefinedCids from ct, or 0 if ct is nil.
-func minAppClassIDSafe(ct *snapshot.CIDTable) int {
-	if ct == nil {
-		return 0
-	}
-	return int(ct.NumPredefinedCids)
 }

@@ -23,7 +23,87 @@ func entryStackFor(ctx *TypeContext, name string) map[int]TypeLattice {
 	if !ok {
 		return nil
 	}
-	return map[int]TypeLattice{slot: KnownClass(ownerCID)}
+	return map[int]TypeLattice{slot: ClassBound(ownerCID)}
+}
+
+func stripFunctionAddressSuffix(name string) string {
+	if idx := strings.LastIndex(name, "_"); idx > 0 {
+		if suffix := name[idx+1:]; isHexSuffix(suffix) {
+			return name[:idx]
+		}
+	}
+	return name
+}
+
+// functionRefIDs prefers the semantic qualified identity. Bare selector names
+// are only a fallback and can denote many unrelated Functions; every consumer
+// therefore requires all returned candidates to agree before using metadata as
+// an inference fact.
+func functionRefIDs(ctx *TypeContext, name string) []int {
+	lookup := stripFunctionAddressSuffix(name)
+	if refs := ctx.MethodNameToRefIDs[lookup]; len(refs) > 0 {
+		return refs
+	}
+	if dot := strings.LastIndex(lookup, "."); dot >= 0 {
+		return ctx.MethodNameToRefIDs[lookup[dot+1:]]
+	}
+	return nil
+}
+
+func consensusParamSignature(ctx *TypeContext, refs []int) ([]int, bool, bool) {
+	if len(refs) == 0 {
+		return nil, false, false
+	}
+	var want []int
+	var wantInstance bool
+	for i, rid := range refs {
+		pt, ok := ctx.FuncParamTypes[rid]
+		if !ok || len(pt) == 0 {
+			return nil, false, false
+		}
+		instance := ctx.FuncIsInstance[rid]
+		if i == 0 {
+			want = append([]int(nil), pt...)
+			wantInstance = instance
+			continue
+		}
+		if instance != wantInstance || len(pt) != len(want) {
+			return nil, false, false
+		}
+		for j := range pt {
+			if pt[j] != want[j] {
+				return nil, false, false
+			}
+		}
+	}
+	return want, wantInstance, true
+}
+
+func consensusReturnClass(ctx *TypeContext, refs []int) (int, bool) {
+	if len(refs) == 0 {
+		return 0, false
+	}
+	want := -1
+	for _, rid := range refs {
+		cid, ok := ctx.FuncReturnType[rid]
+		if !ok || cid < 0 {
+			return 0, false
+		}
+		if want < 0 {
+			want = cid
+		} else if cid != want {
+			return 0, false
+		}
+	}
+	return want, want >= 0
+}
+
+func normalizeReachableEntry(entry *[31]TypeLattice) {
+	for i := range entry {
+		if entry[i].Kind == LatticeBottom {
+			entry[i] = Top()
+		}
+	}
 }
 
 func sortedKeys[M ~map[string]V, V any](m M) []string {
@@ -65,6 +145,12 @@ type InterResult struct {
 
 	// TotalBLR is the total count of BLR call sites across all functions.
 	TotalBLR int
+
+	// Fixed-point telemetry. When Converged is false, Functions contains the
+	// conservative fallback analyses rather than the last partial propagation
+	// round.
+	Iterations int
+	Converged  bool
 }
 
 // FuncInstsARM64 holds ARM64 function instructions for RunInterprocedural.
@@ -76,8 +162,8 @@ type FuncInstsX86 map[string][]x86.Decoded
 // RunInterprocedural runs the inter-procedural fixed-point algorithm:
 //  1. For each function, run intra-procedural analysis with current
 //     parameter type estimates (initially all Top).
-//  2. For each BL call edge, propagate the caller's argument types
-//     to the callee's parameter types (meet).
+//  2. For each BL call edge with independently recovered setup evidence,
+//     propagate the caller's argument types to the callee's parameters.
 //  3. Repeat until no parameter types change (fixed point) or max
 //     iterations reached.
 //
@@ -87,7 +173,9 @@ type FuncInstsX86 map[string][]x86.Decoded
 // funcInstsARM64 or funcInstsX86 maps function name → instruction list.
 // blEdges maps caller name → list of (callee name, argument types at call site).
 // blTargetToName maps BL target address → callee function name (for call-return
-// tracking). maxIterations caps the number of rounds (default 3).
+// tracking). maxIterations is a caller-supplied safety budget; exhaustion is
+// fail-closed through the conservative fallback below rather than published as
+// a partial fixed point.
 // isARM64 selects the architecture-specific analysis path.
 func RunInterprocedural(
 	ctx *TypeContext,
@@ -120,7 +208,13 @@ func RunInterprocedural(
 		masksByFunc := make(map[string][]uint8)
 		for _, caller := range sortedKeys(blEdges) {
 			for _, edge := range blEdges[caller] {
-				if edge.ArgMask != 0 && ctx.FuncMayUseRegisterCC[edge.Callee] {
+				if ctx.FuncMayUseRegisterCC[edge.Callee] {
+					// Zero is real negative evidence from an observed direct call
+					// site: none of the convention registers was set in that site's
+					// local setup window. Dropping zero masks would let two positive
+					// sites manufacture consensus while a third observed site
+					// contradicts it. ResolveArgRegIndices intentionally intersects
+					// every observed site, including zero.
 					masksByFunc[edge.Callee] = append(masksByFunc[edge.Callee], edge.ArgMask)
 				}
 			}
@@ -185,39 +279,8 @@ func RunInterprocedural(
 		if len(positions) == 0 {
 			return
 		}
-		// Function name format: "Owner.method_hexaddr" or "method_hexaddr"
-		// Strip hex suffix to get "Owner.method"
-		lookupName := name
-		if idx := strings.LastIndex(name, "_"); idx > 0 {
-			suffix := name[idx+1:]
-			if isHexSuffix(suffix) {
-				lookupName = name[:idx]
-			}
-		}
-		// Q10: Try qualified name first (e.g., "MyClass.adoptChild")
-		refIDs, ok := ctx.MethodNameToRefIDs[lookupName]
-		if !ok || len(refIDs) == 0 {
-			// Fall back to bare method name (e.g., "adoptChild")
-			methodName := lookupName
-			if dotIdx := strings.LastIndex(lookupName, "."); dotIdx >= 0 {
-				methodName = lookupName[dotIdx+1:]
-			}
-			refIDs, ok = ctx.MethodNameToRefIDs[methodName]
-			if !ok || len(refIDs) == 0 {
-				return
-			}
-		}
-		// Try each refID — use first one that has param types
-		var paramTypes []int
-		var refID int
-		for _, rid := range refIDs {
-			if pt, ok2 := ctx.FuncParamTypes[rid]; ok2 && len(pt) > 0 {
-				paramTypes = pt
-				refID = rid
-				break
-			}
-		}
-		if paramTypes == nil {
+		paramTypes, isInstance, ok := consensusParamSignature(ctx, functionRefIDs(ctx, name))
+		if !ok {
 			return
 		}
 		// For instance methods, parameter 0 is 'this' (receiver in R1).
@@ -227,7 +290,6 @@ func RunInterprocedural(
 		// Dart AOT calling convention: param 0 (this) → R1, param 1 → R2, param 2 → R3, etc.
 		// For instance methods, we skip param 0 (this, already set from FuncOwnerClass),
 		// but param 1 still maps to argRegOrder[1]=R2, not argRegOrder[0]=R1.
-		isInstance := ctx.FuncIsInstance[refID]
 		startIdx := 0
 		if isInstance {
 			startIdx = 1 // Skip 'this' — already set from FuncOwnerClass
@@ -244,15 +306,15 @@ func RunInterprocedural(
 			if cid >= 0 {
 				regIdx := argRegOrder[i]
 				if regIdx < 31 && entry[regIdx].Kind == LatticeTop {
-					entry[regIdx] = KnownClass(cid)
+					entry[regIdx] = ClassBound(cid)
 				}
 			}
 		}
 	}
 
 	// Analyse functions in a deterministic order. AnalyzeFunction mutates the
-	// shared TypeContext (field-store types, instantiated classes, selector
-	// offsets), so what function A records is visible to function B: iterating
+	// shared TypeContext (telemetry, selector offsets, and resolution caches), so
+	// what function A records is visible to function B: iterating
 	// the map directly made the resolved-BLR set differ between runs of the
 	// same binary.
 	if isARM64 {
@@ -265,13 +327,13 @@ func RunInterprocedural(
 			var entryStack map[int]TypeLattice
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 				if receiverReg >= 0 && hasRegPosition(name, 0) {
-					entry[receiverReg] = KnownClass(ownerCID)
+					entry[receiverReg] = ClassBound(ownerCID)
 				}
 				// Pre-3.4.3 the receiver arrives on the stack and the
 				// prologue immediately overwrites the register, so the
 				// register seed alone is dead on arrival.
 				if slot, ok2 := ctx.FuncReceiverStackSlot[name]; ok2 {
-					entryStack = map[int]TypeLattice{slot: KnownClass(ownerCID)}
+					entryStack = map[int]TypeLattice{slot: ClassBound(ownerCID)}
 				}
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
@@ -287,7 +349,7 @@ func RunInterprocedural(
 				entry[i] = Top()
 			}
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 && receiverReg >= 0 && hasRegPosition(name, 0) {
-				entry[receiverReg] = KnownClass(ownerCID)
+				entry[receiverReg] = ClassBound(ownerCID)
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
@@ -299,29 +361,9 @@ func RunInterprocedural(
 	// Seed CalleeExitTypes from declared return types (FuncReturnType).
 	seedHits := 0
 	for target, name := range blTargetToName {
-		lookupName := name
-		if idx := strings.LastIndex(name, "_"); idx > 0 {
-			suffix := name[idx+1:]
-			if isHexSuffix(suffix) {
-				lookupName = name[:idx]
-			}
-		}
-		refIDs, ok := ctx.MethodNameToRefIDs[lookupName]
-		if !ok || len(refIDs) == 0 {
-			methodName := lookupName
-			if dotIdx := strings.LastIndex(lookupName, "."); dotIdx >= 0 {
-				methodName = lookupName[dotIdx+1:]
-			}
-			refIDs, ok = ctx.MethodNameToRefIDs[methodName]
-		}
-		if ok {
-			for _, rid := range refIDs {
-				if cid, ok2 := ctx.FuncReturnType[rid]; ok2 && cid >= 0 {
-					ctx.CalleeExitTypes[target] = KnownClass(cid)
-					seedHits++
-					break
-				}
-			}
+		if cid, ok := consensusReturnClass(ctx, functionRefIDs(ctx, name)); ok {
+			ctx.CalleeExitTypes[target] = ClassBound(cid)
+			seedHits++
 		}
 	}
 	ctx.FuncReturnTypeSeeds = seedHits
@@ -333,7 +375,7 @@ func RunInterprocedural(
 	needReanalysis := false
 	for target, name := range blTargetToName {
 		if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-			if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+			if fa.Intra.ExitTypes[0].Kind != LatticeTop && fa.Intra.ExitTypes[0].Kind != LatticeBottom {
 				if old, ok := ctx.CalleeExitTypes[target]; !ok || !old.Equal(fa.Intra.ExitTypes[0]) {
 					ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
 					needReanalysis = true
@@ -354,7 +396,10 @@ func RunInterprocedural(
 	// the PREVIOUS round. Comparing against a fresh all-Top map makes every
 	// non-Top argument look changed forever and forces maxIterations runs.
 	prevParamTypes := make(map[string][31]TypeLattice)
+	converged := false
+	iterations := 0
 	for iter := 0; iter < maxIterations; iter++ {
+		iterations = iter + 1
 		calleeParamTypes := make(map[string][31]TypeLattice)
 
 		for _, caller := range sortedKeys(blEdges) {
@@ -365,19 +410,18 @@ func RunInterprocedural(
 			}
 
 			for _, edge := range edges {
-				// CRITICAL FIX: use BLCallSiteTypes (register state at BL call site,
-				// BEFORE BL kills R0-R7) instead of ExitTypes (state at function exit).
-				// ExitTypes is Top for R0-R7 because BL kills them and exit blocks
-				// don't restore. BLCallSiteTypes captures ACTUAL parameter types.
-				var argTypes [31]TypeLattice
-				if callerAnalysis.Intra.BLCallSiteTypes != nil {
-					if cs, ok := callerAnalysis.Intra.BLCallSiteTypes[edge.CallPC]; ok {
-						argTypes = cs
-					} else {
-						argTypes = callerAnalysis.Intra.ExitTypes
-					}
-				} else {
-					argTypes = callerAnalysis.Intra.ExitTypes
+				// Use BLCallSiteTypes (register state immediately before the call)
+				// instead of ExitTypes (state at function exit). Ordinary Dart calls
+				// clobber the SDK-defined allocatable set, which is broader than just
+				// argument registers, so exit state is not call-site evidence.
+				if callerAnalysis.Intra.BLCallSiteTypes == nil {
+					continue
+				}
+				argTypes, ok := callerAnalysis.Intra.BLCallSiteTypes[edge.CallPC]
+				if !ok {
+					// Function-exit state is not call-site evidence. Falling back to
+					// it can assign a value created after the call to a callee argument.
+					continue
 				}
 
 				positions := regArgsByFunc[edge.Callee]
@@ -387,7 +431,7 @@ func RunInterprocedural(
 				current := calleeParamTypes[edge.Callee]
 				for _, pos := range positions {
 					r := argRegOrder[pos]
-					newType := meetType(current[r], argTypes[r], lca)
+					newType := joinType(current[r], argTypes[r], lca)
 					if !newType.Equal(current[r]) {
 						calleeParamTypes[edge.Callee] = updateReg(calleeParamTypes[edge.Callee], r, newType)
 					}
@@ -397,6 +441,7 @@ func RunInterprocedural(
 
 		changed := !paramTypeMapsEqual(prevParamTypes, calleeParamTypes)
 		if !changed && !needReanalysis {
+			converged = true
 			break
 		}
 		prevParamTypes = cloneParamTypeMap(calleeParamTypes)
@@ -414,14 +459,10 @@ func RunInterprocedural(
 			for _, name := range sortedKeys(funcInstsARM64) {
 				insts := funcInstsARM64[name]
 				entry := calleeParamTypes[name]
-				if allTop(entry) {
-					for i := range entry {
-						entry[i] = Top()
-					}
-				}
+				normalizeReachableEntry(&entry)
 				if receiverReg >= 0 && hasRegPosition(name, 0) && entry[receiverReg].Kind == LatticeTop {
 					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
-						entry[receiverReg] = KnownClass(ownerCID)
+						entry[receiverReg] = ClassBound(ownerCID)
 					}
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
@@ -433,14 +474,10 @@ func RunInterprocedural(
 			for _, name := range sortedKeys(funcInstsX86) {
 				insts := funcInstsX86[name]
 				entry := calleeParamTypes[name]
-				if allTop(entry) {
-					for i := range entry {
-						entry[i] = Top()
-					}
-				}
+				normalizeReachableEntry(&entry)
 				if receiverReg >= 0 && hasRegPosition(name, 0) && entry[receiverReg].Kind == LatticeTop {
 					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
-						entry[receiverReg] = KnownClass(ownerCID)
+						entry[receiverReg] = ClassBound(ownerCID)
 					}
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
@@ -456,7 +493,7 @@ func RunInterprocedural(
 		// return type is more precise than "analysis found nothing".
 		for target, name := range blTargetToName {
 			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
-				if fa.Intra.ExitTypes[0].Kind != LatticeTop {
+				if fa.Intra.ExitTypes[0].Kind != LatticeTop && fa.Intra.ExitTypes[0].Kind != LatticeBottom {
 					if old, ok := ctx.CalleeExitTypes[target]; !ok || !old.Equal(fa.Intra.ExitTypes[0]) {
 						ctx.CalleeExitTypes[target] = fa.Intra.ExitTypes[0]
 						needReanalysis = true
@@ -468,11 +505,71 @@ func RunInterprocedural(
 				}
 			}
 		}
-		// Invalidate selector cache: new allocation sites may have been
-		// discovered during this iteration's re-analysis, changing the
-		// RTA-filtered candidate set. The cache will be rebuilt lazily
-		// on the next iteration's selectorCandidates calls.
-		ctx.InvalidateSelectorCache()
+		// Selector candidates depend only on immutable dispatch-table evidence;
+		// partial observed-instantiation data is deliberately not a filter.
+	}
+
+	result.Iterations = iterations
+	result.Converged = converged
+	ctx.InterIterations = iterations
+	ctx.InterConverged = converged
+
+	if !converged {
+		// Hitting the resource budget is not proof of a fixed point. The final
+		// partial round can still be too precise when a deeper caller has not yet
+		// contributed a conflicting type. Discard interprocedural facts and run
+		// one conservative pass from independently justified receiver/register
+		// evidence plus declared static bounds.
+		ctx.CalleeExitTypes = make(map[uint64]TypeLattice)
+		ctx.CalleeAllExitTypes = make(map[uint64][31]TypeLattice)
+		for target, name := range blTargetToName {
+			if cid, ok := consensusReturnClass(ctx, functionRefIDs(ctx, name)); ok {
+				ctx.CalleeExitTypes[target] = ClassBound(cid)
+			}
+		}
+
+		if isARM64 {
+			for _, name := range sortedKeys(funcInstsARM64) {
+				var entry [31]TypeLattice
+				for i := range entry {
+					entry[i] = Top()
+				}
+				if receiverReg >= 0 && hasRegPosition(name, 0) {
+					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+						entry[receiverReg] = ClassBound(ownerCID)
+					}
+				}
+				setEntryFromParamTypes(name, &entry)
+				intra := AnalyzeFunction(funcInstsARM64[name], ctx, entry, entryStackFor(ctx, name))
+				result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
+			}
+		} else {
+			for _, name := range sortedKeys(funcInstsX86) {
+				var entry [31]TypeLattice
+				for i := range entry {
+					entry[i] = Top()
+				}
+				if receiverReg >= 0 && hasRegPosition(name, 0) {
+					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+						entry[receiverReg] = ClassBound(ownerCID)
+					}
+				}
+				setEntryFromParamTypes(name, &entry)
+				intra := AnalyzeFunctionX86(funcInstsX86[name], ctx, entry, entryStackFor(ctx, name))
+				result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
+			}
+		}
+
+		// Publish exits from the conservative pass for downstream consumers, but
+		// do not feed them back into another interprocedural propagation round.
+		for target, name := range blTargetToName {
+			if fa, ok := result.Functions[name]; ok && fa.Intra != nil {
+				ctx.CalleeAllExitTypes[target] = fa.Intra.ExitTypes
+				if ret := fa.Intra.ExitTypes[0]; ret.Kind != LatticeTop && ret.Kind != LatticeBottom {
+					ctx.CalleeExitTypes[target] = ret
+				}
+			}
+		}
 	}
 
 	// Count resolved BLR.

@@ -133,13 +133,16 @@ func TestSemanticPipelineRejectsPartialLegacyVMSnapshot(t *testing.T) {
 	}
 }
 
-func TestResolveArgRegIndicesRequiresStrictMajority(t *testing.T) {
+func TestResolveArgRegIndicesRequiresAllObservedCallSites(t *testing.T) {
 	got, ok := disasm.ResolveArgRegIndices([]uint8{0b11, 0b10})
 	if !ok {
 		t.Fatal("two call sites with a common argument should resolve")
 	}
 	if want := []int{1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ResolveArgRegIndices = %v, want %v", got, want)
+	}
+	if got, ok := disasm.ResolveArgRegIndices([]uint8{0b11, 0b10, 0}); ok || len(got) != 0 {
+		t.Fatalf("zero-mask observed call site must veto register consensus: got=%v ok=%v", got, ok)
 	}
 }
 

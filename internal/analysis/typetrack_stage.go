@@ -86,6 +86,9 @@ func RunTypeInferenceStage(
 	if err != nil {
 		return nil, fmt.Errorf("run type inference: %w", err)
 	}
+	if interResult != nil && !interResult.Converged {
+		opts.logf("  type inference: interprocedural budget exhausted after %d iteration(s); using conservative fallback\n", interResult.Iterations)
+	}
 
 	// Report the three claims separately. "resolved N/M" alone hid the
 	// difference between a call site with one known callee and one with 43
@@ -98,11 +101,6 @@ func RunTypeInferenceStage(
 			float64(bd.PolymorphicCandidates)/float64(bd.Polymorphic))
 	}
 	opts.logf("  unresolved: %d site(s)\n", bd.Unresolved)
-	if tctx != nil && len(tctx.InstanceFieldTypes) > 0 {
-		opts.logf("  observed field types: %d classes, %d field loads typed from const instances\n",
-			len(tctx.InstanceFieldTypes), tctx.InstanceFieldHits)
-	}
-
 	out := &TypeInferenceOutput{Inter: interResult}
 	if tctx != nil {
 		out.ClassIDToName = tctx.ClassIDToName
@@ -520,7 +518,6 @@ func runTypeInference(
 		if r.RefID >= 0 {
 			codeName = pl.CodeNames[r.RefID]
 			ctx.FuncMayUseRegisterCC[name] = codeName.MayUseRegisterCC
-			ctx.FuncMustUseStackCC[name] = codeName.MustUseStackCC
 		}
 		// For 3.4.3+ an SDK register table exists globally but a specific
 		// Function may still be forced to the stack. Only the definitive
@@ -642,11 +639,14 @@ func runTypeInference(
 			recoverStackReceiver := receiverDefinitelyOnStack ||
 				(hasRegisterCC && codeName.MayUseRegisterCC && isInstance && !ctx.FuncReceiverInRegister[name])
 			if recoverStackReceiver {
-				if _, set := ctx.FuncReceiverStackSlot[name]; !set {
-					if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+				if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
+					if _, set := ctx.FuncReceiverStackSlot[name]; !set {
 						if slot, ok := typetrack.RecoverReceiverStackSlotX86(insts, ownerCID, ctx); ok {
 							ctx.FuncReceiverStackSlot[name] = slot
 						}
+					}
+					if pc, rl, ok := typetrack.RecoverArgsDescReceiverX86(insts, ownerCID, ctx); ok {
+						ctx.ReceiverLoadAtPC[pc] = rl
 					}
 				}
 			}
@@ -682,12 +682,11 @@ func runTypeInference(
 	for _, fr := range funcRanges {
 		blTargetToName[fr.start] = fr.name
 	}
-	// Fase 7 PHASE 3: increased from 3 to 10 iterations for better convergence.
-	// More iterations allow type info to propagate deeper across function call chains.
-	// Q7: RunInterprocedural already has early convergence detection (breaks when
-	// no types change in an iteration), so 10 is a safe upper bound — it won't
-	// do unnecessary work if the fixed-point is reached earlier.
-	// Override via AOTOPSY_TYPETRACK_ITERATIONS env var for tuning.
+	// Interprocedural propagation stops early at a fixed point. Ten rounds is a
+	// resource budget, not a correctness assumption: if it is exhausted,
+	// RunInterprocedural discards partial propagated facts and performs one
+	// conservative declared-types-only pass. Override the budget via
+	// AOTOPSY_TYPETRACK_ITERATIONS for diagnostics/tuning.
 	maxIter := 10 // M-9 fix: was 5, comment says 10, code now matches comment
 	if v := os.Getenv("AOTOPSY_TYPETRACK_ITERATIONS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

@@ -3,8 +3,6 @@ package typetrack
 import (
 	"sort"
 	"strings"
-
-	"aotopsy/internal/cluster"
 )
 
 // appendKnownStubResolution converts every named KnownStub form produced by
@@ -41,8 +39,11 @@ func appendKnownStubResolution(t TypeLattice, pc uint64, reg int, ctx *TypeConte
 			recordBLRResolution(result, res)
 			return true
 		}
-		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: methodName, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
-		return true
+		// A selector leaf is not a callee identity. Without an independently
+		// recovered selector offset we cannot know which implementation receives
+		// the call, so leave the site unresolved instead of emitting `foo` as if it
+		// were a concrete function.
+		return false
 	}
 	if strings.HasPrefix(sn, "PPCode:") {
 		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "PPCode:"), Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
@@ -52,65 +53,19 @@ func appendKnownStubResolution(t TypeLattice, pc uint64, reg int, ctx *TypeConte
 		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: strings.TrimPrefix(sn, "TTS:"), Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 		return true
 	}
-	if strings.HasPrefix(sn, "Closure:") || strings.HasPrefix(sn, "ClosureEntry:") {
+	if sn == "Closure" || sn == "ClosureEntry" {
 		if name := ctx.PoolClosureFunctionNames[t.StubOff]; name != "" {
 			recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: name, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
 			return true
 		}
 		return false
 	}
-	recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: sn, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
-	return true
-}
-
-// This file holds the dispatch-slot scanning logic shared between ARM64
-// (resolveBLR in intraproc.go) and x86_64 (resolveX86Dispatch in
-// intraprocx86.go). Both architectures scan nearby dispatch table slots
-// when a direct slot lookup fails, using the same candidate-collection
-// and deduplication rules.
-
-const dispatchScanRange = 128
-
-// scanDispatchSlots scans up to dispatchScanRange slots starting at baseSlot,
-// collecting names of DispatchCode entries. Returns the candidate count,
-// the single candidate name (when count==1), and all candidate names.
-func scanDispatchSlots(ctx *TypeContext, baseSlot int) (candidates int, candidateName string, allCandidates []string) {
-	if ctx.DispatchBySlot == nil {
-		return
+	// Raw THR field names include data/code-object fields as well as callable
+	// entry-point addresses. Only the entry-point form is a proven direct control
+	// target when loaded and branched to as-is.
+	if strings.Contains(sn, "entry_point") || strings.HasSuffix(sn, "_entry") {
+		recordBLRResolution(result, BlrResolution{PC: pc, Reg: reg, TargetName: sn, Resolved: true, Confidence: ResolutionStub, Derivation: DerivationStub})
+		return true
 	}
-	for offset := 0; offset < dispatchScanRange; offset++ {
-		slot := baseSlot + offset
-		entry, ok := ctx.DispatchBySlot[slot]
-		if !ok || entry.Kind != cluster.DispatchCode {
-			continue
-		}
-		if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
-			candidates++
-			candidateName = name
-			allCandidates = append(allCandidates, name)
-		}
-	}
-	return
-}
-
-// applyDispatchCandidates sets the resolution fields from the scan result.
-// One candidate → monomorphic; multiple → deduplicated candidate set.
-// Identical names collapse to a monomorphic resolution.
-func applyDispatchCandidates(res *BlrResolution, candidates int, candidateName string, allCandidates []string) {
-	if candidates == 1 {
-		res.TargetName = candidateName
-		res.Resolved = true
-		res.Candidates = 1
-	} else if candidates > 1 {
-		uniqueNames := map[string]bool{}
-		var unique []string
-		for _, n := range allCandidates {
-			if !uniqueNames[n] {
-				uniqueNames[n] = true
-				unique = append(unique, n)
-			}
-		}
-		sort.Strings(unique)
-		applySelectorCandidates(res, unique)
-	}
+	return false
 }

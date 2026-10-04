@@ -2,8 +2,11 @@ package typetrack
 
 import (
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 // Receiver recovery for functions that address their parameters through the
@@ -65,6 +68,15 @@ type ReceiverLoad struct {
 // is an ordinary argument, not `this` -- cannot be mistaken for an instance
 // method and have owner field names fabricated onto it.
 func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeContext) (uint64, ReceiverLoad, bool) {
+	if ctx == nil || (ctx.WordSize != 4 && ctx.WordSize != 8) {
+		return 0, ReceiverLoad{}, false
+	}
+	// runtime_offsets_extracted.h exports ArgumentsDescriptor_count_offset as
+	// 0x10 for compressed targets and 0x20 for uncompressed targets throughout
+	// the supported 2.12.0..3.12.2 SDKs checked locally. FieldAddress subtracts
+	// kHeapObjectTag (1), hence the actual tagged-pointer displacement is 15/31.
+	countDisp := 4*int(ctx.WordSize) - 1
+
 	// Registers currently holding a copy of ARGS_DESC_REG. R4 itself counts.
 	argsDesc := map[int]bool{sdk.ARM64ArgsDesc: true}
 	// Registers holding ArgumentsDescriptor.count.
@@ -86,6 +98,27 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 
 	for i := range insts {
 		raw := insts[i].Raw
+		if insts[i].Bad {
+			break
+		}
+
+		// Calls clobber ARGS_DESC_REG under the Dart ABI, so no post-call value
+		// can be connected to the entry descriptor without fresh proof. This
+		// recovery is deliberately straight-line only: after a branch, re-seeding
+		// the architectural ARGS_DESC_REG would be unsound if an earlier
+		// instruction on the path had overwritten it.
+		if arm64.IsRet(raw) {
+			break
+		}
+		if arm64.IsBLEncoding(raw) {
+			break
+		}
+		if _, ok := arm64.BLR(raw); ok {
+			break
+		}
+		if arm64.IsBEncoding(raw) || arm64.IsConditionalBranchEncoding(raw) {
+			break
+		}
 
 		// LDR Xr, [Xt, #disp] where Xt = FP + index*scale -- a parameter.
 		if base, disp, ok := arm64.LDR64UnsignedOffset(raw); ok && addrRegs[base] {
@@ -112,10 +145,19 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 			}
 			continue
 		}
-		// LDUR Xc, [Xargsdesc, #off]
-		if base, rt, _, ok := arm64.LDUR64(raw); ok {
+		// Load the exact ArgumentsDescriptor.count slot. Accept both X and W
+		// unscaled forms because compressed-pointer builds materialize tagged
+		// array elements through the 32-bit load family.
+		if base, rt, off, ok := arm64.LDUR64(raw); ok {
 			kill(rt)
-			if argsDesc[base] {
+			if argsDesc[base] && off == countDisp {
+				countRegs[rt] = true
+			}
+			continue
+		}
+		if base, rt, off, ok := arm64.LDUR32(raw); ok {
+			kill(rt)
+			if argsDesc[base] && off == countDisp {
 				countRegs[rt] = true
 			}
 			continue
@@ -145,6 +187,126 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 	return bestPC, ReceiverLoad{Reg: bestReg, ClassCID: ownerCID}, true
 }
 
+// RecoverArgsDescReceiverX86 is the x86_64 counterpart. The exact SDK lowering
+// of LoadFpRelativeSlot is `movq(out, [FP + smi_index*4 + offset])`; the Smi
+// scale of four yields an eight-byte stack-slot stride. Compressed builds may
+// insert MOVSXD on the index first. We require the complete provenance chain
+// ARGS_DESC_REG -> ArgumentsDescriptor.count -> subtract fixed-parameter count
+// -> indexed FP load, then the same owner-field use gate as static stack-slot
+// recovery. A bare `[RBP + reg*4 + disp]` is not enough.
+func RecoverArgsDescReceiverX86(insts []x86.Decoded, ownerCID int, ctx *TypeContext) (uint64, ReceiverLoad, bool) {
+	if ctx == nil || (ctx.WordSize != 4 && ctx.WordSize != 8) {
+		return 0, ReceiverLoad{}, false
+	}
+	countDisp := int64(4*int(ctx.WordSize) - sdk.HeapObjectTag)
+
+	argsDesc := map[int]bool{sdk.X86ArgsDesc: true}
+	countRegs := map[int]bool{}
+	indexRegs := map[int]bool{}
+
+	bestDisp := int64(-1)
+	bestReg, bestAt := -1, -1
+	var bestPC uint64
+
+	kill := func(reg int) {
+		delete(argsDesc, reg)
+		delete(countRegs, reg)
+		delete(indexRegs, reg)
+	}
+	for i := range insts {
+		if insts[i].Bad {
+			break
+		}
+		in := insts[i].Inst
+		if in.Op == x86asm.RET || in.Op == x86asm.CALL {
+			break
+		}
+		if in.Op == x86asm.JMP || x86.IsCondJump(in.Op) {
+			break
+		}
+
+		// The parameter load produced by LoadIndexedUnsafeInstr.
+		if in.Op == x86asm.MOV && len(in.Args) >= 2 {
+			if dst, ok := in.Args[0].(x86asm.Reg); ok {
+				dstIdx := x86.CanonReg(dst)
+				if mem, ok := in.Args[1].(x86asm.Mem); ok &&
+					x86.CanonReg(mem.Base) == sdk.X86FrameReg &&
+					mem.Scale == 4 && indexRegs[x86.CanonReg(mem.Index)] {
+					if mem.Disp > bestDisp {
+						bestDisp, bestReg, bestAt, bestPC = mem.Disp, dstIdx, i, insts[i].VA
+					}
+					kill(dstIdx)
+					continue
+				}
+			}
+		}
+
+		// Exact ArgumentsDescriptor.count load from the tagged descriptor.
+		if in.Op == x86asm.MOV && len(in.Args) >= 2 {
+			dst, dstOK := in.Args[0].(x86asm.Reg)
+			mem, memOK := in.Args[1].(x86asm.Mem)
+			if dstOK && memOK && mem.Index == 0 {
+				dstIdx := x86.CanonReg(dst)
+				baseIdx := x86.CanonReg(mem.Base)
+				if dstIdx >= 0 && argsDesc[baseIdx] && mem.Disp == countDisp {
+					kill(dstIdx)
+					countRegs[dstIdx] = true
+					continue
+				}
+			}
+		}
+
+		// MOV copies descriptor/count/index provenance. MOVSXD is emitted on
+		// compressed x64 before the indexed FP load and preserves the Smi index.
+		if (in.Op == x86asm.MOV || in.Op == x86asm.MOVSXD) && len(in.Args) >= 2 {
+			dst, dstOK := in.Args[0].(x86asm.Reg)
+			src, srcOK := in.Args[1].(x86asm.Reg)
+			if dstOK && srcOK {
+				dstIdx, srcIdx := x86.CanonReg(dst), x86.CanonReg(src)
+				wasArgsDesc := argsDesc[srcIdx]
+				wasCount := countRegs[srcIdx]
+				wasIndex := indexRegs[srcIdx]
+				kill(dstIdx)
+				if in.Op == x86asm.MOV && wasArgsDesc {
+					argsDesc[dstIdx] = true
+				}
+				if in.Op == x86asm.MOV && wasCount {
+					countRegs[dstIdx] = true
+				}
+				if wasIndex {
+					indexRegs[dstIdx] = true
+				}
+				continue
+			}
+		}
+
+		// SmiBinaryOp(SUB) is a two-address x64 SUB. Only a register already
+		// proven to contain ArgumentsDescriptor.count may become the runtime index.
+		if in.Op == x86asm.SUB && len(in.Args) >= 2 {
+			if dst, ok := in.Args[0].(x86asm.Reg); ok {
+				dstIdx := x86.CanonReg(dst)
+				wasCount := countRegs[dstIdx]
+				kill(dstIdx)
+				if _, immOK := in.Args[1].(x86asm.Imm); wasCount && immOK {
+					indexRegs[dstIdx] = true
+				}
+				continue
+			}
+		}
+
+		for _, dst := range x86.DstRegsOfInst(in) {
+			if dst >= 0 {
+				kill(dst)
+			}
+		}
+	}
+
+	if bestReg < 0 || !x86RegUsedAsOwnerFieldBaseAfter(insts, bestAt+1, bestReg, ownerCID, ctx) {
+		return 0, ReceiverLoad{}, false
+	}
+	return bestPC, ReceiverLoad{Reg: bestReg, ClassCID: ownerCID}, true
+}
+
 // handleArgsDescReceiver types the destination of a parameter-0 load that the
 // prepass identified as producing `this`.
 func handleArgsDescReceiver(tc *transferCtx) bool {
@@ -155,7 +317,22 @@ func handleArgsDescReceiver(tc *transferCtx) bool {
 	if !ok || rl.Reg < 0 || rl.Reg >= 31 || rl.ClassCID < 0 {
 		return false
 	}
-	tc.state[rl.Reg] = KnownClass(rl.ClassCID)
-	tc.ctx.ArgsDescReceiverHits++
+	// The declaring owner is a safe upper bound only: an inherited instance
+	// method can run with a subclass receiver.
+	tc.state[rl.Reg] = ClassBound(rl.ClassCID)
+	tc.ctx.hitMetric(metricArgsDescReceiver, tc.inst.Addr, &tc.ctx.ArgsDescReceiverHits)
+	return true
+}
+
+func handleArgsDescReceiverX86(tc *transferCtxX86) bool {
+	if tc.ctx == nil || len(tc.ctx.ReceiverLoadAtPC) == 0 {
+		return false
+	}
+	rl, ok := tc.ctx.ReceiverLoadAtPC[tc.inst.VA]
+	if !ok || rl.Reg < 0 || rl.Reg >= 31 || rl.ClassCID < 0 {
+		return false
+	}
+	tc.state[rl.Reg] = ClassBound(rl.ClassCID)
+	tc.ctx.hitMetric(metricArgsDescReceiver, tc.inst.VA, &tc.ctx.ArgsDescReceiverHits)
 	return true
 }

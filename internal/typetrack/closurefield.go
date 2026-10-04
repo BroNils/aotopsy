@@ -1,7 +1,5 @@
 package typetrack
 
-import "strings"
-
 // closureFunctionOffset is the byte offset of UntaggedClosure.function
 // from a TAGGED Closure pointer.
 //
@@ -52,26 +50,23 @@ func ResolveClosureField(ctx *TypeContext, base TypeLattice, byteOff int) (TypeL
 		return Top(), false
 	}
 	sn := base.StubName
-	if !strings.HasPrefix(sn, "Closure:") {
+	if sn != "Closure" && sn != "ClosureEntry" {
 		return Top(), false
 	}
 	switch byteOff {
 	case closureFunctionOffset(ctx):
-		// StubOff holds the PP index the closure came from; the pool
-		// record maps it to the owner class ID, and a closure's
-		// function field holds a Function whose owner IS that class.
-		if ctx.PoolClosureClass != nil {
-			if ownerCID, ok := ctx.PoolClosureClass[base.StubOff]; ok && ownerCID >= 0 {
-				return KnownClass(ownerCID), true
-			}
-		}
+		// The field contains a Function OBJECT. Its owner may be a Class, but
+		// that does not make the Function object an instance of the owner class.
+		// We do not currently carry an exact Function-object CID here, so fail
+		// closed instead of fabricating the receiver/declaring class.
+		return Top(), true
 	case closureEntryPointOffset(ctx):
 		// entry_point_ is the cached code address, not a Function. It is
 		// what a closure call actually branches to, so carry it as a
 		// stub name handleBLR can resolve -- rather than mistyping the
 		// register as the closure's owner class, which is what matching
 		// offset 31 unconditionally used to do.
-		return KnownStub("ClosureEntry:"+sn[len("Closure:"):], base.StubOff), true
+		return KnownStub("ClosureEntry", base.StubOff), true
 	}
 	return Top(), false
 }

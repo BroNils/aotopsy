@@ -425,3 +425,21 @@ Both are necessary: Grep MCP finds the file/line fast, `gh api` gives versioned 
 - **from() differs between versions**: 2.12.0 ObjectStore::from() = &object_class_, 3.9.2 = &list_class_. IsolateObjectStore::from() is different and NOT used for serialization.
 - **Class ID extraction differs**: 2.x uses LDURH (16-bit, kClassIdTagPos=16), 3.x uses LDUR+UBFX (64-bit, kClassIdTagPos=12).
 - **Dispatch pattern differs**: 2.x uses cid_reg in-place (SUB X0, X0, #imm), 3.x uses LR as temp (SUB X30, X0, #imm).
+
+## Never copy the SDK (or any research data) into this repo
+
+The Dart SDK trees already live on this machine at
+`~/dev/dartsdk-research/<exact-version>/`. Research and verify **in place**
+there (`grep` finds, `Read` proves).
+
+- **Never** copy, mirror, rsync, extract or pull SDK files into the project
+  (including via `.sh` scripts), not into `.audit_*`, `.audit_closure/`,
+  `.audit_sdktest/`, `.handoff/`, `scratch/` or anywhere else under the repo.
+  Copies go stale, bloat the project to hundreds of MB, and are never the
+  source of truth. A missing version is added to `~/dev/dartsdk-research/`
+  from `~/dev/.dartsdk-mirror.git`, not into this repo.
+- Temporary output (caches, proofs, helper scripts, test leftovers) goes in the
+  session scratchpad outside the repo and is **deleted when the task ends**.
+  If a test or script leaves files in the repo, remove them before finishing.
+- Every `.audit_closure/` folder holds only a `README.md` stating this rule.
+  Do not put anything else in it.

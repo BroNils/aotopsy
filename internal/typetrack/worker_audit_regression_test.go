@@ -14,10 +14,9 @@ import (
 
 func minimalTypeContext() *TypeContext {
 	return &TypeContext{
+		DartVersion:              "3.12.2",
 		FieldTypes:               map[int]int{},
 		FieldByOwnerOffset:       map[int]map[int32]int{},
-		InstanceFieldTypes:       map[int]map[int32]int{},
-		FieldStoreTypes:          map[int]map[int32]int{},
 		SuperClass:               map[int]int{},
 		CalleeExitTypes:          map[uint64]TypeLattice{},
 		CalleeAllExitTypes:       map[uint64][31]TypeLattice{},
@@ -31,14 +30,13 @@ func minimalTypeContext() *TypeContext {
 	}
 }
 
-func TestResolveDispatchCHAUsesOriginRelativeSelectorImmediate(t *testing.T) {
+func TestSelectorCandidatesUsesOriginRelativeSelectorImmediateWithoutRTAElimination(t *testing.T) {
 	ctx := minimalTypeContext()
 	origin, ok := sdk.DispatchTableOriginElement("3.12.2", sdk.ArchARM64)
 	if !ok {
 		t.Fatal("supported ARM64 dispatch origin unavailable")
 	}
 	ctx.KOriginElement = origin
-	ctx.Subclasses = map[int][]int{}
 	const (
 		classID    = 42
 		imm        = 100
@@ -46,10 +44,12 @@ func TestResolveDispatchCHAUsesOriginRelativeSelectorImmediate(t *testing.T) {
 	)
 	ctx.DispatchBySlot[classID+imm] = cluster.DispatchTableEntry{Kind: cluster.DispatchCode, ClusterIndex: clusterIdx}
 	ctx.DispatchCodeIndexToName[clusterIdx] = "foo"
+	ctx.SuperClass[classID] = -1
+	ctx.InstantiatedClasses = map[int]bool{999: true} // deliberately excludes classID
 
-	targets := ctx.ResolveDispatchCHA(classID, imm)
+	targets := ctx.selectorCandidates(imm)
 	if len(targets) != 1 || targets[0] != "foo" {
-		t.Fatalf("ResolveDispatchCHA(%d,%d) = %v, want [foo]", classID, imm, targets)
+		t.Fatalf("selectorCandidates(%d) = %v, want [foo]", imm, targets)
 	}
 }
 
@@ -86,7 +86,6 @@ func TestBuildDispatchTablesDerivesSelectorImmFromFunctionOwner(t *testing.T) {
 		ClusterIndex: clusterIdx,
 	}
 	ctx := minimalTypeContext()
-	ctx.CodeRefToName = map[int]string{}
 	buildDispatchTables(ctx, []cluster.DispatchTableEntry{entry}, map[int]*cluster.NamedObject{clusterIdx: fn}, result, pl, origin)
 
 	imms := ctx.MethodNameToSelectorImms["foo"]
@@ -136,8 +135,9 @@ func TestARMFieldLoadFormsRecordReadsWithoutFabricatingType(t *testing.T) {
 	for i, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := minimalTypeContext()
+			ctx.FieldByOwnerOffset[100] = map[int32]int{tt.off + 1: 900}
 			var state [31]TypeLattice
-			state[1] = KnownClass(100)
+			state[1] = ClassBound(100)
 			result := &IntraResult{}
 			tc := &transferCtx{
 				state:      &state,
@@ -163,7 +163,7 @@ func TestARMFieldLoadFormsRecordReadsWithoutFabricatingType(t *testing.T) {
 	}
 }
 
-func TestARMUnsignedFieldStoresPersistEvidence(t *testing.T) {
+func TestARMUnsignedFieldStoresRecordXrefWithoutClassWideValueFact(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  uint32
@@ -175,23 +175,25 @@ func TestARMUnsignedFieldStoresPersistEvidence(t *testing.T) {
 	for i, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := minimalTypeContext()
+			ctx.FieldByOwnerOffset[100] = map[int32]int{tt.off + 1: 900}
 			var state [31]TypeLattice
-			state[1] = KnownClass(100)
-			state[2] = KnownClass(200)
+			state[1] = ExactClass(100)
+			state[2] = ExactClass(200)
 			result := &IntraResult{}
+			stack := map[int]TypeLattice{}
 			tc := &transferCtx{
 				state:      &state,
 				inst:       disasm.Inst{Addr: uint64(0x2000 + i*4), Raw: tt.raw, Size: 4},
 				ctx:        ctx,
 				result:     result,
-				stackTypes: map[int]TypeLattice{},
+				stackTypes: stack,
 			}
 			handleStackStore(tc)
 			if len(result.FieldAccesses) != 1 || !result.FieldAccesses[0].IsStore {
 				t.Fatalf("%s did not emit one store xref: %+v", tt.name, result.FieldAccesses)
 			}
-			if got := ctx.FieldStoreTypes[100][tt.off+1]; got != 200 {
-				t.Fatalf("%s persistent store type = %d, want 200", tt.name, got)
+			if len(stack) != 0 {
+				t.Fatalf("%s created class-wide pseudo-memory facts: %v", tt.name, stack)
 			}
 		})
 	}
@@ -204,7 +206,7 @@ func TestSuperclassCyclesDegradeWithoutLooping(t *testing.T) {
 	}
 	ctx := minimalTypeContext()
 	ctx.SuperClass = hierarchy
-	if _, ok := ctx.FieldValueClass(3, 7); ok {
+	if _, ok := ctx.FieldValueType(3, 7, 0); ok {
 		t.Fatal("cyclic hierarchy fabricated a field type")
 	}
 	if ctx.OwnerHasFieldAt(3, 7) {
@@ -262,10 +264,9 @@ func TestKnownStubBLRProducesExactlyOneResolution(t *testing.T) {
 
 func TestGenericAllocationBLRDoesNotTreatPreCallR0AsAllocatedClass(t *testing.T) {
 	ctx := minimalTypeContext()
-	ctx.AllocationSites = map[uint64]int{}
 	ctx.InstantiatedClasses = map[int]bool{}
 	var state [31]TypeLattice
-	state[0] = KnownClass(777) // stale/pre-call value; not an AllocateObject input
+	state[0] = ExactClass(777) // stale/pre-call value; not an AllocateObject input
 	state[1] = KnownStub("AllocateObject", 0x220)
 	result := &IntraResult{}
 	tc := &transferCtx{
@@ -281,19 +282,20 @@ func TestGenericAllocationBLRDoesNotTreatPreCallR0AsAllocatedClass(t *testing.T)
 	if state[0].Kind != LatticeTop {
 		t.Fatalf("post-allocation R0 = %+v, want Top when class is unknown", state[0])
 	}
-	if len(ctx.AllocationSites) != 0 || len(ctx.InstantiatedClasses) != 0 {
-		t.Fatalf("generic allocation fabricated class evidence: sites=%v instantiated=%v", ctx.AllocationSites, ctx.InstantiatedClasses)
+	if len(ctx.InstantiatedClasses) != 0 {
+		t.Fatalf("generic allocation fabricated observed class evidence: instantiated=%v", ctx.InstantiatedClasses)
 	}
 }
 
 func TestFixedPointEvidenceReplacesEarlierVisitAtSamePC(t *testing.T) {
 	ctx := minimalTypeContext()
+	ctx.FieldByOwnerOffset[100] = map[int32]int{9: 900}
 	result := &IntraResult{}
 	const pc = uint64(0x4200)
 
 	// First visit has a concrete receiver and records a field access.
 	var first [31]TypeLattice
-	first[1] = KnownClass(100)
+	first[1] = ClassBound(100)
 	transferInstruction(&first, disasm.Inst{Addr: pc, Raw: 0xF9400420, Size: 4}, 0, ctx, result, nil, map[int]TypeLattice{}, nil) // LDR X0,[X1,#8]
 	if len(result.FieldAccesses) != 1 || result.FieldAccesses[0].ClassID != 100 {
 		t.Fatalf("first visit field evidence = %+v", result.FieldAccesses)
@@ -326,14 +328,14 @@ func TestX86UnknownFullExitUsesDeclaredReturnSeed(t *testing.T) {
 	target := call.VA + uint64(call.Len) + uint64(int64(x86asm.Rel(0x10fb)))
 	ctx := minimalTypeContext()
 	ctx.CalleeAllExitTypes[target] = [31]TypeLattice{}
-	ctx.CalleeExitTypes[target] = KnownClass(42)
+	ctx.CalleeExitTypes[target] = ClassBound(42)
 	var state [31]TypeLattice
-	state[x86RegRAX] = KnownClass(7)
+	state[x86RegRAX] = ExactClass(7)
 	tc := &transferCtxX86{state: &state, inst: call, ctx: ctx, result: &IntraResult{}, stackTypes: map[int]TypeLattice{}}
 	if !handleX86Call(tc) {
 		t.Fatal("direct x86 CALL was not handled")
 	}
-	if !state[x86RegRAX].Equal(KnownClass(42)) {
+	if !state[x86RegRAX].Equal(ClassBound(42)) {
 		t.Fatalf("RAX after call = %+v, want declared return Class(42)", state[x86RegRAX])
 	}
 }
@@ -347,14 +349,14 @@ func TestARMUnknownFullExitUsesDeclaredReturnSeed(t *testing.T) {
 	}
 	ctx := minimalTypeContext()
 	ctx.CalleeAllExitTypes[target] = [31]TypeLattice{}
-	ctx.CalleeExitTypes[target] = KnownClass(42)
+	ctx.CalleeExitTypes[target] = ClassBound(42)
 	var state [31]TypeLattice
-	state[0] = KnownClass(7)
+	state[0] = ExactClass(7)
 	tc := &transferCtx{state: &state, inst: disasm.Inst{Addr: pc, Raw: raw, Size: 4}, ctx: ctx, result: &IntraResult{}, stackTypes: map[int]TypeLattice{}}
 	if !handleBL(tc) {
 		t.Fatal("ARM BL was not handled")
 	}
-	if !state[0].Equal(KnownClass(42)) {
+	if !state[0].Equal(ClassBound(42)) {
 		t.Fatalf("X0 after BL = %+v, want declared return Class(42)", state[0])
 	}
 }
@@ -368,16 +370,16 @@ func TestARMCallDoesNotImportCalleeLocalRegisters(t *testing.T) {
 	}
 	ctx := minimalTypeContext()
 	var exit [31]TypeLattice
-	exit[0] = KnownClass(42)
-	exit[1] = KnownClass(99) // local callee state, never an ABI output
+	exit[0] = ExactClass(42)
+	exit[1] = ExactClass(99) // local callee state, never an ABI output
 	ctx.CalleeAllExitTypes[target] = exit
 	var state [31]TypeLattice
-	state[1] = KnownClass(7)
+	state[1] = ExactClass(7)
 	tc := &transferCtx{state: &state, inst: disasm.Inst{Addr: pc, Raw: raw, Size: 4}, ctx: ctx, result: &IntraResult{}, stackTypes: map[int]TypeLattice{}}
 	if !handleBL(tc) {
 		t.Fatal("ARM BL was not handled")
 	}
-	if !state[0].Equal(KnownClass(42)) {
+	if !state[0].Equal(ExactClass(42)) {
 		t.Fatalf("X0 after BL = %+v, want return Class(42)", state[0])
 	}
 	if state[1].Kind != LatticeTop {
@@ -390,20 +392,20 @@ func TestX86CallDoesNotImportCalleeLocalRegisters(t *testing.T) {
 	target := call.VA + uint64(call.Len) + uint64(int64(x86asm.Rel(0x20)))
 	ctx := minimalTypeContext()
 	var exit [31]TypeLattice
-	exit[x86RegRAX] = KnownClass(42)
-	exit[13] = KnownClass(99) // callee local R13 state
+	exit[x86RegRAX] = ExactClass(42)
+	exit[13] = ExactClass(99) // callee local R13 state
 	ctx.CalleeAllExitTypes[target] = exit
 	var state [31]TypeLattice
-	state[13] = KnownClass(7)
+	state[13] = ExactClass(7)
 	tc := &transferCtxX86{state: &state, inst: call, ctx: ctx, result: &IntraResult{}, stackTypes: map[int]TypeLattice{}}
 	if !handleX86Call(tc) {
 		t.Fatal("x86 CALL was not handled")
 	}
-	if !state[x86RegRAX].Equal(KnownClass(42)) {
+	if !state[x86RegRAX].Equal(ExactClass(42)) {
 		t.Fatalf("RAX after CALL = %+v, want return Class(42)", state[x86RegRAX])
 	}
-	if !state[13].Equal(KnownClass(7)) {
-		t.Fatalf("R13 after CALL = %+v, want caller state Class(7); callee local register leaked", state[13])
+	if state[13].Kind != LatticeTop {
+		t.Fatalf("R13 after CALL = %+v, want Top; Dart calls clobber every allocatable register", state[13])
 	}
 }
 
@@ -426,12 +428,104 @@ func TestX86FlagClobberInvalidatesClassNarrowing(t *testing.T) {
 	}
 }
 
-func TestInvalidateSelectorCacheClearsMonomorphicFastPath(t *testing.T) {
+func TestSelectorCacheIsIndependentOfObservedInstantiationSet(t *testing.T) {
 	ctx := minimalTypeContext()
-	ctx.SelectorCache[7] = []string{"only"}
-	ctx.SelectorMonomorphic[7] = "only"
-	ctx.InvalidateSelectorCache()
-	if len(ctx.SelectorCache) != 0 || len(ctx.SelectorMonomorphic) != 0 {
-		t.Fatalf("selector caches survived invalidation: cache=%v mono=%v", ctx.SelectorCache, ctx.SelectorMonomorphic)
+	ctx.DispatchBySlot[12] = cluster.DispatchTableEntry{Kind: cluster.DispatchCode, ClusterIndex: 1}
+	ctx.DispatchCodeIndexToName[1] = "only"
+	ctx.SuperClass[5] = -1 // 5 + selector 7 = slot 12
+	first := ctx.selectorCandidates(7)
+	ctx.InstantiatedClasses = map[int]bool{999: true}
+	second := ctx.selectorCandidates(7)
+	if len(first) != 1 || first[0] != "only" || len(second) != 1 || second[0] != "only" {
+		t.Fatalf("observed instantiation set changed selector candidates: first=%v second=%v", first, second)
+	}
+}
+
+func TestInterproceduralBudgetExhaustionFallsBackWithoutPropagatedParameterFact(t *testing.T) {
+	ctx := minimalTypeContext()
+	ctx.FuncOwnerClass = map[string]int{"callerA": 100, "callerB": 100}
+	ctx.FuncReceiverInRegister = map[string]bool{"callerA": true, "callerB": true}
+	ctx.FuncMayUseRegisterCC = map[string]bool{"callee": true}
+	ctx.MethodNameToRefIDs = map[string][]int{}
+	ctx.FuncParamTypes = map[int][]int{}
+	ctx.FuncIsInstance = map[int]bool{}
+	ctx.FuncReturnType = map[int]int{}
+
+	caller := func(pc uint64) []disasm.Inst {
+		return []disasm.Inst{
+			{Addr: pc, Raw: 0x94000000, Size: 4}, // BL; target is irrelevant to explicit BLEdge below.
+			{Addr: pc + 4, Raw: 0xD65F03C0, Size: 4},
+		}
+	}
+	funcs := FuncInstsARM64{
+		"callerA": caller(0x8000),
+		"callerB": caller(0x9000),
+		"callee":  {{Addr: 0xA000, Raw: 0xD65F03C0, Size: 4}},
+	}
+	edges := map[string][]BLEdge{
+		"callerA": {{Callee: "callee", CallPC: 0x8000, ArgMask: 1}},
+		"callerB": {{Callee: "callee", CallPC: 0x9000, ArgMask: 1}},
+	}
+
+	result := RunInterprocedural(ctx, funcs, nil, edges, 1, true, nil)
+	if result.Converged || result.Iterations != 1 || ctx.InterConverged || ctx.InterIterations != 1 {
+		t.Fatalf("budget telemetry = result(converged=%v iter=%d) ctx(converged=%v iter=%d), want exhausted after one round",
+			result.Converged, result.Iterations, ctx.InterConverged, ctx.InterIterations)
+	}
+	callee := result.Functions["callee"]
+	if callee == nil || callee.Intra == nil {
+		t.Fatal("callee analysis missing after conservative fallback")
+	}
+	cc, ok := sdk.DartRegisterCallingConvention(ctx.DartVersion, sdk.ArchARM64)
+	if !ok || len(cc.GPR) == 0 {
+		t.Fatal("test SDK register convention unavailable")
+	}
+	if got := callee.Intra.EntryTypes[cc.GPR[0]]; got.Kind != LatticeTop {
+		t.Fatalf("callee retained partially propagated receiver fact after budget exhaustion: %+v", got)
+	}
+}
+
+func TestInterproceduralArgMaskConsensusIncludesZeroEvidence(t *testing.T) {
+	ctx := minimalTypeContext()
+	ctx.FuncMayUseRegisterCC = map[string]bool{"callee": true}
+	ctx.FuncReceiverInRegister = map[string]bool{"callerA": true, "callerB": true, "callerC": true}
+	ctx.FuncReceiverStackSlot = map[string]int{}
+	ctx.FuncOwnerClass = map[string]int{"callerA": 100, "callerB": 100, "callerC": 100}
+	ctx.MethodNameToRefIDs = map[string][]int{}
+	ctx.FuncParamTypes = map[int][]int{}
+	ctx.FuncIsInstance = map[int]bool{}
+	ctx.FuncReturnType = map[int]int{}
+
+	caller := func(pc uint64) []disasm.Inst {
+		return []disasm.Inst{
+			{Addr: pc, Raw: 0x94000000, Size: 4},
+			{Addr: pc + 4, Raw: 0xD65F03C0, Size: 4},
+		}
+	}
+	funcs := FuncInstsARM64{
+		"callerA": caller(0xB000),
+		"callerB": caller(0xC000),
+		"callerC": caller(0xD000),
+		"callee":  {{Addr: 0xE000, Raw: 0xD65F03C0, Size: 4}},
+	}
+	edges := map[string][]BLEdge{
+		"callerA": {{Callee: "callee", CallPC: 0xB000, ArgMask: 1}},
+		"callerB": {{Callee: "callee", CallPC: 0xC000, ArgMask: 1}},
+		// This is an observed direct call site with no register setup in the
+		// local evidence window. It must veto position 0 rather than disappear.
+		"callerC": {{Callee: "callee", CallPC: 0xD000, ArgMask: 0}},
+	}
+
+	result := RunInterprocedural(ctx, funcs, nil, edges, 3, true, nil)
+	callee := result.Functions["callee"]
+	if callee == nil || callee.Intra == nil {
+		t.Fatal("callee analysis missing")
+	}
+	cc, ok := sdk.DartRegisterCallingConvention(ctx.DartVersion, sdk.ArchARM64)
+	if !ok || len(cc.GPR) == 0 {
+		t.Fatal("test SDK register convention unavailable")
+	}
+	if got := callee.Intra.EntryTypes[cc.GPR[0]]; got.Kind != LatticeTop {
+		t.Fatalf("zero-mask call site was ignored and false arg-register consensus leaked into callee: %+v", got)
 	}
 }

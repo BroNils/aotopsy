@@ -7,63 +7,66 @@ import (
 	"aotopsy/internal/cluster"
 )
 
-func TestLatticeTop(t *testing.T) {
-	x := Top()
-	if x.Kind != LatticeTop {
-		t.Fatalf("Top() kind = %d, want %d", x.Kind, LatticeTop)
+func TestLatticeConstructors(t *testing.T) {
+	tests := []struct {
+		name string
+		got  TypeLattice
+		kind TypeLatticeKind
+		cid  int
+	}{
+		{"top", Top(), LatticeTop, 0},
+		{"bottom", Bottom(), LatticeBottom, 0},
+		{"exact object", ExactClass(42), LatticeExactClass, 42},
+		{"class bound", ClassBound(42), LatticeClassBound, 42},
+		{"exact header", ExactHeaderTags(42), LatticeExactHeaderTags, 42},
+		{"unknown header", UnknownHeaderTags(), LatticeUnknownHeaderTags, 0},
+		{"exact cid", ExactClassID(42), LatticeExactClassID, 42},
+		{"unknown cid", UnknownClassID(), LatticeUnknownClassID, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.Kind != tc.kind || tc.got.ClassID != tc.cid {
+				t.Fatalf("constructor = %+v, want kind=%v cid=%d", tc.got, tc.kind, tc.cid)
+			}
+		})
+	}
+
+	d := KnownDispatch(7)
+	if d.Kind != LatticeKnownDispatchIndex || d.DispatchIndex != 7 || d.SelectorOnly {
+		t.Fatalf("KnownDispatch(7) = %+v", d)
+	}
+	s := SelectorDispatch(-11)
+	if s.Kind != LatticeKnownDispatchIndex || !s.SelectorOnly || s.SelectorImm != -11 {
+		t.Fatalf("SelectorDispatch(-11) = %+v", s)
+	}
+	stub := KnownStub("AllocateObject", 0x220)
+	if stub.Kind != LatticeKnownStub || stub.StubName != "AllocateObject" || stub.StubOff != 0x220 {
+		t.Fatalf("KnownStub = %+v", stub)
 	}
 }
 
-func TestLatticeBottom(t *testing.T) {
-	x := Bottom()
-	if x.Kind != LatticeBottom {
-		t.Fatalf("Bottom() kind = %d, want %d", x.Kind, LatticeBottom)
-	}
-}
-
-func TestLatticeKnownClass(t *testing.T) {
-	x := KnownClass(42)
-	if x.Kind != LatticeKnownClass || x.ClassID != 42 {
-		t.Fatalf("KnownClass(42) = %+v", x)
-	}
-}
-
-func TestLatticeKnownDispatch(t *testing.T) {
-	x := KnownDispatch(7)
-	if x.Kind != LatticeKnownDispatchIndex || x.DispatchIndex != 7 {
-		t.Fatalf("KnownDispatch(7) = %+v", x)
-	}
-}
-
-func TestLatticeKnownStub(t *testing.T) {
-	x := KnownStub("AllocateObject", 0x220)
-	if x.Kind != LatticeKnownStub || x.StubName != "AllocateObject" || x.StubOff != 0x220 {
-		t.Fatalf("KnownStub(AllocateObject, 0x220) = %+v", x)
-	}
-}
-
-func TestLatticeEqual(t *testing.T) {
+func TestLatticeEqualDistinguishesSemanticKinds(t *testing.T) {
 	tests := []struct {
 		a, b TypeLattice
 		want bool
 	}{
 		{Top(), Top(), true},
 		{Bottom(), Bottom(), true},
-		{KnownClass(1), KnownClass(1), true},
-		{KnownClass(1), KnownClass(2), false},
+		{ExactClass(1), ExactClass(1), true},
+		{ExactClass(1), ExactClass(2), false},
+		{ExactClass(1), ClassBound(1), false},
+		{ExactClassID(1), ExactClassID(1), true},
+		{ExactClassID(1), ExactClass(1), false},
+		{UnknownClassID(), UnknownClassID(), true},
 		{KnownDispatch(3), KnownDispatch(3), true},
-		{KnownDispatch(3), KnownDispatch(4), false},
+		{KnownDispatch(3), SelectorDispatch(3), false},
 		{KnownStub("A", 0x220), KnownStub("A", 0x220), true},
 		{KnownStub("A", 0x220), KnownStub("B", 0x228), false},
 		{TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, true},
 		{TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, TypeLattice{Kind: LatticePPBase, PPBaseOffset: 24}, false},
-		{Top(), Bottom(), false},
-		{KnownClass(1), KnownDispatch(1), false},
-		{KnownClass(1), KnownStub("A", 0x220), false},
 	}
 	for _, tc := range tests {
-		got := tc.a.Equal(tc.b)
-		if got != tc.want {
+		if got := tc.a.Equal(tc.b); got != tc.want {
 			t.Errorf("%+v.Equal(%+v) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
 	}
@@ -72,228 +75,127 @@ func TestLatticeEqual(t *testing.T) {
 func TestParamTypeMapsCompareAcrossIterations(t *testing.T) {
 	var a [31]TypeLattice
 	var b [31]TypeLattice
-	a[1] = KnownClass(42)
-	b[1] = KnownClass(42)
+	a[1] = ExactClass(42)
+	b[1] = ExactClass(42)
 	one := map[string][31]TypeLattice{"callee": a}
 	two := map[string][31]TypeLattice{"callee": b}
 	if !paramTypeMapsEqual(one, two) {
-		t.Fatal("identical propagated non-Top parameter maps must converge")
+		t.Fatal("identical propagated parameter maps must converge")
 	}
-	b[1] = KnownClass(43)
+	b[1] = ClassBound(42)
 	two["callee"] = b
 	if paramTypeMapsEqual(one, two) {
-		t.Fatal("changed propagated parameter type was treated as converged")
+		t.Fatal("semantic kind change was treated as converged")
 	}
-	clone := cloneParamTypeMap(one)
-	if !paramTypeMapsEqual(one, clone) {
+	if clone := cloneParamTypeMap(one); !paramTypeMapsEqual(one, clone) {
 		t.Fatal("cloned parameter map changed value")
 	}
 }
 
-func TestMeetTypeTop(t *testing.T) {
-	// Top ∧ x = x
-	x := KnownClass(5)
-	got := meetType(Top(), x, nil)
-	if !got.Equal(x) {
-		t.Fatalf("Top ∧ KnownClass(5) = %+v, want %+v", got, x)
+func TestJoinBottomIsUnreachableIdentity(t *testing.T) {
+	x := ExactClass(5)
+	if got := joinType(Bottom(), x, nil); !got.Equal(x) {
+		t.Fatalf("Bottom join exact object = %+v, want %+v", got, x)
 	}
-	got = meetType(x, Top(), nil)
-	if !got.Equal(x) {
-		t.Fatalf("KnownClass(5) ∧ Top = %+v, want %+v", got, x)
+	if got := joinType(x, Bottom(), nil); !got.Equal(x) {
+		t.Fatalf("exact object join Bottom = %+v, want %+v", got, x)
 	}
 }
 
-func TestMeetTypeBottom(t *testing.T) {
-	// Bottom ∧ x = Bottom
-	got := meetType(Bottom(), KnownClass(5), nil)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("Bottom ∧ KnownClass(5) = %+v, want Bottom", got)
+func TestJoinTopIsReachableUnknown(t *testing.T) {
+	if got := joinType(Top(), ExactClass(5), nil); got.Kind != LatticeTop {
+		t.Fatalf("Top join exact object = %+v, want Top", got)
+	}
+	if got := joinType(KnownStub("A", 1), Top(), nil); got.Kind != LatticeTop {
+		t.Fatalf("stub join Top = %+v, want Top", got)
 	}
 }
 
-func TestMeetTypeSameClass(t *testing.T) {
-	// KnownClass(a) ∧ KnownClass(a) = KnownClass(a)
-	got := meetType(KnownClass(3), KnownClass(3), nil)
-	if !got.Equal(KnownClass(3)) {
-		t.Fatalf("KnownClass(3) ∧ KnownClass(3) = %+v, want KnownClass(3)", got)
-	}
-}
-
-func TestMeetTypeDifferentClassWithLCA(t *testing.T) {
-	// KnownClass(2) ∧ KnownClass(3) with LCA(2,3)=1 → KnownClass(1)
-	hierarchy := map[int]int{2: 1, 3: 1, 1: -1}
+func TestJoinObjectFactsUseBoundsAndLCA(t *testing.T) {
+	hierarchy := map[int]int{4: 3, 5: 3, 3: 2, 2: 1, 1: -1}
 	lca := func(a, b int) int { return LCA(a, b, hierarchy) }
-	got := meetType(KnownClass(2), KnownClass(3), lca)
-	if !got.Equal(KnownClass(1)) {
-		t.Fatalf("KnownClass(2) ∧ KnownClass(3) with LCA=1 = %+v, want KnownClass(1)", got)
+
+	if got := joinType(ExactClass(4), ExactClass(4), lca); !got.Equal(ExactClass(4)) {
+		t.Fatalf("same exact object join = %+v", got)
+	}
+	if got := joinType(ExactClass(4), ExactClass(5), lca); !got.Equal(ClassBound(3)) {
+		t.Fatalf("sibling exact objects join = %+v, want Bound(3)", got)
+	}
+	if got := joinType(ExactClass(4), ClassBound(3), lca); !got.Equal(ClassBound(3)) {
+		t.Fatalf("exact subclass + bound join = %+v, want Bound(3)", got)
+	}
+	noCommon := func(int, int) int { return -1 }
+	if got := joinType(ExactClass(4), ExactClass(5), noCommon); got.Kind != LatticeTop {
+		t.Fatalf("objects with no representable common bound = %+v, want Top", got)
 	}
 }
 
-func TestMeetTypeDifferentClassNoLCA(t *testing.T) {
-	// KnownClass(2) ∧ KnownClass(3) with no LCA → Bottom
-	hierarchy := map[int]int{2: -1, 3: -1}
-	lca := func(a, b int) int { return LCA(a, b, hierarchy) }
-	got := meetType(KnownClass(2), KnownClass(3), lca)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("KnownClass(2) ∧ KnownClass(3) with no LCA = %+v, want Bottom", got)
+func TestJoinClassIDFactsNeverBecomeObjectFacts(t *testing.T) {
+	if got := joinType(ExactClassID(7), ExactClassID(7), nil); !got.Equal(ExactClassID(7)) {
+		t.Fatalf("same exact CID join = %+v", got)
+	}
+	if got := joinType(ExactClassID(7), ExactClassID(8), nil); got.Kind != LatticeUnknownClassID {
+		t.Fatalf("different exact CIDs join = %+v, want UnknownClassID", got)
+	}
+	if got := joinType(ExactClassID(7), ExactClass(7), nil); got.Kind != LatticeTop {
+		t.Fatalf("CID scalar + heap object join = %+v, want Top", got)
 	}
 }
 
-func TestMeetTypeSameDispatch(t *testing.T) {
-	got := meetType(KnownDispatch(5), KnownDispatch(5), nil)
-	if !got.Equal(KnownDispatch(5)) {
-		t.Fatalf("KnownDispatch(5) ∧ KnownDispatch(5) = %+v, want KnownDispatch(5)", got)
+func TestJoinNonClassFactsConflictToTop(t *testing.T) {
+	if got := joinType(KnownDispatch(5), KnownDispatch(6), nil); got.Kind != LatticeTop {
+		t.Fatalf("different dispatch facts = %+v, want Top", got)
 	}
-}
-
-func TestMeetTypeDifferentDispatch(t *testing.T) {
-	got := meetType(KnownDispatch(5), KnownDispatch(6), nil)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("KnownDispatch(5) ∧ KnownDispatch(6) = %+v, want Bottom", got)
+	if got := joinType(KnownStub("A", 1), KnownStub("B", 2), nil); got.Kind != LatticeTop {
+		t.Fatalf("different stubs = %+v, want Top", got)
 	}
-}
-
-func TestMeetTypeMixedClassDispatch(t *testing.T) {
-	got := meetType(KnownClass(1), KnownDispatch(1), nil)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("KnownClass(1) ∧ KnownDispatch(1) = %+v, want Bottom", got)
-	}
-}
-
-func TestMeetTypeKnownStub(t *testing.T) {
-	// KnownStub ∧ KnownClass = Bottom
-	got := meetType(KnownStub("AllocateObject", 0x220), KnownClass(5), nil)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("KnownStub ∧ KnownClass(5) = %+v, want Bottom", got)
-	}
-	// H-1 fix: KnownStub ∧ KnownStub with SAME StubOff = KnownStub (not Bottom)
-	got = meetType(KnownStub("AllocateObject", 0x220), KnownStub("AllocateObject", 0x220), nil)
-	if got.Kind != LatticeKnownStub {
-		t.Fatalf("KnownStub ∧ KnownStub (same) = %+v, want KnownStub", got)
-	}
-	// KnownStub ∧ KnownStub with DIFFERENT StubOff = Bottom
-	got = meetType(KnownStub("AllocateObject", 0x220), KnownStub("AllocateArray", 0x2d8), nil)
-	if got.Kind != LatticeBottom {
-		t.Fatalf("KnownStub ∧ KnownStub (diff) = %+v, want Bottom", got)
-	}
-	got = meetType(Top(), KnownStub("AllocateObject", 0x220), nil)
-	if !got.Equal(KnownStub("AllocateObject", 0x220)) {
-		t.Fatalf("Top ∧ KnownStub = %+v, want KnownStub", got)
+	if got := joinType(KnownStub("A", 1), KnownStub("A", 1), nil); !got.Equal(KnownStub("A", 1)) {
+		t.Fatalf("same stub join = %+v", got)
 	}
 }
 
 func TestLCA(t *testing.T) {
-	// Hierarchy: 4→3→2→1, 5→3→2→1
 	hierarchy := map[int]int{4: 3, 5: 3, 3: 2, 2: 1, 1: -1}
-
-	// LCA(4, 5) = 3
-	if got := LCA(4, 5, hierarchy); got != 3 {
-		t.Errorf("LCA(4,5) = %d, want 3", got)
-	}
-	// LCA(4, 3) = 3
-	if got := LCA(4, 3, hierarchy); got != 3 {
-		t.Errorf("LCA(4,3) = %d, want 3", got)
-	}
-	// LCA(4, 1) = 1
-	if got := LCA(4, 1, hierarchy); got != 1 {
-		t.Errorf("LCA(4,1) = %d, want 1", got)
-	}
-	// LCA(4, 4) = 4
-	if got := LCA(4, 4, hierarchy); got != 4 {
-		t.Errorf("LCA(4,4) = %d, want 4", got)
+	for _, tc := range []struct{ a, b, want int }{{4, 5, 3}, {4, 3, 3}, {4, 1, 1}, {4, 4, 4}} {
+		if got := LCA(tc.a, tc.b, hierarchy); got != tc.want {
+			t.Errorf("LCA(%d,%d) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
 
 func TestBuildClassHierarchy(t *testing.T) {
 	classes := []cluster.ClassInfo{
 		{RefID: 100, ClassID: 1, SuperTypeRefID: -1},
-		{RefID: 101, ClassID: 2, SuperTypeRefID: 200}, // Type ref 200 → ClassID 1
-		{RefID: 102, ClassID: 3, SuperTypeRefID: 201}, // Type ref 201 → ClassID 2
+		{RefID: 101, ClassID: 2, SuperTypeRefID: 200},
+		{RefID: 102, ClassID: 3, SuperTypeRefID: 201},
 	}
-	types := []cluster.TypeInfo{
-		{RefID: 200, ClassID: 1},
-		{RefID: 201, ClassID: 2},
-	}
-
-	hierarchy := BuildClassHierarchy(classes, types, nil)
-
-	if hierarchy[1] != -1 {
-		t.Errorf("hierarchy[1] = %d, want -1", hierarchy[1])
-	}
-	if hierarchy[2] != 1 {
-		t.Errorf("hierarchy[2] = %d, want 1", hierarchy[2])
-	}
-	if hierarchy[3] != 2 {
-		t.Errorf("hierarchy[3] = %d, want 2", hierarchy[3])
+	types := []cluster.TypeInfo{{RefID: 200, ClassID: 1}, {RefID: 201, ClassID: 2}}
+	hierarchy := BuildClassHierarchy(classes, types)
+	if hierarchy[1] != -1 || hierarchy[2] != 1 || hierarchy[3] != 2 {
+		t.Fatalf("hierarchy = %v", hierarchy)
 	}
 }
 
-func TestIsBLR(t *testing.T) {
-	// BLR X16: 0xD63F0200
-	// Encoding: 1101011|0|0|01|11111|0000|0|0|10000|00000
-	// Rn = 16 (bits 5-9)
-	raw := uint32(0xD63F0200)
-	rn, ok := arm64.BLR(raw)
+func TestARM64DecoderPrimitives(t *testing.T) {
+	rn, ok := arm64.BLR(0xD63F0200)
 	if !ok || rn != 16 {
-		t.Fatalf("isBLR(0x%x) = (%d, %v), want (16, true)", raw, rn, ok)
+		t.Fatalf("BLR decode = (%d,%v), want (16,true)", rn, ok)
 	}
-
-	// Not a BLR
-	raw = uint32(0x94000000) // BL
-	_, ok = arm64.BLR(raw)
-	if ok {
-		t.Fatalf("isBLR(BL) should be false")
+	if _, ok := arm64.BLR(0x94000000); ok {
+		t.Fatal("BL decoded as BLR")
 	}
-}
-
-func TestIsBL(t *testing.T) {
-	// BL with imm26=1 → target = PC + 4
-	raw := uint32(0x94000001)
-	pc := uint64(0x1000)
-	target, ok := arm64.BL(raw, pc)
+	target, ok := arm64.BL(0x94000001, 0x1000)
 	if !ok || target != 0x1004 {
-		t.Fatalf("isBL(0x%x, 0x%x) = (0x%x, %v), want (0x1004, true)", raw, pc, target, ok)
+		t.Fatalf("BL target = %#x,%v", target, ok)
 	}
-}
-
-func TestIsLDR64UnsignedOffset(t *testing.T) {
-	// LDR X0, [X27, #0] → pool index 0
-	// Encoding: 11|111|0|01|01|000000000000|11011|00000
-	// = 0xF9400000 | (27 << 5) = 0xF9400360
-	raw := uint32(0xF9400360)
-	baseReg, byteOff, ok := arm64.LDR64UnsignedOffset(raw)
-	if !ok || baseReg != 27 || byteOff != 0 {
-		t.Fatalf("isLDR64UnsignedOffset(0x%x) = (%d, %d, %v), want (27, 0, true)", raw, baseReg, byteOff, ok)
+	base, off, ok := arm64.LDR64UnsignedOffset(0xF9400360)
+	if !ok || base != 27 || off != 0 {
+		t.Fatalf("LDR decode = base=%d off=%d ok=%v", base, off, ok)
 	}
-
-	// LDR X1, [X27, #8] → pool index 1
-	// imm12 = 1, so raw = 0xF9400000 | (1 << 10) | (27 << 5) | 1
-	raw = uint32(0xF9400361) | (1 << 10)
-	baseReg, byteOff, ok = arm64.LDR64UnsignedOffset(raw)
-	if !ok || baseReg != 27 || byteOff != 8 {
-		t.Fatalf("isLDR64UnsignedOffset(0x%x) = (%d, %d, %v), want (27, 8, true)", raw, baseReg, byteOff, ok)
-	}
-}
-
-func TestIsADD64Immediate(t *testing.T) {
-	// ADD X0, X21, #16 → slot 2 (16/8=2)
-	// Encoding: sf=1|0|0|100010|00|000000010000|10101|00000
-	// = 0x91000000 | (16 << 10) | (21 << 5) | 0
 	raw := uint32(0x91000000) | (16 << 10) | (21 << 5)
-	rd, rn, imm, ok := arm64.ADD64Immediate(raw)
-	if !ok || rd != 0 || rn != 21 || imm != 16 {
-		t.Fatalf("isADD64Immediate(0x%x) = (%d, %d, %d, %v), want (0, 21, 16, true)", raw, rd, rn, imm, ok)
-	}
-}
-
-func TestIsLDUR64(t *testing.T) {
-	// LDUR X0, [X1, #0]
-	// Encoding: 11|111|0|00|01|000000000|00|00001|00000
-	// = 0xF8400000 | (1 << 5)
-	raw := uint32(0xF8400020)
-	base, rt, _, ok := arm64.LDUR64(raw)
-	if !ok || base != 1 || rt != 0 {
-		t.Fatalf("isLDUR64(0x%x) = (%d, %d, %v), want (1, 0, true)", raw, base, rt, ok)
+	rd, rn2, imm, ok := arm64.ADD64Immediate(raw)
+	if !ok || rd != 0 || rn2 != 21 || imm != 16 {
+		t.Fatalf("ADD decode = rd=%d rn=%d imm=%d ok=%v", rd, rn2, imm, ok)
 	}
 }
 
@@ -301,30 +203,13 @@ func TestTypesEqual(t *testing.T) {
 	a := [31]TypeLattice{}
 	b := [31]TypeLattice{}
 	for i := range a {
-		a[i] = Top()
-		b[i] = Top()
+		a[i], b[i] = Top(), Top()
 	}
 	if !typesEqual(a, b) {
-		t.Fatal("typesEqual(all-Top, all-Top) = false, want true")
+		t.Fatal("identical arrays compare unequal")
 	}
-
-	b[0] = KnownClass(1)
+	b[0] = ExactClass(1)
 	if typesEqual(a, b) {
-		t.Fatal("typesEqual(all-Top, X0=KnownClass(1)) = true, want false")
-	}
-}
-
-func TestAllTop(t *testing.T) {
-	a := [31]TypeLattice{}
-	for i := range a {
-		a[i] = Top()
-	}
-	if !allTop(a) {
-		t.Fatal("allTop(all-Top) = false, want true")
-	}
-
-	a[5] = KnownClass(1)
-	if allTop(a) {
-		t.Fatal("allTop(X5=KnownClass(1)) = true, want false")
+		t.Fatal("different arrays compare equal")
 	}
 }

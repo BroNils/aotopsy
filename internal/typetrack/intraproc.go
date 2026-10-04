@@ -124,17 +124,18 @@ func cappedCandidates(targets []string) []string {
 //
 // The earlier formula, `entry.Index - imm + kOriginElement`, had the origin
 // term on the wrong side and was off by 2*kOriginElement (8192 on ARM64), so
-// every implied class ID -- and thus the RTA filter built on it -- was wrong.
+// every implied class ID -- and thus the old observational RTA filter built
+// on it -- was wrong. Candidate enumeration now uses the structural class
+// universe instead.
 func (ctx *TypeContext) selectorCandidates(imm int) []string {
-	// CHA cache: if we've already computed candidates for this selector
-	// imm, return the cached result. The cache is valid as long as the
-	// InstantiatedClasses set hasn't changed — in practice it converges
-	// after 2-3 inter-procedural iterations, so the cache stabilizes.
+	// Cache by selector immediate. DispatchBySlot and its code-name map are
+	// immutable during typetrack, so this cache is independent of the observed
+	// allocation/instance population.
 	if cached, ok := ctx.SelectorCache[imm]; ok {
 		return cached
 	}
-	// Monomorphic fast path: if this selector has exactly one unique
-	// implementation across all instantiated classes, return it directly.
+	// Monomorphic fast path: if the complete structurally represented dispatch
+	// table has exactly one unique implementation for this selector, return it.
 	if name, ok := ctx.SelectorMonomorphic[imm]; ok {
 		result := []string{name}
 		ctx.SelectorCache[imm] = result
@@ -142,18 +143,20 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 	}
 	seen := map[string]bool{}
 	var targets []string
-	// The RTA filter is only meaningful once enough instantiated classes have
-	// been observed; below that it would silently drop real targets.
-	rtaEnabled := ctx.RTAApplied()
-	for key, entry := range ctx.DispatchBySlot {
+	// SuperClass is built from every isolate + VM ClassInfo, so its keys are a
+	// structural runtime-CID universe. Enumerating those CIDs and looking up
+	// `cid+imm` is strictly safer than iterating every populated dispatch slot
+	// and treating `slot-imm` as a hypothetical CID: an unrelated selector's
+	// code slot can otherwise alias an integer that is not a real class.
+	for cid := range ctx.SuperClass {
+		if cid < 0 {
+			continue
+		}
+		entry, ok := ctx.DispatchBySlot[cid+imm]
+		if !ok {
+			continue
+		}
 		if entry.Kind != cluster.DispatchCode {
-			continue
-		}
-		impliedCID := key - imm
-		if impliedCID < 0 {
-			continue
-		}
-		if rtaEnabled && !ctx.InstantiatedClasses[impliedCID] {
 			continue
 		}
 		if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
@@ -174,34 +177,6 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 		ctx.SelectorMonomorphic[imm] = targets[0]
 	}
 	return targets
-}
-
-// RTAApplied reports whether the selector-offset scan filters candidates by
-// the set of instantiated classes. Exposed so the report can state it: a
-// filter that silently does not run looks exactly like one that finds nothing
-// to remove.
-func (ctx *TypeContext) RTAApplied() bool {
-	return len(ctx.InstantiatedClasses) >= rtaMinInstantiatedClasses
-}
-
-// rtaMinInstantiatedClasses is the number of observed instantiated classes
-// below which the RTA filter is not applied. A previous value of 9999
-// disabled the filter on every sample in the corpus while the comment next
-// to it claimed the threshold was 100.
-// Measured on the 3.12 x86_64 sample (2962 polymorphic sites): with the
-// filter off the scan yields 636904 candidate callees, with it on 174943 --
-// a 72.5% reduction, average fan-out 215 -> 59. It never turns a polymorphic
-// site monomorphic, but it is doing substantial work, so the threshold is
-// worth keeping honest.
-const rtaMinInstantiatedClasses = 100
-
-// InvalidateSelectorCache clears the selector candidate cache. Called
-// between inter-procedural iterations when InstantiatedClasses may have
-// grown (new allocation sites discovered). After invalidation, the next
-// call to selectorCandidates for each imm will recompute and re-cache.
-func (ctx *TypeContext) InvalidateSelectorCache() {
-	ctx.SelectorCache = make(map[int][]string)
-	ctx.SelectorMonomorphic = make(map[int]string)
 }
 
 // applySelectorCandidates fills res from a selector-offset scan: one name
@@ -236,10 +211,10 @@ type IntraResult struct {
 	// Index 0 = X0 (receiver for instance methods).
 	ParamTypes [31]TypeLattice
 
-	// BLCallSiteTypes maps BL target address → register state at call site
-	// (before BL kills R0-R7). This is the ACTUAL parameter types being
-	// passed to the callee, not the exit state. Used by inter-proc to
-	// propagate parameter types more accurately than ExitTypes.
+	// BLCallSiteTypes maps call-instruction PC → register state immediately before
+	// the Dart-call clobber set is invalidated. This is call-site evidence, not
+	// function-exit state, and is keyed by PC because several calls can target the
+	// same callee with different argument facts.
 	BLCallSiteTypes map[uint64][31]TypeLattice
 
 	// FieldAccesses lists every instance-field read/write this function
@@ -274,22 +249,35 @@ func clearFieldAccessAtPC(result *IntraResult, pc uint64) {
 
 // recordFieldAccess records one access, replacing any evidence from an earlier
 // worklist visit to the same instruction.
-func recordFieldAccess(result *IntraResult, classID int, byteOffset int32, isStore bool, pc uint64) {
-	if result == nil || classID < 0 {
+func recordFieldAccess(result *IntraResult, ctx *TypeContext, receiverCID int, byteOffset int32, isStore bool, pc uint64) {
+	if result == nil || ctx == nil || receiverCID < 0 {
+		return
+	}
+	ownerCID, _, ok := ctx.DeclaredFieldOwner(receiverCID, byteOffset)
+	if !ok {
 		return
 	}
 	for i := range result.FieldAccesses {
 		if result.FieldAccesses[i].PC == pc {
-			result.FieldAccesses[i] = FieldAccess{ClassID: classID, ByteOffset: byteOffset, IsStore: isStore, PC: pc}
+			result.FieldAccesses[i] = FieldAccess{ClassID: ownerCID, ByteOffset: byteOffset, IsStore: isStore, PC: pc}
 			return
 		}
 	}
 	result.FieldAccesses = append(result.FieldAccesses, FieldAccess{
-		ClassID:    classID,
+		ClassID:    ownerCID,
 		ByteOffset: byteOffset,
 		IsStore:    isStore,
 		PC:         pc,
 	})
+}
+
+func arm64WritesRegister(raw uint32, reg int) bool {
+	for _, dst := range arm64.DstRegsOfInst(raw) {
+		if dst == reg {
+			return true
+		}
+	}
+	return false
 }
 
 // AnalyzeFunction runs intra-procedural type dataflow on one function.
@@ -381,6 +369,13 @@ func AnalyzeFunction(
 							break
 						}
 					}
+					// This look-ahead is allowed to bridge instructions only while
+					// the exact index register value is still live on the same
+					// straight-line path. A redefinition or control-flow boundary
+					// invalidates the structural proof.
+					if arm64RecoveryBarrier(ldrRaw, insts[j].Addr) || arm64WritesRegister(ldrRaw, rd) {
+						break
+					}
 				}
 			}
 		}
@@ -401,7 +396,8 @@ func AnalyzeFunction(
 		}
 	}
 
-	// Dart 2.10/2.12 alternate form: MOV Xn, #imm → ADD Xd, Xm, Xn →
+	// Dart 2.10/2.12 alternate large-immediate form: LoadImmediate(TMP2,
+	// imm) → ADD Xd, Xm, TMP2 →
 	// LDR X30, [X21, Xd, LSL #3] → BLR X30.
 	// The 2.x compiler sometimes loads the selector offset into a register
 	// via MOVZ, then uses register-register ADD instead of ADD with immediate.
@@ -410,9 +406,12 @@ func AnalyzeFunction(
 		if insts[i].Bad || insts[i+1].Bad || insts[i+2].Bad || insts[i+3].Bad {
 			continue
 		}
-		// Look for MOVZ Xn, #imm16
+		// AddImmediate uses TMP2 exactly when the selector offset does not fit
+		// ADD/SUB immediate. Accept only the single-MOVZ LoadImmediate form;
+		// multi-instruction MOVK/ORR materializations are left unresolved until
+		// replayed exactly rather than guessed from an arbitrary constant reg.
 		movReg, movImm, movOK := arm64.MOVZ64(insts[i].Raw)
-		if !movOK || movReg >= 31 {
+		if !movOK || movReg != sdk.ARM64TMP2 {
 			continue
 		}
 		// Next: ADD Xd, Xm, Xn (register-register, rm == movReg)
@@ -420,7 +419,7 @@ func AnalyzeFunction(
 			continue
 		}
 		addRd, _, addRm, addShift, addAmount, addOK := arm64.ADD64Register(insts[i+1].Raw)
-		if !addOK || addShift != arm64.ShiftLSL || addAmount != 0 || addRm != movReg || addRd >= 31 {
+		if !addOK || addShift != arm64.ShiftLSL || addAmount != 0 || addRm != sdk.ARM64TMP2 || addRd >= 31 {
 			continue
 		}
 		// Next: LDR X30, [X21, Xd, LSL #3]
@@ -448,13 +447,14 @@ func AnalyzeFunction(
 	// There may be intervening instructions (PP loads, STP pushes, MOV) between
 	// the LDURH and the LDR. The MOV bridges the register: LDURH writes Wn,
 	// MOV Xp, Xn copies it, LDR uses Xp.
-	for i := 0; legacyDispatch && i < len(insts)-2; i++ {
+	halfWordDisp, hasHalfWordCID := ctx.HalfWordClassIDDisp()
+	for i := 0; legacyDispatch && hasHalfWordCID && i < len(insts)-2; i++ {
 		if insts[i].Bad {
 			continue
 		}
 		// Look for LDURH Wn, [Xm,#1] (class ID extraction, 2.x style)
 		_, ldurhRt, ldurhImm9, ldurhOK := arm64.LDURH(insts[i].Raw)
-		if !ldurhOK || ldurhImm9 != 1 || ldurhRt >= 31 {
+		if !ldurhOK || int64(ldurhImm9) != halfWordDisp || ldurhRt >= 31 {
 			continue
 		}
 		// Track which register holds the class ID. LDURH writes to ldurhRt,
@@ -476,6 +476,9 @@ func AnalyzeFunction(
 			// Check for LDR X30, [X21, XclassIdReg, LSL #3]
 			base, rm, rt, ldrOK := arm64.LDRRegExtended(jraw)
 			if !ldrOK || base != sdk.ARM64DT || rt != sdk.ARM64LinkReg || rm != classIdReg {
+				if arm64RecoveryBarrier(jraw, insts[j].Addr) || arm64WritesRegister(jraw, classIdReg) {
+					break
+				}
 				continue
 			}
 			// Next: BLR X30
@@ -497,11 +500,12 @@ func AnalyzeFunction(
 	// Per-block entry/exit type state.
 	blockEntry := make([][31]TypeLattice, len(blocks))
 	blockExit := make([][31]TypeLattice, len(blocks))
+	blockVisited := make([]bool, len(blocks))
 
 	// PHASE A: Per-block stack types (replaces function-wide stackTypes).
 	// Each block has its own stackTypes map, propagated via block exit/entry.
 	// This prevents cross-block pollution where Block B (after BL kills R1)
-	// overwrites KnownClass saved by Block A with Top.
+	// overwrites an object-class fact saved by Block A with Top.
 	blockStackEntry := make([]map[int]TypeLattice, len(blocks))
 	blockStackExit := make([]map[int]TypeLattice, len(blocks))
 	blockShadowEntry := make([]shadowSPState, len(blocks))
@@ -514,6 +518,7 @@ func AnalyzeFunction(
 
 	// Initialize first block's entry with parameter types.
 	blockEntry[0] = entryTypes
+	blockVisited[0] = true
 	for off, t := range entryStack {
 		blockStackEntry[0][off] = t
 	}
@@ -565,7 +570,7 @@ func AnalyzeFunction(
 			// call to polymorphic. A class id is extracted into a W
 			// register, so a CMP on an X register is almost always
 			// comparing a tagged value or a Smi, and narrowing the
-			// register to KnownClass(imm) on that edge is simply wrong.
+			// register to an exact class identity on that edge is simply wrong.
 			// 62000 extra narrowings that buy no resolution are 62000
 			// chances to be confidently wrong.
 			if _, rn, imm, ok := arm64.SUBS32Immediate(inst.Raw); ok {
@@ -596,71 +601,69 @@ func AnalyzeFunction(
 		if hasCmp && cmpReg < 31 && len(blk.insts) > 0 {
 			eqSucc = equalitySuccessor(blk.insts[len(blk.insts)-1].Raw, len(blk.successors))
 		}
+		if eqSucc >= 0 {
+			branchPC := blk.insts[len(blk.insts)-1].Addr
+			if isClassID(state[cmpReg].Kind) {
+				ctx.recordNarrowMetric(branchPC, narrowMetricHit)
+			} else {
+				ctx.recordNarrowMetric(branchPC, narrowMetricNoType)
+			}
+		}
 		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
 
 			if succIdx == eqSucc {
-				// The compared register holds a class ID (Bottom, from a
-				// header load) or an already-known class. On this edge the
-				// comparison succeeded, so it is exactly cmpImm.
+				// The compared register is proven to contain a class-id scalar.
+				// On this edge the comparison succeeded, so it is exactly cmpImm.
 				narrowed := state
-				if state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass {
-					narrowed[cmpReg] = KnownClass(cmpImm)
-					ctx.NarrowHits++
+				if isClassID(state[cmpReg].Kind) {
+					narrowed[cmpReg] = ExactClassID(cmpImm)
 				}
-				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+				if !blockVisited[succ] {
 					newEntry = narrowed
 				} else {
 					for r := 0; r < 31; r++ {
-						newEntry[r] = meetType(blockEntry[succ][r], narrowed[r], lca)
+						newEntry[r] = joinType(blockEntry[succ][r], narrowed[r], lca)
 					}
 				}
 			} else {
 				// Every other edge, including the "not equal" one: the
 				// lattice cannot express "not N", so nothing is learned.
-				if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+				if !blockVisited[succ] {
 					newEntry = state
 				} else {
 					for r := 0; r < 31; r++ {
-						newEntry[r] = meetType(blockEntry[succ][r], state[r], lca)
+						newEntry[r] = joinType(blockEntry[succ][r], state[r], lca)
 					}
 				}
 			}
 
-			changed := !typesEqual(newEntry, blockEntry[succ])
+			firstVisit := !blockVisited[succ]
+			changed := firstVisit || !typesEqual(newEntry, blockEntry[succ])
+			newStackEntry, stackChanged := mergeStackFacts(blockStackEntry[succ], stackTypes, firstVisit, lca)
+			if stackChanged {
+				blockStackEntry[succ] = newStackEntry
+				changed = true
+			}
 
-			// PHASE A: propagate stack types to successor (merge/meet).
-			// Only propagate if the successor doesn't already have this key
-			// with the same value. This prevents infinite worklist loops.
-			newStackEntry := blockStackEntry[succ]
-			for k, v := range stackTypes {
-				oldV, exists := newStackEntry[k]
-				if !exists {
-					newStackEntry[k] = v
+			// Shadow-SP is a separate lattice. It must propagate even when the
+			// ordinary stack-fact map is empty; the old code accidentally nested
+			// this merge inside the stack-key loop.
+			if !blockShadowSet[succ] {
+				blockShadowEntry[succ] = shadowSP
+				blockShadowSet[succ] = true
+				changed = true
+			} else {
+				mergedShadow := meetShadowSP(blockShadowEntry[succ], shadowSP)
+				if !mergedShadow.Equal(blockShadowEntry[succ]) {
+					blockShadowEntry[succ] = mergedShadow
 					changed = true
-				} else if !v.Equal(oldV) {
-					meetV := meetType(oldV, v, lca)
-					if !meetV.Equal(oldV) {
-						newStackEntry[k] = meetV
-						changed = true
-					}
-				}
-
-				if !blockShadowSet[succ] {
-					blockShadowEntry[succ] = shadowSP
-					blockShadowSet[succ] = true
-					changed = true
-				} else {
-					mergedShadow := meetShadowSP(blockShadowEntry[succ], shadowSP)
-					if !mergedShadow.Equal(blockShadowEntry[succ]) {
-						blockShadowEntry[succ] = mergedShadow
-						changed = true
-					}
 				}
 			}
 
 			if changed {
 				blockEntry[succ] = newEntry
+				blockVisited[succ] = true
 				if !inWorklist[succ] {
 					worklist = append(worklist, succ)
 					inWorklist[succ] = true
@@ -677,7 +680,7 @@ func AnalyzeFunction(
 		if len(blocks[i].successors) == 0 {
 			// Exit block.
 			for r := 0; r < 31; r++ {
-				result.ExitTypes[r] = meetType(result.ExitTypes[r], blockExit[i][r], lca)
+				result.ExitTypes[r] = joinType(result.ExitTypes[r], blockExit[i][r], lca)
 			}
 		}
 	}
@@ -696,6 +699,43 @@ func typesEqual(a, b [31]TypeLattice) bool {
 		}
 	}
 	return true
+}
+
+// mergeStackFacts is a must-analysis join for sparse stack facts. Absence means
+// reachable-but-unknown, so after the first predecessor a key survives only if
+// every predecessor carries a compatible fact for that slot.
+func mergeStackFacts(old, incoming map[int]TypeLattice, first bool, lca func(int, int) int) (map[int]TypeLattice, bool) {
+	if first {
+		out := make(map[int]TypeLattice, len(incoming))
+		for k, v := range incoming {
+			if v.Kind != LatticeTop && v.Kind != LatticeBottom {
+				out[k] = v
+			}
+		}
+		return out, true
+	}
+	out := make(map[int]TypeLattice, len(old))
+	changed := false
+	for k, oldV := range old {
+		inV, ok := incoming[k]
+		if !ok {
+			changed = true
+			continue
+		}
+		joined := joinType(oldV, inV, lca)
+		if joined.Kind == LatticeTop || joined.Kind == LatticeBottom {
+			changed = true
+			continue
+		}
+		out[k] = joined
+		if !joined.Equal(oldV) {
+			changed = true
+		}
+	}
+	if len(out) != len(old) {
+		changed = true
+	}
+	return out, changed
 }
 
 // arm64PreservesCompareFlags is deliberately conservative. Narrowing is an
@@ -767,16 +807,6 @@ func arm64PreservesCompareFlags(raw uint32, pc uint64) bool {
 	}
 	_, _, kind, ok := arm64.BCond(raw, pc)
 	return ok && kind == arm64.BCondAlways
-}
-
-// allTop checks if all elements in a [31]TypeLattice array are Top.
-func allTop(a [31]TypeLattice) bool {
-	for i := range a {
-		if a[i].Kind != LatticeTop {
-			return false
-		}
-	}
-	return true
 }
 
 // basicBlock is a straight-line sequence of instructions with successors.
@@ -1189,16 +1219,10 @@ func canonicalBLRResolution(res BlrResolution) BlrResolution {
 	return res
 }
 
-// resolveBLR attempts to resolve a BLR call site to a dispatch table target.
-// If the BLR register's type is KnownDispatchIndex, look up the slot.
-// If the BLR register was loaded from dispatch table with a known class,
-// compute the slot from class_id + selector_offset.
-//
-// SUPER FEATURE 2: For BLR with KnownDispatchIndex that doesn't resolve
-// (null entry or code-without-name), try scanning nearby slots for
-// possible targets. For BLR with Top (no type info), check if we can
-// extract the selector offset from the preceding ADD/SUB instruction
-// and do a reverse scan across all class IDs.
+// resolveBLR resolves only evidence produced by the exact generated dispatch
+// shapes: either a proven concrete table slot, or a proven selector immediate
+// whose CID remains unknown. It never scans neighboring slots to manufacture a
+// selector or converts an object-class fact into a code pointer.
 func resolveBLR(
 	state *[31]TypeLattice,
 	rn int,
@@ -1217,20 +1241,20 @@ func resolveBLR(
 	switch t.Kind {
 	case LatticeKnownDispatchIndex:
 		if t.SelectorOnly {
-			ctx.BLRAtKnownDispatchSel++
+			ctx.recordBLRMetric(inst.Addr, blrMetricKnownDispatchSelector)
 		} else {
-			ctx.BLRAtKnownDispatch++
+			ctx.recordBLRMetric(inst.Addr, blrMetricKnownDispatch)
 		}
-	case LatticeKnownClass:
-		ctx.BLRAtKnownClass++
+	case LatticeExactClass, LatticeClassBound:
+		ctx.recordBLRMetric(inst.Addr, blrMetricObject)
 	case LatticeKnownStub:
-		ctx.BLRAtStub++
+		ctx.recordBLRMetric(inst.Addr, blrMetricStub)
 	case LatticeTop:
-		ctx.BLRAtTop++
+		ctx.recordBLRMetric(inst.Addr, blrMetricTop)
 	case LatticeBottom:
-		ctx.BLRAtBottom++
+		ctx.recordBLRMetric(inst.Addr, blrMetricUnreachable)
 	default:
-		ctx.BLRAtOther++
+		ctx.recordBLRMetric(inst.Addr, blrMetricOther)
 	}
 	switch t.Kind {
 	case LatticeKnownStub:
@@ -1241,7 +1265,6 @@ func resolveBLR(
 		// P1.2: class unknown, selector immediate known -- scan the dispatch
 		// table at that selector across all classes.
 		if t.SelectorOnly {
-			ctx.DispatchHits++
 			res.Derivation = DerivationDispatchTable
 			res.SlotIndex = -1
 			imm := t.SelectorImm
@@ -1256,6 +1279,9 @@ func resolveBLR(
 			} else if res.Resolved {
 				res.Confidence = ResolutionStaticInferred
 			}
+			if res.Resolved {
+				ctx.hitMetric(metricDispatch, inst.Addr, &ctx.DispatchHits)
+			}
 			recordBLRResolution(result, res)
 			return
 		}
@@ -1263,15 +1289,14 @@ func resolveBLR(
 		// Direct slot lookup.
 		res.Derivation = DerivationDispatchTable
 		res.SlotIndex = t.DispatchIndex
-		ctx.DispatchHits++
 
 		if name, ok := ctx.ResolveDispatchTarget(t.DispatchIndex); ok {
 			res.TargetName = name
 			res.Resolved = true
 			res.Confidence = ResolutionStaticInferred
 		} else {
-			// SUPER FEATURE 2: slot exists but no name.
-			// Try to find the entry and resolve via CodeRange fallback.
+			// A DispatchCode slot may still have an exact semantic name through
+			// the code-index map even when ResolveDispatchTarget returned false.
 			if entry, ok2 := ctx.DispatchBySlot[t.DispatchIndex]; ok2 && entry.Kind == cluster.DispatchCode {
 				if name, ok3 := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok3 && name != "" {
 					res.TargetName = name
@@ -1279,80 +1304,22 @@ func resolveBLR(
 					res.Confidence = ResolutionStaticInferred
 				}
 			}
-			// P5 CHA: if direct lookup failed, try subclass dispatch slots.
-			// The receiver might be a subclass that overrides the method,
-			// while the superclass slot is null/stub.
-			if !res.Resolved && len(ctx.Subclasses) > 0 {
-				// Recover the class ID from the slot: slot = cid + selector - KOrigin
-				// We don't know selector, but we can scan subclasses at the
-				// same slot offset relative to their own class IDs.
-				// This is a heuristic: try shifting the slot by subclass delta.
-				for parentCID, subs := range ctx.Subclasses {
-					parentSlot := parentCID - ctx.KOriginElement
-					if parentSlot != t.DispatchIndex {
-						continue
-					}
-					for _, subCID := range subs {
-						subSlot := subCID - ctx.KOriginElement
-						if name, ok := ctx.ResolveDispatchTarget(subSlot); ok {
-							res.TargetName = name
-							res.Resolved = true
-							break
-						}
-					}
-					if res.Resolved {
-						break
-					}
-				}
+			if res.Resolved {
+				ctx.hitMetric(metricDispatch, inst.Addr, &ctx.DispatchHits)
 			}
 		}
-	case LatticeKnownClass:
-		res.Derivation = DerivationDispatchTable
-		// When a selector offset is known (from preceding ADD/SUB), CHA enumerates
-		// all subclass dispatch targets.
-		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
-			chaTargets := ctx.ResolveDispatchCHA(t.ClassID, selectorImm)
-			if len(chaTargets) > 0 {
-				applySelectorCandidates(&res, chaTargets)
-				if res.Polymorphic {
-					res.Confidence = ResolutionPolymorphic
-				} else if res.Resolved {
-					res.Confidence = ResolutionStaticInferred
-				}
-			}
-		}
-		if !res.Resolved && !res.Polymorphic {
-			baseSlot := t.ClassID - ctx.KOriginElement
-			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, baseSlot)
-			if candidates == 1 {
-				res.SlotIndex = -1
-			}
-			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
-			if res.Polymorphic {
-				res.Confidence = ResolutionPolymorphic
-			} else if res.Resolved {
-				res.Confidence = ResolutionStaticInferred
-			}
-		}
-	case LatticeTop, LatticeBottom:
+	case LatticeExactClass, LatticeClassBound:
+		// An object value in the BLR target register is not a dispatch entry.
+		// Do not turn an object-type fact into a code pointer by scanning table
+		// slots. Exact dispatch evidence must have been produced by the table load.
+	case LatticeTop, LatticeBottom, LatticeUnknownClassID, LatticeExactClassID:
 		// No usable type for the call register -- fall back to the selector
 		// immediate the pre-scan recorded for this exact BLR.
 		//
-		// Bottom must be handled here too, and it is the COMMON case on Dart
-		// 2.x. The sequence there is
-		//
-		//	LDURH W2, [X0,#1]        ; class id (kClassIdTagPos=16)
-		//	MOV   X0, X2
-		//	SUB   X0, X0, #imm       ; in-place, per 2.x EmitDispatchTableCall
-		//	LDR   X30, [X21,X0,LSL #3]
-		//	BLR   X30
-		//
-		// The LDR from the dispatch-table register sets X30 to Bottom
-		// ("a dispatch entry, slot unknown"), so the register is Bottom, not
-		// Top, and this fallback never ran: 3738 dispatch-table call sites in
-		// the 2.12 sample, 129 resolved. Bottom here is strictly MORE
-		// evidence than Top -- it says the value came from the dispatch table
-		// -- so refusing to use the selector was backwards.
+		// The pre-scan is independent structural evidence from the exact generated
+		// ADD/SUB + DISPATCH_TABLE_REG load + BLR shape, so it can still provide
+		// selector-only candidates when a value fact was lost at a conservative
+		// control-flow merge.
 		if selectorImm, ok := ctx.SelectorOffsets[inst.Addr]; ok {
 			res.Derivation = DerivationDispatchTable
 			// Scan every class's slot at this selector immediate; see
@@ -1362,6 +1329,9 @@ func resolveBLR(
 				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {
 				res.Confidence = ResolutionStaticInferred
+			}
+			if res.Resolved {
+				ctx.hitMetric(metricDispatch, inst.Addr, &ctx.DispatchHits)
 			}
 		}
 	}

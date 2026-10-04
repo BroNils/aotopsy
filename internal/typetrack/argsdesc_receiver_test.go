@@ -3,7 +3,9 @@ package typetrack
 import (
 	"testing"
 
+	archx86 "aotopsy/internal/arch/x86"
 	"aotopsy/internal/disasm"
+	"golang.org/x/arch/x86/x86asm"
 )
 
 // Real encodings from the Dart 2.12.0 arm64 sample, RangeError.range -- a
@@ -93,5 +95,47 @@ func TestRecoverArgsDescReceiverIgnoresStaticFrameLoads(t *testing.T) {
 	}
 	if _, _, ok := RecoverArgsDescReceiverARM64(insts, 100, ctx); ok {
 		t.Error("static FP load must not be treated as an ArgumentsDescriptor parameter")
+	}
+}
+
+func TestRecoverArgsDescReceiverX86(t *testing.T) {
+	ctx := newCtxWithOwnerField(100, 11)
+	ctx.WordSize = 8
+	insts := []archx86.Decoded{
+		x86Inst(0x2000, x86asm.MOV, x86asm.RAX, x86asm.R10),
+		x86Inst(0x2004, x86asm.MOV, x86asm.RCX, x86asm.Mem{Base: x86asm.RAX, Disp: 31}),
+		x86Inst(0x2008, x86asm.MOV, x86asm.RDX, x86asm.RCX),
+		x86Inst(0x200c, x86asm.SUB, x86asm.RDX, x86asm.Imm(8)),
+		x86Inst(0x2010, x86asm.MOV, x86asm.RBX, x86asm.Mem{Base: x86asm.RBP, Index: x86asm.RDX, Scale: 4, Disp: 40}),
+		x86Inst(0x2014, x86asm.MOV, x86asm.R8, x86asm.Mem{Base: x86asm.RBX, Disp: 11}),
+	}
+
+	pc, rl, ok := RecoverArgsDescReceiverX86(insts, 100, ctx)
+	if !ok {
+		t.Fatal("expected x86 ArgumentsDescriptor receiver load to be recovered")
+	}
+	if pc != 0x2010 || rl.Reg != 3 || rl.ClassCID != 100 {
+		t.Fatalf("recovered x86 receiver = pc=%#x reg=%d cid=%d, want pc=0x2010 RBX(3) cid=100", pc, rl.Reg, rl.ClassCID)
+	}
+
+	ctx.ReceiverLoadAtPC = map[uint64]ReceiverLoad{pc: rl}
+	var state [31]TypeLattice
+	transferInstructionX86(&state, insts[4], nil, ctx, &IntraResult{}, nil, map[int]TypeLattice{})
+	if !state[3].Equal(ClassBound(100)) {
+		t.Fatalf("x86 receiver load state = %+v, want ClassBound(100)", state[3])
+	}
+}
+
+func TestRecoverArgsDescReceiverX86RequiresExactDescriptorChain(t *testing.T) {
+	ctx := newCtxWithOwnerField(100, 11)
+	ctx.WordSize = 8
+	insts := []archx86.Decoded{
+		// Looks like LoadIndexedUnsafe but has no proven ArgumentsDescriptor.count
+		// producer. This must not be accepted from shape alone.
+		x86Inst(0x2100, x86asm.MOV, x86asm.RBX, x86asm.Mem{Base: x86asm.RBP, Index: x86asm.RDX, Scale: 4, Disp: 40}),
+		x86Inst(0x2104, x86asm.MOV, x86asm.R8, x86asm.Mem{Base: x86asm.RBX, Disp: 11}),
+	}
+	if _, _, ok := RecoverArgsDescReceiverX86(insts, 100, ctx); ok {
+		t.Fatal("x86 recovery accepted indexed FP load without ArgumentsDescriptor provenance")
 	}
 }

@@ -21,23 +21,14 @@ func handleUBFX(tc *transferCtx) bool {
 		if rd >= 31 {
 			return true
 		}
-		if rn < 31 && tc.state[rn].Kind == LatticeKnownClass {
-			tc.state[rd] = tc.state[rn]
-			tc.ctx.UBFXHits++
+		if rn < 31 && tc.state[rn].Kind == LatticeExactHeaderTags {
+			tc.state[rd] = ExactClassID(tc.state[rn].ClassID)
+			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
 			return true
 		}
-		// UBFX from Bottom: extracting class ID bits from an unknown
-		// header still yields "a class ID, but unknown which one" —
-		// Bottom, not Top. The previous code only preserved Bottom
-		// when the immediately preceding instruction was a LDUR at
-		// offset -1, which missed cases with intervening instructions
-		// (e.g., LDR W0, [X1, #-1] → MOV W2, W0 → UBFX W0, W2, ...).
-		// Bottom is strictly more useful than Top: it enables narrowing
-		// via CMP+BEQ downstream, and it enables SelectorDispatch
-		// (selector-only) instead of Top (no info at all) at the ADD.
-		if rn < 31 && tc.state[rn].Kind == LatticeBottom {
-			tc.state[rd] = Bottom()
-			tc.ctx.UBFXHits++
+		if rn < 31 && tc.state[rn].Kind == LatticeUnknownHeaderTags {
+			tc.state[rd] = UnknownClassID()
+			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
 			return true
 		}
 		if rd >= 0 && rd < 31 {
@@ -89,21 +80,8 @@ func handleBLR(tc *transferCtx) bool {
 				}
 			}
 		}
-		if isAllocation {
-			// Generic allocation stubs return their object in R0. R0 is an
-			// output register, not a class-id input (AllocateObjectABI uses R1
-			// for type arguments and R2 for tags). Keeping the pre-call R0 fact
-			// fabricated both an allocation class and the post-call return type.
-			tc.state[0] = Top()
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
-			}
-		} else {
-			tc.state[0] = Top()
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
-			}
-		}
+		_ = isAllocation // generic indirect allocation has no per-class result fact.
+		killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 		return true
 	}
 	return false
@@ -113,7 +91,7 @@ func handleBLR(tc *transferCtx) bool {
 func handleBL(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 	if target, ok := arm64.BL(raw, tc.inst.Addr); ok {
-		tc.ctx.BLTotal++
+		tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNone)
 		if tc.result.BLCallSiteTypes == nil {
 			tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 		}
@@ -126,12 +104,10 @@ func handleBL(tc *transferCtx) bool {
 		// This is the structural answer -- Code.owner is the Class -- so it
 		// takes precedence over any inferred exit type for the callee.
 		if cid, ok := tc.ctx.AllocationStubCID[target]; ok {
-			tc.ctx.AllocStubHits++
+			tc.ctx.hitMetric(metricAllocStub, tc.inst.Addr, &tc.ctx.AllocStubHits)
+			killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 			if allocABI, abiOK := sdk.AllocateObjectRegs(tc.ctx.DartVersion, sdk.ArchARM64); abiOK {
-				tc.state[allocABI.ResultReg] = KnownClass(cid)
-			}
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
+				tc.state[allocABI.ResultReg] = ExactClass(cid)
 			}
 			return true
 		}
@@ -139,40 +115,56 @@ func handleBL(tc *transferCtx) bool {
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {
 			ret := calleeAllExit[0]
-			if ret.Kind == LatticeTop {
-				if seeded, ok := tc.ctx.CalleeExitTypes[target]; ok && seeded.Kind != LatticeTop {
+			if ret.Kind == LatticeTop || ret.Kind == LatticeBottom {
+				if seeded, ok := tc.ctx.CalleeExitTypes[target]; ok && seeded.Kind != LatticeTop && seeded.Kind != LatticeBottom {
 					ret = seeded
 				}
 			}
-			tc.ctx.BLHasExitType++
-			if ret.Kind == LatticeKnownClass {
-				tc.ctx.BLExitKnown++
-			} else if ret.Kind == LatticeBottom {
-				tc.ctx.BLExitBottom++
+			if ret.Kind != LatticeTop && ret.Kind != LatticeBottom {
+				if isObjectClass(ret.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNonObject)
+				}
+			} else {
+				ret = Top()
 			}
 			// A callee's exit register file is not the caller's post-call
 			// register file. Only the ABI return register crosses the call
 			// boundary; argument/caller-clobbered registers become unknown.
+			killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 			tc.state[0] = ret
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
-			}
 		} else {
 			calleeExit := tc.ctx.CalleeExitTypes[target]
-			if calleeExit.Kind != LatticeTop {
-				tc.ctx.BLHasExitType++
-				if calleeExit.Kind == LatticeKnownClass {
-					tc.ctx.BLExitKnown++
+			if calleeExit.Kind != LatticeTop && calleeExit.Kind != LatticeBottom {
+				if isObjectClass(calleeExit.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNonObject)
 				}
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 				tc.state[0] = calleeExit
 			} else {
-				tc.state[0] = Top()
-			}
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 			}
 		}
 		return true
 	}
 	return false
+}
+
+func killDartCallClobbered(state *[31]TypeLattice, dartVersion string, isARM64 bool) {
+	regs, ok := sdk.DartCallClobberedGPRs(dartVersion, isARM64)
+	if !ok {
+		// Unknown ABI: no register fact is safe across an ordinary Dart call.
+		for i := range state {
+			state[i] = Top()
+		}
+		return
+	}
+	for _, r := range regs {
+		if r >= 0 && r < len(state) {
+			state[r] = Top()
+		}
+	}
 }

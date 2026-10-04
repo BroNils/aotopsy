@@ -48,6 +48,8 @@ const (
 	ARM64ArgsDesc       = 4  // ARGS_DESC_REG = R4 — arguments descriptor
 	ARM64SPReg          = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
 	ARM64NullReg        = 22 // NULL_REG = R22 — caches Object::null() (ARM64-only)
+	ARM64TMP            = 16 // TMP  = R16 — assembler scratch
+	ARM64TMP2           = 17 // TMP2 = R17 — assembler scratch / large immediate materialization
 	ARM64FrameReg       = 29 // FPREG = R29 — frame pointer
 	ARM64LinkReg        = 30 // LR    = R30 — link register
 	ARM64ReturnReg      = 0  // R0 — return value
@@ -245,6 +247,41 @@ func DartRegisterCallingConvention(dartVersion string, isARM64 bool) (cc Registe
 		FPUName:   []string{"xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6"},
 		FPUReturn: "xmm0",
 	}, true
+}
+
+// DartCallClobberedGPRs returns the allocatable CPU registers whose values may
+// not be carried across an ordinary Dart call. This is deliberately broader
+// than DartCallingConvention.GPR: arguments are only a subset of the registers
+// the callee may allocate and overwrite.
+//
+// Exact SDK source @3.12.2:
+//
+//	runtime/vm/compiler/backend/linearscan.cc: normal calls execute
+//	  BlockCpuRegisters(kAllCpuRegistersList, pos, pos + 1)
+//	runtime/vm/constants_arm64.h: kDartAvailableCpuRegs is all CPU registers
+//	  minus SP/FP/TMP/TMP2/PP/THR/LR/HEAP_BITS/NULL/R18/DT/R31.
+//	runtime/vm/constants_x64.h: kDartAvailableCpuRegs is all CPU registers
+//	  minus RSP/RBP/TMP(R11)/PP(R15)/THR(R14).
+//
+// The x64 reserved-register set is stable across the supported releases. ARM64
+// has one important exception: Dart 2.13 reserves R23 as HEAP_BASE; in 2.12 it
+// is allocatable and in 2.14+ the dedicated heap-base role is replaced by
+// HEAP_BITS in R28, making R23 allocatable again. Unknown/future versions fail
+// closed instead of inheriting the newest ABI.
+func DartCallClobberedGPRs(dartVersion string, isARM64 bool) ([]int, bool) {
+	if !isSupportedDartVersion(dartVersion) {
+		return nil, false
+	}
+	if isARM64 {
+		regs := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 20}
+		if !snapshot.VersionAtLeast(dartVersion, "2.13.0") || snapshot.VersionAtLeast(dartVersion, "2.14.0") {
+			regs = append(regs, 23)
+		}
+		regs = append(regs, 24, 25)
+		return regs, true
+	}
+	// RSP(4), RBP(5), R11(TMP), R14(THR), R15(PP) are reserved.
+	return []int{0, 1, 2, 3, 6, 7, 8, 9, 10, 12, 13}, true
 }
 
 // HasDartRegisterCallingConvention reports whether this exact supported Dart

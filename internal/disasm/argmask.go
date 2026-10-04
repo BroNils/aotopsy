@@ -10,38 +10,24 @@ import (
 // ResolveArgRegIndices reduces per-call-site register-setup masks for one
 // direct callee into convention positions that are stable across call sites.
 // One site is never enough: register-allocation noise can make a preserved
-// value look like an argument. A bit therefore needs a strict majority; when
-// no bit reaches that threshold, the all-sites intersection is the only safe
-// fallback. Returned indices are positions in the SDK register convention,
-// not hardware register numbers.
+// value look like an argument. A position is accepted only when EVERY observed
+// direct call site independently sets it in the local call-setup window. A
+// majority is useful telemetry but not proof: one unrelated register write at
+// enough sites can otherwise promote a non-argument to a callee entry fact.
+// Returned indices are positions in the SDK register convention, not hardware
+// register numbers.
 func ResolveArgRegIndices(masks []uint8) ([]int, bool) {
 	if len(masks) < 2 {
 		return nil, false
 	}
-	counts := make([]int, 8)
-	for _, m := range masks {
-		for i := 0; i < 8; i++ {
-			if m&(1<<uint(i)) != 0 {
-				counts[i]++
-			}
-		}
+	core := masks[0]
+	for _, m := range masks[1:] {
+		core &= m
 	}
-	threshold := len(masks)/2 + 1
 	var idx []int
 	for i := 0; i < 8; i++ {
-		if counts[i] >= threshold {
+		if core&(1<<uint(i)) != 0 {
 			idx = append(idx, i)
-		}
-	}
-	if len(idx) == 0 {
-		core := masks[0]
-		for _, m := range masks[1:] {
-			core &= m
-		}
-		for i := 0; i < 8; i++ {
-			if core&(1<<uint(i)) != 0 {
-				idx = append(idx, i)
-			}
 		}
 	}
 	if len(idx) == 0 {
