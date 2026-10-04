@@ -73,6 +73,30 @@ func initTaggedRepo(t *testing.T, repo, tag, sdkPath, body string) string {
 	return git
 }
 
+func initBareTaggedMirror(t *testing.T, tag, sdkPath, body string) string {
+	t.Helper()
+	work := t.TempDir()
+	git := initTaggedRepo(t, work, tag, sdkPath, body)
+	mirror := filepath.Join(t.TempDir(), "sdk.git")
+	cmd := exec.Command(git, "clone", "-q", "--bare", work, mirror)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %v\n%s", err, out)
+	}
+	return mirror
+}
+
+func writePlainVersionTreeFile(t *testing.T, root, tag, sdkPath, body string) string {
+	t.Helper()
+	full := filepath.Join(root, tag, filepath.FromSlash(sdkPath))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return full
+}
+
 // SDKFileAtTag must refuse a floating ref. Reading main gives the future,
 // not the version a table was derived from, and the resulting "no drift"
 // is meaningless.
@@ -178,6 +202,133 @@ func TestSDKFileAtTagReadsProvableExactVersionWorkingTree(t *testing.T) {
 	}
 }
 
+func TestSDKFileAtTagReadsPlainVersionTreeVerifiedByMirror(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := t.TempDir()
+	const sdkPath, tag, body = "runtime/vm/thread.h", "3.12.0", "plain exact-tag source\n"
+	writePlainVersionTreeFile(t, root, tag, sdkPath, body)
+	mirror := initBareTaggedMirror(t, tag, sdkPath, body)
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", mirror)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	got, err := SDKFileAtTag(sdkPath, tag)
+	if err != nil {
+		t.Fatalf("SDKFileAtTag: %v", err)
+	}
+	if got != body {
+		t.Fatalf("got %q, want mirror-verified plain source %q", got, body)
+	}
+	refreshed, err := readCacheEntry(cacheDir, filepath.Join(tag, filepath.FromSlash(sdkPath)), sdkPath, tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(refreshed) != body {
+		t.Fatalf("cache was not refreshed from mirror-verified plain tree: %q", refreshed)
+	}
+}
+
+func TestPlainVersionTreeMismatchCannotFallBackToStaleCache(t *testing.T) {
+	root := t.TempDir()
+	const sdkPath, tag = "runtime/vm/thread.h", "3.12.0"
+	writePlainVersionTreeFile(t, root, tag, sdkPath, "tampered local source\n")
+	mirror := initBareTaggedMirror(t, tag, sdkPath, "immutable tagged source\n")
+	cacheDir := t.TempDir()
+	writeCacheFixture(t, cacheDir, sdkPath, tag, "stale cached source\n")
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", mirror)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	if got, err := SDKFileAtTag(sdkPath, tag); err == nil || !strings.Contains(err.Error(), "differs from immutable tag blob") {
+		t.Fatalf("tampered authoritative plain tree result = %q, %v", got, err)
+	}
+}
+
+func TestPlainVersionTreeMissingLocalFileCannotFallBackToCache(t *testing.T) {
+	root := t.TempDir()
+	const sdkPath, tag = "runtime/vm/thread.h", "3.12.0"
+	if err := os.MkdirAll(filepath.Join(root, tag), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mirror := initBareTaggedMirror(t, tag, sdkPath, "immutable tagged source\n")
+	cacheDir := t.TempDir()
+	writeCacheFixture(t, cacheDir, sdkPath, tag, "stale cached source\n")
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", mirror)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	if got, err := SDKFileAtTag(sdkPath, tag); err == nil || !strings.Contains(err.Error(), "is missing") {
+		t.Fatalf("incomplete authoritative plain tree result = %q, %v", got, err)
+	}
+}
+
+func TestPlainVersionTreeExactPathAbsenceIsNotFound(t *testing.T) {
+	root := t.TempDir()
+	const tag = "3.12.0"
+	const presentPath = "runtime/vm/present.h"
+	const missingPath = "runtime/vm/missing.h"
+	if err := os.MkdirAll(filepath.Join(root, tag), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mirror := initBareTaggedMirror(t, tag, presentPath, "present\n")
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", mirror)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", t.TempDir())
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	if _, err := SDKFileAtTag(missingPath, tag); !errors.Is(err, ErrSDKFileNotFound) {
+		t.Fatalf("plain-tree immutable path absence = %v, want ErrSDKFileNotFound", err)
+	}
+}
+
+func TestPlainVersionTreeMissingMirrorCannotFallBackToCache(t *testing.T) {
+	root := t.TempDir()
+	const sdkPath, tag = "runtime/vm/thread.h", "3.12.0"
+	writePlainVersionTreeFile(t, root, tag, sdkPath, "unproven local source\n")
+	cacheDir := t.TempDir()
+	writeCacheFixture(t, cacheDir, sdkPath, tag, "stale cached source\n")
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", filepath.Join(t.TempDir(), "missing.git"))
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	if got, err := SDKFileAtTag(sdkPath, tag); err == nil || !strings.Contains(err.Error(), "Dart SDK mirror") {
+		t.Fatalf("unprovable authoritative plain tree result = %q, %v", got, err)
+	}
+}
+
+func TestPlainVersionTreeMissingExactMirrorTagCannotFallBackToCache(t *testing.T) {
+	root := t.TempDir()
+	const sdkPath, tag = "runtime/vm/thread.h", "3.12.0"
+	writePlainVersionTreeFile(t, root, tag, sdkPath, "unproven local source\n")
+	mirror := initBareTaggedMirror(t, "3.12.1", sdkPath, "other tagged source\n")
+	cacheDir := t.TempDir()
+	writeCacheFixture(t, cacheDir, sdkPath, tag, "stale cached source\n")
+
+	t.Setenv("AOTOPSY_DART_SDK_REPO", root)
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", mirror)
+	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
+	t.Setenv("AOTOPSY_TEST_SDK_OFFLINE", "1")
+	resetMemCache()
+
+	if got, err := SDKFileAtTag(sdkPath, tag); err == nil || !strings.Contains(err.Error(), "has no immutable tag") {
+		t.Fatalf("wrong-tag mirror result = %q, %v", got, err)
+	}
+}
+
 func TestExplicitSDKRepoOverridesDefaultDiscovery(t *testing.T) {
 	repo := t.TempDir()
 	t.Setenv("AOTOPSY_DART_SDK_REPO", repo)
@@ -196,6 +347,11 @@ func TestSDKSourceAndCacheOverridesMustBeAbsolute(t *testing.T) {
 		t.Fatal("relative SDK source root accepted")
 	}
 	t.Setenv("AOTOPSY_DART_SDK_REPO", "")
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", "relative-mirror")
+	if _, err := localSDKMirror(); err == nil {
+		t.Fatal("relative SDK mirror accepted")
+	}
+	t.Setenv("AOTOPSY_DART_SDK_MIRROR", "")
 	t.Setenv("AOTOPSY_SDK_CACHE_DIR", "relative-cache")
 	if _, err := SDKFileAtTag("runtime/vm/thread.h", "3.12.2"); err == nil {
 		t.Fatal("relative SDK cache root accepted")

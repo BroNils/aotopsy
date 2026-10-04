@@ -4341,7 +4341,7 @@ func thrFieldsX64Compressed(dartVersion string) map[int]string {
 		return thrV3107_x64
 	case "3.11.0":
 		return thrV3110_x64
-	case "3.12.0-dev", "3.12.2":
+	case "3.12.2":
 		return thrV3122_x64
 	case "3.13.0":
 		return thrV3130_x64

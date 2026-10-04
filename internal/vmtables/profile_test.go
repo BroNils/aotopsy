@@ -29,3 +29,18 @@ func TestTargetProfileFromVersionRequiresExactProfile(t *testing.T) {
 		t.Fatal("future version carrying copied profile facts was accepted")
 	}
 }
+
+func TestTargetProfileRejectsUnregisteredVersion(t *testing.T) {
+	target := TargetProfile{
+		DartVersion:        "3.12.0-dev",
+		Architecture:       ArchitectureX64,
+		CompressedPointers: true,
+		BuildMode:          snapshot.BuildProduct,
+	}
+	if fields := THRFields(target); fields != nil {
+		t.Fatal("unregistered Dart version selected a THR table")
+	}
+	if stubs := ThreadStubOffsets(target); stubs != nil {
+		t.Fatal("unregistered Dart version selected Thread cached stubs")
+	}
+}

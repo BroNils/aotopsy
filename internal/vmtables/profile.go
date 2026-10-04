@@ -44,7 +44,8 @@ func TargetProfileFromVersion(profile *snapshot.VersionProfile, isARM64 bool) (T
 }
 
 func (p TargetProfile) supportedProduct() bool {
-	return p.DartVersion != "" &&
+	version := snapshot.ProfileForVersion(p.DartVersion)
+	return version != nil && version.Supported &&
 		(p.Architecture == ArchitectureARM64 || p.Architecture == ArchitectureX64) &&
 		p.BuildMode == snapshot.BuildProduct
 }

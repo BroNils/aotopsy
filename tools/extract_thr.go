@@ -1970,8 +1970,15 @@ func runCheckObjectStore() int {
 	return bad
 }
 
-// runCheck re-extracts every target and diffs it against the committed
-// tables. Returns the number of tables with unexplained differences.
+// runCheck re-extracts every selector-exposed PRODUCT target and diffs it
+// against the table THRFields actually returns for that exact target. This is
+// intentionally target-centric rather than storage-centric: two releases may
+// share one committed map only while their SDK layouts remain byte-for-byte
+// identical. If either release later drifts, the alias must make this gate red.
+//
+// The committed-table coverage pass remains separate so an orphaned map cannot
+// silently stop being checked just because no selector returns it anymore.
+// Returns the number of target tables with unexplained differences.
 func runCheck() int {
 	committed, err := parseCommittedTables(thrTableFiles)
 	if err != nil {
@@ -1986,12 +1993,18 @@ func runCheck() int {
 	covered := map[string]bool{}
 
 	for _, t := range allTargets {
-		name := mapName(t.tag, t.arch, t.compressed, t.product)
-		want, ok := committed[name]
-		if !ok {
-			continue // target has no committed table (e.g. non-PRODUCT)
+		if !t.product {
+			continue
 		}
-		covered[name] = true
+		want := vmtables.THRFields(vmTargetProfile(t))
+		if len(want) == 0 {
+			continue
+		}
+		storageName := mapName(t.tag, t.arch, t.compressed, t.product)
+		if _, ok := committed[storageName]; ok {
+			covered[storageName] = true
+		}
+		name := fmt.Sprintf("%s/%s compressed=%t", t.tag, t.arch, t.compressed)
 		header, ok := headers[t.tag]
 		if !ok {
 			h, err := fetchHeader(t.tag)
@@ -2905,7 +2918,11 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 `)
 	for _, v := range versions {
 		es, ok := byVersion[v]
-		if !ok || len(es) == 0 {
+		if !ok {
+			continue
+		}
+		if len(es) == 0 {
+			fmt.Fprintf(&b, "\t%q: {},\n", v)
 			continue
 		}
 		fmt.Fprintf(&b, "\t%q: {\n", v)

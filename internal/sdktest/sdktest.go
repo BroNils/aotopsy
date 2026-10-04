@@ -22,6 +22,8 @@
 //	AOTOPSY_TEST_SDK          set to anything to enable the gates
 //	AOTOPSY_DART_SDK_REPO     optional exact local dart-lang/sdk checkout;
 //	                          ~/dev/dartsdk-research is also probed
+//	AOTOPSY_DART_SDK_MIRROR   optional bare git mirror used to prove plain
+//	                          <repo>/<tag> trees; default ~/dev/.dartsdk-mirror.git
 //	AOTOPSY_SDK_CACHE_DIR     where to cache fetched files
 //	                          (default $XDG_CACHE_HOME or ~/.cache, /aotopsy/sdk)
 //	AOTOPSY_TEST_SDK_OFFLINE  set to anything to forbid network entirely;
@@ -329,6 +331,24 @@ func localSDKRepos() ([]string, error) {
 	return out, nil
 }
 
+func localSDKMirror() (string, error) {
+	if mirror := strings.TrimSpace(os.Getenv("AOTOPSY_DART_SDK_MIRROR")); mirror != "" {
+		mirror = filepath.Clean(mirror)
+		if !filepath.IsAbs(mirror) {
+			return "", fmt.Errorf("sdktest: AOTOPSY_DART_SDK_MIRROR must be absolute, got %q", mirror)
+		}
+		return mirror, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("sdktest: cannot resolve default Dart SDK mirror without a home directory: %w", err)
+	}
+	if home == "" {
+		return "", fmt.Errorf("sdktest: cannot resolve default Dart SDK mirror: home directory is empty")
+	}
+	return filepath.Join(home, "dev", ".dartsdk-mirror.git"), nil
+}
+
 // readLocalSDKFile returns handled=true once an exact local source identity has
 // been found. From that point any error is authoritative and MUST NOT fall
 // through to cache/network: doing so lets a broken/wrong local release produce
@@ -337,17 +357,33 @@ func readLocalSDKFile(repo, filePath, tag string) (out []byte, handled bool, sou
 	if st, err := os.Stat(repo); err != nil || !st.IsDir() {
 		return nil, false, "", "", nil
 	}
-	// The QA corpus keeps one authoritative working tree per exact release at
-	// <root>/<version>/. Prove both repository identity and file identity rather
-	// than trusting the directory name: HEAD must equal refs/tags/<tag>, and the
-	// checked-out file must byte-match that immutable tag blob.
+	// The QA corpus keeps one authoritative source tree per exact release at
+	// <root>/<version>/. Older/full trees are Git checkouts; archive-populated
+	// trees intentionally have no .git and are proved file-by-file against the
+	// exact immutable tag in the local bare mirror. In both forms a present local
+	// tree is authoritative and must never be healed from cache/network.
 	versionTree := filepath.Join(repo, tag)
 	if st, statErr := os.Stat(versionTree); statErr == nil && st.IsDir() {
-		out, commit, err := readVerifiedVersionTreeFile(versionTree, filePath, tag)
-		if err != nil {
-			return nil, true, "local-version-tree", "", err
+		gitMeta := filepath.Join(versionTree, ".git")
+		if _, gitErr := os.Lstat(gitMeta); gitErr == nil {
+			out, commit, err := readVerifiedVersionTreeFile(versionTree, filePath, tag)
+			if err != nil {
+				return nil, true, "local-version-tree", "", err
+			}
+			return out, true, "local-version-tree", commit, nil
+		} else if !os.IsNotExist(gitErr) {
+			return nil, true, "local-version-tree", "", fmt.Errorf("sdktest: inspect git metadata for exact local tree %s: %w", versionTree, gitErr)
 		}
-		return out, true, "local-version-tree", commit, nil
+
+		mirror, mirrorErr := localSDKMirror()
+		if mirrorErr != nil {
+			return nil, true, "local-plain-version-tree", "", mirrorErr
+		}
+		out, commit, err := readVerifiedPlainVersionTreeFile(versionTree, mirror, filePath, tag)
+		if err != nil {
+			return nil, true, "local-plain-version-tree", "", err
+		}
+		return out, true, "local-plain-version-tree", commit, nil
 	} else if statErr != nil && !os.IsNotExist(statErr) {
 		return nil, true, "local-version-tree", "", fmt.Errorf("sdktest: stat exact local tree %s: %w", versionTree, statErr)
 	}
@@ -416,6 +452,67 @@ func readVerifiedVersionTreeFile(versionTree, filePath, tag string) ([]byte, str
 	}
 	if !bytes.Equal(working, tagged) {
 		return nil, commit, fmt.Errorf("sdktest: authoritative working-tree file %s@%s differs from immutable tag blob", filePath, tag)
+	}
+	return working, commit, nil
+}
+
+// readVerifiedPlainVersionTreeFile verifies an archive-populated SDK tree that
+// intentionally has no .git metadata. The directory name alone is never proof:
+// every requested file must byte-match the same path at refs/tags/<tag> in the
+// local immutable mirror before it can participate in a drift gate.
+func readVerifiedPlainVersionTreeFile(versionTree, mirror, filePath, tag string) ([]byte, string, error) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return nil, "", fmt.Errorf("sdktest: cannot prove plain local tree %s without git: %w", versionTree, err)
+	}
+	st, err := os.Stat(mirror)
+	if err != nil {
+		return nil, "", fmt.Errorf("sdktest: inspect Dart SDK mirror %s for plain tree %s: %w", mirror, versionTree, err)
+	}
+	if !st.IsDir() {
+		return nil, "", fmt.Errorf("sdktest: Dart SDK mirror %s is not a directory", mirror)
+	}
+	isBare, err := gitOutput(gitPath, mirror, 32, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return nil, "", fmt.Errorf("sdktest: Dart SDK mirror %s is not a readable Git repository: %w", mirror, err)
+	}
+	if strings.TrimSpace(string(isBare)) != "true" {
+		return nil, "", fmt.Errorf("sdktest: Dart SDK mirror %s is not bare", mirror)
+	}
+
+	ref := "refs/tags/" + tag
+	commit, found, err := gitExactTagCommit(gitPath, mirror, ref)
+	if err != nil {
+		return nil, "", fmt.Errorf("sdktest: verify exact tag %s in Dart SDK mirror %s: %w", tag, mirror, err)
+	}
+	if !found {
+		return nil, "", fmt.Errorf("sdktest: Dart SDK mirror %s has no immutable tag %s required to prove plain tree %s", mirror, tag, versionTree)
+	}
+	exists, err := gitPathExistsAtRef(gitPath, mirror, ref, filePath)
+	if err != nil {
+		return nil, commit, fmt.Errorf("sdktest: verify %s at %s in Dart SDK mirror: %w", filePath, tag, err)
+	}
+
+	workingPath := filepath.Join(versionTree, filepath.FromSlash(filePath))
+	working, readErr := readBoundedFile(workingPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			if !exists {
+				return nil, commit, fmt.Errorf("%w: %s:%s", ErrSDKFileNotFound, ref, filePath)
+			}
+			return nil, commit, fmt.Errorf("sdktest: authoritative plain tree %s is missing %s, which exists at immutable tag %s", versionTree, filePath, tag)
+		}
+		return nil, commit, fmt.Errorf("sdktest: read authoritative %s@%s from plain tree %s: %w", filePath, tag, versionTree, readErr)
+	}
+	if !exists {
+		return nil, commit, fmt.Errorf("sdktest: authoritative plain-tree file %s@%s exists locally but is absent from immutable tag", filePath, tag)
+	}
+	tagged, err := gitOutput(gitPath, mirror, maxSDKSourceBytes, "show", ref+":"+filePath)
+	if err != nil {
+		return nil, commit, fmt.Errorf("sdktest: read immutable mirror blob %s:%s: %w", ref, filePath, err)
+	}
+	if !bytes.Equal(working, tagged) {
+		return nil, commit, fmt.Errorf("sdktest: authoritative plain-tree file %s@%s differs from immutable tag blob", filePath, tag)
 	}
 	return working, commit, nil
 }
