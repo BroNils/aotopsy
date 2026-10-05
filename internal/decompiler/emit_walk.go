@@ -72,6 +72,11 @@ func (e *emitter) emitOrphanBlocks(indent int) {
 		if e.omittedSet != nil && e.omittedSet[i] {
 			continue
 		}
+		// Runtime stack-overflow / write-barrier stub paths were elided on
+		// purpose (see markElidedSlowPath); they are not lost code.
+		if e.elidedSlowPaths[i] {
+			continue
+		}
 		orphans = append(orphans, i)
 	}
 	if len(orphans) == 0 {
@@ -543,6 +548,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 			}
 		}
 		if normalID >= 0 {
+			e.markElidedSlowPath(takenID, fallID, normalID)
 			e.emitSuccessor(normalID, indent, depth)
 			return
 		}
@@ -558,6 +564,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 			normalID = fallID
 		}
 		if normalID >= 0 {
+			e.markElidedSlowPath(takenID, fallID, normalID)
 			e.emitSuccessor(normalID, indent, depth)
 			return
 		}
@@ -576,6 +583,23 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// Item 7: Merge branch states instead of restoring pre-branch state.
 	e.state = savedState.MergeJoin(takenState, fallState)
 	e.emit(indent, "}")
+}
+
+// markElidedSlowPath records the successor of an elided stack-overflow or
+// write-barrier check that is NOT the normal continuation, so the orphan scan
+// does not list the runtime stub block as lost code.
+func (e *emitter) markElidedSlowPath(takenID, fallID, normalID int) {
+	if e.elidedSlowPaths == nil {
+		return
+	}
+	for _, id := range []int{takenID, fallID} {
+		if id >= 0 && id != normalID {
+			e.elidedSlowPaths[id] = true
+			// The edge exists in the CFG and was consciously dropped: record it
+			// so CFG verification does not report it as a lost branch.
+			e.recordEmittedEdge(e.currentBlock, id)
+		}
+	}
 }
 
 // isStackOverflowCond and isWriteBarrierCond/Stmt are now in internal/sdk —

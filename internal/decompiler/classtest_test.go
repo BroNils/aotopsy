@@ -30,3 +30,25 @@ func TestAnnotateClassIDCondition(t *testing.T) {
 		t.Errorf("nil resolver changed the condition: %q", got)
 	}
 }
+
+func TestTruncateRegExprDropsMeaninglessMasks(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		width uint
+		want  string
+	}{
+		{`"abc"`, 32, `"abc"`},
+		{"null", 32, "null"},
+		{"true", 32, "true"},
+		{"(x & 0xffffffff)", 32, "(x & 0xffffffff)"},            // already masked: identity
+		{"(x & 0xff)", 32, "(x & 0xff)"},                        // narrower mask is within
+		{"(x & 0xffffffff)", 16, "((x & 0xffffffff) & 0xffff)"}, // wider mask is not within
+		{"(a | b & 0xffffffff)", 32, "((a | b & 0xffffffff) & 0xffffffff)"},
+		{"arg0.f7", 32, "(arg0.f7 & 0xffffffff)"},
+		{"300", 8, "44"},
+	} {
+		if got := truncateRegExpr(tc.in, tc.width); got != tc.want {
+			t.Errorf("truncateRegExpr(%q,%d) = %q, want %q", tc.in, tc.width, got, tc.want)
+		}
+	}
+}

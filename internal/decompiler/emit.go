@@ -164,6 +164,11 @@ type emitter struct {
 	// subtree from a fresh visit map and re-emitted join blocks the main
 	// body had already shown.
 	emittedAnywhere map[int]bool
+	// elidedSlowPaths holds the successor blocks of stack-overflow and
+	// write-barrier checks that the emitter deliberately drops (runtime/GC
+	// bookkeeping with no source meaning). They are unreached by design, so they
+	// must not be reported as orphans. Shared with helper sub-emitters.
+	elidedSlowPaths map[int]bool
 	// emittedEdges is shared with helper sub-emitters, like emittedAnywhere.
 	// Key packs source/target block ids into one uint64.
 	emittedEdges map[uint64]bool
@@ -298,6 +303,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		phiDeclared: make(map[int]bool),
 
 		emittedAnywhere: make(map[int]bool),
+		elidedSlowPaths: make(map[int]bool),
 		emittedEdges:    make(map[uint64]bool),
 		currentBlock:    -1,
 		spillSeq:        new(int),
@@ -648,6 +654,13 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	visited := make(map[int]bool, len(e.visits))
 	for id, count := range e.visits {
 		if count > 0 {
+			visited[id] = true
+		}
+	}
+	// A deliberately elided runtime stub block (stack-overflow / write-barrier
+	// slow path) is accounted for, not lost.
+	for id, elided := range e.elidedSlowPaths {
+		if elided && e.visits[id] == 0 {
 			visited[id] = true
 		}
 	}

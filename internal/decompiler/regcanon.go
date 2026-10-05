@@ -59,7 +59,7 @@ func canonReg(tok string) string {
 			// strip a trailing width suffix, then require r<8..15>.
 			core := body
 			switch body[n-1] {
-			case 'd', 'w', 'b':
+			case 'd', 'l', 'w', 'b': // 'l' is Go syntax's spelling of the 32-bit view (R11L)
 				core = body[:n-1]
 			}
 			if isAllDigits(core) {
@@ -129,7 +129,7 @@ func gprView(tok string) (regView, bool) {
 		view := regView{width: 64}
 		if n := len(body); n > 0 {
 			switch body[n-1] {
-			case 'd':
+			case 'd', 'l':
 				core = body[:n-1]
 				view = regView{width: 32, zeroExtendWrite: true}
 			case 'w':
@@ -180,7 +180,68 @@ func truncateRegExpr(expr string, width uint) string {
 	if v, ok := parseImm(expr); ok {
 		return strconv.FormatUint(uint64(v)&mask, 10)
 	}
+	if isObjectLiteralExpr(expr) || alreadyMaskedWithin(expr, mask) {
+		return expr
+	}
 	return fmt.Sprintf("(%s & 0x%x)", expr, mask)
+}
+
+// isObjectLiteralExpr reports whether expr is a Dart literal that denotes an
+// OBJECT (string literal, null, true, false) rather than a machine integer.
+// A 32-bit register view of such a value is a compressed object reference;
+// truncating it to 32 bits says nothing about the object, it only renders as
+// `"text" & 0xffffffff`, which is never source.
+func isObjectLiteralExpr(expr string) bool {
+	switch expr {
+	case "null", "true", "false":
+		return true
+	}
+	return len(expr) >= 2 && expr[0] == '"' && expr[len(expr)-1] == '"' && !strings.Contains(expr[1:len(expr)-1], `"`)
+}
+
+// alreadyMaskedWithin reports whether expr is a parenthesised `(X & 0xM)` whose
+// top-level operator is that AND and whose mask M is a subset of mask: masking
+// it again is the identity, so the second mask is redundant noise.
+func alreadyMaskedWithin(expr string, mask uint64) bool {
+	if len(expr) < 8 || expr[0] != '(' || expr[len(expr)-1] != ')' {
+		return false
+	}
+	// The outer parentheses must be one matching pair.
+	depth := 0
+	andAt := -1
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(expr)-1 {
+				return false
+			}
+		case '&':
+			if depth == 1 {
+				andAt = i
+			}
+		case '|', '^', '+', '-', '*', '/', '<', '>', '=', '!', '?', ':':
+			// Another top-level operator: the AND may bind to only part of
+			// the expression, so the mask proves nothing about the whole.
+			if depth == 1 {
+				return false
+			}
+		}
+	}
+	if andAt < 0 || depth != 0 {
+		return false
+	}
+	rest := strings.TrimSpace(expr[andAt+1 : len(expr)-1])
+	if !strings.HasPrefix(rest, "0x") {
+		return false
+	}
+	m, err := strconv.ParseUint(rest[2:], 16, 64)
+	if err != nil {
+		return false
+	}
+	return m&^mask == 0
 }
 
 func readRegView(tok, full string) string {

@@ -52,21 +52,34 @@ type qualityFloor struct {
 	maxDefects       map[string]int
 }
 
-// Measured 2026-10 at 15b6e0b..a16d368 (59 ground-truth functions each).
+// Measured (59 ground-truth functions each). History:
+//
+//	baseline (b031828):  arm64 lit 50.0 / x64 lit 45.2, masked_string 140/129, double_mask 6/58,
+//	                     orphan 192/111, goto 362/384, local_mN 534/608
+//	P4.1 (this file):    string/object literals no longer masked, redundant re-masks dropped,
+//	                     x64 R8L..R15L (Go-syntax 32-bit view) aliased to their 64-bit register,
+//	                     elided stack-overflow/write-barrier stub blocks no longer listed as orphans.
+//
+// x64 orphan_block went UP (111 -> 143) although the code shown is strictly more
+// correct: with R11L aliased, the barrier/Smi diamonds around `_StringBase._interpolate`
+// chains are recognised, the nesting reaches the walker's depth budget sooner and the
+// join block is emitted verbatim as an orphan. Collapsing the Mint-box diamond
+// (`if ((v>>30)+1 < 2) {..} else {AllocateMint..f7 = v}`) is P4.2 in
+// .tmp/review/MASTER-PLAN.md and should bring this ceiling down.
 var qualityFloors = map[string]qualityFloor{
 	"dart-3.9.2-arm64.so": {
 		minLiteralRecall: 50.0, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
-			"SubtypeTestCache_arg": 0, "const_masked": 6, "double_mask": 6, "dynamicCall_dispatchTarget": 2,
-			"goto_block": 362, "local_mN": 534, "masked_string_literal": 140, "orphan_block": 192,
+			"SubtypeTestCache_arg": 0, "const_masked": 6, "double_mask": 0, "dynamicCall_dispatchTarget": 2,
+			"goto_block": 277, "local_mN": 534, "masked_string_literal": 2, "orphan_block": 107,
 			"raw_register": 45, "runtime_stub_call": 2, "stack_sp_leak": 144,
 		},
 	},
 	"dart-3.9.2-x64.so": {
-		minLiteralRecall: 45.2, minCalleeRecall: 80.0,
+		minLiteralRecall: 52.3, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
-			"SubtypeTestCache_arg": 0, "const_masked": 29, "double_mask": 58, "dynamicCall_dispatchTarget": 0,
-			"goto_block": 384, "local_mN": 608, "masked_string_literal": 129, "orphan_block": 111,
+			"SubtypeTestCache_arg": 0, "const_masked": 29, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
+			"goto_block": 285, "local_mN": 544, "masked_string_literal": 2, "orphan_block": 143,
 			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 146,
 		},
 	},

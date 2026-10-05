@@ -81,6 +81,7 @@ func (e *emitter) appendHelperFunctions() {
 			phiDeclared:     make(map[int]bool),
 			// Shared, unlike visits: see emitter.emittedAnywhere.
 			emittedAnywhere: e.emittedAnywhere,
+			elidedSlowPaths: e.elidedSlowPaths,
 			emittedEdges:    e.emittedEdges,
 			currentBlock:    -1}
 		sub.state.Pool = e.pool
