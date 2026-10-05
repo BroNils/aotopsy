@@ -36,6 +36,15 @@ type LiftState struct {
 	// pool operand renders as `pool[N]` rather than its contents.
 	Pool PoolLookup
 
+	// OutSlots maps the SP-relative byte offset of an outgoing-argument slot to
+	// the value last stored there in the CURRENT block (store `[SP + disp]`,
+	// disp >= 0). From 3.0.5 every stack argument of a call is written by a
+	// MoveArgument instruction inserted immediately before the call
+	// (FlowGraph::InsertMoveArguments), so the slots written since the previous
+	// call are exactly that call's stack arguments (see takeOutgoingStackArgs).
+	// Path-local: dropped at block entry and at every call, never merged.
+	OutSlots map[int64]string
+
 	// Spills holds `var _tN = <expr>;` declarations produced by setReg when a
 	// forwarded expression outgrew maxForwardedExprLen. The emitter drains
 	// them after every instruction, before the statement that uses the name.
@@ -100,6 +109,12 @@ func (s *LiftState) Clone() *LiftState {
 	}
 	for k, v := range s.RegClass {
 		c.RegClass[k] = v
+	}
+	if len(s.OutSlots) > 0 {
+		c.OutSlots = make(map[int64]string, len(s.OutSlots))
+		for k, v := range s.OutSlots {
+			c.OutSlots[k] = v
+		}
 	}
 	return c
 }
@@ -959,6 +974,15 @@ func ApplyOther(fir *FuncIR, s *LiftState, ins Instr) (line string, hasLine bool
 			dst := strings.ToLower(ops[0])
 			s.setReg(dst, fmt.Sprintf("(-%s)", operandExpr(fir, s, ops[1])))
 		}
+	default:
+		// A mnemonic nothing above models (SBFIZ, SXTW, ... ). It still WRITES its
+		// destination, so the old value of that register is gone: leaving it in
+		// place made later reads render the value from BEFORE the instruction --
+		// e.g. `t1.f23 = local_m8` for the Smi-tagged `version` that SBFIZ had just
+		// produced. Drop the value; an unknown register renders as itself.
+		for _, d := range ins.DefRegs {
+			delete(s.Regs, canonReg(d))
+		}
 	}
 	return "", false
 }
@@ -1048,9 +1072,20 @@ func applyStore(fir *FuncIR, s *LiftState, memTok, srcTok string) (string, bool)
 	if base == fir.StackReg {
 		if op.hasDisp {
 			if slot, ok := stackSlotExpr(fir, base, op.memDisp); ok {
+				if op.memDisp >= 0 && op.memDisp%8 == 0 {
+					if s.OutSlots == nil {
+						s.OutSlots = make(map[int64]string)
+					}
+					s.OutSlots[op.memDisp] = valExpr
+				}
 				return fmt.Sprintf("%s = %s;", slot, valExpr), true
 			}
 		}
+		// `str x, [sp]`: slot 0 (no displacement operand).
+		if s.OutSlots == nil {
+			s.OutSlots = make(map[int64]string)
+		}
+		s.OutSlots[0] = valExpr
 		return fmt.Sprintf("stack_sp = %s;", valExpr), true
 	}
 	baseExpr := s.lookupReg(base)

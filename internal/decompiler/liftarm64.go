@@ -277,6 +277,29 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			s.setReg(dst, expr)
 		}
 		return "", false, true
+	case "sbfx", "sbfiz":
+		// Signed bitfield extract / insert-in-zeros. The two shapes the compiler
+		// emits for compressed Smis (kSmiTagSize = 1):
+		//   SBFX  Xd, Xn, #1, #w  : SmiUntag with sign extension  -> Xn >> 1
+		//   SBFIZ Xd, Xn, #1, #31 : SmiTag of a 31-bit value       -> Xn << 1
+		// Anything else is a different bitfield operation: its destination is
+		// left unknown (the generic default drops it) rather than guessed.
+		if len(ops) >= 4 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			lsb, ok1 := parseImm(ops[2])
+			width, ok2 := parseImm(ops[3])
+			if ok1 && ok2 && lsb == 1 && width >= 31 {
+				if mnemonic == "sbfx" {
+					s.setReg(dst, fmt.Sprintf("(%s >> 1)", src))
+					return "", false, true
+				}
+				s.setReg(dst, fmt.Sprintf("(%s << 1)", src))
+				return "", false, true
+			}
+			delete(s.Regs, canonReg(dst))
+			return "", false, true
+		}
 	case "ubfx":
 		if len(ops) >= 4 {
 			dst := strings.ToLower(ops[0])

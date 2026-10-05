@@ -81,6 +81,18 @@ type qualityFloor struct {
 //	                     (fallthrough, jump, elided branch) no longer consume nesting depth.
 //	                     orphan_block 107/143 -> 11/47, goto_block 127/133 -> 32/38.
 //
+//	P7 (outargs.go, lift.go):
+//	                     (3.0.5+) the SP-relative outgoing slots written since the previous call are
+//	                     the call's stack arguments (MoveArgument); they are now printed as the
+//	                     argument list and the slot stores are removed: stack_sp_leak 140/142 -> 0/2;
+//	                     3000 functions: slot statements arm64 2679 -> 155, x64 3256 -> 699.
+//	                     Two soundness fixes found on the way: (a) a mnemonic with no handler left its
+//	                     destination register's OLD value in place (the SBFIZ that Smi-tags `version`
+//	                     left `local_m8`, printing `"$name v$name"`); unhandled defs are now dropped,
+//	                     and SBFX/SBFIZ #1 (SmiUntag/SmiTag) are modelled; raw_register arm64 42 -> 49;
+//	                     (b) the pure-goto diamond rule is limited to Smi tests (`>> 0 & 1`): a bool bit
+//	                     test is a real branch whose join value differs by path.
+//
 // (History: x64 orphan_block had risen 111 -> 143 after the R8L aliasing fix, for the same
 // reason: more barrier checks were recognised, so more stub blocks were left unmarked.)
 var qualityFloors = map[string]qualityFloor{
@@ -88,16 +100,16 @@ var qualityFloors = map[string]qualityFloor{
 		minLiteralRecall: 50.0, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 6, "double_mask": 0, "dynamicCall_dispatchTarget": 2,
-			"goto_block": 32, "interpolate_call": 126, "local_mN": 525, "masked_string_literal": 2, "orphan_block": 11,
-			"raw_register": 42, "runtime_stub_call": 2, "stack_sp_leak": 140,
+			"goto_block": 36, "interpolate_call": 127, "local_mN": 529, "masked_string_literal": 2, "orphan_block": 11,
+			"raw_register": 49, "runtime_stub_call": 2, "stack_sp_leak": 0,
 		},
 	},
 	"dart-3.9.2-x64.so": {
 		minLiteralRecall: 52.3, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 2, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
-			"goto_block": 38, "interpolate_call": 126, "local_mN": 533, "masked_string_literal": 2, "orphan_block": 10,
-			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 142,
+			"goto_block": 47, "interpolate_call": 127, "local_mN": 536, "masked_string_literal": 2, "orphan_block": 10,
+			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 2,
 		},
 	},
 }

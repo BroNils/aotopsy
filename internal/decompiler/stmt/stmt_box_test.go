@@ -57,7 +57,11 @@ func TestMintBoxDiamondLeavesRealBranches(t *testing.T) {
 		"extra statement":   "void f() {\n  if (c) {\n    block_3:;\n    a();\n  } else {\n    AllocateMintWithoutFpuRegs().f7 = v;\n    log();\n    goto block_3;\n  }\n}",
 		"other goto":        "void f() {\n  if (c) {\n    block_3:;\n    a();\n  } else {\n    AllocateMintWithoutFpuRegs().f7 = v;\n    goto block_9;\n  }\n}",
 		"call in condition": "void f() {\n  if (probe()) {\n    block_3:;\n    a();\n  } else {\n    goto block_3;\n  }\n}",
-		"not a mint":        "void f() {\n  if (c) {\n    block_3:;\n    a();\n  } else {\n    AllocateDouble().f7 = v;\n    goto block_3;\n  }\n}",
+		// A bool bit test (`enabled ? "on" : "off"`) is a real branch whose join
+		// value differs by path: it must stay visible.
+		"bool bit test":   "void f() {\n  if ((((e.f19 & 0xffffffff) >> 4 & 1) != 0) {\n    block_6:;\n    s = \"off\";\n  } else {\n    goto block_6;\n  }\n}",
+		"plain condition": "void f() {\n  if (c) {\n    block_3:;\n    a();\n  } else {\n    goto block_3;\n  }\n}",
+		"not a mint":      "void f() {\n  if (c) {\n    block_3:;\n    a();\n  } else {\n    AllocateDouble().f7 = v;\n    goto block_3;\n  }\n}",
 	} {
 		if _, changed := collapseBox(t, src); changed {
 			t.Errorf("%s: a real branch was collapsed", name)

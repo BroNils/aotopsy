@@ -60,6 +60,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Decompiler binds stack-passed call arguments to the call (3.0.5+).** From 3.0.5 the
+  compiler writes every stack argument with a `MoveArgumentInstr` inserted immediately before the
+  call (`FlowGraph::InsertMoveArguments`; il_arm64.cc / il_x64.cc), to the pre-reserved
+  outgoing area at `[SP + index*8]`, with the LAST stack argument at `SP+0`
+  (`dart_calling_conventions.cc ComputeCallingConvention`). The SP-relative slots written since
+  the previous call are therefore exactly the call's stack arguments, so they are now printed as
+  its argument list (deepest slot first) and the redundant `stack_sp = ...` statements are
+  removed. Only for a contiguous run `SP+0..SP+8(k-1)`, never for VM stub callees. In 3.0.5..3.3.x
+  (no register calling convention: `dart_calling_conventions.cc` first exists at 3.4.3) the
+  stack arguments are the whole list; from 3.4 they follow the register arguments. 3.9.2, first
+  3000 functions: stack-slot statements arm64 2679 -> 155, x64 3256 -> 699; ground-truth gate
+  `stack_sp_leak` 140/142 -> 0/2. The <= 2.19.0 push model is NOT bound yet (it needs
+  stack-pointer tracking, see `.tmp/review/AUDIT-2026-10.md` 11.1).
+- **Lifter: an instruction with no handler no longer leaves its destination's old value in place.**
+  `ApplyOther` silently skipped unknown mnemonics, so a register written by e.g. `SBFIZ` kept the
+  value from BEFORE the instruction and later reads printed it (`describeConfig` showed
+  `"$name v$name"` instead of the version). Unhandled destinations are now dropped, and `SBFX`/
+  `SBFIZ` with `#1` (SmiUntag/SmiTag, `kSmiTagSize = 1`) are modelled (`x >> 1`, `x << 1`).
+  `raw_register` on the arm64 ground truth 42 -> 49 (unknown values show as the register).
+- **The "rejoin-only else" collapse is limited to Smi tests.** `if (c) { L: X } else { goto L }`
+  is only value-preserving for a bit-0 test (`>> 0 & 1`), where both paths hold the same value;
+  for any other condition (e.g. `enabled ? "on" : "off"`) the structured walk prints the join
+  under one path's register state, so the condition is the only hint left and must stay.
 - **Decompiler no longer lists write-barrier / stack-overflow stub blocks as lost code, and
   straight-line continuations no longer consume nesting depth.** The barrier-check block can be
   emitted as a helper after the orphan scan runs, so its stub path was not yet marked as elided

@@ -128,6 +128,16 @@ func isPureGotoPath(body []Stmt, label string) bool {
 
 var callInCondRe = regexp.MustCompile(`[A-Za-z_]\w*\s*\(`)
 
+// smiTestCondRe matches the Smi-tag test `(... >> 0 & 1) == 0` / `!= 0` (bit 0
+// of a value: the BranchIfSmi that guards an array/field store's write barrier).
+// Both paths of such a diamond hold the SAME value, so dropping the branch loses
+// nothing. A rejoin-only `else` behind any OTHER condition is NOT safe to drop:
+// the structured walk prints the join under the register state of one path, so the
+// condition is the only hint left that the value differs by path (e.g. the bool
+// bit test `>> 4 & 1` of `enabled ? "on" : "off"` would become an unconditional
+// "off").
+var smiTestCondRe = regexp.MustCompile(`>>\s*0\s*&\s*1\)\s*(==|!=)\s*0`)
+
 // collapseMintBoxDiamondStmt removes BoxInt64 Smi-or-Mint diamonds (see above).
 func collapseMintBoxDiamondStmt(body []Stmt) ([]Stmt, bool) {
 	changed := false
@@ -135,9 +145,11 @@ func collapseMintBoxDiamondStmt(body []Stmt) ([]Stmt, bool) {
 	for _, s := range body {
 		c := asConstruct(s)
 		if c != nil && c.isIf() && len(c.Clauses) == 2 && c.hasElse() {
-			// A branch that only rejoins is irrelevant when the condition has no
-			// side effect (no call): both paths run the other branch's body.
-			pure := !callInCondRe.MatchString(c.cond())
+			// A branch that only rejoins is irrelevant when the condition is a Smi
+			// test with no side effect: both paths hold the same value and run the
+			// other branch's body.
+			cond := c.cond()
+			pure := !callInCondRe.MatchString(cond) && smiTestCondRe.MatchString(cond)
 			slow := func(miss []Stmt, label string) bool {
 				return isMintSlowPath(miss, label) || (pure && isPureGotoPath(miss, label))
 			}

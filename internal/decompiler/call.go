@@ -116,6 +116,27 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 		calleeVA = 0
 	}
 	args := e.callArgExprs(len(e.fir.ArgRegs), calleeVA)
+	// Stack-passed arguments (MoveArgument model, >= 3.0.5): the slots written
+	// since the previous call. The callee's name bounds what may be bound.
+	calleeName := ""
+	if isDirect && e.symbols != nil {
+		if sym, ok := e.symbols(calleeVA); ok {
+			calleeName = cleanCalleeName(sym)
+		}
+	}
+	if stackArgs := e.takeOutgoingStackArgs(calleeName); len(stackArgs) > 0 {
+		if e.hasRegisterCC() {
+			// >= 3.4.x: the first max_arguments_in_registers arguments of an
+			// eligible callee are in registers and the rest on the stack, so the
+			// register list is kept and the stack arguments follow it.
+			args = append(args, stackArgs...)
+		} else {
+			// 3.0.5..3.3.x pass EVERY argument on the stack (no
+			// DartCallingConvention yet): the registers listed above are not
+			// arguments, only whatever those registers happened to hold.
+			args = stackArgs
+		}
+	}
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 
