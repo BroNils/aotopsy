@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Decompiler collapses BoxInt64 Smi-or-Mint diamonds.** `BoxInt64Instr::EmitNativeCode`
+  (read and diffed in all 23 SDK trees) tags the value when it fits a Smi and otherwise
+  allocates a Mint and stores the value; both paths continue at the same label and hold
+  the same Dart int. The emitter showed this as a nested `if/else` whose miss branch is only
+  the `Allocate...Mint...` stub call plus a `goto`. A new statement-tree pass removes the
+  diamond when (and only when) the miss branch contains nothing else. 3.9.2 ground-truth gate:
+  `goto_block` 277/285 -> 249/257 (arm64/x64), x64 `const_masked` 29 -> 1. `orphan_block`
+  is unchanged: orphans are decided by the walk's depth budget before this pass runs.
 - **Removed two unfounded annotations.** The `// null-safety: nullable variables`
   comment (a `== null` compare does not prove a nullable type: the compiler emits
   null compares for caller-side assert-assignable checks, `??`/`?.` lowering and

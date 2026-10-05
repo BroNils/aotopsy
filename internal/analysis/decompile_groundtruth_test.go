@@ -60,6 +60,11 @@ type qualityFloor struct {
 //	                     x64 R8L..R15L (Go-syntax 32-bit view) aliased to their 64-bit register,
 //	                     elided stack-overflow/write-barrier stub blocks no longer listed as orphans.
 //
+//	P4.2 (stmt_box.go):  BoxInt64 Smi-or-Mint diamonds collapsed after emission
+//	                     (goto_block 277/285 -> 249/257, local_mN 534/544 -> 529/540,
+//	                     x64 const_masked 29 -> 1). orphan_block is unchanged: orphans come
+//	                     from the walk's depth budget, which runs BEFORE this text pass.
+//
 // x64 orphan_block went UP (111 -> 143) although the code shown is strictly more
 // correct: with R11L aliased, the barrier/Smi diamonds around `_StringBase._interpolate`
 // chains are recognised, the nesting reaches the walker's depth budget sooner and the
@@ -71,15 +76,15 @@ var qualityFloors = map[string]qualityFloor{
 		minLiteralRecall: 50.0, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 6, "double_mask": 0, "dynamicCall_dispatchTarget": 2,
-			"goto_block": 277, "local_mN": 534, "masked_string_literal": 2, "orphan_block": 107,
+			"goto_block": 249, "local_mN": 529, "masked_string_literal": 2, "orphan_block": 107,
 			"raw_register": 45, "runtime_stub_call": 2, "stack_sp_leak": 144,
 		},
 	},
 	"dart-3.9.2-x64.so": {
 		minLiteralRecall: 52.3, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
-			"SubtypeTestCache_arg": 0, "const_masked": 29, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
-			"goto_block": 285, "local_mN": 544, "masked_string_literal": 2, "orphan_block": 143,
+			"SubtypeTestCache_arg": 0, "const_masked": 1, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
+			"goto_block": 257, "local_mN": 540, "masked_string_literal": 2, "orphan_block": 143,
 			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 146,
 		},
 	},

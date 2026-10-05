@@ -20,6 +20,7 @@ func CompactTree(stmts []Stmt) ([]Stmt, bool) {
 		for _, fn := range []func([]Stmt) ([]Stmt, bool){
 			removeDeadCodeAfterTerminatorStmt,
 			removeSelfAssignStmt,
+			collapseMintBoxDiamondStmt,
 			removeEmptyElseStmt,
 			collapseElseIfStmt,
 			collapseRedundantGuardedReturnStmt,
