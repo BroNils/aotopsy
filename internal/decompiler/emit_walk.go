@@ -77,6 +77,16 @@ func (e *emitter) emitOrphanBlocks(indent int) {
 		if e.elidedSlowPaths[i] {
 			continue
 		}
+		// The check that guards a runtime slow path may be in a block that is
+		// emitted as a helper AFTER this scan, so its stub path is not marked
+		// yet. A block that is nothing but a call to a write-barrier or
+		// stack-overflow stub is never source code, whichever way it is reached.
+		if e.isRuntimeSlowPathBlock(i) {
+			if e.elidedSlowPaths != nil {
+				e.elidedSlowPaths[i] = true
+			}
+			continue
+		}
 		orphans = append(orphans, i)
 	}
 	if len(orphans) == 0 {
@@ -354,7 +364,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	if len(blk.Instrs) == 0 || !isControlFlowOp(blk.Instrs[len(blk.Instrs)-1].Op) {
 		for _, s := range blk.Succs {
 			if s.Cond == "" {
-				e.emitSuccessor(s.BlockID, indent, depth)
+				e.emitContinuation(s.BlockID, indent, depth)
 				return
 			}
 		}
@@ -386,6 +396,22 @@ func (e *emitter) recordEmittedEdge(from, to int) {
 // covers back-edges reached via a conditional branch or fallthrough/jump
 // successor dispatch (emitBranch/emitBlock); emitJump had its own
 // equivalent special case already.
+// emitContinuation follows an edge that stays at the SAME indentation -- a
+// fallthrough, an unconditional jump, or the normal edge of an elided
+// stack-overflow/write-barrier check. No construct is opened for it, so it adds
+// no nesting and must not consume nesting depth: maxDepth bounds how deeply the
+// output nests, not how many blocks a straight-line function has. Charging a
+// block per chain link pushed ordinary 20+ block functions over the budget and
+// turned the rest of the function into `// orphan block` text.
+//
+// Termination is unchanged: a block already on the walk stack (active), the
+// per-block re-emission cap (maxVisitCount) and the step budget
+// (maxStepsPerEmitter) still bound the walk, and the step budget bounds the Go
+// recursion depth.
+func (e *emitter) emitContinuation(id, indent, depth int) {
+	e.emitSuccessor(id, indent, depth-1)
+}
+
 func (e *emitter) emitSuccessor(id, indent, depth int) {
 	if id < 0 || id >= len(e.fir.Blocks) {
 		e.emit(indent, "// unresolved branch target")
@@ -549,7 +575,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		}
 		if normalID >= 0 {
 			e.markElidedSlowPath(takenID, fallID, normalID)
-			e.emitSuccessor(normalID, indent, depth)
+			e.emitContinuation(normalID, indent, depth)
 			return
 		}
 	}
@@ -565,7 +591,7 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 		}
 		if normalID >= 0 {
 			e.markElidedSlowPath(takenID, fallID, normalID)
-			e.emitSuccessor(normalID, indent, depth)
+			e.emitContinuation(normalID, indent, depth)
 			return
 		}
 	}
@@ -583,6 +609,40 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	// Item 7: Merge branch states instead of restoring pre-branch state.
 	e.state = savedState.MergeJoin(takenState, fallState)
 	e.emit(indent, "}")
+}
+
+// isRuntimeSlowPathBlock reports whether block i only calls a GC write-barrier
+// or stack-overflow stub (plus register moves and the jump back): the body of the
+// slow path that BranchIf*/StoreBarrier skip in the common case. The callee is
+// identified by its resolved symbol name, so a block that calls anything else, or
+// has more than that one call, is not matched.
+func (e *emitter) isRuntimeSlowPathBlock(i int) bool {
+	if e.symbols == nil || i < 0 || i >= len(e.fir.Blocks) {
+		return false
+	}
+	blk := &e.fir.Blocks[i]
+	if len(blk.Instrs) == 0 || len(blk.Instrs) > 8 || len(blk.Succs) > 1 {
+		return false
+	}
+	calls := 0
+	for _, ins := range blk.Instrs {
+		switch ins.Op {
+		case OpCall:
+			va, ok := parseHexVA(ins.Target)
+			if !ok {
+				return false
+			}
+			name, ok := e.symbols(va)
+			if !ok || !(strings.Contains(name, "WriteBarrier") || strings.HasPrefix(name, "StackOverflowStub")) {
+				return false
+			}
+			calls++
+		case OpOther, OpJump:
+		default:
+			return false
+		}
+	}
+	return calls == 1
 }
 
 // markElidedSlowPath records the successor of an elided stack-overflow or
@@ -636,7 +696,7 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 		targetID = s.BlockID
 	}
 	if targetID >= 0 {
-		e.emitSuccessor(targetID, indent, depth)
+		e.emitContinuation(targetID, indent, depth)
 		return
 	}
 	// P6: Indirect branch (br xN) — jump-table dispatch or tail call.

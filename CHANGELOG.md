@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Decompiler no longer lists write-barrier / stack-overflow stub blocks as lost code, and
+  straight-line continuations no longer consume nesting depth.** The barrier-check block can be
+  emitted as a helper after the orphan scan runs, so its stub path was not yet marked as elided
+  and showed up as `// orphan block N` (with a `goto` to it left behind). An unreached block that
+  is only a call to a `*WriteBarrier` / `StackOverflowStub*` symbol is now accounted for. Also,
+  a fallthrough, unconditional jump or elided-branch edge opens no construct, so it no longer
+  counts against `maxDepth` (that bounds nesting, not function length). 3.9.2 ground-truth gate:
+  `orphan_block` 107/143 -> 11/47 and `goto_block` 127/133 -> 32/38 (arm64/x64); first 3000
+  functions: orphan blocks arm64 423 -> 157, x64 3797 (before the decompiler series) -> 2400.
 - **Decompiler rebuilds string templates from the interpolation array.** A Dart
   interpolation compiles to `CreateArray(n)` + one `StoreIndexed` per piece +
   `_StringBase._interpolate(list)` (one argument; `kernel_binary_flowgraph.cc`
