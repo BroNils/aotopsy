@@ -631,8 +631,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = hoistStringLiterals(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
-	// Null-safety annotation (detect null-check patterns)
-	source = nullSafetyAnnotation(source)
 	// A1: Local variable type inference — consolidated pass that combines
 	// IR-level hints (from typetrack KnownClass) with heuristic text-based
 	// inference from ParamTypeNames. One split + one join instead of two.

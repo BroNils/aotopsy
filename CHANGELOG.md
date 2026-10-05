@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Removed two unfounded annotations.** The `// null-safety: nullable variables`
+  comment (a `== null` compare does not prove a nullable type: the compiler emits
+  null compares for caller-side assert-assignable checks, `??`/`?.` lowering and
+  defensive checks) and the integer-literal guess in `// local types` (a bare integer
+  may be a raw machine immediate, not a Dart int). String/bool/double literals and
+  declared/IR types are still annotated.
 - **Parameters keep neutral `argN` names.** The type-derived renaming (`str0`,
   `n1`, `flag2`, `callback3`) invented roles: positional parameter names are not in
   a Full-AOT snapshot in any supported version (>=2.14.0 does not serialize them;

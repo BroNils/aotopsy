@@ -66,23 +66,6 @@ func TestSimplifyExpressions(t *testing.T) {
 
 // --- CSE tests ---
 
-// --- Null-safety annotation tests ---
-
-func TestNullSafetyAnnotation(t *testing.T) {
-	source := `dynamic foo(int x) {
-  if (x == null) { return 0; }
-  if (x != null) { return x; }
-  return null;
-}`
-	result := nullSafetyAnnotation(source)
-	if !strings.Contains(result, "null-safety") {
-		t.Error("null-safety annotation should detect null checks")
-	}
-	if !strings.Contains(result, "x") {
-		t.Error("null-safety annotation should list 'x' as nullable")
-	}
-}
-
 // --- Local type inference tests ---
 
 func TestLocalTypeInference(t *testing.T) {
@@ -100,8 +83,8 @@ func TestLocalTypeInference(t *testing.T) {
 	if !strings.Contains(result, "local_8: int") {
 		t.Error("local type inference should infer local_8 as int from arg0")
 	}
-	if !strings.Contains(result, "t1: int") {
-		t.Error("local type inference should infer t1 as int from literal 42")
+	if strings.Contains(result, "t1:") {
+		t.Error("a bare integer literal may be a raw immediate and must not be typed as int")
 	}
 	if !strings.Contains(result, "t2: String") {
 		t.Error("local type inference should infer t2 as String from literal 'hello'")

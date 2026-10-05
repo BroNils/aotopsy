@@ -74,13 +74,9 @@ func trimmed(line string) string {
 // which is both slow and a Go anti-pattern. Each regex is compiled once
 // at package init and reused across all calls.
 var (
-	// nullSafetyAnnotation
-	nullCheckRe    = regexp.MustCompile(`if \((\w+) == null\)`)
-	notNullCheckRe = regexp.MustCompile(`(\w+) != null`)
 	// localTypeInference / applyLocalTypeHints
 	localAssignArgRe = regexp.MustCompile(`^(local_\w+) = (arg\d+);`)
 	finalAssignRe    = regexp.MustCompile(`^final (t\d+) = (.+);`)
-	intLitRe         = regexp.MustCompile(`^-?\d+$`)
 	doubleLitRe      = regexp.MustCompile(`^-?\d+\.\d+$`)
 	stringLitRe      = regexp.MustCompile(`^'[^']*'$`)
 	// applyLocalTypeHints: "final tN = ..."
@@ -239,54 +235,11 @@ func simplifyLineProtectingStrings(line string) string {
 // 43 (as `// local_m8: List` comments -- proven by diffing the output with the
 // call disabled, after a grep for typed declarations wrongly suggested zero).
 
-// --- Null-safety Annotation ---
-
-// nullSafetyAnnotation detects null-check patterns and annotates variables
-// with nullability info. This is a heuristic pass that looks for:
-// 1. "if (x == null)" → x is nullable
-// 2. "x!" → x is being null-asserted
-// 3. "x?.field" → x is nullable, safe access
-func nullSafetyAnnotation(source string) string {
-	lines := strings.Split(source, "\n")
-	var out []string
-	nullableVars := map[string]bool{}
-
-	for _, line := range lines {
-		t := trimmed(line)
-
-		// Detect "if (x == null)" → mark x as nullable
-		m := nullCheckRe.FindStringSubmatch(t)
-		if m != nil {
-			nullableVars[m[1]] = true
-		}
-
-		// Detect "x != null" checks
-		m2 := notNullCheckRe.FindStringSubmatch(t)
-		if m2 != nil {
-			nullableVars[m2[1]] = true
-		}
-
-		out = append(out, line)
-	}
-
-	// If any nullable vars were found, emit annotation at the top
-	if len(nullableVars) > 0 {
-		var vars []string
-		for v := range nullableVars {
-			vars = append(vars, v)
-		}
-		sort.Strings(vars)
-		annotation := "// null-safety: nullable variables: " + strings.Join(vars, ", ")
-		// Insert after the first line (signature)
-		if len(out) > 0 {
-			rest := make([]string, len(out)-1)
-			copy(rest, out[1:])
-			out = append([]string{out[0], annotation}, rest...)
-		}
-	}
-
-	return strings.Join(out, "\n")
-}
+// The null-safety annotation pass ("x == null seen => x is nullable") was
+// removed: a comparison with null does not prove a declared type is nullable.
+// The compiler emits null compares for caller-side assert-assignable checks
+// (flow_graph_compiler.cc GenerateCallerChecksForAssertAssignable), for `??`/`?.`
+// lowering and for defensive checks on non-nullable values (AUDIT-2026-10 9.2).
 
 // --- Local Variable Type Inference (heuristic) ---
 
@@ -341,9 +294,10 @@ func localTypeInference(source string, paramTypes []string, irHints map[string]s
 		if m2 := finalAssignRe.FindStringSubmatch(t); m2 != nil {
 			val := m2[1]
 			expr := m2[2]
+			// Only literals that are pool OBJECTS name a type. A bare integer is
+			// not listed: it may be a raw machine immediate (a Smi tag, a size,
+			// a bool-from-null offset) rather than a Dart int.
 			switch {
-			case intLitRe.MatchString(expr):
-				varTypes[val] = "int"
 			case doubleLitRe.MatchString(expr):
 				varTypes[val] = "double"
 			case stringLitRe.MatchString(expr):
