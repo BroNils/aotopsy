@@ -130,7 +130,7 @@ func CollectionIdiomsStmt(stmts []Stmt) ([]Stmt, bool) {
 var (
 	// interpolateCallRe matches `_StringBase._interpolate(...)` / `_interpolate(...)`
 	// and `_StringBase._interpolateSingle(...)` / `_interpolateSingle(...)`.
-	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\.)?(_interpolateSingle|_interpolate)\((.+)\)`)
+	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\.)?(_interpolateSingle|_interpolate)\((.*)\)`)
 )
 
 // stringInterpolationIdiomStmt rewrites runtime string interpolation calls to clean Dart template literals:
@@ -186,7 +186,7 @@ func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 						return match
 					}
 					args := strings.TrimSpace(m[2])
-					if !bracketsBalanced(args) || topLevelCommaCount(args) != 0 {
+					if args == "" || !bracketsBalanced(args) || topLevelCommaCount(args) != 0 {
 						return match // not exactly one argument
 					}
 					isList := strings.HasPrefix(args, "[") && strings.HasSuffix(args, "]")
@@ -229,7 +229,7 @@ func formatStringInterpolation(argsText string) string {
 	}
 	var sb strings.Builder
 	sb.WriteByte('"')
-	for _, p := range parts {
+	for pi, p := range parts {
 		p = strings.TrimSpace(p)
 		if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
 			inner := p[1 : len(p)-1]
@@ -243,7 +243,7 @@ func formatStringInterpolation(argsText string) string {
 			inner := p[1 : len(p)-1]
 			inner = escapeLiteralDollars(inner)
 			sb.WriteString(inner)
-		} else if isSimpleIdent(p) {
+		} else if isSimpleIdent(p) && !identContinues(parts, pi) {
 			sb.WriteString("$")
 			sb.WriteString(p)
 		} else {
@@ -254,6 +254,21 @@ func formatStringInterpolation(argsText string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+// identContinues reports whether the piece after parts[i] starts with a
+// character that would extend a bare `$ident` interpolation into a longer
+// identifier (`"$a" "_b"` must not become `"$a_b"`); such a piece needs `${a}`.
+func identContinues(parts []string, i int) bool {
+	if i+1 >= len(parts) {
+		return false
+	}
+	next := strings.TrimSpace(parts[i+1])
+	if len(next) < 3 || (next[0] != '"' && next[0] != '\'') || next[len(next)-1] != next[0] {
+		return false
+	}
+	c := next[1]
+	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func escapeLiteralDollars(s string) string {

@@ -60,6 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Decompiler rebuilds string templates from the interpolation array.** A Dart
+  interpolation compiles to `CreateArray(n)` + one `StoreIndexed` per piece +
+  `_StringBase._interpolate(list)` (one argument; `kernel_binary_flowgraph.cc`
+  `BuildStringConcatenation`), and an Array's element `i` sits at tagged offset
+  `f23 + 8*i` (uncompressed) or `f15 + 4*i` (compressed >= 2.14.0)
+  (`runtime_offsets_extracted.h` `Array_data_offset` 24 / 16). A new statement-tree
+  pass folds the three shapes real output shows (array temp, array pushed inline,
+  array copied to a frame slot that the call overwrites) into `"..$x..${e}"`, only when
+  the element indices are exactly 0..n-1, no construct sits between allocation and call,
+  and every piece survives being evaluated at the call (a call-valued piece may not be
+  reordered past any statement, a memory read may not cross a call or store, a local may
+  not be reassigned). A bare `$ident` followed by an identifier character is written
+  `${ident}`. A second rule collapses `if (c) { L: X } else { goto L }` when `c` contains
+  no call (what an array store's Smi/barrier check leaves once the stub is elided).
+  First 3000 functions of the 3.9.2 sample: remaining `_interpolate(` calls 253 -> 190
+  (arm64), 255 -> 189 (x64); template strings 6/0 -> 54/56. Ground-truth gate: `goto_block`
+  249/257 -> 127/133. The shared call regex now also matches empty-argument calls
+  (`_interpolate()`), the dominant real shape.
 - **Decompiler collapses BoxInt64 Smi-or-Mint diamonds.** `BoxInt64Instr::EmitNativeCode`
   (read and diffed in all 23 SDK trees) tags the value when it fits a Smi and otherwise
   allocates a Mint and stores the value; both paths continue at the same label and hold

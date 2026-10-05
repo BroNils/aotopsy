@@ -99,6 +99,35 @@ func isMintSlowPath(body []Stmt, label string) bool {
 	return allocs > 0 && sawGoto
 }
 
+// isPureGotoPath reports whether body is nothing but a `goto label` (plus
+// comments and labels): a branch that only rejoins the other branch.
+func isPureGotoPath(body []Stmt, label string) bool {
+	sawGoto := false
+	for _, s := range body {
+		t, leaf := lineOrVerbatimText(s)
+		if !leaf {
+			return false
+		}
+		switch {
+		case t == "" || strings.HasPrefix(t, "//"):
+			continue
+		case sawGoto:
+			return false
+		case LabelDeclRe.MatchString(t):
+			continue
+		default:
+			m := gotoLabelRe.FindStringSubmatch(t)
+			if m == nil || m[1] != label {
+				return false
+			}
+			sawGoto = true
+		}
+	}
+	return sawGoto
+}
+
+var callInCondRe = regexp.MustCompile(`[A-Za-z_]\w*\s*\(`)
+
 // collapseMintBoxDiamondStmt removes BoxInt64 Smi-or-Mint diamonds (see above).
 func collapseMintBoxDiamondStmt(body []Stmt) ([]Stmt, bool) {
 	changed := false
@@ -106,13 +135,19 @@ func collapseMintBoxDiamondStmt(body []Stmt) ([]Stmt, bool) {
 	for _, s := range body {
 		c := asConstruct(s)
 		if c != nil && c.isIf() && len(c.Clauses) == 2 && c.hasElse() {
+			// A branch that only rejoins is irrelevant when the condition has no
+			// side effect (no call): both paths run the other branch's body.
+			pure := !callInCondRe.MatchString(c.cond())
+			slow := func(miss []Stmt, label string) bool {
+				return isMintSlowPath(miss, label) || (pure && isPureGotoPath(miss, label))
+			}
 			hit, miss := c.Clauses[0].Body, c.Clauses[1].Body
 			label, ok := openingLabel(hit)
-			if !ok || !isMintSlowPath(miss, label) {
-				// Orientation 2: the Mint path is the `if` clause.
+			if !ok || !slow(miss, label) {
+				// Orientation 2: the slow path is the `if` clause.
 				hit, miss = c.Clauses[1].Body, c.Clauses[0].Body
 				label, ok = openingLabel(hit)
-				if !ok || !isMintSlowPath(miss, label) {
+				if !ok || !slow(miss, label) {
 					out = append(out, s)
 					continue
 				}

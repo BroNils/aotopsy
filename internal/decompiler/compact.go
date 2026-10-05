@@ -37,7 +37,10 @@ func compactLines(source string) string {
 	for pass := 0; pass < 16; pass++ {
 		var changed bool
 		tree, changed = stmt.CompactTree(tree)
-		var c0, c4, c5, c6, c7, c8, c9, c10, c11 bool
+		var c0, c4, c5, c6, c7, c8, c9, c10, c11, c12 bool
+		// Before the cascade/inline passes, while the array element stores are
+		// still separate lines.
+		tree, c12 = stmt.FoldInterpolationArrayStmt(tree)
 		tree, c9 = stmt.LinearizeAsyncStmt(tree)
 		tree, c6 = stmt.ForInLoopRecoveryStmt(tree)
 		tree, c10 = stmt.ClosureInliningStmt(tree)
@@ -50,7 +53,7 @@ func compactLines(source string) string {
 		tree, c8 = stmt.CascadeIdiomStmt(tree)
 		tree, c11 = stmt.TypedDeclarationsStmt(tree)
 		c3 := stmt.CleanExprs(tree)
-		if !changed && !c0 && !c1 && !c2 && !c3 && !c4 && !c5 && !c6 && !c7 && !c8 && !c9 && !c10 && !c11 {
+		if !changed && !c0 && !c1 && !c2 && !c3 && !c4 && !c5 && !c6 && !c7 && !c8 && !c9 && !c10 && !c11 && !c12 {
 			break
 		}
 	}

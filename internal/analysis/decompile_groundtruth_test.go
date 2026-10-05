@@ -64,6 +64,14 @@ type qualityFloor struct {
 //	                     (goto_block 277/285 -> 249/257, local_mN 534/544 -> 529/540,
 //	                     x64 const_masked 29 -> 1). orphan_block is unchanged: orphans come
 //	                     from the walk's depth budget, which runs BEFORE this text pass.
+//	P4.4 (stmt_interp.go, + pure-goto diamond rule in stmt_box.go): string templates rebuilt from
+//	                     the array element stores; `if (c) {L: X} else {goto L}` collapsed when c has
+//	                     no call (what the array-store Smi/barrier check leaves behind): goto_block
+//	                     249/257 -> 127/133, stack_sp_leak 144/146 -> 141/143, raw_register arm64
+//	                     45 -> 41. interpolate_call (new counter) is 127 in these 59 functions
+//	                     (call-valued and conditional pieces block the fold); across the first 3000
+//	                     functions of the 3.9.2 sample the remaining `_interpolate(` calls went
+//	                     253 -> 190 (arm64) and 255 -> 189 (x64), template strings 6/0 -> 54/56.
 //
 // x64 orphan_block went UP (111 -> 143) although the code shown is strictly more
 // correct: with R11L aliased, the barrier/Smi diamonds around `_StringBase._interpolate`
@@ -76,16 +84,16 @@ var qualityFloors = map[string]qualityFloor{
 		minLiteralRecall: 50.0, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 6, "double_mask": 0, "dynamicCall_dispatchTarget": 2,
-			"goto_block": 249, "local_mN": 529, "masked_string_literal": 2, "orphan_block": 107,
-			"raw_register": 45, "runtime_stub_call": 2, "stack_sp_leak": 144,
+			"goto_block": 127, "interpolate_call": 127, "local_mN": 528, "masked_string_literal": 2, "orphan_block": 107,
+			"raw_register": 41, "runtime_stub_call": 2, "stack_sp_leak": 141,
 		},
 	},
 	"dart-3.9.2-x64.so": {
 		minLiteralRecall: 52.3, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 1, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
-			"goto_block": 257, "local_mN": 540, "masked_string_literal": 2, "orphan_block": 143,
-			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 146,
+			"goto_block": 133, "interpolate_call": 127, "local_mN": 536, "masked_string_literal": 2, "orphan_block": 143,
+			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 143,
 		},
 	},
 }
@@ -103,6 +111,8 @@ var defectPatterns = []struct {
 	{"double_mask", regexp.MustCompile(`& 0xffffffff & 0xffffffff`)},
 	{"const_masked", regexp.MustCompile(`\((false|true|null|\d+) & 0x[0-9a-f]+\)`)},
 	{"runtime_stub_call", regexp.MustCompile(`CallToRuntime\(`)},
+	// A string interpolation still shown as the runtime call instead of a template.
+	{"interpolate_call", regexp.MustCompile(`_StringBase\._interpolate(?:Single)?\(`)},
 	{"stack_sp_leak", regexp.MustCompile(`\bstack_sp\b`)},
 	{"raw_register", regexp.MustCompile(`\bx\d{1,2}\b`)},
 }
