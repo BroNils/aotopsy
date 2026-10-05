@@ -98,3 +98,39 @@ func TestSrcLinkJoinKeepsOnlyAgreement(t *testing.T) {
 		t.Fatal("values with different source links compared equal")
 	}
 }
+
+// armCidLadder builds `LDUR X1,[X2,#-1]; UBFX X1,X1,#12,#20; CMP W1,#0x5e; <mid>; B.EQ +8; NOP; RET`.
+func armCidLadder(mid ...uint32) []disasm.Inst {
+	raws := append([]uint32{rawLDURHdr, rawUBFXCid, 0x7101783F}, mid...)
+	raws = append(raws, 0x54000040, 0xD503201F, 0xD65F03C0)
+	insts := make([]disasm.Inst, len(raws))
+	for i, r := range raws {
+		insts[i] = disasm.Inst{Addr: 0x1000 + uint64(i)*4, Raw: r, Size: 4}
+	}
+	return insts
+}
+
+func TestArm64CmpThenBeqNarrowsSourceObject(t *testing.T) {
+	ctx := minimalTypeContext()
+	ctx.SetClassIDTagLayout(12, 20)
+	AnalyzeFunction(armCidLadder(), ctx, [31]TypeLattice{}, nil)
+	if ctx.NarrowHits != 1 || ctx.NarrowSrcHits != 1 {
+		t.Fatalf("CMP; B.EQ: NarrowHits=%d NarrowSrcHits=%d, want 1/1", ctx.NarrowHits, ctx.NarrowSrcHits)
+	}
+}
+
+// A flag-preserving instruction that REWRITES the compared register between
+// the CMP and the branch makes the equality fact about the old value; it must
+// not be attributed to the new one (here a different class id, X3).
+func TestArm64RewriteOfComparedRegisterBetweenCmpAndBranchDoesNotNarrow(t *testing.T) {
+	ctx := minimalTypeContext()
+	ctx.SetClassIDTagLayout(12, 20)
+	var entry [31]TypeLattice
+	entry[3] = UnknownClassID()
+	AnalyzeFunction(armCidLadder(rawMovX1X3), ctx, entry, nil)
+	if ctx.NarrowHits != 0 || ctx.NarrowSrcHits != 0 {
+		t.Fatalf("stale CMP narrowed a rewritten register: NarrowHits=%d NarrowSrcHits=%d", ctx.NarrowHits, ctx.NarrowSrcHits)
+	}
+}
+
+const rawMovX1X3 = 0xAA0303E1 // MOV X1, X3

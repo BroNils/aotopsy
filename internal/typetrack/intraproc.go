@@ -610,10 +610,13 @@ func AnalyzeFunction(
 				cmpReg = rn
 				cmpImm = imm
 				hasCmp = true
-			} else if hasCmp && !arm64PreservesCompareFlags(inst.Raw, inst.Addr) {
+			} else if hasCmp && (!arm64PreservesCompareFlags(inst.Raw, inst.Addr) || arm64WritesRegister(inst.Raw, cmpReg)) {
 				// A later flag-writing/unknown instruction invalidates the CMP.
 				// Previously CMP; <flag clobber>; B.EQ still narrowed the edge
-				// using stale NZCV state.
+				// using stale NZCV state. A flag-preserving instruction that
+				// REWRITES the compared register invalidates it too: the
+				// equality the flags record is about the old value, and the
+				// edge narrowing reads the register's state AFTER the block.
 				hasCmp = false
 			}
 			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes, &shadowSP)

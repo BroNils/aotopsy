@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A stale compare no longer narrows a rewritten register (ARM64).** `CMP W1,#c;
+  <flag-preserving instruction that rewrites X1>; B.EQ` narrowed the NEW value of
+  X1, because the edge narrowing reads the block-exit state. The compare is now
+  dropped as soon as an instruction writes the compared register. Golden outputs
+  are unchanged (no site on the four golden samples hit it).
+- **String-interpolation idiom no longer invents operands.** `_StringBase._interpolate`
+  takes ONE `List` argument and `_interpolateSingle` takes one `Object?` in all 23
+  supported SDKs (`string_patch.dart`; `kernel_to_il.cc` emits `argument_count = 1`),
+  so the parts are the array's element stores, not the call's comma-separated
+  arguments. The idiom now rewrites only `_interpolate([...list literal...])` and
+  `_interpolateSingle(x)` and leaves multi-argument calls alone (it used to print
+  `"$null$accumulator$local_m16"`). The non-existent `_StringBase.concat` rewrite
+  was removed (string `+` is an operator method).
+- **Decompiler output: literals and redundant masks.** String/`null`/`true`/`false`
+  literals are no longer printed as `"x" & 0xffffffff`; a mask is not applied on top
+  of an expression already masked at least as narrowly; x64 `R8L..R15L` (Go syntax's
+  32-bit view) are aliased to their 64-bit register (they used to be treated as
+  separate registers and leaked as `r11l`). Elided stack-overflow / write-barrier stub
+  blocks are no longer reported as orphans. Ground-truth gate, 3.9.2 arm64/x64:
+  masked literals 140/129 -> 2/2, double masks 6/58 -> 0, literal recall x64
+  45.2% -> 52.4%; x64 `orphan_block` rose 111 -> 143 (box/Smi diamonds now reach the
+  walker's depth budget; recorded in the floor comment).
 - **Indirect-call candidates no longer merge unrelated selectors.** The dispatch
   table packs selector rows by row displacement, so slot `selector_offset + cid`
   of a class a selector does not implement usually holds another selector's
