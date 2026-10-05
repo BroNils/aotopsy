@@ -640,10 +640,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// For-loop recovery, guard merging and null-check annotation now run
 	// inside compactLines, on the statement tree -- see stmt_loops.go, which
 	// records what each of them used to get wrong as a text pass.
-	// Arg renaming with type hints (from flutterdec naming.rs). Uses the
-	// types the signature actually displayed, so a name never implies a type
-	// the trust gate rejected.
-	source = applyArgRenaming(source, effectiveParamTypes)
 	source = applyNamingPass(source, fir)
 
 	visited := make(map[int]bool, len(e.visits))

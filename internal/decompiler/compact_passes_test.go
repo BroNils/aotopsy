@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler/stmt"
+	"aotopsy/internal/sdk"
 )
 
 // --- countArgs tests ---
@@ -291,15 +292,21 @@ func TestSimplifyExpressionsKeepsMask(t *testing.T) {
 
 // A dead store may only be dropped when the value it computes has no effect,
 // and when the reassignment does not read the variable.
-// Two parameters of the same type must not collapse onto one name.
-func TestApplyArgRenamingIsCollisionFree(t *testing.T) {
-	src := "dynamic foo(String arg0, String arg1) {\n  return arg0 + arg1;\n}"
-	got := applyArgRenaming(src, []string{"String", "String"})
-	if strings.Contains(got, "str + str") {
-		t.Errorf("two params collapsed onto one name:\n%s", got)
-	}
-	if strings.Contains(got, "arg0") || strings.Contains(got, "arg1") {
-		t.Errorf("signature and body disagree on parameter names:\n%s", got)
+// Parameters are never given invented role names: positional parameter names
+// are absent from every Full-AOT snapshot, so the emitted signature keeps the
+// declared type and the neutral `argN` name.
+func TestParametersKeepNeutralNames(t *testing.T) {
+	fir := newFuncIR("foo", 0x4000)
+	fir.ArgRegs = arm64ArgRegs
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ParamTypeNames = []string{"String", "bool"}
+	fir.addBlock(Block{ID: 0, StartVA: 0x4000, Instrs: []Instr{{Addr: 0x4000, Op: OpReturn, Src: "ret"}}})
+	got := EmitPseudocode(fir, nil, nil).Source
+	for _, bad := range []string{"str0", "flag1"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("invented parameter name %q in:\n%s", bad, got)
+		}
 	}
 }
 

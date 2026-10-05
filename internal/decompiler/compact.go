@@ -106,108 +106,11 @@ var (
 
 // --- Naming passes (from naming.rs) ---
 
-// applyArgRenaming renames arg0..arg7 to more meaningful names based on
-// usage patterns. Ported from flutterdec's apply_name_and_type_hints.
-// This is a lightweight version: it renames based on parameter type names
-// when available (passed via FuncIR.ParamTypeNames).
-func applyArgRenaming(source string, paramTypes []string) string {
-	if len(paramTypes) == 0 {
-		return source
-	}
-	// Build the rename map first, so collisions can be resolved BEFORE any
-	// text is rewritten. Two params of the same type (`String arg0, String
-	// arg1`) both map to "str"; renaming them independently merged two
-	// distinct variables into one. Colliding names get their index appended.
-	renames := make(map[string]string, len(paramTypes))
-	for argIdx, typeName := range paramTypes {
-		if argIdx > 7 || typeName == "" {
-			continue
-		}
-		if typeName == "dynamic" || typeName == "Object" {
-			continue
-		}
-		oldName := fmt.Sprintf("arg%d", argIdx)
-		base := semanticArgName(typeName, argIdx)
-		if base == "" {
-			continue
-		}
-		// The parameter index is always kept as a suffix: it makes the name
-		// collision-free (two String params would both be "str" otherwise,
-		// silently merging two distinct variables) and keeps the mapping
-		// back to argN -- and to the argument register -- readable.
-		newName := fmt.Sprintf("%s%d", base, argIdx)
-		if newName == oldName {
-			continue
-		}
-		renames[oldName] = newName
-	}
-	if len(renames) == 0 {
-		return source
-	}
-	// Rename EVERYWHERE, including the signature. Skipping the signature
-	// left the parameter declared as `arg0` while the body referred to the
-	// new name -- an undeclared identifier in the emitted pseudocode.
-	lines := strings.Split(source, "\n")
-	for i := range lines {
-		for oldName, newName := range renames {
-			lines[i] = stmt.ReplaceIdent(lines[i], oldName, newName)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func semanticArgName(typeName string, idx int) string {
-	// Strip library prefix and generic params
-	typeName = strings.TrimSpace(typeName)
-	if i := strings.Index(typeName, "<"); i >= 0 {
-		typeName = typeName[:i]
-	}
-	if i := strings.Index(typeName, "@"); i >= 0 {
-		typeName = typeName[:i]
-	}
-	// Map common types to argument names
-	switch strings.ToLower(typeName) {
-	case "string":
-		return "str"
-	case "int", "integer":
-		return "n"
-	case "double":
-		return "d"
-	case "bool", "boolean":
-		return "flag"
-	case "list":
-		return "items"
-	case "map":
-		return "entries"
-	case "set":
-		return "values"
-	case "future":
-		return "future"
-	case "stream":
-		return "stream"
-	case "function":
-		return "callback"
-	case "widget":
-		return "widget"
-	case "buildelement", "element":
-		return "element"
-	case "renderobject":
-		return "renderObj"
-	case "context":
-		return "context"
-	case "duration":
-		return "duration"
-	case "key":
-		return "key"
-	case "stringbuffer":
-		return "buffer"
-	}
-	// For other types, use first letter lowercase
-	if len(typeName) > 0 && typeName[0] >= 'A' && typeName[0] <= 'Z' {
-		return strings.ToLower(typeName[:1])
-	}
-	return ""
-}
+// Parameters keep their `argN` names. Positional parameter names are not in a
+// Full-AOT snapshot in ANY supported version: >=2.14.0 does not serialize them
+// and 2.10.0..2.13.0 overwrite them with `<optimized out>` (program_visitor.cc
+// PrepareParameterNames), so a type-derived name (`str0`, `flag2`, `callback3`)
+// would invent a role the binary does not carry (AUDIT-2026-10 section 9.1).
 
 // --- Expression Simplification (lightweight SSA-style) ---
 

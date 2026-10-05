@@ -216,15 +216,16 @@ func simpleRetFir(argRegIndices []int, paramTypeNames []string) *FuncIR {
 func TestEmitPseudocode_ParamTypeNames_CountMatchShowsRealTypes(t *testing.T) {
 	fir := simpleRetFir([]int{0, 1}, []string{"int", "String"})
 	art := EmitPseudocode(fir, nil, nil)
-	// Trusted types also drive arg renaming, so the parameters are shown as
-	// "<semantic-name><index>" -- the index keeps the mapping back to argN
-	// unambiguous and prevents two same-typed params sharing a name.
-	if !strings.Contains(art.Source, "int n0") || !strings.Contains(art.Source, "String str1") {
-		t.Errorf("expected real param types in signature, got:\n%s", art.Source)
+	// The declared type is shown; the name stays the neutral `argN` because
+	// positional parameter names are not in a Full-AOT snapshot (no invented
+	// role names).
+	if !strings.Contains(art.Source, "int arg0") || !strings.Contains(art.Source, "String arg1") {
+		t.Errorf("expected real param types with neutral names in signature, got:\n%s", art.Source)
 	}
-	// The signature and the body must agree on the parameter name.
-	if strings.Contains(art.Source, "arg0") {
-		t.Errorf("renamed parameter must not still appear as arg0, got:\n%s", art.Source)
+	for _, invented := range []string{"n0", "str1"} {
+		if strings.Contains(art.Source, invented) {
+			t.Errorf("invented parameter name %q in:\n%s", invented, art.Source)
+		}
 	}
 }
 
@@ -270,7 +271,7 @@ func TestEmitPseudocode_ParamTypeNames_UnresolvedArityFallsBackToDynamic(t *test
 func TestEmitPseudocode_ParamTypeNames_QuestionMarkFallsBackPerArgument(t *testing.T) {
 	fir := simpleRetFir([]int{0, 1}, []string{"String", "?"})
 	art := EmitPseudocode(fir, nil, nil)
-	if !strings.Contains(art.Source, "String str0") {
+	if !strings.Contains(art.Source, "String arg0") {
 		t.Errorf("expected real type for arg0, got:\n%s", art.Source)
 	}
 	if !strings.Contains(art.Source, "dynamic arg1") {

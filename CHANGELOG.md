@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Parameters keep neutral `argN` names.** The type-derived renaming (`str0`,
+  `n1`, `flag2`, `callback3`) invented roles: positional parameter names are not in
+  a Full-AOT snapshot in any supported version (>=2.14.0 does not serialize them;
+  2.10.0..2.13.0 overwrite them with `<optimized out>`, measured on four samples
+  and traced to `ProgramVisitor::PrepareParameterNames`). The declared type is
+  still shown in the signature.
 - **Removed the usage-count temp renaming from the decompiler.** The pass that
   renamed temps to `result`/`flag`/`counter`/`accumulator` from occurrence counts
   asserted roles the binary does not have, and its choice changed after unrelated
