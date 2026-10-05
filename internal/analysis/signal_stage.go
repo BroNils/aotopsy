@@ -303,15 +303,10 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 		// The standalone/from-artifacts path can recompute graph-based detectors
 		// from the current functions/calls/string refs, but it cannot recompute
 		// binary-only entropy/crypto or cluster-backed channel/native artifacts.
-		// Remove those stale outputs and regenerate every detector it can prove
-		// from this generation before publishing SARIF/evidence.
-		if err := removeSignalDetectorArtifacts(outDir); err != nil {
+		// Preserve those cloned inputs and clear only detector files this stage is
+		// about to regenerate.
+		if err := removeSignalFromArtifactsDetectorArtifacts(outDir); err != nil {
 			return nil, err
-		}
-		for _, name := range []string{"platform_channels.jsonl", "native_capabilities.jsonl", "deobfuscate_map.jsonl"} {
-			if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, fmt.Errorf("remove stale %s: %w", name, err)
-			}
 		}
 		if err := signal.WriteSourceSinkFindings(outDir, funcs, stringRefs, edges); err != nil {
 			return nil, fmt.Errorf("source/sink proximity: %w", err)
@@ -345,7 +340,21 @@ func RunSignalStage(inDir, outDir string, k int, noAsm bool, quiet bool, log io.
 		if hasProv {
 			dartVersion = prov.DartVersion
 		}
-		evCollector := evidence.NewCollector(dartVersion)
+		// A --from rerun has no typetrack stage. Keep evidence produced by stages
+		// this rerun cannot reproduce (typetrack/runtime), while replacing call-edge
+		// and signal rows from the current cloned artifacts. Records() deduplicates
+		// the final union deterministically.
+		var preserved []evidence.Evidence
+		if existing, readErr := jsonutil.ReadJSONL[evidence.Evidence](evidencePath, jsonutil.StandardLimits); readErr == nil {
+			for _, rec := range existing {
+				if rec.Source != evidence.SourceCallEdges && rec.Source != evidence.SourceSignal {
+					preserved = append(preserved, rec)
+				}
+			}
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read existing evidence for --from merge: %w", readErr)
+		}
+		evCollector := evidence.NewCollectorFromRecords(dartVersion, preserved)
 		evCollector.FromCallEdges(edges)
 		evCollector.FromSignalFindings(findings)
 		if err := evCollector.WriteJSONL(evidencePath); err != nil {

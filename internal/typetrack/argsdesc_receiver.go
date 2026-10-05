@@ -5,6 +5,7 @@ import (
 	"aotopsy/internal/arch/x86"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/snapshot"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -71,11 +72,10 @@ func RecoverArgsDescReceiverARM64(insts []disasm.Inst, ownerCID int, ctx *TypeCo
 	if ctx == nil || (ctx.WordSize != 4 && ctx.WordSize != 8) {
 		return 0, ReceiverLoad{}, false
 	}
-	// runtime_offsets_extracted.h exports ArgumentsDescriptor_count_offset as
-	// 0x10 for compressed targets and 0x20 for uncompressed targets throughout
-	// the supported 2.12.0..3.12.2 SDKs checked locally. FieldAddress subtracts
-	// kHeapObjectTag (1), hence the actual tagged-pointer displacement is 15/31.
-	countDisp := 4*int(ctx.WordSize) - 1
+	countDisp, ok := argumentsDescriptorCountDisp(ctx)
+	if !ok {
+		return 0, ReceiverLoad{}, false
+	}
 
 	// Registers currently holding a copy of ARGS_DESC_REG. R4 itself counts.
 	argsDesc := map[int]bool{sdk.ARM64ArgsDesc: true}
@@ -198,7 +198,11 @@ func RecoverArgsDescReceiverX86(insts []x86.Decoded, ownerCID int, ctx *TypeCont
 	if ctx == nil || (ctx.WordSize != 4 && ctx.WordSize != 8) {
 		return 0, ReceiverLoad{}, false
 	}
-	countDisp := int64(4*int(ctx.WordSize) - sdk.HeapObjectTag)
+	countDispInt, ok := argumentsDescriptorCountDisp(ctx)
+	if !ok {
+		return 0, ReceiverLoad{}, false
+	}
+	countDisp := int64(countDispInt)
 
 	argsDesc := map[int]bool{sdk.X86ArgsDesc: true}
 	countRegs := map[int]bool{}
@@ -305,6 +309,37 @@ func RecoverArgsDescReceiverX86(insts []x86.Decoded, ownerCID int, ctx *TypeCont
 		return 0, ReceiverLoad{}, false
 	}
 	return bestPC, ReceiverLoad{Reg: bestReg, ClassCID: ownerCID}, true
+}
+
+func argumentsDescriptorCountDisp(ctx *TypeContext) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	// SDK runtime/vm/compiler/runtime_offsets_extracted.h AOT blocks:
+	//   64-bit uncompressed: ArgumentsDescriptor_count_offset = 0x20
+	//   64-bit compressed:   ArgumentsDescriptor_count_offset = 0x14
+	//   32-bit uncompressed: ArgumentsDescriptor_count_offset = 0x10
+	// The generated load uses FieldAddress and therefore subtracts
+	// kHeapObjectTag. WordSize==4 alone is not enough to choose the last row:
+	// ARM64/x86_64 compressed snapshots also have four-byte heap slots.
+	var offset int
+	switch {
+	case ctx.CompressedPointers && snapshot.VersionAtLeast(ctx.DartVersion, "2.14.0"):
+		offset = 0x14
+	case ctx.CompressedPointers:
+		// SDK @2.13.0 AOT runtime_offsets_extracted.h still keeps the
+		// 64-bit ArgumentsDescriptor count slot at 0x20 even when the build
+		// advertises compressed pointers. The compact 0x14 layout starts at
+		// 2.14.0 (verified by the SDK-derived gate below).
+		offset = 0x20
+	case ctx.WordSize == 8:
+		offset = 0x20
+	case ctx.WordSize == 4:
+		offset = 0x10
+	default:
+		return 0, false
+	}
+	return offset - sdk.HeapObjectTag, true
 }
 
 // handleArgsDescReceiver types the destination of a parameter-0 load that the

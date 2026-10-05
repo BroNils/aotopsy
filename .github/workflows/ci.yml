@@ -91,20 +91,44 @@ jobs:
         with:
           go-version: stable
           cache: true
-      - name: Verify SDK-derived tables
+      - name: Verify SDK-derived tests
+        env:
+          AOTOPSY_TEST_SDK: '1'
+          AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          go test -p 1 -v -count=1 -timeout 30m \
+            ./internal/cluster \
+            ./internal/disasm \
+            ./internal/evidence \
+            ./internal/sdk \
+            ./internal/sdktest \
+            ./internal/snapshot \
+            ./internal/strutil \
+            ./internal/typetrack \
+            ./internal/vmtables | tee "$log"
+          # Sentinel PASS lines make an accidentally all-skipped SDK run fail
+          # instead of reporting green after a test rename/package omission.
+          grep -q -- '--- PASS: TestEvidenceSDKReferencesMatchExactSDK' "$log"
+          grep -q -- '--- PASS: TestDartIdentifierAlphabetMatchesSDK' "$log"
+          grep -q -- '--- PASS: TestWireDimensionsMatchSDK' "$log"
+          grep -q -- '--- PASS: TestArgumentsDescriptorCountOffsetMatchesSDK' "$log"
+      - name: Verify generated SDK tables
         env:
           AOTOPSY_TEST_SDK: '1'
           AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
           GH_TOKEN: ${{ github.token }}
         run: >-
-          go test -p 1
-          ./internal/cluster
-          ./internal/disasm
-          ./internal/sdk
-          ./internal/sdktest
-          ./internal/snapshot
-          ./internal/vmtables
-          -run '(Match(es)?SDK|SDKBacked|SDKFileAtTag)' -count=1 -timeout 20m
+          go run ./tools/extract_thr.go
+          -check
+          -check-objectstore
+          -check-stubs
+          -check-roots
+          -check-classid-tag
+          -check-runtime-entries
+          -check-stub-offsets
 
   race-coverage:
     name: race + coverage (linux/amd64)

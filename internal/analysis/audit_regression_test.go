@@ -530,10 +530,15 @@ func TestInventoryExtractLibappDistinguishesCleanAbsenceFromArchiveFailure(t *te
 }
 
 func TestRunGraphPublishesOneFreshGeneration(t *testing.T) {
-	outDir := filepath.Join(t.TempDir(), "graph")
-	stale := filepath.Join(outDir, "stale-from-previous-run.txt")
+	outDir := t.TempDir()
+	graphDir := filepath.Join(outDir, "graph")
+	stale := filepath.Join(graphDir, "stale-from-previous-run.txt")
 	// Only a directory an earlier aotopsy run published may be replaced.
-	publishAuditTestGeneration(t, outDir, map[string][]byte{"stale-from-previous-run.txt": []byte("stale")})
+	publishAuditTestGeneration(t, graphDir, map[string][]byte{"stale-from-previous-run.txt": []byte("stale")})
+	analysisSentinel := filepath.Join(outDir, "functions.jsonl")
+	if err := os.WriteFile(analysisSentinel, []byte("analysis survives"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := RunGraph(sample312X64(t), outDir, "isolate", 0); err != nil {
 		t.Fatalf("RunGraph: %v", err)
@@ -541,17 +546,54 @@ func TestRunGraphPublishesOneFreshGeneration(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale graph generation survived successful publication: %v", err)
 	}
-	objects, err := jsonutil.ReadJSONL[GraphObject](filepath.Join(outDir, "objects.jsonl"), jsonutil.StandardLimits)
+	objects, err := jsonutil.ReadJSONL[GraphObject](filepath.Join(graphDir, "objects.jsonl"), jsonutil.StandardLimits)
 	if err != nil || len(objects) == 0 {
 		t.Fatalf("objects.jsonl = %d records, err=%v", len(objects), err)
 	}
-	edges, err := jsonutil.ReadJSONL[GraphEdge](filepath.Join(outDir, "edges.jsonl"), jsonutil.StandardLimits)
+	edges, err := jsonutil.ReadJSONL[GraphEdge](filepath.Join(graphDir, "edges.jsonl"), jsonutil.StandardLimits)
 	if err != nil || len(edges) == 0 {
 		t.Fatalf("edges.jsonl = %d records, err=%v", len(edges), err)
 	}
-	codeMap, err := jsonutil.ReadJSONL[CodeMapEntry](filepath.Join(outDir, "code_map.jsonl"), jsonutil.StandardLimits)
+	codeMap, err := jsonutil.ReadJSONL[CodeMapEntry](filepath.Join(graphDir, "code_map.jsonl"), jsonutil.StandardLimits)
 	if err != nil || len(codeMap) == 0 {
 		t.Fatalf("code_map.jsonl = %d records, err=%v", len(codeMap), err)
+	}
+	if got, err := os.ReadFile(analysisSentinel); err != nil || string(got) != "analysis survives" {
+		t.Fatalf("graph publication replaced parent analysis artifact: %q, %v", got, err)
+	}
+}
+
+func TestAuthoritativeDisasmNamePrefersRecoveredSemanticName(t *testing.T) {
+	const va = uint64(0x1234)
+	for _, tc := range []struct {
+		name, owner, funcName, fallback, symbol string
+		wantName, wantFunc                      string
+	}{
+		{"semantic symbol wins", "", "stub_20", "stub_20", "Real.owner", "Real.owner", "Real.owner"},
+		{"owner split", "Owner", "method", "Owner.method_20", "Owner.recovered_20", "Owner.recovered_20", "recovered_20"},
+		{"generic symbol does not erase ELF", "", "", "ELFReal", "sub_20", "ELFReal", "ELFReal"},
+		{"fallback when absent", "", "stub_20", "stub_20", "", "stub_20", "stub_20"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotFunc := authoritativeDisasmName(map[uint64]string{va: tc.symbol}, va, tc.owner, tc.funcName, tc.fallback)
+			if gotName != tc.wantName || gotFunc != tc.wantFunc {
+				t.Fatalf("authoritativeDisasmName = (%q,%q), want (%q,%q)", gotName, gotFunc, tc.wantName, tc.wantFunc)
+			}
+		})
+	}
+}
+
+func TestLoadSnapshotPopulatesObjectStoreBeforePoolLookups(t *testing.T) {
+	sc, err := LoadSnapshot(sample312X64(t), dartfmt.Options{Mode: dartfmt.ModeStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sc.Close()
+	if len(sc.Result.ObjectStoreRefs) == 0 {
+		t.Fatal("LoadSnapshot returned before ObjectStoreRefs were populated")
+	}
+	if sc.Pool == nil {
+		t.Fatal("LoadSnapshot returned nil PoolLookups")
 	}
 }
 
@@ -587,8 +629,9 @@ func TestParityEncodersPropagateWriterErrors(t *testing.T) {
 
 func TestRunParityPublishesManagedReportsTogether(t *testing.T) {
 	samplesDir := t.TempDir()
-	outDir := filepath.Join(t.TempDir(), "parity")
-	prior, err := output.BeginDirTransaction(outDir)
+	outDir := t.TempDir()
+	parityDir := filepath.Join(outDir, "parity")
+	prior, err := output.BeginDirTransaction(parityDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,21 +653,21 @@ func TestRunParityPublishesManagedReportsTogether(t *testing.T) {
 	if err := RunParity(samplesDir, outDir); err != nil {
 		t.Fatalf("RunParity: %v", err)
 	}
-	csvData, err := os.ReadFile(filepath.Join(outDir, "parity.csv"))
+	csvData, err := os.ReadFile(filepath.Join(parityDir, "parity.csv"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(csvData), "stale-generation") || !strings.Contains(string(csvData), "sample_hash,dart_version,status") {
 		t.Fatalf("parity.csv was not a fresh generation: %q", csvData)
 	}
-	summary, err := os.ReadFile(filepath.Join(outDir, "parity_summary.md"))
+	summary, err := os.ReadFile(filepath.Join(parityDir, "parity_summary.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(summary), "stale-generation") || !strings.Contains(string(summary), "Total samples: 0") {
 		t.Fatalf("parity_summary.md was not a fresh generation: %q", summary)
 	}
-	if _, err := os.Stat(filepath.Join(outDir, "obsolete.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(parityDir, "obsolete.txt")); !os.IsNotExist(err) {
 		t.Fatalf("obsolete prior-generation artifact survived whole-directory publication: %v", err)
 	}
 }
@@ -918,7 +961,7 @@ func TestRunFromExistingCarriesProvenanceIdentityIntoResult(t *testing.T) {
 	}
 }
 
-func TestRunFromExistingWithoutSignalDropsStaleSignalGeneration(t *testing.T) {
+func TestRunFromExistingWithoutSignalPreservesClonedGeneration(t *testing.T) {
 	src := t.TempDir()
 	dst := filepath.Join(t.TempDir(), "out")
 	for _, name := range []string{"functions.jsonl", "call_edges.jsonl"} {
@@ -926,10 +969,17 @@ func TestRunFromExistingWithoutSignalDropsStaleSignalGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stale := append([]string{}, signalGenerationArtifacts...)
-	stale = append(stale, signalDetectorArtifacts...)
-	for _, name := range stale {
-		if err := os.WriteFile(filepath.Join(src, name), []byte("stale generation\n"), 0o644); err != nil {
+	preserved := []string{
+		"signal_graph.json",
+		"evidence.jsonl",
+		"entropy_findings.jsonl",
+		"crypto_findings.jsonl",
+		"platform_channels.jsonl",
+		"native_capabilities.jsonl",
+		"deobfuscate_map.jsonl",
+	}
+	for _, name := range preserved {
+		if err := os.WriteFile(filepath.Join(src, name), []byte("preserved generation\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -937,13 +987,91 @@ func TestRunFromExistingWithoutSignalDropsStaleSignalGeneration(t *testing.T) {
 	if _, err := Run(Opts{FromDir: src, OutDir: dst, Quiet: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range stale {
-		if _, err := os.Stat(filepath.Join(dst, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("stale signal artifact %s survived no-signal --from generation: %v", name, err)
+	for _, name := range preserved {
+		got, err := os.ReadFile(filepath.Join(dst, name))
+		if err != nil || string(got) != "preserved generation\n" {
+			t.Fatalf("cloned artifact %s was not preserved: %q, %v", name, got, err)
 		}
 		if _, err := os.Stat(filepath.Join(src, name)); err != nil {
-			t.Fatalf("source artifact %s was mutated while cleaning destination: %v", name, err)
+			t.Fatalf("source artifact %s was mutated while cloning destination: %v", name, err)
 		}
+	}
+}
+
+func TestRunSignalStageFromArtifactsPreservesNonRegenerableArtifactsAndEvidence(t *testing.T) {
+	dir := t.TempDir()
+	asmDir := filepath.Join(dir, "asm")
+	if err := os.MkdirAll(asmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLine := func(name string, v any) {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = append(b, '\n')
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeLine("functions.jsonl", disasm.FuncRecord{PC: "0x1000", RefID: 1, Size: 4, Name: "F"})
+	writeLine("index.jsonl", strutil.DisasmIndexEntry{Name: "F", RefID: 1, Size: 4, File: "asm/F.txt"})
+	if err := os.WriteFile(filepath.Join(dir, "call_edges.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeLine("string_refs.jsonl", disasm.StringRefRecord{Func: "F", PC: "0x1000", Value: "https://api.example.test/v1"})
+	if err := os.WriteFile(filepath.Join(asmDir, "F.txt"), []byte("00001000: nop\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{
+		"entropy_findings.jsonl",
+		"crypto_findings.jsonl",
+		"platform_channels.jsonl",
+		"native_capabilities.jsonl",
+		"deobfuscate_map.jsonl",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTypeEvidence := evidence.Evidence{
+		PC: "0x1000", Function: "F", Kind: "field_access", Source: evidence.SourceTypeTrack,
+		Confidence: evidence.ConfStaticInferred, Rule: evidence.RuleTypeTrackFieldAccess,
+		Inputs: map[string]any{"class_id": 7, "byte_offset": 8, "is_store": false},
+	}
+	if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "evidence.jsonl"), []evidence.Evidence{oldTypeEvidence}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RunSignalStage(dir, dir, 1, true, true, io.Discard, true); err != nil {
+		t.Fatalf("from-artifacts signal rerun: %v", err)
+	}
+	for _, name := range []string{
+		"entropy_findings.jsonl",
+		"crypto_findings.jsonl",
+		"platform_channels.jsonl",
+		"native_capabilities.jsonl",
+		"deobfuscate_map.jsonl",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("non-regenerable artifact %s was removed: %v", name, err)
+		}
+	}
+	rows, err := jsonutil.ReadJSONL[evidence.Evidence](filepath.Join(dir, "evidence.jsonl"), jsonutil.StandardLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundType := false
+	for _, row := range rows {
+		if row.Source == evidence.SourceTypeTrack && row.Rule == evidence.RuleTypeTrackFieldAccess {
+			foundType = true
+			break
+		}
+	}
+	if !foundType {
+		t.Fatalf("typetrack evidence was dropped by --from signal rerun: %+v", rows)
 	}
 }
 
@@ -1079,26 +1207,47 @@ func TestDisasmArtifactFilesJoinsByIdentityNotRowOrder(t *testing.T) {
 	}
 }
 
-func TestDisasmArtifactFilesAllowsDeduplicatedCodeAliases(t *testing.T) {
+func TestDisasmArtifactFilesAllowsDeduplicatedCodeAliasesWithDistinctPaths(t *testing.T) {
 	funcs := []disasm.FuncRecord{
 		{PCOffset: 0x10, RefID: 1, Size: 4, Name: "Owner.same_10"},
 		{PCOffset: 0x10, RefID: 2, Size: 4, Name: "Owner.same_10"},
 	}
 	index := []strutil.DisasmIndexEntry{
-		{RefID: 1, PCOffset: 0x10, Size: 4, File: "asm/Owner/same_10.txt"},
-		{RefID: 2, PCOffset: 0x10, Size: 4, File: "asm/Owner/same_10.txt"},
+		{RefID: 1, PCOffset: 0x10, Size: 4, File: "asm/Zed/same_10.txt"},
+		{RefID: 2, PCOffset: 0x10, Size: 4, File: "asm/Alpha/same_10.txt"},
 	}
 	got, err := DisasmArtifactFiles(funcs, index)
 	if err != nil {
 		t.Fatalf("deduplicated Code aliases rejected: %v", err)
 	}
-	if got["Owner.same_10"] != filepath.FromSlash("asm/Owner/same_10.txt") {
+	if got["Owner.same_10"] != filepath.FromSlash("asm/Alpha/same_10.txt") {
 		t.Fatalf("artifact alias = %q", got["Owner.same_10"])
 	}
 
-	index[1].File = "asm/Owner/other_10.txt"
+	// index.jsonl order is not semantic: the identity join must still select the
+	// path belonging to the final functions.jsonl alias that supplied the
+	// canonical shared-VA name.
+	index[0], index[1] = index[1], index[0]
+	got, err = DisasmArtifactFiles(funcs, index)
+	if err != nil {
+		t.Fatalf("reordered index aliases rejected: %v", err)
+	}
+	if got["Owner.same_10"] != filepath.FromSlash("asm/Alpha/same_10.txt") {
+		t.Fatalf("reordered index artifact alias = %q", got["Owner.same_10"])
+	}
+}
+
+func TestDisasmArtifactFilesRejectsSameNameAcrossDistinctCodeRanges(t *testing.T) {
+	funcs := []disasm.FuncRecord{
+		{PCOffset: 0x10, RefID: 1, Size: 4, Name: "Owner.same"},
+		{PCOffset: 0x20, RefID: 2, Size: 4, Name: "Owner.same"},
+	}
+	index := []strutil.DisasmIndexEntry{
+		{RefID: 1, PCOffset: 0x10, Size: 4, File: "asm/Owner/same_10.txt"},
+		{RefID: 2, PCOffset: 0x20, Size: 4, File: "asm/Owner/same_20.txt"},
+	}
 	if _, err := DisasmArtifactFiles(funcs, index); err == nil {
-		t.Fatal("same display name pointing at different artifacts was accepted")
+		t.Fatal("same display name across distinct code ranges was accepted")
 	}
 }
 
@@ -1401,6 +1550,32 @@ func TestRunMetaStageRejectsAmbiguousAddressesAndIdentityMismatch(t *testing.T) 
 		}
 		if _, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard); err == nil || !strings.Contains(err.Error(), "duplicate function address") {
 			t.Fatalf("duplicate normalized address error = %v", err)
+		}
+	})
+
+	t.Run("shared-code-alias-keeps-canonical-final-metadata", func(t *testing.T) {
+		dir := makeBase(t)
+		rows := []disasm.FuncRecord{
+			{PC: "0x0010", PCOffset: 0x10, RefID: 1, Size: 4, Name: "Canonical.same_10", Owner: "WrongAlias", ParamCount: 7},
+			{PC: "0X10", PCOffset: 0x10, RefID: 2, Size: 4, Name: "Canonical.same_10", Owner: "Canonical", ParamCount: 1},
+		}
+		if _, err := jsonutil.WriteJSONLFile(filepath.Join(dir, "functions.jsonl"), rows); err != nil {
+			t.Fatal(err)
+		}
+		path, err := RunMetaStage(dir, dir, "arm64", true, true, io.Discard)
+		if err != nil {
+			t.Fatalf("shared-code alias rejected: %v", err)
+		}
+		meta, err := readJSONBounded[strutil.FlutterMetaJSON](path, maxMetadataArtifactBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(meta.Functions) != 1 {
+			t.Fatalf("meta functions = %d, want one shared code range", len(meta.Functions))
+		}
+		got := meta.Functions[0]
+		if got.Addr != "0x10" || got.Name != "Canonical.same_10" || got.Owner != "Canonical" || got.ParamCount != 1 || got.Size != 4 {
+			t.Fatalf("canonical alias metadata = %+v", got)
 		}
 	})
 

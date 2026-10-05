@@ -98,15 +98,28 @@ func NewAtomicFileUnder(rootPath, rel string, perm os.FileMode) (*AtomicFile, er
 	for _, segment := range parts[:len(parts)-1] {
 		info, err := root.Lstat(segment)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := root.Mkdir(segment, 0o755); err != nil {
+			created := false
+			if err := root.Mkdir(segment, 0o755); err == nil {
+				created = true
+			} else if !errors.Is(err, fs.ErrExist) {
 				_ = root.Close()
 				return nil, fmt.Errorf("artifactfs: mkdir artifact directory %q: %w", segment, err)
 			}
-			if err := syncDirectory(root); err != nil {
-				_ = root.Close()
-				return nil, fmt.Errorf("artifactfs: sync artifact directory creation %q: %w", segment, err)
+			// Another writer may have created the same grouped-artifact directory
+			// between Lstat and Mkdir. EEXIST is safe only after the common path
+			// below re-stats and proves the object is a real directory. Only the
+			// writer that created the directory owns the parent-directory fsync.
+			if created {
+				if err := syncDirectory(root); err != nil {
+					_ = root.Close()
+					return nil, fmt.Errorf("artifactfs: sync artifact directory creation %q: %w", segment, err)
+				}
 			}
 			info, err = root.Lstat(segment)
+			if err != nil {
+				_ = root.Close()
+				return nil, fmt.Errorf("artifactfs: stat artifact directory %q after creation race: %w", segment, err)
+			}
 		}
 		if err != nil {
 			_ = root.Close()
@@ -468,11 +481,11 @@ func validatePortableSegment(name string) error {
 		return fmt.Errorf("empty or dot path segment")
 	}
 	if strings.HasSuffix(name, " ") || strings.HasSuffix(name, ".") {
-		return fmt.Errorf("Windows-ambiguous trailing space/dot")
+		return fmt.Errorf("windows-ambiguous trailing space/dot")
 	}
 	for _, r := range name {
 		if r < 0x20 || strings.ContainsRune(`<>:"|?*`, r) {
-			return fmt.Errorf("Windows-reserved character %q", r)
+			return fmt.Errorf("windows-reserved character %q", r)
 		}
 	}
 	base := name
@@ -482,15 +495,15 @@ func validatePortableSegment(name string) error {
 	base = strings.TrimRight(base, " ")
 	upper := strings.ToUpper(base)
 	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" || upper == "CONIN$" || upper == "CONOUT$" {
-		return fmt.Errorf("Windows-reserved device name")
+		return fmt.Errorf("windows-reserved device name")
 	}
 	if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) && upper[3] >= '1' && upper[3] <= '9' {
-		return fmt.Errorf("Windows-reserved device name")
+		return fmt.Errorf("windows-reserved device name")
 	}
 	if strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT") {
 		suffix := strings.TrimPrefix(strings.TrimPrefix(upper, "COM"), "LPT")
 		if suffix == "¹" || suffix == "²" || suffix == "³" {
-			return fmt.Errorf("Windows-reserved device name")
+			return fmt.Errorf("windows-reserved device name")
 		}
 	}
 	return nil

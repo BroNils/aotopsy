@@ -132,12 +132,16 @@ func TestBuildSignalGraphKeepsRawDirectAddressOutOfFunctionRelations(t *testing.
 
 func TestBuildSignalGraphDeduplicatesCodeAliasesByFunctionIdentity(t *testing.T) {
 	funcs := []disasm.FuncRecord{
-		{Name: "Alias.same", Owner: "Alias", PC: "0x1000", Size: 16, RefID: 1},
+		{Name: "Alias.same", Owner: "WrongAlias", PC: "0x1000", Size: 16, RefID: 1},
 		{Name: "Alias.same", Owner: "Alias", PC: "0x1000", Size: 16, RefID: 2},
 	}
-	g := BuildSignalGraph("3.12.2", funcs, nil, []disasm.StringRefRecord{{Func: "Alias.same", Value: "https://example.com"}}, 1, nil)
-	if g.Stats.TotalFuncs != 1 || g.Stats.SignalFuncs != 1 || len(g.Funcs) != 1 {
+	ref := disasm.StringRefRecord{Func: "Alias.same", PC: "0x1004", Kind: "PP", PoolIdx: 7, Value: "https://example.com"}
+	g := BuildSignalGraph("3.12.2", funcs, nil, []disasm.StringRefRecord{ref, ref}, 1, nil)
+	if g.Stats.TotalFuncs != 1 || g.Stats.SignalFuncs != 1 || g.Stats.StringRefCount != 1 || len(g.Funcs) != 1 {
 		t.Fatalf("code alias inflated signal graph function population: stats=%+v funcs=%+v", g.Stats, g.Funcs)
+	}
+	if g.Funcs[0].Owner != "Alias" || len(g.Funcs[0].StringRefs) != 1 {
+		t.Fatalf("canonical alias metadata/evidence = %+v", g.Funcs[0])
 	}
 }
 

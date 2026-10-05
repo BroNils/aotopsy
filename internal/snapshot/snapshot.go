@@ -376,6 +376,77 @@ func compressedPointersFromFeatures(style CompressionFeatureStyle, features stri
 	}
 }
 
+func targetFeaturesCompatible(style TargetFeatureStyle, features string, isARM64 bool) error {
+	tokens := strings.Fields(features)
+	has := func(want string) bool {
+		for _, token := range tokens {
+			if token == want {
+				return true
+			}
+		}
+		return false
+	}
+	count := func(vocabulary []string) (int, string) {
+		n, found := 0, ""
+		for _, token := range vocabulary {
+			if has(token) {
+				n++
+				found = token
+			}
+		}
+		return n, found
+	}
+
+	switch style {
+	case TargetFeatureLegacyABI:
+		// SDK @2.10.0..2.18.0 runtime/vm/dart.cc FeaturesString uses these
+		// architecture/ABI tokens and has no separate OS token.
+		n, target := count([]string{
+			"arm64-sysv", "arm64-fuchsia", "x64-sysv", "x64-win",
+			"ia32", "arm-eabi", "arm-ios", "riscv32", "riscv64",
+		})
+		if n != 1 {
+			return fmt.Errorf("expected exactly one legacy architecture/ABI token")
+		}
+		want := "x64-sysv"
+		if isARM64 {
+			want = "arm64-sysv"
+		}
+		if target != want {
+			return fmt.Errorf("snapshot target %q is incompatible with ELF machine (want %s)", target, want)
+		}
+		return nil
+
+	case TargetFeatureArchAndOS:
+		// SDK @2.19.0+ runtime/vm/dart.cc emits a bare architecture followed by
+		// exactly one OS token. The pipeline implements ELF SysV semantics only,
+		// so Windows/Fuchsia/iOS/macOS snapshots are unsupported even when their
+		// CPU family matches.
+		archCount, arch := count([]string{"arm64", "x64", "ia32", "arm", "riscv32", "riscv64"})
+		if archCount != 1 {
+			return fmt.Errorf("expected exactly one architecture token")
+		}
+		wantArch := "x64"
+		if isARM64 {
+			wantArch = "arm64"
+		}
+		if arch != wantArch {
+			return fmt.Errorf("snapshot architecture %q is incompatible with ELF machine (want %s)", arch, wantArch)
+		}
+		osCount, targetOS := count([]string{"android", "fuchsia", "ios", "macos", "linux", "windows"})
+		if osCount != 1 {
+			return fmt.Errorf("expected exactly one target OS token")
+		}
+		if targetOS != "android" && targetOS != "linux" {
+			return fmt.Errorf("snapshot target OS %q is unsupported for ELF analysis", targetOS)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unverified target feature vocabulary")
+	}
+}
+
 // Info aggregates all extracted snapshot information.
 type Info struct {
 	VmData              Region          `json:"vm_data"`
@@ -693,6 +764,12 @@ func Extract(ef *elfx.File, opts dartfmt.Options) (*Info, error) {
 			if mode == BuildUnknown {
 				if err := unsupported("%s features do not prove exactly one SDK build mode", item.label); err != nil {
 					return nil, err
+				}
+			}
+			if err := targetFeaturesCompatible(info.Version.TargetFeatures, item.hdr.Features, ef.IsARM64()); err != nil {
+				if err2 := unsupported("%s target features are incompatible with format profile %s: %v",
+					item.label, info.Version.DartVersion, err); err2 != nil {
+					return nil, err2
 				}
 			}
 			compressed, err := compressedPointersFromFeatures(info.Version.CompressionFeatures, item.hdr.Features)

@@ -238,8 +238,10 @@ func ParseHexAddr(s string) (uint64, error) {
 	return v, nil
 }
 
-// AsmCommentRe matches annotated asm lines: address + instruction + "; comment"
-var AsmCommentRe = regexp.MustCompile(`^(0x[0-9a-fA-F]+)\s+.*;\s+(.+)$`)
+// AsmCommentRe matches the first producer-owned "  ; " separator. Comments may
+// themselves contain "; " (paired THR annotations and string literals), so the
+// instruction portion must not greedily consume later semicolons.
+var AsmCommentRe = regexp.MustCompile(`^(0x[0-9a-fA-F]+)\s+.*?  ;\s+(.+)$`)
 
 // ExtractAsmComments parses all .txt files below asmDir for instruction-level
 // annotations. Disassembly artifacts are grouped under owner directories, so a

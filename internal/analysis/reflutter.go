@@ -151,7 +151,7 @@ func RunReFlutterImport(opts ReFlutterImportOptions) (*ReFlutterImportResult, er
 		}
 	}()
 	stage := tx.StageDir()
-	if err := output.CloneTree(staticAbs, stage); err != nil {
+	if err := tx.CloneFrom(staticAbs); err != nil {
 		return nil, fmt.Errorf("clone static generation: %w", err)
 	}
 	if err := output.WriteJSONFile(filepath.Join(stage, "reflutter_data.json"), reflutterData); err != nil {

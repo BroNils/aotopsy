@@ -42,7 +42,7 @@ type CodeMapEntry struct {
 }
 
 // RunGraph parses a snapshot's named-object graph and writes objects.jsonl,
-// edges.jsonl, and code_map.jsonl to outDir.
+// edges.jsonl, and code_map.jsonl to the dedicated outDir/graph generation.
 func RunGraph(libapp, outDir, which string, maxSteps int) error {
 	if outDir == "" {
 		return fmt.Errorf("graph: output directory is empty")
@@ -224,10 +224,12 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 
 	ct := info.Version.CIDs
 
-	// The three graph files are one generation: never publish objects.jsonl from
+	// The three graph files are one dedicated generation: never publish objects.jsonl from
 	// the new parse next to edges/code_map from an older run.  This also removes
-	// stale graph artifacts when a rerun legitimately produces fewer files.
-	tx, err := output.BeginDirTransaction(outDir)
+	// stale graph artifacts when a rerun legitimately produces fewer files,
+	// without replacing an analysis generation if outDir points at one.
+	graphDir := filepath.Join(outDir, "graph")
+	tx, err := output.BeginDirTransaction(graphDir)
 	if err != nil {
 		return fmt.Errorf("begin graph output transaction: %w", err)
 	}
@@ -373,9 +375,9 @@ func RunGraph(libapp, outDir, which string, maxSteps int) error {
 	}
 	committed = true
 
-	cli.Errf("Wrote %d objects to %s\n", objectCount, filepath.Join(outDir, "objects.jsonl"))
-	cli.Errf("Wrote %d edges to %s\n", edgeCount, filepath.Join(outDir, "edges.jsonl"))
-	cli.Errf("Wrote %d code mappings to %s\n", codeMapCount, filepath.Join(outDir, "code_map.jsonl"))
+	cli.Errf("Wrote %d objects to %s\n", objectCount, filepath.Join(graphDir, "objects.jsonl"))
+	cli.Errf("Wrote %d edges to %s\n", edgeCount, filepath.Join(graphDir, "edges.jsonl"))
+	cli.Errf("Wrote %d code mappings to %s\n", codeMapCount, filepath.Join(graphDir, "code_map.jsonl"))
 
 	return nil
 }

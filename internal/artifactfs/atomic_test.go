@@ -2,10 +2,12 @@ package artifactfs
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -198,5 +200,39 @@ func TestWriteAtomicUnderAllowsGroupedArtifact(t *testing.T) {
 		}
 	} else if info.Mode().Perm() != 0o640 {
 		t.Fatalf("grouped artifact mode = %v, want 0640", info.Mode().Perm())
+	}
+}
+
+func TestWriteAtomicUnderConcurrentGroupedArtifactsShareDirectory(t *testing.T) {
+	root := t.TempDir()
+	const writers = 24
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rel := filepath.ToSlash(filepath.Join("Owner", fmt.Sprintf("method_%02d.txt", i)))
+			errs <- WriteAtomicUnder(root, rel, 0o600, func(w io.Writer) error {
+				_, err := w.Write([]byte("ok"))
+				return err
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent grouped write failed: %v", err)
+		}
+	}
+	for i := 0; i < writers; i++ {
+		if _, err := os.Stat(filepath.Join(root, "Owner", fmt.Sprintf("method_%02d.txt", i))); err != nil {
+			t.Fatalf("missing concurrent artifact %d: %v", i, err)
+		}
 	}
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -51,13 +50,17 @@ func cmdRender(args []string) error {
 	maxNodes := fs.Int("max-nodes", 0, "max function nodes in callgraph (0 = all)")
 	title := fs.String("title", "", "title for callgraph and HTML (auto-detected from dir name)")
 	noDot := fs.Bool("no-dot", true, "skip SVG generation (dot not required)")
-	cfgFlag := fs.Bool("cfg", false, "generate per-function CFGs for reachable functions")
+	cfgFlag := fs.Bool("cfg", false, "generate per-function CFGs")
+	cfgMax := fs.Int("cfg-max", 500, "max per-function CFGs to generate (0 = unlimited)")
 	asmDir := fs.String("asm", "", "directory with per-function .bin files (defaults to <in>/asm)")
 
 	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if err := requireNonNegativeFlag("max-nodes", *maxNodes); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("cfg-max", *cfgMax); err != nil {
 		return err
 	}
 	if *inDir == "" {
@@ -121,24 +124,11 @@ func cmdRender(args []string) error {
 	// Compute stats.
 	stats := render.ComputeStats(funcs, edges)
 
-	// Compute reachability.
+	// Structural roots remain useful as a graph-shape diagnostic and sorting
+	// hint, but are not program-entry evidence. Do not close reachability from
+	// all source SCCs: that is the entire finite graph by construction.
 	rootCandidates := render.FindRootCandidates(funcs, edges)
-	reach := render.ReachableSet(funcs, rootCandidates, edges)
-	logger.Printf("static root candidates: %d, known functions in structural closure: %d / %d\n",
-		len(rootCandidates), len(reach.Functions), stats.TotalFunctions)
-	if reach.IncompletePolymorphicSites > 0 || reach.UnknownCandidateCountSites > 0 || reach.UnresolvedIndirectSites > 0 {
-		logger.Printf("  reachability lower-bound gaps: %d incomplete polymorphic, %d unknown candidate-count, %d unresolved indirect site(s)\n",
-			reach.IncompletePolymorphicSites, reach.UnknownCandidateCountSites, reach.UnresolvedIndirectSites)
-	}
-
-	// Generate reachability DOT.
-	reachDOT := render.ReachabilityDOT(funcs, edges, reach, rootCandidates,
-		*title+" (static structural closure)", render.NASA)
-	reachDotPath := filepath.Join(renderDir, "reachable.dot")
-	if err := output.WriteArtifactFile(renderDir, "reachable.dot", []byte(reachDOT), 0o644); err != nil {
-		return fmt.Errorf("write reachable.dot: %w", err)
-	}
-	logger.Printf("wrote %s (%d bytes)\n", reachDotPath, len(reachDOT))
+	logger.Printf("static root candidates: %d\n", len(rootCandidates))
 
 	// Generate callgraph DOT.
 	dot := render.CallgraphDOT(funcs, edges, *title, render.NASA, *maxNodes)
@@ -159,7 +149,6 @@ func cmdRender(args []string) error {
 	// Generate SVGs via graphviz dot.
 	hasCallgraphSVG := false
 	hasClassgraphSVG := false
-	hasReachableSVG := false
 	if !*noDot {
 		svgPath := filepath.Join(renderDir, "callgraph.svg")
 		stderr, err := runDot(dotPath, svgPath, "svg")
@@ -181,17 +170,6 @@ func cmdRender(args []string) error {
 			hasClassgraphSVG = true
 			fi, _ := os.Stat(classSvgPath)
 			logger.Printf("wrote %s (%d bytes)\n", classSvgPath, fi.Size())
-		}
-
-		reachSvgPath := filepath.Join(renderDir, "reachable.svg")
-		stderr, err = runDot(reachDotPath, reachSvgPath, "svg")
-		if err != nil {
-			warnDotFailure(logger, "reachable SVG", err, stderr, "")
-		} else {
-			warnDotOutput(logger, "reachable SVG", stderr)
-			hasReachableSVG = true
-			fi, _ := os.Stat(reachSvgPath)
-			logger.Printf("wrote %s (%d bytes)\n", reachSvgPath, fi.Size())
 		}
 	}
 
@@ -217,7 +195,7 @@ func cmdRender(args []string) error {
 		if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 			return fmt.Errorf("mkdir cfg: %w", err)
 		}
-		cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, reach.Functions, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
+		cfgFuncs, cfgLinks, err = generateCFGs(logger, funcs, edges, *cfgMax, artifactFiles, *asmDir, cfgDir, prov.Arch, !*noDot)
 		if err != nil {
 			return fmt.Errorf("generate CFGs: %w", err)
 		}
@@ -228,8 +206,8 @@ func cmdRender(args []string) error {
 	htmlPath := filepath.Join(renderDir, "index.html")
 	if err := output.WriteAtomic(htmlPath, 0o644, func(w io.Writer) error {
 		return render.WriteIndexHTML(w, stats, unresTHR, *title,
-			hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG,
-			rootCandidates, reach, cfgFuncs, cfgLinks)
+			hasCallgraphSVG, hasClassgraphSVG,
+			rootCandidates, cfgFuncs, cfgLinks)
 	}); err != nil {
 		return fmt.Errorf("write index.html: %w", err)
 	}
@@ -243,7 +221,7 @@ func cmdRender(args []string) error {
 	return nil
 }
 
-func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, reachable map[string]bool, artifactFiles map[string]string, asmDir, cfgDir, arch string, genSVG bool) (int, map[string]string, error) {
+func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, maxCFGs int, artifactFiles map[string]string, asmDir, cfgDir, arch string, genSVG bool) (int, map[string]string, error) {
 	// Call edges bucketed by caller, so each CFG can be drawn with the
 	// callees of that function rather than of the whole binary.
 	edgesByFunc := make(map[string][]disasm.CallEdgeRecord, len(funcs))
@@ -253,11 +231,11 @@ func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.
 	count := 0
 	cfgLinks := make(map[string]string)
 	for _, f := range funcs {
-		if !reachable[f.Name] {
-			continue
-		}
 		if strings.HasPrefix(f.Name, "sub_") {
 			continue
+		}
+		if maxCFGs > 0 && count >= maxCFGs {
+			break
 		}
 
 		txtRel, ok := artifactFiles[f.Name]
@@ -280,10 +258,10 @@ func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.
 		var cfg disasm.FuncCFG
 		switch arch {
 		case "arm64":
-			if len(data)%4 != 0 {
-				return count, cfgLinks, fmt.Errorf("ARM64 function %s has non-word byte length %d", f.Name, len(data))
-			}
-			insts := decodeRawInsts(data, pc)
+			// Use the same decoder as the pipeline. Besides formatted text it
+			// carries Bad/Mnemonic barrier metadata, so BRK/HLT/UDF and truncated
+			// tails cannot fabricate fall-through edges in the render-only CFG.
+			insts := disasm.Disassemble(data, disasm.Options{BaseAddr: pc})
 			cfg = disasm.BuildCFG(f.Name, insts)
 		case "x64":
 			cfg = disasm.BuildX86CFG(f.Name, data, pc)
@@ -319,27 +297,6 @@ func generateCFGs(logger *cli.Logger, funcs []disasm.FuncRecord, edges []disasm.
 		count++
 	}
 	return count, cfgLinks, nil
-}
-
-func decodeRawInsts(data []byte, baseAddr uint64) []disasm.Inst {
-	n := len(data) / 4
-	insts := make([]disasm.Inst, 0, n)
-	for i := 0; i < n; i++ {
-		raw := binary.LittleEndian.Uint32(data[i*4:])
-		addr := baseAddr + uint64(i*4)
-		inst := disasm.Inst{
-			Addr: addr,
-			Raw:  raw,
-			Size: 4,
-			Text: fmt.Sprintf(".word 0x%08x", raw),
-		}
-		text := disasm.DisasmOne(raw)
-		if text != "" {
-			inst.Text = text
-		}
-		insts = append(insts, inst)
-	}
-	return insts
 }
 
 func runDot(dotPath, outPath, format string) (string, error) {

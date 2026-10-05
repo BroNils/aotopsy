@@ -373,12 +373,13 @@ func TestWriteArtifactsPublishesOneGenerationAndRemovesStaleReverseMap(t *testin
 	if err := WriteArtifacts(dir, rep); err != nil {
 		t.Fatalf("WriteArtifacts with reverse map: %v", err)
 	}
+	artifactDir := filepath.Join(dir, "symbolmap")
 	for _, name := range []string{"symbol_call_sites.tsv", "symbol_target_summary.json", "symbol_map_report.json", "symbol_reverse_map.json"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		if _, err := os.Stat(filepath.Join(artifactDir, name)); err != nil {
 			t.Fatalf("%s missing after publish: %v", name, err)
 		}
 	}
-	reportData, err := os.ReadFile(filepath.Join(dir, "symbol_map_report.json"))
+	reportData, err := os.ReadFile(filepath.Join(artifactDir, "symbol_map_report.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,10 +395,10 @@ func TestWriteArtifactsPublishesOneGenerationAndRemovesStaleReverseMap(t *testin
 	if err := WriteArtifacts(dir, rep); err != nil {
 		t.Fatalf("WriteArtifacts without reverse map: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "symbol_reverse_map.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(artifactDir, "symbol_reverse_map.json")); !os.IsNotExist(err) {
 		t.Fatalf("stale reverse map survived new generation: err=%v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "symbol_call_sites.tsv"))
+	data, err := os.ReadFile(filepath.Join(artifactDir, "symbol_call_sites.tsv"))
 	if err != nil {
 		t.Fatal(err)
 	}

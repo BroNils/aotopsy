@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	maxClonedOutputFiles = 250000
+	// A generation holds two files per disassembled function (asm/*.txt and
+	// asm/*.bin), so a ~129k-function app is already >258k files. The cap only
+	// has to stop a hostile or runaway tree, not a legitimate large app.
+	maxClonedOutputFiles = 4_000_000
 	maxClonedOutputBytes = int64(16 << 30)
 	tempNameAttempts     = 128
 	dirStagePrefix       = ".aotopsy-dir-stage-"
@@ -34,6 +37,14 @@ const (
 // Production always points at artifactfs.SyncRoot.
 var syncDirectory = artifactfs.SyncRoot
 
+// syncRegularFile and linkFile are test seams for clone/commit durability and
+// hard-link fallback behavior. Production always uses the artifactfs/os
+// implementations.
+var (
+	syncRegularFile = artifactfs.SyncRegularFile
+	linkFile        = os.Link
+)
+
 // DirTransaction publishes a complete artifact generation with one directory
 // rename. The target parent is held open for the lifetime of the transaction so
 // path replacement cannot make commit operate in a different directory tree.
@@ -50,6 +61,12 @@ type DirTransaction struct {
 	targetInfo    os.FileInfo
 	stageInfo     os.FileInfo
 	targetExisted bool
+	// clonedDurable records stage paths that still share an inode with a file
+	// from an already-published aotopsy generation. Those bytes were fsynced by
+	// the source generation's Commit and do not need another per-file fsync. If a
+	// mutator replaces one of these paths atomically, os.SameFile stops matching
+	// and validateAndSyncGeneration syncs the new inode normally.
+	clonedDurable map[string]os.FileInfo
 }
 
 func BeginDirTransaction(target string) (*DirTransaction, error) {
@@ -78,10 +95,11 @@ func BeginDirTransaction(target string) (*DirTransaction, error) {
 	}
 
 	tx := &DirTransaction{
-		target:     filepath.Join(parentPath, filepath.Base(absTarget)),
-		parentPath: parentPath,
-		targetName: filepath.Base(absTarget),
-		parentRoot: parentRoot,
+		target:        filepath.Join(parentPath, filepath.Base(absTarget)),
+		parentPath:    parentPath,
+		targetName:    filepath.Base(absTarget),
+		parentRoot:    parentRoot,
+		clonedDurable: make(map[string]os.FileInfo),
 	}
 	fail := func(err error) (*DirTransaction, error) {
 		tx.closeRoots()
@@ -204,7 +222,7 @@ func (tx *DirTransaction) stampGeneration() error {
 // external renderers and legacy callers may have populated StageDir directly.
 // Commit therefore rejects links/special files, pins every regular file before
 // syncing it, then syncs every directory from leaves to the stage root.
-func validateAndSyncGeneration(root *os.Root) error {
+func validateAndSyncGeneration(root *os.Root, clonedDurable map[string]os.FileInfo) error {
 	if root == nil {
 		return fmt.Errorf("output staging root is nil")
 	}
@@ -237,7 +255,11 @@ func validateAndSyncGeneration(root *os.Root) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("staged generation contains non-regular artifact %s (%s)", path, info.Mode().Type())
 		}
-		if err := artifactfs.SyncRegularFile(root, path, info); err != nil {
+		rel := filepath.FromSlash(path)
+		if durableInfo, ok := clonedDurable[rel]; ok && os.SameFile(info, durableInfo) {
+			return nil
+		}
+		if err := syncRegularFile(root, path, info); err != nil {
 			return fmt.Errorf("sync staged artifact %s: %w", path, err)
 		}
 		return nil
@@ -290,6 +312,19 @@ func (tx *DirTransaction) StageDir() string {
 	return tx.stage
 }
 
+// CloneFrom clones an existing artifact generation into this transaction's
+// unpublished stage. When the source carries a valid aotopsy generation marker,
+// regular files are hard-linked where the filesystem allows it. Published
+// aotopsy writers replace artifacts atomically rather than modifying them in
+// place, so sharing those immutable inodes is safe; Commit re-checks inode
+// identity and fsyncs any path that a stage mutator replaced.
+func (tx *DirTransaction) CloneFrom(src string) error {
+	if tx == nil || tx.stageRoot == nil || tx.stageName == "" || tx.stage == "" {
+		return fmt.Errorf("output transaction is not active")
+	}
+	return cloneTree(src, tx.stage, tx.clonedDurable)
+}
+
 // RemoveStageFile removes one top-level managed artifact from the unpublished
 // generation. The pinned stage root keeps removal independent of pathname
 // replacement outside the transaction; directories are deliberately refused.
@@ -340,7 +375,7 @@ func (tx *DirTransaction) Commit() error {
 	if err := tx.stampGeneration(); err != nil {
 		return err
 	}
-	if err := validateAndSyncGeneration(tx.stageRoot); err != nil {
+	if err := validateAndSyncGeneration(tx.stageRoot, tx.clonedDurable); err != nil {
 		return fmt.Errorf("validate staged generation: %w", err)
 	}
 
@@ -638,6 +673,14 @@ func ContainsPath(container, path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// filepath.Rel returns an error on Windows when the two paths are on
+	// different volumes (for example a local NTFS temp directory and a WSL UNC
+	// corpus path). After canonicalPath has resolved existing aliases, distinct
+	// volumes cannot contain one another, so this is a clean non-overlap rather
+	// than a trust-boundary failure.
+	if filepath.VolumeName(c) != filepath.VolumeName(p) {
+		return false, nil
+	}
 	rel, err := filepath.Rel(c, p)
 	if err != nil {
 		return false, err
@@ -711,11 +754,14 @@ func canonicalPath(path string) (string, error) {
 	}
 }
 
-// CloneTree copies one complete reusable artifact generation into an
-// unpublished staging directory. Both roots are pinned, symlinks and special
-// files are rejected, and the byte budget is enforced on bytes actually read
-// rather than on mutable directory metadata alone.
+// CloneTree copies one complete reusable artifact generation into a destination
+// directory. Transactional callers should prefer DirTransaction.CloneFrom,
+// which can reuse already-durable source inodes and avoid redundant fsyncs.
 func CloneTree(src, dst string) error {
+	return cloneTree(src, dst, nil)
+}
+
+func cloneTree(src, dst string, clonedDurable map[string]os.FileInfo) error {
 	srcAbs, err := filepath.Abs(src)
 	if err != nil {
 		return err
@@ -770,6 +816,12 @@ func CloneTree(src, dst string) error {
 	if !os.SameFile(dstInfo, dstPinned) {
 		return fmt.Errorf("artifact clone destination changed while being opened")
 	}
+	sourceDurable := false
+	if clonedDurable != nil {
+		if marker, readErr := fs.ReadFile(root.FS(), GenerationMarker); readErr == nil && string(marker) == generationMarkerData {
+			sourceDurable = true
+		}
+	}
 
 	var files int
 	var total int64
@@ -820,6 +872,31 @@ func CloneTree(src, dst string) error {
 			_ = in.Close()
 			return fmt.Errorf("artifact source %s changed while being opened", rel)
 		}
+		if openedInfo.Size() < 0 || openedInfo.Size() > maxClonedOutputBytes-total {
+			_ = in.Close()
+			return fmt.Errorf("artifact tree exceeds %d-byte clone limit", maxClonedOutputBytes)
+		}
+
+		// The generation marker is stamped in place by Commit, so never share its
+		// inode with the source generation. Every other source file in a marked
+		// generation is immutable by contract: aotopsy writers publish replacements
+		// with rename/unlink rather than truncating an existing inode.
+		if sourceDurable && rel != GenerationMarker {
+			linked, linkErr := cloneByHardLink(srcAbs, dstAbs, rel, openedInfo)
+			if linkErr != nil {
+				_ = in.Close()
+				return linkErr
+			}
+			if linked {
+				closeInErr := in.Close()
+				if closeInErr != nil {
+					return fmt.Errorf("close source %s: %w", rel, closeInErr)
+				}
+				total += openedInfo.Size()
+				clonedDurable[rel] = openedInfo
+				return nil
+			}
+		}
 		outFile, err := dstRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
 			_ = in.Close()
@@ -828,7 +905,6 @@ func CloneTree(src, dst string) error {
 		remaining := maxClonedOutputBytes - total
 		written, copyErr := io.Copy(outFile, io.LimitReader(in, remaining+1))
 		closeInErr := in.Close()
-		syncErr := outFile.Sync()
 		closeOutErr := outFile.Close()
 		if written > remaining {
 			return fmt.Errorf("artifact tree exceeds %d-byte clone limit", maxClonedOutputBytes)
@@ -840,14 +916,35 @@ func CloneTree(src, dst string) error {
 		if closeInErr != nil {
 			return fmt.Errorf("close source %s: %w", rel, closeInErr)
 		}
-		if syncErr != nil {
-			return fmt.Errorf("sync clone %s: %w", rel, syncErr)
-		}
 		if closeOutErr != nil {
 			return fmt.Errorf("close clone %s: %w", rel, closeOutErr)
 		}
 		return nil
 	})
+}
+
+func cloneByHardLink(srcAbs, dstAbs, rel string, expected os.FileInfo) (bool, error) {
+	srcPath := filepath.Join(srcAbs, rel)
+	dstPath := filepath.Join(dstAbs, rel)
+	if err := linkFile(srcPath, dstPath); err != nil {
+		// Hard links are an optimization only. Cross-device filesystems, DrvFS,
+		// permissions, link-count limits, and filesystems without link support all
+		// fall back to the ordinary copy path.
+		return false, nil
+	}
+	linkedInfo, err := os.Lstat(dstPath)
+	if err == nil && linkedInfo.Mode().IsRegular() && os.SameFile(expected, linkedInfo) {
+		return true, nil
+	}
+	// The source pathname may have been replaced between opening it and Link.
+	// Never keep a link whose inode is not the already-pinned source file.
+	if removeErr := os.Remove(dstPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return false, fmt.Errorf("remove mismatched clone link %s: %w", rel, removeErr)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("verify clone link %s: %w", rel, err)
+	}
+	return false, nil
 }
 
 func makeTempDirInRoot(root *os.Root, prefix string) (string, error) {

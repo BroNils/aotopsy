@@ -115,11 +115,28 @@ func BuildSignalGraph(
 
 	catCounts := make(map[string]int)
 	validStringRefCount := 0
+	type stringRefKey struct {
+		funcName string
+		pc       string
+		kind     string
+		poolIdx  int
+		value    string
+	}
+	seenStringRefs := make(map[stringRefKey]bool, len(stringRefs))
 
 	for _, sr := range stringRefs {
 		if !funcSet[sr.Func] {
 			continue
 		}
+		key := stringRefKey{funcName: sr.Func, pc: sr.PC, kind: sr.Kind, poolIdx: sr.PoolIdx, value: sr.Value}
+		if seenStringRefs[key] {
+			// Pre-InstructionsTable snapshots can emit several Function/Code
+			// aliases for one deduplicated instructions payload. Disassembly resolves
+			// those aliases to one canonical function name, so their identical string
+			// refs are the same machine-code evidence, not repeated observations.
+			continue
+		}
+		seenStringRefs[key] = true
 		validStringRefCount++
 		cats := ClassifyString(dartVersion, sr.Value)
 		if len(cats) == 0 {
@@ -273,7 +290,13 @@ func BuildSignalGraph(
 	// Build ALL funcs with role annotations.
 	var allFuncs []SignalFunc
 	seenFuncs := make(map[string]bool, len(funcSet))
-	for _, f := range funcs {
+	// Shared-code aliases all carry the canonical VA-keyed display name, while
+	// owner/arity metadata remains row-specific. BuildSymbolNames chooses that
+	// canonical name by last write at a shared VA, so walk functions.jsonl in
+	// reverse and keep the same final alias metadata rather than attaching the
+	// first alias's unrelated owner to the canonical name.
+	for i := len(funcs) - 1; i >= 0; i-- {
+		f := funcs[i]
 		if seenFuncs[f.Name] {
 			continue
 		}

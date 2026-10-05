@@ -75,6 +75,7 @@ func TestAsyncStubClassificationRequiresExactSDKLeaf(t *testing.T) {
 		"InitSyncStarStub", "SuspendSyncStarAtYieldStub", "resume_stub",
 		"MyInitAsyncCache", "ReturnAsyncHandler", "foo._initAsyncLater",
 		"_SuspendStateHelper._awaiting", "userYieldAsyncStarThing",
+		"Retry._await", "Foo._resume", "Foo.InitAsync", "pkg::Foo::AwaitStub",
 	} {
 		if IsAsyncStubName("3.12.2", name) {
 			t.Errorf("IsAsyncStubName(%q) = true for ordinary application symbol", name)

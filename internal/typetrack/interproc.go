@@ -203,6 +203,32 @@ func RunInterprocedural(
 	// direct-call setup masks and only propagate those proven positions.
 	cc, hasRegisterCC := sdk.DartRegisterCallingConvention(ctx.DartVersion, isARM64)
 	argRegOrder := cc.GPR
+	// Direct BL/CALL sites are not a closed-world caller census. Code referenced
+	// by the dispatch table or by a pool Code/Closure may also be entered through
+	// indirect runtime paths that never contribute a BLEdge. Exact runtime facts
+	// observed at the direct sites therefore cannot remain Exact at such a
+	// callee's entry.
+	externallyEnterable := make(map[string]bool)
+	markExternallyEnterable := func(name string) {
+		if name == "" {
+			return
+		}
+		externallyEnterable[name] = true
+		externallyEnterable[stripFunctionAddressSuffix(name)] = true
+	}
+	for _, name := range ctx.DispatchCodeIndexToName {
+		markExternallyEnterable(name)
+	}
+	for _, name := range ctx.PoolCodeNames {
+		markExternallyEnterable(name)
+	}
+	for _, name := range ctx.PoolClosureFunctionNames {
+		markExternallyEnterable(name)
+	}
+	isExternallyEnterable := func(name string) bool {
+		return externallyEnterable[name] || externallyEnterable[stripFunctionAddressSuffix(name)] ||
+			sdk.LooksLikeVMStubName(stripFunctionAddressSuffix(name))
+	}
 	regArgsByFunc := make(map[string][]int)
 	if hasRegisterCC {
 		masksByFunc := make(map[string][]uint8)
@@ -431,7 +457,11 @@ func RunInterprocedural(
 				current := calleeParamTypes[edge.Callee]
 				for _, pos := range positions {
 					r := argRegOrder[pos]
-					newType := joinType(current[r], argTypes[r], lca)
+					incoming := argTypes[r]
+					if isExternallyEnterable(edge.Callee) {
+						incoming = openWorldEntryFact(incoming)
+					}
+					newType := joinType(current[r], incoming, lca)
 					if !newType.Equal(current[r]) {
 						calleeParamTypes[edge.Callee] = updateReg(calleeParamTypes[edge.Callee], r, newType)
 					}
@@ -583,6 +613,23 @@ func RunInterprocedural(
 	}
 
 	return result
+}
+
+// openWorldEntryFact removes exactness that is justified only by the observed
+// direct callers. A ClassBound remains valid for additional subclass/indirect
+// callers; other value-specific lattice facts have no equivalent open-world
+// guarantee and become Top.
+func openWorldEntryFact(v TypeLattice) TypeLattice {
+	switch v.Kind {
+	case LatticeBottom, LatticeTop:
+		return v
+	case LatticeExactClass:
+		return ClassBound(v.ClassID)
+	case LatticeClassBound:
+		return v
+	default:
+		return Top()
+	}
 }
 
 func paramTypeMapsEqual(a, b map[string][31]TypeLattice) bool {

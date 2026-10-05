@@ -58,7 +58,7 @@ func TestTopNMapDeterministicTieBreak(t *testing.T) {
 }
 
 func TestHTMLWritersPropagateShortWrites(t *testing.T) {
-	if err := WriteIndexHTML(shortWriter{}, CallgraphStats{}, nil, "title", false, false, false, nil, ReachabilityResult{}, 0, nil); !errors.Is(err, io.ErrShortWrite) {
+	if err := WriteIndexHTML(shortWriter{}, CallgraphStats{}, nil, "title", false, false, nil, 0, nil); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("WriteIndexHTML short write error = %v, want io.ErrShortWrite", err)
 	}
 	g := &signal.SignalGraph{Stats: signal.SignalStats{Categories: map[string]int{}}}
@@ -73,8 +73,7 @@ func TestIndexHTMLUsesCanonicalCFGLink(t *testing.T) {
 		name: "cfg/ShortcutManager/#action#initializer_1000.svg",
 	}
 	var out bytes.Buffer
-	reach := ReachabilityResult{Functions: map[string]bool{name: true}}
-	if err := WriteIndexHTML(&out, CallgraphStats{}, nil, "title", false, false, false, []string{name}, reach, 1, links); err != nil {
+	if err := WriteIndexHTML(&out, CallgraphStats{}, nil, "title", false, false, []string{name}, 1, links); err != nil {
 		t.Fatal(err)
 	}
 	html := out.String()
@@ -198,7 +197,7 @@ func TestSignalCFGDOTMarksIndirectContextPath(t *testing.T) {
 	}
 }
 
-func TestClassgraphAndReachabilityAreDeterministicOnTies(t *testing.T) {
+func TestClassgraphIsDeterministicOnTies(t *testing.T) {
 	funcs := []disasm.FuncRecord{
 		{Name: "A.one", Owner: "A"}, {Name: "B.one", Owner: "B"},
 		{Name: "C.one", Owner: "C"}, {Name: "D.one", Owner: "D"},
@@ -207,16 +206,10 @@ func TestClassgraphAndReachabilityAreDeterministicOnTies(t *testing.T) {
 		{FromFunc: "A.one", Kind: "bl", Target: "B.one"},
 		{FromFunc: "C.one", Kind: "bl", Target: "D.one"},
 	}
-	reachable := map[string]bool{"A.one": true, "B.one": true, "C.one": true, "D.one": true}
 	classFirst := ClassgraphDOT(funcs, edges, "", NASA, 0)
-	reachResult := ReachabilityResult{Functions: reachable}
-	reachFirst := ReachabilityDOT(funcs, edges, reachResult, []string{"A.one", "C.one"}, "", NASA)
 	for i := 0; i < 25; i++ {
 		if got := ClassgraphDOT(funcs, edges, "", NASA, 0); got != classFirst {
 			t.Fatalf("ClassgraphDOT changed on repeat %d", i+1)
-		}
-		if got := ReachabilityDOT(funcs, edges, reachResult, []string{"A.one", "C.one"}, "", NASA); got != reachFirst {
-			t.Fatalf("ReachabilityDOT changed on repeat %d", i+1)
 		}
 	}
 }
@@ -297,36 +290,6 @@ func TestSignalDOTUsesExplicitRootCandidateInsideCycle(t *testing.T) {
 	}
 }
 
-func TestReachableSetDoesNotTreatViaProvenanceAsFunction(t *testing.T) {
-	edges := []disasm.CallEdgeRecord{{
-		FromFunc: "entry", Kind: "call_indirect", Via: "dispatch_table",
-	}}
-	funcs := []disasm.FuncRecord{{Name: "entry"}}
-	reachable := ReachableSet(funcs, []string{"entry"}, edges)
-	if reachable.Functions["dispatch_table"] {
-		t.Fatalf("Via provenance was treated as a reachable function: %+v", reachable.Functions)
-	}
-}
-
-func TestReachabilityDOTPreservesIndirectProvenance(t *testing.T) {
-	funcs := []disasm.FuncRecord{{Name: "entry"}, {Name: "impl"}}
-	edges := []disasm.CallEdgeRecord{{
-		FromFunc: "entry", Kind: "call_indirect", Via: "dispatch_table", Targets: []string{"impl"}, Candidates: 1,
-	}}
-	reachable := map[string]bool{"entry": true, "impl": true}
-	dot := ReachabilityDOT(funcs, edges, ReachabilityResult{Functions: reachable}, []string{"entry"}, "", NASA)
-	want := dotID("entry") + " -> " + dotID("impl")
-	for _, line := range strings.Split(dot, "\n") {
-		if strings.Contains(line, want) {
-			if !strings.Contains(line, `style="dotted"`) || !strings.Contains(line, NASA.EdgeDispatch) {
-				t.Fatalf("indirect dispatch edge lost provenance styling: %s", line)
-			}
-			return
-		}
-	}
-	t.Fatalf("reachable dispatch edge missing:\n%s", dot)
-}
-
 func TestCFGDOTToleratesMalformedBlockBounds(t *testing.T) {
 	cfg := disasm.FuncCFG{
 		Name: "bad",
@@ -345,7 +308,7 @@ func TestCFGDOTToleratesMalformedBlockBounds(t *testing.T) {
 func TestWriteIndexHTMLToleratesZeroTopOwnerCount(t *testing.T) {
 	stats := CallgraphStats{TopOwners: []NameCount{{Name: "Owner", Count: 0}}}
 	var out bytes.Buffer
-	if err := WriteIndexHTML(&out, stats, nil, "title", false, false, false, nil, ReachabilityResult{}, 0, nil); err != nil {
+	if err := WriteIndexHTML(&out, stats, nil, "title", false, false, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -362,13 +325,8 @@ func TestComputeStatsIncludesResolvedIndirectCallees(t *testing.T) {
 	}
 }
 
-func TestReachableSetDoesNotCountRawAddressTargetsAsFunctions(t *testing.T) {
+func TestComputeStatsDoesNotCountRawAddressTargetsAsFunctions(t *testing.T) {
 	edges := []disasm.CallEdgeRecord{{FromFunc: "entry", Kind: "bl", Target: "0x1234"}}
-	funcs := []disasm.FuncRecord{{Name: "entry"}}
-	reachable := ReachableSet(funcs, []string{"entry"}, edges)
-	if reachable.Functions["0x1234"] {
-		t.Fatalf("raw call address was counted as a reachable function: %+v", reachable.Functions)
-	}
 	stats := ComputeStats([]disasm.FuncRecord{{Name: "entry"}}, edges)
 	if len(stats.TopCallees) != 0 {
 		t.Fatalf("raw call address was counted as a top function callee: %+v", stats.TopCallees)
@@ -525,11 +483,6 @@ func TestRenderPreservesUnknownCallKindsAsNonTraversableEvidence(t *testing.T) {
 	if strings.Contains(classDOT, dotID("Caller")+" -> "+dotID("Callee")) || !strings.Contains(classDOT, "unsupported call kinds") {
 		t.Fatalf("classgraph mishandled unsupported call kind:\n%s", classDOT)
 	}
-	roots := FindRootCandidates(funcs, []disasm.CallEdgeRecord{edge})
-	reach := ReachableSet(funcs, roots, []disasm.CallEdgeRecord{edge})
-	if reach.UnsupportedCallSites != 1 {
-		t.Fatalf("structural closure dropped unsupported call-site completeness: %+v", reach)
-	}
 	cfg := disasm.FuncCFG{
 		Name:   "caller",
 		Blocks: []disasm.BasicBlock{{ID: 0, Start: 0, End: 1, IsEntry: true}},
@@ -663,7 +616,7 @@ func TestCFGDOTReportsDisplayCapInsteadOfSilentlyDroppingTargets(t *testing.T) {
 	}
 }
 
-func TestReachabilityBoundsExternalTargetsAndSurvivesRootCycle(t *testing.T) {
+func TestRootCandidatesSurviveRootCycleAndIgnoreExternalTargets(t *testing.T) {
 	funcs := []disasm.FuncRecord{{Name: "A"}, {Name: "B"}, {Name: "C"}}
 	edges := []disasm.CallEdgeRecord{
 		{FromFunc: "A", Kind: "bl", Target: "B"},
@@ -675,18 +628,9 @@ func TestReachabilityBoundsExternalTargetsAndSurvivesRootCycle(t *testing.T) {
 	if got := strings.Join(roots, ","); got != "A,B" {
 		t.Fatalf("root cycle candidates = %q, want A,B", got)
 	}
-	reach := ReachableSet(funcs, roots, edges)
-	for _, name := range []string{"A", "B", "C"} {
-		if !reach.Functions[name] {
-			t.Fatalf("root-cycle reachability lost %q: %+v", name, reach.Functions)
-		}
-	}
-	if reach.Functions["external.semantic.name"] || len(reach.Functions) != len(funcs) {
-		t.Fatalf("external target polluted function denominator: %+v", reach.Functions)
-	}
 }
 
-func TestRuntimeObservationIsRenderedSeparatelyAndDoesNotChangeStaticReachability(t *testing.T) {
+func TestRuntimeObservationIsRenderedSeparately(t *testing.T) {
 	funcs := []disasm.FuncRecord{{Name: "caller"}, {Name: "Static.impl"}, {Name: "Runtime.only"}}
 	edge := disasm.CallEdgeRecord{
 		FromFunc: "caller", FromPC: "0x1000", Kind: "call_indirect", Via: "dispatch_table",
@@ -699,10 +643,6 @@ func TestRuntimeObservationIsRenderedSeparatelyAndDoesNotChangeStaticReachabilit
 	dot := CallgraphDOT(funcs, []disasm.CallEdgeRecord{edge}, "", NASA, 0)
 	if !strings.Contains(dot, "runtime conflict") || !strings.Contains(dot, NASA.EdgeRuntime) {
 		t.Fatalf("runtime evidence is not visibly separated from static edges:\n%s", dot)
-	}
-	reach := ReachableSet(funcs, []string{"caller"}, []disasm.CallEdgeRecord{edge})
-	if !reach.Functions["Static.impl"] || reach.Functions["Runtime.only"] {
-		t.Fatalf("runtime observation changed static reachability: %+v", reach.Functions)
 	}
 }
 

@@ -141,6 +141,71 @@ func TestARM64DispatchCallRecovery(t *testing.T) {
 			t.Fatal("modern SDK accepted legacy in-place dispatch index register")
 		}
 	})
+
+	t.Run("large selector materialized through TMP2", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x30, x0, x17", "", false},
+			{"ldr x30, [x21,x30,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		fir.Blocks[0].Instrs[0].DefRegs = []string{"x17"}
+		fir.Blocks[0].Instrs[1].DefRegs = []string{"x30"}
+		fir.Blocks[0].Instrs[2].DefRegs = []string{"x30"}
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall {
+			t.Fatal("TMP2 large-selector call was not recognised")
+		}
+		if want := 0x1388 + origin; got.DispatchSelector != want {
+			t.Fatalf("selector = %d, want %d", got.DispatchSelector, want)
+		}
+	})
+
+	t.Run("2.12 large selector materialized through TMP2", func(t *testing.T) {
+		legacyOrigin, ok := sdk.DispatchTableOriginElement("2.12.0", true)
+		if !ok {
+			t.Fatal("missing 2.12.0 ARM64 dispatch-table origin")
+		}
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x0, x0, x17", "", false},
+			{"ldr x30, [x21,x0,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		fir.DartVersion = "2.12.0"
+		fir.Blocks[0].Instrs[0].DefRegs = []string{"x17"}
+		fir.Blocks[0].Instrs[1].DefRegs = []string{"x0"}
+		fir.Blocks[0].Instrs[2].DefRegs = []string{"x30"}
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall || got.DispatchSelector != 0x1388+legacyOrigin {
+			t.Fatalf("legacy TMP2 dispatch = %+v, want selector %d", got, 0x1388+legacyOrigin)
+		}
+	})
+
+	t.Run("TMP2 add must use SDK dispatch index registers", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x5, x0, x17", "", false},
+			{"ldr x30, [x21,x30,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall || got.DispatchSelector != dispatchSelectorUnknown {
+			t.Fatalf("non-dispatch TMP2 add fabricated selector: %+v", got)
+		}
+	})
 }
 
 // TestX64DispatchCallRecovery: `call [RAX + cid*8 + offset]` with

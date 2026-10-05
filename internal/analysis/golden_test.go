@@ -56,11 +56,23 @@ import (
 // snapshot, the disassembly, or type inference belongs here; files carrying
 // absolute paths or timings do not.
 var goldenFiles = []string{
+	"aotopsy.sarif",
+	"behavioral_findings.jsonl",
+	"crypto_findings.jsonl",
 	"dart_meta.json",
+	"deobfuscation.jsonl",
+	"entropy_findings.jsonl",
+	"flutter_meta.json",
 	"functions.jsonl",
 	"call_edges.jsonl",
 	"string_refs.jsonl",
 	"index.jsonl",
+	"method_channels.jsonl",
+	"network_endpoints.jsonl",
+	"plugins.jsonl",
+	"signal_graph.json",
+	"source_sink_findings.jsonl",
+	"source_sink_summary.json",
 	"unresolved_thr.jsonl",
 	"classes.jsonl",
 	"scripts.jsonl",
@@ -86,19 +98,19 @@ var goldenFiles = []string{
 	"deobfuscate_map.jsonl",
 	"native_capabilities.jsonl",
 	"aotopsy.r2",
+	"yara_findings.jsonl",
 }
 
-// signal.dot and signal_cfg.dot are NOT here, and cannot be: this harness runs
-// the pipeline with Signal:false (their titles embed the host path), so they
-// are never produced during a golden run and would be silently skipped -- a
-// manifest entry that looks like coverage and is not.
+// signal.dot/signal_cfg.dot and Graphviz SVG are intentionally excluded from
+// the byte-for-byte golden. Graphviz is an external executable whose serialized
+// SVG may vary by installed version, while DOT rendering already has pure-Go
+// determinism tests in internal/render. The default CLI does not request the
+// separate --graph stage or --decompile stage.
 //
-// They were nondeterministic for their whole life because of that gap: five
-// `for k := range someMap` loops across the two renderers, one of which
-// DELETED nodes while iterating, so the graph's SHAPE differed between two
-// runs of the same input. They are covered instead by
-// TestSignalDOTIsDeterministic in internal/render, which exercises the
-// renderers directly and needs no corpus. See docs/findings-repo/011.
+// asm/ is too large to store one map entry per function, but it is part of the
+// default CLI contract. goldenTrees records one content+relative-path digest so
+// a changed/missing per-function .txt/.bin artifact still fails this gate.
+var goldenTrees = []string{"asm"}
 
 type goldenRecord struct {
 	Sample      string            `json:"sample"`
@@ -108,6 +120,8 @@ type goldenRecord struct {
 	ClassCount  int               `json:"class_count"`
 	Lines       map[string]int    `json:"lines"`
 	SHA256      map[string]string `json:"sha256"`
+	TreeFiles   map[string]int    `json:"tree_files,omitempty"`
+	TreeSHA256  map[string]string `json:"tree_sha256,omitempty"`
 }
 
 // goldenSamples maps each record to the corpus sample it covers.
@@ -176,13 +190,7 @@ func runGolden(t *testing.T, sample, name string) {
 	}
 
 	outDir := t.TempDir()
-	result, err := Run(Opts{
-		LibPath:  libPath,
-		OutDir:   outDir,
-		Quiet:    true,
-		Signal:   false, // signal output embeds host paths; the JSONL above is the contract
-		MaxSteps: 100000,
-	})
+	result, err := Run(defaultCLIGoldenOpts(libPath, outDir))
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
 	}
@@ -195,6 +203,8 @@ func runGolden(t *testing.T, sample, name string) {
 		ClassCount:  result.ClassCount,
 		Lines:       map[string]int{},
 		SHA256:      map[string]string{},
+		TreeFiles:   map[string]int{},
+		TreeSHA256:  map[string]string{},
 	}
 	for _, f := range goldenFiles {
 		p := filepath.Join(outDir, f)
@@ -205,6 +215,14 @@ func runGolden(t *testing.T, sample, name string) {
 		sum := sha256.Sum256(data)
 		got.SHA256[f] = hex.EncodeToString(sum[:])
 		got.Lines[f] = strings.Count(string(data), "\n")
+	}
+	for _, tree := range goldenTrees {
+		files, sum, err := digestArtifactTree(filepath.Join(outDir, tree))
+		if err != nil {
+			t.Fatalf("digest %s tree: %v", tree, err)
+		}
+		got.TreeFiles[tree] = files
+		got.TreeSHA256[tree] = sum
 	}
 
 	if update {
@@ -259,6 +277,22 @@ func runGolden(t *testing.T, sample, name string) {
 			t.Errorf("%s: newly produced (%d lines) -- re-record the golden file", f, got.Lines[f])
 		}
 	}
+	for _, tree := range goldenTrees {
+		gotSum, gotOK := got.TreeSHA256[tree]
+		wantSum, wantOK := want.TreeSHA256[tree]
+		if !wantOK {
+			t.Errorf("%s/: newly covered tree (%d files) -- re-record the golden file", tree, got.TreeFiles[tree])
+			continue
+		}
+		if !gotOK {
+			t.Errorf("%s/: golden tree is no longer produced", tree)
+			continue
+		}
+		if got.TreeFiles[tree] != want.TreeFiles[tree] || gotSum != wantSum {
+			t.Errorf("%s/: tree changed\n  golden sha256 %s (%d files)\n  actual sha256 %s (%d files)",
+				tree, wantSum, want.TreeFiles[tree], gotSum, got.TreeFiles[tree])
+		}
+	}
 }
 
 // TestGoldenOutputIsDeterministic runs the pipeline twice on the same input
@@ -268,26 +302,105 @@ func runGolden(t *testing.T, sample, name string) {
 // reproducible: map iteration order leaking into a JSONL file would make them
 // fail at random and train everyone to re-record instead of investigating.
 func TestGoldenOutputIsDeterministic(t *testing.T) {
-	libPath := corpusSample(t, "dart-3.9.2-arm64.so")
-	sums := make([]map[string]string, 2)
-	for run := 0; run < 2; run++ {
-		outDir := t.TempDir()
-		if _, err := Run(Opts{LibPath: libPath, OutDir: outDir, Quiet: true, MaxSteps: 100000}); err != nil {
-			t.Fatalf("run %d: %v", run, err)
-		}
-		sums[run] = map[string]string{}
-		for _, f := range goldenFiles {
-			data, err := os.ReadFile(filepath.Join(outDir, f))
-			if err != nil {
-				continue
+	for _, sample := range []string{"dart-3.9.2-arm64.so", "dart-3.12.2-x64.so"} {
+		t.Run(sample, func(t *testing.T) {
+			libPath := corpusSample(t, sample)
+			sums := make([]map[string]string, 2)
+			for run := 0; run < 2; run++ {
+				outDir := t.TempDir()
+				if _, err := Run(defaultCLIGoldenOpts(libPath, outDir)); err != nil {
+					t.Fatalf("run %d: %v", run, err)
+				}
+				sums[run] = map[string]string{}
+				for _, f := range goldenFiles {
+					data, err := os.ReadFile(filepath.Join(outDir, f))
+					if err != nil {
+						continue
+					}
+					sum := sha256.Sum256(data)
+					sums[run][f] = hex.EncodeToString(sum[:])
+				}
+				for _, tree := range goldenTrees {
+					files, sum, err := digestArtifactTree(filepath.Join(outDir, tree))
+					if err != nil {
+						t.Fatalf("run %d digest %s: %v", run, tree, err)
+					}
+					sums[run][tree+"/**"] = fmt.Sprintf("%d:%s", files, sum)
+				}
 			}
-			sum := sha256.Sum256(data)
-			sums[run][f] = hex.EncodeToString(sum[:])
+			files := append([]string(nil), goldenFiles...)
+			for _, tree := range goldenTrees {
+				files = append(files, tree+"/**")
+			}
+			for _, diff := range deterministicOutputDiffs(sums[0], sums[1], files) {
+				t.Error(diff)
+			}
+		})
+	}
+}
+
+func defaultCLIGoldenOpts(libPath, outDir string) Opts {
+	// Keep this aligned with cmd/aotopsy/cmd_run.go's no-flag fresh-run path:
+	// signal is on, ARM64 metadata is generated when supported, while graph and
+	// decompile remain opt-in. MaxSteps is a test-only safety ceiling.
+	return Opts{
+		LibPath:  libPath,
+		OutDir:   outDir,
+		Quiet:    true,
+		Signal:   true,
+		SignalK:  2,
+		Meta:     MetaIfSupported,
+		MaxSteps: 100000,
+	}
+}
+
+func digestArtifactTree(root string) (int, string, error) {
+	var rels []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("non-regular artifact %s", path)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rels = append(rels, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		return 0, "", err
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		if _, err := io.WriteString(h, rel); err != nil {
+			return 0, "", err
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return 0, "", err
+		}
+		f, err := os.Open(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return 0, "", err
+		}
+		_, copyErr := io.Copy(h, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return 0, "", copyErr
+		}
+		if closeErr != nil {
+			return 0, "", closeErr
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return 0, "", err
 		}
 	}
-	for _, diff := range deterministicOutputDiffs(sums[0], sums[1], goldenFiles) {
-		t.Error(diff)
-	}
+	return len(rels), hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func deterministicOutputDiffs(a, b map[string]string, files []string) []string {

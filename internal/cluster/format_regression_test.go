@@ -594,6 +594,31 @@ func TestObjectPoolType4Boundary(t *testing.T) {
 	}
 }
 
+func TestAbstractStringFullAOTRouteStartsAt213(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    FillKind
+	}{
+		{"2.10.0", FillUnknown},
+		{"2.12.0", FillUnknown},
+		{"2.13.0", FillROData},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			profile := snapshot.ProfileForVersion(tc.version)
+			cid := profile.CIDs.String
+			if got := GetFillSpec(cid, &ClusterMeta{CID: cid}, profile).Kind; got != tc.want {
+				t.Fatalf("String CID %d fill kind=%v, want %v", cid, got, tc.want)
+			}
+			if tc.want == FillUnknown {
+				if _, err := skipAllocV(dartfmt.NewStream(nil), &ClusterMeta{CID: cid}, false, profile.CIDs, false, profile, nil, 100); err == nil ||
+					!strings.Contains(err.Error(), "no Full-AOT serialization cluster") {
+					t.Fatalf("pre-2.13 abstract String alloc error=%v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestObjectPoolModernRejectsNotSnapshotable(t *testing.T) {
 	profile := snapshot.ProfileForVersion("3.3.0")
 	// behavior=1 occupies bits 5..7; type=0 is otherwise a valid immediate.

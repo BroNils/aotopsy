@@ -23,7 +23,7 @@ func augmentOutputGeneration(outDir string, mutate func(stage string) error) err
 			tx.Abort()
 		}
 	}()
-	if err := output.CloneTree(outDir, tx.StageDir()); err != nil {
+	if err := tx.CloneFrom(outDir); err != nil {
 		return fmt.Errorf("clone current output generation: %w", err)
 	}
 	if err := mutate(tx.StageDir()); err != nil {

@@ -290,16 +290,16 @@ func readTypeScalar(s *dartfmt.Stream, si int, ref int, state *scalarState, i, c
 		// 2.19.0+: the scalar is the packed flags word. type_class_id and
 		// nullability are independent bit fields in the same value.
 		v, err := s.ReadUnsigned()
-			if err != nil {
-				return nil, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
-			}
-			_, classIDWidth, ok := snapshot.ClassIdTagLayout(dartVersion)
-			if !ok {
-				return nil, fmt.Errorf("unsupported class-id tag layout for Dart %s", dartVersion)
-			}
-			return &TypeInfo{
-				RefID:       ref,
-				ClassID:     int32((v >> classIDShift) & ((1 << classIDWidth) - 1)),
+		if err != nil {
+			return nil, fmt.Errorf("obj %d/%d type flags: %w", i, count, err)
+		}
+		_, classIDWidth, ok := snapshot.ClassIdTagLayout(dartVersion)
+		if !ok {
+			return nil, fmt.Errorf("unsupported class-id tag layout for Dart %s", dartVersion)
+		}
+		return &TypeInfo{
+			RefID:       ref,
+			ClassID:     int32((v >> classIDShift) & ((1 << classIDWidth) - 1)),
 			Nullability: decodeTypeNullability(uint64(v), classIDShift),
 		}, nil
 	}

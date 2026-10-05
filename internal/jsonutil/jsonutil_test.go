@@ -347,6 +347,58 @@ func TestJSONLWriterAbortLeavesCurrentArtifactUntouched(t *testing.T) {
 	}
 }
 
+func TestJSONLWriterEnforcesReaderCompatibleBudgetsBeforePublish(t *testing.T) {
+	tests := []struct {
+		name   string
+		limits Limits
+		write  []sampleRecord
+	}{
+		{
+			name:   "record count",
+			limits: Limits{MaxBytes: 1024, MaxRecords: 1, MaxRecordBytes: 128},
+			write:  []sampleRecord{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}},
+		},
+		{
+			name:   "record bytes",
+			limits: Limits{MaxBytes: 1024, MaxRecords: 10, MaxRecordBytes: 20},
+			write:  []sampleRecord{{ID: 1, Name: strings.Repeat("x", 64)}},
+		},
+		{
+			name:   "total bytes",
+			limits: Limits{MaxBytes: 45, MaxRecords: 10, MaxRecordBytes: 128},
+			write:  []sampleRecord{{ID: 1, Name: "alpha"}, {ID: 2, Name: "beta"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "records.jsonl")
+			const old = "previous generation\n"
+			if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w, err := newJSONLWriter[sampleRecord](path, tc.limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var writeErr error
+			for i := range tc.write {
+				if err := w.Write(&tc.write[i]); err != nil {
+					writeErr = err
+					break
+				}
+			}
+			if writeErr == nil {
+				t.Fatal("writer accepted artifact beyond configured reader-compatible ceiling")
+			}
+			_ = w.Abort()
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != old {
+				t.Fatalf("budget failure changed published artifact: %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestWriteJSONFileReplacesCompleteObject(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "meta.json")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {

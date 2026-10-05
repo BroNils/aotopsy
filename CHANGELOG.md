@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`_debug fingerprint` now has a source-bounded report contract and accepts
+  only supported Dart AOT ELF inputs.** The JSON report no longer exposes the
+  old `flutter_version`, generic `confidence`, or `exec_section_size` fields.
+  It now separates exact file/build/snapshot identities from heuristic Dart
+  `Version::String()` evidence with fields such as `file_sha256`, `elf_class`,
+  `snapshot_hash`, `version_evidence`, `version_confidence`,
+  `mapped_executable_size`, and explicit evidence limitations/conflicts.
+  Flutter marker text is diagnostic only and is not promoted to Dart-version
+  evidence. The command now uses the same validated ELF reader as the analyzer,
+  so its input scope is ELF64 little-endian ET_DYN AArch64/x86-64 rather than an
+  arbitrary ELF file. External consumers of the previous fingerprint JSON
+  schema must update their field names and confidence handling.
+
 ### Removed
 - **Function fingerprint dictionary (cross-sample name transfer).** The feature
   existed and has been removed entirely: the `build-fingerprint-dict` and

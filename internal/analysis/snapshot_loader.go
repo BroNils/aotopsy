@@ -148,6 +148,14 @@ func LoadSnapshot(libPath string, opts dartfmt.Options) (*SnapshotContext, error
 		_ = ef.Close()
 		return nil, fmt.Errorf("fill: %w", err)
 	}
+	// Pool/type-testing-stub naming consumes ObjectStoreRefs (notably the
+	// record-field-names root for named RecordType shapes). Populate the roots
+	// before BuildPoolLookups below; doing it lazily in BuildSymbolNames is too
+	// late because those naming maps are constructed only once.
+	if err := cluster.ReadObjectStoreRefs(data, result, info.Version); err != nil {
+		_ = ef.Close()
+		return nil, fmt.Errorf("object store roots: %w", err)
+	}
 
 	// Instructions table + code ranges.
 	var table *cluster.InstructionsTable

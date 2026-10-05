@@ -46,6 +46,16 @@ func TestContainsPathAndSamePath(t *testing.T) {
 	}
 }
 
+func TestContainsPathDifferentWindowsVolumesDoNotOverlap(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only volume semantics")
+	}
+	contained, err := ContainsPath(`C:\aotopsy-out`, `\\server\share\libapp.so`)
+	if err != nil || contained {
+		t.Fatalf("ContainsPath(different volumes) = %v, %v; want false,nil", contained, err)
+	}
+}
+
 func TestSamePathRecognizesWindowsCaseAliasBeforeCreation(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows path comparison is case-insensitive")
@@ -541,6 +551,128 @@ func TestCloneTreeRejectsSymlinkRoot(t *testing.T) {
 	}
 	if err := CloneTree(alias, t.TempDir()); err == nil {
 		t.Fatal("CloneTree accepted a symlink root")
+	}
+}
+
+func TestDirTransactionCloneFromReusesDurableFileAndSkipsItsFsync(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markGeneration(t, src)
+	if err := os.WriteFile(filepath.Join(src, "payload.bin"), []byte("durable payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := BeginDirTransaction(filepath.Join(parent, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	if err := tx.CloneFrom(src); err != nil {
+		t.Fatal(err)
+	}
+	srcInfo, err := os.Stat(filepath.Join(src, "payload.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageInfo, err := os.Stat(filepath.Join(tx.StageDir(), "payload.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(srcInfo, stageInfo) {
+		t.Skip("filesystem did not permit hard-link clone optimization")
+	}
+
+	originalSync := syncRegularFile
+	defer func() { syncRegularFile = originalSync }()
+	var synced []string
+	syncRegularFile = func(root *os.Root, path string, info os.FileInfo) error {
+		synced = append(synced, filepath.FromSlash(path))
+		return originalSync(root, path, info)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range synced {
+		if path == "payload.bin" {
+			t.Fatalf("durable hard-linked clone was redundantly fsynced: %v", synced)
+		}
+	}
+}
+
+func TestDirTransactionCloneFromAtomicReplacementDoesNotMutateSource(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markGeneration(t, src)
+	const oldData = "source stays old"
+	if err := os.WriteFile(filepath.Join(src, "artifact.txt"), []byte(oldData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(parent, "out")
+	tx, err := BeginDirTransaction(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	if err := tx.CloneFrom(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteArtifactFile(tx.StageDir(), "artifact.txt", []byte("new generation"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(src, "artifact.txt")); err != nil || string(got) != oldData {
+		t.Fatalf("atomic stage replacement mutated clone source: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "artifact.txt")); err != nil || string(got) != "new generation" {
+		t.Fatalf("published replacement = %q, %v", got, err)
+	}
+}
+
+func TestDirTransactionCloneFromFallsBackToCopyWhenLinkFails(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markGeneration(t, src)
+	if err := os.WriteFile(filepath.Join(src, "artifact.txt"), []byte("copy me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalLink := linkFile
+	defer func() { linkFile = originalLink }()
+	linkFile = func(string, string) error { return errors.New("links unavailable") }
+
+	tx, err := BeginDirTransaction(filepath.Join(parent, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Abort()
+	if err := tx.CloneFrom(src); err != nil {
+		t.Fatal(err)
+	}
+	srcInfo, err := os.Stat(filepath.Join(src, "artifact.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageInfo, err := os.Stat(filepath.Join(tx.StageDir(), "artifact.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(srcInfo, stageInfo) {
+		t.Fatal("link failure did not fall back to an independent copy")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
 

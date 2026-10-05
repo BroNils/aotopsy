@@ -32,7 +32,8 @@ type ParityRow struct {
 	Error       string
 }
 
-// RunParity scans a samples directory and generates parity.csv + parity_summary.md.
+// RunParity scans a samples directory and generates parity.csv +
+// parity_summary.md in the dedicated outDir/parity generation.
 func RunParity(samplesDir, outDir string) error {
 	containsSamples, err := output.ContainsPath(outDir, samplesDir)
 	if err != nil {
@@ -72,17 +73,18 @@ func RunParity(samplesDir, outDir string) error {
 	// Encode both managed artifacts completely before publishing either one.
 	// A failed CSV flush or Markdown write therefore cannot leave a mixed
 	// generation where parity.csv and parity_summary.md describe different runs.
-	csvPath := filepath.Join(outDir, "parity.csv")
+	parityDir := filepath.Join(outDir, "parity")
+	csvPath := filepath.Join(parityDir, "parity.csv")
 	var csvBuf bytes.Buffer
 	if err := writeParityCSV(&csvBuf, rows); err != nil {
 		return fmt.Errorf("encode %s: %w", csvPath, err)
 	}
-	summaryPath := filepath.Join(outDir, "parity_summary.md")
+	summaryPath := filepath.Join(parityDir, "parity_summary.md")
 	var summaryBuf bytes.Buffer
 	if err := writeParitySummary(&summaryBuf, rows); err != nil {
 		return fmt.Errorf("encode %s: %w", summaryPath, err)
 	}
-	tx, err := output.BeginDirTransaction(outDir)
+	tx, err := output.BeginDirTransaction(parityDir)
 	if err != nil {
 		return fmt.Errorf("begin parity output transaction: %w", err)
 	}

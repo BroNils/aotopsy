@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
@@ -193,13 +194,24 @@ func cmdGhidra(args []string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("analyzeHeadless failed: %w", err)
 	}
+	applyResult, err := analysis.ReadApplyResult(decompTx.StageDir())
+	if err != nil {
+		return fmt.Errorf("ghidra apply did not complete: %w", err)
+	}
+	if !strings.EqualFold(applyResult.BinarySHA256, prov.SHA256) {
+		return fmt.Errorf("ghidra apply completion sentinel does not match binary provenance")
+	}
+	for _, name := range []string{analysis.ApplyOKFileName, analysis.ApplyFailedFileName} {
+		if err := decompTx.RemoveStageFile(name); err != nil {
+			return fmt.Errorf("remove Ghidra apply sentinel: %w", err)
+		}
+	}
 	if err := decompTx.Commit(); err != nil {
 		return fmt.Errorf("publish Ghidra decompile generation: %w", err)
 	}
 	decompCommitted = true
 
-	cCount := analysis.CountDecompiledFiles(decompDir)
-	cli.Errf("decompiled %d functions → %s\n", cCount, decompDir)
+	cli.Errf("decompiled %d functions (%d failed) → %s\n", applyResult.Decompiled, applyResult.Failed, decompDir)
 
 	return nil
 }

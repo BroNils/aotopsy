@@ -412,7 +412,7 @@ func runTypeInference(
 	// profile inconsistency rather than a reason to guess.
 	kOriginElement, hasDispatchOrigin := sdk.DispatchTableOriginElement(info.Version.DartVersion, isARM64)
 	if len(dispatchEntries) > 0 && !hasDispatchOrigin {
-		return BLRBreakdown{}, nil, nil, fmt.Errorf("Dart %s has dispatch entries but no verified dispatch-table origin", info.Version.DartVersion)
+		return BLRBreakdown{}, nil, nil, fmt.Errorf("dart %s has dispatch entries but no verified dispatch-table origin", info.Version.DartVersion)
 	}
 
 	// Get allocation stub offsets from the exact snapshot profile. Pointer

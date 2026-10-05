@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -879,9 +880,12 @@ func encodeCallSitesTSV(sites []CallSite) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// WriteArtifacts publishes the symbolmap directory as one generation. Optional
-// artifacts omitted from the stage are absent after commit, so a stale reverse
-// map can never survive a successful rerun.
+// WriteArtifacts publishes dir/symbolmap as one dedicated generation. Keeping
+// partial debug-tool output below its own owned subtree prevents a caller from
+// pointing --out at an analysis generation and atomically replacing the entire
+// analysis with only these three/four files. Optional artifacts omitted from
+// the stage are absent after commit, so a stale reverse map cannot survive a
+// successful rerun.
 func WriteArtifacts(dir string, rep *Report) error {
 	if rep == nil {
 		return fmt.Errorf("symbolmap: nil report")
@@ -909,7 +913,8 @@ func WriteArtifacts(dir string, rep *Report) error {
 		return fmt.Errorf("symbolmap: encode report: %w", err)
 	}
 
-	tx, err := output.BeginDirTransaction(dir)
+	finalDir := filepath.Join(dir, "symbolmap")
+	tx, err := output.BeginDirTransaction(finalDir)
 	if err != nil {
 		return fmt.Errorf("symbolmap: begin output transaction: %w", err)
 	}

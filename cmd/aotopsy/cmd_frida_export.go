@@ -140,7 +140,7 @@ func cmdFridaExport(args []string) error {
 		}
 	}()
 	stage := tx.StageDir()
-	if err := output.CloneTree(dir, stage); err != nil {
+	if err := tx.CloneFrom(dir); err != nil {
 		return fmt.Errorf("clone static generation for Frida export: %w", err)
 	}
 	if err := output.WriteArtifactFile(stage, "frida_metadata.json", metaBytes, 0o644); err != nil {

@@ -621,31 +621,45 @@ func WriteJSONFile(path string, value any) error {
 // TextMarshaler methods are never accidentally bypassed.
 type JSONLWriter[T any] struct {
 	atomic    *artifactfs.AtomicFile
-	enc       *json.Encoder
+	limits    Limits
+	records   int
+	bytes     int64
 	failed    bool
 	committed bool
 }
 
 func NewJSONLWriter[T any](path string) (*JSONLWriter[T], error) {
+	return newJSONLWriter[T](path, StandardLimits)
+}
+
+func newJSONLWriter[T any](path string, limits Limits) (*JSONLWriter[T], error) {
+	limits, err := limits.normalized()
+	if err != nil {
+		return nil, err
+	}
 	f, err := artifactfs.NewAtomicFile(path, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	return &JSONLWriter[T]{atomic: f, enc: enc}, nil
+	return &JSONLWriter[T]{atomic: f, limits: limits}, nil
 }
 
 // NewJSONLWriterUnder is the root-relative form for artifact names that must
 // stay inside a pinned generation even if path components are raced or replaced.
 func NewJSONLWriterUnder[T any](root, rel string) (*JSONLWriter[T], error) {
+	return newJSONLWriterUnder[T](root, rel, StandardLimits)
+}
+
+func newJSONLWriterUnder[T any](root, rel string, limits Limits) (*JSONLWriter[T], error) {
+	limits, err := limits.normalized()
+	if err != nil {
+		return nil, err
+	}
 	f, err := artifactfs.NewAtomicFileUnder(root, rel, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	return &JSONLWriter[T]{atomic: f, enc: enc}, nil
+	return &JSONLWriter[T]{atomic: f, limits: limits}, nil
 }
 
 func (w *JSONLWriter[T]) Write(rec *T) error {
@@ -659,10 +673,36 @@ func (w *JSONLWriter[T]) Write(rec *T) error {
 		w.failed = true
 		return fmt.Errorf("nil record")
 	}
-	if err := w.enc.Encode(rec); err != nil {
+	if w.records >= w.limits.MaxRecords {
+		w.failed = true
+		return fmt.Errorf("jsonl: record limit %d exceeded", w.limits.MaxRecords)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(rec); err != nil {
 		w.failed = true
 		return err
 	}
+	encoded := buf.Bytes()
+	recordBytes := len(encoded)
+	if recordBytes > 0 && encoded[recordBytes-1] == '\n' {
+		recordBytes--
+	}
+	if recordBytes > w.limits.MaxRecordBytes {
+		w.failed = true
+		return fmt.Errorf("jsonl: encoded record is %d bytes, exceeds limit %d", recordBytes, w.limits.MaxRecordBytes)
+	}
+	if int64(len(encoded)) > w.limits.MaxBytes-w.bytes {
+		w.failed = true
+		return fmt.Errorf("jsonl: encoded output would exceed byte limit %d", w.limits.MaxBytes)
+	}
+	if _, err := w.atomic.Write(encoded); err != nil {
+		w.failed = true
+		return err
+	}
+	w.records++
+	w.bytes += int64(len(encoded))
 	return nil
 }
 

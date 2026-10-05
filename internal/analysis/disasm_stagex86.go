@@ -89,19 +89,20 @@ func RunDisasmStageX86(
 		funcCode := fs.Code
 		funcVA := fs.VA
 
-		var funcName, ownerName, name string
+		var funcName, ownerName, fallbackName string
 		if r.RefID >= 0 {
 			ci := pl.CodeNames[r.RefID]
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
-			name = ci.Qualified(r.PCOffset)
+			fallbackName = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-				name = naming.ElfStubName(elfFuncSyms, funcVA, name)
+				fallbackName = naming.ElfStubName(elfFuncSyms, funcVA, fallbackName)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-			name = funcName
+			fallbackName = funcName
 		}
+		name, funcName := authoritativeDisasmName(symbols, funcVA, ownerName, funcName, fallbackName)
 
 		relName := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
 		if err := writeX86ASM(opts.OutDir, relName, funcCode, funcVA, lookup); err != nil {

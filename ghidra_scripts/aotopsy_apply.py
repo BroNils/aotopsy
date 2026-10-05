@@ -22,6 +22,48 @@ import json
 import hashlib
 import os
 
+
+APPLY_OK_FILE = ".aotopsy-apply-ok"
+APPLY_FAILED_FILE = ".aotopsy-apply-failed"
+
+
+class ApplyError(RuntimeError):
+    pass
+
+
+def _ensure_output_dir(out_dir):
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+
+def _write_apply_failed(out_dir, message):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    ok_path = os.path.join(out_dir, APPLY_OK_FILE)
+    if os.path.exists(ok_path):
+        os.remove(ok_path)
+    with open(os.path.join(out_dir, APPLY_FAILED_FILE), "w") as f:
+        json.dump({"error": str(message)}, f)
+
+
+def _write_apply_ok(out_dir, stats, focus_count, binary_sha256):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    failed_path = os.path.join(out_dir, APPLY_FAILED_FILE)
+    if os.path.exists(failed_path):
+        os.remove(failed_path)
+    payload = {
+        "functions": stats["functions"],
+        "decompiled": stats["decompiled"],
+        "failed": stats["decompile_failed"],
+        "focus": focus_count,
+        "binary_sha256": binary_sha256,
+    }
+    with open(os.path.join(out_dir, APPLY_OK_FILE), "w") as f:
+        json.dump(payload, f)
+
 try:
     _TEXT_TYPES = (basestring,)
     _INTEGER_TYPES = (int, long)
@@ -195,13 +237,8 @@ def validate_meta_records(meta):
                 raise ValueError("classes[%d].fields[%d] has non-reference type_arguments_field" % (i, j))
 
 
-def main():
-    args = getScriptArgs()
-    try:
-        meta_path = resolve_meta_path(args)
-    except RuntimeError as e:
-        println("ERROR: %s" % str(e))
-        return
+def main(args):
+    meta_path = resolve_meta_path(args)
     out_dir = args[1] if len(args) > 1 else None
 
     println("aotopsy_apply: loading %s" % meta_path)
@@ -210,51 +247,39 @@ def main():
         meta = json.load(f)
 
     if meta.get("version") != "3" or meta.get("arch") != "arm64":
-        println("ERROR: flutter_meta.json must be schema version 3 for arch arm64")
-        return
+        raise ApplyError("flutter_meta.json must be schema version 3 for arch arm64")
     missing = [k for k in ("dart_version", "binary_sha256", "binary_size", "compressed_pointers", "pointer_size", "thr_fields")
                if k not in meta]
     if missing:
-        println("ERROR: flutter_meta.json missing required field(s): %s" % ", ".join(missing))
-        return
+        raise ApplyError("flutter_meta.json missing required field(s): %s" % ", ".join(missing))
     if not isinstance(meta["compressed_pointers"], bool):
-        println("ERROR: compressed_pointers must be a boolean")
-        return
+        raise ApplyError("compressed_pointers must be a boolean")
     expected_pointer_size = 4 if meta["compressed_pointers"] else 8
     if meta["pointer_size"] != expected_pointer_size:
-        println("ERROR: pointer_size %r disagrees with compressed_pointers=%r (want %d)" % (
+        raise ApplyError("pointer_size %r disagrees with compressed_pointers=%r (want %d)" % (
             meta["pointer_size"], meta["compressed_pointers"], expected_pointer_size))
-        return
     if not isinstance(meta["dart_version"], _TEXT_TYPES) or not meta["dart_version"] or not isinstance(meta["thr_fields"], list):
-        println("ERROR: dart_version must be non-empty and thr_fields must be an array")
-        return
+        raise ApplyError("dart_version must be non-empty and thr_fields must be an array")
     if not isinstance(meta["binary_sha256"], _TEXT_TYPES):
-        println("ERROR: binary_sha256 must be a string")
-        return
+        raise ApplyError("binary_sha256 must be a string")
     binary_sha256 = str(meta["binary_sha256"])
     if isinstance(meta["binary_size"], bool) or not isinstance(meta["binary_size"], _INTEGER_TYPES):
-        println("ERROR: binary_size must be a positive integer")
-        return
+        raise ApplyError("binary_size must be a positive integer")
     binary_size = meta["binary_size"]
     if len(binary_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in binary_sha256):
-        println("ERROR: binary_sha256 must be 64 lowercase hex characters")
-        return
+        raise ApplyError("binary_sha256 must be 64 lowercase hex characters")
     if binary_size <= 0 or binary_size != meta["binary_size"]:
-        println("ERROR: binary_size must be a positive integer")
-        return
+        raise ApplyError("binary_size must be a positive integer")
     try:
         validate_meta_records(meta)
     except ValueError as e:
-        println("ERROR: invalid flutter_meta.json records: %s" % str(e))
-        return
+        raise ApplyError("invalid flutter_meta.json records: %s" % str(e))
 
     executable_path = str(currentProgram.getExecutablePath() or "")
     if not executable_path or not os.path.isfile(executable_path):
-        println("ERROR: cannot verify imported binary path for flutter_meta.json provenance")
-        return
+        raise ApplyError("cannot verify imported binary path for flutter_meta.json provenance")
     if os.path.getsize(executable_path) != binary_size:
-        println("ERROR: imported binary size does not match flutter_meta.json provenance")
-        return
+        raise ApplyError("imported binary size does not match flutter_meta.json provenance")
     digest = hashlib.sha256()
     with open(executable_path, "rb") as bf:
         while True:
@@ -263,8 +288,7 @@ def main():
                 break
             digest.update(chunk)
     if digest.hexdigest() != binary_sha256:
-        println("ERROR: imported binary SHA-256 does not match flutter_meta.json provenance")
-        return
+        raise ApplyError("imported binary SHA-256 does not match flutter_meta.json provenance")
 
     stats = {
         "functions": len(meta.get("functions", [])),
@@ -724,6 +748,7 @@ def main():
         stats["decompiled"],
         stats["decompile_failed"],
     ))
+    _write_apply_ok(out_dir, stats, len(focus), binary_sha256)
 
 
 def _retype_dart_registers(hfunc, dart_thread_ptr_dt, ptr_type):
@@ -910,4 +935,14 @@ def function_identifier(name, addr):
     return "%s_a%x" % (sanitize_identifier(name), addr)
 
 
-main()
+def _run_main():
+    args = getScriptArgs()
+    out_dir = args[1] if len(args) > 1 else None
+    try:
+        main(args)
+    except Exception as e:
+        println("ERROR: %s" % str(e))
+        _write_apply_failed(out_dir, str(e))
+
+
+_run_main()

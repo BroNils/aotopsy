@@ -2,11 +2,9 @@ package analysis
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // FindPython locates a python3 binary that can import idapro.
@@ -85,16 +83,4 @@ func FindIDAScript() (string, error) {
 	}
 
 	return "", fmt.Errorf("cannot find ida_scripts/aotopsy_apply.py; run from the aotopsy project root or install with 'make install'")
-}
-
-// CountDecompiledFiles counts .c files in a directory tree.
-func CountDecompiledFiles(dir string) int {
-	count := 0
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".c") {
-			count++
-		}
-		return nil
-	})
-	return count
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 
 	"aotopsy/internal/cli"
@@ -123,6 +124,23 @@ func RunDisasmStage(
 	dr := &DisasmResult{}
 	var funcRecs []disasm.FuncRecord
 	var edgeRecs []disasm.CallEdgeRecord
+	// Pre-InstructionsTable snapshots can contain many Code objects that share
+	// one deduplicated instructions payload. When those aliases resolve to the
+	// same semantic name they also intentionally share one canonical asm path
+	// (DisasmArtifactFiles accepts exactly that case). Parallel workers must not
+	// race to atomically replace that same .txt/.bin pair. Claim the path once;
+	// every alias still emits its own functions/index metadata below.
+	var artifactMu sync.Mutex
+	writtenArtifacts := make(map[string]struct{})
+	claimArtifact := func(name string) bool {
+		artifactMu.Lock()
+		defer artifactMu.Unlock()
+		if _, exists := writtenArtifacts[name]; exists {
+			return false
+		}
+		writtenArtifacts[name] = struct{}{}
+		return true
+	}
 
 	// Disassembly runs in parallel (each function is independent: read-only
 	// code slice, read-only lookup), but every SHARED output is written by
@@ -175,19 +193,20 @@ func RunDisasmStage(
 		funcCode := fs.Code
 		funcVA := fs.VA
 
-		var funcName, ownerName, name string
+		var funcName, ownerName, fallbackName string
 		if r.RefID >= 0 {
 			ci := pl.CodeNames[r.RefID]
 			funcName = ci.FuncName
 			ownerName = ci.OwnerName
-			name = ci.Qualified(r.PCOffset)
+			fallbackName = ci.Qualified(r.PCOffset)
 			if funcName == "" {
-				name = naming.ElfStubName(elfFuncSyms, funcVA, name)
+				fallbackName = naming.ElfStubName(elfFuncSyms, funcVA, fallbackName)
 			}
 		} else {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
-			name = funcName
+			fallbackName = funcName
 		}
+		name, funcName := authoritativeDisasmName(symbols, funcVA, ownerName, funcName, fallbackName)
 		out.name = name
 
 		insts := disasm.Disassemble(funcCode, disasm.Options{
@@ -202,15 +221,15 @@ func RunDisasmStage(
 		filename := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
 		out.filename = filename
 
-		// Per-function files live at unique paths, so they can be written
-		// here: their content and location do not depend on ordering.
-		if err := output.WriteASM(opts.OutDir, filename, insts, lookup, annotators...); err != nil {
-			out.err = fmt.Errorf("write asm %s: %w", filename, err)
-			return
-		}
-		if err := output.WriteBin(opts.OutDir, filename, funcCode); err != nil {
-			out.err = fmt.Errorf("write bin %s: %w", filename, err)
-			return
+		if claimArtifact(filename) {
+			if err := output.WriteASM(opts.OutDir, filename, insts, lookup, annotators...); err != nil {
+				out.err = fmt.Errorf("write asm %s: %w", filename, err)
+				return
+			}
+			if err := output.WriteBin(opts.OutDir, filename, funcCode); err != nil {
+				out.err = fmt.Errorf("write bin %s: %w", filename, err)
+				return
+			}
 		}
 
 		out.entry = strutil.DisasmIndexEntry{
@@ -393,6 +412,27 @@ func RunDisasmStage(
 	}
 
 	return dr, nil
+}
+
+func authoritativeDisasmName(symbols map[uint64]string, va uint64, ownerName, funcName, fallback string) (string, string) {
+	name := symbols[va]
+	if name == "" || (isGenericDisasmName(name) && !isGenericDisasmName(fallback)) {
+		name = fallback
+	}
+	if ownerName != "" {
+		prefix := ownerName + "."
+		if strings.HasPrefix(name, prefix) {
+			return name, strings.TrimPrefix(name, prefix)
+		}
+	}
+	if funcName == "" || strings.HasPrefix(funcName, "stub_") || strings.HasPrefix(funcName, "sub_") {
+		funcName = name
+	}
+	return name, funcName
+}
+
+func isGenericDisasmName(name string) bool {
+	return strings.HasPrefix(name, "sub_") || strings.HasPrefix(name, "stub_") || strings.HasPrefix(name, "Stub_")
 }
 
 // ExtractStringRefs scans instructions for PP loads that resolve to string values.

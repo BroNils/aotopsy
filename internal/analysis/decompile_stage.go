@@ -5,8 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 
 	"aotopsy/internal/cli"
+	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
 	"aotopsy/internal/output"
@@ -29,6 +32,16 @@ func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
 	if ctx == nil || ctx.EF == nil {
 		return 0, fmt.Errorf("decompile: missing analysis context")
 	}
+	oldProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(oldProcs)
+	oldLimit := debug.SetMemoryLimit(1536 << 20)
+	defer debug.SetMemoryLimit(oldLimit)
+
+	// FuncIRFor only wires register-CC parameters after whole-binary call-site
+	// setup masks are available. The standalone batch decompiler builds these
+	// before entering its loop; the pipeline path must use the same enrichment or
+	// the two surfaces produce different pseudocode for Dart 3.4.3+.
+	ctx.BuildArgRegMasks()
 	dartDir := filepath.Join(opts.OutDir, "dart")
 	if err := os.MkdirAll(dartDir, 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir dart: %w", err)
@@ -49,17 +62,30 @@ func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
 	}
 
 	written, orphanBlocks, orphanFuncs := 0, 0, 0
+	failures := FailureLog{Strict: opts.Strict}
+	image := cluster.CodeImage{CodeVA: ctx.CodeVA, CodeOff: ctx.CodeOff}
 	for i := 0; i < n; i++ {
 		r := ctx.Ranges[i]
 		if r.Size == 0 {
 			continue
 		}
-		fir, err := ctx.FuncIRFor(r)
-		if err != nil {
-			return written, fmt.Errorf("decompile pc=0x%x ref=%d: %w", r.PCOffset, r.RefID, err)
+		fir, err := func() (fir *decompiler.FuncIR, err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					err = fmt.Errorf("panic: %v", rec)
+				}
+			}()
+			return ctx.FuncIRFor(r)
+		}()
+		if err == nil && fir == nil {
+			err = fmt.Errorf("FuncIRFor returned nil IR without error")
 		}
-		if fir == nil {
-			return written, fmt.Errorf("decompile pc=0x%x ref=%d: FuncIRFor returned nil IR without error", r.PCOffset, r.RefID)
+		if err != nil {
+			funcVA, _ := image.FuncVA(r)
+			if ferr := failures.Record(funcVA, r.RefID, ctx.SymbolNames[funcVA], err); ferr != nil {
+				return written, ferr
+			}
+			continue
 		}
 		if len(fir.Blocks) == 0 {
 			continue
@@ -83,6 +109,13 @@ func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
 			return written, err
 		}
 		written++
+		if written%100 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}
+	if err := failures.Finish(opts.OutDir, opts.log()); err != nil {
+		return written, err
 	}
 
 	opts.stagef("decompile", "%s%d%s functions -> %s%s%s",

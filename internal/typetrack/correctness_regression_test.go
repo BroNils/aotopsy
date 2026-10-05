@@ -209,6 +209,18 @@ func TestBLCallSiteTypesKeyIsCallSitePC(t *testing.T) {
 	}
 }
 
+func TestOpenWorldEntryFactsDemoteDirectCallerExactness(t *testing.T) {
+	if got := openWorldEntryFact(ExactClass(100)); !got.Equal(ClassBound(100)) {
+		t.Fatalf("ExactClass direct-call observation stayed exact for open-world callee: %+v", got)
+	}
+	if got := openWorldEntryFact(ClassBound(100)); !got.Equal(ClassBound(100)) {
+		t.Fatalf("ClassBound was unnecessarily weakened: %+v", got)
+	}
+	if got := openWorldEntryFact(KnownStub("AllocateFoo", 7)); got.Kind != LatticeTop {
+		t.Fatalf("value-specific stub fact survived open-world entry: %+v", got)
+	}
+}
+
 func TestUBFXTypePropagationRequiresClassIDBitfield(t *testing.T) {
 	ctx := &TypeContext{}
 	ctx.SetClassIDTagLayout(12, 20)

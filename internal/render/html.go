@@ -12,8 +12,8 @@ import (
 
 // WriteIndexHTML writes a small HTML page summarizing the disasm output.
 func WriteIndexHTML(w io.Writer, stats CallgraphStats, unresTHR []disasm.UnresolvedTHRRecord, title string,
-	hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG bool,
-	rootCandidates []string, reach ReachabilityResult, cfgCount int, cfgLinks map[string]string) error {
+	hasCallgraphSVG, hasClassgraphSVG bool,
+	rootCandidates []string, cfgCount int, cfgLinks map[string]string) error {
 	ew := &errorWriter{w: w}
 	w = ew
 
@@ -65,11 +65,6 @@ a { color: #0B3D91; }
 	_, _ = fmt.Fprintf(w, "<tr><td>Runtime-observed sites</td><td class=\"num\">%d</td></tr>\n", stats.RuntimeObservedSites)
 	_, _ = fmt.Fprintf(w, "<tr><td>Runtime target relations</td><td class=\"num\">%d</td></tr>\n", stats.RuntimeTargetRelations)
 	_, _ = fmt.Fprintf(w, "<tr><td>Static root candidates</td><td class=\"num\">%d</td></tr>\n", len(rootCandidates))
-	_, _ = fmt.Fprintf(w, "<tr><td>Known functions in structural closure</td><td class=\"num\">%d</td></tr>\n", len(reach.Functions))
-	_, _ = fmt.Fprintf(w, "<tr><td>Closure incomplete polymorphic sites</td><td class=\"num\">%d</td></tr>\n", reach.IncompletePolymorphicSites)
-	_, _ = fmt.Fprintf(w, "<tr><td>Closure unknown candidate-count sites</td><td class=\"num\">%d</td></tr>\n", reach.UnknownCandidateCountSites)
-	_, _ = fmt.Fprintf(w, "<tr><td>Closure unresolved indirect sites</td><td class=\"num\">%d</td></tr>\n", reach.UnresolvedIndirectSites)
-	_, _ = fmt.Fprintf(w, "<tr><td>Closure unsupported call-kind sites</td><td class=\"num\">%d</td></tr>\n", reach.UnsupportedCallSites)
 	_, _ = fmt.Fprintf(w, "<tr><td>Unresolved THR</td><td class=\"num\">%d</td></tr>\n", len(unresTHR))
 	if cfgCount > 0 {
 		_, _ = fmt.Fprintf(w, "<tr><td>CFGs generated</td><td class=\"num\">%d</td></tr>\n", cfgCount)
@@ -120,9 +115,6 @@ a { color: #0B3D91; }
 	_, _ = fmt.Fprintln(w, "<h2>Graphs</h2>")
 	_, _ = fmt.Fprint(w, "<p>")
 	var links []string
-	if hasReachableSVG {
-		links = append(links, `<a href="reachable.svg">Static structural closure</a>`)
-	}
 	if hasClassgraphSVG {
 		links = append(links, `<a href="classgraph.svg">Class-level graph</a>`)
 	}

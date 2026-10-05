@@ -47,8 +47,13 @@ func cmdMeta(args []string) error {
 			*outDir = *from
 		}
 		result, err := analysis.Run(analysis.Opts{
-			FromDir:   *from,
-			OutDir:    *outDir,
+			FromDir: *from,
+			OutDir:  *outDir,
+			// The meta focus set is read from signal_graph.json, and a --from run
+			// without the signal stage deletes every signal-derived artifact of the
+			// cloned generation (see runFromExisting). Rebuild signal like the
+			// fresh-run branch below does.
+			Signal:    true,
 			Meta:      analysis.MetaRequired,
 			DecompAll: *all,
 			Quiet:     quiet,

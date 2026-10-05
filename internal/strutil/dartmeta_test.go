@@ -16,10 +16,10 @@ func TestExtractAsmCommentsWalksOwnerDirectories(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(nested, []byte("0x0010  ldr x0, [x1] ; field load\n"), 0o644); err != nil {
+	if err := os.WriteFile(nested, []byte("0x0010  ldr x0, [x1]  ; field load\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(asmDir, "top.txt"), []byte("0x0020  ret ; return\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(asmDir, "top.txt"), []byte("0x0020  ret  ; return\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,6 +41,27 @@ func TestExtractAsmCommentsWalksOwnerDirectories(t *testing.T) {
 	}
 	if !reflect.DeepEqual(again, got) {
 		t.Fatalf("ExtractAsmComments() order changed: first=%#v second=%#v", got, again)
+	}
+}
+
+func TestExtractAsmCommentsPreservesInternalSemicolons(t *testing.T) {
+	asmDir := t.TempDir()
+	contents := "0x0010  ldp x0, x1, [x26, #16]  ; THR.a; THR.b\n" +
+		"0x0020  ldr x0, [x27, #8]  ; \"select a; b from t\"\n"
+	if err := os.WriteFile(filepath.Join(asmDir, "comments.txt"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []FlutterMetaComment{
+		{Addr: "0x10", Text: "THR.a; THR.b"},
+		{Addr: "0x20", Text: `"select a; b from t"`},
+	}
+	got, err := ExtractAsmComments(asmDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ExtractAsmComments() = %#v, want %#v", got, want)
 	}
 }
 

@@ -23,31 +23,6 @@ const (
 // GenerateAllocateObjectHelper it is only a scratch register. The class is
 // now read from Code.owner via TypeContext.AllocationStubCID.
 
-// x86ArgRegCanon lists Dart's OWN calling-convention integer argument
-// registers as canonical indices, parameter 0 first. This is NOT the
-// SysV C ABI — Dart declares its own convention (verified via gh api to
-// constants_x64.h @3.9.2):
-//
-//	DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
-//
-// The previous value used RCX (1) for parameter 3 instead of RBX (3) —
-// the SysV C ABI order. On releases that have this register calling
-// convention, RCX is DispatchTableNullErrorABI::kClassIdReg, not an argument
-// register. killX86ArgRegs was killing RCX
-// (losing class-id type info needed for dispatch resolution) and NOT
-// killing RBX (leaving stale type info after calls that could propagate
-// incorrect types).
-var x86ArgRegCanon = func() [6]int {
-	cc, ok := sdk.DartRegisterCallingConvention(sdk.RegisterCallingConventionReferenceVersion, sdk.ArchX86)
-	if !ok {
-		panic("sdk: x86_64 register calling convention missing at first supported version")
-	}
-	r := cc.GPR
-	var arr [6]int
-	copy(arr[:], r)
-	return arr
-}()
-
 // AnalyzeFunctionX86 runs intra-procedural type dataflow on one x86_64 function.
 // It mirrors AnalyzeFunction (ARM64) but uses x86_64 instruction decoders.
 func AnalyzeFunctionX86(

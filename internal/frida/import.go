@@ -277,7 +277,7 @@ func Import(opts ImportOptions) error {
 		}
 	}()
 	stage := tx.StageDir()
-	if err := output.CloneTree(staticAbs, stage); err != nil {
+	if err := tx.CloneFrom(staticAbs); err != nil {
 		return fmt.Errorf("frida-import: clone static generation: %w", err)
 	}
 	stagedGeneration, err := readStaticGeneration(stage)

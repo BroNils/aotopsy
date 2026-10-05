@@ -425,10 +425,6 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
-func writeFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0644)
-}
-
 func readYaraFindings(path string) ([]YaraFinding, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

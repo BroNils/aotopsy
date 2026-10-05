@@ -19,6 +19,13 @@ func skipAllocV(s *dartfmt.Stream, cm *ClusterMeta, isCanonical bool, ct *snapsh
 		// case in 3.4.0 (absent in every 3.3.x tag, present 3.4.0 onward).
 		return 0, fmt.Errorf("SIMD CID %d has no Full-AOT serialization cluster before Dart 3.4.0", cid)
 	}
+	if ct != nil && cid == ct.String && !snapshot.VersionAtLeast(profile.DartVersion, "2.13.0") {
+		// Exact SDK NewClusterForClass/ReadOnlyObjectType has no productive
+		// kStringCid route in 2.10 or 2.12. The abstract String CID first becomes
+		// a Full-AOT ROData route in 2.13; OneByteString/TwoByteString remain valid
+		// concrete routes throughout.
+		return 0, fmt.Errorf("abstract String CID %d has no Full-AOT serialization cluster before Dart 2.13.0", cid)
+	}
 	kind := ClassifyAlloc(cid, ct)
 	// v2.12 and earlier (NoCanonicalSetData): canonical sets are rebuilt in memory
 	// during PostLoad, never written to the stream. CanonicalSetDeserializationCluster

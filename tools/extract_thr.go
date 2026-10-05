@@ -2946,7 +2946,12 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 	b.WriteString("}\n")
 
 	path := "internal/vmtables/objectstorestubs.go"
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+	formatted, err := format.Source([]byte(b.String()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: format generated source: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(path, formatted, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: %v\n", err)
 		return 1
 	}

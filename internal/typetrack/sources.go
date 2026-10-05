@@ -336,6 +336,10 @@ type TypeContext struct {
 	// 8 for non-compressed). Used to convert word offsets to byte offsets
 	// for FieldByOwnerOffset keys.
 	WordSize int32 `json:"-"`
+	// CompressedPointers distinguishes a 64-bit compressed target (whose heap
+	// slots are four bytes) from a true 32-bit target. Several VM object layouts,
+	// including ArgumentsDescriptor, do not reduce to a simple WordSize multiple.
+	CompressedPointers bool `json:"-"`
 }
 
 // buildMethodNameToRefIDs builds a map from method name → list of Function
@@ -464,6 +468,7 @@ func BuildTypeContext(
 	}
 	if profile != nil {
 		ctx.DartVersion = profile.DartVersion
+		ctx.CompressedPointers = profile.CompressedPointers
 	}
 
 	// Adjust word size for compressed pointers.

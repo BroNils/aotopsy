@@ -24,6 +24,44 @@ import os
 import sys
 import time
 
+
+APPLY_OK_FILE = ".aotopsy-apply-ok"
+APPLY_FAILED_FILE = ".aotopsy-apply-failed"
+
+
+def _ensure_output_dir(out_dir):
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+
+def _write_apply_failed(out_dir, message):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    ok_path = os.path.join(out_dir, APPLY_OK_FILE)
+    if os.path.exists(ok_path):
+        os.remove(ok_path)
+    with open(os.path.join(out_dir, APPLY_FAILED_FILE), "w") as f:
+        json.dump({"error": str(message)}, f)
+
+
+def _write_apply_ok(out_dir, functions, decompiled, failed, focus_count, binary_sha256):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    failed_path = os.path.join(out_dir, APPLY_FAILED_FILE)
+    if os.path.exists(failed_path):
+        os.remove(failed_path)
+    payload = {
+        "functions": functions,
+        "decompiled": decompiled,
+        "failed": failed,
+        "focus": focus_count,
+        "binary_sha256": binary_sha256,
+    }
+    with open(os.path.join(out_dir, APPLY_OK_FILE), "w") as f:
+        json.dump(payload, f)
+
 try:
     _TEXT_TYPES = (basestring,)
     _INTEGER_TYPES = (int, long)
@@ -455,19 +493,16 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 aotopsy_apply.py <libapp.so> [<flutter_meta.json>] [<output_dir>]")
-        sys.exit(1)
+        raise RuntimeError("Usage: python3 aotopsy_apply.py <libapp.so> [<flutter_meta.json>] [<output_dir>]")
 
     binary_path = sys.argv[1]
     meta_path = resolve_meta_path(sys.argv)
     out_dir = sys.argv[3] if len(sys.argv) > 3 else None
 
     if not os.path.exists(binary_path):
-        log("ERROR: binary not found: %s" % binary_path)
-        sys.exit(1)
+        raise RuntimeError("binary not found: %s" % binary_path)
     if meta_path is None or not os.path.exists(meta_path):
-        log("ERROR: flutter_meta.json not found. Pass as argument or place script in <output>/ida/")
-        sys.exit(1)
+        raise RuntimeError("flutter_meta.json not found. Pass as argument or place script in <output>/ida/")
 
     log("aotopsy_apply (IDA): loading %s" % meta_path)
     with open(meta_path, "r") as f:
@@ -480,15 +515,7 @@ def main():
 
     result = idapro.open_database(binary_path, True)
     if result != 0:
-        # Try fresh — delete stale database files.
-        for ext in (".i64", ".idb", ".id0", ".id1", ".id2", ".nam", ".til"):
-            p = binary_path + ext
-            if os.path.exists(p):
-                os.remove(p)
-        result = idapro.open_database(binary_path, True)
-        if result != 0:
-            log("ERROR: failed to open database (code %d)" % result)
-            sys.exit(1)
+        raise RuntimeError("failed to open database (code %d)" % result)
     log("  database opened")
 
     # ---- Import IDA modules (only after db is open) ----
@@ -593,8 +620,8 @@ def main():
         with open(os.path.join(out_dir, "index.json"), "w") as idx:
             json.dump(index, idx, indent=2)
         log("  decompiled=%d failed=%d" % (decompiled, decompile_failed))
-    elif not has_decompiler:
-        log("Phase 5: skipped (no Hex-Rays)")
+    elif focus and not has_decompiler:
+        raise RuntimeError("Hex-Rays decompiler unavailable for %d focus functions" % len(focus))
     elif not out_dir:
         log("Phase 5: skipped (no output dir)")
     else:
@@ -615,6 +642,7 @@ def main():
             stats["comments_set"],
             decompiled,
         ))
+    _write_apply_ok(out_dir, len(functions), decompiled, decompile_failed, len(focus), meta["binary_sha256"])
 
 
 # ============================================================
@@ -805,4 +833,10 @@ def _retype_ida_registers(cfunc, ea, ida_hexrays, has_thr_fields):
 
 
 if __name__ == "__main__":
-    main()
+    out_dir = sys.argv[3] if len(sys.argv) > 3 else None
+    try:
+        main()
+    except Exception as e:
+        log("ERROR: %s" % str(e))
+        _write_apply_failed(out_dir, str(e))
+        sys.exit(1)

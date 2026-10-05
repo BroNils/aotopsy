@@ -85,19 +85,23 @@ func ClassifyStubRole(dartVersion, name string) StubRole {
 	if !isSupportedDartVersion(dartVersion) {
 		return StubRoleNone
 	}
-	// Dart-side helpers and named stubs use a finite SDK vocabulary. Match the
-	// terminal symbol exactly rather than looking for an async substring: an app
-	// function named MyInitAsyncCache is ordinary user code, not a VM stub.
-	leaf := name
-	if i := strings.LastIndex(leaf, "::"); i >= 0 {
-		leaf = leaf[i+2:]
+	// Dart-side helpers and named stubs use a finite SDK vocabulary, but their
+	// ownership is part of that identity. Bare PascalCase names are VM stubs only
+	// when unqualified; private Dart helpers belong specifically to
+	// _SuspendState. Stripping an arbitrary owner here makes Retry._await or
+	// Widget._resume indistinguishable from SDK machinery.
+	qualifier, leaf := splitQualifiedStubName(name)
+	trimmed := strings.TrimSuffix(leaf, "Stub")
+	allowSuspendable := false
+	if strings.HasPrefix(trimmed, "_") {
+		allowSuspendable = terminalQualifier(qualifier) == "_SuspendState"
+	} else {
+		allowSuspendable = qualifier == ""
 	}
-	if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
-		leaf = leaf[i+1:]
-	}
-	leaf = strings.TrimSuffix(leaf, "Stub")
-	if role, ok := classifySuspendableLeaf(dartVersion, leaf); ok {
-		return role
+	if allowSuspendable {
+		if role, ok := classifySuspendableLeaf(dartVersion, trimmed); ok {
+			return role
+		}
 	}
 
 	// VM stub slots require a terminator.
@@ -136,6 +140,29 @@ func ClassifyStubRole(dartVersion, name string) StubRole {
 
 	// Other VM stub roles.
 	return classifyMundanePattern(name)
+}
+
+func splitQualifiedStubName(name string) (qualifier, leaf string) {
+	lastDot := strings.LastIndexByte(name, '.')
+	lastColon := strings.LastIndex(name, "::")
+	switch {
+	case lastColon >= 0 && lastColon+1 > lastDot:
+		return name[:lastColon], name[lastColon+2:]
+	case lastDot >= 0:
+		return name[:lastDot], name[lastDot+1:]
+	default:
+		return "", name
+	}
+}
+
+func terminalQualifier(qualifier string) string {
+	if i := strings.LastIndex(qualifier, "::"); i >= 0 {
+		qualifier = qualifier[i+2:]
+	}
+	if i := strings.LastIndexByte(qualifier, '.'); i >= 0 {
+		qualifier = qualifier[i+1:]
+	}
+	return qualifier
 }
 
 func classifySuspendableLeaf(dartVersion, leaf string) (StubRole, bool) {

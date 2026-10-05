@@ -60,15 +60,12 @@ func RunMetaStage(inDir, outDir, targetArch string, decompAll bool, quiet bool, 
 	}
 	stagef("meta", "%s%d%s functions", cli.Gold, len(funcs), cli.Reset)
 
-	metaFuncs := make([]strutil.FlutterMetaFunc, len(funcs))
-	functionPCs := make(map[string]struct{}, len(funcs))
+	metaFuncs := make([]strutil.FlutterMetaFunc, 0, len(funcs))
+	functionPCs := make(map[string]int, len(funcs))
 	for i, f := range funcs {
 		addr, err := strutil.NormalizeHexAddr(f.PC)
 		if err != nil {
 			return "", fmt.Errorf("functions.jsonl record %d PC %q: %w", i, f.PC, err)
-		}
-		if _, exists := functionPCs[addr]; exists {
-			return "", fmt.Errorf("functions.jsonl contains duplicate function address %s", addr)
 		}
 		if f.Name == "" {
 			return "", fmt.Errorf("functions.jsonl record %d at %s has empty name", i, addr)
@@ -79,14 +76,31 @@ func RunMetaStage(inDir, outDir, targetArch string, decompAll bool, quiet bool, 
 		if f.ParamCount < 0 {
 			return "", fmt.Errorf("functions.jsonl record %d at %s has negative param_count %d", i, addr, f.ParamCount)
 		}
-		functionPCs[addr] = struct{}{}
-		metaFuncs[i] = strutil.FlutterMetaFunc{
+		mf := strutil.FlutterMetaFunc{
 			Addr:       addr,
 			Name:       f.Name,
 			Size:       f.Size,
 			Owner:      f.Owner,
 			ParamCount: f.ParamCount,
 		}
+		if priorIndex, exists := functionPCs[addr]; exists {
+			prior := metaFuncs[priorIndex]
+			// Pre-InstructionsTable snapshots can have many Function/Code aliases
+			// sharing one deduplicated instructions payload. The disassembly stage
+			// resolves all aliases at that VA to the same canonical display name,
+			// while owner/arity metadata remains row-specific. Keep the final alias:
+			// BuildSymbolNames uses the same last-write rule for a shared VA, so this
+			// row is the metadata that corresponds to the canonical name. A duplicate
+			// address with a different canonical name or size is not a code alias and
+			// stays a hard error rather than being silently collapsed.
+			if prior.Name != mf.Name || prior.Size != mf.Size {
+				return "", fmt.Errorf("functions.jsonl contains duplicate function address %s with conflicting identity", addr)
+			}
+			metaFuncs[priorIndex] = mf
+			continue
+		}
+		functionPCs[addr] = len(metaFuncs)
+		metaFuncs = append(metaFuncs, mf)
 	}
 
 	// 2. Determine which functions to decompile.

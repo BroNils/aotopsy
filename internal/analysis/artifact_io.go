@@ -68,6 +68,11 @@ func DisasmArtifactFiles(funcs []disasm.FuncRecord, index []strutil.DisasmIndexE
 		indexByID[id] = idx
 	}
 	out := make(map[string]string, len(funcs))
+	type codeIdentity struct {
+		pcOffset uint32
+		size     int
+	}
+	codeByName := make(map[string]codeIdentity, len(funcs))
 	for i := range funcs {
 		f := funcs[i]
 		id := identity{refID: f.RefID, pcOffset: f.PCOffset}
@@ -89,19 +94,28 @@ func DisasmArtifactFiles(funcs []disasm.FuncRecord, index []strutil.DisasmIndexE
 		if prior, dup := out[f.Name]; dup {
 			// Dart can emit multiple Code objects that share one deduplicated
 			// machine-code range. They consequently have distinct snapshot
-			// identities but the same resolved display name and the same canonical
-			// asm artifact. A function name is therefore not globally unique.
+			// identities but the same resolved display name. The disassembly producer
+			// still writes each snapshot alias to its own owner/name-derived artifact
+			// path, even though all of those paths contain the same machine-code range.
+			// A function name is therefore not globally unique, and a shared-code alias
+			// does not require the producer paths to be equal.
 			//
-			// Accept only that exact aliasing case. Two identities with the same
-			// display name but different artifacts would make a name-keyed consumer
-			// ambiguous and must still fail loudly rather than selecting one by row
-			// order.
-			if prior != rel {
-				return nil, fmt.Errorf("disassembly artifact index has ambiguous function name %q: %q and %q", f.Name, prior, rel)
+			// Accept only that exact aliasing case: the code offset and size must match.
+			// If the same display name describes two distinct code ranges, a name-keyed
+			// consumer really is ambiguous and must still fail loudly. For genuine
+			// aliases keep the final producer function row. BuildSymbolNames uses the
+			// same last-write rule for a shared VA, so that row is the alias whose
+			// owner/name metadata supplied the canonical display name. index.jsonl row
+			// order is irrelevant because the join above is by snapshot identity.
+			if priorCode := codeByName[f.Name]; priorCode != (codeIdentity{pcOffset: f.PCOffset, size: f.Size}) {
+				return nil, fmt.Errorf("disassembly artifact index has ambiguous function name %q across distinct code ranges", f.Name)
 			}
+			_ = prior
+			out[f.Name] = rel
 			continue
 		}
 		out[f.Name] = rel
+		codeByName[f.Name] = codeIdentity{pcOffset: f.PCOffset, size: f.Size}
 	}
 	return out, nil
 }

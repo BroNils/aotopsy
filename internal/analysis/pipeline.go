@@ -157,49 +157,33 @@ var signalDetectorArtifacts = []string{
 	"behavioral_findings.jsonl",
 }
 
-// signalGenerationArtifacts are outputs whose meaning depends on running the
-// signal/security stage for the current generation. `run --from` clones an
-// existing directory before applying requested stages; when signal analysis is
-// disabled, carrying these files through would make old findings look current.
-// evidence.jsonl is included because a cloned unified evidence file can contain
-// signal rows that cannot be separated safely without rerunning its producers.
-var signalGenerationArtifacts = []string{
-	"signal_graph.json",
-	"signal.html",
-	"signal.dot",
-	"signal.svg",
-	"signal_cfg.dot",
-	"signal_cfg.svg",
-	"method_channels.jsonl",
-	"plugins.jsonl",
-	"deobfuscation.jsonl",
-	"network_endpoints.jsonl",
-	"platform_channels.jsonl",
-	"native_capabilities.jsonl",
-	"deobfuscate_map.jsonl",
-	"aotopsy.sarif",
-	"evidence.jsonl",
+// signalFromArtifactsDetectorArtifacts are the detector files a --from signal
+// rerun can actually recompute from functions/call edges/string refs. Binary- and
+// cluster-derived detector artifacts are intentionally excluded: the --from path
+// has no ELF/snapshot objects with which to reproduce them, so deleting them
+// would silently strip valid facts from the cloned generation.
+var signalFromArtifactsDetectorArtifacts = []string{
+	"source_sink_findings.jsonl",
+	"source_sink_summary.json",
+	"yara_findings.jsonl",
+	"behavioral_findings.jsonl",
+}
+
+func removeArtifacts(outDir string, names []string) error {
+	for _, name := range names {
+		if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func removeSignalDetectorArtifacts(outDir string) error {
-	for _, name := range signalDetectorArtifacts {
-		if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stale %s: %w", name, err)
-		}
-	}
-	return nil
+	return removeArtifacts(outDir, signalDetectorArtifacts)
 }
 
-func removeSignalGenerationArtifacts(outDir string) error {
-	if err := removeSignalDetectorArtifacts(outDir); err != nil {
-		return err
-	}
-	for _, name := range signalGenerationArtifacts {
-		if err := os.Remove(filepath.Join(outDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stale %s: %w", name, err)
-		}
-	}
-	return nil
+func removeSignalFromArtifactsDetectorArtifacts(outDir string) error {
+	return removeArtifacts(outDir, signalFromArtifactsDetectorArtifacts)
 }
 
 func readOptionalJSONL[T any](path string) ([]T, error) {
@@ -351,7 +335,7 @@ func runFromExistingTransactional(opts Opts) (*Result, error) {
 			tx.Abort()
 		}
 	}()
-	if err := output.CloneTree(fromAbs, tx.StageDir()); err != nil {
+	if err := tx.CloneFrom(fromAbs); err != nil {
 		return nil, fmt.Errorf("clone --from: %w", err)
 	}
 
@@ -979,13 +963,6 @@ func runFromExisting(opts *Opts, result *Result) (*Result, error) {
 			return nil, fmt.Errorf("signal: %w", err)
 		}
 		result.SignalCount = sigResult.SignalCount
-	} else {
-		// The transaction cloned the previous generation verbatim. A caller that
-		// explicitly omits signal analysis must not publish cloned SARIF/evidence
-		// or optional signal artifacts as though they were regenerated now.
-		if err := removeSignalGenerationArtifacts(outDir); err != nil {
-			return nil, err
-		}
 	}
 
 	if opts.Meta != MetaDisabled {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"path/filepath"
 
 	"aotopsy/internal/cli"
 	"aotopsy/internal/funcdiff"
@@ -68,7 +69,7 @@ func cmdSymbolMap(args []string) error {
 	if err := symbolmap.WriteArtifacts(*outDir, rep); err != nil {
 		return err
 	}
-	cli.Errf("wrote symbolmap artifacts under %s\n", *outDir)
+	cli.Errf("wrote symbolmap artifacts under %s\n", filepath.Join(*outDir, "symbolmap"))
 	return nil
 }
 

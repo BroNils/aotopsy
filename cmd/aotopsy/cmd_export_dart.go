@@ -24,7 +24,7 @@ func cmdExportDart(args []string) error {
 	outDir := fs.String("out", "", "output directory for synthesized Dart source files")
 	appOnly := fs.Bool("app-only", false, "export only user app code (skip dart:* and package:flutter* libraries)")
 	filterSubstr := fs.String("filter", "", "filter to classes or methods matching this substring")
-	maxFuncs := fs.Int("max", 500, "max methods/functions to decompile (0 = unlimited)")
+	maxFuncs := fs.Int("max", 0, "max methods/functions to decompile (0 = unlimited)")
 	strict := fs.Bool("strict", false, "abort on the first function that cannot be decompiled (default: skip it and list it in "+analysis.DecompileFailuresFile+")")
 
 	if err := parseInterspersed(fs, args); err != nil {

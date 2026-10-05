@@ -396,13 +396,16 @@ func AnalyzeFunction(
 		}
 	}
 
-	// Dart 2.10/2.12 alternate large-immediate form: LoadImmediate(TMP2,
-	// imm) → ADD Xd, Xm, TMP2 →
-	// LDR X30, [X21, Xd, LSL #3] → BLR X30.
-	// The 2.x compiler sometimes loads the selector offset into a register
-	// via MOVZ, then uses register-register ADD instead of ADD with immediate.
-	// This pattern is NOT caught by the ADD/SUB #imm scan above.
-	for i := 0; legacyDispatch && i < len(insts)-3; i++ {
+	// Large-immediate form, every supported SDK: LoadImmediate(TMP2, imm) →
+	// ADD Xd, Xm, TMP2 → LDR X30, [X21, Xd, LSL #3] → BLR X30.
+	// AddImmediate(dest, rn, imm) falls back to LoadImmediate(TMP2, imm) +
+	// register-register ADD whenever imm is neither a 12-bit immediate nor
+	// imm12<<12 (SDK @3.12.2 assembler_arm64.cc AddImmediate, assembler_arm64.h
+	// CanHold; same shape @2.12.0), and EmitDispatchTableCall emits
+	// AddImmediate(LR, cid_reg, offset). This pattern is NOT caught by the
+	// ADD/SUB #imm scan above. The destination/source registers are validated by
+	// the same per-SDK predicate as the immediate form.
+	for i := 0; dispatchSupported && i < len(insts)-3; i++ {
 		if insts[i].Bad || insts[i+1].Bad || insts[i+2].Bad || insts[i+3].Bad {
 			continue
 		}
@@ -418,8 +421,9 @@ func AnalyzeFunction(
 		if i+1 >= len(insts) {
 			continue
 		}
-		addRd, _, addRm, addShift, addAmount, addOK := arm64.ADD64Register(insts[i+1].Raw)
-		if !addOK || addShift != arm64.ShiftLSL || addAmount != 0 || addRm != sdk.ARM64TMP2 || addRd >= 31 {
+		addRd, addRn, addRm, addShift, addAmount, addOK := arm64.ADD64Register(insts[i+1].Raw)
+		if !addOK || addShift != arm64.ShiftLSL || addAmount != 0 || addRm != sdk.ARM64TMP2 ||
+			!sdk.IsARM64DispatchTableIndexComputation(ctx.DartVersion, addRd, addRn) {
 			continue
 		}
 		// Next: LDR X30, [X21, Xd, LSL #3]

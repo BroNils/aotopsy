@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -46,9 +47,15 @@ func requireOrderedSDKText(t *testing.T, src, fact string, needles ...string) {
 //	AOTOPSY_TEST_SDK=1 go test ./internal/sdk/ -run MatchesSDK
 
 var (
-	reDartCC  = regexp.MustCompile(`(?s)struct DartCallingConvention \{(.*?)\n\};`)
-	reCPURegs = regexp.MustCompile(`(?s)kCpuRegistersForArgs\[\]\s*=\s*\{([^}]*)\}`)
-	reFPURegs = regexp.MustCompile(`(?s)kFpuRegistersForArgs\[\]\s*=\s*\{([^}]*)\}`)
+	reDartCC        = regexp.MustCompile(`(?s)struct DartCallingConvention \{(.*?)\n\};`)
+	reCPURegs       = regexp.MustCompile(`(?s)kCpuRegistersForArgs\[\]\s*=\s*\{([^}]*)\}`)
+	reFPURegs       = regexp.MustCompile(`(?s)kFpuRegistersForArgs\[\]\s*=\s*\{([^}]*)\}`)
+	reReservedRegs  = regexp.MustCompile(`(?s)kReservedCpuRegisters\s*=\s*(.*?);`)
+	reWrappedReg    = regexp.MustCompile(`R\(\s*([A-Za-z0-9_]+)\s*\)`)
+	reShiftedReg    = regexp.MustCompile(`1\s*<<\s*([A-Za-z0-9_]+)`)
+	reRegisterAlias = regexp.MustCompile(
+		`(?m)\b(?:const|constexpr)\s+Register\s+([A-Za-z0-9_]+)\s*=\s*([A-Za-z0-9_]+)\s*;`,
+	)
 )
 
 func sdkRegisterList(t *testing.T, body string, re *regexp.Regexp) []string {
@@ -84,6 +91,143 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sdkRegisterAliases(src string) map[string]string {
+	out := make(map[string]string)
+	for _, m := range reRegisterAlias.FindAllStringSubmatch(src, -1) {
+		out[m[1]] = m[2]
+	}
+	return out
+}
+
+func sdkRegisterNumber(name string, arm64 bool, aliases map[string]string) (int, bool) {
+	seen := map[string]bool{}
+	for name != "" && !seen[name] {
+		seen[name] = true
+		if arm64 {
+			switch name {
+			case "FP":
+				return 29, true
+			case "LR":
+				return 30, true
+			case "ZR", "CSP":
+				return 31, true
+			}
+			if strings.HasPrefix(name, "R") {
+				if n, err := strconv.Atoi(strings.TrimPrefix(name, "R")); err == nil && n >= 0 && n <= 31 {
+					return n, true
+				}
+			}
+		} else {
+			for i, reg := range x86Name {
+				if strings.EqualFold(name, reg) {
+					return i, true
+				}
+			}
+			if strings.HasPrefix(name, "R") {
+				if n, err := strconv.Atoi(strings.TrimPrefix(name, "R")); err == nil && n >= 8 && n <= 15 {
+					return n, true
+				}
+			}
+		}
+		next, ok := aliases[name]
+		if !ok {
+			return 0, false
+		}
+		name = next
+	}
+	return 0, false
+}
+
+func sdkDartAvailableCPURegs(t *testing.T, src string, arm64 bool) []int {
+	t.Helper()
+	m := reReservedRegs.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("kReservedCpuRegisters definition not found")
+	}
+	aliases := sdkRegisterAliases(src)
+	reserved := make(map[int]bool)
+	for _, re := range []*regexp.Regexp{reWrappedReg, reShiftedReg} {
+		for _, rm := range re.FindAllStringSubmatch(m[1], -1) {
+			n, ok := sdkRegisterNumber(rm[1], arm64, aliases)
+			if !ok {
+				t.Fatalf("cannot resolve reserved register %q from exact SDK source", rm[1])
+			}
+			reserved[n] = true
+		}
+	}
+	maxReg := 15
+	if arm64 {
+		maxReg = 30 // R31 is ZR/CSP, not an allocatable CPU register.
+	}
+	var out []int
+	for reg := 0; reg <= maxReg; reg++ {
+		if !reserved[reg] {
+			out = append(out, reg)
+		}
+	}
+	return out
+}
+
+func TestDartCallClobberedGPRsMatchSDK(t *testing.T) {
+	sdktest.SkipIfNoSDKTools(t)
+	for _, v := range snapshot.SupportedVersions() {
+		v := v
+		t.Run(v, func(t *testing.T) {
+			for _, arch := range []struct {
+				file  string
+				arm64 bool
+			}{{"runtime/vm/constants_arm64.h", true}, {"runtime/vm/constants_x64.h", false}} {
+				src, err := sdktest.SDKFileAtTag(arch.file, v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := sdkDartAvailableCPURegs(t, src, arch.arm64)
+				got, ok := DartCallClobberedGPRs(v, arch.arm64)
+				if !ok || !equalInts(got, want) {
+					t.Errorf("DartCallClobberedGPRs(%s, arm64=%v) = %v,%v; exact SDK kDartAvailableCpuRegs = %v", v, arch.arm64, got, ok, want)
+				}
+			}
+		})
+	}
+}
+
+func TestARM64PointerDecompressionSpecMatchesSDK(t *testing.T) {
+	sdktest.SkipIfNoSDKTools(t)
+	for _, v := range snapshot.SupportedVersions() {
+		v := v
+		t.Run(v, func(t *testing.T) {
+			src, err := sdktest.SDKFileAtTag("runtime/vm/compiler/assembler/assembler_arm64.cc", v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantReg, wantShift, wantOK := 0, 0, false
+			switch {
+			case strings.Contains(src, "Operand(HEAP_BASE)"):
+				wantReg, wantShift, wantOK = ARM64HeapBaseLegacy, 0, true
+			case strings.Contains(src, "Operand(HEAP_BITS, LSL, 32)"):
+				wantReg, wantShift, wantOK = ARM64HeapBits, 32, true
+			}
+			gotReg, gotShift, gotOK := ARM64PointerDecompressionSpec(v)
+			if gotReg != wantReg || gotShift != wantShift || gotOK != wantOK {
+				t.Errorf("ARM64PointerDecompressionSpec(%s) = (%d,%d,%v), exact assembler source = (%d,%d,%v)",
+					v, gotReg, gotShift, gotOK, wantReg, wantShift, wantOK)
+			}
+		})
+	}
 }
 
 func TestDartCallingConventionMatchesSDK(t *testing.T) {

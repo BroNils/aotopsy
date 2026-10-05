@@ -974,8 +974,19 @@ func GetFillSpec(cid int, cm *ClusterMeta, profile *snapshot.VersionProfile) Fil
 	case ct.WeakSerializationReference != 0 && cid == ct.WeakSerializationReference:
 		return specWeakSerializationReference(profile.DartVersion)
 
-	// Special fill formats (not FillRefs)
-	case cid == ct.String, cid == ct.OneByteString, cid == ct.TwoByteString:
+		// Special fill formats (not FillRefs)
+	case cid == ct.String:
+		// Exact SDK NewClusterForClass/ReadOnlyObjectType does not route the
+		// abstract kStringCid in 2.10/2.12. It becomes a Full-AOT ROData route
+		// in 2.13; the concrete one-/two-byte string CIDs are older routes.
+		if !snapshot.VersionAtLeast(profile.DartVersion, "2.13.0") {
+			return specUnsupported()
+		}
+		if profile.SplitCanonical || !profile.CompressedPointers {
+			return FillSpec{Kind: FillROData, NameIdx: -1, OwnerIdx: -1}
+		}
+		return FillSpec{Kind: FillString, NameIdx: -1, OwnerIdx: -1}
+	case cid == ct.OneByteString, cid == ct.TwoByteString:
 		// In AOT without compressed pointers (or SplitCanonical/2.13), strings use
 		// ROData format: alloc embeds the data inline, fill has nothing.
 		// With compressed pointers, strings have per-string fill data.

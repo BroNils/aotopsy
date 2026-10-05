@@ -52,6 +52,11 @@ var (
 	// dispatch index. Xindex is LR from 2.13 onward but is the incoming cid_reg
 	// itself in 2.10/2.12.
 	arm64IndexAddRe = regexp.MustCompile(`^(add|sub)\s+(x[0-9]+),\s*(x[0-9]+),\s*#(?:0x([0-9a-f]+)|(\d+))`)
+	// Large selector offsets do not fit AddImmediate's immediate forms. The SDK
+	// materializes them in TMP2 (x17) and then uses a register ADD. Track the
+	// common MOVZ form exactly; MOVK/ORR variants remain conservatively unknown.
+	arm64Tmp2MovzRe     = regexp.MustCompile(`^movz\s+x17,\s*#(?:0x([0-9a-f]+)|(\d+))(?:,\s*lsl\s*#(\d+))?$`)
+	arm64IndexAddTmp2Re = regexp.MustCompile(`^add\s+(x[0-9]+),\s*(x[0-9]+),\s*x17$`)
 	// `ldr x30, [x21,xN,lsl #3]` -- the dispatch-table load itself. x21 is
 	// DISPATCH_TABLE_REG (constants_arm64.h), indexed by LR and scaled by the
 	// word size. The loaded target always lands in LR before `blr x30`.
@@ -84,6 +89,7 @@ func annotateDispatchCalls(fir *FuncIR) {
 		// predecessor is not something this pass can claim to know.
 		lastIndexImm, haveIndex := 0, false
 		lastIndexReg := ""
+		tmp2Val, haveTmp2 := 0, false
 		dispatchLoadSeen := false
 		for i := range blk.Instrs {
 			ins := &blk.Instrs[i]
@@ -110,9 +116,32 @@ func annotateDispatchCalls(fir *FuncIR) {
 							v = -v
 						}
 						lastIndexImm, lastIndexReg, haveIndex = v, m[2], true
-					case strings.Contains(ins.Src, "x30"):
-						// Any other write to LR invalidates both.
-						haveIndex, dispatchLoadSeen = false, false
+					case arm64Tmp2MovzRe.MatchString(ins.Src):
+						m := arm64Tmp2MovzRe.FindStringSubmatch(ins.Src)
+						v := parseImmDec(m[1], m[2])
+						shift := 0
+						if m[3] != "" {
+							shift, _ = strconv.Atoi(m[3])
+						}
+						tmp2Val, haveTmp2 = v<<shift, true
+					case arm64IndexAddTmp2Re.MatchString(ins.Src):
+						m := arm64IndexAddTmp2Re.FindStringSubmatch(ins.Src)
+						dstReg, dstOK := arm64RegNumber(m[1])
+						srcReg, srcOK := arm64RegNumber(m[2])
+						if !haveTmp2 || !dstOK || !srcOK || !sdk.IsARM64DispatchTableIndexComputation(fir.DartVersion, dstReg, srcReg) {
+							haveIndex, dispatchLoadSeen = false, false
+							break
+						}
+						lastIndexImm, lastIndexReg, haveIndex = tmp2Val, m[1], true
+					default:
+						// Invalidate tracked constants/facts only on actual writes. Text
+						// mentions of x17/x30 as sources must not destroy provenance.
+						if definesReg(ins, "x17") {
+							haveTmp2 = false
+						}
+						if definesReg(ins, "x30") {
+							haveIndex, dispatchLoadSeen = false, false
+						}
 					}
 				}
 				continue
@@ -156,6 +185,15 @@ func annotateDispatchCalls(fir *FuncIR) {
 			}
 		}
 	}
+}
+
+func definesReg(ins *Instr, reg string) bool {
+	for _, defined := range ins.DefRegs {
+		if defined == reg {
+			return true
+		}
+	}
+	return false
 }
 
 func parseImmDec(hex, dec string) int {

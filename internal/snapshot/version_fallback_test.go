@@ -30,12 +30,25 @@ func TestKnownHashesHaveConcreteProfiles(t *testing.T) {
 
 func TestSpeculativeCompatibilityHashesAreNotParserOracles(t *testing.T) {
 	for _, hash := range []string{
-		"aa64af18e7d086041ac127cc4bc50c5e", // previously labelled "approximate"
 		"2858c2c0920495f00b9bce9edf6a8cd9", // previously labelled "likely"
 	} {
 		if p := DetectVersion(hash); p != nil {
 			t.Errorf("speculative hash %s inherited parser profile %+v", hash, *p)
 		}
+	}
+}
+
+func TestDart300To302CompatibilityHashUses305Profile(t *testing.T) {
+	const hash = "aa64af18e7d086041ac127cc4bc50c5e"
+	p := DetectVersion(hash)
+	if p == nil {
+		t.Fatal("Dart 3.0.0-3.0.2 compatibility hash was rejected")
+	}
+	if p.DartVersion != "3.0.5" || !p.Supported || p.CIDs == nil {
+		t.Fatalf("compatibility hash mapped to wrong/incomplete profile: %+v", *p)
+	}
+	if speculative := DetectVersion("2858c2c0920495f00b9bce9edf6a8cd9"); speculative != nil {
+		t.Fatalf("adding concrete 3.0.x family revived speculative hash: %+v", *speculative)
 	}
 }
 
@@ -86,6 +99,37 @@ func TestBuildModeFromFeatures(t *testing.T) {
 		if m.IsProduct() {
 			t.Errorf("%v.IsProduct() = true", m)
 		}
+	}
+}
+
+func TestTargetFeaturesMatchELFMachineAndSupportedABI(t *testing.T) {
+	tests := []struct {
+		name     string
+		style    TargetFeatureStyle
+		features string
+		arm64    bool
+		wantErr  bool
+	}{
+		{"legacy arm64 sysv", TargetFeatureLegacyABI, "product arm64-sysv no-compressed-pointers", true, false},
+		{"legacy x64 sysv", TargetFeatureLegacyABI, "product x64-sysv no-compressed-pointers", false, false},
+		{"legacy machine mismatch", TargetFeatureLegacyABI, "product arm64-sysv", false, true},
+		{"legacy unsupported fuchsia", TargetFeatureLegacyABI, "product arm64-fuchsia", true, true},
+		{"legacy unsupported windows", TargetFeatureLegacyABI, "product x64-win", false, true},
+		{"modern arm64 android", TargetFeatureArchAndOS, "product arm64 android compressed-pointers", true, false},
+		{"modern x64 linux", TargetFeatureArchAndOS, "product x64 linux no-compressed-pointers", false, false},
+		{"modern machine mismatch", TargetFeatureArchAndOS, "product arm64 linux", false, true},
+		{"modern unsupported windows", TargetFeatureArchAndOS, "product x64 windows", false, true},
+		{"modern missing os", TargetFeatureArchAndOS, "product x64", false, true},
+		{"modern contradictory os", TargetFeatureArchAndOS, "product x64 linux android", false, true},
+		{"modern contradictory arch", TargetFeatureArchAndOS, "product x64 arm64 linux", false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := targetFeaturesCompatible(tc.style, tc.features, tc.arm64)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("targetFeaturesCompatible(%d, %q, arm64=%v) error=%v, wantErr=%v", tc.style, tc.features, tc.arm64, err, tc.wantErr)
+			}
+		})
 	}
 }
 

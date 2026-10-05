@@ -114,6 +114,20 @@ const (
 	CompressionFeatureExplicit
 )
 
+// TargetFeatureStyle records how Dart::FeaturesString identifies the generated
+// machine-code target. Through Dart 2.18 the architecture token also carries
+// the ABI (for the supported 64-bit targets, arm64-sysv/x64-sysv). Dart 2.19+
+// emits a bare architecture token followed by a separate operating-system
+// token. AOTopsy supports only the SysV/Linux-or-Android variants that match
+// its ELF64 ARM64/x86_64 analysis paths.
+type TargetFeatureStyle uint8
+
+const (
+	TargetFeatureUnknown TargetFeatureStyle = iota
+	TargetFeatureLegacyABI
+	TargetFeatureArchAndOS
+)
+
 // InstructionsImageLayout records the versioned instructions-image header.
 // Dart 2.10's second Image word is a BSS offset and the InstructionsSection
 // starts at Image::kHeaderSize. Dart 2.12+ stores an explicit section offset;
@@ -136,6 +150,7 @@ type VersionProfile struct {
 	CIDs                            *CIDTable
 	SnapshotSymbols                 SnapshotSymbolLayout
 	CompressionFeatures             CompressionFeatureStyle
+	TargetFeatures                  TargetFeatureStyle
 	InstructionsImage               InstructionsImageLayout
 	FullAOTKind                     SnapshotKind // exact enum value written into AOT snapshot headers
 	DataImageAlignment              int64        // Snapshot::DataImage RoundUp alignment on 64-bit AOT
@@ -473,9 +488,8 @@ type CIDTable struct {
 var knownHashes = map[string]string{
 	// Dart 2.17.x (Flutter 2.17.0 stable + betas)
 	"1441d6b13b8623fa7fbf61433abebd31": "2.17.6", // Flutter 2.17.0.stable
-	"a0cb0c928b23bc17a26e062b351dc44d": "2.17.6", // Flutter 2.17.0-182.2.beta
-	"ded6ef11c73fdc638d6ff6d3ad22a67b": "2.17.6", // Flutter 2.17.0-69.2.beta
 	// Dart 3.0.x (Flutter 3.10.x)
+	"aa64af18e7d086041ac127cc4bc50c5e": "3.0.5", // Dart 3.0.0-3.0.2; same VM_SNAPSHOT_FILES family except raw_object.h tags() accessor
 	"90b56a561f70cd55e972cb49b79b3d8b": "3.0.5", // Flutter 3.10.4
 	// Dart 3.1.x (Flutter 3.13.x)
 	"7dbbeeb8ef7b91338640dca3927636de": "3.1.0", // Flutter 3.13.9
@@ -487,7 +501,6 @@ var knownHashes = map[string]string{
 	"d20a1be77c3d3c41b2a5accaee1ce549": "3.4.3", // Flutter 3.22.0
 	// Dart 3.5.x (Flutter 3.24.x)
 	"80a49c7111088100a233b2ae788e1f48": "3.5.0", // Flutter 3.24.0
-	"cda356e9bae476c70de33809fd92e009": "3.5.0", // Dart 3.5.1 (from blutter SDK v3.5.1/runtime/vm/version.cc)
 	// Dart 3.6.x (Flutter 3.27.x)
 	"f956f595844a2f845a55707faaaa51e4": "3.6.2", // Flutter 3.27.1
 	// Dart 3.7.x (Flutter 3.29.x)
@@ -517,7 +530,6 @@ var knownHashes = map[string]string{
 	// All three now map to one profile. The unknown-hash fallback is what made
 	// this worth chasing: it hands back a 3.9.2-shaped placeholder, under which
 	// 3.12.0 died in the String cluster rather than being reported unsupported.
-	"bf2a89a0870c9457c268c1bc89403fe1": "3.12.2", // dart-lang/sdk main (pre-release)
 	"41be3daaabd524b8aa7423bc24584957": "3.12.2", // Flutter 3.44.0 (Dart 3.12.0)
 	"ace654289f5abc240509fc941453ebc5": "3.12.2", // Flutter 3.44.7 (Dart 3.12.2)
 
@@ -529,11 +541,7 @@ var knownHashes = map[string]string{
 
 	// Dart 2.14-2.19 (supported with CID tables)
 	"9cf77f4405212c45daf608e1cd646852": "2.14.0", // Flutter 2.5.0
-	"659a72e41e3276e882709901c27de33d": "2.14.0", // Flutter 2.4.0
-	"f10776149bf76be288def3c2ca73bdc1": "2.15.0", // Flutter 2.6.0-5.2.pre (NativePointer inserted, CIDs shifted +1 from v2.14)
-	"24d9d411c2f90c8fbe8907f99e89d4b0": "2.15.0", // Flutter 2.7.0-3.0.pre
 	"d56742caf7b3b3f4bd2df93a9bbb5503": "2.16.0", // Flutter 2.16.0-134.1.beta
-	"3318fe66091c0ffbb64faec39976cb7d": "2.16.0", // Flutter 2.16.0-80.1.beta
 	// Flutter 2.8.0 ships Dart 2.15.0, not 2.16.0 -- the comment recorded the
 	// Flutter version correctly and the Dart version wrongly. Proven by
 	// building this exact hash: flutter_for_dart_2.15.0 is Flutter 2.8.0, its
@@ -543,14 +551,8 @@ var knownHashes = map[string]string{
 	"adf563436d12ba0d50ea5beb7f3be1bb": "2.15.0", // Flutter 2.8.0
 	"b0e899ec5a90e4661501f0b69e9dd70f": "2.18.0", // Flutter 3.3.0-0.1.pre
 	"b6d0a1f034d158b0d37b51d559379697": "2.18.0", // Flutter 3.3.10
-	"8e50e448b241be23b9e990094f4dca39": "2.18.0", // Flutter 2.18.0.165
-	"6a9b5a03a7e784a4558b10c769f188d9": "2.18.0", // Flutter 2.18.0.44
 	"adb4292f3ec25074ca70abcd2d5c7251": "2.19.0", // Flutter 3.7.12
 	"501ef5cbd64ca70b6b42672346af6a8a": "2.19.0", // Flutter 3.7.0
-
-	// Dart 3.0-3.1 additional hashes
-	"36b0375d284ee2af0d0fffc6e6e48fde": "3.0.5", // Flutter 3.11.0-0.1.pre
-	"16ad76edd19b537bf6ea64fdd31977a7": "3.0.5", // Flutter 3.12.0
 
 	// Dart 2.10-2.13 (supported with CID tables, int32 tag format)
 	"8ee4ef7a67df9845fba331734198a953": "2.10.0", // Flutter 1.22.6
@@ -712,7 +714,8 @@ var cidsV214 = CIDTable{
 // get +0 (NativePointer +1, GOA removal -1), Map/Set/Array/ImmutableArray get +0,
 // GOA moves from CID 57 to CID 81, String and beyond get +1.
 // No ImmutableLinkedHashMap/Set (those were added in v2.16).
-// Hash f10776149bf76be288def3c2ca73bdc1 (Flutter 2.6.0-5.2.pre) uses this layout.
+// The exact 2.15.0 SDK and corpus samples use this layout; SDK drift gates
+// derive the CID table independently from class_id.h.
 var cidsV215 = CIDTable{
 	Class: 5, PatchClass: 6, Function: 7, TypeParameters: 8,
 	ClosureData: 9, FfiTrampolineData: 10, Field: 11, Script: 12,
@@ -1136,6 +1139,7 @@ var versionProfiles = map[string]*VersionProfile{
 type wireDimensions struct {
 	symbols                 SnapshotSymbolLayout
 	compression             CompressionFeatureStyle
+	targetFeatures          TargetFeatureStyle
 	instructionsImage       InstructionsImageLayout
 	fullAOTKind             SnapshotKind
 	dataImageAlignment      int64
@@ -1184,7 +1188,17 @@ func init() {
 		if p == nil || !p.Supported || p.CIDs == nil {
 			panic(fmt.Sprintf("snapshot: profile %s is incomplete", version))
 		}
+		// SDK @2.10.0..2.18.0 runtime/vm/dart.cc emits the ABI-qualified
+		// arm64-sysv/x64-sysv vocabulary; @2.19.0+ emits arm64/x64 followed by
+		// a separate OS token. TestWireDimensionsMatchSDK re-derives this boundary
+		// from each exact supported SDK tag.
+		if VersionAtLeast(version, "2.19.0") {
+			d.targetFeatures = TargetFeatureArchAndOS
+		} else {
+			d.targetFeatures = TargetFeatureLegacyABI
+		}
 		if d.symbols == SnapshotSymbolsUnknown || d.compression == CompressionFeatureUnknown ||
+			d.targetFeatures == TargetFeatureUnknown ||
 			d.instructionsImage == InstructionsImageUnknown || d.dataImageAlignment <= 0 || d.imageHeaderSize == 0 ||
 			d.classIDTagPos <= 0 || d.classIDTagSize <= 0 ||
 			(d.fullAOTKind != KindFullAOT && d.fullAOTKind != KindFullAOTV210) ||
@@ -1193,6 +1207,7 @@ func init() {
 		}
 		p.SnapshotSymbols = d.symbols
 		p.CompressionFeatures = d.compression
+		p.TargetFeatures = d.targetFeatures
 		p.InstructionsImage = d.instructionsImage
 		p.FullAOTKind = d.fullAOTKind
 		p.DataImageAlignment = d.dataImageAlignment

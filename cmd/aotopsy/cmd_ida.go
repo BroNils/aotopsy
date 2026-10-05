@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"aotopsy/internal/analysis"
 	"aotopsy/internal/cli"
@@ -96,7 +98,8 @@ func cmdIDA(args []string) error {
 			return err
 		}
 	}
-	if _, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, absLibPath); err != nil {
+	prov, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, absLibPath)
+	if err != nil {
 		return fmt.Errorf("verify IDA binary provenance: %w", err)
 	}
 
@@ -135,6 +138,13 @@ func cmdIDA(args []string) error {
 	}()
 	absMetaPath, _ := filepath.Abs(metaPath)
 	absDecompStage, _ := filepath.Abs(decompTx.StageDir())
+	workDir, workBinary, err := stageIDAWorkBinary(absDecompStage, absLibPath)
+	if err != nil {
+		return fmt.Errorf("stage private IDA work binary: %w", err)
+	}
+	if _, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, workBinary); err != nil {
+		return fmt.Errorf("verify private IDA work binary provenance: %w", err)
+	}
 
 	if *all {
 		cli.Errf("running IDA idalib analysis (decompiling ALL functions)...\n")
@@ -143,20 +153,55 @@ func cmdIDA(args []string) error {
 	}
 	cli.Errf("  decompile output: %s\n", decompDir)
 
-	cmd := exec.Command(python, scriptPath, absLibPath, absMetaPath, absDecompStage)
+	cmd := exec.Command(python, scriptPath, workBinary, absMetaPath, absDecompStage)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ida script failed: %w", err)
 	}
+	applyResult, err := analysis.ReadApplyResult(decompTx.StageDir())
+	if err != nil {
+		return fmt.Errorf("IDA apply did not complete: %w", err)
+	}
+	if !strings.EqualFold(applyResult.BinarySHA256, prov.SHA256) {
+		return fmt.Errorf("IDA apply completion sentinel does not match binary provenance")
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		return fmt.Errorf("remove private IDA work directory: %w", err)
+	}
+	for _, name := range []string{analysis.ApplyOKFileName, analysis.ApplyFailedFileName} {
+		if err := decompTx.RemoveStageFile(name); err != nil {
+			return fmt.Errorf("remove IDA apply sentinel: %w", err)
+		}
+	}
 	if err := decompTx.Commit(); err != nil {
 		return fmt.Errorf("publish IDA decompile generation: %w", err)
 	}
 	decompCommitted = true
 
-	cCount := analysis.CountDecompiledFiles(decompDir)
-	cli.Errf("decompiled %d functions → %s\n", cCount, decompDir)
+	cli.Errf("decompiled %d functions (%d failed) → %s\n", applyResult.Decompiled, applyResult.Failed, decompDir)
 
 	return nil
+}
+
+func stageIDAWorkBinary(stageDir, sourcePath string) (string, string, error) {
+	workDir := filepath.Join(stageDir, ".ida-work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		return "", "", err
+	}
+	workBinary := filepath.Join(workDir, "libapp.so")
+	err := output.WriteAtomic(workBinary, 0o600, func(w io.Writer) error {
+		src, err := os.Open(sourcePath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = src.Close() }()
+		_, err = io.Copy(w, src)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return workDir, workBinary, nil
 }

@@ -276,21 +276,23 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 					len(e.fir.Blocks[takenID].Preds) == 1 && e.visits[takenID] == 0
 				canInlineFall := fallID >= 0 && fallID < len(e.fir.Blocks) &&
 					len(e.fir.Blocks[fallID].Preds) == 1 && e.visits[fallID] == 0
+				// The conditional itself represents both CFG transitions. Record
+				// them from the actual parent before entering either child; child
+				// emission then owns any edges it follows from there.
+				e.recordEmittedEdge(blk.ID, takenID)
+				e.recordEmittedEdge(blk.ID, fallID)
 
 				if canInlineTaken && canInlineFall {
 					// Both branches can be inlined — emit real if/else
 					e.emit(indent, "if (%s) {", cond)
-					e.emitBlockBody(takenID, indent+1, depth+1)
-					e.visits[takenID]++
+					e.emitBlock(takenID, indent+1, depth+1)
 					e.emit(indent, "} else {")
-					e.emitBlockBody(fallID, indent+1, depth+1)
-					e.visits[fallID]++
+					e.emitBlock(fallID, indent+1, depth+1)
 					e.emit(indent, "}")
 				} else if canInlineTaken {
 					// Only taken branch can be inlined
 					e.emit(indent, "if (%s) {", cond)
-					e.emitBlockBody(takenID, indent+1, depth+1)
-					e.visits[takenID]++
+					e.emitBlock(takenID, indent+1, depth+1)
 					e.emit(indent, "}")
 					if fallID >= 0 {
 						e.emit(indent, "goto block_%d;", fallID)
@@ -354,6 +356,17 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	}
 }
 
+func (e *emitter) recordEmittedEdge(from, to int) {
+	if from < 0 || from >= len(e.fir.Blocks) || to < 0 || to >= len(e.fir.Blocks) {
+		return
+	}
+	if e.emittedEdges == nil {
+		e.emittedEdges = make(map[uint64]bool)
+	}
+	key := uint64(uint32(from))<<32 | uint64(uint32(to))
+	e.emittedEdges[key] = true
+}
+
 // emitSuccessor dispatches control to a successor block: inline it if the
 // recursion budget allows, emit a bare "continue;" if it is a genuine loop
 // back-edge (the target is still on the active recursion stack -- same
@@ -374,13 +387,7 @@ func (e *emitter) emitSuccessor(id, indent, depth int) {
 		e.stats.UnresolvedCF++
 		return
 	}
-	if e.currentBlock >= 0 && id < len(e.fir.Blocks) {
-		if e.emittedEdges == nil {
-			e.emittedEdges = make(map[uint64]bool)
-		}
-		key := uint64(uint32(e.currentBlock))<<32 | uint64(uint32(id))
-		e.emittedEdges[key] = true
-	}
+	e.recordEmittedEdge(e.currentBlock, id)
 	// A source-level try may only contain blocks whose full extents were proven
 	// protected by buildBlockTryIndex. Do not let the recursive CFG walk inline a
 	// successor outside the currently open region before the try brace closes.
