@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Removed the usage-count temp renaming from the decompiler.** The pass that
+  renamed temps to `result`/`flag`/`counter`/`accumulator` from occurrence counts
+  asserted roles the binary does not have, and its choice changed after unrelated
+  edits (a `StringBuffer.writeln()` result was printed as `counter`, then as
+  `accumulator`). Temps keep their neutral `tN` names. `compare.ReplaceIdentToken`
+  (a one-line wrapper) was deleted in favour of `stmt.ReplaceIdent`.
 - **Class-id compares narrow the object they were read from (ARM64).** A class
   id now remembers the register whose header it came from (dropped as soon as
   that register is rewritten); `cmp cid,#c; b.eq`, including the Smi-tagged

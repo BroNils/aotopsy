@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 )
@@ -108,11 +107,6 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 	x64Art := EmitPseudocode(x64Fir, nil, nil)
 	if probs := ValidateSource(x64Art.Source); len(probs) > 0 {
 		t.Errorf("x86_64 pseudocode validation failed: %v\nSource:\n%s", probs, x64Art.Source)
-	}
-
-	idStats := compare.CollectIdentStats(armArt.Source)
-	if len(idStats) == 0 {
-		t.Errorf("expected ident stats on ARM64, got 0")
 	}
 }
 
