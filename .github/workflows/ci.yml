@@ -115,6 +115,7 @@ jobs:
           grep -q -- '--- PASS: TestDartIdentifierAlphabetMatchesSDK' "$log"
           grep -q -- '--- PASS: TestWireDimensionsMatchSDK' "$log"
           grep -q -- '--- PASS: TestArgumentsDescriptorCountOffsetMatchesSDK' "$log"
+          grep -q -- '--- PASS: TestClosureEntryPointDispMatchesSDK' "$log"
       - name: Verify generated SDK tables
         env:
           AOTOPSY_TEST_SDK: '1'

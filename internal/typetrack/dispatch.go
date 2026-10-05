@@ -89,15 +89,21 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		BLRAtUnreachable      int `json:"blr_at_unreachable_invariant,omitempty"`
 		BLRAtOther            int `json:"blr_at_other,omitempty"`
 		// Declared static field bounds are the only authoritative field type source.
-		FieldTypeDeclaredHits    int  `json:"field_type_declared_hits,omitempty"`
-		FieldTypeDeclaredClasses int  `json:"field_type_declared_classes,omitempty"`
-		SelectorMonomorphicCount int  `json:"selector_monomorphic_count,omitempty"`
-		FuncReturnTypeCount      int  `json:"func_return_type_count,omitempty"`
-		FuncReturnTypeSeeds      int  `json:"func_return_type_seeds,omitempty"`
-		ArgsDescReceiverHits     int  `json:"args_desc_receiver_hits,omitempty"`
-		ArgsDescReceiverFuncs    int  `json:"args_desc_receiver_funcs,omitempty"`
-		InterIterations          int  `json:"inter_iterations,omitempty"`
-		InterConverged           bool `json:"inter_converged"`
+		FieldTypeDeclaredHits    int `json:"field_type_declared_hits,omitempty"`
+		FieldTypeDeclaredClasses int `json:"field_type_declared_classes,omitempty"`
+		SelectorMonomorphicCount int `json:"selector_monomorphic_count,omitempty"`
+		// Row identity coverage of the dispatch table's Code slots (selector_rows.go):
+		// slots whose declaring class / selector leaf were recovered. Low values mean
+		// selectorCandidates falls back to leaf-less matching and over-approximates.
+		DispatchCodeSlots     int  `json:"dispatch_code_slots,omitempty"`
+		DispatchSlotsOwned    int  `json:"dispatch_slots_with_owner,omitempty"`
+		DispatchSlotsLeafed   int  `json:"dispatch_slots_with_leaf,omitempty"`
+		FuncReturnTypeCount   int  `json:"func_return_type_count,omitempty"`
+		FuncReturnTypeSeeds   int  `json:"func_return_type_seeds,omitempty"`
+		ArgsDescReceiverHits  int  `json:"args_desc_receiver_hits,omitempty"`
+		ArgsDescReceiverFuncs int  `json:"args_desc_receiver_funcs,omitempty"`
+		InterIterations       int  `json:"inter_iterations,omitempty"`
+		InterConverged        bool `json:"inter_converged"`
 	}{
 		ResolvedBLR: bd.Resolved(),
 		TotalBLR:    bd.Total,
@@ -135,6 +141,15 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.FieldTypeDeclaredHits = ctx.FieldTypeDeclaredHits
 		report.FieldTypeDeclaredClasses = len(ctx.FieldByOwnerOffset)
 		report.SelectorMonomorphicCount = len(ctx.SelectorMonomorphic)
+		report.DispatchCodeSlots = len(ctx.DispatchSlotMeta)
+		for _, m := range ctx.DispatchSlotMeta {
+			if m.Owner >= 0 {
+				report.DispatchSlotsOwned++
+			}
+			if m.Leaf != "" {
+				report.DispatchSlotsLeafed++
+			}
+		}
 		report.FuncReturnTypeCount = len(ctx.FuncReturnType)
 		report.FuncReturnTypeSeeds = ctx.FuncReturnTypeSeeds
 		report.ArgsDescReceiverHits = ctx.ArgsDescReceiverHits

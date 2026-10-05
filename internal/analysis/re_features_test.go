@@ -117,7 +117,7 @@ func TestBuildPlatformChannels(t *testing.T) {
 		{Func: "package:my_app/pay.dart::sendPayment", Value: "com.example.app/payments"},
 	}
 
-	channels := BuildPlatformChannels(cl, pl, nil, edges, stringRefs)
+	channels := BuildPlatformChannels(cl, pl, nil, nil, edges, stringRefs)
 	if len(channels) != 2 {
 		t.Fatalf("expected 2 platform channels, got %d", len(channels))
 	}
@@ -148,7 +148,7 @@ func TestBuildPlatformChannelsDoesNotTreatViaAsAPIIdentity(t *testing.T) {
 	}}
 	refs := []disasm.StringRefRecord{{Func: "caller", Value: "plugins.flutter.io/example"}}
 
-	channels := BuildPlatformChannels(cl, pl, nil, edges, refs)
+	channels := BuildPlatformChannels(cl, pl, nil, nil, edges, refs)
 	if len(channels) != 0 {
 		t.Fatalf("Via provenance fabricated platform API call: %+v", channels)
 	}
@@ -163,9 +163,46 @@ func TestBuildPlatformChannelsResolvesDirectTargetAddressThroughFunctions(t *tes
 	}}
 	refs := []disasm.StringRefRecord{{Func: "caller", Value: "plugins.flutter.io/example"}}
 
-	channels := BuildPlatformChannels(cl, pl, funcs, edges, refs)
+	channels := BuildPlatformChannels(cl, pl, nil, funcs, edges, refs)
 	if len(channels) != 1 || len(channels[0].ChannelTypes) != 1 || channels[0].ChannelTypes[0] != "method_channel" {
 		t.Fatalf("direct-address channel binding = %+v", channels)
+	}
+}
+
+// Framework channels such as `flutter/platform` are `const MethodChannel(...)`
+// instances living in the snapshot heap: no code constructs them, so the
+// string+call join finds nothing. The Instance itself is the evidence.
+func TestBuildPlatformChannelsFromConstInstances(t *testing.T) {
+	cl := &cluster.Result{Instances: []cluster.InstanceInfo{
+		// MethodChannel(name, codec, binaryMessenger): name is the first slot.
+		{RefID: 1, CID: 351, Fields: []cluster.InstanceFieldRef{{ByteOffset: 12, Ref: 40}, {ByteOffset: 8, Ref: 10}}},
+		// BasicMessageChannel<T>: TypeArguments first, then name.
+		{RefID: 2, CID: 353, Fields: []cluster.InstanceFieldRef{{ByteOffset: 8, Ref: 41}, {ByteOffset: 12, Ref: 11}}},
+		// EventChannel with a non-reverse-domain name.
+		{RefID: 3, CID: 354, Fields: []cluster.InstanceFieldRef{{ByteOffset: 8, Ref: 12}}},
+		// Unrelated class with a string in slot 0.
+		{RefID: 4, CID: 999, Fields: []cluster.InstanceFieldRef{{ByteOffset: 8, Ref: 12}}},
+	}}
+	pl := &naming.PoolLookups{RefToStr: map[int]string{10: "flutter/platform", 11: "flutter/keydata", 12: "battery_events", 40: "codec-not-a-name"}}
+	layouts := []DartClassLayout{
+		{ClassName: "MethodChannel", ClassID: 351},
+		{ClassName: "BasicMessageChannel", ClassID: 353},
+		{ClassName: "EventChannel", ClassID: 354},
+		{ClassName: "Widget", ClassID: 999},
+	}
+	got := map[string]PlatformChannelRecord{}
+	for _, ch := range BuildPlatformChannels(cl, pl, layouts, nil, nil, nil) {
+		got[ch.ChannelName] = ch
+	}
+	want := map[string]string{"flutter/platform": "method_channel", "flutter/keydata": "basic_message_channel", "battery_events": "event_channel"}
+	if len(got) != len(want) {
+		t.Fatalf("channels = %+v, want %v", got, want)
+	}
+	for name, typ := range want {
+		ch, ok := got[name]
+		if !ok || len(ch.ChannelTypes) != 1 || ch.ChannelTypes[0] != typ || ch.Confidence != "high" || ch.ConstInstances != 1 {
+			t.Errorf("%s = %+v, want one %s const instance with high confidence", name, ch, typ)
+		}
 	}
 }
 

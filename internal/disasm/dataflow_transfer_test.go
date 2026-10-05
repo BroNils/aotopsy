@@ -297,7 +297,7 @@ func TestX86BlockEffectPreservesIncomingMoveProvenance(t *testing.T) {
 		0xff, 0xd3,
 		0xc3,
 	}
-	res := ScanX86FunctionCFG("3.12.2", code, 0x4000, nil, map[int]string{0: "CodeTarget"}, "block_transfer", nil)
+	res := ScanX86FunctionCFG("3.12.2", ClosureEntry{}, code, 0x4000, nil, map[int]string{0: "CodeTarget"}, "block_transfer", nil)
 	if len(res.Edges) != 1 || res.Edges[0].Kind != "call_indirect" {
 		t.Fatalf("edges = %+v, want one indirect CALL", res.Edges)
 	}
@@ -313,7 +313,7 @@ func TestX86FrameLoadIsNotObjectFieldProvenance(t *testing.T) {
 		0x41, 0xff, 0xd3,
 		0xc3,
 	}
-	res := ScanX86FunctionCFG("3.12.2", code, 0x4800, nil, nil, "frame_load", nil)
+	res := ScanX86FunctionCFG("3.12.2", ClosureEntry{}, code, 0x4800, nil, nil, "frame_load", nil)
 	if len(res.Edges) != 1 || res.Edges[0].Kind != "call_indirect" {
 		t.Fatalf("edges = %+v, want one indirect CALL", res.Edges)
 	}

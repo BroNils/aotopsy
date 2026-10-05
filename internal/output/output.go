@@ -48,11 +48,21 @@ func WriteSymbolsJSON(dir string, symbols []SymbolEntry) error {
 // own their schema outside this package.
 func WriteJSONFile(path string, v any) error { return writeJSON(path, v) }
 
-// WriteASM writes disassembled instructions to asm/<name>.txt.
+// WriteStagedArtifact publishes rel beneath root like WriteArtifactAtomic but
+// defers fsync to the enclosing DirTransaction.Commit. root MUST be the
+// unpublished stage directory of such a transaction; the pipeline writes tens of
+// thousands of per-function files this way and syncing each one here as well as
+// at Commit made a 8k-function app 3-4x slower than a plain write.
+func WriteStagedArtifact(root, rel string, perm os.FileMode, write func(io.Writer) error) error {
+	return artifactfs.WriteAtomicUnderStaged(root, rel, perm, write)
+}
+
+// WriteASM writes disassembled instructions to asm/<name>.txt into a transaction
+// stage (fsync deferred to the transaction's Commit).
 // name may contain path separators (e.g., "OwnerClass/func_hex") for directory grouping.
 func WriteASM(dir string, name string, insts []disasm.Inst, lookup disasm.SymbolLookup, annotators ...disasm.Annotator) error {
 	text := disasm.Format(insts, lookup, annotators...)
-	return WriteArtifactAtomic(dir, "asm/"+name+".txt", 0o644, func(w io.Writer) error {
+	return WriteStagedArtifact(dir, "asm/"+name+".txt", 0o644, func(w io.Writer) error {
 		_, err := io.WriteString(w, text)
 		return err
 	})
@@ -70,7 +80,7 @@ func WriteASMSingle(dir string, insts []disasm.Inst, lookup disasm.SymbolLookup,
 // WriteBin writes raw instruction bytes to asm/<name>.bin for CFG construction.
 // name may contain path separators (e.g., "OwnerClass/func_hex") for directory grouping.
 func WriteBin(dir string, name string, data []byte) error {
-	return WriteArtifactAtomic(dir, "asm/"+name+".bin", 0o644, func(w io.Writer) error {
+	return WriteStagedArtifact(dir, "asm/"+name+".bin", 0o644, func(w io.Writer) error {
 		_, err := w.Write(data)
 		return err
 	})

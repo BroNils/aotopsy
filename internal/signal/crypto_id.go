@@ -5,7 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"net"
+	// net/netip, not net: importing "net" pulls in runtime/cgo, which turns the
+	// binary into a dynamically linked cgo executable whose glibc per-thread malloc
+	// arenas reserve ~1 GB of address space and break the repository's
+	// `ulimit -v 2500000` budget (see TestCommandDoesNotLinkNetOrCgo).
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -645,8 +649,8 @@ func ExtractNetworkEndpoints(stringRefs []StringRefRecord) []NetworkEndpointFind
 		}
 		// IPs (skip 0.0.0.0, 127.0.0.1, 255.x)
 		for _, m := range ipRe.FindAllString(sr.Value, -1) {
-			ip := net.ParseIP(m)
-			if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || strings.HasPrefix(m, "255.") {
+			ip, err := netip.ParseAddr(m)
+			if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || strings.HasPrefix(m, "255.") {
 				continue
 			}
 			add("ip", m, sr.Func, "medium")

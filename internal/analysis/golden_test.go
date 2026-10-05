@@ -194,6 +194,9 @@ func runGolden(t *testing.T, sample, name string) {
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)
 	}
+	// Behavioural health first: a hash can be re-recorded over a dead stage, a
+	// floor cannot (see metricFloors).
+	assertMetricFloors(t, name, outDir)
 
 	got := goldenRecord{
 		Sample:      name,

@@ -122,9 +122,14 @@ func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 	if result.ClassCount < 1500 || result.ClassCount > 2500 {
 		t.Errorf("Class count: got %d, expected 1500-2500", result.ClassCount)
 	}
-	// Signal should be ~136 after C-1 fix (was 247 before)
-	if result.SignalCount < 50 || result.SignalCount > 300 {
-		t.Errorf("Signal count: got %d, expected 50-300", result.SignalCount)
+	// Measured on this sample: 104 signal functions before the signal rework, of
+	// which 80 were the `thr` category (a Thread-field access is not a behavioural
+	// signal), 5 base64 (radix-digit / hex tables, not keys: the category now
+	// requires text that decodes), 2 webview (the Flutter `Intent` string) -- 17
+	// remain (url, async, device, encryption, cloaking, gambling, ...). The band
+	// is wide on purpose; metric floors in golden_test.go carry the precise gate.
+	if result.SignalCount < 10 || result.SignalCount > 100 {
+		t.Errorf("Signal count: got %d, expected 10-100", result.SignalCount)
 	}
 }
 

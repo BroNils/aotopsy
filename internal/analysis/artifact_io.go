@@ -14,8 +14,13 @@ import (
 
 const (
 	maxMetadataArtifactBytes = int64(64 << 20)
-	maxAsmArtifactBytes      = int64(4 << 20)
-	maxFunctionBinBytes      = int64(64 << 20)
+	// maxSignalGraphBytes bounds signal_graph.json, which scales with the app:
+	// 23 MB at 8k functions, ~370 MB at the 129k-function reference app -- far
+	// past maxMetadataArtifactBytes, which made the default run's meta stage fail
+	// there on a file the signal stage had just written.
+	maxSignalGraphBytes = int64(1 << 30)
+	maxAsmArtifactBytes = int64(4 << 20)
+	maxFunctionBinBytes = int64(64 << 20)
 )
 
 // readFileBounded prevents a reused/corrupted output directory from turning a

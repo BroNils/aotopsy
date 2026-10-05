@@ -26,11 +26,15 @@ type Limits struct {
 	MaxRecordBytes int
 }
 
-// StandardLimits are deliberately generous for normal aotopsy artifacts while
-// still fitting below the repository's 2.5 GiB per-process WSL safety cap.
+// StandardLimits bound hostile or runaway artifacts, and the writer enforces the
+// SAME numbers so a file this package wrote can always be read back. They must
+// therefore clear a legitimately large app: measured on a 8,049-function sample,
+// evidence.jsonl is 21.4 MB / 79.5k rows, i.e. ~340 MB / ~1.3M rows at the
+// repository's 129k-function reference app. 1 GiB / 10M rows leaves ~3x
+// headroom while a slice-materialising reader still fits the 2.5 GiB WSL budget.
 const (
-	hardMaxBytes        int64 = 256 << 20
-	hardMaxRecords            = 2_000_000
+	hardMaxBytes        int64 = 1 << 30
+	hardMaxRecords            = 10_000_000
 	hardMaxRecordBytes        = 4 << 20
 	maxJSONNestingDepth       = 256
 )

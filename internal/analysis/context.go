@@ -542,7 +542,10 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	var fir *decompiler.FuncIR
 	if c.IsARM64 {
 		insts := disasm.Disassemble(fs.Code, disasm.Options{BaseAddr: fs.VA})
-		fir = decompiler.BuildARM64IR(name, c.DartVersion, c.Info.Version.CompressedPointers, insts, cc)
+		// Info is nil only for synthetic contexts (ffitrace tests); real analyses
+		// always carry the snapshot profile.
+		compressed := c.Info != nil && c.Info.Version != nil && c.Info.Version.CompressedPointers
+		fir = decompiler.BuildARM64IR(name, c.DartVersion, compressed, insts, cc)
 	} else {
 		xinsts, err := decompiler.DecodeX86Range(fs.Code, fs.VA)
 		if err != nil {
@@ -888,7 +891,7 @@ func (c *AnalysisContext) BuildArgRegMasks() {
 			}
 			continue
 		}
-		scan := disasm.ScanX86FunctionCFG(c.DartVersion, fs.Code, fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
+		scan := disasm.ScanX86FunctionCFG(c.DartVersion, disasm.ClosureEntryFor(c.DartVersion, c.Info.Version.CompressedPointers), fs.Code, fVA, symLk, c.PoolDisplay, c.SymbolNames[fVA], thrFields)
 		for _, e := range scan.Edges {
 			if e.Kind == "call" && e.TargetValid && e.ArgRegMask != 0 {
 				c.Enrichment.ArgRegMasks[e.TargetPC] = append(c.Enrichment.ArgRegMasks[e.TargetPC], e.ArgRegMask)

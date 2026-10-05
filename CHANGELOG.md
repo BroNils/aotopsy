@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Indirect-call candidates no longer merge unrelated selectors.** The dispatch
+  table packs selector rows by row displacement, so slot `selector_offset + cid`
+  of a class a selector does not implement usually holds another selector's
+  entry. Candidate scans now accept a slot only when its Code's declaring class
+  is the receiver class or one of its superclasses and its selector leaf is the
+  row's leaf (`typetrack/selector_rows.go`); selector immediates per method name
+  are inferred from the rows instead of `slot - ownerCID`. On a real 3.9.2 app a
+  Map-literal call had 576 "targets" of unrelated names; polymorphic sites with
+  mixed leaves went from 2780 to 0 and the largest set is a real row (~170).
+  `selector_dispatch_xref.jsonl` now has one entry per row instead of per slot.
+- **Default run exceeded the 2.5 GB address-space budget.** `internal/signal`
+  imported `net` (only for `ParseIP`), which linked cgo and glibc's per-thread
+  malloc arenas (~1 GB of address space); it uses `net/netip` now and
+  `TestCommandDoesNotLinkNetOrCgo` guards the binary.
+- **Per-file fsync made large runs 3-4x slower.** Staged artifact writes defer
+  fsync to the directory transaction, whose commit syncs files with a worker pool.
+- **`platform_channels.jsonl` finds the framework's `const MethodChannel` /
+  `EventChannel` / `BasicMessageChannel` instances** (exact evidence,
+  `confidence: high`, `const_instances`) in addition to the string+call join.
+  Record schema: `channel_name`, `channel_types[]`, `call_sites[]`,
+  `const_instances`, `confidence`.
+- Full-AOT closure calls are labelled `object_field(Closure.entry_point)` by exact
+  SDK shape (arm64 `LDR X2,[X0,#d]; BLR X2`, x64 `MOV RCX,[RAX+d]; CALL RCX`;
+  displacement derived from `runtime_offsets_extracted.h`, 2.14.0..3.13.0)
+  instead of raw `object_field+N` guesses.
+- JSONL writer and reader limits are one 1 GiB / 10M-row budget (a 129k-function
+  app writes ~340 MB of evidence); `signal_graph.json` may be up to 1 GiB when
+  `meta` reads it.
+
 ### Changed
+- **Output layout:** `--graph`, `parity` and `_debug symbolmap` write into
+  `<out>/graph`, `<out>/parity` and `<out>/symbolmap` instead of replacing `<out>`.
+  `_debug render` no longer writes `reachable.dot/svg` (the structural closure from
+  all source SCCs covered every function by construction) and `--cfg` takes
+  `--cfg-max` (default 500). `export-dart --max` defaults to 0 (unlimited).
+- Snapshots whose features string targets another architecture/OS than the ELF
+  (or an unsupported OS) are rejected; `knownHashes` lost the 18 entries that no SDK
+  tag reproduces and regained the Dart 3.0.0-3.0.2 hash.
+- Ghidra/IDA integrations publish only after a completion sentinel
+  (`.aotopsy-apply-ok` / `.aotopsy-apply-failed`) validated against the staged
+  `.c` files; IDA works on a private copy and never touches the input directory.
+- `typetrack` no longer uses observed const-instance field types or RTA filtering
+  (the Full-AOT snapshot carries only declared field types: `guarded_cid` /
+  exactness are written only for non-AOT kinds in every supported SDK).
 - **`_debug fingerprint` now has a source-bounded report contract and accepts
   only supported Dart AOT ELF inputs.** The JSON report no longer exposes the
   old `flutter_version`, generic `confidence`, or `exec_section_size` fields.

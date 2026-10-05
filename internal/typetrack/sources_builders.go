@@ -1,8 +1,6 @@
 package typetrack
 
 import (
-	"sort"
-
 	"aotopsy/internal/cluster"
 )
 
@@ -274,48 +272,37 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 			codeClusterToCID[c.ClusterIndex] = cid
 		}
 	}
+	if ctx.DispatchSlotMeta == nil {
+		ctx.DispatchSlotMeta = make(map[int]DispatchSlotMeta, len(ctx.DispatchBySlot))
+	}
 	for key, entry := range ctx.DispatchBySlot {
 		if entry.Kind != cluster.DispatchCode {
 			continue
 		}
-		// UnlinkedCall.target_name is a selector leaf, not a semantic target
-		// identity. Keep the leaf lookup separate from DispatchCodeIndexToName so
-		// "foo" can locate all implementations while the candidates themselves
-		// remain qualified (A.foo, B.foo).
-		owner := byCodeIndex[entry.ClusterIndex]
-		if owner == nil {
+		// Row identity for selectorCandidates: owner class + selector leaf of the
+		// Function this Code implements (UnlinkedCall.target_name is a selector
+		// leaf too, not a semantic target identity: "foo" locates all
+		// implementations while the candidates stay qualified A.foo / B.foo). A
+		// Code without a resolvable Function keeps Owner=-1 / empty Leaf.
+		fn := byCodeIndex[entry.ClusterIndex]
+		if fn == nil {
 			if code := codeClusterToEntry[entry.ClusterIndex]; code != nil && code.OwnerRef > cluster.RefNull {
-				owner = pl.RefToNamed[code.OwnerRef]
+				fn = pl.RefToNamed[code.OwnerRef]
 			}
 		}
-		if owner == nil {
-			continue
+		meta := DispatchSlotMeta{Owner: -1}
+		if fn != nil {
+			meta.Leaf = pl.FunctionRefToLeafName[fn.RefID]
 		}
-		leaf := pl.FunctionRefToLeafName[owner.RefID]
-		if leaf == "" {
-			continue
+		if cid, ok := codeClusterToCID[entry.ClusterIndex]; ok {
+			meta.Owner = cid
 		}
-		cid, hasCID := codeClusterToCID[entry.ClusterIndex]
-		if !hasCID {
-			continue
-		}
-		selectorImm := key - cid
-		ctx.MethodNameToSelectorImms[leaf] = append(ctx.MethodNameToSelectorImms[leaf], selectorImm)
+		ctx.DispatchSlotMeta[key] = meta
 	}
-	// Deduplicate selector immediates per name (a method may appear at the
-	// same selector from multiple classes).
-	for name, imms := range ctx.MethodNameToSelectorImms {
-		seen := map[int]bool{}
-		var dedup []int
-		for _, imm := range imms {
-			if !seen[imm] {
-				seen[imm] = true
-				dedup = append(dedup, imm)
-			}
-		}
-		sort.Ints(dedup)
-		ctx.MethodNameToSelectorImms[name] = dedup
-	}
+	// Selector immediates per leaf come from the reconstructed rows, not from
+	// `slot - ownerCID`: that only equals the row offset for the slot of the
+	// implementing class itself, and was wrong for every inherited slot.
+	ctx.MethodNameToSelectorImms = ctx.inferSelectorRowImms()
 }
 
 // buildPoolUnlinkedCallNames builds PP index → UnlinkedCall target_name.

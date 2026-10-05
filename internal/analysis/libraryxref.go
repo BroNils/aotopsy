@@ -117,7 +117,11 @@ func BuildLibraryFunctions(result *cluster.Result, pl *naming.PoolLookups) []Lib
 			get(url).funcs = append(get(url).funcs, name)
 		case pl.CT.Class:
 			url := res.LibraryURLForClassRef(no.RefID)
-			if name := pl.ResolveIsolateName(no); name != "" {
+			// "::" is the VM's synthetic per-library top-level class (it owns the
+			// library's top-level functions, which are already listed under
+			// `functions`). It is not a class the source declares, so counting it
+			// made class_count one too high for every library.
+			if name := pl.ResolveIsolateName(no); name != "" && name != "::" {
 				get(url).classes = append(get(url).classes, name)
 			}
 		}

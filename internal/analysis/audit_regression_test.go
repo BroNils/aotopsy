@@ -1466,7 +1466,7 @@ func TestRunMetaStageIncludesNestedAsmComments(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(asmPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(asmPath, []byte("0x0010  ldr x0, [x1] ; nested annotation\n"), 0o644); err != nil {
+	if err := os.WriteFile(asmPath, []byte("0x0010  ldr x0, [x1]  ; nested annotation\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

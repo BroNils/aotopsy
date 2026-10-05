@@ -112,10 +112,10 @@ func RunMetaStage(inDir, outDir, targetArch string, decompAll bool, quiet bool, 
 		logf("  %sfocus:%s ALL %d functions\n", cli.Muted, cli.Reset, len(focusFuncs))
 	} else {
 		sgPath := filepath.Join(outDir, "signal_graph.json")
-		sg, err := readJSONBounded[signal.SignalGraph](sgPath, maxMetadataArtifactBytes)
+		sg, err := readJSONBounded[signal.SignalGraph](sgPath, maxSignalGraphBytes)
 		if errors.Is(err, os.ErrNotExist) && filepath.Clean(outDir) != filepath.Clean(inDir) {
 			sgPath = filepath.Join(inDir, "signal_graph.json")
-			sg, err = readJSONBounded[signal.SignalGraph](sgPath, maxMetadataArtifactBytes)
+			sg, err = readJSONBounded[signal.SignalGraph](sgPath, maxSignalGraphBytes)
 		}
 		if err != nil {
 			return "", fmt.Errorf("read signal graph for focus set: %w", err)

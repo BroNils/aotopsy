@@ -65,6 +65,7 @@ func RunDisasmStage(
 	lookup := disasm.PlaceholderLookup(symbols)
 
 	ppAnn := disasm.PPAnnotator(poolDisplay)
+	closureEntry := disasm.ClosureEntryFor(info.Version.DartVersion, info.Version.CompressedPointers)
 
 	opts.stagef("disasm", "%s%d%s functions, pool %s%d%s entries (%d resolved)",
 		cli.Gold, len(ranges), cli.Reset, cli.Gold, len(clResult.Pool), cli.Reset, len(poolDisplay))
@@ -216,7 +217,8 @@ func RunDisasmStage(
 
 		thrCtxAnn := disasm.THRContextAnnotator(insts, thrFields)
 		ppCtxAnn := disasm.PPContextAnnotator(insts, poolDisplay)
-		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, ppCtxAnn}
+		closureAnn := disasm.ClosureCallAnnotator(insts, closureEntry)
+		annotators := []disasm.Annotator{ppAnn, thrCtxAnn, ppCtxAnn, closureAnn}
 
 		filename := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
 		out.filename = filename

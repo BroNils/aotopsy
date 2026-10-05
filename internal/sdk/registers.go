@@ -369,6 +369,41 @@ const (
 	HeapObjectTag = 1
 )
 
+// ClosureEntryPointDisp returns the tagged displacement of the cached entry point
+// that a Full-AOT ClosureCallInstr loads before calling:
+//
+//	arm64:  LDR X2, [X0, #disp] ; BLR X2   (R0 = closure)
+//	x64:    MOV RCX, [RAX+disp] ; CALL RCX (RAX = closure)
+//
+// SDK facts, derived from runtime/vm/compiler/runtime_offsets_extracted.h
+// (AOT_Closure_entry_point_offset, every supported tag 2.14.0..3.13.0, arm64 and
+// x64, compressed and uncompressed) and from il_{arm64,x64}.cc
+// ClosureCallInstr::EmitNativeCode (bodies Read at every md5 boundary):
+//
+//   - before 2.14.0 there is no Closure.entry_point_: the call loads
+//     Function.entry_point from a Function in R0/RAX, which has the same
+//     displacement as Code.entry_point, so the pair cannot be told apart from
+//     other register-entry calls. Reported as unknown (false);
+//   - 2.14.0..3.12.2: entry_point_ follows the six pointer fields, 56 uncompressed
+//     (tagged 55) and 32 compressed (tagged 31);
+//   - 3.13.0+: Closure became variable length and entry_point_ moved directly
+//     behind the header: 8 (tagged 7) in every configuration.
+//
+// TestClosureEntryPointDispMatchesSDK re-derives this table from the SDK.
+func ClosureEntryPointDisp(dartVersion string, compressedPointers bool) (int, bool) {
+	if !isSupportedDartVersion(dartVersion) || !snapshot.VersionAtLeast(dartVersion, "2.14.0") {
+		return 0, false
+	}
+	switch {
+	case snapshot.VersionAtLeast(dartVersion, "3.13.0"):
+		return 8 - HeapObjectTag, true
+	case compressedPointers:
+		return 32 - HeapObjectTag, true
+	default:
+		return 56 - HeapObjectTag, true
+	}
+}
+
 // IsCodeEntryPointDisp reports whether off is an instruction displacement for
 // one of UntaggedCode's four generated-code entry-point uwords. Every supported
 // ARM64/x64 SDK stores these as full target words even with compressed heap

@@ -26,7 +26,7 @@ import (
 // with ARM64 through PartitionBlocks, so the architecture rules themselves are
 // not duplicated here.
 // H-3 fix: thrFields parameter added to annotate THR loads with field names.
-func ScanX86FunctionCFG(dartVersion string, funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
+func ScanX86FunctionCFG(dartVersion string, closure ClosureEntry, funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
 	insts := decodeX86Flat(funcCode, funcVA)
 	if len(insts) == 0 {
 		return X86ScanResult{}
@@ -89,6 +89,11 @@ func ScanX86FunctionCFG(dartVersion string, funcCode []byte, funcVA uint64, symb
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
 				e := classifyX86Call(dartVersion, d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
+				// The generic object_field+disp provenance (if any) names the same load
+				// by displacement only; the exact SDK shape names the field.
+				if e.Kind == "call_indirect" && closureCallX86(insts, i, closure) {
+					e.Via = ClosureEntryVia
+				}
 				if e.Kind == "call" {
 					argMask := inferX86CallArgRegMaskLocal(insts, i, blk.Start)
 					e.ArgRegMask = argMask

@@ -86,6 +86,9 @@ func TestBuildDispatchTablesDerivesSelectorImmFromFunctionOwner(t *testing.T) {
 		ClusterIndex: clusterIdx,
 	}
 	ctx := minimalTypeContext()
+	// The row offset is recovered against the class universe (every class of the
+	// snapshot); a lone concrete class 42 declares and receives foo.
+	ctx.SuperClass = map[int]int{classID: -1}
 	buildDispatchTables(ctx, []cluster.DispatchTableEntry{entry}, map[int]*cluster.NamedObject{clusterIdx: fn}, result, pl, origin)
 
 	imms := ctx.MethodNameToSelectorImms["foo"]

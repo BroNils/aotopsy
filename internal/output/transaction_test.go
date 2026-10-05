@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -587,9 +588,14 @@ func TestDirTransactionCloneFromReusesDurableFileAndSkipsItsFsync(t *testing.T) 
 
 	originalSync := syncRegularFile
 	defer func() { syncRegularFile = originalSync }()
-	var synced []string
+	var (
+		syncedMu sync.Mutex
+		synced   []string
+	)
 	syncRegularFile = func(root *os.Root, path string, info os.FileInfo) error {
+		syncedMu.Lock()
 		synced = append(synced, filepath.FromSlash(path))
+		syncedMu.Unlock()
 		return originalSync(root, path, info)
 	}
 	if err := tx.Commit(); err != nil {

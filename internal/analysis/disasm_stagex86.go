@@ -138,7 +138,7 @@ func RunDisasmStageX86(
 		funcRecs = append(funcRecs, fRec)
 
 		var fnEdgeRecs []disasm.CallEdgeRecord
-		scan := disasm.ScanX86FunctionCFG(info.Version.DartVersion, funcCode, funcVA, lookup, poolDisplay, name, thrFields)
+		scan := disasm.ScanX86FunctionCFG(info.Version.DartVersion, disasm.ClosureEntryFor(info.Version.DartVersion, info.Version.CompressedPointers), funcCode, funcVA, lookup, poolDisplay, name, thrFields)
 		for _, e := range scan.Edges {
 			rec := disasm.CallEdgeRecord{
 				FromFunc: name, FromPC: fmt.Sprintf("0x%x", e.FromPC),
@@ -242,7 +242,7 @@ func RunDisasmStageX86(
 // type). Kept minimal: it is the human-readable listing only. Consumers
 // that need to re-decode instructions read the .bin written alongside it.
 func writeX86ASM(outDir, relName string, funcCode []byte, funcVA uint64, symbols disasm.SymbolLookup) error {
-	return output.WriteArtifactAtomic(outDir, "asm/"+relName+".txt", 0o644, func(w io.Writer) error {
+	return output.WriteStagedArtifact(outDir, "asm/"+relName+".txt", 0o644, func(w io.Writer) error {
 		var writeErr error
 		x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 			if d.Bad {

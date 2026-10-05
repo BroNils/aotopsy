@@ -41,6 +41,23 @@ type AtomicFile struct {
 	failed     bool
 	committed  bool
 	rootClosed bool
+	// deferSync skips the per-file and per-directory fsyncs of Commit. It is set
+	// only by the Staged constructors, for files written into an unpublished
+	// DirTransaction stage: output.DirTransaction.Commit syncs every staged file
+	// and directory bottom-up before the single publishing rename, so syncing
+	// each file twice (once here, once there) only multiplies fsync cost by the
+	// number of artifacts (two per disassembled function) without making any
+	// published state more durable.
+	deferSync bool
+}
+
+// syncDir fsyncs the artifact's directory unless durability is deferred to the
+// enclosing transaction.
+func (a *AtomicFile) syncDir() error {
+	if a.deferSync {
+		return nil
+	}
+	return syncDirectory(a.root)
 }
 
 // NewAtomicFile creates a streaming atomic writer for path. This API is for
@@ -76,6 +93,17 @@ func NewAtomicFile(path string, perm os.FileMode) (*AtomicFile, error) {
 // detected by inode/file identity, so a recovered name cannot escape or redirect
 // publication after a separate preflight check.
 func NewAtomicFileUnder(rootPath, rel string, perm os.FileMode) (*AtomicFile, error) {
+	return newAtomicFileUnder(rootPath, rel, perm, false)
+}
+
+// NewAtomicFileUnderStaged is NewAtomicFileUnder for files written into an
+// unpublished directory-transaction stage whose Commit syncs the whole
+// generation: this writer renames atomically but defers all fsyncs to it.
+func NewAtomicFileUnderStaged(rootPath, rel string, perm os.FileMode) (*AtomicFile, error) {
+	return newAtomicFileUnder(rootPath, rel, perm, true)
+}
+
+func newAtomicFileUnder(rootPath, rel string, perm os.FileMode, deferSync bool) (*AtomicFile, error) {
 	localRel, parts, err := portableRelative(rel)
 	if err != nil {
 		return nil, err
@@ -109,7 +137,7 @@ func NewAtomicFileUnder(rootPath, rel string, perm os.FileMode) (*AtomicFile, er
 			// between Lstat and Mkdir. EEXIST is safe only after the common path
 			// below re-stats and proves the object is a real directory. Only the
 			// writer that created the directory owns the parent-directory fsync.
-			if created {
+			if created && !deferSync {
 				if err := syncDirectory(root); err != nil {
 					_ = root.Close()
 					return nil, fmt.Errorf("artifactfs: sync artifact directory creation %q: %w", segment, err)
@@ -151,7 +179,12 @@ func NewAtomicFileUnder(rootPath, rel string, perm os.FileMode) (*AtomicFile, er
 	}
 
 	display := filepath.Join(absRoot, localRel)
-	return newAtomicFileInRoot(root, display, parts[len(parts)-1], perm)
+	a, err := newAtomicFileInRoot(root, display, parts[len(parts)-1], perm)
+	if err != nil {
+		return nil, err
+	}
+	a.deferSync = deferSync
+	return a, nil
 }
 
 func newAtomicFileInRoot(root *os.Root, display, finalName string, perm os.FileMode) (*AtomicFile, error) {
@@ -242,9 +275,11 @@ func (a *AtomicFile) Commit() error {
 	if a.file == nil {
 		return fmt.Errorf("artifactfs: writer for %s has no open temp file", a.display)
 	}
-	if err := a.file.Sync(); err != nil {
-		a.failed = true
-		return errors.Join(fmt.Errorf("artifactfs: sync %s: %w", a.display, err), a.Abort())
+	if !a.deferSync { // staged files are synced by the enclosing DirTransaction.Commit
+		if err := a.file.Sync(); err != nil {
+			a.failed = true
+			return errors.Join(fmt.Errorf("artifactfs: sync %s: %w", a.display, err), a.Abort())
+		}
 	}
 	if err := a.file.Close(); err != nil {
 		a.file = nil
@@ -277,7 +312,7 @@ func (a *AtomicFile) Commit() error {
 			a.failed = true
 			return errors.Join(fmt.Errorf("artifactfs: backup %s: %w", a.display, err), a.Abort())
 		}
-		if err := syncDirectory(a.root); err != nil {
+		if err := a.syncDir(); err != nil {
 			_ = removeIfIdentity(a.root, backupName, oldInfo)
 			a.failed = true
 			return errors.Join(fmt.Errorf("artifactfs: sync backup for %s: %w", a.display, err), a.Abort())
@@ -298,7 +333,7 @@ func (a *AtomicFile) Commit() error {
 	if err := a.root.Rename(a.tempName, a.finalName); err != nil {
 		if backupName != "" {
 			_ = removeIfIdentity(a.root, backupName, oldInfo)
-			_ = syncDirectory(a.root)
+			_ = a.syncDir()
 		}
 		a.failed = true
 		return errors.Join(fmt.Errorf("artifactfs: publish %s: %w", a.display, err), a.Abort())
@@ -311,7 +346,7 @@ func (a *AtomicFile) Commit() error {
 		}
 		return errors.Join(fmt.Errorf("artifactfs: verify published %s: %w", a.display, err), a.rollbackPublished(backupName, oldInfo))
 	}
-	if err := syncDirectory(a.root); err != nil {
+	if err := a.syncDir(); err != nil {
 		return errors.Join(fmt.Errorf("artifactfs: sync published %s: %w", a.display, err), a.rollbackPublished(backupName, oldInfo))
 	}
 
@@ -322,7 +357,7 @@ func (a *AtomicFile) Commit() error {
 		if err := removeIfIdentity(a.root, backupName, oldInfo); err != nil {
 			return errors.Join(fmt.Errorf("artifactfs: cleanup backup for %s: %w", a.display, err), a.closeRoot())
 		}
-		if err := syncDirectory(a.root); err != nil {
+		if err := a.syncDir(); err != nil {
 			return errors.Join(fmt.Errorf("artifactfs: sync backup cleanup for %s: %w", a.display, err), a.closeRoot())
 		}
 	}
@@ -365,7 +400,7 @@ func (a *AtomicFile) rollbackPublished(backupName string, oldInfo os.FileInfo) e
 			errs = append(errs, err)
 		}
 	}
-	if err := syncDirectory(a.root); err != nil {
+	if err := a.syncDir(); err != nil {
 		errs = append(errs, fmt.Errorf("artifactfs: sync rollback: %w", err))
 	}
 	a.failed = true
@@ -410,6 +445,23 @@ func WriteAtomicUnder(rootPath, rel string, perm os.FileMode, write func(io.Writ
 		return fmt.Errorf("artifactfs: nil writer for %s", rel)
 	}
 	a, err := NewAtomicFileUnder(rootPath, rel, perm)
+	if err != nil {
+		return err
+	}
+	if err := write(a); err != nil {
+		return errors.Join(err, a.Abort())
+	}
+	return a.Commit()
+}
+
+// WriteAtomicUnderStaged is WriteAtomicUnder for files inside an unpublished
+// directory-transaction stage: the rename is atomic but fsync is left to the
+// transaction's Commit (see AtomicFile.deferSync). Use it only for such stages.
+func WriteAtomicUnderStaged(rootPath, rel string, perm os.FileMode, write func(io.Writer) error) error {
+	if write == nil {
+		return fmt.Errorf("artifactfs: nil writer for %s", rel)
+	}
+	a, err := NewAtomicFileUnderStaged(rootPath, rel, perm)
 	if err != nil {
 		return err
 	}

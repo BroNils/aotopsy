@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"aotopsy/internal/artifactfs"
 )
@@ -231,6 +233,7 @@ func validateAndSyncGeneration(root *os.Root, clonedDurable map[string]os.FileIn
 		info os.FileInfo
 	}
 	dirs := []dirEntry{{path: "."}}
+	var pending []pendingFile
 	err := fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -259,12 +262,13 @@ func validateAndSyncGeneration(root *os.Root, clonedDurable map[string]os.FileIn
 		if durableInfo, ok := clonedDurable[rel]; ok && os.SameFile(info, durableInfo) {
 			return nil
 		}
-		if err := syncRegularFile(root, path, info); err != nil {
-			return fmt.Errorf("sync staged artifact %s: %w", path, err)
-		}
+		pending = append(pending, pendingFile{path: path, info: info})
 		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := syncFilesParallel(root, pending); err != nil {
 		return err
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
@@ -303,6 +307,62 @@ func validateAndSyncGeneration(root *os.Root, clonedDurable map[string]os.FileIn
 		}
 	}
 	return nil
+}
+
+type pendingFile struct {
+	path string
+	info os.FileInfo
+}
+
+// syncFileWorkers bounds concurrent fsyncs. A generation holds one or two files
+// per disassembled function (tens of thousands); fsyncs are latency-bound, so
+// issuing them from a small pool turned ~32 s of serial syncing on a 8k-function
+// app into a few seconds without weakening the guarantee that every staged file
+// is durable before the publishing rename.
+const syncFileWorkers = 16
+
+func syncFilesParallel(root *os.Root, files []pendingFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	workers := syncFileWorkers
+	if workers > len(files) {
+		workers = len(files)
+	}
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		next     atomic.Int64
+	)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(files) {
+					return
+				}
+				mu.Lock()
+				failed := firstErr != nil
+				mu.Unlock()
+				if failed {
+					return
+				}
+				if err := syncRegularFile(root, files[i].path, files[i].info); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("sync staged artifact %s: %w", files[i].path, err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 func (tx *DirTransaction) StageDir() string {

@@ -4,7 +4,7 @@
 package signal
 
 import (
-	"net"
+	"net/netip"
 	neturl "net/url"
 	"regexp"
 	"strings"
@@ -449,8 +449,8 @@ func ClassifyString(dartVersion, value string) []string {
 
 func containsRoutableIPv4Literal(value string) bool {
 	for _, candidate := range reIPLiteral.FindAllString(value, -1) {
-		ip := net.ParseIP(candidate)
-		if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+		ip, err := netip.ParseAddr(candidate)
+		if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
 			continue
 		}
 		return true

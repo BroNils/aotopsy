@@ -15,15 +15,41 @@ type PlatformChannelRecord struct {
 	ChannelName  string   `json:"channel_name"`
 	ChannelTypes []string `json:"channel_types"` // method_channel, event_channel, basic_message_channel
 	CallSites    []string `json:"call_sites"`
-	Confidence   string   `json:"confidence"`
+	// ConstInstances counts canonical const channel Instances in the snapshot
+	// carrying this name (exact evidence; see BuildPlatformChannels).
+	ConstInstances int    `json:"const_instances,omitempty"`
+	Confidence     string `json:"confidence"`
 }
 
-// BuildPlatformChannels joins three independent facts instead of guessing from
-// string spelling: a channel-looking string exists, a function references that
-// exact string, and the same function calls a Flutter channel API. Only joined
-// records are emitted; a reverse-domain string by itself is not proof that it is
-// a platform channel.
-func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) []PlatformChannelRecord {
+// channelClassTypes maps the Flutter services channel classes to the channel
+// type reported in platform_channels.jsonl. OptionalMethodChannel extends
+// MethodChannel.
+var channelClassTypes = map[string]string{
+	"MethodChannel":         "method_channel",
+	"OptionalMethodChannel": "method_channel",
+	"EventChannel":          "event_channel",
+	"BasicMessageChannel":   "basic_message_channel",
+}
+
+// channelNameSlotWindow is how many leading reference slots of a channel instance
+// are searched for the `name` String. Flutter declares `final String name`
+// first in MethodChannel and EventChannel; BasicMessageChannel<T> puts its
+// TypeArguments pointer ahead of it.
+const channelNameSlotWindow = 3
+
+// BuildPlatformChannels reports Flutter platform channels from two independent,
+// exact kinds of evidence instead of guessing from string spelling:
+//
+//  1. const channel instances: the framework's own channels
+//     (`flutter/platform`, `flutter/navigation`, ...) and any app channel written
+//     as `const MethodChannel('x')` are canonical heap Instances in the snapshot,
+//     never constructed by code. An Instance of MethodChannel / EventChannel /
+//     BasicMessageChannel (class names from layouts) whose leading slots hold a
+//     String is exactly such a channel. Confidence "high".
+//  2. dynamic constructions: a function references a channel-looking string AND
+//     calls a Flutter channel API. A reverse-domain string by itself is not proof.
+//     Confidence "medium".
+func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, layouts []DartClassLayout, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, stringRefs []disasm.StringRefRecord) []PlatformChannelRecord {
 	if cl == nil || pl == nil {
 		return nil
 	}
@@ -36,6 +62,39 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, funcs []d
 		rec := &PlatformChannelRecord{ChannelName: name, Confidence: "medium"}
 		channelMap[name] = rec
 		return rec
+	}
+
+	// 0. Const channel instances (exact).
+	channelByCID := make(map[int]string)
+	for _, l := range layouts {
+		if typ, ok := channelClassTypes[l.ClassName]; ok {
+			channelByCID[int(l.ClassID)] = typ
+		}
+	}
+	constInstances := make(map[string]int)
+	if len(channelByCID) > 0 {
+		for i := range cl.Instances {
+			inst := &cl.Instances[i]
+			typ, ok := channelByCID[inst.CID]
+			if !ok {
+				continue
+			}
+			slots := append([]cluster.InstanceFieldRef(nil), inst.Fields...)
+			sort.Slice(slots, func(a, b int) bool { return slots[a].ByteOffset < slots[b].ByteOffset })
+			if len(slots) > channelNameSlotWindow {
+				slots = slots[:channelNameSlotWindow]
+			}
+			for _, slot := range slots {
+				name, ok := pl.StringForRef(slot.Ref)
+				if !ok || name == "" {
+					continue
+				}
+				rec := getOrCreate(name)
+				rec.ChannelTypes = append(rec.ChannelTypes, typ)
+				constInstances[name]++
+				break
+			}
+		}
 	}
 
 	// 1. Scan pool strings for candidate channel names.
@@ -98,6 +157,10 @@ func BuildPlatformChannels(cl *cluster.Result, pl *naming.PoolLookups, funcs []d
 		rec.ChannelTypes = slices.Compact(rec.ChannelTypes)
 		slices.Sort(rec.CallSites)
 		rec.CallSites = slices.Compact(rec.CallSites)
+		if n := constInstances[rec.ChannelName]; n > 0 {
+			rec.ConstInstances = n
+			rec.Confidence = "high"
+		}
 		results = append(results, *rec)
 	}
 

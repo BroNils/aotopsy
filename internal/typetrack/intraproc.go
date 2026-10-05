@@ -1,8 +1,6 @@
 package typetrack
 
 import (
-	"sort"
-
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
@@ -141,34 +139,14 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 		ctx.SelectorCache[imm] = result
 		return result
 	}
-	seen := map[string]bool{}
-	var targets []string
 	// SuperClass is built from every isolate + VM ClassInfo, so its keys are a
 	// structural runtime-CID universe. Enumerating those CIDs and looking up
 	// `cid+imm` is strictly safer than iterating every populated dispatch slot
-	// and treating `slot-imm` as a hypothetical CID: an unrelated selector's
-	// code slot can otherwise alias an integer that is not a real class.
-	for cid := range ctx.SuperClass {
-		if cid < 0 {
-			continue
-		}
-		entry, ok := ctx.DispatchBySlot[cid+imm]
-		if !ok {
-			continue
-		}
-		if entry.Kind != cluster.DispatchCode {
-			continue
-		}
-		if name, ok := ctx.DispatchCodeIndexToName[entry.ClusterIndex]; ok && name != "" {
-			if !seen[name] {
-				seen[name] = true
-				targets = append(targets, name)
-			}
-		}
-	}
-	// DispatchBySlot is a map: sort so the same binary yields the same
-	// candidate list (and the same call_edges.jsonl) on every run.
-	sort.Strings(targets)
+	// and treating `slot-imm` as a hypothetical CID. Slots that the SDK's
+	// row-displacement packing placed there for OTHER selectors are rejected by
+	// selectorRowCandidates (owner/leaf row identity). The result is sorted, so
+	// the same binary yields the same call_edges.jsonl on every run.
+	targets := ctx.selectorRowCandidates(imm)
 	// Cache the result for future lookups with the same imm.
 	ctx.SelectorCache[imm] = targets
 	// If exactly one unique name, record as monomorphic for future

@@ -244,6 +244,13 @@ type TypeContext struct {
 	// to that implementation or to no code entry.
 	SelectorMonomorphic map[int]string
 
+	// DispatchSlotMeta records, for every Code slot of the dispatch table (same
+	// key as DispatchBySlot), the owner class of the implementing Function and its
+	// selector leaf name. selectorCandidates uses it to tell the slots of ONE
+	// selector row apart from slots of other rows that the SDK's row-displacement
+	// packing placed at cid+imm; see selector_rows.go.
+	DispatchSlotMeta map[int]DispatchSlotMeta
+
 	// Debug counters.
 	// PPHits counts object-pool loads that RESOLVED to something: an exact runtime
 	// object class, or a KnownStub for Code/type-testing/unlinked-call/closure
@@ -465,6 +472,7 @@ func BuildTypeContext(
 		SelectorOffsets:         make(map[uint64]int),
 		SelectorCache:           make(map[int][]string),
 		SelectorMonomorphic:     make(map[int]string),
+		DispatchSlotMeta:        make(map[int]DispatchSlotMeta),
 	}
 	if profile != nil {
 		ctx.DartVersion = profile.DartVersion
