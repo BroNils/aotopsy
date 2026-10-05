@@ -478,6 +478,20 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 	return false
 }
 
+// noteSelectorReceiver is a per-site diagnostic: what is the receiver object
+// whose class id feeds this selector-only dispatch?
+func noteSelectorReceiver(tc *transferCtx, cidReg int) {
+	src := tc.state[cidReg].SrcReg - 1
+	switch {
+	case src < 0 || src >= 31:
+		tc.ctx.hitMetric("sel_recv_nolink", tc.inst.Addr, &tc.ctx.SelRecvNoLink)
+	case tc.state[src].Kind == LatticeClassBound:
+		tc.ctx.hitMetric("sel_recv_bound", tc.inst.Addr, &tc.ctx.SelRecvBound)
+	default:
+		tc.ctx.hitMetric("sel_recv_top", tc.inst.Addr, &tc.ctx.SelRecvTop)
+	}
+}
+
 // handleDispatchArith handles cases 3/4/4b/4c: ADD/SUB for dispatch slot
 // computation, including compressed-pointer decompression.
 func handleDispatchArith(tc *transferCtx) bool {
@@ -505,6 +519,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		} else if tc.state[rn].Kind == LatticeUnknownClassID {
+			noteSelectorReceiver(tc, rn)
 			tc.state[rd] = SelectorDispatch(imm)
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
@@ -523,6 +538,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		} else if tc.state[rn].Kind == LatticeUnknownClassID {
+			noteSelectorReceiver(tc, rn)
 			tc.state[rd] = SelectorDispatch(-imm)
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
@@ -579,9 +595,9 @@ func handleFieldLoad(tc *transferCtx) bool {
 		if base < 31 && isObjectClass(tc.state[base].Kind) {
 			if imm9 == -1 {
 				if cid, exact := exactObjectClassID(tc.state[base]); exact {
-					tc.state[rt] = ExactHeaderTags(cid)
+					tc.state[rt] = ExactHeaderTags(cid).linkedTo(base, rt)
 				} else {
-					tc.state[rt] = UnknownHeaderTags()
+					tc.state[rt] = UnknownHeaderTags().linkedTo(base, rt)
 				}
 				tc.ctx.hitMetric(metricHeader, tc.inst.Addr, &tc.ctx.HeaderHits)
 				return true
@@ -611,7 +627,7 @@ func handleFieldLoad(tc *transferCtx) bool {
 			}
 		}
 		if imm9 == -1 && base < 31 {
-			tc.state[rt] = UnknownHeaderTags()
+			tc.state[rt] = UnknownHeaderTags().linkedTo(base, rt)
 			tc.ctx.hitMetric(metricHeader, tc.inst.Addr, &tc.ctx.HeaderHits)
 			return true
 		}
@@ -641,9 +657,9 @@ func handleFieldLoad(tc *transferCtx) bool {
 		}
 		if imm9 == 1 && base < 31 {
 			if cid, exact := exactObjectClassID(tc.state[base]); exact {
-				tc.state[rt] = ExactClassID(cid)
+				tc.state[rt] = ExactClassID(cid).linkedTo(base, rt)
 			} else {
-				tc.state[rt] = UnknownClassID()
+				tc.state[rt] = UnknownClassID().linkedTo(base, rt)
 			}
 			tc.ctx.hitMetric(metricHeader, tc.inst.Addr, &tc.ctx.HeaderHits)
 			return true

@@ -263,12 +263,20 @@ type TypeContext struct {
 	// successful resolution, so typetrack_report.json's "pool_hits" meant
 	// attempts on one architecture and resolutions on the other, under the
 	// same key.
-	PPHits       int
-	PPLoads      int
-	HeaderHits   int
-	UBFXHits     int
-	ADDClassHits int
-	DispatchHits int
+	PPHits     int
+	PPLoads    int
+	HeaderHits int
+	// NarrowSrcHits counts equality edges that narrowed the object a class id
+	// was read from, counted once per branch site.
+	NarrowSrcHits int
+	// SelRecvBound / SelRecvTop count selector-only dispatch sites (once per
+	// site) by what the linked receiver object is known to be at the ADD/SUB.
+	SelRecvBound  int
+	SelRecvTop    int
+	SelRecvNoLink int
+	UBFXHits      int
+	ADDClassHits  int
+	DispatchHits  int
 	// AllocStubHits counts calls resolved to a per-class allocation stub,
 	// where the result register's class comes from Code.owner rather than
 	// from any register the caller set up. Both architectures.

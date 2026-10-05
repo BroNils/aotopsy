@@ -48,12 +48,16 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		TotalBLR    int          `json:"total_blr"`
 		BLR         BLRBreakdown `json:"blr"`
 		// Per-source hit counters (omitted when no context was supplied).
-		PoolHits     int `json:"pool_hits,omitempty"`
-		PoolLoads    int `json:"pool_loads,omitempty"`
-		HeaderHits   int `json:"header_hits,omitempty"`
-		DispatchHits int `json:"dispatch_hits,omitempty"`
-		UBFXHits     int `json:"ubfx_hits,omitempty"`
-		ADDClassHits int `json:"add_class_hits,omitempty"`
+		PoolHits      int `json:"pool_hits,omitempty"`
+		PoolLoads     int `json:"pool_loads,omitempty"`
+		HeaderHits    int `json:"header_hits,omitempty"`
+		NarrowSrcHits int `json:"narrow_src_hits,omitempty"`
+		SelRecvBound  int `json:"sel_recv_bound,omitempty"`
+		SelRecvTop    int `json:"sel_recv_top,omitempty"`
+		SelRecvNoLink int `json:"sel_recv_nolink,omitempty"`
+		DispatchHits  int `json:"dispatch_hits,omitempty"`
+		UBFXHits      int `json:"ubfx_hits,omitempty"`
+		ADDClassHits  int `json:"add_class_hits,omitempty"`
 		// AllocStubHits counts calls whose result class came from a
 		// per-class allocation stub's Code.owner -- a structural fact, not
 		// an inference from registers. Both architectures.
@@ -113,6 +117,10 @@ func WriteTypeInferenceReport(outDir string, bd BLRBreakdown, ctx *TypeContext) 
 		report.PoolHits = ctx.PPHits
 		report.PoolLoads = ctx.PPLoads
 		report.HeaderHits = ctx.HeaderHits
+		report.NarrowSrcHits = ctx.NarrowSrcHits
+		report.SelRecvBound = ctx.SelRecvBound
+		report.SelRecvTop = ctx.SelRecvTop
+		report.SelRecvNoLink = ctx.SelRecvNoLink
 		report.DispatchHits = ctx.DispatchHits
 		report.UBFXHits = ctx.UBFXHits
 		report.AllocStubHits = ctx.AllocStubHits

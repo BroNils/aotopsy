@@ -249,6 +249,54 @@ func recordFieldAccess(result *IntraResult, ctx *TypeContext, receiverCID int, b
 	})
 }
 
+// dropWrittenSrcLinks forgets every header/class-id source link whose source
+// register this instruction rewrote: after the write the register no longer
+// holds the object the cid was read from, so narrowing it would be unsound.
+func dropWrittenSrcLinks(state *[31]TypeLattice, raw uint32) {
+	for _, dst := range arm64.DstRegsOfInst(raw) {
+		if dst < 0 || dst >= 31 {
+			continue
+		}
+		for r := range state {
+			if state[r].SrcReg == dst+1 {
+				state[r].SrcReg = 0
+			}
+		}
+	}
+}
+
+// narrowByClassIDCompare applies the equality edge of `cmp cidReg, #imm`.
+// The compared register is exactly imm (class-id scalar) or imm>>1 (Smi-tagged
+// by LSL #1); when it still remembers the object its header was read from,
+// that object is exactly that class on this edge -- the emitted ladders of
+// EmitTestAndCall/CheckCids are `is`/polymorphic-call tests on that object.
+func narrowByClassIDCompare(st *[31]TypeLattice, cmpReg, cmpImm int, ctx *TypeContext, pc uint64) {
+	cur := st[cmpReg]
+	cid := cmpImm
+	switch {
+	case isClassID(cur.Kind):
+		st[cmpReg] = ExactClassID(cmpImm)
+		st[cmpReg].SrcReg = cur.SrcReg
+	case cur.Kind == LatticeTaggedClassID:
+		if cmpImm&1 != 0 {
+			return
+		}
+		cid = cmpImm >> 1
+		st[cmpReg] = TypeLattice{Kind: LatticeTaggedClassID, ClassID: cid, SrcReg: cur.SrcReg}
+	default:
+		return
+	}
+	src := cur.SrcReg - 1
+	if src < 0 || src >= 31 || src == cmpReg {
+		return
+	}
+	if k := st[src].Kind; k == LatticeExactClass && st[src].ClassID != cid {
+		return // contradictory edge (dead path): keep the earlier fact
+	}
+	st[src] = ExactClass(cid)
+	ctx.hitMetric("narrow_src", pc, &ctx.NarrowSrcHits)
+}
+
 func arm64WritesRegister(raw uint32, reg int) bool {
 	for _, dst := range arm64.DstRegsOfInst(raw) {
 		if dst == reg {
@@ -540,6 +588,9 @@ func AnalyzeFunction(
 			if inst.Bad {
 				hasCmp = false
 				transferInstruction(&state, inst, 0, ctx, result, lca, stackTypes, &shadowSP)
+				for r := range state {
+					state[r].SrcReg = 0
+				}
 				prevRaw = 0
 				continue
 			}
@@ -566,6 +617,7 @@ func AnalyzeFunction(
 				hasCmp = false
 			}
 			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes, &shadowSP)
+			dropWrittenSrcLinks(&state, inst.Raw)
 			prevRaw = inst.Raw
 		}
 
@@ -585,7 +637,7 @@ func AnalyzeFunction(
 		}
 		if eqSucc >= 0 {
 			branchPC := blk.insts[len(blk.insts)-1].Addr
-			if isClassID(state[cmpReg].Kind) {
+			if isClassID(state[cmpReg].Kind) || state[cmpReg].Kind == LatticeTaggedClassID {
 				ctx.recordNarrowMetric(branchPC, narrowMetricHit)
 			} else {
 				ctx.recordNarrowMetric(branchPC, narrowMetricNoType)
@@ -598,9 +650,7 @@ func AnalyzeFunction(
 				// The compared register is proven to contain a class-id scalar.
 				// On this edge the comparison succeeded, so it is exactly cmpImm.
 				narrowed := state
-				if isClassID(state[cmpReg].Kind) {
-					narrowed[cmpReg] = ExactClassID(cmpImm)
-				}
+				narrowByClassIDCompare(&narrowed, cmpReg, cmpImm, ctx, blk.insts[len(blk.insts)-1].Addr)
 				if !blockVisited[succ] {
 					newEntry = narrowed
 				} else {

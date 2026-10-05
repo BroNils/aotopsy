@@ -41,7 +41,7 @@
     "string_refs.jsonl": 2770,
     "string_value_xref.jsonl": 1408,
     "type_arguments.jsonl": 752,
-    "typetrack_report.json": 39,
+    "typetrack_report.json": 44,
     "unresolved_thr.jsonl": 0,
     "yara_findings.jsonl": 12
   },
@@ -82,7 +82,7 @@
     "string_refs.jsonl": "a4e13f918f21ccd6b397a06a1640566d51ac9b1983e24e6717997a02ab4cf0b6",
     "string_value_xref.jsonl": "2edd501e9c71b0123d3bfa16d2445237164cec5f9bb5b439406749dac93bb1c0",
     "type_arguments.jsonl": "d4a270c810a6a4c80a3d349756637a0048f9b1adfb157ca88792055b03d79920",
-    "typetrack_report.json": "b611cf71877a22cefd5c75e01fac2fddb60e228fc0fa08b4eda52acfe22c548b",
+    "typetrack_report.json": "0f3d248dc5e0d5fca9e42178cf891720be780769cb16d2e6d90f1af5bf6bc2da",
     "unresolved_thr.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "yara_findings.jsonl": "b5fdc004a72ae70952095495f366e5e2a6d1d8b8d114f5aeb9c27b44358fcd05"
   },

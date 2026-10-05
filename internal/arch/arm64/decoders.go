@@ -804,6 +804,16 @@ func UBFX(raw uint32) (rd, rn int, lsb, width int, ok bool) {
 	return rd, rn, lsb, width, true
 }
 
+// LSL1 detects LSL Xd, Xn, #1 (UBFM Xd, Xn, #63, #62), the instruction that
+// Smi-tags a class id (`LoadTaggedClassIdMayBeSmi`).
+// Mask: 0xFFFFFC00, Value: 0xD37FF800.
+func LSL1(raw uint32) (rd, rn int, ok bool) {
+	if raw&0xFFFFFC00 != 0xD37FF800 {
+		return 0, 0, false
+	}
+	return int(raw & 0x1F), int((raw >> 5) & 0x1F), true
+}
+
 // MOVOrr detects MOV (alias of ORR Xd, XZR, Xm).
 // Returns destination and source registers.
 // Encoding: sf=1 | 01 | 01010 | 00 | 0 | Rm | 000000 | Rn=31 | Rd

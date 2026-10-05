@@ -10,6 +10,28 @@ import (
 // handleUBFX handles case 5b-ubfx: UBFX/UBFM bitfield extract for class ID.
 func handleUBFX(tc *transferCtx) bool {
 	raw := tc.inst.Raw
+	// LSL #1 of a class id is the Smi tagging of LoadTaggedClassIdMayBeSmi.
+	// Anything else shifted is ordinary arithmetic and falls through to the
+	// generic destination kill.
+	if rd, rn, ok := arm64.LSL1(raw); ok {
+		if rd >= 31 {
+			return true
+		}
+		if rn < 31 && isClassID(tc.state[rn].Kind) {
+			cid := -1
+			if tc.state[rn].Kind == LatticeExactClassID {
+				cid = tc.state[rn].ClassID
+			}
+			src := tc.state[rn].SrcReg
+			tc.state[rd] = TypeLattice{Kind: LatticeTaggedClassID, ClassID: cid, SrcReg: src}
+			if src-1 == rd {
+				tc.state[rd].SrcReg = 0
+			}
+			return true
+		}
+		tc.state[rd] = Top()
+		return true
+	}
 	if rd, rn, lsb, width, ok := arm64.UBFX(raw); ok {
 		// UBFM has several aliases (including LSR) with the same basic decode.
 		// Only the exact ClassIdTag slice is evidence that the result is a class
@@ -22,12 +44,20 @@ func handleUBFX(tc *transferCtx) bool {
 			return true
 		}
 		if rn < 31 && tc.state[rn].Kind == LatticeExactHeaderTags {
+			src := tc.state[rn].SrcReg // read before rd (possibly == rn) is overwritten
 			tc.state[rd] = ExactClassID(tc.state[rn].ClassID)
+			if src-1 != rd {
+				tc.state[rd].SrcReg = src
+			}
 			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
 			return true
 		}
 		if rn < 31 && tc.state[rn].Kind == LatticeUnknownHeaderTags {
+			src := tc.state[rn].SrcReg // read before rd (possibly == rn) is overwritten
 			tc.state[rd] = UnknownClassID()
+			if src-1 != rd {
+				tc.state[rd].SrcReg = src
+			}
 			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
 			return true
 		}

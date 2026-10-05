@@ -36,6 +36,11 @@ const (
 	// UnknownClassID means the register is proven to contain a class-id integer,
 	// but its concrete value is unknown. This is useful for selector-only dispatch.
 	LatticeUnknownClassID
+	// TaggedClassID is a class id Smi-tagged by `LSL #1` (ClassID is the
+	// untagged cid, or -1 when unknown). It is deliberately NOT a class-id
+	// kind: dispatch arithmetic must not consume a shifted value. Its only
+	// consumer is the equality narrowing of the object it was read from.
+	LatticeTaggedClassID
 	// KnownDispatchIndex is either an exact dispatch-table-relative slot or, when
 	// SelectorOnly is set, only the selector immediate with an unknown CID.
 	LatticeKnownDispatchIndex
@@ -54,6 +59,25 @@ type TypeLattice struct {
 	SelectorImm  int
 
 	PPBaseOffset int
+
+	// SrcReg is 1+the register whose object header this tags/class-id value
+	// was read from (0 = unlinked). Only meaningful for header-tag and
+	// class-id kinds. The block loop drops the link as soon as that register
+	// is rewritten, so a link that survives always names the same object.
+	SrcReg int
+}
+
+// linkedTo returns t with its source link set to reg (the link is only kept
+// when it cannot name the destination itself).
+func (t TypeLattice) linkedTo(reg, dst int) TypeLattice {
+	if reg >= 0 && reg < 31 && reg != dst {
+		t.SrcReg = reg + 1
+	}
+	return t
+}
+
+func carriesSrcLink(k TypeLatticeKind) bool {
+	return isClassID(k) || isHeaderTags(k) || k == LatticeTaggedClassID
 }
 
 func Bottom() TypeLattice { return TypeLattice{Kind: LatticeBottom} }
@@ -95,8 +119,11 @@ func (a TypeLattice) Equal(b TypeLattice) bool {
 	if a.Kind != b.Kind {
 		return false
 	}
+	if carriesSrcLink(a.Kind) && a.SrcReg != b.SrcReg {
+		return false
+	}
 	switch a.Kind {
-	case LatticeExactClass, LatticeClassBound, LatticeExactHeaderTags, LatticeExactClassID:
+	case LatticeExactClass, LatticeClassBound, LatticeExactHeaderTags, LatticeExactClassID, LatticeTaggedClassID:
 		return a.ClassID == b.ClassID
 	case LatticeKnownDispatchIndex:
 		if a.SelectorOnly != b.SelectorOnly {
@@ -152,15 +179,41 @@ func joinType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 	// concrete number, not the fact that selector arithmetic is operating on a CID.
 	if isClassID(a.Kind) && isClassID(b.Kind) {
 		if a.Kind == LatticeExactClassID && b.Kind == LatticeExactClassID && a.ClassID == b.ClassID {
+			if a.SrcReg != b.SrcReg {
+				a.SrcReg = 0
+			}
 			return a
 		}
-		return UnknownClassID()
+		u := UnknownClassID()
+		if a.SrcReg == b.SrcReg {
+			u.SrcReg = a.SrcReg
+		}
+		return u
 	}
 	if isHeaderTags(a.Kind) && isHeaderTags(b.Kind) {
 		if a.Kind == LatticeExactHeaderTags && b.Kind == LatticeExactHeaderTags && a.ClassID == b.ClassID {
+			if a.SrcReg != b.SrcReg {
+				a.SrcReg = 0
+			}
 			return a
 		}
-		return UnknownHeaderTags()
+		u := UnknownHeaderTags()
+		if a.SrcReg == b.SrcReg {
+			u.SrcReg = a.SrcReg
+		}
+		return u
+	}
+	if a.Kind == LatticeTaggedClassID && b.Kind == LatticeTaggedClassID {
+		// Only the source link matters for a tagged value; the cid number is
+		// kept when both paths agree.
+		t := TypeLattice{Kind: LatticeTaggedClassID, ClassID: -1}
+		if a.ClassID == b.ClassID {
+			t.ClassID = a.ClassID
+		}
+		if a.SrcReg == b.SrcReg {
+			t.SrcReg = a.SrcReg
+		}
+		return t
 	}
 
 	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
