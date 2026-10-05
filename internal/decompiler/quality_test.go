@@ -518,19 +518,31 @@ func TestStringInterpolationIdiom(t *testing.T) {
 	input := []string{
 		"dynamic sample() {",
 		`  final msg = _StringBase._interpolate(["Hello, ", name, "!"]);`,
+		`  final one = _StringBase._interpolateSingle(x);`,
+		// Real output carries a register list, not the List literal: the parts are
+		// not visible in the call, so nothing may be invented from it.
+		`  final raw = _StringBase._interpolate(null, acc, local_m16);`,
+		// `_StringBase.concat` does not exist in any supported SDK (string `+` is
+		// an operator method), so it must never be rewritten to an interpolation.
 		`  final pair = _StringBase.concat(a, b);`,
 		"  return msg;",
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "_StringBase._interpolate") || strings.Contains(compacted, "_StringBase.concat") {
-		t.Errorf("Phase 5 violation: string interpolation call was not converted:\n%s", compacted)
+	if strings.Contains(compacted, `_StringBase._interpolate(["Hello`) || strings.Contains(compacted, "_interpolateSingle") {
+		t.Errorf("single-argument interpolation call was not converted:\n%s", compacted)
 	}
 	if !strings.Contains(compacted, `"Hello, $name!"`) {
 		t.Errorf("expected template literal '\"Hello, $name!\"', got:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, `"$a$b"`) {
-		t.Errorf("expected template literal '\"$a$b\"', got:\n%s", compacted)
+	if !strings.Contains(compacted, `"$x"`) {
+		t.Errorf("expected template literal '\"$x\"', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "_interpolate(null, acc, local_m16)") {
+		t.Errorf("a multi-argument _interpolate call must be left untouched, got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "_StringBase.concat(a, b)") {
+		t.Errorf("_StringBase.concat is not an SDK function and must not be rewritten, got:\n%s", compacted)
 	}
 }
 

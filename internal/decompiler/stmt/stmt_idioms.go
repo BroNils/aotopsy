@@ -128,8 +128,9 @@ func CollectionIdiomsStmt(stmts []Stmt) ([]Stmt, bool) {
 }
 
 var (
-	// interpolateCallRe matches `_StringBase._interpolate(...)`, `_interpolate(...)`, or `_StringBase.concat(...)`.
-	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\._interpolate|_interpolate|_StringBase\.concat)\((.+)\)`)
+	// interpolateCallRe matches `_StringBase._interpolate(...)` / `_interpolate(...)`
+	// and `_StringBase._interpolateSingle(...)` / `_interpolateSingle(...)`.
+	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\.)?(_interpolateSingle|_interpolate)\((.+)\)`)
 )
 
 // stringInterpolationIdiomStmt rewrites runtime string interpolation calls to clean Dart template literals:
@@ -138,11 +139,27 @@ var (
 //	->
 //	final t0 = "Hello, $name!";
 //
-// And:
-//
-//	final t0 = _StringBase.concat(a, b);
+//	final t0 = _StringBase._interpolateSingle(x);
 //	->
-//	final t0 = "$a$b";
+//	final t0 = "$x";
+//
+// Only the two shapes the SDK actually produces are recognised, and only when
+// the call has exactly ONE argument:
+//
+//   - `_StringBase._interpolate(final List values)` and
+//     `_StringBase._interpolateSingle(Object? o)` exist, with those single
+//     parameters, in sdk/lib/_internal/vm/lib/string_patch.dart of all 23
+//     supported SDK trees (2.10.0 .. 3.13.0).
+//   - kernel_to_il.cc StringInterpolate/StringInterpolateSingle emit
+//     `StaticCall(..., /* argument_count = */ 1, ...)`: the parts are the
+//     elements of the one List argument (built by CreateArray + StoreIndexed in
+//     kernel_binary_flowgraph.cc BuildStringConcatenation), never separate call
+//     arguments. A call whose arguments are a comma list (type-args/receiver/
+//     array registers in real output) therefore says nothing about the parts and
+//     is left untouched -- rewriting it produced `"$null$accumulator$..."`.
+//   - There is NO `_StringBase.concat`: string `+` is the operator method
+//     (String_concat native behind `operator +`), and a concatenation of two
+//     operands is not an interpolation. That rewrite was removed.
 func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 	anyChanged := false
 
@@ -165,10 +182,25 @@ func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 			if interpolateCallRe.MatchString(line.Text) {
 				newText := replaceRegexpMatchesOutsideStrings(line.Text, interpolateCallRe, func(match string) string {
 					m := interpolateCallRe.FindStringSubmatch(match)
-					if len(m) < 2 {
+					if len(m) < 3 {
 						return match
 					}
-					return formatStringInterpolation(m[1])
+					args := strings.TrimSpace(m[2])
+					if !bracketsBalanced(args) || topLevelCommaCount(args) != 0 {
+						return match // not exactly one argument
+					}
+					isList := strings.HasPrefix(args, "[") && strings.HasSuffix(args, "]")
+					switch m[1] {
+					case "_interpolate":
+						if !isList {
+							return match // the parts are not visible in the call
+						}
+					case "_interpolateSingle":
+						if isList {
+							return match
+						}
+					}
+					return formatStringInterpolation(args)
 				})
 				if newText != line.Text {
 					line.Text = newText
