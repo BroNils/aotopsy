@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta` reads it.
 
 ### Changed
+- **Class-id compares narrow the object they were read from (ARM64).** A class
+  id now remembers the register whose header it came from (dropped as soon as
+  that register is rewritten); `cmp cid,#c; b.eq`, including the Smi-tagged
+  `LSL #1` form, narrows that object to exactly that class on the equal edge.
+  `narrow_hits` 0 -> 81 on 3.9.2, `narrow_no_type` 297 -> 216. It does NOT change
+  any call resolution (monomorphic and resolved counts are identical); it is
+  groundwork. New report counters: `narrow_src_hits`, `sel_recv_bound/top/nolink`
+  (only ~4-8% of selector-only dispatch sites have a class-bounded receiver).
+- **Decompiler annotates class-id tests.** `classId(x) == N` and unsigned cid
+  range tests get a trailing comment naming the classes at the ends of the range.
+  It does not claim which type `T` the test implements (the VM's ranges follow
+  `implements` and merge across abstract classes).
 - **Output layout:** `--graph`, `parity` and `_debug symbolmap` write into
   `<out>/graph`, `<out>/parity` and `<out>/symbolmap` instead of replacing `<out>`.
   `_debug render` no longer writes `reachable.dot/svg` (the structural closure from

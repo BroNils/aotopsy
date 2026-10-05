@@ -365,6 +365,11 @@ type FuncIR struct {
 	// of a known class yields an object of `a`'s type, so a following `.b`
 	// resolves. Nil disables chain typing.
 	FieldTypeResolver func(classID int, byteOffset int64) int `json:"-"`
+
+	// ClassNameForCID returns the name of the class with this cid, or "". It
+	// annotates class-id range/equality tests with the classes they cover.
+	// Nil disables the annotation.
+	ClassNameForCID func(cid int) string `json:"-"`
 }
 
 // AllocatedClassID returns the class ID a callee name allocates, or 0. A Dart

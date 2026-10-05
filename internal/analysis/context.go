@@ -109,6 +109,7 @@ type DecompileEnrichment struct {
 	PcDescByCode           map[int][]cluster.PcDescriptorEntry
 	ParamTypeByCodeIndex   map[int]*cluster.NamedObject
 	ClassNameToID          map[string]int
+	ClassNameForCID        func(cid int) string
 	FieldTypeByClassOffset map[int]map[int64]int
 	ParamFuncTypeByRef     map[int]*cluster.FuncTypeInfo
 	TypeParams             *naming.TypeParamResolver
@@ -247,6 +248,20 @@ func (c *AnalysisContext) ensureDecompileMaps() error {
 	perClass := map[int32]map[int32]string{}
 	offsetNames := map[int32]map[string]bool{}
 	c.Enrichment.ClassNameToID = BuildClassNameToID(layouts)
+	// Straight from the Class objects, not from layouts: BuildClassLayouts
+	// drops classes with a zero instance size (variable-length ones such as the
+	// typed-data and string classes), which are exactly the ones cid-range
+	// tests name.
+	cidNames := make(map[int]string, len(result.Classes))
+	for _, ci := range result.Classes {
+		if ci.ClassID <= 0 || ci.NameRefID < 0 {
+			continue
+		}
+		if s, ok := pl.StringForRef(ci.NameRefID); ok && s != "" {
+			cidNames[int(ci.ClassID)] = s
+		}
+	}
+	c.Enrichment.ClassNameForCID = func(cid int) string { return cidNames[cid] }
 	for _, cl := range layouts {
 		if perClass[cl.ClassID] == nil {
 			perClass[cl.ClassID] = map[int32]string{}
@@ -582,6 +597,7 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	}
 	fir.FieldNameResolver = c.Enrichment.FieldNameResolver
 	fir.ClassNameToID = c.Enrichment.ClassNameToID
+	fir.ClassNameForCID = c.Enrichment.ClassNameForCID
 	if c.Enrichment.FieldTypeByClassOffset != nil {
 		fir.FieldTypeResolver = func(classID int, off int64) int {
 			if m, ok := c.Enrichment.FieldTypeByClassOffset[classID]; ok {

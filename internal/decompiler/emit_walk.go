@@ -585,7 +585,11 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
 	switch ins.CondKind {
 	case "cmp":
-		return rememberedCmpCondition(e.state, ins.CondOp, ins.CondUnsigned)
+		cond, ok := rememberedCmpCondition(e.state, ins.CondOp, ins.CondUnsigned)
+		if ok {
+			cond = annotateClassIDCondition(e.fir, cond)
+		}
+		return cond, ok
 	case "eqz":
 		return e.state.lookupReg(ins.CondReg) + " == 0", true
 	case "nez":
