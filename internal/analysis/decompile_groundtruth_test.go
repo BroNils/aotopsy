@@ -96,7 +96,7 @@ var qualityFloors = map[string]qualityFloor{
 		minLiteralRecall: 52.3, minCalleeRecall: 80.0,
 		maxDefects: map[string]int{
 			"SubtypeTestCache_arg": 0, "const_masked": 2, "double_mask": 0, "dynamicCall_dispatchTarget": 0,
-			"goto_block": 38, "interpolate_call": 126, "local_mN": 533, "masked_string_literal": 2, "orphan_block": 47,
+			"goto_block": 38, "interpolate_call": 126, "local_mN": 533, "masked_string_literal": 2, "orphan_block": 10,
 			"raw_register": 0, "runtime_stub_call": 2, "stack_sp_leak": 142,
 		},
 	},

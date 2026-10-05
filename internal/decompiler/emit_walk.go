@@ -81,7 +81,7 @@ func (e *emitter) emitOrphanBlocks(indent int) {
 		// emitted as a helper AFTER this scan, so its stub path is not marked
 		// yet. A block that is nothing but a call to a write-barrier or
 		// stack-overflow stub is never source code, whichever way it is reached.
-		if e.isRuntimeSlowPathBlock(i) {
+		if e.isRuntimeSlowPathBlock(i) || e.isPaddingBlock(i) {
 			if e.elidedSlowPaths != nil {
 				e.elidedSlowPaths[i] = true
 			}
@@ -611,6 +611,29 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	e.emit(indent, "}")
 }
 
+// isPaddingBlock reports whether block i is unreachable alignment padding: no
+// predecessor, and nothing but `int3` (0xCC, the x86-64 code-range fill) and
+// `nop`s. A function's code range on x86-64 is padded to its alignment with 0xCC,
+// so the tail after the final jump/ret decodes as a block of its own; it carries
+// no code, so listing it as an orphan was noise (91% of the x64 orphans of the
+// first 3000 functions of the 3.9.2 sample).
+func (e *emitter) isPaddingBlock(i int) bool {
+	if i < 0 || i >= len(e.fir.Blocks) {
+		return false
+	}
+	blk := &e.fir.Blocks[i]
+	if len(blk.Instrs) == 0 || len(blk.Preds) != 0 {
+		return false
+	}
+	for _, ins := range blk.Instrs {
+		s := strings.ToLower(strings.TrimSpace(ins.Src))
+		if s != "int3" && s != "int 0x3" && !strings.HasPrefix(s, "nop") {
+			return false
+		}
+	}
+	return true
+}
+
 // isRuntimeSlowPathBlock reports whether block i only calls a GC write-barrier
 // or stack-overflow stub (plus register moves and the jump back): the body of the
 // slow path that BranchIf*/StoreBarrier skip in the common case. The callee is
@@ -625,24 +648,71 @@ func (e *emitter) isRuntimeSlowPathBlock(i int) bool {
 		return false
 	}
 	calls := 0
+	thrLoaded := map[string]string{} // register -> Thread-cached stub it was just loaded with (ARM64 ldr+blr)
 	for _, ins := range blk.Instrs {
 		switch ins.Op {
 		case OpCall:
-			va, ok := parseHexVA(ins.Target)
-			if !ok {
-				return false
-			}
-			name, ok := e.symbols(va)
-			if !ok || !(strings.Contains(name, "WriteBarrier") || strings.HasPrefix(name, "StackOverflowStub")) {
+			if !isSlowPathStubName(e.slowPathCalleeName(ins, thrLoaded)) {
 				return false
 			}
 			calls++
-		case OpOther, OpJump:
+		case OpOther:
+			// `ldr x30, [THR, #off]` / `mov` of a Thread-cached stub entry point.
+			s := strings.ToLower(strings.TrimSpace(ins.Src))
+			if strings.HasPrefix(s, "ldr ") || strings.HasPrefix(s, "mov ") {
+				if dst, src, ok := strings.Cut(s[4:], ","); ok {
+					if name := e.thrStubAt(strings.TrimSpace(src)); name != "" {
+						thrLoaded[strings.TrimSpace(dst)] = name
+					}
+				}
+			}
+		case OpJump:
 		default:
 			return false
 		}
 	}
 	return calls == 1
+}
+
+// slowPathCalleeName names the callee of a call instruction from IR facts only:
+// a direct target's symbol, a register loaded from a known Thread-cached stub
+// slot, or an x86-64 `call [THR+disp]` memory operand.
+func (e *emitter) slowPathCalleeName(ins Instr, thrLoaded map[string]string) string {
+	if va, ok := parseHexVA(ins.Target); ok {
+		if name, ok := e.symbols(va); ok {
+			return name
+		}
+		return ""
+	}
+	if name, ok := thrLoaded[strings.ToLower(ins.Target)]; ok {
+		return name
+	}
+	s := strings.ToLower(strings.TrimSpace(ins.Src))
+	if strings.HasPrefix(s, "call ") {
+		return e.thrStubAt(strings.TrimSpace(s[5:]))
+	}
+	return ""
+}
+
+// thrStubAt resolves a memory operand `[THR + disp]` to its Thread-cached stub
+// name, or "".
+func (e *emitter) thrStubAt(operand string) string {
+	if e.fir.ThreadStubOffsets == nil {
+		return ""
+	}
+	op := parseOperand(operand)
+	if !op.isMem || !op.hasDisp || strings.ToLower(op.memBase) != e.fir.ThreadReg {
+		return ""
+	}
+	return e.fir.ThreadStubOffsets[op.memDisp]
+}
+
+// isSlowPathStubName reports whether a stub name is a GC write-barrier or
+// stack-overflow slow path (symbol spellings and the snake_case Thread-table
+// spellings).
+func isSlowPathStubName(name string) bool {
+	l := strings.ToLower(strings.ReplaceAll(name, "_", ""))
+	return strings.Contains(l, "writebarrier") || strings.Contains(l, "stackoverflow")
 }
 
 // markElidedSlowPath records the successor of an elided stack-overflow or

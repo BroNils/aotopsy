@@ -69,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts against `maxDepth` (that bounds nesting, not function length). 3.9.2 ground-truth gate:
   `orphan_block` 107/143 -> 11/47 and `goto_block` 127/133 -> 32/38 (arm64/x64); first 3000
   functions: orphan blocks arm64 423 -> 157, x64 3797 (before the decompiler series) -> 2400.
+- **x86-64 alignment padding is no longer reported as an orphan block.** A function's code
+  range is padded with `int3` (0xCC) to its alignment; the tail after the final `jmp`
+  decoded as a block of its own with no predecessor and was listed as lost code. That was
+  91% of all x64 orphans (2180 of 2400 in the first 3000 functions of the 3.9.2 sample).
+  An unreachable block made only of `int3`/`nop` is now accounted for. The barrier /
+  stack-overflow stub recogniser also resolves calls made through the Thread stub table
+  (`call [r14+disp]`, `ldr x30,[THR,#off]; blr x30`). First 3000 functions: x64 orphan blocks
+  2400 -> 166 (arm64 stays at 157: those are the bodies of the WriteBarrier wrapper stubs
+  themselves, which are real code); ground-truth gate x64 `orphan_block` 47 -> 10.
 - **Decompiler rebuilds string templates from the interpolation array.** A Dart
   interpolation compiles to `CreateArray(n)` + one `StoreIndexed` per piece +
   `_StringBase._interpolate(list)` (one argument; `kernel_binary_flowgraph.cc`
