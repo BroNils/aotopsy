@@ -137,6 +137,11 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 			args = stackArgs
 		}
 	}
+	if pushed := e.takePushedArgs(calleeName); len(pushed) > 0 {
+		// <= 2.19.0: every argument is pushed; the registers listed above are
+		// not arguments.
+		args = pushed
+	}
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 

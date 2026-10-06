@@ -343,6 +343,11 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 		}
 		return "", false, true
 	case "str", "stur":
+		if len(ops) >= 2 && isArm64PreIndexSPPush(fir, ops[1]) {
+			v := operandExpr(fir, s, ops[0])
+			s.Pushed = append(s.Pushed, v)
+			return fmt.Sprintf("push(%s);", v), true, true
+		}
 		if len(ops) >= 2 {
 			line, hasLine := applyStore(fir, s, ops[1], ops[0])
 			return line, hasLine, true
@@ -387,6 +392,12 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 					// Prologue frame pointer & link register save — elide in high-level pseudocode
 					return "", false, true
 				}
+			}
+			if isArm64PreIndexSPPush(fir, ops[2]) {
+				a, b := operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])
+				pushed := pushedByStp(a, b)
+				s.Pushed = append(s.Pushed, pushed...)
+				return fmt.Sprintf("push(%s);\npush(%s);", pushed[0], pushed[1]), true, true
 			}
 			// Store pair: stp src1, src2, [mem] — emit as two stores.
 			line1, handled := applyStore(fir, s, ops[2], ops[0])

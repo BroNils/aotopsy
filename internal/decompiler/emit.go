@@ -175,6 +175,10 @@ type emitter struct {
 	// blockLineStart is the index in lines where the block being emitted begins;
 	// outgoing-argument slot stores are only dropped from there on (outargs.go).
 	blockLineStart int
+	// dropAfterCall is the byte count released by the stack-pointer adjustment
+	// that immediately follows the call being emitted (0 if none); it carries
+	// the argument count of a <= 2.19.0 push-model call (outargs.go).
+	dropAfterCall int64
 	// orphanBlocks records predecessorless/unreached blocks emitted after the
 	// main structured walk. Their labels are semantic control-flow boundaries for
 	// the compactor even when no goto references them; pruning those labels would

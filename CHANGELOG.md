@@ -71,8 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (no register calling convention: `dart_calling_conventions.cc` first exists at 3.4.3) the
   stack arguments are the whole list; from 3.4 they follow the register arguments. 3.9.2, first
   3000 functions: stack-slot statements arm64 2679 -> 155, x64 3256 -> 699; ground-truth gate
-  `stack_sp_leak` 140/142 -> 0/2. The <= 2.19.0 push model is NOT bound yet (it needs
-  stack-pointer tracking, see `.tmp/review/AUDIT-2026-10.md` 11.1).
+  `stack_sp_leak` 140/142 -> 0/2.
+- **Decompiler binds pushed call arguments to the call (<= 2.19.0).** Before 3.0.5 arguments are
+  pushed (`PushArgumentInstr`) and the caller drops them after the call (`Drop(argc)`), so the
+  argument count is the stack-pointer adjustment right after the call (`ADD X15,X15,#8*argc` /
+  `ADD RSP,8*argc`). The lifter now records pushes (`str/stp [x15,#-N]!`, x64 `push`) in push
+  order (`ArgumentsPusher` uses `PushPair(reg, pending)`: in `STP Xa,Xb` Xb is the EARLIER
+  argument), and the call takes the last `argc` of them and removes their `push(...)`
+  statements. Never for VM stub callees, never when the next instruction is not the drop.
+  2.12.0 arm64, first 3000 functions: stack-slot statements 11329 -> 1215, calls with arguments
+  1570 -> 2816.
 - **Lifter: an instruction with no handler no longer leaves its destination's old value in place.**
   `ApplyOther` silently skipped unknown mnemonics, so a register written by e.g. `SBFIZ` kept the
   value from BEFORE the instruction and later reads printed it (`describeConfig` showed

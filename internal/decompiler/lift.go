@@ -45,6 +45,12 @@ type LiftState struct {
 	// Path-local: dropped at block entry and at every call, never merged.
 	OutSlots map[int64]string
 
+	// Pushed lists, in push order, the values pushed in the CURRENT block
+	// (<= 2.19.0 PushArgument model: arm64 `str/stp [x15, #-N]!`, x64 `push`).
+	// The call that follows consumes the last N of them, N being the drop
+	// right after it (see takePushedArgs). Path-local like OutSlots.
+	Pushed []string
+
 	// Spills holds `var _tN = <expr>;` declarations produced by setReg when a
 	// forwarded expression outgrew maxForwardedExprLen. The emitter drains
 	// them after every instruction, before the statement that uses the name.
@@ -115,6 +121,9 @@ func (s *LiftState) Clone() *LiftState {
 		for k, v := range s.OutSlots {
 			c.OutSlots[k] = v
 		}
+	}
+	if len(s.Pushed) > 0 {
+		c.Pushed = append([]string(nil), s.Pushed...)
 	}
 	return c
 }

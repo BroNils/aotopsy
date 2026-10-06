@@ -236,6 +236,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// consumed within the block that stores them, see outargs.go).
 	e.blockLineStart = len(e.lines)
 	e.state.OutSlots = nil
+	e.state.Pushed = nil
 	e.emit(indent, "block_%d:;", id)
 	if e.emittedAnywhere != nil {
 		e.emittedAnywhere[id] = true
@@ -252,6 +253,10 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 		e.state.clearWrittenRegClasses(ins)
 		switch ins.Op {
 		case OpCall:
+			e.dropAfterCall = 0
+			if !isLast {
+				e.dropAfterCall = parseSPAdjust(e.fir, blk.Instrs[i+1].Src)
+			}
 			e.emitCall(ins, indent)
 		case OpLoadPool:
 			e.emitLoadPool(ins)

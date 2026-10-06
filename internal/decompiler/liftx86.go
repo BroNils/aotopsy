@@ -534,7 +534,9 @@ func applyOtherX86(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (li
 		return "", false, true
 	case "push":
 		if len(ops) >= 1 {
-			return fmt.Sprintf("push(%s);", operandExpr(fir, s, ops[0])), true, true
+			v := operandExpr(fir, s, ops[0])
+			s.Pushed = append(s.Pushed, v)
+			return fmt.Sprintf("push(%s);", v), true, true
 		}
 		return "", false, true
 	case "pop":
