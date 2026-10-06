@@ -127,6 +127,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types`. Monomorphic sites -27/-19/-34 are wrong single answers that became honest candidate sets.
   Not done: x86_64 still takes the unbounded prescan path (separate transfer function, no
   `SelectorDispatch` lattice there).
+- **Without a receiver fact, a selector-only call reports the UNION of the proven rows at its
+  imm, not the winner of a vote.** Rows of unrelated class families legitimately SHARE an imm
+  (`RowFitter::TryFit` only requires the row's own cids to be free: dispatch_table_generator.cc,
+  read at 2.12.0 and 3.9.2), so the same `imm` is `handleTapCancel` for a tap recognizer,
+  `_doRequestFocus` for a FocusNode and `get:hasListener` for a StreamController -- a single
+  elected leaf could only ever be right for one of them. A slot proves its row when EVERY concrete
+  class below its owner (extends tree, `Abstract` flag from the new hierarchy capture) has a slot at
+  `imm + cid` with the same leaf (`SelectorRow::FillTable` fills a class's whole concrete subtree;
+  sufficient, not necessary -- a descendant whose Function has no code stays empty, so one complete
+  slot per leaf is enough); every leaf with a proven slot is reported. When nothing proves a row the
+  old most-frequent-leaf vote is the fallback. Validated against the receiver-bound answers as an
+  oracle (the bounded sites, ~91 on 3.9.2 and ~64 on 2.12.0): the old vote contained the bounded
+  answer at 30/91 and 31/64; the union at 91/91 and 64/64, i.e. nothing real is dropped any more.
+  The price is honest: candidate counts rise (polymorphic_candidates 3.9.2 163k -> 196k) and 25%
+  of the former `monomorphic` answers (`Object.==` for `InheritedElement.notifyClients`,
+  `ChangeNotifier.addListener` for `_AnimatedState.build`, ...) become candidate sets. Affects both
+  architectures (x86_64 reaches `selectorCandidates` through its prescan): per-record golden deltas
+  3.9.2 arm64 1814, 2.12.0 955, 3.13.0 1658, 3.12.2 x64 1270 records, no record added or removed,
+  only `target/targets/candidates` change.
 - **Class hierarchy capture (P1 of the type-test work): `implements` edges and the abstract
   bit.** `readFillClass` read and discarded `UntaggedClass::interfaces` and `state_bits`; both
   are now kept (`ClassInfo.InterfacesRefID`, `StateBits`, `IsAbstract()`), and

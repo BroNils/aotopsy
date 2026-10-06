@@ -42,16 +42,50 @@ func TestReceiverBoundElectsTheRowLeafAmongTheReceiversClasses(t *testing.T) {
 	addSlot(ctx, imm, 20, 3, "Str.length", 20, "length")
 	ctx.SetHierarchy(hierarchyOf(map[int][]int{1: nil, 20: {1}, 30: {1}, 31: {30}, 40: {1, 50}, 50: {1}, 171: {1}}))
 
-	if got := ctx.selectorCandidatesFor(imm, 0); !reflect.DeepEqual(got, []string{"Ptr.pointer", "Ptr2.pointer"}) {
-		t.Fatalf("without a bound the vote is global: %v", got)
+	// A foreign slot: class 60's subtree {60,61,62} is not filled with `bar`.
+	ctx.SuperClass[60], ctx.SuperClass[61], ctx.SuperClass[62] = 1, 60, 60
+	addSlot(ctx, imm, 61, 4, "Fam.bar", 60, "bar")
+	ctx.SetHierarchy(hierarchyOf(map[int][]int{1: nil, 20: {1}, 30: {1}, 31: {30}, 40: {1, 50}, 50: {1}, 60: {1}, 61: {60}, 62: {60}, 171: {1}}))
+
+	// No receiver fact: rows of unrelated families share this imm, so the answer
+	// is the union of the rows that are PROVEN (complete subtree), never a vote
+	// and never the foreign half-row.
+	want := []string{"Ptr.pointer", "Ptr2.pointer", "Str.length"}
+	if got := ctx.selectorCandidatesFor(imm, 0); !reflect.DeepEqual(got, want) {
+		t.Fatalf("without a bound: %v, want the proven rows %v", got, want)
 	}
 	got := ctx.selectorCandidatesFor(imm, 20)
 	if !reflect.DeepEqual(got, []string{"Str.length"}) {
 		t.Fatalf("bound Str: %v, want [Str.length]", got)
 	}
 	// The unbounded cache entry is untouched by the bounded query.
-	if got := ctx.selectorCandidates(imm); !reflect.DeepEqual(got, []string{"Ptr.pointer", "Ptr2.pointer"}) {
+	if got := ctx.selectorCandidates(imm); !reflect.DeepEqual(got, want) {
 		t.Fatalf("bounded query leaked into the unbounded cache: %v", got)
+	}
+}
+
+// With no proven row at all (a hierarchy too incomplete to judge) the old
+// behaviour -- the most frequent leaf -- is kept rather than answering nothing.
+func TestRowElectionFallsBackToTheVoteWhenNoRowIsProven(t *testing.T) {
+	ctx := boundContext()
+	const imm = 700
+	ctx.SuperClass[61], ctx.SuperClass[62] = 30, 30
+	// Owner 30's subtree is {30,31,61,62}; only two of them carry the slot.
+	addSlot(ctx, imm, 31, 1, "A.go", 30, "go")
+	addSlot(ctx, imm, 61, 2, "B.go", 30, "go")
+	addSlot(ctx, imm, 20, 3, "S.stop", 20, "stop")
+	ctx.SuperClass[20] = 1
+	ctx.SetHierarchy(nil)
+	// `stop` IS complete (its subtree is just class 20) so it is proven alone.
+	if got := ctx.selectorCandidatesFor(imm, 0); !reflect.DeepEqual(got, []string{"S.stop"}) {
+		t.Fatalf("proven row = %v, want [S.stop]", got)
+	}
+	delete(ctx.DispatchSlotMeta, 20+imm)
+	ctx.DispatchBySlot[20+imm] = cluster.DispatchTableEntry{Kind: cluster.DispatchNull}
+	ctx.SelectorCache = map[int][]string{}
+	ctx.SelectorMonomorphic = map[int]string{}
+	if got := ctx.selectorCandidatesFor(imm, 0); !reflect.DeepEqual(got, []string{"A.go", "B.go"}) {
+		t.Fatalf("vote fallback = %v, want [A.go B.go]", got)
 	}
 }
 
@@ -89,8 +123,10 @@ func TestIncompleteHierarchyDisablesTheReceiverBound(t *testing.T) {
 	h := hierarchyOf(map[int][]int{1: nil, 20: {1}, 30: {1}, 31: {30}, 171: {1}})
 	h.Unresolved = 1
 	ctx.SetHierarchy(h)
-	if got := ctx.selectorCandidatesFor(imm, 20); !reflect.DeepEqual(got, []string{"Ptr.pointer", "Ptr2.pointer"}) {
-		t.Fatalf("bound applied despite an unresolved hierarchy: %v", got)
+	// Ignored: the same answer as with no bound at all.
+	want := ctx.selectorCandidatesFor(imm, 0)
+	if got := ctx.selectorCandidatesFor(imm, 20); !reflect.DeepEqual(got, want) {
+		t.Fatalf("bound applied despite an unresolved hierarchy: %v, want %v", got, want)
 	}
 }
 

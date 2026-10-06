@@ -242,6 +242,9 @@ type TypeContext struct {
 	// bound, keyed by {selector imm, bound class id} (see subtype_filter.go).
 	SelectorBoundCache map[[2]int][]string
 
+	// superChildren is SuperClass inverted (lazily), for concreteSubtree.
+	superChildren map[int][]int
+
 	// hierarchy, subtypeSets and nullCID back subtypeFilter.
 	hierarchy   *cluster.ClassHierarchy
 	subtypeSets map[int]map[int]bool

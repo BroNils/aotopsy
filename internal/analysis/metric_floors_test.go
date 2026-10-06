@@ -32,11 +32,22 @@ type metricFloors struct {
 	MinPlatformChannels int
 }
 
+// MinMonomorphicBLR CHANGED MEANING with the proven-row selector election
+// (typetrack/selector_rows.go ownerRowComplete): the earlier floors (950 / 1150 /
+// 1150 / 630) counted single answers that came out of a most-frequent-leaf vote,
+// and that vote contained the true callee at only 30 of 91 (3.9.2) and 31 of 64
+// (2.12.0) sites where a receiver bound gives an independent answer -- most of
+// those "monomorphic" sites were confidently wrong (`Object.==`,
+// `PointerEvent.get:pointer`). They are now candidate sets, which is why the count
+// fell (x64 1350 -> 639). The new floors are the measured values with ~15% margin
+// and still catch a dead stage; they are NOT a licence to loosen a floor to get a
+// red build green. The ceiling on candidates per polymorphic site is untouched and
+// still passes.
 var goldenMetricFloors = map[string]metricFloors{
-	"compare_sample_arm64": {MinMonomorphicBLR: 950, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
-	"sample312_x64":        {MinMonomorphicBLR: 1150, MaxAvgPolymorphicCandidates: 90, MinAnnotatedBLR: 0.90, MinPlatformChannels: 8},
-	"dart212_arm64":        {MinMonomorphicBLR: 1150, MaxAvgPolymorphicCandidates: 70, MinAnnotatedBLR: 0.80, MinPlatformChannels: 5},
-	"sample313_arm64":      {MinMonomorphicBLR: 630, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
+	"compare_sample_arm64": {MinMonomorphicBLR: 665, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
+	"sample312_x64":        {MinMonomorphicBLR: 540, MaxAvgPolymorphicCandidates: 90, MinAnnotatedBLR: 0.90, MinPlatformChannels: 8},
+	"dart212_arm64":        {MinMonomorphicBLR: 665, MaxAvgPolymorphicCandidates: 70, MinAnnotatedBLR: 0.80, MinPlatformChannels: 5},
+	"sample313_arm64":      {MinMonomorphicBLR: 320, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
 }
 
 func assertMetricFloors(t *testing.T, name, outDir string) {

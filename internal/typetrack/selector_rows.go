@@ -217,29 +217,52 @@ func (ctx *TypeContext) selectorRowCandidates(imm int, allowed func(cid int) boo
 		return nil
 	}
 
-	// Row leaf: most frequent among ownership-verified slots, else among all.
-	counts := map[string]int{}
+	// The rows at this imm: every leaf backed by a COMPLETE slot (see
+	// ownerRowComplete). Several can share one imm, so all of them are kept.
+	valid := map[string]bool{}
+	complete := map[[2]interface{}]bool{}
 	for _, m := range members {
-		if m.owned {
-			counts[m.meta.Leaf]++
+		if !m.owned || valid[m.meta.Leaf] {
+			continue
+		}
+		ck := [2]interface{}{m.meta.Owner, m.meta.Leaf}
+		ok, seen := complete[ck]
+		if !seen {
+			ok = ctx.ownerRowComplete(imm, m.meta.Owner, m.meta.Leaf)
+			complete[ck] = ok
+		}
+		if ok {
+			valid[m.meta.Leaf] = true
 		}
 	}
-	if len(counts) == 0 {
+	if len(valid) == 0 {
+		// No slot proves its row (a hierarchy too incomplete to judge, or every
+		// descendant lacking code): fall back to the most frequent leaf among the
+		// ownership-verified slots, else among all.
+		counts := map[string]int{}
 		for _, m := range members {
-			counts[m.meta.Leaf]++
+			if m.owned {
+				counts[m.meta.Leaf]++
+			}
 		}
-	}
-	rowLeaf, best := "", -1
-	for leaf, n := range counts {
-		if n > best || (n == best && leaf < rowLeaf) {
-			rowLeaf, best = leaf, n
+		if len(counts) == 0 {
+			for _, m := range members {
+				counts[m.meta.Leaf]++
+			}
 		}
+		rowLeaf, best := "", -1
+		for leaf, n := range counts {
+			if n > best || (n == best && leaf < rowLeaf) {
+				rowLeaf, best = leaf, n
+			}
+		}
+		valid[rowLeaf] = true
 	}
 
 	seen := map[string]bool{}
 	var names []string
 	for _, m := range members {
-		if m.meta.Leaf != rowLeaf {
+		if !valid[m.meta.Leaf] {
 			continue
 		}
 		entry := ctx.DispatchBySlot[m.key]
@@ -252,4 +275,63 @@ func (ctx *TypeContext) selectorRowCandidates(imm int, allowed func(cid int) boo
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ownerRowComplete reports whether EVERY concrete class below `owner` (extends
+// tree, owner included) has a Code slot at imm+cid with selector leaf `leaf`.
+//
+// SelectorRow::FillTable (dispatch_table_generator.cc, read at 2.12.0 and 3.9.2)
+// writes `entries[offset + cid]` for every cid of the implementing class's
+// concrete subtree, so a slot that really belongs to the row has its whole
+// subtree filled with the row's leaf (an override has the same name). A slot
+// that merely landed in the region -- another row sharing the offset or sitting
+// in its holes (RowFitter::TryFit only needs the row's own cids to be free, so
+// rows of unrelated class families legitimately share an imm) -- has siblings
+// that belong to other selectors. It is sufficient evidence, not necessary: a
+// descendant whose Function has no code leaves its slot empty (FillTable
+// `function->HasCode()`), which is why a leaf needs only ONE complete slot.
+func (ctx *TypeContext) ownerRowComplete(imm, owner int, leaf string) bool {
+	any := false
+	for _, d := range ctx.concreteSubtree(owner) {
+		any = true
+		key := d + imm
+		e, ok := ctx.DispatchBySlot[key]
+		if !ok || e.Kind != cluster.DispatchCode {
+			return false
+		}
+		if meta, ok := ctx.DispatchSlotMeta[key]; !ok || meta.Leaf != leaf {
+			return false
+		}
+	}
+	return any
+}
+
+// concreteSubtree lists the non-abstract classes at or below owner in the
+// extends tree (every class when abstractness is unknown).
+func (ctx *TypeContext) concreteSubtree(owner int) []int {
+	if ctx.superChildren == nil {
+		ctx.superChildren = make(map[int][]int, len(ctx.SuperClass))
+		for c, s := range ctx.SuperClass {
+			if s >= 0 && s != c {
+				ctx.superChildren[s] = append(ctx.superChildren[s], c)
+			}
+		}
+	}
+	var out []int
+	seen := map[int]bool{owner: true}
+	stack := []int{owner}
+	for len(stack) > 0 {
+		c := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if ctx.hierarchy == nil || !ctx.hierarchy.Abstract[c] {
+			out = append(out, c)
+		}
+		for _, ch := range ctx.superChildren[c] {
+			if !seen[ch] {
+				seen[ch] = true
+				stack = append(stack, ch)
+			}
+		}
+	}
+	return out
 }
