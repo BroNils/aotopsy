@@ -126,6 +126,38 @@ func cappedCandidates(targets []string) []string {
 // on it -- was wrong. Candidate enumeration now uses the structural class
 // universe instead.
 func (ctx *TypeContext) selectorCandidates(imm int) []string {
+	return ctx.selectorCandidatesFor(imm, 0)
+}
+
+// selectorCandidatesFor is selectorCandidates for a receiver known to be an
+// instance of `bound` or of a class that extends or implements it (bound 0 =
+// nothing known). Only runtime cids in that subtype set are consulted, so the
+// result is a subset of the unrestricted one; when no hierarchy is available the
+// two are identical.
+func (ctx *TypeContext) selectorCandidatesFor(imm, bound int) []string {
+	allowed := ctx.subtypeFilter(bound)
+	if allowed == nil {
+		return ctx.selectorCandidatesAll(imm)
+	}
+	key := [2]int{imm, bound}
+	if cached, ok := ctx.SelectorBoundCache[key]; ok {
+		return cached
+	}
+	targets := ctx.selectorRowCandidates(imm, allowed)
+	if len(targets) == 0 {
+		// No runtime class of the bound owns a slot in this row although the row
+		// exists: the hierarchy is missing an edge (or the receiver cannot exist),
+		// and an empty answer must not hide real callees. Fall back.
+		targets = ctx.selectorCandidatesAll(imm)
+	}
+	if ctx.SelectorBoundCache == nil {
+		ctx.SelectorBoundCache = make(map[[2]int][]string)
+	}
+	ctx.SelectorBoundCache[key] = targets
+	return targets
+}
+
+func (ctx *TypeContext) selectorCandidatesAll(imm int) []string {
 	// Cache by selector immediate. DispatchBySlot and its code-name map are
 	// immutable during typetrack, so this cache is independent of the observed
 	// allocation/instance population.
@@ -146,7 +178,7 @@ func (ctx *TypeContext) selectorCandidates(imm int) []string {
 	// row-displacement packing placed there for OTHER selectors are rejected by
 	// selectorRowCandidates (owner/leaf row identity). The result is sorted, so
 	// the same binary yields the same call_edges.jsonl on every run.
-	targets := ctx.selectorRowCandidates(imm)
+	targets := ctx.selectorRowCandidates(imm, nil)
 	// Cache the result for future lookups with the same imm.
 	ctx.SelectorCache[imm] = targets
 	// If exactly one unique name, record as monomorphic for future
@@ -1308,7 +1340,7 @@ func resolveBLR(
 			if fromPreScan, ok := ctx.SelectorOffsets[inst.Addr]; ok {
 				imm = fromPreScan
 			}
-			applySelectorCandidates(&res, ctx.selectorCandidates(imm))
+			applySelectorCandidates(&res, ctx.selectorCandidatesFor(imm, t.RecvBound))
 			if res.Polymorphic {
 				res.Confidence = ResolutionPolymorphic
 			} else if res.Resolved {

@@ -105,6 +105,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3.5.0..3.12.2; 32 entries, plus 3 type-argument entries from 3.9.2) and, because 3.13.0 no
   longer adds them as base objects (AOT base objects are the 7 Roots), real Arrays of Smi
   objects (`Result.MintValues`). 2.12.0 arm64, first 3000 functions: `dynamicCall(` 472 -> 398.
+- **A receiver's class bound now selects the dispatch-table row (selector-only calls).** For a
+  selector-only dispatch (`SUB X, cid, #imm; LDR X30,[DT, X, LSL #3]; BLR`) the callee is the
+  slot `imm + cid(receiver)`. When the receiver object is a `ClassBound(C)` (declared parameter /
+  field / return types, the owner of an instance method), its runtime classes are the classes that
+  extend or implement C (`ClassHierarchy`, proven on the corpus above; Null always kept), and the
+  row leaf is now elected among THOSE classes' slots instead of among every class. That is the
+  fix, not just a narrowing: row displacement packs rows into each other's holes, so the global
+  vote let whichever selector owned the most slots in the region win -- on 3.9.2 a `String`-typed
+  receiver's call was reported as `PointerEvent.get:pointer`, `Element.inflateWidget` as
+  `Object.==`, `_AsyncStarStreamController.add` as `PointerEvent.get:pointer`. The receiver's own
+  slot is in the selector's row by construction (`SelectorRow::FillTable` writes `offset + cid`
+  for every concrete subclass interval), which is why electing among the receiver's classes is
+  sound; an empty bounded answer, an unknown bound or a hierarchy with an unresolved edge fall back
+  to the unbounded scan. Lattice: `SelectorDispatch(imm, recvBound)`, joins drop a disagreeing bound
+  and keep the selector. Per-record effect on the golden samples (arm64; the x86_64 path is
+  unchanged, see below): 3.9.2 88 records, 2.12.0 63, 3.13.0 81, no record added or removed, only
+  `target/targets/candidates` change, e.g. `Element.updateChildren: Object.== ->
+  Element.inflateWidget`, `RenderBox.performResize: Object.get:runtimeType ->
+  RenderBox.get:constraints`, `NavigatorState.activate: 34 get:iterator candidates -> 9, all List
+  types`. Monomorphic sites -27/-19/-34 are wrong single answers that became honest candidate sets.
+  Not done: x86_64 still takes the unbounded prescan path (separate transfer function, no
+  `SelectorDispatch` lattice there).
 - **Class hierarchy capture (P1 of the type-test work): `implements` edges and the abstract
   bit.** `readFillClass` read and discarded `UntaggedClass::interfaces` and `state_bits`; both
   are now kept (`ClassInfo.InterfacesRefID`, `StateBits`, `IsAbstract()`), and

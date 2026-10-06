@@ -238,6 +238,14 @@ type TypeContext struct {
 	// for every BLR site.
 	//
 	SelectorCache map[int][]string
+	// SelectorBoundCache is SelectorCache for receivers with a known subtype
+	// bound, keyed by {selector imm, bound class id} (see subtype_filter.go).
+	SelectorBoundCache map[[2]int][]string
+
+	// hierarchy, subtypeSets and nullCID back subtypeFilter.
+	hierarchy   *cluster.ClassHierarchy
+	subtypeSets map[int]map[int]bool
+	nullCID     int
 
 	// SelectorMonomorphic maps selector imm → single function name when every
 	// structural runtime CID represented by SuperClass maps that selector either

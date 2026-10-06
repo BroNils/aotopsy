@@ -424,6 +424,8 @@ func runTypeInference(
 
 	ctx := typetrack.BuildTypeContext(clResult, poolData, dispatchEntries, byCodeIndex, info.Version, kOriginElement, thrFields, allocStubOffsets,
 		buildAllocationStubCIDs(clResult, pl, ranges, codeVA, codeOff))
+	// extends + implements: bounds a selector scan to the receiver's subtypes.
+	ctx.SetHierarchy(cluster.NewClassHierarchy(clResult, vmResult))
 	registerCC, hasRegisterCC := sdk.DartRegisterCallingConvention(info.Version.DartVersion, isARM64)
 
 	// Build class name → class ID lookup from ClassIDToName.

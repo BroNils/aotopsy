@@ -35,7 +35,7 @@ func TestLatticeConstructors(t *testing.T) {
 	if d.Kind != LatticeKnownDispatchIndex || d.DispatchIndex != 7 || d.SelectorOnly {
 		t.Fatalf("KnownDispatch(7) = %+v", d)
 	}
-	s := SelectorDispatch(-11)
+	s := SelectorDispatch(-11, 0)
 	if s.Kind != LatticeKnownDispatchIndex || !s.SelectorOnly || s.SelectorImm != -11 {
 		t.Fatalf("SelectorDispatch(-11) = %+v", s)
 	}
@@ -59,7 +59,7 @@ func TestLatticeEqualDistinguishesSemanticKinds(t *testing.T) {
 		{ExactClassID(1), ExactClass(1), false},
 		{UnknownClassID(), UnknownClassID(), true},
 		{KnownDispatch(3), KnownDispatch(3), true},
-		{KnownDispatch(3), SelectorDispatch(3), false},
+		{KnownDispatch(3), SelectorDispatch(3, 0), false},
 		{KnownStub("A", 0x220), KnownStub("A", 0x220), true},
 		{KnownStub("A", 0x220), KnownStub("B", 0x228), false},
 		{TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, TypeLattice{Kind: LatticePPBase, PPBaseOffset: 16}, true},

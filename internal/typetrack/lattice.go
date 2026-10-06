@@ -57,6 +57,10 @@ type TypeLattice struct {
 
 	SelectorOnly bool
 	SelectorImm  int
+	// RecvBound is, for a SelectorOnly dispatch, the class the receiver whose
+	// class id fed the selector arithmetic is known to be an instance of (or of a
+	// subtype of); 0 when nothing is known. See subtype_filter.go.
+	RecvBound int
 
 	PPBaseOffset int
 
@@ -107,8 +111,10 @@ func KnownDispatch(slot int) TypeLattice {
 	return TypeLattice{Kind: LatticeKnownDispatchIndex, DispatchIndex: slot}
 }
 
-func SelectorDispatch(imm int) TypeLattice {
-	return TypeLattice{Kind: LatticeKnownDispatchIndex, SelectorOnly: true, SelectorImm: imm}
+// SelectorDispatch is a selector-only dispatch index whose receiver is known to
+// be a subtype of recvBound (0 = unknown).
+func SelectorDispatch(imm, recvBound int) TypeLattice {
+	return TypeLattice{Kind: LatticeKnownDispatchIndex, SelectorOnly: true, SelectorImm: imm, RecvBound: recvBound}
 }
 
 func KnownStub(name string, off int) TypeLattice {
@@ -130,7 +136,7 @@ func (a TypeLattice) Equal(b TypeLattice) bool {
 			return false
 		}
 		if a.SelectorOnly {
-			return a.SelectorImm == b.SelectorImm
+			return a.SelectorImm == b.SelectorImm && a.RecvBound == b.RecvBound
 		}
 		return a.DispatchIndex == b.DispatchIndex
 	case LatticeKnownStub:
@@ -219,6 +225,11 @@ func joinType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
 		if a.Equal(b) {
 			return a
+		}
+		// Same selector reached with different receiver bounds: the selector is
+		// still known, the receiver bound is not.
+		if a.SelectorOnly && b.SelectorOnly && a.SelectorImm == b.SelectorImm {
+			return SelectorDispatch(a.SelectorImm, 0)
 		}
 		return Top()
 	}

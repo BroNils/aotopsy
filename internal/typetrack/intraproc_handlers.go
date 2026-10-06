@@ -533,18 +533,23 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 	return false
 }
 
-// noteSelectorReceiver is a per-site diagnostic: what is the receiver object
-// whose class id feeds this selector-only dispatch?
-func noteSelectorReceiver(tc *transferCtx, cidReg int) {
+// selectorReceiverBound classifies the receiver object whose class id feeds a
+// selector-only dispatch (a per-site diagnostic) and returns the class it is
+// known to be an instance of, 0 when nothing is known. The link names the
+// object the class id was read from and survives only while that register is
+// unchanged (dropWrittenSrcLinks), so the object is the one being dispatched on.
+func selectorReceiverBound(tc *transferCtx, cidReg int) int {
 	src := tc.state[cidReg].SrcReg - 1
 	switch {
 	case src < 0 || src >= 31:
 		tc.ctx.hitMetric("sel_recv_nolink", tc.inst.Addr, &tc.ctx.SelRecvNoLink)
 	case tc.state[src].Kind == LatticeClassBound:
 		tc.ctx.hitMetric("sel_recv_bound", tc.inst.Addr, &tc.ctx.SelRecvBound)
+		return tc.state[src].ClassID
 	default:
 		tc.ctx.hitMetric("sel_recv_top", tc.inst.Addr, &tc.ctx.SelRecvTop)
 	}
+	return 0
 }
 
 // handleDispatchArith handles cases 3/4/4b/4c: ADD/SUB for dispatch slot
@@ -574,8 +579,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		} else if tc.state[rn].Kind == LatticeUnknownClassID {
-			noteSelectorReceiver(tc, rn)
-			tc.state[rd] = SelectorDispatch(imm)
+			tc.state[rd] = SelectorDispatch(imm, selectorReceiverBound(tc, rn))
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		}
@@ -593,8 +597,7 @@ func handleDispatchArith(tc *transferCtx) bool {
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		} else if tc.state[rn].Kind == LatticeUnknownClassID {
-			noteSelectorReceiver(tc, rn)
-			tc.state[rd] = SelectorDispatch(-imm)
+			tc.state[rd] = SelectorDispatch(-imm, selectorReceiverBound(tc, rn))
 			tc.ctx.hitMetric(metricADDClass, tc.inst.Addr, &tc.ctx.ADDClassHits)
 			return true
 		}

@@ -166,7 +166,16 @@ func (ctx *TypeContext) inferSelectorRowImms() map[string][]int {
 // selectors that merely share the same table region (576 "targets" for one
 // Map-literal call on a real 3.9.2 app, whose whole table holds ~400 selectors
 // and whose largest real row has 168 implementations).
-func (ctx *TypeContext) selectorRowCandidates(imm int) []string {
+//
+// allowed, when non-nil, restricts the runtime cids consulted (a receiver known
+// to be a subtype of some class), and it does so BEFORE the row leaf is elected.
+// That is deliberate: the receiver's own slot imm+cid is by construction in the
+// selector's row, so the leaf elected among the receiver's possible classes is
+// the selector's; electing it among ALL cids lets another selector whose slots
+// overlap this region (row displacement packs rows into each other's holes) win
+// the vote, which for a sparse row (a String receiver, 2-3 cids) it routinely
+// did -- the candidates came back as `PointerEvent.get:pointer`.
+func (ctx *TypeContext) selectorRowCandidates(imm int, allowed func(cid int) bool) []string {
 	type member struct {
 		cid   int
 		key   int
@@ -182,6 +191,9 @@ func (ctx *TypeContext) selectorRowCandidates(imm int) []string {
 	}
 	sort.Ints(cids)
 	for _, cid := range cids {
+		if allowed != nil && !allowed(cid) {
+			continue
+		}
 		key := cid + imm
 		entry, ok := ctx.DispatchBySlot[key]
 		if !ok || entry.Kind != cluster.DispatchCode {
