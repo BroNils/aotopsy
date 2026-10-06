@@ -224,6 +224,17 @@ type ClassInfo struct {
 	// full vector instead.
 	TypeParamsRefID int
 
+	// InterfacesRefID is the Array of AbstractType the class `implements`
+	// (UntaggedClass::interfaces). -1 when not captured. Mixins need no separate
+	// field: the loader skips ClassHelper::kMixinType and a transformed mixin
+	// application class `S&M` has super_type S and M among these interfaces
+	// (kernel_loader.cc: `ASSERT(interface_count > 0)` for
+	// is_transformed_mixin_application), so extends + implements is the whole
+	// subtype relation.
+	InterfacesRefID int
+	// StateBits is Class::state_bits_ as serialized (Read<uint32_t>).
+	StateBits uint32
+
 	// UnboxedFieldBitmap marks which of this class's instance field slots hold
 	// a raw machine word rather than a ref, indexed by word offset from the
 	// object start -- the same indexing readFillInstance uses.
@@ -1326,3 +1337,13 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	}
 	return nil
 }
+
+// classAbstractBit is Class::AbstractBit in state_bits_: Const(0), Implemented(1),
+// ClassFinalized(2..3), ClassLoading(4..5), Abstract(6). The same position in every
+// supported version (object.h Class::StateBits enum up to 3.5.0, the BitField chain
+// from 3.6.2 -- read at 2.10.0, 2.12.0, 2.13.0, 2.14.0, 2.17.6, 2.19.0, 3.0.5, 3.2.5,
+// 3.5.0, 3.6.2, 3.9.2, 3.13.0 and md5-identical across 3.6.2..3.13.0).
+const classAbstractBit = 6
+
+// IsAbstract reports whether the class is declared abstract (Class::is_abstract).
+func (c ClassInfo) IsAbstract() bool { return c.StateBits>>classAbstractBit&1 == 1 }

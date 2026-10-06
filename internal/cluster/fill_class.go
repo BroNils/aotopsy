@@ -49,6 +49,13 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 	//   library(8), type_parameters(9), super_type(10),
 	//   signature_function(11), constants(12), declaration_type(13),
 	//   invocation_dispatcher_cache(14), allocation_stub(15)
+	//
+	// interfaces is the field four slots before super_type in every layout
+	// (raw_object.h UntaggedClass: ... offset_in_words_to_field, interfaces,
+	// script, library, type_parameters, super_type; read at 2.12.0, 2.14.0,
+	// 3.9.2 and 3.13.0, same order in all of them): 5 on 13 refs, 6 on 15/16.
+	const interfacesIdxV13 = 5
+	const interfacesIdxV2 = 6
 	const superTypeIdxV13 = 9
 	const libraryIdxV13 = 7
 	const typeParamsIdxV13 = 8
@@ -61,6 +68,7 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 		superTypeRef := -1
 		libraryRef := -1
 		typeParamsRef := -1
+		interfacesRef := -1
 
 		// ReadFromTo: 13 refs.
 		for j := 0; j < spec.NumRefs; j++ {
@@ -84,6 +92,11 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 				libraryRef = int(r)
 			} else if (spec.NumRefs == 15 || spec.NumRefs == 16) && j == libraryIdxV2 {
 				libraryRef = int(r)
+			}
+			if spec.NumRefs == 13 && j == interfacesIdxV13 {
+				interfacesRef = int(r)
+			} else if (spec.NumRefs == 15 || spec.NumRefs == 16) && j == interfacesIdxV2 {
+				interfacesRef = int(r)
 			}
 			if spec.NumRefs == 13 && j == typeParamsIdxV13 {
 				typeParamsRef = int(r)
@@ -131,7 +144,8 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			}
 		}
 		// Read<uint32_t>(state_bits) — Read32 marker 192.
-		if _, err := s.ReadTagged32(); err != nil {
+		stateBits, err := s.ReadTagged32()
+		if err != nil {
 			return named, classes, fmt.Errorf("obj %d/%d state_bits: %w", i, count, err)
 		}
 
@@ -172,6 +186,8 @@ func readFillClass(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefUn
 			SuperTypeRefID:  superTypeRef,
 			LibraryRefID:    libraryRef,
 			TypeParamsRefID: typeParamsRef,
+			InterfacesRefID: interfacesRef,
+			StateBits:       uint32(stateBits),
 
 			UnboxedFieldBitmap: unboxed,
 		})

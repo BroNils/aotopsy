@@ -105,6 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3.5.0..3.12.2; 32 entries, plus 3 type-argument entries from 3.9.2) and, because 3.13.0 no
   longer adds them as base objects (AOT base objects are the 7 Roots), real Arrays of Smi
   objects (`Result.MintValues`). 2.12.0 arm64, first 3000 functions: `dynamicCall(` 472 -> 398.
+- **Class hierarchy capture (P1 of the type-test work): `implements` edges and the abstract
+  bit.** `readFillClass` read and discarded `UntaggedClass::interfaces` and `state_bits`; both
+  are now kept (`ClassInfo.InterfacesRefID`, `StateBits`, `IsAbstract()`), and
+  `cluster.NewClassHierarchy` merges isolate + VM snapshot into `extends`/`implements` edges
+  plus the abstract flag. SDK facts read per version: `interfaces` is the field four slots
+  before `super_type` in every layout (index 5 on 13 refs, 6 on 15/16; `raw_object.h`
+  UntaggedClass at 2.12.0, 2.14.0, 3.9.2, 3.13.0); the abstract bit is bit 6 of `state_bits_`
+  (`Const 0, Implemented 1, ClassFinalized 2..3, ClassLoading 4..5, Abstract 6`) in every
+  version (object.h `Class::StateBits` through 3.5.0, the BitField chain from 3.6.2, md5-identical
+  3.6.2..3.13.0); mixins need no field (kernel_loader.cc skips `kMixinType`; a transformed
+  mixin application `S&M` has the mixin among its `interfaces`, `ASSERT(interface_count > 0)`).
+  Proven on the corpus, not assumed: on all 24 arm64 samples every super/interface ref resolves
+  to a class (0 unresolved), `_OneByteString <: String <: Comparable`,
+  `_GrowableList <: List <: Iterable`, `_Smi/_Double <: num` hold and `List`/`Iterable` are
+  abstract while `_GrowableList`/`_OneByteString` are not (`TestClassHierarchyOnCorpus`; the
+  first version of that test was vacuous -- library-mangled names `_Smi@0150898` -- and the
+  non-vacuity guard caught it). Pure capture: no output changes.
 - **VM stub Code objects in the pool were named from the wrong end of the stub list (all
   versions).** `BuildPoolLookups` zipped `vmResult.Codes[i]` against the stub list in
   `StubCode::Init` emission order, but an AOT Code cluster is written in IMAGE order
