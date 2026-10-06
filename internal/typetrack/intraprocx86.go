@@ -152,6 +152,7 @@ func AnalyzeFunctionX86(
 				hasCmp = false
 			}
 			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
+			dropWrittenSrcLinksX86(&state, inst.Inst)
 			prevInst = &inst
 		}
 
@@ -177,7 +178,10 @@ func AnalyzeFunctionX86(
 			var newEntry [31]TypeLattice
 			narrowedState := state
 			if succIdx == eqSucc && isClassID(state[cmpReg].Kind) {
-				narrowedState[cmpReg] = ExactClassID(cmpImm)
+				// The compared register is exactly cmpImm, and when it still
+				// remembers the object its header was read from, that object is
+				// exactly that class on this edge (shared with ARM64).
+				narrowByClassIDCompare(&narrowedState, cmpReg, cmpImm, ctx, blk.insts[len(blk.insts)-1].VA)
 			}
 			if !blockVisited[succ] {
 				newEntry = narrowedState
@@ -544,9 +548,9 @@ func handleX86Load(tc *transferCtxX86) bool {
 			if mem.Index == 0 && hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
 				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
 				if cid, exact := exactObjectClassID(tc.state[baseIdx]); exact {
-					tc.state[dstIdx] = ExactClassID(cid)
+					tc.state[dstIdx] = ExactClassID(cid).linkedTo(baseIdx, dstIdx)
 				} else {
-					tc.state[dstIdx] = UnknownClassID()
+					tc.state[dstIdx] = UnknownClassID().linkedTo(baseIdx, dstIdx)
 				}
 				tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 				return true
@@ -559,9 +563,9 @@ func handleX86Load(tc *transferCtxX86) bool {
 				// only -1.
 				if mem.Disp == -1 {
 					if cid, exact := exactObjectClassID(tc.state[baseIdx]); exact {
-						tc.state[dstIdx] = ExactHeaderTags(cid)
+						tc.state[dstIdx] = ExactHeaderTags(cid).linkedTo(baseIdx, dstIdx)
 					} else {
-						tc.state[dstIdx] = UnknownHeaderTags()
+						tc.state[dstIdx] = UnknownHeaderTags().linkedTo(baseIdx, dstIdx)
 					}
 					tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 					return true
@@ -594,7 +598,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 			// SDK class-ID extraction can then produce UnknownClassID, which keeps
 			// selector-only dispatch possible without pretending the CID is known.
 			if mem.Index == 0 && mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
-				tc.state[dstIdx] = UnknownHeaderTags()
+				tc.state[dstIdx] = UnknownHeaderTags().linkedTo(baseIdx, dstIdx)
 				tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 				return true
 			}
@@ -674,13 +678,19 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 			tc.state[dstIdx] = Top()
 			return true
 		}
+		// The object the header was read from stays linked through the shift
+		// (the ARM64 UBFX path does the same), so the dispatch call can ask what
+		// that object is known to be.
+		src := tc.state[dstIdx].SrcReg
 		if tc.state[dstIdx].Kind == LatticeExactHeaderTags {
 			tc.state[dstIdx] = ExactClassID(tc.state[dstIdx].ClassID)
+			tc.state[dstIdx].SrcReg = src
 			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
 			return true
 		}
 		if tc.state[dstIdx].Kind == LatticeUnknownHeaderTags {
 			tc.state[dstIdx] = UnknownClassID()
+			tc.state[dstIdx].SrcReg = src
 			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
 			return true
 		}
@@ -763,7 +773,7 @@ func handleX86Call(tc *transferCtxX86) bool {
 					slot := int(tc.state[idxReg].ClassID) + int(mem.Disp/8)
 					resolveX86Dispatch(tc.state, idxReg, slot, tc.inst, tc.ctx, tc.result)
 				} else if isDispatchCID {
-					resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result)
+					resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result, x86ReceiverBound(tc, idxReg))
 				}
 			}
 			killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
@@ -956,6 +966,7 @@ func resolveX86DispatchSelectorOffset(
 	inst x86.Decoded,
 	ctx *TypeContext,
 	result *IntraResult,
+	recvBound int,
 ) {
 	selectorImm, ok := ctx.SelectorOffsets[inst.VA]
 	if !ok {
@@ -970,7 +981,7 @@ func resolveX86DispatchSelectorOffset(
 		Confidence: ResolutionStaticInferred,
 		Derivation: DerivationDispatchTable,
 	}
-	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
+	applySelectorCandidates(&res, ctx.selectorCandidatesFor(selectorImm, recvBound))
 	if res.Polymorphic {
 		res.Confidence = ResolutionPolymorphic
 	}
@@ -978,6 +989,43 @@ func resolveX86DispatchSelectorOffset(
 		ctx.hitMetric(metricDispatch, inst.VA, &ctx.DispatchHits)
 	}
 	recordBLRResolution(result, res)
+}
+
+// x86ReceiverBound is the x86_64 counterpart of selectorReceiverBound: the class
+// the object whose class id feeds this dispatch is known to be an instance of
+// (0 when nothing is known), counted once per site in the same sel_recv_*
+// metrics. The class-id register's source link survives only while the object
+// register is unchanged (dropWrittenSrcLinksX86).
+func x86ReceiverBound(tc *transferCtxX86, cidReg int) int {
+	if cidReg < 0 || cidReg >= len(tc.state) {
+		return 0
+	}
+	src := tc.state[cidReg].SrcReg - 1
+	switch {
+	case src < 0 || src >= 31:
+		tc.ctx.hitMetric("sel_recv_nolink", tc.inst.VA, &tc.ctx.SelRecvNoLink)
+	case tc.state[src].Kind == LatticeClassBound:
+		tc.ctx.hitMetric("sel_recv_bound", tc.inst.VA, &tc.ctx.SelRecvBound)
+		return tc.state[src].ClassID
+	default:
+		tc.ctx.hitMetric("sel_recv_top", tc.inst.VA, &tc.ctx.SelRecvTop)
+	}
+	return 0
+}
+
+// dropWrittenSrcLinksX86 forgets every header/class-id source link whose source
+// register the instruction just wrote (see dropWrittenSrcLinks).
+func dropWrittenSrcLinksX86(state *[31]TypeLattice, ins x86asm.Inst) {
+	for _, dst := range x86.DstRegsOfInst(ins) {
+		if dst < 0 || dst >= 31 {
+			continue
+		}
+		for r := range state {
+			if state[r].SrcReg == dst+1 {
+				state[r].SrcReg = 0
+			}
+		}
+	}
 }
 
 // DecodeX86Function decodes a function's raw bytes into x86.Decoded slice.

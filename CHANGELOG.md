@@ -127,6 +127,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types`. Monomorphic sites -27/-19/-34 are wrong single answers that became honest candidate sets.
   Not done: x86_64 still takes the unbounded prescan path (separate transfer function, no
   `SelectorDispatch` lattice there).
+- **x86_64 gets the F4 source link and the receiver bound (P5).** On ARM64 a class-id register
+  remembers the object its header was read from (`SrcReg`), which gives (a) the receiver bound
+  for selector-only dispatch and (b) object narrowing on the equality edge of a class-id
+  compare. The x86_64 transfer functions had neither: the header load
+  (`mov r32,[obj-1]`, or `movzx r,word [obj+1]` through 2.18) now links the register to `obj`,
+  the exact `shr r,kClassIdTagPos` keeps the link, writes to the object register drop it
+  (`dropWrittenSrcLinksX86`, `x86.DstRegsOfInst`), the dispatch call asks
+  `x86ReceiverBound` (same `sel_recv_*` counters as ARM64), and the equality edge uses the
+  shared `narrowByClassIDCompare`. 3.12.2 x64: receiver-bound sites 0 -> 128, `narrow_src_hits`
+  0 -> 1321, 64 call_edges records change (50 shrink to subsets, e.g. `Set.contains`
+  implementations for `_IconButtonDefaultsM3.get:overlayColor`, `_slowSetRange` for the typed-list
+  views), 3.9.2 x64 and 2.14.0 x64 gain the same. Still open on x86_64: 1924 of 3366 selector sites
+  have no source link at all (3.12.2), i.e. the class id does not come from the direct
+  `mov; shr` shape.
 - **Stack-passed parameters now carry their declared class.** The entry stack seed held only the
   receiver; every other stack parameter started as Top, and the dominant source of Top receivers at
   selector-only sites is exactly a load from a frame slot (1140 of 2438 on 3.9.2; the rest are
