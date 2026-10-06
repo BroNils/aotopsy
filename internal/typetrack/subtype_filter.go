@@ -1,6 +1,10 @@
 package typetrack
 
-import "aotopsy/internal/cluster"
+import (
+	"strings"
+
+	"aotopsy/internal/cluster"
+)
 
 // Receiver subtype bounds for selector scans.
 //
@@ -63,4 +67,39 @@ func (ctx *TypeContext) subtypeFilter(bound int) func(cid int) bool {
 		ctx.subtypeSets[bound] = set
 	}
 	return func(cid int) bool { return set[cid] }
+}
+
+// smiCID returns the class id of the Smi class (`_Smi`), as named in the
+// snapshot, or false when the class table does not name it.
+func (ctx *TypeContext) smiCID() (int, bool) {
+	if ctx.smiCIDKnown {
+		return ctx.smiCIDValue, ctx.smiCIDValue >= 0
+	}
+	ctx.smiCIDKnown, ctx.smiCIDValue = true, -1
+	for cid, name := range ctx.ClassIDToName {
+		// Core private classes carry their library mangling: `_Smi@0150898`.
+		if name == "_Smi" || strings.HasPrefix(name, "_Smi@") {
+			ctx.smiCIDValue = cid
+			break
+		}
+	}
+	return ctx.smiCIDValue, ctx.smiCIDValue >= 0
+}
+
+// stampReceiverBounds records, on every header-tag / class-id value that still
+// has a live source link, the class bound of the object it was read from. Run
+// after each instruction and BEFORE the written-register links are dropped, so
+// the bound is captured while the object is still where the link says: the
+// dispatch sequence overwrites the object's register with the dispatch table
+// (`mov rax,[r14+DT]`; ARM64 reuses LR) before it consumes the class id.
+func stampReceiverBounds(state *[31]TypeLattice) {
+	for r := range state {
+		t := &state[r]
+		if !carriesSrcLink(t.Kind) || t.SrcReg == 0 || t.RecvBound != 0 {
+			continue
+		}
+		if src := t.SrcReg - 1; src < 31 && state[src].Kind == LatticeClassBound {
+			t.RecvBound = state[src].ClassID
+		}
+	}
 }

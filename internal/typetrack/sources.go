@@ -251,6 +251,10 @@ type TypeContext struct {
 	// bound, keyed by {selector imm, bound class id} (see subtype_filter.go).
 	SelectorBoundCache map[[2]int][]string
 
+	// smiCIDValue/smiCIDKnown cache smiCID().
+	smiCIDValue int
+	smiCIDKnown bool
+
 	// superChildren is SuperClass inverted (lazily), for concreteSubtree.
 	superChildren map[int][]int
 

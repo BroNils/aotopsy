@@ -60,6 +60,11 @@ type TypeLattice struct {
 	// RecvBound is, for a SelectorOnly dispatch, the class the receiver whose
 	// class id fed the selector arithmetic is known to be an instance of (or of a
 	// subtype of); 0 when nothing is known. See subtype_filter.go.
+	//
+	// For header-tag and class-id values it is the bound of the object the value
+	// was READ FROM, stamped while that object was still in its register
+	// (stampReceiverBounds). Unlike SrcReg it survives the object register being
+	// overwritten -- the class id stays the class id of that object.
 	RecvBound int
 
 	PPBaseOffset int
@@ -128,6 +133,9 @@ func (a TypeLattice) Equal(b TypeLattice) bool {
 	if carriesSrcLink(a.Kind) && a.SrcReg != b.SrcReg {
 		return false
 	}
+	if (isClassID(a.Kind) || isHeaderTags(a.Kind)) && a.RecvBound != b.RecvBound {
+		return false
+	}
 	switch a.Kind {
 	case LatticeExactClass, LatticeClassBound, LatticeExactHeaderTags, LatticeExactClassID, LatticeTaggedClassID:
 		return a.ClassID == b.ClassID
@@ -188,11 +196,17 @@ func joinType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 			if a.SrcReg != b.SrcReg {
 				a.SrcReg = 0
 			}
+			if a.RecvBound != b.RecvBound {
+				a.RecvBound = 0
+			}
 			return a
 		}
 		u := UnknownClassID()
 		if a.SrcReg == b.SrcReg {
 			u.SrcReg = a.SrcReg
+		}
+		if a.RecvBound == b.RecvBound {
+			u.RecvBound = a.RecvBound
 		}
 		return u
 	}
@@ -201,11 +215,17 @@ func joinType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
 			if a.SrcReg != b.SrcReg {
 				a.SrcReg = 0
 			}
+			if a.RecvBound != b.RecvBound {
+				a.RecvBound = 0
+			}
 			return a
 		}
 		u := UnknownHeaderTags()
 		if a.SrcReg == b.SrcReg {
 			u.SrcReg = a.SrcReg
+		}
+		if a.RecvBound == b.RecvBound {
+			u.RecvBound = a.RecvBound
 		}
 		return u
 	}

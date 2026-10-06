@@ -539,15 +539,28 @@ func handleDispatchTableLoad(tc *transferCtx) bool {
 // object the class id was read from and survives only while that register is
 // unchanged (dropWrittenSrcLinks), so the object is the one being dispatched on.
 func selectorReceiverBound(tc *transferCtx, cidReg int) int {
-	src := tc.state[cidReg].SrcReg - 1
+	return receiverBound(tc.state, cidReg, tc.ctx, tc.inst.Addr)
+}
+
+// receiverBound is the shared core of selectorReceiverBound and x86ReceiverBound:
+// the live source link first (the object's CURRENT type, which narrowing may have
+// sharpened), else the bound stamped on the class id when it was read.
+func receiverBound(state *[31]TypeLattice, cidReg int, ctx *TypeContext, pc uint64) int {
+	if cidReg < 0 || cidReg >= len(state) {
+		return 0
+	}
+	src := state[cidReg].SrcReg - 1
 	switch {
+	case src >= 0 && src < 31 && state[src].Kind == LatticeClassBound:
+		ctx.hitMetric("sel_recv_bound", pc, &ctx.SelRecvBound)
+		return state[src].ClassID
+	case state[cidReg].RecvBound > 0:
+		ctx.hitMetric("sel_recv_bound", pc, &ctx.SelRecvBound)
+		return state[cidReg].RecvBound
 	case src < 0 || src >= 31:
-		tc.ctx.hitMetric("sel_recv_nolink", tc.inst.Addr, &tc.ctx.SelRecvNoLink)
-	case tc.state[src].Kind == LatticeClassBound:
-		tc.ctx.hitMetric("sel_recv_bound", tc.inst.Addr, &tc.ctx.SelRecvBound)
-		return tc.state[src].ClassID
+		ctx.hitMetric("sel_recv_nolink", pc, &ctx.SelRecvNoLink)
 	default:
-		tc.ctx.hitMetric("sel_recv_top", tc.inst.Addr, &tc.ctx.SelRecvTop)
+		ctx.hitMetric("sel_recv_top", pc, &ctx.SelRecvTop)
 	}
 	return 0
 }

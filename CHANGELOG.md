@@ -141,6 +141,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   views), 3.9.2 x64 and 2.14.0 x64 gain the same. Still open on x86_64: 1924 of 3366 selector sites
   have no source link at all (3.12.2), i.e. the class id does not come from the direct
   `mov; shr` shape.
+- **Receiver bounds no longer die when the object register is overwritten (both
+  architectures).** Classifying the 1924 unlinked x86_64 selector sites of the 3.12.2 sample by
+  the instruction before the call showed one shape: `mov ecx,[rax-1]; shr ecx,12; mov rdi,rax;
+  mov rax,[r14+DT]; call [rax+8*rcx+imm]` -- the object's register is reused for the dispatch
+  table before the class id is consumed, so the link was dropped one instruction early (1753
+  sites; the 2.x form `push rax` instead of `mov rdi,rax`, 2.14.0). Three changes:
+  `updateSrcLinksX86` moves a link to an intact 64-bit register copy of the object instead of
+  dropping it; `LoadClassIdMayBeSmi`'s Smi path (`test al,1; mov ecx,kSmiCid; je`) is linked to its
+  object, only when the immediate is the snapshot's own `_Smi` cid; and the class bound of the
+  object is STAMPED on the header/class-id value while the link is alive
+  (`stampReceiverBounds`, `TypeLattice.RecvBound` on header and class-id kinds, preserved by
+  UBFX/SHR and by joins when both paths agree), so the bound survives the register being
+  overwritten -- the class id remains the class id of that object. ARM64 uses the same core
+  (`receiverBound`). Receiver-bound selector sites: 3.12.2 x64 128 -> 359, 2.14.0 x64 18 -> 232,
+  3.9.2 arm64 306 -> 322, 2.12.0 arm64 157 -> 257; polymorphic candidates 3.12.2 x64 172k -> 150k
+  and 2.14.0 x64 148k -> 133k; `narrow_src_hits` 1321 -> 1845 on 3.12.2 x64.
 - **Stack-passed parameters now carry their declared class.** The entry stack seed held only the
   receiver; every other stack parameter started as Top, and the dominant source of Top receivers at
   selector-only sites is exactly a load from a frame slot (1140 of 2438 on 3.9.2; the rest are

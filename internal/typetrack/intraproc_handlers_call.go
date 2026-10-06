@@ -44,8 +44,9 @@ func handleUBFX(tc *transferCtx) bool {
 			return true
 		}
 		if rn < 31 && tc.state[rn].Kind == LatticeExactHeaderTags {
-			src := tc.state[rn].SrcReg // read before rd (possibly == rn) is overwritten
+			src, bound := tc.state[rn].SrcReg, tc.state[rn].RecvBound // read before rd (possibly == rn) is overwritten
 			tc.state[rd] = ExactClassID(tc.state[rn].ClassID)
+			tc.state[rd].RecvBound = bound
 			if src-1 != rd {
 				tc.state[rd].SrcReg = src
 			}
@@ -53,8 +54,9 @@ func handleUBFX(tc *transferCtx) bool {
 			return true
 		}
 		if rn < 31 && tc.state[rn].Kind == LatticeUnknownHeaderTags {
-			src := tc.state[rn].SrcReg // read before rd (possibly == rn) is overwritten
+			src, bound := tc.state[rn].SrcReg, tc.state[rn].RecvBound // read before rd (possibly == rn) is overwritten
 			tc.state[rd] = UnknownClassID()
+			tc.state[rd].RecvBound = bound
 			if src-1 != rd {
 				tc.state[rd].SrcReg = src
 			}

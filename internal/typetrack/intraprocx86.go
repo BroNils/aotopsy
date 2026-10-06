@@ -139,6 +139,7 @@ func AnalyzeFunctionX86(
 		// survive without overloading Bottom as "unknown CID".
 		var cmpReg, cmpImm int
 		var hasCmp bool
+		copies := make(map[int]int) // register -> the register it is an intact copy of (updateSrcLinksX86)
 		for _, inst := range blk.insts {
 			if inst.Bad {
 				hasCmp = false
@@ -152,7 +153,8 @@ func AnalyzeFunctionX86(
 				hasCmp = false
 			}
 			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
-			dropWrittenSrcLinksX86(&state, inst.Inst)
+			stampReceiverBounds(&state)
+			updateSrcLinksX86(&state, inst.Inst, copies)
 			prevInst = &inst
 		}
 
@@ -681,16 +683,16 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 		// The object the header was read from stays linked through the shift
 		// (the ARM64 UBFX path does the same), so the dispatch call can ask what
 		// that object is known to be.
-		src := tc.state[dstIdx].SrcReg
+		src, bound := tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound
 		if tc.state[dstIdx].Kind == LatticeExactHeaderTags {
 			tc.state[dstIdx] = ExactClassID(tc.state[dstIdx].ClassID)
-			tc.state[dstIdx].SrcReg = src
+			tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound = src, bound
 			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
 			return true
 		}
 		if tc.state[dstIdx].Kind == LatticeUnknownHeaderTags {
 			tc.state[dstIdx] = UnknownClassID()
-			tc.state[dstIdx].SrcReg = src
+			tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound = src, bound
 			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
 			return true
 		}
@@ -910,6 +912,9 @@ func transferInstructionX86(
 	if handleX86Store(tc) {
 		return
 	}
+	if handleX86SmiClassID(tc) {
+		return
+	}
 	if handleX86Load(tc) {
 		return
 	}
@@ -995,38 +1000,77 @@ func resolveX86DispatchSelectorOffset(
 // the object whose class id feeds this dispatch is known to be an instance of
 // (0 when nothing is known), counted once per site in the same sel_recv_*
 // metrics. The class-id register's source link survives only while the object
-// register is unchanged (dropWrittenSrcLinksX86).
+// register is unchanged (updateSrcLinksX86).
 func x86ReceiverBound(tc *transferCtxX86, cidReg int) int {
-	if cidReg < 0 || cidReg >= len(tc.state) {
-		return 0
-	}
-	src := tc.state[cidReg].SrcReg - 1
-	switch {
-	case src < 0 || src >= 31:
-		tc.ctx.hitMetric("sel_recv_nolink", tc.inst.VA, &tc.ctx.SelRecvNoLink)
-	case tc.state[src].Kind == LatticeClassBound:
-		tc.ctx.hitMetric("sel_recv_bound", tc.inst.VA, &tc.ctx.SelRecvBound)
-		return tc.state[src].ClassID
-	default:
-		tc.ctx.hitMetric("sel_recv_top", tc.inst.VA, &tc.ctx.SelRecvTop)
-	}
-	return 0
+	return receiverBound(tc.state, cidReg, tc.ctx, tc.inst.VA)
 }
 
-// dropWrittenSrcLinksX86 forgets every header/class-id source link whose source
-// register the instruction just wrote (see dropWrittenSrcLinks).
-func dropWrittenSrcLinksX86(state *[31]TypeLattice, ins x86asm.Inst) {
-	for _, dst := range x86.DstRegsOfInst(ins) {
-		if dst < 0 || dst >= 31 {
+// updateSrcLinksX86 keeps the header/class-id source links honest after an
+// instruction (the x86_64 counterpart of dropWrittenSrcLinks).
+//
+// A link names the register that holds the object; when the instruction writes
+// that register the link is dropped -- unless a 64-bit register copy of it is
+// still intact, in which case the link moves to the copy. That is the shape of
+// every dispatch call the compiler emits:
+//
+//	mov ecx, [rax-1]; shr ecx, 12   ; class id of the object in RAX
+//	mov rdi, rax                    ; receiver argument: a copy of the object
+//	mov rax, [r14+DT]               ; RAX is now the dispatch table
+//	call [rax + 8*rcx + imm]
+//
+// Dropping at the third instruction (RAX overwritten) lost the receiver at 1753
+// of the 1924 unlinked x86_64 selector sites of the 3.12.2 sample. copies maps a
+// register to the register it is a copy of, per basic block.
+func updateSrcLinksX86(state *[31]TypeLattice, ins x86asm.Inst, copies map[int]int) {
+	written := x86.DstRegsOfInst(ins)
+	isWritten := func(reg int) bool {
+		for _, w := range written {
+			if w == reg {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range written {
+		if w < 0 || w >= 31 {
 			continue
 		}
+		// An intact copy of w that this instruction does not touch inherits the links.
+		heir := -1
+		for c, of := range copies {
+			if of == w && !isWritten(c) && (heir < 0 || c < heir) {
+				heir = c
+			}
+		}
 		for r := range state {
-			if state[r].SrcReg == dst+1 {
-				state[r].SrcReg = 0
+			if state[r].SrcReg == w+1 {
+				if heir >= 0 && heir != r {
+					state[r].SrcReg = heir + 1
+				} else {
+					state[r].SrcReg = 0
+				}
+			}
+		}
+		delete(copies, w)
+		for c, of := range copies {
+			if of == w {
+				delete(copies, c)
+			}
+		}
+	}
+	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
+		dst, ok1 := ins.Args[0].(x86asm.Reg)
+		src, ok2 := ins.Args[1].(x86asm.Reg)
+		if ok1 && ok2 && is64BitGPR(dst) && is64BitGPR(src) {
+			d, s := x86.CanonReg(dst), x86.CanonReg(src)
+			if d >= 0 && d < 31 && s >= 0 && s < 31 && d != s {
+				copies[d] = s
 			}
 		}
 	}
 }
+
+func is64BitGPR(r x86asm.Reg) bool { return r >= x86asm.RAX && r <= x86asm.R15 }
 
 // DecodeX86Function decodes a function's raw bytes into x86.Decoded slice.
 func DecodeX86Function(funcCode []byte, funcVA uint64) []x86.Decoded {
@@ -1036,4 +1080,47 @@ func DecodeX86Function(funcCode []byte, funcVA uint64) []x86.Decoded {
 		out = append(out, x86.Decoded{VA: d.VA, Inst: d.Inst, Len: d.Len, Bad: d.Bad})
 	}
 	return out
+}
+
+// handleX86SmiClassID recognizes the immediate of Assembler::LoadClassIdMayBeSmi:
+//
+//	test obj8, 1        ; BranchIfSmi's test
+//	mov  result32, kSmiCid
+//	je   done           ; the Smi path keeps kSmiCid
+//	mov  result32, [obj-1] ; shr result32, kClassIdTagPos   (heap path, linked)
+//
+// On the Smi path the register IS the class id of `obj` (it is a Smi), so it is
+// linked to `obj` exactly like the heap path is; the two paths then join with the
+// same link instead of losing it (a link only survives a join when both sides
+// agree). The immediate must be the snapshot's own Smi class id, otherwise any
+// `test; mov r, imm` pair would be taken for a class id.
+func handleX86SmiClassID(tc *transferCtxX86) bool {
+	ins := tc.inst.Inst
+	if ins.Op != x86asm.MOV || len(ins.Args) < 2 || tc.prevInst == nil || tc.prevInst.Bad {
+		return false
+	}
+	dst, ok := ins.Args[0].(x86asm.Reg)
+	imm, immOK := ins.Args[1].(x86asm.Imm)
+	if !ok || !immOK {
+		return false
+	}
+	smi, known := tc.ctx.smiCID()
+	if !known || int(imm) != smi {
+		return false
+	}
+	prev := tc.prevInst.Inst
+	if prev.Op != x86asm.TEST || len(prev.Args) < 2 {
+		return false
+	}
+	obj, objOK := prev.Args[0].(x86asm.Reg)
+	one, oneOK := prev.Args[1].(x86asm.Imm)
+	if !objOK || !oneOK || one != 1 {
+		return false
+	}
+	dstIdx, objIdx := x86.CanonReg(dst), x86.CanonReg(obj)
+	if dstIdx < 0 || dstIdx >= 31 || objIdx < 0 || objIdx >= 31 {
+		return false
+	}
+	tc.state[dstIdx] = ExactClassID(smi).linkedTo(objIdx, dstIdx)
+	return true
 }

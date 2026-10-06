@@ -652,6 +652,7 @@ func AnalyzeFunction(
 				hasCmp = false
 			}
 			transferInstruction(&state, inst, prevRaw, ctx, result, lca, stackTypes, &shadowSP)
+			stampReceiverBounds(&state)
 			dropWrittenSrcLinks(&state, inst.Raw)
 			prevRaw = inst.Raw
 		}
