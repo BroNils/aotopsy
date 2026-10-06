@@ -132,6 +132,10 @@ const (
 	ARM64FrameRegStr       = "x29"
 	ARM64LinkRegStr        = "x30"
 	ARM64ReturnRegStr      = "x0"
+	// ARM64ICDataStr is IC_DATA_REG (constants_arm64.h: R5). EmitInstanceCallAOT
+	// loads the UnlinkedCall into it together with the SwitchableCallMiss stub
+	// in LR (one LDP from the pool; order flips at 3.10.7, see switchable.go).
+	ARM64ICDataStr = "x5"
 )
 
 // ── x86_64 register roles ─────────────────────────────────────────────
@@ -159,6 +163,10 @@ const (
 	X86StackRegStr  = "rsp"
 	X86FrameRegStr  = "rbp"
 	X86ReturnRegStr = "rax"
+	// X86ICDataStr is IC_DATA_REG (constants_x64.h: RBX). EmitInstanceCallAOT
+	// (flow_graph_compiler_x64.cc, identical shape 2.10.0..3.13.0) loads the stub
+	// into RCX, the UnlinkedCall into RBX and the receiver into RDX, then `call RCX`.
+	X86ICDataStr = "rbx"
 )
 
 // ── Symbolic names for register seeding ───────────────────────────────

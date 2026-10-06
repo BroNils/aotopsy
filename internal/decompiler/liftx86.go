@@ -68,6 +68,7 @@ func BuildX86IR(name, dartVersion string, insts []x86.Decoded, cc sdk.RegisterCa
 	fir.StackReg = sdk.X86StackRegStr
 	fir.CodeReg = sdk.X86CodeRegStr
 	fir.ArgsDescReg = sdk.X86ArgsDescStr
+	fir.ICDataReg = sdk.X86ICDataStr
 	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
 	fir.FpuReturnReg = cc.FPUReturn
 	fir.TypeTestABIRegs = sdk.TypeTestRegNames(dartVersion, false)

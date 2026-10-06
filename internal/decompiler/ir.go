@@ -29,6 +29,13 @@ const (
 	OpLoadPool
 )
 
+// PoolLoad is one destination register of a paired pool load and the pool
+// index it receives.
+type PoolLoad struct {
+	Reg   string
+	Index int
+}
+
 // Instr is one lifted instruction. Src is the normalized, lowercased
 // "mnemonic operand1, operand2, ..." text for BOTH architectures -- ARM64
 // and x86_64 instructions are rendered into the same textual shape so a
@@ -49,6 +56,10 @@ type Instr struct {
 	// (direct and materialized-address forms); x86_64 uses static MOV loads from
 	// [r15+disp]. For OpLoadPool, Target holds the destination register name.
 	PoolIndex int
+	// PoolLoads lists the two pool words an ARM64 LDP loads (the IR has one
+	// Target per instruction, so a pair cannot be an OpLoadPool). Set only for
+	// an LDP the canonical pool-access extractor resolved, base and index.
+	PoolLoads []PoolLoad
 
 	// OpBranch condition classification -- the emitter builds the actual
 	// condition expression at walk time (against the live LiftState), so
@@ -130,6 +141,9 @@ type FuncIR struct {
 	// ARM64 -- which overlaps the x0..x7 arg display and so was already seeded --
 	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
 	ArgsDescReg string
+	// ICDataReg is IC_DATA_REG, which a switchable call loads with its
+	// UnlinkedCall (x5 / rbx). See switchable.go.
+	ICDataReg string
 
 	// FpuArgRegs holds the architecture's possible FPU argument registers
 	// (ARM64: v0-v5; x86_64: xmm1-xmm6) in calling-convention allocation order.

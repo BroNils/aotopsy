@@ -51,6 +51,10 @@ type LiftState struct {
 	// right after it (see takePushedArgs). Path-local like OutSlots.
 	Pushed []string
 
+	// ICName is the target name of the UnlinkedCall a switchable call loaded
+	// into IC_DATA_REG in the CURRENT block ("" when none); see switchable.go.
+	ICName string
+
 	// Spills holds `var _tN = <expr>;` declarations produced by setReg when a
 	// forwarded expression outgrew maxForwardedExprLen. The emitter drains
 	// them after every instruction, before the statement that uses the name.
@@ -125,6 +129,7 @@ func (s *LiftState) Clone() *LiftState {
 	if len(s.Pushed) > 0 {
 		c.Pushed = append([]string(nil), s.Pushed...)
 	}
+	c.ICName = s.ICName
 	return c
 }
 
@@ -600,6 +605,11 @@ func operandExpr(fir *FuncIR, s *LiftState, tok string) string {
 		return poolOperandDispExpr(fir, s, ppOff+op.memDisp)
 	}
 	if !op.hasDisp {
+		// `[reg]` with reg holding PP+N reads pool element N: the LDP that
+		// loads a switchable call's {UnlinkedCall, stub} pair is exactly this.
+		if ppOff, ok := parsePPOffset(fir, baseExpr); ok {
+			return poolOperandDispExpr(fir, s, ppOff)
+		}
 		return baseExpr
 	}
 	if expr, ok := threadFieldExpr(fir, base, op.memDisp); ok {

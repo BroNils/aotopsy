@@ -72,6 +72,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stack arguments are the whole list; from 3.4 they follow the register arguments. 3.9.2, first
   3000 functions: stack-slot statements arm64 2679 -> 155, x64 3256 -> 699; ground-truth gate
   `stack_sp_leak` 140/142 -> 0/2.
+- **Decompiler names switchable (instance) calls: `recv.name(args)` instead of
+  `dynamicCall(dispatchTarget, ...)`.** `FlowGraphCompiler::EmitInstanceCallAOT` (read at x64
+  2.10.0 / 2.12.0 / 3.9.2 / 3.13.0; arm64 per the audit) loads the receiver from
+  `[SP + (SizeWithoutTypeArgs-1)*8]` (R0 / RDX), the UnlinkedCall into IC_DATA_REG (R5 / RBX) and
+  the SwitchableCallMiss stub into LR / RCX, then calls. The UnlinkedCall's `target_name` is the
+  selector (`dyn:` prefix = dynamic-invocation forwarder, `Symbols::DynamicPrefix` in every
+  version). The call is recognised from the register pair {IC_DATA_REG, LR} of the LDP (arm64; the
+  pool-slot ORDER flips at 3.10.7 but the registers do not) or the RBX pool load (x64), and printed
+  only when the receiver is exactly the first bound stack argument (so type-argument vectors and
+  unbound slots are left as before). Getters/setters/operators/`[]` print as such. Also: an
+  `ldr/ldp reg, [x]` with no displacement whose base holds `PP+N` now resolves to pool element N.
+  Measured on the first 3000 functions: `dynamicCall(` 357 -> 348 (3.9.2 arm64), 401 -> 392 (3.9.2
+  x64), 472 -> 450 (2.12.0 arm64). The ceiling is low by construction: switchable calls are only
+  189 call sites in the whole 2.12.0 sample (3734 BLRs are dispatch-table calls, which already
+  carry their selector).
 - **Decompiler binds pushed call arguments to the call (<= 2.19.0).** Before 3.0.5 arguments are
   pushed (`PushArgumentInstr`) and the caller drops them after the call (`Drop(argc)`), so the
   argument count is the stack-pointer adjustment right after the call (`ADD X15,X15,#8*argc` /

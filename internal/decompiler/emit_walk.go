@@ -237,6 +237,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	e.blockLineStart = len(e.lines)
 	e.state.OutSlots = nil
 	e.state.Pushed = nil
+	e.state.ICName = ""
 	e.emit(indent, "block_%d:;", id)
 	if e.emittedAnywhere != nil {
 		e.emittedAnywhere[id] = true
@@ -257,7 +258,9 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			if !isLast {
 				e.dropAfterCall = parseSPAdjust(e.fir, blk.Instrs[i+1].Src)
 			}
+			e.recvDisp = switchableReceiverDisp(e.fir, blk.Instrs[:i])
 			e.emitCall(ins, indent)
+			e.state.ICName = ""
 		case OpLoadPool:
 			e.emitLoadPool(ins)
 		case OpReturn:
@@ -352,6 +355,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			}
 		default:
 			line, ok := ApplyOther(e.fir, e.state, ins)
+			e.applyPairedPoolLoad(ins)
 			// Declarations first: `line` may read a name that was just spilled.
 			e.drainSpills(indent)
 			if ok && !sdk.IsWriteBarrierStmt(line) {

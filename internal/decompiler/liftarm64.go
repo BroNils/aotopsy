@@ -49,6 +49,7 @@ func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []dis
 	fir.StackReg = sdk.ARM64StackRegStr
 	fir.CodeReg = sdk.ARM64CodeRegStr
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
+	fir.ICDataReg = sdk.ARM64ICDataStr
 	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
 	fir.FpuReturnReg = cc.FPUReturn
 	fir.TypeTestABIRegs = sdk.TypeTestRegNames(dartVersion, true)
@@ -67,7 +68,13 @@ func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []dis
 			if len(loads) == 1 {
 				scalarPoolLoad = &loads[0]
 			}
-			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i], scalarPoolLoad))
+			lifted := liftARM64Instr(insts[i], scalarPoolLoad)
+			if len(loads) == 2 && strings.EqualFold(insts[i].Mnemonic, "ldp") {
+				for _, l := range loads {
+					lifted.PoolLoads = append(lifted.PoolLoads, PoolLoad{Reg: sdk.ARM64RegName(l.Reg), Index: l.PoolIndex})
+				}
+			}
+			blk.Instrs = append(blk.Instrs, lifted)
 		}
 		for _, s := range bb.Succs {
 			blk.Succs = append(blk.Succs, Succ{BlockID: s.BlockID, Cond: s.Cond})

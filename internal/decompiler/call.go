@@ -124,7 +124,9 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 			calleeName = cleanCalleeName(sym)
 		}
 	}
+	var boundArgs []string // stack/pushed arguments bound to this call (switchable.go)
 	if stackArgs := e.takeOutgoingStackArgs(calleeName); len(stackArgs) > 0 {
+		boundArgs = stackArgs
 		if e.hasRegisterCC() {
 			// >= 3.4.x: the first max_arguments_in_registers arguments of an
 			// eligible callee are in registers and the rest on the stack, so the
@@ -141,6 +143,7 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 		// <= 2.19.0: every argument is pushed; the registers listed above are
 		// not arguments.
 		args = pushed
+		boundArgs = pushed
 	}
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
@@ -165,6 +168,10 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 				tmpName, ins.DispatchSelector, argsText)
 		}
 		e.stats.IndirectCalls++
+		bound = true
+	} else if text, ok := e.switchableCallExpr(boundArgs); !isDirect && ok {		e.stats.IndirectCalls++
+		e.stats.SemanticIndirectCalls++
+		e.emit(indent, "final %s = %s;", tmpName, text)
 		bound = true
 	} else if isDirect {
 		bound = e.emitDirectCall(tmpName, calleeVA, argsText, selectorHint, indent)
