@@ -13,14 +13,14 @@ func (e *emitter) emitLoadPool(ins Instr) {
 		return
 	}
 	dst := strings.ToLower(ins.Target)
+	// x64 loads the CallSiteData with its own pool load into RBX; arm64 uses one
+	// LDP (applyPairedPoolLoad).
+	if e.fir.ICDataReg == sdk.X86ICDataStr {
+		e.noteCallSiteLoad(dst, ins.PoolIndex)
+	}
 	if e.pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := e.pool(ins.PoolIndex); ok {
 			e.state.setReg(dst, dartPoolDisplay(disp))
-			// x64 loads the UnlinkedCall with its own pool load into RBX; arm64
-			// uses one LDP, handled in the lifter.
-			if e.fir.ICDataReg != "" && e.fir.ICDataReg == sdk.X86ICDataStr && canonReg(dst) == e.fir.ICDataReg {
-				e.state.ICName = switchableName(dartPoolDisplay(disp))
-			}
 			return
 		}
 	}

@@ -384,6 +384,32 @@ type FuncIR struct {
 	// annotates class-id range/equality tests with the classes they cover.
 	// Nil disables the annotation.
 	ClassNameForCID func(cid int) string `json:"-"`
+
+	// CallSiteAt resolves an object-pool index to the CallSiteData object
+	// (UnlinkedCall / MegamorphicCache) stored there, if that is what it is.
+	// It is what identifies a switchable call by the OBJECT it loads rather
+	// than by how the pool entry happens to print. Nil disables switchable-call
+	// recovery.
+	CallSiteAt func(poolIndex int) (CallSite, bool) `json:"-"`
+}
+
+// CallSite is the resolved content of a CallSiteData pool object: the selector
+// the call names and the shape of its arguments (ArgumentsDescriptor).
+type CallSite struct {
+	// Selector is target_name as stored: `foo`, `get:foo`, `set:foo`, an
+	// operator such as `+` or `[]`, each optionally prefixed `dyn:` (the
+	// dynamic-invocation forwarder name, Symbols::DynamicPrefix).
+	Selector string
+	// Count is the number of passed arguments, receiver included and type
+	// arguments excluded; TypeArgsLen > 0 means a type-argument vector is passed
+	// as one more leading argument. Positional is the positional count
+	// (receiver included).
+	Count       int
+	TypeArgsLen int
+	Positional  int
+	// NamedArgs maps an argument's index among the Count passed arguments to the
+	// name it is passed under.
+	NamedArgs map[int]string
 }
 
 // AllocatedClassID returns the class ID a callee name allocates, or 0. A Dart

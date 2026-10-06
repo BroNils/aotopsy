@@ -18,7 +18,12 @@ func appendKnownStubResolution(t TypeLattice, pc uint64, reg int, ctx *TypeConte
 		return false
 	}
 	if strings.HasPrefix(sn, "UnlinkedCall:") {
-		methodName := strings.TrimPrefix(sn, "UnlinkedCall:")
+		// A `dyn:foo` call resolves to a dyn:foo forwarder if the class has one,
+		// else to the function `foo`: Resolver::ResolveDynamic* demangles the
+		// name with DemangleDynamicInvocationForwarderName before the lookup
+		// (resolver.cc, same logic at 2.12.0 and 3.9.2, present in every
+		// supported version). The implementations are therefore those of `foo`.
+		methodName := strings.TrimPrefix(strings.TrimPrefix(sn, "UnlinkedCall:"), "dyn:")
 		if selectorImms := ctx.MethodNameToSelectorImms[methodName]; len(selectorImms) > 0 {
 			res := BlrResolution{PC: pc, Reg: reg, SlotIndex: -1, Confidence: ResolutionStaticInferred, Derivation: DerivationUnlinkedCall}
 			seen := make(map[string]bool)

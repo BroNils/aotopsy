@@ -110,6 +110,7 @@ type DecompileEnrichment struct {
 	ParamTypeByCodeIndex   map[int]*cluster.NamedObject
 	ClassNameToID          map[string]int
 	ClassNameForCID        func(cid int) string
+	CallSiteAt             func(poolIndex int) (decompiler.CallSite, bool)
 	FieldTypeByClassOffset map[int]map[int64]int
 	ParamFuncTypeByRef     map[int]*cluster.FuncTypeInfo
 	TypeParams             *naming.TypeParamResolver
@@ -248,6 +249,7 @@ func (c *AnalysisContext) ensureDecompileMaps() error {
 	perClass := map[int32]map[int32]string{}
 	offsetNames := map[int32]map[string]bool{}
 	c.Enrichment.ClassNameToID = BuildClassNameToID(layouts)
+	c.Enrichment.CallSiteAt = BuildCallSiteLookup(result, pl, c.Info.Version.DartVersion)
 	// Straight from the Class objects, not from layouts: BuildClassLayouts
 	// drops classes with a zero instance size (variable-length ones such as the
 	// typed-data and string classes), which are exactly the ones cid-range
@@ -598,6 +600,7 @@ func (c *AnalysisContext) FuncIRFor(r cluster.CodeRange) (*decompiler.FuncIR, er
 	fir.FieldNameResolver = c.Enrichment.FieldNameResolver
 	fir.ClassNameToID = c.Enrichment.ClassNameToID
 	fir.ClassNameForCID = c.Enrichment.ClassNameForCID
+	fir.CallSiteAt = c.Enrichment.CallSiteAt
 	if c.Enrichment.FieldTypeByClassOffset != nil {
 		fir.FieldTypeResolver = func(classID int, off int64) int {
 			if m, ok := c.Enrichment.FieldTypeByClassOffset[classID]; ok {

@@ -414,6 +414,17 @@ type ICDataInfo struct {
 	EntriesRef    int // ref 2: ICData.entries (Array of class_id/target pairs)
 }
 
+// CallSiteInfo holds the CallSiteData refs of an UnlinkedCall or a
+// MegamorphicCache: the object an AOT instance call loads into IC_DATA_REG
+// (EmitInstanceCallAOT / EmitMegamorphicInstanceCall, see
+// decompiler/switchable.go). Unlike ICData both ARE present in AOT snapshots.
+type CallSiteInfo struct {
+	RefID         int
+	Megamorphic   bool // MegamorphicCache (else UnlinkedCall)
+	TargetNameRef int  // ref 0: CallSiteData.target_name (the selector)
+	ArgsDescRef   int  // ref 1: CallSiteData.args_descriptor (ArgumentsDescriptor array)
+}
+
 // ScriptInfo holds a Script object's URL and optional line/col metadata.
 type ScriptInfo struct {
 	RefID             int
@@ -846,22 +857,23 @@ func ReadFill(data []byte, result *Result, profile *snapshot.VersionProfile, isV
 			}
 
 		case FillRefs:
-			named, funcTypes, fieldInfos, typeInfos, recordTypeInfos, icDataInfos, scriptInfos, loadingUnitInfos, closureDataInfos, typeParamInfos, closureInfos, ffiInfos, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
+			refs, err := readFillRefs(s, cm, &spec, fillRefUnsigned, profile)
 			if err != nil {
 				return fmt.Errorf("fill: cluster %d (CID %d): %w", i, cm.CID, err)
 			}
-			result.Named = append(result.Named, named...)
-			result.FuncTypes = append(result.FuncTypes, funcTypes...)
-			result.Fields = append(result.Fields, fieldInfos...)
-			result.Types = append(result.Types, typeInfos...)
-			result.RecordTypes = append(result.RecordTypes, recordTypeInfos...)
-			result.ICData = append(result.ICData, icDataInfos...)
-			result.Scripts = append(result.Scripts, scriptInfos...)
-			result.LoadingUnits = append(result.LoadingUnits, loadingUnitInfos...)
-			result.ClosureData = append(result.ClosureData, closureDataInfos...)
-			result.TypeParameters = append(result.TypeParameters, typeParamInfos...)
-			result.Closures = append(result.Closures, closureInfos...)
-			result.FfiTrampolines = append(result.FfiTrampolines, ffiInfos...)
+			result.Named = append(result.Named, refs.Named...)
+			result.FuncTypes = append(result.FuncTypes, refs.FuncTypes...)
+			result.Fields = append(result.Fields, refs.Fields...)
+			result.Types = append(result.Types, refs.Types...)
+			result.RecordTypes = append(result.RecordTypes, refs.RecordTypes...)
+			result.ICData = append(result.ICData, refs.ICData...)
+			result.CallSites = append(result.CallSites, refs.CallSites...)
+			result.Scripts = append(result.Scripts, refs.Scripts...)
+			result.LoadingUnits = append(result.LoadingUnits, refs.LoadingUnits...)
+			result.ClosureData = append(result.ClosureData, refs.ClosureData...)
+			result.TypeParameters = append(result.TypeParameters, refs.TypeParameters...)
+			result.Closures = append(result.Closures, refs.Closures...)
+			result.FfiTrampolines = append(result.FfiTrampolines, refs.FfiTrampolines...)
 
 		case FillDouble:
 			if err := skipFillDouble(s, cm, profile.PreCanonicalSplit); err != nil {
@@ -1255,7 +1267,7 @@ func fillOneCluster(s *dartfmt.Stream, cm *ClusterMeta, spec *FillSpec, fillRefU
 	case FillInlineBytes:
 		return skipFillInlineBytes(s, cm, spec.InlineBytesLengthShift)
 	case FillRefs:
-		_, _, _, _, _, _, _, _, _, _, _, _, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
+		_, err := readFillRefs(s, cm, spec, fillRefUnsigned, profile)
 		return err
 	case FillDouble:
 		return skipFillDouble(s, cm, profile.PreCanonicalSplit)

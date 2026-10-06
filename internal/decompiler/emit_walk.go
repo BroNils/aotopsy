@@ -237,7 +237,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	e.blockLineStart = len(e.lines)
 	e.state.OutSlots = nil
 	e.state.Pushed = nil
-	e.state.ICName = ""
+	e.state.ICSite = nil
 	e.emit(indent, "block_%d:;", id)
 	if e.emittedAnywhere != nil {
 		e.emittedAnywhere[id] = true
@@ -252,15 +252,19 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 		// instruction overwrites BEFORE lifting it, so a stale type can never
 		// survive a redefinition (see LiftState.RegClass).
 		e.state.clearWrittenRegClasses(ins)
+		// The CallSiteData in IC_DATA_REG is only meaningful until the register
+		// is overwritten (the instruction that loads it sets it again below).
+		if e.state.ICSite != nil && instrWritesReg(ins, e.fir.ICDataReg) {
+			e.state.ICSite = nil
+		}
 		switch ins.Op {
 		case OpCall:
 			e.dropAfterCall = 0
 			if !isLast {
 				e.dropAfterCall = parseSPAdjust(e.fir, blk.Instrs[i+1].Src)
 			}
-			e.recvDisp = switchableReceiverDisp(e.fir, blk.Instrs[:i])
 			e.emitCall(ins, indent)
-			e.state.ICName = ""
+			e.state.ICSite = nil
 		case OpLoadPool:
 			e.emitLoadPool(ins)
 		case OpReturn:

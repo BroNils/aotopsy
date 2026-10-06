@@ -179,9 +179,6 @@ type emitter struct {
 	// that immediately follows the call being emitted (0 if none); it carries
 	// the argument count of a <= 2.19.0 push-model call (outargs.go).
 	dropAfterCall int64
-	// recvDisp is the SP displacement the receiver of the call being emitted was
-	// read from (-1 if no receiver load precedes it), see switchable.go.
-	recvDisp int64
 	// orphanBlocks records predecessorless/unreached blocks emitted after the
 	// main structured walk. Their labels are semantic control-flow boundaries for
 	// the compactor even when no goto references them; pruning those labels would

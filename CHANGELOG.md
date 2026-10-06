@@ -87,6 +87,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   x64), 472 -> 450 (2.12.0 arm64). The ceiling is low by construction: switchable calls are only
   189 call sites in the whole 2.12.0 sample (3734 BLRs are dispatch-table calls, which already
   carry their selector).
+  **Second step (this replaces the display-based recogniser above):** the call is now identified by
+  the OBJECT in IC_DATA_REG, not by how its pool entry prints. `cluster` captures the
+  CallSiteData refs of every `UnlinkedCall` and `MegamorphicCache` (`Result.CallSites`;
+  `EmitMegamorphicInstanceCall`, which is the 2.x AOT form of the same call, loads a
+  MegamorphicCache with the identical `LDP {R5, LR}` -- 139 of the 189 call sites of the 2.12.0
+  sample), `cluster.ArgsDescriptorDecoder` decodes `args_descriptor`, and the decompiler gets
+  selector + exact argument count + named arguments through `FuncIR.CallSiteAt`. The call is
+  rendered only when the bound stack arguments are exactly the descriptor's count (plus the
+  type-argument vector when `type_args_len > 0`), and named arguments print as `name: value`.
+  The descriptor's argument count equals the receiver slot `[SP+(count-1)*8]` at **every** one of
+  the ~520 switchable sites of the 21 arm64 corpus samples (0 mismatches;
+  `TestSwitchableReceiverSlotMatchesArgumentsDescriptor`). Descriptors are decoded two ways, both
+  read from the SDK at every md5 bucket: the VM's pre-allocated `cached_args_descriptors_`
+  (`Serializer::AddBaseObjects` hands them the first reference ids, in order: first id 25 on
+  2.10.0, 19 on 2.12..2.17.6, 20 on 2.18/2.19, 21 on 3.0.5/3.1.0, 22 on 3.2.5..3.4.3, 21 on
+  3.5.0..3.12.2; 32 entries, plus 3 type-argument entries from 3.9.2) and, because 3.13.0 no
+  longer adds them as base objects (AOT base objects are the 7 Roots), real Arrays of Smi
+  objects (`Result.MintValues`). 2.12.0 arm64, first 3000 functions: `dynamicCall(` 472 -> 398.
+- **Typetrack resolves switchable calls by the UnlinkedCall/MegamorphicCache selector.** There
+  was no handler for the pool-pair `LDP R5, LR, [PP + n]` at all: LR kept the *stub* slot, whose
+  display is a pool-name artifact, so 150 call edges of the 2.12.0 sample were recorded with the
+  bogus target `Subtype5TestCache` (139) or `TopTypeTypeTest` (11). `handlePPLoad` now types both
+  words of the pair (and accumulates `ADD X16, PP, #hi, LSL #12; ADD X16, X16, #lo`, the form
+  LoadDoubleWordFromPoolIndex uses past the LDP range), and the BLR through LR takes the
+  call-site fact. x64 gets the same for `call RCX` after `RBX <- UnlinkedCall`. A `dyn:foo`
+  call resolves by `foo` (`Resolver::ResolveDynamic*` demangles it before the lookup; same logic
+  at 2.12.0 and 3.9.2, `DemangleDynamicInvocationForwarderName` in every supported version).
+  Per-record golden deltas (all explained, none unexplained): 2.12.0 arm64 150 records bogus
+  target -> real candidate sets (140 polymorphic, 10 single), no record added or removed;
+  3.9.2 / 3.13.0 arm64 and 3.12.2 x64 +3 previously unresolved `dyn:` sites each. MegamorphicCache
+  objects are now named by their selector (`NameIdx 0`, as UnlinkedCall): corpus `named`
+  +3/+4 on 2.10.0/2.12.0, asm annotations `<MegamorphicCache>` -> selector (139 lines).
+  *Open, separate defect found on the way:* the stub slot of these pairs displays as a wrong stub
+  name on 2.12.0 (`Subtype5TestCache` for MegamorphicCall) -- a stub-name table problem, see
+  `.tmp/review/SESSION-LOG-2026-10.md`.
 - **Decompiler binds pushed call arguments to the call (<= 2.19.0).** Before 3.0.5 arguments are
   pushed (`PushArgumentInstr`) and the caller drops them after the call (`Drop(argc)`), so the
   argument count is the stack-pointer adjustment right after the call (`ADD X15,X15,#8*argc` /

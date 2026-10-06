@@ -3,6 +3,7 @@ package typetrack
 import (
 	"aotopsy/internal/arch/x86"
 	"sort"
+	"strings"
 
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
@@ -826,7 +827,13 @@ func handleX86Call(tc *transferCtxX86) bool {
 		// CALL reg — indirect call through register.
 		if reg, ok := ins.Args[0].(x86asm.Reg); ok {
 			regIdx := x86.CanonReg(reg)
-			if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
+			// `call RCX` right after RBX <- UnlinkedCall is EmitInstanceCallAOT:
+			// RCX holds the SwitchableCallMiss stub, which names nothing, while
+			// RBX's target_name is the call's selector. Resolve by the selector.
+			if regIdx == sdk.X86CallStub && tc.state[sdk.X86ICData].Kind == LatticeKnownStub &&
+				strings.HasPrefix(tc.state[sdk.X86ICData].StubName, "UnlinkedCall:") {
+				appendKnownStubResolution(tc.state[sdk.X86ICData], tc.inst.VA, regIdx, tc.ctx, tc.result)
+			} else if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
 				// No allocation case here. An indirect call through a THR
 				// stub slot reaches the GENERIC AllocateObject stub, which
 				// allocates whatever the tags word says -- there is no

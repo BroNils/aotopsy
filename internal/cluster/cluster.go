@@ -188,6 +188,7 @@ type Result struct {
 	TypeArguments     []TypeArgumentsInfo    // TypeArguments type refs
 	ExceptionHandlers []ExceptionHandlerInfo // Exception handler tables
 	ICData            []ICDataInfo           // ICData call-site→class→target mappings (empty in AOT — JIT-only)
+	CallSites         []CallSiteInfo         // UnlinkedCall / MegamorphicCache objects (call-site pool entries)
 	Scripts           []ScriptInfo           // Script URLs + line/col metadata
 	LoadingUnits      []LoadingUnitInfo      // Loading unit / deferred library metadata
 

@@ -169,7 +169,8 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 		}
 		e.stats.IndirectCalls++
 		bound = true
-	} else if text, ok := e.switchableCallExpr(boundArgs); !isDirect && ok {		e.stats.IndirectCalls++
+	} else if text, ok := e.switchableCallExpr(boundArgs); !isDirect && ok {
+		e.stats.IndirectCalls++
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s;", tmpName, text)
 		bound = true

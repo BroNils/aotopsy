@@ -6,11 +6,12 @@ import (
 	"strings"
 )
 
-// Switchable calls.
+// Switchable and megamorphic calls.
 //
 // An AOT instance call is lowered by FlowGraphCompiler::EmitInstanceCallAOT
-// (flow_graph_compiler_{arm64,x64}.cc, shape verified at 2.10.0, 2.12.0, 3.9.2
-// and 3.13.0 for x64, and by the audit for arm64):
+// (flow_graph_compiler_{arm64,x64}.cc, read at x64 2.10.0 / 2.12.0 / 3.9.2 /
+// 3.13.0 and verified on every arm64 corpus sample, see
+// analysis/switchable_corpus_test.go):
 //
 //	receiver <- [SP + (ic_data.SizeWithoutTypeArgs() - 1) * kWordSize]   (R0 / RDX)
 //	IC_DATA_REG <- UnlinkedCall from the object pool                      (R5 / RBX)
@@ -18,15 +19,15 @@ import (
 //	call
 //	drop(SizeWithTypeArgs())
 //
-// UnlinkedCall holds {target_name, args_descriptor} (cluster fill spec), so the
-// pool entry names the called selector. The receiver's slot displacement gives
-// the argument count without the type arguments, which is how the receiver is
-// told apart from a leading type-arguments vector.
+// and, through 2.x AOT, EmitMegamorphicInstanceCall emits the same sequence
+// with a MegamorphicCache and the MegamorphicCall stub. Both objects are
+// CallSiteData: target_name (the selector) and args_descriptor come first.
 //
-// The stack arguments of the call are already bound by outargs.go (3.0.5+) /
-// outargs_push.go (<= 2.19.0); the first of them is the receiver. Nothing is
-// printed unless that binding succeeded and the receiver is exactly the first
-// bound argument.
+// The call is recognised by the OBJECT in IC_DATA_REG, resolved through
+// FuncIR.CallSiteAt, never by how the pool entry prints. The descriptor gives
+// the exact argument count, so the stack arguments already bound to the call
+// (outargs.go for 3.0.5+, outargs_push.go for <= 2.19.0) are rendered only when
+// there are exactly that many; the first of them is the receiver.
 
 var (
 	identNameRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
@@ -39,77 +40,111 @@ var (
 	}
 )
 
-// switchableName returns display when it is the target name of an UnlinkedCall
-// (a bare selector, optionally prefixed `dyn:`), else "". Strings, objects and
-// every display that is not a plain selector are rejected.
-func switchableName(display string) string {
-	n := strings.TrimPrefix(display, "dyn:")
-	n = strings.TrimPrefix(strings.TrimPrefix(n, "get:"), "set:")
-	switch {
-	case identNameRe.MatchString(n), binaryOperators[n], n == "[]", n == "[]=", n == "unary-", n == "~":
-		return display
+// instrWritesReg reports whether the instruction's write-set contains reg.
+func instrWritesReg(ins Instr, reg string) bool {
+	for _, r := range ins.DefRegs {
+		if r == reg {
+			return true
+		}
 	}
-	return ""
+	return false
 }
 
-// switchableReceiverDisp finds the receiver load that precedes a switchable
-// call -- `ldr x0, [x15, #d]` on ARM64, `mov rdx, [rsp + d]` on x86_64 -- and
-// returns d, or -1. The scan stops at the previous call.
-func switchableReceiverDisp(fir *FuncIR, instrs []Instr) int64 {
-	recvReg := fir.ReturnReg // R0 on ARM64
-	mnemonics := map[string]bool{"ldr": true, "ldur": true}
-	if fir.ICDataReg == "rbx" { // x86_64: RDX
-		recvReg = "rdx"
-		mnemonics = map[string]bool{"mov": true}
+// noteCallSiteLoad records the CallSiteData loaded into the IC register from
+// the given pool slot (nothing when the slot holds another kind of object).
+func (e *emitter) noteCallSiteLoad(reg string, poolIndex int) {
+	if e.fir.CallSiteAt == nil || poolIndex < 0 || canonReg(reg) != canonReg(e.fir.ICDataReg) {
+		return
 	}
-	for i := len(instrs) - 1; i >= 0; i-- {
-		if instrs[i].Op == OpCall {
-			return -1
-		}
-		mn, ops := splitOperands(strings.ToLower(instrs[i].Src))
-		if !mnemonics[mn] || len(ops) < 2 || canonReg(ops[0]) != canonReg(recvReg) {
-			continue
-		}
-		op := parseOperand(ops[1])
-		if !op.isMem || strings.ToLower(op.memBase) != fir.StackReg || op.memDisp < 0 || op.memDisp%8 != 0 {
-			return -1
-		}
-		return op.memDisp
+	if site, ok := e.fir.CallSiteAt(poolIndex); ok {
+		e.state.ICSite = &site
 	}
-	return -1
 }
 
-// switchableCallExpr renders a recognised switchable call from the bound
-// stack arguments (receiver first). ok is false when anything is missing.
+// applyPairedPoolLoad records the two pool words an LDP loaded. The pair
+// {IC_DATA_REG, LR} is EmitInstanceCallAOT's {UnlinkedCall, stub} load; the
+// order of the two pool slots flips at 3.10.7 but the destination registers do
+// not, so the registers identify the shape.
+func (e *emitter) applyPairedPoolLoad(ins Instr) {
+	if len(ins.PoolLoads) != 2 {
+		return
+	}
+	var ic, lr bool
+	for _, l := range ins.PoolLoads {
+		if e.pool != nil {
+			if disp, ok := e.pool(l.Index); ok {
+				e.state.setReg(l.Reg, dartPoolDisplay(disp))
+			}
+		}
+		switch canonReg(l.Reg) {
+		case canonReg(e.fir.ICDataReg):
+			ic = true
+			e.noteCallSiteLoad(l.Reg, l.Index)
+		case canonReg(e.fir.LinkReg):
+			lr = true
+		}
+	}
+	if !(ic && lr) {
+		e.state.ICSite = nil
+	}
+}
+
+// switchableCallExpr renders a recognised call from the stack arguments bound
+// to it (receiver first, preceded by the type-argument vector when the
+// descriptor says one is passed). ok is false when the count does not match.
 func (e *emitter) switchableCallExpr(bound []string) (string, bool) {
-	name := e.state.ICName
-	if name == "" || e.recvDisp < 0 || len(bound) == 0 {
+	site := e.state.ICSite
+	if site == nil || len(bound) == 0 {
 		return "", false
 	}
-	if len(bound) != int(e.recvDisp/8)+1 { // type arguments, or an unbound slot
+	var typeArgs string
+	args := bound
+	if site.TypeArgsLen > 0 {
+		if len(bound) != site.Count+1 {
+			return "", false
+		}
+		typeArgs, args = bound[0], bound[1:]
+	} else if len(bound) != site.Count {
 		return "", false
 	}
-	recv, args := bound[0], bound[1:]
-	dyn := strings.HasPrefix(name, "dyn:")
-	sel := strings.TrimPrefix(name, "dyn:")
+	recv, rest := args[0], args[1:]
+	for idx := range site.NamedArgs {
+		if idx < site.Positional || idx >= site.Count {
+			return "", false
+		}
+	}
+	rendered := make([]string, len(rest))
+	for i, a := range rest {
+		if name, ok := site.NamedArgs[i+1]; ok {
+			a = name + ": " + a
+		}
+		rendered[i] = a
+	}
+
+	dyn := strings.HasPrefix(site.Selector, "dyn:")
+	sel := strings.TrimPrefix(site.Selector, "dyn:")
 	text := ""
 	switch {
-	case strings.HasPrefix(sel, "get:") && len(args) == 0:
+	case strings.HasPrefix(sel, "get:") && len(rest) == 0:
 		text = fmt.Sprintf("%s.%s", recv, strings.TrimPrefix(sel, "get:"))
-	case strings.HasPrefix(sel, "set:") && len(args) == 1:
-		text = fmt.Sprintf("%s.%s = %s", recv, strings.TrimPrefix(sel, "set:"), args[0])
-	case sel == "[]" && len(args) == 1:
-		text = fmt.Sprintf("%s[%s]", recv, args[0])
-	case sel == "[]=" && len(args) == 2:
-		text = fmt.Sprintf("%s[%s] = %s", recv, args[0], args[1])
-	case binaryOperators[sel] && len(args) == 1:
-		text = fmt.Sprintf("(%s %s %s)", recv, sel, args[0])
-	case sel == "unary-" && len(args) == 0:
+	case strings.HasPrefix(sel, "set:") && len(rest) == 1:
+		text = fmt.Sprintf("%s.%s = %s", recv, strings.TrimPrefix(sel, "set:"), rest[0])
+	case sel == "[]" && len(rest) == 1:
+		text = fmt.Sprintf("%s[%s]", recv, rest[0])
+	case sel == "[]=" && len(rest) == 2:
+		text = fmt.Sprintf("%s[%s] = %s", recv, rest[0], rest[1])
+	case binaryOperators[sel] && len(rest) == 1:
+		text = fmt.Sprintf("(%s %s %s)", recv, sel, rest[0])
+	case sel == "unary-" && len(rest) == 0:
 		text = fmt.Sprintf("-%s", recv)
-	case sel == "~" && len(args) == 0:
+	case sel == "~" && len(rest) == 0:
 		text = fmt.Sprintf("~%s", recv)
 	case identNameRe.MatchString(sel):
-		text = fmt.Sprintf("%s.%s(%s)", recv, sel, strings.Join(args, ", "))
+		targs := ""
+		if typeArgs != "" {
+			targs = fmt.Sprintf("/* typeArgs: %s */", typeArgs)
+		}
+		text = fmt.Sprintf("%s.%s%s(%s)", recv, sel, targs, strings.Join(rendered, ", "))
 	default:
 		return "", false
 	}
@@ -117,33 +152,4 @@ func (e *emitter) switchableCallExpr(bound []string) (string, bool) {
 		text += " /* dynamic */"
 	}
 	return text, true
-}
-
-// applyPairedPoolLoad records the two pool words an LDP loaded. The pair
-// {IC_DATA_REG, LR} is EmitInstanceCallAOT's {UnlinkedCall, stub} load (the
-// order of the two pool slots flips at 3.10.7 but the destination registers do
-// not, so the registers -- not the order -- identify the shape).
-func (e *emitter) applyPairedPoolLoad(ins Instr) {
-	if len(ins.PoolLoads) != 2 || e.pool == nil {
-		return
-	}
-	var ic, lr bool
-	for _, l := range ins.PoolLoads {
-		disp, ok := e.pool(l.Index)
-		if !ok {
-			return
-		}
-		shown := dartPoolDisplay(disp)
-		e.state.setReg(l.Reg, shown)
-		switch canonReg(l.Reg) {
-		case canonReg(e.fir.ICDataReg):
-			ic = true
-			e.state.ICName = switchableName(shown)
-		case canonReg(e.fir.LinkReg):
-			lr = true
-		}
-	}
-	if !(ic && lr) {
-		e.state.ICName = ""
-	}
 }

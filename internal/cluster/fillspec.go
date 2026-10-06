@@ -767,11 +767,13 @@ func specICData() FillSpec {
 func specMegamorphicCache() FillSpec {
 	// ReadFromTo reads CallSiteData (target_name, args_descriptor) + MegamorphicCache (buckets, mask) = 4 refs.
 	// Read<int32_t>(filled_entry_count).
+	// target_name is ref 0, exactly as for UnlinkedCall, so the object is named
+	// by its selector.
 	return FillSpec{
 		Kind:    FillRefs,
 		NumRefs: 4,
 		Scalars: []ScalarOp{OpTagged32},
-		NameIdx: -1, OwnerIdx: -1,
+		NameIdx: 0, OwnerIdx: -1,
 	}
 }
 

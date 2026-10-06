@@ -51,9 +51,10 @@ type LiftState struct {
 	// right after it (see takePushedArgs). Path-local like OutSlots.
 	Pushed []string
 
-	// ICName is the target name of the UnlinkedCall a switchable call loaded
-	// into IC_DATA_REG in the CURRENT block ("" when none); see switchable.go.
-	ICName string
+	// ICSite is the CallSiteData object (UnlinkedCall / MegamorphicCache) a call
+	// sequence loaded into IC_DATA_REG in the CURRENT block, nil when none; see
+	// switchable.go. Immutable, so clones share it.
+	ICSite *CallSite
 
 	// Spills holds `var _tN = <expr>;` declarations produced by setReg when a
 	// forwarded expression outgrew maxForwardedExprLen. The emitter drains
@@ -129,7 +130,7 @@ func (s *LiftState) Clone() *LiftState {
 	if len(s.Pushed) > 0 {
 		c.Pushed = append([]string(nil), s.Pushed...)
 	}
-	c.ICName = s.ICName
+	c.ICSite = s.ICSite
 	return c
 }
 

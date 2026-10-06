@@ -46,6 +46,7 @@ const (
 	ARM64HeapBits       = 28 // HEAP_BITS = R28 (Dart 2.14+: write_barrier_mask<<32 | heap_base>>32; Dart 2.10–2.13: BARRIER_MASK = R28)
 	ARM64CodeReg        = 24 // CODE_REG  = R24 — current Code object
 	ARM64ArgsDesc       = 4  // ARGS_DESC_REG = R4 — arguments descriptor
+	ARM64ICData         = 5  // IC_DATA_REG = R5 — UnlinkedCall / MegamorphicCache of an instance call
 	ARM64SPReg          = 15 // SPREG = R15 — Dart stack pointer (NOT hardware CSP)
 	ARM64NullReg        = 22 // NULL_REG = R22 — caches Object::null() (ARM64-only)
 	ARM64TMP            = 16 // TMP  = R16 — assembler scratch
@@ -152,6 +153,8 @@ const (
 	X86SPReg     = 4  // SPREG = RSP — Dart stack pointer
 	X86FrameReg  = 5  // FPREG = RBP — frame pointer
 	X86ReturnReg = 0  // RAX — return value
+	X86ICData    = 3  // IC_DATA_REG = RBX — UnlinkedCall / MegamorphicCache of an instance call
+	X86CallStub  = 1  // RCX — where EmitInstanceCallAOT puts the stub it then calls
 )
 
 // x86_64 register string names (for the decompiler's string-rewriting model).

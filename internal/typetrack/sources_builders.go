@@ -305,7 +305,10 @@ func buildDispatchTables(ctx *TypeContext, dispatchEntries []cluster.DispatchTab
 	ctx.MethodNameToSelectorImms = ctx.inferSelectorRowImms()
 }
 
-// buildPoolUnlinkedCallNames builds PP index → UnlinkedCall target_name.
+// buildPoolUnlinkedCallNames builds PP index → CallSiteData target_name for
+// UnlinkedCall and MegamorphicCache pool entries (the object an AOT instance
+// call loads into IC_DATA_REG; EmitMegamorphicInstanceCall is the 2.x AOT
+// form of the same call).
 func buildPoolUnlinkedCallNames(clResult *cluster.Result, pl *PoolLookupData) map[int]string {
 	poolUnlinkedCallNames := make(map[int]string)
 	if pl.CT != nil && pl.RefToNamed != nil {
@@ -314,7 +317,7 @@ func buildPoolUnlinkedCallNames(clResult *cluster.Result, pl *PoolLookupData) ma
 				continue
 			}
 			if pl.RefCID != nil {
-				if cid, ok := pl.RefCID[pe.RefID]; ok && cid == pl.CT.UnlinkedCall {
+				if cid, ok := pl.RefCID[pe.RefID]; ok && (cid == pl.CT.UnlinkedCall || cid == pl.CT.MegamorphicCache) {
 					if name := pl.ObjectRefToName[pe.RefID]; name != "" {
 						poolUnlinkedCallNames[pe.Index] = name
 					}

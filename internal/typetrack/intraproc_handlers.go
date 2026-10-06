@@ -378,6 +378,13 @@ func handlePPLoad(tc *transferCtx) bool {
 		tc.ctx.hitMetric(metricPPLoad, tc.inst.Addr, &tc.ctx.PPLoads)
 		return resolvePPLoad(tc, byteOff)
 	}
+	// LDP Xt1, Xt2, [Xn, #imm] with Xn = PP (+ a tracked offset): two adjacent
+	// pool words.
+	if pair, ok := arm64.LoadPair64(raw); ok && pair.Mode == arm64.PairOffset {
+		if baseOff, ok := ppPairBase(tc, pair); ok {
+			return resolvePPPair(tc, pair, baseOff)
+		}
+	}
 	// 2-level PP addressing: LDR Xt, [Xn, #imm] where Xn = PP + upper_offset.
 	// The SDK's LoadWordFromPoolIndex emits ADD Xd, PP, #upper20 then
 	// LDR Xd, [Xd, #lower12] when the pool offset exceeds 12-bit range.
@@ -418,6 +425,54 @@ func resolvePPLoad(tc *transferCtx, byteOff int) bool {
 	tc.state[rt] = lat
 	if hit {
 		tc.ctx.hitMetric(metricPPHit, tc.inst.Addr, &tc.ctx.PPHits)
+	}
+	return true
+}
+
+// ppPairBase returns the pool byte offset an LDP reads from, when its base is PP
+// itself or a register holding PP plus a tracked offset.
+func ppPairBase(tc *transferCtx, pair arm64.Pair64) (int, bool) {
+	switch {
+	case pair.BaseReg == sdk.ARM64PP:
+		return pair.ByteOffset, true
+	case pair.BaseReg < 31 && tc.state[pair.BaseReg].Kind == LatticePPBase:
+		return tc.state[pair.BaseReg].PPBaseOffset + pair.ByteOffset, true
+	}
+	return 0, false
+}
+
+// resolvePPPair types both destinations of an LDP from the object pool.
+//
+// This is the load a switchable (or 2.x megamorphic) call opens with:
+// EmitInstanceCallAOT emits LoadDoubleWordFromPoolIndex(R5, LR, index) for the
+// {UnlinkedCall, SwitchableCallMiss stub} pair (the pool-slot order flips at
+// 3.10.7, the registers do not). LR then holds the stub, which names nothing,
+// while R5 holds the UnlinkedCall whose target_name IS the call's selector; so
+// when R5 resolves to a call site the BLR through LR takes that same fact and
+// resolves by selector (appendKnownStubResolution).
+func resolvePPPair(tc *transferCtx, pair arm64.Pair64, baseOff int) bool {
+	for i, reg := range []int{pair.Reg1, pair.Reg2} {
+		if reg >= 31 {
+			continue
+		}
+		off := baseOff + 8*i
+		poolIdx, ok := disasm.ARM64PoolIndex(off)
+		if !ok {
+			tc.state[reg] = Top()
+			continue
+		}
+		tc.ctx.hitMetric(metricPPLoad, tc.inst.Addr, &tc.ctx.PPLoads)
+		lat, hit := ResolvePoolEntry(tc.ctx, poolIdx, off)
+		tc.state[reg] = lat
+		if hit {
+			tc.ctx.hitMetric(metricPPHit, tc.inst.Addr, &tc.ctx.PPHits)
+		}
+	}
+	regs := [2]int{pair.Reg1, pair.Reg2}
+	if (regs[0] == sdk.ARM64ICData && regs[1] == sdk.ARM64LinkReg) || (regs[0] == sdk.ARM64LinkReg && regs[1] == sdk.ARM64ICData) {
+		if ic := tc.state[sdk.ARM64ICData]; ic.Kind == LatticeKnownStub && strings.HasPrefix(ic.StubName, "UnlinkedCall:") {
+			tc.state[sdk.ARM64LinkReg] = ic
+		}
 	}
 	return true
 }
@@ -564,9 +619,18 @@ func handleDispatchArith(tc *transferCtx) bool {
 	// The SDK's LoadWordFromPoolIndex emits this when the pool offset
 	// exceeds 12-bit range: ADD Xd, PP, #upper20 → LDR Xd, [Xd, #lower12].
 	// Track the PP base offset so handlePPLoad can resolve the full index.
-	if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rn == sdk.ARM64PP && rd < 31 {
-		tc.state[rd] = TypeLattice{Kind: LatticePPBase, PPBaseOffset: imm}
-		return true
+	// A second ADD on an already-PP-based register (`ADD X16, PP, #hi, LSL #12;
+	// ADD X16, X16, #lo`) accumulates: that is how LoadDoubleWordFromPoolIndex
+	// reaches an LDP-range-limited offset.
+	if rd, rn, imm, ok := arm64.ADD64Immediate(raw); ok && rd < 31 {
+		switch {
+		case rn == sdk.ARM64PP:
+			tc.state[rd] = TypeLattice{Kind: LatticePPBase, PPBaseOffset: imm}
+			return true
+		case rn < 31 && tc.state[rn].Kind == LatticePPBase:
+			tc.state[rd] = TypeLattice{Kind: LatticePPBase, PPBaseOffset: tc.state[rn].PPBaseOffset + imm}
+			return true
+		}
 	}
 
 	return false
