@@ -5,7 +5,7 @@
   "func_count": 8049,
   "class_count": 2265,
   "lines": {
-    "address_callers_xref.jsonl": 5327,
+    "address_callers_xref.jsonl": 5332,
     "aotopsy.r2": 8049,
     "aotopsy.sarif": 5793,
     "behavioral_findings.jsonl": 10,
@@ -46,11 +46,11 @@
     "yara_findings.jsonl": 12
   },
   "sha256": {
-    "address_callers_xref.jsonl": "d20a2b50d172b06cbc0fc921140b0c08bc856e85e899376e4028010f1cd35e32",
+    "address_callers_xref.jsonl": "2046f3377294bf50b3659a23b959eb50f841e13752dab754a1c50a6cfe5482f1",
     "aotopsy.r2": "6c34d25cab2e256e2eceb7c21241b34d37ba3ee32a1371f21230f2d3f3b1da3e",
     "aotopsy.sarif": "e143e7c68ff7626f1740d4b43437ef9d035fcabf55deb603ce6ea5b37d7fc579",
     "behavioral_findings.jsonl": "eaf227941be3eef4fafb45f94d95cd77a2a25c5353a52aec15703008477b478b",
-    "call_edges.jsonl": "1f4fe3c3ae08d6eafe7aaba438283792d14e0c81433c40db3c2071e773d7ffdc",
+    "call_edges.jsonl": "4855b38662c4739082e2c8349f470352ef178d85826e46da1bcd528bd0e22aa2",
     "classes.jsonl": "b9b8ffe5934e821e69e1b13ddf2124d8d9be74c833984814ff4414915aac163c",
     "closure_data.jsonl": "be52fa5ed47467a85a6de188bd6c30b3419dcc58290ef6839f52f403bb0dd18c",
     "dart_meta.json": "b26343529c76e74ef3a4c5d3b3f887266a356b9867739e76990adbd5a07d9bd0",
@@ -58,10 +58,10 @@
     "deobfuscation.jsonl": "406169240baa3fa6950c9d5bbdb6d0d2106006c7a1afb384f0008d64541799fd",
     "dispatch_table.jsonl": "ce7947b5f2a596f5a0c69c38d6b175233f31543e9c91233ca9c01779007a9428",
     "entropy_findings.jsonl": "74ba5e2a2f6b854d0dab3e9677d27e99fa0b23ef8c67a36931676be3155a621f",
-    "evidence.jsonl": "8c9dc859a892088fb57b1d383ffae432354312ca89b80a8650b85e6cbcaf7520",
+    "evidence.jsonl": "98550157e35c79e0e69cac03bc2a1a8d371928c2e7edf418e7c102aed735006b",
     "exception_handlers.jsonl": "2bbda087d4c986be790a3ebc8fcc87026f68a0e65c8d80ff6c54e56063fb142e",
     "field_accessor_xref.jsonl": "47b2022729724221c2b11dc9f02b555469e1998c52f682cf3acadd459b861951",
-    "flutter_meta.json": "cb99f4c1a2b11077db764ab43341417dc3e753b4593cf82ee299080088e3d12f",
+    "flutter_meta.json": "e90b9fee5e3fe4c2f9ee881c2f3b819d9f4ad10e284b641206b6fb924b2c5dbf",
     "functions.jsonl": "673cf77afdb05e6e402fbfcdafb8ef6a1e9f08c3d8b05bde13d43ed208d8e7f6",
     "index.jsonl": "2145578412f2687554a3f37d032643f57632ae318b189cce4500f1c40067ee57",
     "instances.jsonl": "4498464295d5a39ae289fc496380a51639d593dfd0aa2ef0b3c088890df17d2a",
@@ -75,7 +75,7 @@
     "pool_immediates.jsonl": "81b892225a9e09ee68abb1d28c1afc1a9d2d4821d82dc141aa13b9225a045d01",
     "scripts.jsonl": "a62cd3dc49e101dbf2f88a1c4c0cf10ca46cb3c724a09126dfd418dd5813b9b5",
     "selector_dispatch_xref.jsonl": "b1b986ad76f99c935777123238b114a344efa784fea8cecfc71dbc0ac74681d0",
-    "signal_graph.json": "c701a3b1ce5cee51daefcf339b602997d238be2ad9465784321682667a3ab483",
+    "signal_graph.json": "dd424207c10c259b413211514ee4bbd6a7f494fb05772b702f3ed2ecc79596c4",
     "source_sink_findings.jsonl": "f133f005bd2392175370cfb71ebeabb891d4b1c7a49c9b227d53a2ca07a11b33",
     "source_sink_summary.json": "536e1ede63d051e83b2cd7a5a4f3f33b91986e7d4bc9237c3cbc760126f3e4f4",
     "stack_maps.jsonl": "087f435f1d92fb89f96327d7c6ea5dc0fc0061aa08a22ce6887565836fdde443",
@@ -90,6 +90,6 @@
     "asm": 16098
   },
   "tree_sha256": {
-    "asm": "91ee9e22c5f82fff1612f80b8aa2e5e8073ecbe2debf63de7834752af55ac3e2"
+    "asm": "15eaa45dc6f49ba2cd33b9ccbbe98cd561bd88322ec7c548170385d3cd4d3eb3"
   }
 }

@@ -13,9 +13,9 @@ import (
 // compares it element for element.
 //
 // This gate exists because a wrong stub table cannot be caught by any
-// local test. Stub naming is a zip by INDEX: VMStubNamesInClusterOrder is
-// zipped against vmResult.Codes[i], and VMStubNamesInImageOrder against
-// address-sorted ranges. One missing or extra entry does not fail — it
+// local test. Stub naming is a zip by INDEX: VMStubNamesInImageOrder is
+// zipped against vmResult.Codes[i] and against address-sorted ranges (the VM
+// Code cluster is in image order). One missing or extra entry does not fail — it
 // silently shifts every subsequent name by one, producing plausible
 // output that points at the wrong stub. Exactly the failure mode
 // AGENTS.md's "Two gates that must stay green" describes.
@@ -62,16 +62,17 @@ func TestVMStubNamesMatchSDK(t *testing.T) {
 				}
 			}
 
-			// Cluster order is the exact semantic list exposed to naming code.
-			composed := VMStubNamesInClusterOrder(tag)
-			if len(composed) != len(full) {
-				t.Errorf("composed order for %s has %d entries, SDK VM_STUB_CODE_LIST has %d",
-					tag, len(composed), len(full))
+			// The image/Code-cluster order exposed to naming code is exactly the
+			// reverse of that emission order.
+			image := VMStubNamesInImageOrder(tag)
+			if len(image) != len(full) {
+				t.Errorf("image order for %s has %d entries, SDK VM_STUB_CODE_LIST has %d",
+					tag, len(image), len(full))
 			}
-			for i := 0; i < len(composed) && i < len(full); i++ {
-				if composed[i] != full[i] {
-					t.Fatalf("composed order for %s diverges at index %d: ours=%q sdk=%q",
-						tag, i, composed[i], full[i])
+			for i := 0; i < len(image) && i < len(full); i++ {
+				if image[i] != full[len(full)-1-i] {
+					t.Fatalf("image order for %s diverges at index %d: ours=%q sdk(reversed)=%q",
+						tag, i, image[i], full[len(full)-1-i])
 				}
 			}
 		})
@@ -95,7 +96,7 @@ func TestVMStubNamesRefusesUnknownVersions(t *testing.T) {
 // expanded into a list that already contained it.
 func TestVMStubTablesHaveNoDuplicates(t *testing.T) {
 	for _, tag := range snapshot.SupportedVersions() {
-		for _, list := range [][]string{VMStubNames(tag), VMStubNamesInClusterOrder(tag), VMStubNamesInImageOrder(tag)} {
+		for _, list := range [][]string{VMStubNames(tag), VMStubNamesInImageOrder(tag)} {
 			seen := make(map[string]int, len(list))
 			for i, n := range list {
 				if prev, dup := seen[n]; dup {

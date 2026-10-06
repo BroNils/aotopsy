@@ -366,9 +366,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
 	// owner — ResolveCodeOwner fails for them. Their names come from
 	// VM_STUB_CODE_LIST + VM_TYPE_TESTING_STUB_CODE_LIST
-	// (vmtables.VMStubNamesInClusterOrder), which is ordered by creation
-	// order (VM_STUB_CODE_LIST order with TTS after Subtype7TestCache),
-	// matching vmResult.Codes[i] cluster serialization order.
+	// (vmtables.VMStubNamesInImageOrder): the VM Code cluster is written in
+	// IMAGE order, which is the reverse of StubCode::Init emission order (see
+	// that function for the evidence). Zipping the emission order here named
+	// every VM Code in the pool by the stub at the opposite end of the list.
 	//
 	// This runs BEFORE the Function-owner resolution below so that stub
 	// names take precedence over Function owner names. Without this
@@ -377,11 +378,9 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// and the stub naming loop skips it — the correct name
 	// "UnknownDartCode" is never assigned.
 	//
-	// X-2: Previously used VMStubNames (164 entries, no TTS), missing
-	// the 9 type-testing stubs at indices 164-172. Now uses
-	// VMStubNamesInClusterOrder (173 entries with TTS).
+	// The list includes the 9 type-testing stubs (173 entries on 3.12.2).
 	if vmResult != nil {
-		vmStubNames := vmtables.VMStubNamesInClusterOrder(dartVersion)
+		vmStubNames := vmtables.VMStubNamesInImageOrder(dartVersion)
 		if len(vmStubNames) > 0 {
 			for i, ce := range vmResult.Codes {
 				if i >= len(vmStubNames) {

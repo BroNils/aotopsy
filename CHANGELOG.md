@@ -105,6 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3.5.0..3.12.2; 32 entries, plus 3 type-argument entries from 3.9.2) and, because 3.13.0 no
   longer adds them as base objects (AOT base objects are the 7 Roots), real Arrays of Smi
   objects (`Result.MintValues`). 2.12.0 arm64, first 3000 functions: `dynamicCall(` 472 -> 398.
+- **VM stub Code objects in the pool were named from the wrong end of the stub list (all
+  versions).** `BuildPoolLookups` zipped `vmResult.Codes[i]` against the stub list in
+  `StubCode::Init` emission order, but an AOT Code cluster is written in IMAGE order
+  (`CodeSerializationCluster::WriteAlloc` sorts by instructions id, `CompareCodeOrderInfo`;
+  the image is the reverse of the emission order). Evidence in the corpus, not inference: on the
+  `-gt-` builds 2.13.0..2.16.0 the `Precompiled_Stub_*` ELF symbols in ascending address order are
+  exactly the image-order table (`TestVMStubOrderMatchesSymbolTable`), and on 2.10.0..2.14.0 the
+  stub slot paired with an UnlinkedCall must be `SwitchableCallMiss` / with a MegamorphicCache
+  `MegamorphicCall` (`TestVMStubPairSlotsAreNamedByTheirStub`: it displayed `NotLoaded` /
+  `Subtype5TestCache` before, proven failing on a clean HEAD worktree). The emission-order
+  function `VMStubNamesInClusterOrder` is deleted; `VMStubNamesInImageOrder` is the single list.
+  Per-record effect (call_edges only `target`/`via` change, no record added or removed): 3.9.2
+  arm64 426 edges, 3.12.2 x64 405, 2.12.0 arm64 754, e.g. 114x `AllocateInt32Array` ->
+  `InstantiateTypeArguments`, 111x `AllocateFloat32x4Array` -> `InstanceOf`, 20x
+  `OptimizedIdenticalWithNumberCheck` (`===`), the JIT-only `*Breakpoint`/`*InlineCache` stubs
+  that cannot occur in AOT are gone; 2.12.0: 225x `FrameAwaitingMaterialization` ->
+  `CallBootstrapNative`. 3.13.0 has no VM snapshot and is unaffected.
 - **Typetrack resolves switchable calls by the UnlinkedCall/MegamorphicCache selector.** There
   was no handler for the pool-pair `LDP R5, LR, [PP + n]` at all: LR kept the *stub* slot, whose
   display is a pool-name artifact, so 150 call edges of the 2.12.0 sample were recorded with the

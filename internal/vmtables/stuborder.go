@@ -57,6 +57,23 @@ const subtypeTestCacheAnchor = "Subtype7TestCache"
 // objects appear in the VM instructions image, lowest address first -- ready
 // to be zipped against address-sorted code ranges. Returns nil for a version
 // with no verified list, so callers name nothing rather than guessing.
+//
+// This is ALSO the order of the VM snapshot's Code cluster, so it is the list
+// to zip against vmResult.Codes[i]. An AOT Code cluster is written sorted by
+// instructions id (CodeSerializationCluster::WriteAlloc, CompareCodeOrderInfo,
+// app_snapshot.cc), i.e. in image order, not in StubCode::Init emission order.
+// A second function that returned the emission order for the cluster was
+// here and wrong: it named every VM Code object in the pool by the stub at the
+// opposite end of the list (a MegamorphicCall stub slot printed as
+// Subtype5TestCache on 2.12.0). Evidence, all in the corpus:
+//
+//   - ground truth: on the `-gt-` builds 2.13.0..2.16.0 (arm64) the
+//     `Precompiled_Stub_*` ELF symbols in ascending address order are exactly
+//     this list (TestVMStubOrderMatchesSymbolTable);
+//   - oracle: on 2.10.0..2.14.0 the pool slot paired with an UnlinkedCall IS
+//     StubCode::SwitchableCallMiss and the one paired with a MegamorphicCache
+//     IS StubCode::MegamorphicCall, and they sit at exactly this list's
+//     positions in the VM Code cluster (TestVMStubPairSlotsAreNamedByTheirStub).
 func VMStubNamesInImageOrder(dartVersion string) []string {
 	list := VMStubNames(dartVersion)
 	if list == nil {
@@ -68,24 +85,6 @@ func VMStubNamesInImageOrder(dartVersion string) []string {
 		out[len(list)-1-i] = n
 	}
 	return out
-}
-
-// VMStubNamesInClusterOrder returns the stub names in the order their Code
-// objects appear in the VM snapshot's Code cluster (creation/emission order),
-// including type-testing stubs exactly where the SDK emits them. This matches
-// vmResult.Codes[i] ordering, which is the order Code objects were serialized
-// into the cluster — the same as StubCode::Init emission order.
-//
-// Use this (NOT VMStubNamesInImageOrder) when zipping against vmResult.Codes
-// directly, as BuildPoolLookups does for pool-display naming. The image-order
-// function is for address-sorted ranges, as BuildVMStubSymbols does for
-// VA→name symbol mapping.
-func VMStubNamesInClusterOrder(dartVersion string) []string {
-	list := VMStubNames(dartVersion)
-	if list == nil {
-		return nil
-	}
-	return list
 }
 
 // composeVMStubEmissionOrder inserts the type-testing stubs after the
