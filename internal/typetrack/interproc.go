@@ -350,21 +350,18 @@ func RunInterprocedural(
 			for i := range entry {
 				entry[i] = Top()
 			}
-			var entryStack map[int]TypeLattice
 			if ownerCID, ok := ctx.FuncOwnerClass[name]; ok && ownerCID >= 0 {
 				if receiverReg >= 0 && hasRegPosition(name, 0) {
 					entry[receiverReg] = ClassBound(ownerCID)
 				}
-				// Pre-3.4.3 the receiver arrives on the stack and the
-				// prologue immediately overwrites the register, so the
-				// register seed alone is dead on arrival.
-				if slot, ok2 := ctx.FuncReceiverStackSlot[name]; ok2 {
-					entryStack = map[int]TypeLattice{slot: ClassBound(ownerCID)}
-				}
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunction(insts, ctx, entry, entryStack)
+			// Pre-3.4.3 the receiver arrives on the stack and the prologue
+			// immediately overwrites the register, so the register seed alone is
+			// dead on arrival; the stack seed also carries the declared type of
+			// every stack-passed parameter.
+			intra := AnalyzeFunction(insts, ctx, entry, entryStackSeed(ctx, name))
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	} else {
@@ -379,7 +376,7 @@ func RunInterprocedural(
 			}
 			// TARGET 1: Also set entry types for non-receiver parameters.
 			setEntryFromParamTypes(name, &entry)
-			intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
+			intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackSeed(ctx, name))
 			result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 		}
 	}
@@ -497,7 +494,7 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunction(insts, ctx, entry, entryStackFor(ctx, name))
+				intra := AnalyzeFunction(insts, ctx, entry, entryStackSeed(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		} else {
@@ -512,7 +509,7 @@ func RunInterprocedural(
 				}
 				// TARGET 1: Also update non-receiver params from FuncParamTypes.
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackFor(ctx, name))
+				intra := AnalyzeFunctionX86(insts, ctx, entry, entryStackSeed(ctx, name))
 				result.Functions[name].Intra = intra
 			}
 		}
@@ -570,7 +567,7 @@ func RunInterprocedural(
 					}
 				}
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunction(funcInstsARM64[name], ctx, entry, entryStackFor(ctx, name))
+				intra := AnalyzeFunction(funcInstsARM64[name], ctx, entry, entryStackSeed(ctx, name))
 				result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 			}
 		} else {
@@ -585,7 +582,7 @@ func RunInterprocedural(
 					}
 				}
 				setEntryFromParamTypes(name, &entry)
-				intra := AnalyzeFunctionX86(funcInstsX86[name], ctx, entry, entryStackFor(ctx, name))
+				intra := AnalyzeFunctionX86(funcInstsX86[name], ctx, entry, entryStackSeed(ctx, name))
 				result.Functions[name] = &FuncAnalysis{Intra: intra, Name: name}
 			}
 		}
@@ -676,4 +673,37 @@ func latticeArrayEqual(a, b [31]TypeLattice) bool {
 		}
 	}
 	return true
+}
+
+// StackParam is one stack-passed parameter with a declared class (see
+// TypeContext.FuncStackParams).
+type StackParam struct {
+	Slot  int // FP-relative byte offset
+	Class int // class id of the declared parameter type
+}
+
+// DeclaredParamClasses returns the declared class of every parameter of the
+// function (index 0 = the receiver of an instance method), -1 where the
+// declared type has no class (dynamic, a type parameter, a function type). ok is
+// false when the metadata of the candidate Functions disagrees or is missing.
+func (ctx *TypeContext) DeclaredParamClasses(name string) ([]int, bool) {
+	classes, _, ok := consensusParamSignature(ctx, functionRefIDs(ctx, name))
+	return classes, ok
+}
+
+// entryStackSeed builds the first-block stack seed of a function: the receiver
+// slot (owner class) and every stack parameter with a declared class. A slot
+// holds an upper bound, so the owner class wins for the receiver.
+func entryStackSeed(ctx *TypeContext, name string) map[int]TypeLattice {
+	seed := entryStackFor(ctx, name)
+	for _, p := range ctx.FuncStackParams[name] {
+		if _, taken := seed[p.Slot]; taken || p.Class < 0 {
+			continue
+		}
+		if seed == nil {
+			seed = make(map[int]TypeLattice)
+		}
+		seed[p.Slot] = ClassBound(p.Class)
+	}
+	return seed
 }

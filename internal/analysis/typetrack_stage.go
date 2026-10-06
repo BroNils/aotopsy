@@ -561,6 +561,26 @@ func runTypeInference(
 			}
 		}
 
+		// Stack-passed parameters with a declared class. Same frame formula as the
+		// receiver (cluster.ParamFrameSlot) and the same preconditions: the function
+		// passes its arguments on the stack (every function before the register
+		// calling convention, the snapshot-proven stack-CC ones after it) with a
+		// constant-index prologue, and the declared signature agrees on the arity.
+		if r.RefID >= 0 && (legacyStaticReceiverSlot || !sdk.HasDartRegisterCallingConvention(info.Version.DartVersion) || codeName.MustUseStackCC) &&
+			codeName.ParamCountKnown && codeName.FixedParamsWithReceiver > 0 {
+			if classes, ok := ctx.DeclaredParamClasses(name); ok && len(classes) == codeName.FixedParamsWithReceiver {
+				_, hasReceiver := ctx.FuncOwnerClass[name]
+				for i, cls := range classes {
+					if cls < 0 || (i == 0 && hasReceiver) {
+						continue // no class to bound, or the receiver (owner class)
+					}
+					if slot, ok := cluster.ParamFrameSlot(codeName.FixedParamsWithReceiver, codeName.OptionalParams, codeName.IsSuspendable, i, 8); ok {
+						ctx.FuncStackParams[name] = append(ctx.FuncStackParams[name], typetrack.StackParam{Slot: int(slot), Class: cls})
+					}
+				}
+			}
+		}
+
 		funcCode := fs.Code
 
 		if isARM64 {

@@ -127,6 +127,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types`. Monomorphic sites -27/-19/-34 are wrong single answers that became honest candidate sets.
   Not done: x86_64 still takes the unbounded prescan path (separate transfer function, no
   `SelectorDispatch` lattice there).
+- **Stack-passed parameters now carry their declared class.** The entry stack seed held only the
+  receiver; every other stack parameter started as Top, and the dominant source of Top receivers at
+  selector-only sites is exactly a load from a frame slot (1140 of 2438 on 3.9.2; the rest are
+  moves/adds of other values, spills and call results). `cluster.ParamFrameSlot` generalizes
+  `ReceiverFrameSlot` (parameter i at `FP + (kParamEndSlotFromFp + num_fixed - i) * word`,
+  confirmed on 2.12.0 arm64: a two-parameter `operator+` loads its receiver at `[x29,#24]` and its
+  argument at `[x29,#16]`), under the same preconditions (stack calling convention -- every function
+  before the register CC, the snapshot-proven stack-CC ones after it -- no optional parameters, not
+  suspendable, signature agreeing on the arity). The declared class is an upper bound
+  (`ClassBound`), never an exact class. Receiver-bound sites 221 -> 306 (3.9.2), 109 -> 157
+  (2.12.0), 213 -> 310 (3.13.0); call_edges records changed 64 / 7 / 66 (candidate sets shrink to
+  the declared type's subtypes, e.g. `Set.contains` implementations, `InheritedElement.get:widget`);
+  on 3.12.2 x64 call_edges are unchanged but +6 evidence records and more field readers are
+  attributed (`field_type_declared_hits` 432 -> 438).
 - **Without a receiver fact, a selector-only call reports the UNION of the proven rows at its
   imm, not the winner of a vote.** Rows of unrelated class families legitimately SHARE an imm
   (`RowFitter::TryFit` only requires the row's own cids to be free: dispatch_table_generator.cc,

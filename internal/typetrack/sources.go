@@ -83,6 +83,15 @@ type TypeContext struct {
 	// populated where stack calling is proved or recovered from actual code.
 	FuncReceiverStackSlot map[string]int
 
+	// FuncStackParams maps a function name to its stack-passed parameters with a
+	// declared class: the FP-relative slot (cluster.ParamFrameSlot) and the class
+	// of the declared parameter type. Only populated where the function passes
+	// its arguments on the stack with a constant-index prologue (no optional
+	// parameters, not suspendable) and its signature agrees on the arity. The
+	// declared type is an upper bound: the argument's runtime class is that class
+	// or one of its subtypes (or Null), never an exact class.
+	FuncStackParams map[string][]StackParam
+
 	// ReceiverLoadAtPC types the destination of an
 	// ArgumentsDescriptor-relative parameter-0 load, keyed by the load's PC.
 	//
@@ -475,6 +484,7 @@ func BuildTypeContext(
 		FuncMayUseRegisterCC:    make(map[string]bool),
 		FuncReceiverInRegister:  make(map[string]bool),
 		FuncReceiverStackSlot:   make(map[string]int),
+		FuncStackParams:         make(map[string][]StackParam),
 		ReceiverLoadAtPC:        make(map[uint64]ReceiverLoad),
 		FuncReturnType:          make(map[int]int),
 		RefToType:               make(map[int]*cluster.TypeInfo, len(clResult.Types)),

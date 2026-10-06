@@ -162,3 +162,23 @@ func TestReceiverFrameSlotDeclinesWithoutStaticSlot(t *testing.T) {
 		t.Errorf("unknown arity: got (%d, true), want no slot", got)
 	}
 }
+
+// Parameters descend one word per index from the receiver's slot.
+func TestParamFrameSlotDescendsFromTheReceiver(t *testing.T) {
+	for i, want := range []int64{24, 16} { // two fixed parameters (receiver + 1), 2.12.0 arm64 operator+
+		if got, ok := ParamFrameSlot(2, 0, false, i, 8); !ok || got != want {
+			t.Errorf("param %d: got (%d, %v), want (%d, true)", i, got, ok, want)
+		}
+	}
+	if got, ok := ParamFrameSlot(3, 0, false, 2, 8); !ok || got != 16 {
+		t.Errorf("last of three: got (%d, %v), want (16, true)", got, ok)
+	}
+	for _, bad := range []int{-1, 2} {
+		if got, ok := ParamFrameSlot(2, 0, false, bad, 8); ok {
+			t.Errorf("index %d out of range returned slot %d", bad, got)
+		}
+	}
+	if got, ok := ParamFrameSlot(2, 1, false, 1, 8); ok {
+		t.Errorf("optional params: got slot %d", got)
+	}
+}
