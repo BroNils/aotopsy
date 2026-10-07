@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The `gh` fallback tests run on Windows.** `internal/sdktest` faked `gh` with a
+  `#!/bin/sh` script, which Windows cannot execute, so four tests failed there on
+  every run since they were added, and `TestOfflineModeNeverInvokesGH` passed only
+  because the fake could not start. The test binary now installs a copy of itself
+  as `gh[.exe]` and `TestMain` turns that copy into the fake (`fakegh_test.go`), so
+  the same code path runs on every OS. Test-only change; no product behaviour moves.
 - **A stale compare no longer narrows a rewritten register (ARM64).** `CMP W1,#c;
   <flag-preserving instruction that rewrites X1>; B.EQ` narrowed the NEW value of
   X1, because the edge narrowing reads the block-exit state. The compare is now

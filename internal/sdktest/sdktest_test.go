@@ -581,14 +581,8 @@ func TestCorruptExplicitGitRepoCannotFallBackToCache(t *testing.T) {
 }
 
 func TestOfflineModeNeverInvokesGH(t *testing.T) {
-	binDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "gh-called")
-	ghPath := filepath.Join(binDir, "gh")
-	script := "#!/bin/sh\nprintf called > \"$AOTOPSY_GH_MARKER\"\nexit 99\n"
-	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
+	installFakeGH(t, fakeGHOffline)
 	t.Setenv("AOTOPSY_GH_MARKER", marker)
 	t.Setenv("AOTOPSY_DART_SDK_REPO", t.TempDir())
 	t.Setenv("AOTOPSY_SDK_CACHE_DIR", t.TempDir())
@@ -603,35 +597,12 @@ func TestOfflineModeNeverInvokesGH(t *testing.T) {
 }
 
 func TestGitHubFallbackUsesExactRefAndCachesForOfflineUse(t *testing.T) {
-	binDir := t.TempDir()
 	argsPath := filepath.Join(t.TempDir(), "gh-args")
-	ghPath := filepath.Join(binDir, "gh")
 	const body = "exact gh bytes\n"
 	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const tagObject = "cccccccccccccccccccccccccccccccccccccccc"
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$AOTOPSY_GH_ARGS"
-case "$*" in
-  *"repos/dart-lang/sdk/git/ref/tags/9.9.9"*)
-	printf '{"object":{"type":"tag","sha":"cccccccccccccccccccccccccccccccccccccccc"}}'
-	;;
-  *"repos/dart-lang/sdk/git/tags/cccccccccccccccccccccccccccccccccccccccc"*)
-	printf '{"object":{"type":"commit","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
-	;;
-  *"repos/dart-lang/sdk/contents/runtime/vm/thread.h?ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"*)
-    printf 'exact gh bytes\n'
-    ;;
-  *)
-    printf 'unexpected gh call: %s\n' "$*" >&2
-    exit 2
-    ;;
-esac
-`
-	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	cacheDir := t.TempDir()
-	t.Setenv("PATH", binDir)
+	installFakeGH(t, fakeGHExact)
 	t.Setenv("AOTOPSY_GH_ARGS", argsPath)
 	t.Setenv("AOTOPSY_DART_SDK_REPO", t.TempDir())
 	t.Setenv("AOTOPSY_SDK_CACHE_DIR", cacheDir)
@@ -667,27 +638,8 @@ esac
 }
 
 func TestGitHubFallbackRetriesBoundedAttempts(t *testing.T) {
-	binDir := t.TempDir()
 	state := filepath.Join(t.TempDir(), "attempts")
-	ghPath := filepath.Join(binDir, "gh")
-	script := `#!/bin/sh
-case "$*" in
-  *"repos/dart-lang/sdk/git/ref/tags/9.9.9"*)
-    printf '{"object":{"type":"commit","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
-    exit 0
-    ;;
-esac
-n=0
-if [ -f "$AOTOPSY_GH_STATE" ]; then read n < "$AOTOPSY_GH_STATE"; fi
-n=$((n + 1))
-printf '%s' "$n" > "$AOTOPSY_GH_STATE"
-if [ "$n" -lt 3 ]; then printf 'temporary failure' >&2; exit 1; fi
-printf 'eventual success'
-`
-	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
+	installFakeGH(t, fakeGHRetry)
 	t.Setenv("AOTOPSY_GH_STATE", state)
 	t.Setenv("AOTOPSY_DART_SDK_REPO", t.TempDir())
 	t.Setenv("AOTOPSY_SDK_CACHE_DIR", t.TempDir())
@@ -704,21 +656,8 @@ printf 'eventual success'
 }
 
 func TestGHAPIDoesNotRetryPermanent404(t *testing.T) {
-	binDir := t.TempDir()
 	state := filepath.Join(t.TempDir(), "attempts")
-	ghPath := filepath.Join(binDir, "gh")
-	script := `#!/bin/sh
-n=0
-if [ -f "$AOTOPSY_GH_STATE" ]; then read n < "$AOTOPSY_GH_STATE"; fi
-n=$((n + 1))
-printf '%s' "$n" > "$AOTOPSY_GH_STATE"
-printf 'gh: Not Found (HTTP 404)' >&2
-exit 1
-`
-	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
+	installFakeGH(t, fakeGHNotFound)
 	t.Setenv("AOTOPSY_GH_STATE", state)
 	if _, err := ghAPI("repos/dart-lang/sdk/contents/missing", "application/vnd.github.raw", 1024); err == nil || !strings.Contains(err.Error(), "after 1 attempt(s)") {
 		t.Fatalf("permanent 404 retry result = %v, want one-attempt failure", err)
@@ -733,25 +672,8 @@ exit 1
 }
 
 func TestGitHubFallbackRejectsMalformedTagIdentity(t *testing.T) {
-	binDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "content-called")
-	ghPath := filepath.Join(binDir, "gh")
-	script := `#!/bin/sh
-case "$*" in
-  *"repos/dart-lang/sdk/git/ref/tags/9.9.9"*)
-    printf '{"object":{"type":"commit","sha":"not-an-object-id"}}'
-    ;;
-  *)
-    printf called > "$AOTOPSY_GH_MARKER"
-    printf 'unexpected content fetch' >&2
-    exit 2
-    ;;
-esac
-`
-	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
+	installFakeGH(t, fakeGHMalformed)
 	t.Setenv("AOTOPSY_GH_MARKER", marker)
 	t.Setenv("AOTOPSY_DART_SDK_REPO", t.TempDir())
 	t.Setenv("AOTOPSY_SDK_CACHE_DIR", t.TempDir())
