@@ -21,6 +21,12 @@ import (
 type metricFloors struct {
 	// MinMonomorphicBLR: indirect call sites with exactly one proven callee.
 	MinMonomorphicBLR int
+	// MinResolvedSites: sites the analysis said anything about (monomorphic +
+	// polymorphic). Unlike MinMonomorphicBLR this does not depend on how often a
+	// row is narrowed to one callee, so it stays a stable "is the stage alive"
+	// signal: the selector-election change moved ~25% of sites from monomorphic
+	// to polymorphic and left this total unchanged (3.9.2: 3905 before and after).
+	MinResolvedSites int
 	// MaxAvgPolymorphicCandidates: candidates per polymorphic site. Every real
 	// dispatch-table row is <= ~170 implementations on these apps; an average
 	// above this means unrelated selector rows are being merged (the 576-target
@@ -44,10 +50,10 @@ type metricFloors struct {
 // red build green. The ceiling on candidates per polymorphic site is untouched and
 // still passes.
 var goldenMetricFloors = map[string]metricFloors{
-	"compare_sample_arm64": {MinMonomorphicBLR: 665, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
-	"sample312_x64":        {MinMonomorphicBLR: 540, MaxAvgPolymorphicCandidates: 90, MinAnnotatedBLR: 0.90, MinPlatformChannels: 8},
-	"dart212_arm64":        {MinMonomorphicBLR: 665, MaxAvgPolymorphicCandidates: 70, MinAnnotatedBLR: 0.80, MinPlatformChannels: 5},
-	"sample313_arm64":      {MinMonomorphicBLR: 320, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
+	"compare_sample_arm64": {MinMonomorphicBLR: 665, MinResolvedSites: 3300, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
+	"sample312_x64":        {MinMonomorphicBLR: 540, MinResolvedSites: 3250, MaxAvgPolymorphicCandidates: 90, MinAnnotatedBLR: 0.90, MinPlatformChannels: 8},
+	"dart212_arm64":        {MinMonomorphicBLR: 665, MinResolvedSites: 3900, MaxAvgPolymorphicCandidates: 70, MinAnnotatedBLR: 0.80, MinPlatformChannels: 5},
+	"sample313_arm64":      {MinMonomorphicBLR: 320, MinResolvedSites: 3100, MaxAvgPolymorphicCandidates: 80, MinAnnotatedBLR: 0.80, MinPlatformChannels: 8},
 }
 
 func assertMetricFloors(t *testing.T, name, outDir string) {
@@ -73,6 +79,9 @@ func assertMetricFloors(t *testing.T, name, outDir string) {
 	}
 	if report.BLR.Monomorphic < floors.MinMonomorphicBLR {
 		t.Errorf("%s: monomorphic BLR = %d, floor %d (resolution regressed or a stage is dead)", name, report.BLR.Monomorphic, floors.MinMonomorphicBLR)
+	}
+	if resolved := report.BLR.Monomorphic + report.BLR.Polymorphic; resolved < floors.MinResolvedSites {
+		t.Errorf("%s: %d resolved indirect sites (monomorphic + polymorphic), floor %d (a resolution stage is dead)", name, resolved, floors.MinResolvedSites)
 	}
 	if report.BLR.Polymorphic > 0 {
 		avg := float64(report.BLR.PolymorphicCandidates) / float64(report.BLR.Polymorphic)
