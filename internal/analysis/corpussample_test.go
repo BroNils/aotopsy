@@ -48,9 +48,9 @@ const (
 	sample312ARM64Name = "dart-3.12.2-arm64.so"
 	sample312X64Name   = "dart-3.12.2-x64.so"
 
-	// A real production app, an order of magnitude larger than the
-	// synthetic samples. Only used by tests that stop at the cluster
-	// stage -- a full pipeline run on it exhausts this machine.
+	// A real app, an order of magnitude larger than the synthetic
+	// samples. Only used by tests that stop at the cluster stage -- a full
+	// pipeline run on it exhausts this machine.
 	sampleLargeName = "dart-3.12.2-sampleapp-arm64.so"
 )
 
