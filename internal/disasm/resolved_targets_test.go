@@ -24,11 +24,12 @@ func TestResolvedTargets(t *testing.T) {
 		t.Errorf("polymorphic: got %v, want [Foo.paint Bar.paint]", got)
 	}
 
-	// Indirect with Via only (no Target, no Targets).
+	// Indirect with Via only (no Target, no Targets). Via is provenance, not a
+	// callee identity, so it must not be promoted into the target set.
 	viaOnly := CallEdgeRecord{Kind: "blr", Via: "THR.AllocateArray_ep"}
 	got = viaOnly.ResolvedTargets()
-	if len(got) != 1 || got[0] != "THR.AllocateArray_ep" {
-		t.Errorf("via-only: got %v, want [THR.AllocateArray_ep]", got)
+	if got != nil {
+		t.Errorf("via-only: got %v, want nil", got)
 	}
 
 	// Truly unresolved.

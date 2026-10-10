@@ -41,7 +41,7 @@ func TestClassIdTagLayoutMatchesSDK(t *testing.T) {
 			"and nowhere else; three separate predicates for this one fact is the\n"+
 			"state this function was introduced to end.", err)
 	}
-	if !strings.Contains(string(out), "matches SDK for all") {
+	if !strings.Contains(string(out), "matches SDK exactly for all 23 version(s)") {
 		t.Fatalf("gate did not report a clean run:\n%s", out)
 	}
 }
@@ -60,11 +60,14 @@ func TestClassIdTagLayoutBoundary(t *testing.T) {
 		{"3.0.5", 12, 20},
 		{"3.13.0", 12, 20},
 	} {
-		pos, size := ClassIdTagLayout(tc.version)
-		if pos != tc.pos || size != tc.size {
+		pos, size, ok := ClassIdTagLayout(tc.version)
+		if !ok || pos != tc.pos || size != tc.size {
 			t.Errorf("ClassIdTagLayout(%s) = (%d, %d), want (%d, %d)",
 				tc.version, pos, size, tc.pos, tc.size)
 		}
+	}
+	if _, _, ok := ClassIdTagLayout("3.99.0"); ok {
+		t.Error("unknown future version inherited a class-id tag layout")
 	}
 }
 

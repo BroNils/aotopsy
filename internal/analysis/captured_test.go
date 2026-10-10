@@ -13,8 +13,9 @@ import (
 // TypeArguments, ExceptionHandlers, ICData, Script, LoadingUnit,
 // KernelProgramInfo, ClosureData) and for the JSONL artifacts built from it.
 //
-// Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus, same
-// as the other integration tests.
+// Runs on the canonical stripped Dart 3.9.2 ARM64 corpus sample, same as the
+// other general integration tests. Symbol-oracle binaries are reserved for the
+// explicit symtab differential.
 
 func runCaptureFixture(t *testing.T) string {
 	t.Helper()
@@ -26,7 +27,10 @@ func readJSONL(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
-		return nil // absent file == zero records, which is a valid assertion target
+		if os.IsNotExist(err) {
+			return nil // absent file == zero records, which is a valid assertion target
+		}
+		t.Fatalf("open %s: %v", filepath.Base(path), err)
 	}
 	defer func() { _ = f.Close() }()
 	var out []map[string]any
@@ -49,13 +53,12 @@ func readJSONL(t *testing.T, path string) []map[string]any {
 	return out
 }
 
-// TestCaptured_AbsentInAOT pins the fact that ICData, Context and
-// KernelProgramInfo never appear in an AOT snapshot, so their files are never
-// written. Analysis features must not be built on them -- an earlier revision
+// TestCaptured_AbsentInAOT pins the fact that ICData and Context never appear
+// in an AOT snapshot, so their files are never written. Analysis features must not be built on them -- an earlier revision
 // wired BLR call resolution to ICData and it resolved exactly zero call sites.
 func TestCaptured_AbsentInAOT(t *testing.T) {
 	outDir := runCaptureFixture(t)
-	for _, name := range []string{"icdata.jsonl", "contexts.jsonl", "kpi.jsonl"} {
+	for _, name := range []string{"icdata.jsonl", "contexts.jsonl"} {
 		if recs := readJSONL(t, filepath.Join(outDir, name)); len(recs) != 0 {
 			t.Errorf("%s: got %d records, want 0 (not serialized in AOT). If this "+
 				"ever fires legitimately, the capture code is unverified against a "+
@@ -143,7 +146,7 @@ func TestCaptured_LoadingUnitID(t *testing.T) {
 	outDir := runCaptureFixture(t)
 	recs := readJSONL(t, filepath.Join(outDir, "loading_units.jsonl"))
 	if len(recs) == 0 {
-		t.Skip("no loading units in this sample")
+		t.Fatal("canonical 3.9.2 sample produced no loading units; root unit id=1 should be serialized")
 	}
 	for _, r := range recs {
 		// unit_id is omitempty, so a dropped id shows up as a missing key.

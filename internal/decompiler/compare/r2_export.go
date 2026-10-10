@@ -2,11 +2,12 @@ package compare
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"aotopsy/internal/artifactfs"
 	"aotopsy/internal/strutil"
 )
 
@@ -47,8 +48,12 @@ func (r *R2Export) AddFunction(va uint64, name string) {
 	if name == "" {
 		return
 	}
-	// r2 flag names can't contain dots, @, or spaces.
-	r2Name := strutil.SanitizeR2FlagName(name)
+	// The canonical sanitizer follows r2's actual r_name_check grammar and
+	// binds the flag identity to both the raw semantic name and this VA.
+	r2Name := strutil.SanitizeR2FlagName(name, va)
+	if r2Name == "" {
+		return
+	}
 	r.Lines = append(r.Lines, fmt.Sprintf("f %s @ 0x%x", r2Name, va))
 }
 
@@ -83,7 +88,10 @@ func (r *R2Export) AddStringRef(va uint64, value string) {
 func (r *R2Export) Write(path string) error {
 	sort.Strings(r.Lines)
 	content := strings.Join(r.Lines, "\n") + "\n"
-	return os.WriteFile(path, []byte(content), 0644)
+	return artifactfs.WriteAtomic(path, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, content)
+		return err
+	})
 }
 
 // WriteToDir writes the r2 script to outDir/aotopsy.r2.

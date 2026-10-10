@@ -1,0 +1,290 @@
+{
+ "source": "compare_sample/lib/{ground_truth,signal_ground_truth,main}.dart",
+ "funcs": {
+  "_runAll": {
+   "literals": [
+    "--- Ground Truth ---",
+    "--- Signal Ground Truth ---",
+    "compare sample",
+    "flutter"
+   ],
+   "callees": [
+    "buildSeparator",
+    "classify",
+    "countVowels",
+    "dayName",
+    "factorial",
+    "fibonacci",
+    "findFirstPrime",
+    "isPrime",
+    "processItems",
+    "reverseString",
+    "runGroundTruth",
+    "runSignalGroundTruth",
+    "safeDivide"
+   ]
+  },
+  "aesRoundKey": {},
+  "asyncCompute": {},
+  "asyncSum": {},
+  "authenticateUser": {
+   "literals": [
+    "https://api.example.com/auth"
+   ],
+   "callees": [
+    "getAuthTokenCredential",
+    "httpRequest"
+   ]
+  },
+  "bigSwitch": {
+   "literals": [
+    "eight",
+    "eleven",
+    "end",
+    "five",
+    "four",
+    "fourteen",
+    "nine",
+    "one",
+    "seven",
+    "six",
+    "ten",
+    "thirteen",
+    "three",
+    "twelve",
+    "unknown",
+    "zero"
+   ]
+  },
+  "buildSeparator": {},
+  "chachaQuarterRound": {},
+  "checkRoot": {
+   "callees": [
+    "isRooted"
+   ]
+  },
+  "classify": {
+   "literals": [
+    "even",
+    "negative",
+    "odd",
+    "zero"
+   ]
+  },
+  "computeCRC32": {},
+  "computeHash": {},
+  "countVowels": {
+   "literals": [
+    "aeiouAEIOU"
+   ]
+  },
+  "dayName": {
+   "literals": [
+    "Friday",
+    "Monday",
+    "Saturday",
+    "Sunday",
+    "Thursday",
+    "Tuesday",
+    "Unknown",
+    "Wednesday"
+   ]
+  },
+  "decodeObfuscatedString": {},
+  "decryptData": {},
+  "describeConfig": {},
+  "describeShape": {},
+  "encryptData": {},
+  "exfiltrateImei": {
+   "literals": [
+    "https://api.example.com/track"
+   ],
+   "callees": [
+    "sendHttpRequest"
+   ]
+  },
+  "exfiltrateToken": {
+   "literals": [
+    "10.0.0.5"
+   ],
+   "callees": [
+    "sendToSocket"
+   ]
+  },
+  "factorial": {},
+  "fibonacci": {},
+  "findFirstPrime": {},
+  "forLoopCount": {},
+  "forLoopSquares": {},
+  "forLoopSum": {},
+  "getAuthTokenCredential": {},
+  "getCurrentLocation": {},
+  "groundTruthScriptUrl": {
+   "literals": [
+    "ground_truth.dart"
+   ]
+  },
+  "httpRequest": {
+   "callees": [
+    "sendHttpRequest"
+   ]
+  },
+  "initState": {
+   "callees": [
+    "_runAll"
+   ]
+  },
+  "isBeingDebugged": {},
+  "isDebuggerConnected": {
+   "callees": [
+    "isBeingDebugged"
+   ]
+  },
+  "isPrime": {},
+  "isRooted": {},
+  "logAnalytics": {},
+  "main": {},
+  "makeAdder": {},
+  "makeIntList": {},
+  "makeMultiplier": {},
+  "makeStringIntMap": {
+   "literals": [
+    "one",
+    "three",
+    "two"
+   ]
+  },
+  "makeStringList": {},
+  "nestedTryCatch": {},
+  "processItems": {},
+  "rangeGuardAccess": {},
+  "rangeGuardClamp": {},
+  "rangeGuardSubstring": {},
+  "reportLocation": {
+   "literals": [
+    "https://tracker.example.com/loc"
+   ],
+   "callees": [
+    "getCurrentLocation",
+    "httpRequest"
+   ]
+  },
+  "reverseString": {},
+  "runGroundTruth": {
+   "literals": [
+    "abc",
+    "hello",
+    "prod",
+    "test"
+   ],
+   "callees": [
+    "asyncCompute",
+    "bigSwitch",
+    "describeConfig",
+    "describeShape",
+    "forLoopCount",
+    "forLoopSquares",
+    "forLoopSum",
+    "groundTruthScriptUrl",
+    "makeAdder",
+    "makeIntList",
+    "makeMultiplier",
+    "makeStringIntMap",
+    "makeStringList",
+    "nestedTryCatch",
+    "rangeGuardAccess",
+    "rangeGuardClamp",
+    "rangeGuardSubstring",
+    "totalArea",
+    "tryCatchFinally",
+    "tryCatchWithType"
+   ]
+  },
+  "runSignalGroundTruth": {
+   "literals": [
+    "hello",
+    "test"
+   ],
+   "callees": [
+    "aesRoundKey",
+    "authenticateUser",
+    "chachaQuarterRound",
+    "computeCRC32",
+    "computeHash",
+    "decodeObfuscatedString",
+    "decryptData",
+    "encryptData",
+    "exfiltrateImei",
+    "exfiltrateToken",
+    "isBeingDebugged",
+    "isRooted",
+    "reportLocation",
+    "savePasswordToFile",
+    "securityCheck",
+    "sendEmailToAnalytics",
+    "sendEncryptedData",
+    "setupSslPinning",
+    "trackLocation",
+    "xteaEncrypt"
+   ]
+  },
+  "safeDivide": {},
+  "saveFile": {
+   "callees": [
+    "writeToStorage"
+   ]
+  },
+  "savePasswordToFile": {
+   "literals": [
+    "passwords.txt"
+   ],
+   "callees": [
+    "writeToStorage"
+   ]
+  },
+  "securityCheck": {
+   "literals": [
+    "clean",
+    "rooted",
+    "rooted_and_debugged"
+   ],
+   "callees": [
+    "checkRoot",
+    "isDebuggerConnected"
+   ]
+  },
+  "sendEmailToAnalytics": {
+   "literals": [
+    "user_email"
+   ],
+   "callees": [
+    "logAnalytics"
+   ]
+  },
+  "sendEncryptedData": {
+   "literals": [
+    "https://api.example.com/secure"
+   ],
+   "callees": [
+    "encryptData",
+    "httpRequest"
+   ]
+  },
+  "sendHttpRequest": {},
+  "sendToSocket": {},
+  "setupSslPinning": {},
+  "totalArea": {},
+  "trackLocation": {
+   "literals": [
+    "https://tracker.example.com/loc"
+   ],
+   "callees": [
+    "sendHttpRequest"
+   ]
+  },
+  "tryCatchFinally": {},
+  "tryCatchWithType": {},
+  "writeToStorage": {},
+  "xteaEncrypt": {}
+ }
+}

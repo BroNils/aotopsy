@@ -12,14 +12,16 @@ import (
 
 // cmdDoctor handles "aotopsy doctor <libapp.so>" — diagnostic scan.
 func cmdDoctor(args []string) error {
-	args = reorderPositionalArg(args)
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy doctor <libapp.so>")
 	}
 
@@ -46,18 +48,23 @@ func cmdDoctor(args []string) error {
 		_, _ = fmt.Fprintf(os.Stdout, "Snapshot:    FAIL (%v)\n", err)
 		return fmt.Errorf("snapshot: %w", err)
 	}
+	profile, err := doctorVersionProfile(info)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "Snapshot:    FAIL (%v)\n", err)
+		return err
+	}
 	_, _ = fmt.Fprintf(os.Stdout, "Snapshot:    OK\n")
 
-	if info.Version != nil {
-		_, _ = fmt.Fprintf(os.Stdout, "Dart:        %s\n", info.Version.DartVersion)
-		if info.Version.CompressedPointers {
+	if profile != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "Dart:        %s\n", profile.DartVersion)
+		if profile.CompressedPointers {
 			_, _ = fmt.Fprintf(os.Stdout, "Pointers:    compressed (4 bytes)\n")
 		} else {
 			_, _ = fmt.Fprintf(os.Stdout, "Pointers:    uncompressed (8 bytes)\n")
 		}
-		if !info.Version.Supported {
+		if !profile.Supported {
 			_, _ = fmt.Fprintf(os.Stdout, "Support:     UNSUPPORTED\n")
-			return fmt.Errorf("unsupported dart version: %s", info.Version.DartVersion)
+			return fmt.Errorf("unsupported dart version: %s", profile.DartVersion)
 		}
 		_, _ = fmt.Fprintf(os.Stdout, "Support:     OK\n")
 	}
@@ -83,4 +90,11 @@ func cmdDoctor(args []string) error {
 	}
 
 	return nil
+}
+
+func doctorVersionProfile(info *snapshot.Info) (*snapshot.VersionProfile, error) {
+	if info == nil || info.Version == nil || info.Version.DartVersion == "" {
+		return nil, fmt.Errorf("snapshot version/profile could not be resolved")
+	}
+	return info.Version, nil
 }

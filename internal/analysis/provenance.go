@@ -1,17 +1,20 @@
 package analysis
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"io"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"aotopsy/internal/elfx"
+	"aotopsy/internal/output"
 )
 
 // ProvenanceFileName is the artifact recording which binary an output
 // directory was produced from.
-const ProvenanceFileName = "snapshot.json"
+const ProvenanceFileName = "provenance.json"
 
 // Provenance ties an output directory to the binary it came from.
 //
@@ -30,7 +33,7 @@ type Provenance struct {
 	SHA256             string    `json:"sha256"`
 	Size               int64     `json:"size"`
 	Arch               string    `json:"arch"`
-	DartVersion        string    `json:"dart_version,omitempty"`
+	DartVersion        string    `json:"dart_version"`
 	CompressedPointers bool      `json:"compressed_pointers"`
 	Build              BuildMode `json:"build"`
 }
@@ -79,10 +82,19 @@ func DetectBuildMode(csmCount, discarded, codeRanges int) BuildMode {
 	return b
 }
 
-// WriteProvenance records the analysed binary in outDir.
-func WriteProvenance(outDir, libPath, dartVersion string, isARM64, compressedPtrs bool, build BuildMode) error {
+// WriteProvenance captures identity from the same opened file descriptor and
+// atomically records it. Returning the immutable value lets later report stages
+// identify the analysed bytes without reopening a mutable input path.
+func WriteProvenance(outDir, libPath string, source *elfx.File, dartVersion string, isARM64, compressedPtrs bool, build BuildMode) (Provenance, error) {
+	if source == nil {
+		return Provenance{}, fmt.Errorf("nil provenance source")
+	}
+	absSource, err := filepath.Abs(libPath)
+	if err != nil {
+		return Provenance{}, fmt.Errorf("resolve provenance source: %w", err)
+	}
 	p := Provenance{
-		Source:             libPath,
+		Source:             absSource,
 		SourceName:         filepath.Base(libPath),
 		Arch:               "x64",
 		DartVersion:        dartVersion,
@@ -92,35 +104,68 @@ func WriteProvenance(outDir, libPath, dartVersion string, isARM64, compressedPtr
 	if isARM64 {
 		p.Arch = "arm64"
 	}
-	if fi, err := os.Stat(libPath); err == nil {
-		p.Size = fi.Size()
-	}
-	if f, err := os.Open(libPath); err == nil {
-		h := sha256.New()
-		if _, err := io.Copy(h, f); err == nil {
-			p.SHA256 = hex.EncodeToString(h.Sum(nil))
-		}
-		_ = f.Close()
-	}
-	data, err := json.MarshalIndent(p, "", "  ")
+	p.Size = source.FileSize()
+	sha, err := source.SHA256()
 	if err != nil {
-		return err
+		return Provenance{}, fmt.Errorf("hash provenance source: %w", err)
 	}
-	return os.WriteFile(filepath.Join(outDir, ProvenanceFileName), append(data, '\n'), 0o644)
+	p.SHA256 = sha
+	if err := output.WriteJSONFile(filepath.Join(outDir, ProvenanceFileName), p); err != nil {
+		return Provenance{}, err
+	}
+	return p, nil
 }
 
-// ReadProvenance loads the provenance record from an output directory,
-// reporting ok=false when there is none -- which is the honest answer for
-// a directory produced before this existed, or by a path that never had
-// the binary to record.
-func ReadProvenance(dir string) (Provenance, bool) {
-	data, err := os.ReadFile(filepath.Join(dir, ProvenanceFileName))
+// ReadProvenance loads the provenance record from an output directory.
+// Missing provenance is a supported legacy state (ok=false); malformed or
+// oversized provenance is an error because --from is a trust boundary and an
+// anonymous fallback would silently detach reports from their binary identity.
+func ReadProvenance(dir string) (p Provenance, ok bool, err error) {
+	p, err = readJSONBounded[Provenance](filepath.Join(dir, ProvenanceFileName), maxMetadataArtifactBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return Provenance{}, false, nil
+	}
 	if err != nil {
-		return Provenance{}, false
+		return Provenance{}, false, err
 	}
-	var p Provenance
-	if err := json.Unmarshal(data, &p); err != nil {
-		return Provenance{}, false
+	if p.Source == "" || !filepath.IsAbs(p.Source) || p.SourceName == "" || p.Size <= 0 ||
+		(p.Arch != "arm64" && p.Arch != "x64") || p.DartVersion == "" || len(p.SHA256) != 64 {
+		return Provenance{}, false, fmt.Errorf("%s: incomplete provenance identity", ProvenanceFileName)
 	}
-	return p, p.SourceName != ""
+	if _, err := hex.DecodeString(p.SHA256); err != nil {
+		return Provenance{}, false, fmt.Errorf("%s: invalid sha256: %w", ProvenanceFileName, err)
+	}
+	return p, true, nil
+}
+
+// VerifyProvenanceBinary binds an existing analysis directory to the exact ELF
+// bytes a downstream importer/decompiler is about to use. Reusing semantic
+// artifacts with a same-architecture but different libapp silently applies
+// stale addresses and names, so --from/static consumers must fail closed.
+func VerifyProvenanceBinary(dir, libPath string) (Provenance, error) {
+	p, ok, err := ReadProvenance(dir)
+	if err != nil {
+		return Provenance{}, fmt.Errorf("read provenance: %w", err)
+	}
+	if !ok || len(p.SHA256) != 64 || p.Size <= 0 || p.DartVersion == "" ||
+		(p.Arch != "arm64" && p.Arch != "x64") {
+		return Provenance{}, fmt.Errorf("analysis directory lacks complete binary provenance")
+	}
+	ef, err := elfx.Open(libPath)
+	if err != nil {
+		return Provenance{}, fmt.Errorf("open binary for provenance verification: %w", err)
+	}
+	defer func() { _ = ef.Close() }()
+	arch := "x64"
+	if ef.IsARM64() {
+		arch = "arm64"
+	}
+	sha, err := ef.SHA256()
+	if err != nil {
+		return Provenance{}, fmt.Errorf("hash binary for provenance verification: %w", err)
+	}
+	if !strings.EqualFold(sha, p.SHA256) || ef.FileSize() != p.Size || arch != p.Arch {
+		return Provenance{}, fmt.Errorf("binary does not match analysis provenance (sha256/size/arch mismatch)")
+	}
+	return p, nil
 }

@@ -1,14 +1,17 @@
 package sdk
 
-import "strings"
+import (
+	_ "embed"
+	"strings"
+)
 
 // VM native function names.
 //
-// Every Dart AOT snapshot carries the names of the VM natives its code
-// can reach, as ordinary strings in the object pool: Ffi_dl_open,
-// File_Open, Socket_CreateConnect, Isolate_spawnUri. They are the most
-// reliable behavioural evidence a stripped binary offers -- they survive
-// obfuscation, because the VM resolves them by name at runtime.
+// Dart AOT snapshots can carry VM-native names as ordinary strings:
+// Ffi_dl_open, File_Open, Socket_CreateConnect, Isolate_spawnUri. An exact
+// name is reliable native-identity evidence and survives obfuscation because
+// the VM resolves natives by name at runtime. Presence in snapshot inventory
+// alone is not evidence that application code calls or reaches that native.
 //
 // Measured before this table existed: of 20 representative native names,
 // the string heuristics classified 4, and one of those four was wrong
@@ -16,11 +19,10 @@ import "strings"
 // contains "PrivateKey"). A stripped 3.9.2 sample carries 105 such names;
 // a production app carries 1286.
 //
-// The classification is by NAMESPACE -- the part before the first
-// underscore -- because that is how the SDK groups natives, and it is
-// what carries the meaning: every File_* native is file I/O whichever one
-// it is. Matching whole names would need all ~570 of them and would go
-// stale on every SDK release; matching the namespace does not.
+// The semantic category is by NAMESPACE -- the part before the first
+// underscore -- after exact SDK membership has been established. Every
+// File_* native is a file-I/O native whichever member it is. The category
+// describes the native capability, not proof of target behavior.
 //
 // Sources, both re-derived by TestDartNativeNamespacesMatchSDK:
 //
@@ -44,8 +46,8 @@ const (
 	NativeCatCompression = "compression"
 )
 
-// dartNativeNamespaces maps a native's namespace to what reaching it
-// means. Namespaces with no behavioural signal (Object_, Double_,
+// dartNativeNamespaces maps a native's namespace to the capability it
+// represents. Namespaces with no useful security/reversing signal (Object_, Double_,
 // Float32x4_, List_, String_ ...) are deliberately absent: they appear in
 // every Dart program and classifying them would drown the interesting
 // ones.
@@ -73,8 +75,8 @@ var dartNativeNamespaces = map[string]string{
 	"ResourceHandleImpl":       NativeCatNet,
 	"SocketControlMessageImpl": NativeCatNet,
 
-	// TLS. Distinct from "net": reaching these means the app terminates
-	// or inspects TLS itself, which is where pinning and MITM live.
+	// TLS. Distinct from "net" because these are TLS/context/certificate
+	// primitives. Inventory membership still does not prove they are used.
 	"SecureSocket":    NativeCatTLS,
 	"SecurityContext": NativeCatTLS,
 	"X509":            NativeCatTLS,
@@ -99,8 +101,7 @@ var dartNativeNamespaces = map[string]string{
 
 	"Platform": NativeCatDeviceInfo,
 
-	// Observability. Interesting mainly because a release build that
-	// still reaches these is unusual.
+	// Observability-related native capabilities.
 	"Developer": NativeCatVMService,
 	"VMService": NativeCatVMService,
 	"Timeline":  NativeCatVMService,
@@ -121,12 +122,38 @@ var dartNativeExact = map[string]string{
 	"Ffi_createNativeCallableListener": NativeCatFFI,
 }
 
-// DartNativeCategory classifies a VM native function name.
+// dartnatives_known.txt is the cross-version union of exact SDK natives whose
+// namespaces this classifier intentionally assigns behavioral signal (plus any
+// exact-name overrides). It is NOT the union of every mundane VM native:
+// Object_*, Double_*, List_* and similar high-frequency namespaces are excluded
+// deliberately. Namespace membership alone is not evidence that an arbitrary
+// application string is a VM native: `Socket_NotARealNative` has the right
+// prefix but the VM will never resolve it.
+//
+//go:embed dartnatives_known.txt
+var dartNativeKnownText string
+
+var dartNativeKnown = func() map[string]struct{} {
+	lines := strings.Fields(dartNativeKnownText)
+	out := make(map[string]struct{}, len(lines))
+	for _, name := range lines {
+		out[name] = struct{}{}
+	}
+	return out
+}()
+
+// DartNativeCategory classifies a VM native function name for an exact
+// supported Dart version.
 //
 // The match is exact-then-namespace, never substring: a substring match
 // is what turned SecurityContext_UsePrivateKeyBytes into a blockchain
-// signal.
-func DartNativeCategory(name string) (string, bool) {
+// signal. The known-name file is a cross-version union, so version membership
+// is checked separately: 123 of the 304 known names are not present in every
+// supported SDK release.
+func DartNativeCategory(dartVersion, name string) (string, bool) {
+	if !dartNativeExistsAtVersion(dartVersion, name) {
+		return "", false
+	}
 	if cat, ok := dartNativeExact[name]; ok {
 		return cat, true
 	}
@@ -140,6 +167,20 @@ func DartNativeCategory(name string) (string, bool) {
 	ns := name[:i]
 	cat, ok := dartNativeNamespaces[ns]
 	return cat, ok
+}
+
+func dartNativeExistsAtVersion(dartVersion, name string) bool {
+	if _, ok := dartNativeKnown[name]; !ok {
+		return false
+	}
+	bit, ok := dartNativeVersionBit[dartVersion]
+	if !ok {
+		return false
+	}
+	if mask, varies := dartNativeVersionOverrides[name]; varies {
+		return mask&bit != 0
+	}
+	return true
 }
 
 // DartNativeNamespaces returns the namespaces this table classifies, for

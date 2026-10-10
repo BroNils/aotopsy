@@ -26,13 +26,13 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"aotopsy/internal/cmacro"
+	"aotopsy/internal/sdktest"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
@@ -42,6 +42,23 @@ type extractTarget struct {
 	arch       string // "arm64" or "x64"
 	compressed bool
 	product    bool // true = PRODUCT, false = non-PRODUCT (Debug/Profile)
+}
+
+func vmTargetProfile(t extractTarget) vmtables.TargetProfile {
+	arch := vmtables.ArchitectureX64
+	if t.arch == "arm64" {
+		arch = vmtables.ArchitectureARM64
+	}
+	mode := snapshot.BuildRelease
+	if t.product {
+		mode = snapshot.BuildProduct
+	}
+	return vmtables.TargetProfile{
+		DartVersion:        t.tag,
+		Architecture:       arch,
+		CompressedPointers: t.compressed,
+		BuildMode:          mode,
+	}
 }
 
 // All supported versions and their THR table configurations.
@@ -112,6 +129,7 @@ var allTargets = []extractTarget{
 	// carries a table for it -- so it must be regenerable and checkable
 	// like every other one.
 	{"3.9.2", "x64", false, true},
+	{"3.12.2", "x64", false, true},
 	// ARM64 + compressed + non-PRODUCT (v2.18+)
 	{"2.18.0", "arm64", true, false},
 	{"2.19.0", "arm64", true, false},
@@ -174,147 +192,72 @@ func parseOffset(s string) int {
 }
 
 func fetchHeader(tag string) (string, error) {
-	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
-		fmt.Sprintf("repos/dart-lang/sdk/contents/runtime/vm/compiler/runtime_offsets_extracted.h?ref=%s", tag))
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("gh api for tag %s: %w", tag, err)
-	}
-	return string(out), nil
+	return fetchSDKFile("runtime/vm/compiler/runtime_offsets_extracted.h", tag)
 }
 
-// fetchSDKFile fetches any file from dart-lang/sdk at a given tag via gh api.
+// fetchSDKFile resolves an exact-tag dart-lang/sdk source file through the
+// shared drift-gate loader. Keeping extraction and tests on one loader is
+// correctness-critical: otherwise one path can prefer a stale cache while the
+// other is validating against an exact local checkout.
 func fetchSDKFile(path, tag string) (string, error) {
-	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
-		fmt.Sprintf("repos/dart-lang/sdk/contents/%s?ref=%s", path, tag))
-	out, err := cmd.Output()
+	return sdktest.SDKFileAtTag(path, tag)
+}
+
+// parseVMStubCodeList parses the SDK's exact VM_STUB_CODE_LIST expansion
+// through the shared cmacro engine. This deliberately returns the final
+// emission order, not an implementation-detail split between the main list
+// and VM_TYPE_TESTING_STUB_CODE_LIST. Dart 2.10 inlines the type-testing
+// stubs, while later SDKs expand a nested macro at the same semantic point.
+func parseVMStubCodeList(header string) ([]string, error) {
+	macros, err := cmacro.ParseMacros(header)
 	if err != nil {
-		return "", fmt.Errorf("gh api for %s@%s: %w", path, tag, err)
+		return nil, err
 	}
-	return string(out), nil
-}
-
-// parseVMStubCodeList parses VM_STUB_CODE_LIST(V) from stub_code_list.h,
-// returning the ordered list of stub names (including PROBE_POINT_STUBS_LIST
-// expansion). Also returns VM_TYPE_TESTING_STUB_CODE_LIST entries separately.
-func parseVMStubCodeList(header string) (vmStubs, ttsStubs []string) {
-	// Expand PROBE_POINT_STUBS_LIST(V) → V(AllocationProbePoint) first,
-	// so it's picked up by the V(Name) scan below.
-	expanded := regexp.MustCompile(`PROBE_POINT_STUBS_LIST\(V\)`).ReplaceAllString(header, "V(AllocationProbePoint)")
-
-	// Extract VM_STUB_CODE_LIST block: from #define to the next #define/#endif/EOF
-	vmStubs = extractMacroBlock(expanded, "VM_STUB_CODE_LIST")
-
-	// Extract VM_TYPE_TESTING_STUB_CODE_LIST block
-	ttsStubs = extractMacroBlock(expanded, "VM_TYPE_TESTING_STUB_CODE_LIST")
-	return vmStubs, ttsStubs
-}
-
-// extractMacroBlock finds a #define MACRO(V) ... block and extracts all
-// V(Name) entries within it, stopping at the next #define/#endif/EOF.
-func extractMacroBlock(header, macroName string) []string {
-	// Find the #define line
-	defineRe := regexp.MustCompile(`#define\s+` + regexp.QuoteMeta(macroName) + `\(V\)\s*\\?\n`)
-	loc := defineRe.FindStringIndex(header)
-	if loc == nil {
-		return nil
-	}
-	rest := header[loc[1]:]
-	// Find the end: next #define, #endif, or EOF
-	endRe := regexp.MustCompile(`\n#define\s|\n#endif`)
-	endLoc := endRe.FindStringIndex(rest)
-	if endLoc != nil {
-		rest = rest[:endLoc[0]]
-	}
-	// Extract all V(Name) entries
-	return parseMacroEntries(rest)
-}
-
-// parseMacroEntries extracts V(...) entries from a macro body. Supports both
-// single-arg V(Name) and multi-arg V(Type, name) / V(Name, "string") forms.
-// For multi-arg forms, the LAST identifier argument is used as the entry name
-// (matching how roots.h and symbol_list.h name their entries).
-func parseMacroEntries(body string) []string {
-	// Match V(...) capturing everything inside the parens, then extract the
-	// last identifier. This handles V(Name), V(Type, name), V(Name, "str"), etc.
-	entryRe := regexp.MustCompile(`V\(([^)]+)\)`)
-	matches := entryRe.FindAllStringSubmatch(body, -1)
-	var names []string
-	for _, m := range matches {
-		args := m[1]
-		// Split on comma and take the last meaningful identifier.
-		parts := strings.Split(args, ",")
-		if len(parts) == 0 {
-			continue
-		}
-		// For V(Type, name) the name is the second arg; for V(Name) it's the first.
-		// Take the last arg and strip whitespace/quotes.
-		last := strings.TrimSpace(parts[len(parts)-1])
-		last = strings.Trim(last, `"`)
-		// Extract the identifier (may have leading type like "ObjectPtr, null_obj").
-		identRe := regexp.MustCompile(`(\w+)\s*$`)
-		if im := identRe.FindStringSubmatch(last); im != nil {
-			names = append(names, im[1])
-		}
-	}
-	return names
+	return cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 }
 
 // runCheckStubs verifies stubnames.go against SDK's stub_code_list.h
 // for every supported version. Returns count of mismatches.
 func runCheckStubs() int {
-	mismatches := 0
-	seenTag := map[string]bool{}
-	for _, t := range allTargets {
-		if t.arch != "arm64" || seenTag[t.tag] {
-			continue
-		}
-		seenTag[t.tag] = true
-		header, err := fetchSDKFile("runtime/vm/stub_code_list.h", t.tag)
+	mismatches, verified := 0, 0
+	for _, tag := range snapshot.SupportedVersions() {
+		header, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
 			continue
 		}
-		vmStubs, ttsStubs := parseVMStubCodeList(header)
-		committed := vmtables.VMStubNames(t.tag)
+		vmStubs, err := parseVMStubCodeList(header)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: parse stub list: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		committed := vmtables.VMStubNames(tag)
 		if committed == nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: no committed table\n", t.tag)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: no committed table\n", tag)
+			mismatches++
 			continue
 		}
-		// Compare VM_STUB_CODE_LIST entries
 		if len(vmStubs) != len(committed) {
-			// The committed table includes TTS entries merged in by
-			// VMStubNamesInClusterOrder, so length may differ.
-			// Compare only the VM_STUB_CODE_LIST portion.
-			fmt.Fprintf(os.Stderr, "  INFO %s: SDK VM_STUB_CODE_LIST=%d, committed=%d (committed may include TTS)\n",
-				t.tag, len(vmStubs), len(committed))
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK has %d stubs, committed exact order has %d\n",
+				tag, len(vmStubs), len(committed))
+			mismatches++
 		}
-		// Check that every SDK entry appears in the committed list
-		committedSet := map[string]bool{}
-		for _, s := range committed {
-			committedSet[s] = true
-		}
-		for _, s := range vmStubs {
-			if !committedSet[s] {
-				fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK stub %q not in committed table\n", t.tag, s)
+		for i := 0; i < len(vmStubs) && i < len(committed); i++ {
+			if vmStubs[i] != committed[i] {
+				fmt.Fprintf(os.Stderr, "  MISMATCH %s: index %d SDK=%q committed=%q\n",
+					tag, i, vmStubs[i], committed[i])
 				mismatches++
+				break
 			}
 		}
-		// Check TTS entries
-		ttsCommitted := vmtables.VMStubNamesInClusterOrder(t.tag)
-		if ttsCommitted != nil {
-			ttsCommittedSet := map[string]bool{}
-			for _, s := range ttsCommitted {
-				ttsCommittedSet[s] = true
-			}
-			for _, s := range ttsStubs {
-				if !ttsCommittedSet[s] {
-					fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK TTS stub %q not in committed table\n", t.tag, s)
-					mismatches++
-				}
-			}
-		}
-		fmt.Fprintf(os.Stderr, "  OK %s: %d VM stubs, %d TTS stubs\n", t.tag, len(vmStubs), len(ttsStubs))
+		fmt.Fprintf(os.Stderr, "  OK %s: %d exact-order VM stubs\n", tag, len(vmStubs))
+		verified++
+	}
+	if verified == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: stub-name drift gate verified zero SDK versions")
+		mismatches++
 	}
 	if mismatches > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d stub mismatch(es) found\n", mismatches)
@@ -342,13 +285,12 @@ func runCheckStubs() int {
 // same headers, and any disagreement about *which* name sits at an offset
 // is caught by runtimeEntryConflicts instead.
 func runCheckRuntimeEntries() int {
-	mismatches := 0
-	seenTag := map[string]bool{}
+	mismatches, verified := 0, 0
 	for _, t := range allTargets {
-		if seenTag[t.tag+t.arch] {
+		fields := vmtables.THRFields(vmTargetProfile(t))
+		if len(fields) == 0 {
 			continue
 		}
-		seenTag[t.tag+t.arch] = true
 		// Deliberately the same derivation -write uses. The gate's
 		// first draft called a second, older parser that took the LAST
 		// macro argument -- right for roots.h, wrong for
@@ -358,12 +300,8 @@ func runCheckRuntimeEntries() int {
 		// the broken half. That parser is now gone.
 		entries, leafEntries, _, err := sdkRuntimeEntriesFor(t.tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
-			continue
-		}
-		fields := vmtables.THRFields(t.tag, t.arch == "arm64")
-		if len(fields) == 0 {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no committed THR table\n", t.tag, t.arch)
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s compressed=%v: %v\n", t.tag, t.arch, t.compressed, err)
+			mismatches++
 			continue
 		}
 		named := map[string]bool{}
@@ -388,10 +326,15 @@ func runCheckRuntimeEntries() int {
 			}
 		}
 		if local == 0 {
-			fmt.Fprintf(os.Stderr, "  OK %s/%s: %d runtime + %d leaf entries all named\n",
-				t.tag, t.arch, len(entries), len(leafEntries))
+			fmt.Fprintf(os.Stderr, "  OK %s/%s compressed=%v: %d runtime + %d leaf entries all named\n",
+				t.tag, t.arch, t.compressed, len(entries), len(leafEntries))
 		}
 		mismatches += local
+		verified++
+	}
+	if verified == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: runtime-entry drift gate verified zero target profiles")
+		mismatches++
 	}
 	if mismatches > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d runtime-entry naming gap(s) found\n", mismatches)
@@ -422,14 +365,18 @@ func sdkThreadStubNames(tag string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := cmacro.ExpandRaw(cmacro.ParseMacros(src), "CACHED_ADDRESSES_LIST")
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(macros, "CACHED_ADDRESSES_LIST")
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
-	for _, r := range rows {
-		if len(r) < 3 {
-			continue
+	for i, r := range rows {
+		if len(r) != 4 {
+			return nil, fmt.Errorf("CACHED_ADDRESSES_LIST row %d has %d columns, want 4", i, len(r))
 		}
 		m := reStubCtor.FindStringSubmatch(r[2])
 		if m == nil {
@@ -453,26 +400,32 @@ func sdkThreadStubNames(tag string) (map[string]string, error) {
 // "THR.f248" instead of "THR.MegamorphicCall", so nothing downstream can
 // tell the table is short.
 func runCheckStubOffsets() int {
-	mismatches := 0
-	for _, t := range stubOffsetTargets {
-		committed := vmtables.ThreadStubOffsets(t.tag, t.arch == "arm64")
+	mismatches, verified := 0, 0
+	for _, t := range supportedProductTHRTargets() {
+		committed := vmtables.ThreadStubOffsets(vmTargetProfile(t))
 		if committed == nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no committed table\n", t.tag, t.arch)
+			// The target list follows the committed THR tables. A nil result here
+			// means the selection contract and the gate disagree -- never skip it.
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s compressed=%v: THR target exists but ThreadStubOffsets is nil\n", t.tag, t.arch, t.compressed)
+			mismatches++
 			continue
 		}
 		fieldToStub, err := sdkThreadStubNames(t.tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s compressed=%v: %v\n", t.tag, t.arch, t.compressed, err)
+			mismatches++
 			continue
 		}
 		header, err := fetchHeader(t.tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s compressed=%v: %v\n", t.tag, t.arch, t.compressed, err)
+			mismatches++
 			continue
 		}
 		fields, err := extractTHRFields(header, t.arch, t.compressed, true)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", t.tag, t.arch, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s compressed=%v: %v\n", t.tag, t.arch, t.compressed, err)
+			mismatches++
 			continue
 		}
 
@@ -484,8 +437,9 @@ func runCheckStubOffsets() int {
 			}
 		}
 		if len(want) == 0 {
-			fmt.Fprintf(os.Stderr, "  SKIP %s/%s: no stub offsets in the %s/compressed=%v PRODUCT block\n",
+			fmt.Fprintf(os.Stderr, "  ERROR %s/%s: no stub offsets in the %s/compressed=%v PRODUCT block\n",
 				t.tag, t.arch, t.arch, t.compressed)
+			mismatches++
 			continue
 		}
 
@@ -511,112 +465,78 @@ func runCheckStubOffsets() int {
 			}
 		}
 		if local == 0 {
-			fmt.Fprintf(os.Stderr, "  OK %s/%s: %d stub offsets\n", t.tag, t.arch, len(want))
+			fmt.Fprintf(os.Stderr, "  OK %s/%s compressed=%v: %d stub offsets\n", t.tag, t.arch, t.compressed, len(want))
 		}
 		mismatches += local
+		verified++
+	}
+	if verified == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: thread-stub drift gate verified zero target profiles")
+		mismatches++
 	}
 	if mismatches > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d thread-stub offset mismatch(es) found\n", mismatches)
 	} else {
-		fmt.Fprintf(os.Stderr, "\nAll thread-stub offsets match SDK\n")
+		fmt.Fprintf(os.Stderr, "\nAll thread-stub offsets match SDK; %d target profile(s) verified\n", verified)
 	}
 	return mismatches
 }
 
-// stubOffsetTargets is every (version, arch) pair ThreadStubOffsets
-// claims to support, with the pointer-compression mode that version's
-// release builds use. Keep it in sync with the switch in threadstubs.go:
-// a version with a table but no target here is untested, which is the
-// state the whole file was in.
-var stubOffsetTargets = []extractTarget{
-	{"2.10.0", "arm64", false, true},
-	{"2.10.0", "x64", false, true},
-	{"2.12.0", "arm64", false, true},
-	{"2.12.0", "x64", false, true},
-	{"2.13.0", "arm64", false, true},
-	{"2.13.0", "x64", false, true},
-	{"2.14.0", "arm64", false, true},
-	{"2.14.0", "x64", false, true},
-	{"2.15.0", "arm64", false, true},
-	{"2.15.0", "x64", false, true},
-	{"2.16.0", "arm64", false, true},
-	{"2.16.0", "x64", false, true},
-	{"2.17.6", "arm64", false, true},
-	{"2.17.6", "x64", false, true},
-	{"2.18.0", "arm64", true, true},
-	{"2.18.0", "x64", true, true},
-	{"2.19.0", "arm64", true, true},
-	{"2.19.0", "x64", true, true},
-	{"3.1.0", "arm64", true, true},
-	{"3.3.0", "arm64", true, true},
-	{"3.5.0", "arm64", true, true},
-	{"3.8.1", "arm64", true, true},
-	{"3.8.1", "x64", true, true},
-	{"3.0.5", "arm64", true, true},
-	{"3.0.5", "x64", true, true},
-	{"3.2.5", "arm64", true, true},
-	{"3.2.5", "x64", true, true},
-	{"3.4.3", "arm64", true, true},
-	{"3.4.3", "x64", true, true},
-	{"3.6.2", "arm64", true, true},
-	{"3.6.2", "x64", true, true},
-	{"3.7.0", "arm64", true, true},
-	{"3.7.0", "x64", true, true},
-	{"3.9.2", "arm64", true, true},
-	{"3.9.2", "x64", true, true},
-	{"3.10.7", "arm64", true, true},
-	{"3.11.0", "arm64", true, true},
-	{"3.12.2", "arm64", true, true},
-	{"3.12.2", "x64", true, true},
-	{"3.13.0", "arm64", true, true},
-	{"3.13.0", "x64", true, true},
+// supportedProductTHRTargets is the single source of truth for stub-offset
+// verification. ThreadStubOffsets is derived from THRFields, so maintaining a
+// second hand-written target list can only make the verifier weaker.
+func supportedProductTHRTargets() []extractTarget {
+	out := make([]extractTarget, 0, len(allTargets))
+	seen := map[string]bool{}
+	for _, t := range allTargets {
+		if !t.product {
+			continue
+		}
+		profile := vmTargetProfile(t)
+		if vmtables.THRFields(profile) == nil {
+			continue
+		}
+		key := fmt.Sprintf("%s/%s/%t", t.tag, t.arch, t.compressed)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	return out
 }
 
-// runEmitStubNames prints Go source for the VM stub NAME tables of the
-// given tags -- VM_STUB_CODE_LIST minus the type-testing stubs, which
-// composeVMStubEmissionOrder splices back in at the Subtype7TestCache
-// anchor.
+// runEmitStubNames prints Go source for the exact VM_STUB_CODE_LIST expansion
+// of the given tags. Keeping the final emission order as the generated
+// contract handles both historical shapes: Dart 2.10 inlines type-testing
+// stubs, while later SDKs reference VM_TYPE_TESTING_STUB_CODE_LIST.
 //
 // This list is zipped by index against the VM snapshot's Code objects,
 // so one missing or extra name shifts every later stub. It is generated
 // rather than transcribed for that reason.
 func runEmitStubNames(tags []string) int {
+	failures := 0
 	for _, tag := range tags {
 		src, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
-		macros := cmacro.ParseMacros(src)
-		full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
+		full, err := parseVMStubCodeList(src)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
-		}
-		tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
-			continue
-		}
-		ttsSet := map[string]bool{}
-		for _, n := range tts {
-			ttsSet[n] = true
-		}
-		var want []string
-		for _, n := range full {
-			if !ttsSet[n] {
-				want = append(want, n)
-			}
 		}
 		id := strings.ReplaceAll(tag, ".", "")
-		fmt.Printf("\n// Dart %s -- VM_STUB_CODE_LIST@%s minus the %d type-testing\n", tag, tag, len(tts))
-		fmt.Printf("// stubs, %d entries.\n", len(want))
+		fmt.Printf("\n// Dart %s -- exact VM_STUB_CODE_LIST@%s expansion, %d entries.\n", tag, tag, len(full))
 		fmt.Printf("var stubNames%s = []string{\n", id)
-		printGoStrings(want)
+		printGoStrings(full)
 		fmt.Printf("}\n")
 		fmt.Printf("// switch: case %q: return stubNames%s\n", tag, id)
 	}
-	return 0
+	return failures
 }
 
 // runEmitStubOffsets prints Go source for the Thread-cached stub offset
@@ -628,20 +548,24 @@ func runEmitStubNames(tags []string) int {
 // comparing the two lets the caller see whether the arches agree, which
 // is the usual case but not one to assume.
 func runEmitStubOffsets(tags []string) int {
+	failures := 0
 	for _, tag := range tags {
 		fieldToStub, err := sdkThreadStubNames(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		header, err := fetchHeader(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		target, ok := arm64ProductTarget(tag)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: no arm64 PRODUCT target\n", tag)
+			failures++
 			continue
 		}
 
@@ -649,7 +573,8 @@ func runEmitStubOffsets(tags []string) int {
 		for _, arch := range []string{"arm64", "x64"} {
 			fields, err := extractTHRFields(header, arch, target.compressed, true)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  SKIP %s/%s: %v\n", tag, arch, err)
+				fmt.Fprintf(os.Stderr, "  ERROR %s/%s: %v\n", tag, arch, err)
+				failures++
 				continue
 			}
 			m := map[int]string{}
@@ -662,7 +587,13 @@ func runEmitStubOffsets(tags []string) int {
 		}
 		arm, x64 := perArch["arm64"], perArch["x64"]
 		if len(arm) == 0 {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: no stub offsets in the arm64 PRODUCT block\n", tag)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: no stub offsets in the arm64 PRODUCT block\n", tag)
+			failures++
+			continue
+		}
+		if len(x64) == 0 {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: no stub offsets in the x64 PRODUCT block\n", tag)
+			failures++
 			continue
 		}
 		same := len(arm) == len(x64)
@@ -694,7 +625,7 @@ func runEmitStubOffsets(tags []string) int {
 		fmt.Printf("}\n")
 		fmt.Printf("// switch: case %q: return threadStubOffsets%s\n", tag, id)
 	}
-	return 0
+	return failures
 }
 
 // runEmitRuntimeEntries prints Go source for the runtime-entry name
@@ -709,38 +640,50 @@ func runEmitStubOffsets(tags []string) int {
 // has a 49-slot gap between them that a "leaf follows runtime" assumption
 // would silently write over.
 func runEmitRuntimeEntries(tags []string) int {
+	failures := 0
 	for _, tag := range tags {
 		target, ok := arm64ProductTarget(tag)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: no arm64 PRODUCT target\n", tag)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: no arm64 PRODUCT target\n", tag)
+			failures++
 			continue
 		}
 		relSrc, err := fetchSDKFile("runtime/vm/runtime_entry_list.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
-		macros := cmacro.ParseMacros(relSrc)
+		macros, err := cmacro.ParseMacros(relSrc)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
+			continue
+		}
 		runtime, err := cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		// LEAF entries put the return type first: V(intptr_t, Name, ...).
 		leaf, err := cmacro.Column(macros, "LEAF_RUNTIME_ENTRY_LIST", 1)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 
 		header, err := fetchHeader(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		fields, err := extractTHRFields(header, target.arch, target.compressed, true)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		offsetOf := func(name string) (int, bool) {
@@ -756,7 +699,8 @@ func runEmitRuntimeEntries(tags []string) int {
 		rtBase, ok1 := offsetOf("AllocateArray_entry_point")
 		leafBase, ok2 := offsetOf("DeoptimizeCopyFrame_entry_point")
 		if !ok1 {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: AllocateArray entry point not in the extracted header\n", tag)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: AllocateArray entry point not in the extracted header\n", tag)
+			failures++
 			continue
 		}
 
@@ -773,19 +717,22 @@ func runEmitRuntimeEntries(tags []string) int {
 		// where present, is used as a cross-check.
 		contiguous, err := leafFollowsRuntime(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			failures++
 			continue
 		}
 		switch {
 		case contiguous && ok2 && leafBase != rtBase+len(runtime)*8:
-			fmt.Fprintf(os.Stderr, "  SKIP %s: thread.h says the blocks are adjacent but the header puts\n"+
+			fmt.Fprintf(os.Stderr, "  ERROR %s: thread.h says the blocks are adjacent but the header puts\n"+
 				"    DeoptimizeCopyFrame at %#x, not %#x -- resolve before emitting\n",
 				tag, leafBase, rtBase+len(runtime)*8)
+			failures++
 			continue
 		case !contiguous && !ok2:
-			fmt.Fprintf(os.Stderr, "  SKIP %s: LEAF block is not adjacent to the runtime block and the\n"+
+			fmt.Fprintf(os.Stderr, "  ERROR %s: LEAF block is not adjacent to the runtime block and the\n"+
 				"    header does not export DeoptimizeCopyFrame_entry_point_offset.\n"+
 				"    The leaf base cannot be derived; guessing it would misname the whole block.\n", tag)
+			failures++
 			continue
 		}
 		fmt.Printf("\n// Dart %s. Derived from runtime_entry_list.h@%s;\n", tag, tag)
@@ -815,7 +762,7 @@ func runEmitRuntimeEntries(tags []string) int {
 			fmt.Printf("// merge: mergeRuntimeEntries(thrV%s, %#x, leafEntriesV%s)\n", id, leafBase, id)
 		}
 	}
-	return 0
+	return failures
 }
 
 func printGoStrings(names []string) {
@@ -874,7 +821,7 @@ func arm64ProductTarget(tag string) (extractTarget, bool) {
 //   - (kNumPredefinedCids - kObjectCid) - |IsAbsentCid| (class table entries)
 //
 // Source: runtime/vm/roots.h, runtime/vm/symbol_list.h,
-// runtime/vm/stub_code_list.h, runtime/vm/class_id.h.
+// runtime/vm/stub_code_list.h, runtime/vm/class_id.h, runtime/vm/app_snapshot.cc.
 // Verified via gh api at tag 3.13.0.
 // reClassIdTagPosComment matches the pre-3.6 enum form, where the position is
 // an expression whose value only exists in the trailing comment:
@@ -893,24 +840,23 @@ var reClassIdTagSizeLiteral = regexp.MustCompile(`kClassIdTagSize\s*=\s*(\d+)\s*
 //	using ClassIdTag =
 //	    BitField<decltype(tags_), ClassIdTagType, SizeTagBits::kNextBit, 20>;
 var reClassIdTagBitField = regexp.MustCompile(`using ClassIdTag\s*=\s*BitField<[^>]*?,\s*(\d+)>`)
+var reSizeTagBits = regexp.MustCompile(`using SizeTagBits\s*=\s*BitField<[^>]*?,\s*kBitsPerInt8\s*,\s*(\d+)>`)
+var reInt8SizeLog2 = regexp.MustCompile(`kInt8SizeLog2\s*=\s*(\d+)`)
+var reBitsPerByteLog2 = regexp.MustCompile(`kBitsPerByteLog2\s*=\s*(\d+)`)
 
 // reExtractedClassIdTag matches the generated header, which carries both as
 // literals from 3.12.2 onwards.
 var reExtractedClassIdTagPos = regexp.MustCompile(`UntaggedObject_kClassIdTagPos\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
 var reExtractedClassIdTagSize = regexp.MustCompile(`UntaggedObject_kClassIdTagSize\s*=\s*(0x[0-9a-fA-F]+|\d+)`)
 
-// sdkClassIdTagLayout recovers the ClassIdTag bitfield layout from the SDK at
-// a tag, returning pos = -1 when only the width is machine-readable.
+// sdkClassIdTagLayout recovers the complete ClassIdTag bitfield layout from
+// the exact SDK source at a tag.
 //
 // Three shapes across the supported range, because the SDK rewrote this twice:
 //
 //	<= 3.5.0     raw_object.h enum, value in a trailing comment
 //	3.6.2-3.11.0 raw_object.h `using ClassIdTag = BitField<..., 20>`
 //	>= 3.12.2    runtime_offsets_extracted.h, both as literals
-//
-// The width alone still decides the layout: across every version AOTopsy
-// supports, size 16 means pos 16 and size 20 means pos 12. A fourth shape
-// would fail to parse rather than pass quietly.
 func sdkClassIdTagLayout(tag string) (pos, size int, source string, err error) {
 	if src, e := fetchHeader(tag); e == nil {
 		mp := reExtractedClassIdTagPos.FindStringSubmatch(src)
@@ -936,7 +882,30 @@ func sdkClassIdTagLayout(tag string) (pos, size int, source string, err error) {
 	}
 	if mb := reClassIdTagBitField.FindStringSubmatch(raw); mb != nil {
 		s, _ := strconv.Atoi(mb[1])
-		return -1, s, "raw_object.h (BitField)", nil
+		ms := reSizeTagBits.FindStringSubmatch(raw)
+		if ms == nil {
+			return 0, 0, "", fmt.Errorf("raw_object.h@%s uses ClassIdTag BitField but SizeTagBits is not the expected exact-source form", tag)
+		}
+		sizeWidth, convErr := strconv.Atoi(ms[1])
+		if convErr != nil {
+			return 0, 0, "", fmt.Errorf("raw_object.h@%s invalid SizeTagBits width: %w", tag, convErr)
+		}
+		globals, fetchErr := fetchSDKFile("runtime/platform/globals.h", tag)
+		if fetchErr != nil {
+			return 0, 0, "", fetchErr
+		}
+		mi8 := reInt8SizeLog2.FindStringSubmatch(globals)
+		mbp := reBitsPerByteLog2.FindStringSubmatch(globals)
+		if mi8 == nil || mbp == nil {
+			return 0, 0, "", fmt.Errorf("globals.h@%s does not expose kInt8SizeLog2/kBitsPerByteLog2 literals", tag)
+		}
+		i8Log2, e1 := strconv.Atoi(mi8[1])
+		bitsLog2, e2 := strconv.Atoi(mbp[1])
+		if e1 != nil || e2 != nil || i8Log2 < 0 || i8Log2 > 8 || bitsLog2 < 0 || bitsLog2 > 8 {
+			return 0, 0, "", fmt.Errorf("globals.h@%s has invalid bit-size constants", tag)
+		}
+		bitsPerInt8 := (1 << i8Log2) * (1 << bitsLog2)
+		return bitsPerInt8 + sizeWidth, s, "raw_object.h SizeTagBits::kNextBit + runtime/platform/globals.h", nil
 	}
 	return 0, 0, "", fmt.Errorf("no recognised ClassIdTag declaration in raw_object.h@%s", tag)
 }
@@ -951,139 +920,194 @@ func sdkClassIdTagLayout(tag string) (pos, size int, source string, err error) {
 // differential table in AGENTS-local.md), and it decides how every object
 // header's class id is read.
 func runCheckClassIdTag() int {
-	seen := map[string]bool{}
-	bad, checked, partial := 0, 0, 0
-	for _, t := range allTargets {
-		if seen[t.tag] {
-			continue
-		}
-		seen[t.tag] = true
-
-		sdkPos, sdkSize, source, err := sdkClassIdTagLayout(t.tag)
+	bad, checked := 0, 0
+	for _, tag := range snapshot.SupportedVersions() {
+		sdkPos, sdkSize, source, err := sdkClassIdTagLayout(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			bad++
 			continue
 		}
-		wantPos, wantSize := snapshot.ClassIdTagLayout(t.tag)
+		wantPos, wantSize, ok := snapshot.ClassIdTagLayout(tag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: unsupported committed class-id tag layout\n", tag)
+			bad++
+			continue
+		}
 		checked++
 
 		if sdkSize != wantSize {
 			fmt.Fprintf(os.Stderr, "  MISMATCH %s: size committed=%d sdk=%d (%s)\n",
-				t.tag, wantSize, sdkSize, source)
+				tag, wantSize, sdkSize, source)
 			bad++
-			continue
-		}
-		if sdkPos < 0 {
-			partial++
-			fmt.Fprintf(os.Stderr, "  OK %s: size %d (%s; position not machine-readable at this tag)\n",
-				t.tag, sdkSize, source)
 			continue
 		}
 		if sdkPos != wantPos {
 			fmt.Fprintf(os.Stderr, "  MISMATCH %s: pos committed=%d sdk=%d (%s)\n",
-				t.tag, wantPos, sdkPos, source)
+				tag, wantPos, sdkPos, source)
 			bad++
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "  OK %s: pos %d size %d (%s)\n", t.tag, sdkPos, sdkSize, source)
+		fmt.Fprintf(os.Stderr, "  OK %s: pos %d size %d (%s)\n", tag, sdkPos, sdkSize, source)
+	}
+	if checked == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: ClassIdTag drift gate verified zero SDK versions")
+		bad++
 	}
 	if bad > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d ClassIdTag layout mismatch(es) across %d version(s)\n", bad, checked)
 	} else {
-		fmt.Fprintf(os.Stderr, "\nClassIdTag layout matches SDK for all %d version(s) (%d width-only)\n",
-			checked, partial)
+		fmt.Fprintf(os.Stderr, "\nClassIdTag layout matches SDK exactly for all %d version(s)\n", checked)
 	}
 	return bad
 }
 
 func runCheckRoots() int {
-	mismatches := 0
-	// Only 3.13.0+ has RootsPrefixRefCount.
-	for _, t := range allTargets {
-		if t.tag != "3.13.0" {
+	mismatches, checked := 0, 0
+	for _, tag := range snapshot.SupportedVersions() {
+		profile := snapshot.ProfileForVersion(tag)
+		if !snapshot.VersionAtLeast(tag, "3.13.0") {
 			continue
 		}
+		if profile == nil || profile.RootsPrefixRefCount <= 0 {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: supported 3.13+ profile has no RootsPrefixRefCount\n", tag)
+			mismatches++
+			continue
+		}
+		checked++
 		// Fetch roots.h to count RAW_ROOTS_LIST + HANDLE_ROOTS_LIST + API_HANDLE_ROOTS_LIST.
-		rootsHeader, err := fetchSDKFile("runtime/vm/roots.h", t.tag)
+		rootsHeader, err := fetchSDKFile("runtime/vm/roots.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
 			continue
 		}
-		rawRoots := countMacroEntries(rootsHeader, "RAW_ROOTS_LIST")
-		handleRoots := countMacroEntries(rootsHeader, "HANDLE_ROOTS_LIST")
-		apiHandleRoots := countMacroEntries(rootsHeader, "API_HANDLE_ROOTS_LIST")
+		rawRoots, err := countMacroEntries(rootsHeader, "RAW_ROOTS_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: parse RAW_ROOTS_LIST: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		handleRoots, err := countMacroEntries(rootsHeader, "HANDLE_ROOTS_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: parse HANDLE_ROOTS_LIST: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		apiHandleRoots, err := countMacroEntries(rootsHeader, "API_HANDLE_ROOTS_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: parse API_HANDLE_ROOTS_LIST: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		argsDescriptors, err := extractArrayExtent(rootsHeader, "cached_args_descriptors_")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		icdataArrays, err := extractArrayExtent(rootsHeader, "cached_icdata_arrays_")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		oneCharSymbols, err := extractArrayExtent(rootsHeader, "one_char_symbols_")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
+			continue
+		}
 
 		// Fetch symbol_list.h for kNumPredefinedSymbols.
-		symbolHeader, err := fetchSDKFile("runtime/vm/symbol_list.h", t.tag)
+		symbolHeader, err := fetchSDKFile("runtime/vm/symbol_list.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
 			continue
 		}
-		// kNumPredefinedSymbols is defined as a count in symbol_list.h.
-		// We look for the #define or the macro count.
-		numSymbols := extractDefineInt(symbolHeader, "kNumPredefinedSymbols")
-		if numSymbols == 0 {
-			// Fallback: count V(Name) entries in PREDEFINED_SYMBOLS_LIST.
-			numSymbols = countMacroEntries(symbolHeader, "PREDEFINED_SYMBOLS_LIST")
+		numSymbols, err := countMacroEntries(symbolHeader, "PREDEFINED_SYMBOLS_LIST")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: parse PREDEFINED_SYMBOLS_LIST: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		symbolHandleExtra, err := extractArrayExpressionAddend(rootsHeader, "symbol_handles_", "kNumPredefinedSymbols")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		if !regexp.MustCompile(`stub_handles_\s*\[\s*kNumStubEntries\s*\]`).MatchString(rootsHeader) {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: roots.h no longer declares stub_handles_[kNumStubEntries]\n", tag)
+			mismatches++
+			continue
 		}
 
 		// Fetch stub_code_list.h for kNumStubEntries.
-		stubHeader, err := fetchSDKFile("runtime/vm/stub_code_list.h", t.tag)
+		stubHeader, err := fetchSDKFile("runtime/vm/stub_code_list.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
 			continue
 		}
-		vmStubs, ttsStubs := parseVMStubCodeList(stubHeader)
-		numStubEntries := len(vmStubs) + len(ttsStubs)
+		vmStubs, err := parseVMStubCodeList(stubHeader)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: parse stub lists: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		numStubEntries := len(vmStubs)
 
-		// Fetch class_id.h for kNumPredefinedCids and IsAbsentCid count.
-		classIDHeader, err := fetchSDKFile("runtime/vm/class_id.h", t.tag)
+		// class_id.h owns the final CLASS_ID_LIST enum ordering; app_snapshot.cc
+		// owns IsAbsentCid, the exact filter the roots serializer/deserializer use.
+		classIDHeader, err := fetchSDKFile("runtime/vm/class_id.h", tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  SKIP %s: %v\n", t.tag, err)
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
 			continue
 		}
-		// kNumPredefinedCids cannot be reliably extracted from class_id.h
-		// because the enum body is a macro expansion (CLASS_ID_LIST) that
-		// nests 5+ levels deep (CLASS_LIST → CLASS_LIST_NO_OBJECT →
-		// CLASS_LIST_NO_OBJECT_NOR_STRING_NOR_ARRAY_NOR_MAP → ...).
-		// Instead, we compute it from the known total: the committed
-		// RootsPrefixRefCount (1518) minus the other components, and verify
-		// the other components match. This is a partial check — it verifies
-		// raw/handle/api/symbols/stubs but not the class table count directly.
-		// A full check would require running the C preprocessor on class_id.h.
-		numPredefinedCids := 0 // computed below from the known total
-		// Count IsAbsentCid entries — these are CIDs skipped in the roots.
-		numAbsentCids := strings.Count(classIDHeader, "IsAbsentCid")
+		appSnapshot, err := fetchSDKFile("runtime/vm/app_snapshot.cc", tag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: %v\n", tag, err)
+			mismatches++
+			continue
+		}
+		numPredefinedCids, kObjectCid, numAbsentCids, err := classTableFacts(classIDHeader, appSnapshot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR %s: derive ClassId roots facts: %v\n", tag, err)
+			mismatches++
+			continue
+		}
 
 		// Compute the expected roots prefix count.
-		// sizeof(Raw)/sizeof(ObjectPtr) = |RAW_ROOTS_LIST| + 35 + 4 + 256
-		// sizeof(Internal)/sizeof(VMHandle) = |HANDLE_ROOTS_LIST| + (kNumPredefinedSymbols + 256) + kNumStubEntries
+		// Every term, including array extents, is parsed from exact-tag source.
+		// sizeof(Raw)/sizeof(ObjectPtr) = |RAW_ROOTS_LIST| + three Raw arrays
+		// sizeof(Internal)/sizeof(VMHandle) = |HANDLE_ROOTS_LIST| + symbol handles + stub handles
 		// sizeof(Api)/sizeof(ObjectPtr) = |API_HANDLE_ROOTS_LIST|
 		// class table = (kNumPredefinedCids - kObjectCid) - |IsAbsentCid|
-		kObjectCid := 4 // kObjectCid is always 4
-		rawCount := rawRoots + 35 + 4 + 256
-		handleCount := handleRoots + (numSymbols + 256) + numStubEntries
+		rawCount := rawRoots + argsDescriptors + icdataArrays + oneCharSymbols
+		handleCount := handleRoots + (numSymbols + symbolHandleExtra) + numStubEntries
 		apiCount := apiHandleRoots
-		// kNumPredefinedCids cannot be extracted from source (nested macro
-		// expansion). Compute classTableCount from the known total instead.
-		committed := 1518
-		classTableCount := committed - rawCount - handleCount - apiCount
-		// Derive kNumPredefinedCids from classTableCount for reporting.
-		numPredefinedCids = classTableCount + kObjectCid + numAbsentCids
+		classTableCount := (numPredefinedCids - kObjectCid) - numAbsentCids
 		expected := rawCount + handleCount + apiCount + classTableCount
+		committed := profile.RootsPrefixRefCount
 
-		// Verify the parseable components (raw, handle, api) are non-zero
-		// and the total matches. If raw/handle/api are wrong, the derived
-		// classTableCount will be wrong too, so the total check catches it.
-		if expected != committed || rawRoots == 0 || handleRoots == 0 || numSymbols == 0 {
-			fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK roots prefix=%d, committed=%d\n", t.tag, expected, committed)
-			fmt.Fprintf(os.Stderr, "    raw=%d (roots=%d+35+4+256), handle=%d (roots=%d+symbols=%d+256+stubs=%d), api=%d, classtable=%d (cids=%d-obj=%d-absent=%d)\n",
-				rawCount, rawRoots, handleCount, handleRoots, numSymbols, numStubEntries, apiCount, classTableCount, numPredefinedCids, kObjectCid, numAbsentCids)
+		if expected != committed || rawRoots == 0 || handleRoots == 0 || numSymbols == 0 || classTableCount <= 0 {
+			fmt.Fprintf(os.Stderr, "  MISMATCH %s: SDK roots prefix=%d, committed=%d\n", tag, expected, committed)
+			fmt.Fprintf(os.Stderr, "    raw=%d (roots=%d+args=%d+icdata=%d+chars=%d), handle=%d (roots=%d+symbols=%d+extra=%d+stubs=%d), api=%d, classtable=%d (cids=%d-obj=%d-absent=%d)\n",
+				rawCount, rawRoots, argsDescriptors, icdataArrays, oneCharSymbols,
+				handleCount, handleRoots, numSymbols, symbolHandleExtra, numStubEntries,
+				apiCount, classTableCount, numPredefinedCids, kObjectCid, numAbsentCids)
 			mismatches++
 		} else {
 			fmt.Fprintf(os.Stderr, "  OK %s: roots prefix=%d (raw=%d, handle=%d, api=%d, classtable=%d)\n",
-				t.tag, expected, rawCount, handleCount, apiCount, classTableCount)
+				tag, expected, rawCount, handleCount, apiCount, classTableCount)
 		}
+	}
+	if checked == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: roots-prefix drift gate verified zero supported versions")
+		mismatches++
 	}
 	if mismatches > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d root prefix mismatch(es) found\n", mismatches)
@@ -1093,21 +1117,129 @@ func runCheckRoots() int {
 	return mismatches
 }
 
-// countMacroEntries counts V(Name) entries in a macro block.
-func countMacroEntries(header, macroName string) int {
-	entries := extractMacroBlock(header, macroName)
-	return len(entries)
+// countMacroEntries counts entries through the same fail-loud X-macro engine
+// used by every other SDK drift gate.
+func countMacroEntries(header, macroName string) (int, error) {
+	macros, err := cmacro.ParseMacros(header)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := cmacro.Expand(macros, macroName)
+	if err != nil {
+		return 0, err
+	}
+	return len(entries), nil
 }
 
-// extractDefineInt extracts a #define constant's integer value.
-func extractDefineInt(header, name string) int {
-	re := regexp.MustCompile(`#define\s+` + regexp.QuoteMeta(name) + `\s+(\d+)`)
+func extractArrayExtent(header, name string) (int, error) {
+	re := regexp.MustCompile(regexp.QuoteMeta(name) + `\s*\[\s*(\d+)\s*\]`)
+	matches := re.FindAllStringSubmatch(header, -1)
+	if len(matches) == 0 {
+		return 0, fmt.Errorf("roots.h: array extent for %s not found", name)
+	}
+	positive := map[int]bool{}
+	for _, m := range matches {
+		n, err := strconv.Atoi(m[1])
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("roots.h: invalid array index/extent for %s: %q", name, m[1])
+		}
+		// Accessors such as one_char_symbols_[0] are not declarations. The
+		// declaration extent is positive; require exactly one distinct value so
+		// a future second array shape fails closed rather than picking one.
+		if n > 0 {
+			positive[n] = true
+		}
+	}
+	if len(positive) != 1 {
+		return 0, fmt.Errorf("roots.h: array extent for %s is ambiguous: %v", name, positive)
+	}
+	for n := range positive {
+		return n, nil
+	}
+	panic("unreachable")
+}
+
+func extractArrayExpressionAddend(header, name, base string) (int, error) {
+	re := regexp.MustCompile(regexp.QuoteMeta(name) + `\s*\[\s*` + regexp.QuoteMeta(base) + `\s*\+\s*(\d+)\s*\]`)
 	m := re.FindStringSubmatch(header)
 	if m == nil {
-		return 0
+		return 0, fmt.Errorf("roots.h: array expression %s[%s + N] not found", name, base)
 	}
-	n, _ := strconv.Atoi(m[1])
-	return n
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("roots.h: invalid array addend for %s: %q", name, m[1])
+	}
+	return n, nil
+}
+
+// classTableFacts derives the three ClassId facts used by the 3.13+ roots
+// class-table loops directly from class_id.h. It deliberately does not accept a
+// committed total as an input: doing that made the old gate prove 1518 from
+// 1518 even when the class table changed.
+func classTableFacts(classHeader, appSnapshot string) (numPredefined, objectCID, absent int, err error) {
+	macros, err := cmacro.ParseMacros(classHeader)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	ids, err := cmacro.ColumnWithCallback(macros, "CLASS_ID_LIST", "CID", 0)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("expand CLASS_ID_LIST: %w", err)
+	}
+	if len(ids) < 50 {
+		return 0, 0, 0, fmt.Errorf("CLASS_ID_LIST expanded to only %d entries", len(ids))
+	}
+	objectCID = -1
+	for i, name := range ids {
+		// cmacro preserves token-paste spelling (`Object##Cid`) because drift
+		// gates care about row order rather than C preprocessor token spelling.
+		// Normalize only for this identifier comparison.
+		normalized := strings.ReplaceAll(strings.TrimSpace(name), "##", "")
+		if strings.TrimSuffix(normalized, "Cid") == "Object" {
+			objectCID = i
+			break
+		}
+	}
+	if objectCID < 0 {
+		return 0, 0, 0, fmt.Errorf("CLASS_ID_LIST has no Object CID")
+	}
+	numPredefined = len(ids)
+
+	isAbsent := strings.Index(appSnapshot, "IsAbsentCid(intptr_t cid)")
+	if isAbsent < 0 {
+		return 0, 0, 0, fmt.Errorf("app_snapshot.cc: IsAbsentCid(intptr_t cid) not found")
+	}
+	absentBody := appSnapshot[isAbsent:]
+	open := strings.IndexByte(absentBody, '{')
+	if open < 0 {
+		return 0, 0, 0, fmt.Errorf("app_snapshot.cc: IsAbsentCid body has no opening brace")
+	}
+	depth, close := 0, -1
+	for i := open; i < len(absentBody); i++ {
+		switch absentBody[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				close = i
+				i = len(absentBody)
+			}
+		}
+	}
+	if close < 0 {
+		return 0, 0, 0, fmt.Errorf("app_snapshot.cc: IsAbsentCid body is unterminated")
+	}
+	absentBody = absentBody[open+1 : close]
+	absentRe := regexp.MustCompile(`\bcase\s+k([A-Za-z0-9_]+)Cid\s*:`)
+	seen := map[string]bool{}
+	for _, m := range absentRe.FindAllStringSubmatch(absentBody, -1) {
+		seen[m[1]] = true
+	}
+	absent = len(seen)
+	if absent == 0 {
+		return 0, 0, 0, fmt.Errorf("IsAbsentCid yielded zero excluded CIDs")
+	}
+	return numPredefined, objectCID, absent, nil
 }
 func extractTHRFields(header, arch string, compressed, product bool) ([]struct {
 	offset int
@@ -1418,28 +1550,12 @@ var thrTableFiles = []string{
 	"internal/vmtables/thrfieldsx86.go",
 }
 
-// handDerivedFields are Thread fields that runtime_offsets_extracted.h does
-// NOT export, so -check cannot confirm them and must not fail on them.
-//
-// They are real fields -- runtime/vm/thread.h declares them in
-// CACHED_NON_VM_STUB_LIST / CACHED_VM_OBJECTS_LIST, contiguously and in
-// declaration order right after object_null_/bool_true_/bool_false_ -- but
-// the offsets are only exported for fields the compiler needs, so these were
-// derived by hand from that declaration order.
-//
-// Anything NOT on this list must match the SDK exactly.
-var handDerivedFields = map[string]string{
-	"empty_array":                  "thread.h CACHED_NON_VM_STUB_LIST, follows bool_false_",
-	"empty_type_arguments":         "thread.h CACHED_NON_VM_STUB_LIST, follows empty_array_",
-	"dynamic_type":                 "thread.h CACHED_NON_VM_STUB_LIST, follows empty_type_arguments_",
-	"object_sentinel":              "thread.h CACHED_VM_OBJECTS_LIST",
-	"deferred_marking_stack_block": "thread.h, not exported for the compiler",
-}
-
 // committedNameOverrides maps a generated variable name to the name actually
-// used in internal/vmtables. The ARM64 v2.x tables predate the naming
-// convention generateGoMap follows: they omit the "_nocompress" suffix (those
-// versions have no compressed variant at all) and 2.17.6 is spelled "thrV217".
+// used in internal/vmtables. The older ARM64 v2.x tables predate the naming
+// convention generateGoMap follows and omit the "_nocompress" suffix because
+// those versions have no compressed variant at all. Dart 2.17.6 was later
+// committed under the exact generated name, thrV2176_nocompress, so it must
+// not be aliased here.
 // Without these, -check would report the tables as "NOT CHECKED" -- i.e.
 // silently unverified, which is the failure mode this tool exists to prevent.
 var committedNameOverrides = map[string]string{
@@ -1449,7 +1565,6 @@ var committedNameOverrides = map[string]string{
 	"thrV2140_nocompress": "thrV2140",
 	"thrV2150_nocompress": "thrV2150",
 	"thrV2160_nocompress": "thrV2160",
-	"thrV2176_nocompress": "thrV217",
 }
 
 // mapName mirrors generateGoMap's naming so a target can be matched to the
@@ -1559,7 +1674,11 @@ func extractAll() (map[string]map[int]string, []string) {
 		for _, e := range entries {
 			m[e.offset] = e.name
 		}
-		fillRuntimeEntries(m, t.tag, t.arch)
+		if err := fillDerivedThreadFields(m, t.tag, t.arch); err != nil {
+			failed = append(failed, fmt.Sprintf("%s %s compressed=%v product=%v: derived fields: %v",
+				t.tag, t.arch, t.compressed, t.product, err))
+			continue
+		}
 		out[mapName(t.tag, t.arch, t.compressed, t.product)] = m
 	}
 	return out, failed
@@ -1576,7 +1695,11 @@ func extractAll() (map[string]map[int]string, []string) {
 func runWrite() int {
 	sdk, failed := extractAll()
 	for _, f := range failed {
-		fmt.Fprintf(os.Stderr, "write: SKIP %s\n", f)
+		fmt.Fprintf(os.Stderr, "write: ERROR %s\n", f)
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(os.Stderr, "write: refusing partial rewrite after %d extraction failure(s)\n", len(failed))
+		return 1
 	}
 	rewritten, skipped := 0, 0
 	for _, path := range thrTableFiles {
@@ -1619,41 +1742,15 @@ func runWrite() int {
 					skipped++
 					continue
 				}
-				// Preserve hand-derived fields the SDK header never exports.
-				merged := map[int]string{}
-				for off, n := range entries {
-					merged[off] = n
-				}
-				for _, el := range lit.Elts {
-					kv, ok := el.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					kb, kok := kv.Key.(*ast.BasicLit)
-					vb, vok := kv.Value.(*ast.BasicLit)
-					if !kok || !vok {
-						continue
-					}
-					off, err1 := strconv.ParseInt(kb.Value, 0, 64)
-					val, err2 := strconv.Unquote(vb.Value)
-					if err1 != nil || err2 != nil {
-						continue
-					}
-					if _, isHand := handDerivedFields[val]; isHand {
-						if _, taken := merged[int(off)]; !taken {
-							merged[int(off)] = val
-						}
-					}
-				}
-				offs := make([]int, 0, len(merged))
-				for off := range merged {
+				offs := make([]int, 0, len(entries))
+				for off := range entries {
 					offs = append(offs, off)
 				}
 				sort.Ints(offs)
 				var b strings.Builder
 				b.WriteString("map[int]string{\n")
 				for _, off := range offs {
-					fmt.Fprintf(&b, "\t0x%x: %q,\n", off, merged[off])
+					fmt.Fprintf(&b, "\t0x%x: %q,\n", off, entries[off])
 				}
 				b.WriteString("}")
 				edits = append(edits, edit{
@@ -1734,13 +1831,10 @@ func objectStoreFieldCount(tag string) (int, string, error) {
 // ranges on dart-3.9.2-gt-arm64, all of them `_iso_stub_*` in the ELF symbol
 // table.
 func objectStoreFields(tag string) ([]string, string, error) {
-	cmd := exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
-		fmt.Sprintf("repos/dart-lang/sdk/contents/runtime/vm/object_store.h?ref=%s", tag))
-	out, err := cmd.Output()
+	src, err := fetchSDKFile("runtime/vm/object_store.h", tag)
 	if err != nil {
-		return nil, "", fmt.Errorf("gh api object_store.h@%s: %w", tag, err)
+		return nil, "", fmt.Errorf("fetch object_store.h@%s: %w", tag, err)
 	}
-	src := string(out)
 
 	// The OBJECT_STORE_FIELD_LIST macros are defined near the top of the
 	// file, well before the class, so they are looked up in the whole
@@ -1754,38 +1848,24 @@ func objectStoreFields(tag string) ([]string, string, error) {
 		body = src[i:]
 	}
 
-	fieldRe := regexp.MustCompile(`^\s*(R_|RW|CW|FW|ARW_RELAXED|ARW_AR|LAZY_[A-Z]+)\(\s*[\w:]+\s*,\s*(\w+)\s*\)`)
-	macroList := func(macro string) []string {
-		i := strings.Index(src, "#define "+macro)
-		if i < 0 {
-			return nil
-		}
-		var names []string
-		for _, ln := range strings.Split(src[i:], "\n")[1:] {
-			if m := fieldRe.FindStringSubmatch(ln); m != nil {
-				names = append(names, m[2])
-			}
-			if !strings.HasSuffix(strings.TrimSpace(ln), "\\") {
-				break
-			}
-		}
-		return names
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: parse object_store.h macros: %w", tag, err)
 	}
-
-	// Which field lists the declaration block expands, in order.
-	declRe := regexp.MustCompile(`(?s)#define DECLARE_OBJECT_STORE_FIELD.*?\n((?:[^\n]*_FIELD_LIST\([^\n]*\n)+)`)
-	var order []string
-	if m := declRe.FindStringSubmatch(body); m != nil {
-		for _, mm := range regexp.MustCompile(`([A-Z_0-9]+_FIELD_LIST)\(`).FindAllStringSubmatch(m[1], -1) {
-			order = append(order, mm[1])
+	rows, err := cmacro.ExpandRawAllCallbacks(macros, "OBJECT_STORE_FIELD_LIST")
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: expand OBJECT_STORE_FIELD_LIST: %w", tag, err)
+	}
+	names := make([]string, 0, len(rows))
+	for i, row := range rows {
+		if len(row) != 2 {
+			return nil, "", fmt.Errorf("%s: OBJECT_STORE_FIELD_LIST row %d has %d columns, want 2", tag, i, len(row))
 		}
-	}
-	if len(order) == 0 {
-		order = []string{"OBJECT_STORE_FIELD_LIST"}
-	}
-	var names []string
-	for _, macro := range order {
-		names = append(names, macroList(macro)...)
+		name := strings.TrimSpace(row[1])
+		if name == "" {
+			return nil, "", fmt.Errorf("%s: OBJECT_STORE_FIELD_LIST row %d has empty field name", tag, i)
+		}
+		names = append(names, name)
 	}
 
 	fromRe := regexp.MustCompile(`ObjectPtr\* from\(\)\s*\{\s*return[^&]*&(\w+)_\)`)
@@ -1860,44 +1940,45 @@ func committedFieldCounts() (map[string]int, error) {
 // runCheckObjectStore verifies every profile's ObjectStoreAOTFieldCount
 // against the SDK. Returns the number of mismatches.
 func runCheckObjectStore() int {
-	committed, err := committedFieldCounts()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "check-objectstore: %v\n", err)
-		return 1
-	}
-	versions := make([]string, 0, len(committed))
-	for v := range committed {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
-
 	bad, checked := 0, 0
-	for _, v := range versions {
-		// "3.12.0-dev" and friends have no SDK tag of their own.
-		tag := v
-		if i := strings.IndexByte(tag, '-'); i >= 0 {
-			fmt.Fprintf(os.Stderr, "  %-12s SKIP (pre-release, no SDK tag)\n", v)
+	for _, v := range snapshot.SupportedVersions() {
+		profile := snapshot.ProfileForVersion(v)
+		if profile == nil || !profile.Supported || profile.ObjectStoreAOTFieldCount <= 0 {
+			fmt.Fprintf(os.Stderr, "  %-12s ERROR (supported profile has no verified ObjectStoreAOTFieldCount)\n", v)
+			bad++
 			continue
 		}
-		got, where, err := objectStoreFieldCount(tag)
+		got, where, err := objectStoreFieldCount(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %-12s SKIP (%v)\n", v, err)
+			fmt.Fprintf(os.Stderr, "  %-12s ERROR (%v)\n", v, err)
+			bad++
 			continue
 		}
 		checked++
-		if got == committed[v] {
+		if got == profile.ObjectStoreAOTFieldCount {
 			fmt.Fprintf(os.Stderr, "  %-12s OK %d (%s)\n", v, got, where)
 			continue
 		}
 		bad++
-		fmt.Fprintf(os.Stderr, "  %-12s MISMATCH: committed %d, SDK %d (%s)\n", v, committed[v], got, where)
+		fmt.Fprintf(os.Stderr, "  %-12s MISMATCH: committed %d, SDK %d (%s)\n", v, profile.ObjectStoreAOTFieldCount, got, where)
 	}
-	fmt.Fprintf(os.Stderr, "check-objectstore: %d version(s) verified, %d mismatch(es)\n", checked, bad)
+	if checked == 0 {
+		fmt.Fprintln(os.Stderr, "check-objectstore: ERROR verified zero SDK versions")
+		bad++
+	}
+	fmt.Fprintf(os.Stderr, "check-objectstore: %d supported version(s) verified, %d mismatch(es)\n", checked, bad)
 	return bad
 }
 
-// runCheck re-extracts every target and diffs it against the committed
-// tables. Returns the number of tables with unexplained differences.
+// runCheck re-extracts every selector-exposed PRODUCT target and diffs it
+// against the table THRFields actually returns for that exact target. This is
+// intentionally target-centric rather than storage-centric: two releases may
+// share one committed map only while their SDK layouts remain byte-for-byte
+// identical. If either release later drifts, the alias must make this gate red.
+//
+// The committed-table coverage pass remains separate so an orphaned map cannot
+// silently stop being checked just because no selector returns it anymore.
+// Returns the number of target tables with unexplained differences.
 func runCheck() int {
 	committed, err := parseCommittedTables(thrTableFiles)
 	if err != nil {
@@ -1912,12 +1993,18 @@ func runCheck() int {
 	covered := map[string]bool{}
 
 	for _, t := range allTargets {
-		name := mapName(t.tag, t.arch, t.compressed, t.product)
-		want, ok := committed[name]
-		if !ok {
-			continue // target has no committed table (e.g. non-PRODUCT)
+		if !t.product {
+			continue
 		}
-		covered[name] = true
+		want := vmtables.THRFields(vmTargetProfile(t))
+		if len(want) == 0 {
+			continue
+		}
+		storageName := mapName(t.tag, t.arch, t.compressed, t.product)
+		if _, ok := committed[storageName]; ok {
+			covered[storageName] = true
+		}
+		name := fmt.Sprintf("%s/%s compressed=%t", t.tag, t.arch, t.compressed)
 		header, ok := headers[t.tag]
 		if !ok {
 			h, err := fetchHeader(t.tag)
@@ -1944,7 +2031,12 @@ func runCheck() int {
 		// tables carry the ~70 runtime entries the header declares only
 		// in RUNTIME_ENTRY_LIST order, and comparing them against the
 		// raw header alone reports every one of them as "extra".
-		fillRuntimeEntries(got, t.tag, t.arch)
+		if err := fillDerivedThreadFields(got, t.tag, t.arch); err != nil {
+			fmt.Fprintf(os.Stderr, "  %-38s ERROR (derived fields: %v)\n", name, err)
+			bad++
+			checked++
+			continue
+		}
 
 		var problems []string
 		for off, sdkName := range got {
@@ -1958,9 +2050,6 @@ func runCheck() int {
 		}
 		for off, repoName := range want {
 			if _, present := got[off]; present {
-				continue
-			}
-			if _, allowed := handDerivedFields[repoName]; allowed {
 				continue
 			}
 			problems = append(problems, fmt.Sprintf("extra 0x%x %q (not in SDK header)", off, repoName))
@@ -1978,13 +2067,19 @@ func runCheck() int {
 		}
 	}
 
+	notChecked := 0
 	for name := range committed {
 		if !covered[name] {
 			fmt.Fprintf(os.Stderr, "  %-38s NOT CHECKED (no target in allTargets)\n", name)
+			notChecked++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "check: %d table(s) verified, %d with problems, %d skipped\n", checked, bad, skipped)
-	return bad
+	if checked == 0 {
+		fmt.Fprintln(os.Stderr, "check: ERROR verified zero committed THR tables")
+		bad++
+	}
+	fmt.Fprintf(os.Stderr, "check: %d table(s) verified, %d with problems, %d skipped, %d not checked\n", checked, bad, skipped, notChecked)
+	return bad + skipped + notChecked
 }
 
 func main() {
@@ -2085,24 +2180,48 @@ func main() {
 	}
 
 	if *allFlag {
+		failures := 0
 		for _, t := range allTargets {
 			fmt.Fprintf(os.Stderr, "Extracting %s %s compressed=%v product=%v...\n", t.tag, t.arch, t.compressed, t.product)
 			header, err := fetchHeader(t.tag)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  SKIP: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  ERROR: %v\n", err)
+				failures++
 				continue
 			}
 			entries, err := extractTHRFields(header, t.arch, t.compressed, t.product)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ERROR: %v\n", err)
+				failures++
 				continue
 			}
 			if len(entries) == 0 {
-				fmt.Fprintf(os.Stderr, "  SKIP: 0 entries found\n")
+				fmt.Fprintf(os.Stderr, "  ERROR: 0 entries found\n")
+				failures++
 				continue
+			}
+			complete := make(map[int]string, len(entries))
+			for _, e := range entries {
+				complete[e.offset] = e.name
+			}
+			if err := fillDerivedThreadFields(complete, t.tag, t.arch); err != nil {
+				fmt.Fprintf(os.Stderr, "  ERROR: derived fields: %v\n", err)
+				failures++
+				continue
+			}
+			entries = entries[:0]
+			for off, name := range complete {
+				entries = append(entries, struct {
+					offset int
+					name   string
+				}{off, name})
 			}
 			fmt.Fprintf(os.Stderr, "  Found %d entries\n", len(entries))
 			fmt.Print(generateGoMap(t.tag, t.arch, t.compressed, t.product, entries))
+		}
+		if failures > 0 {
+			fmt.Fprintf(os.Stderr, "extract-all: refusing success after %d extraction failure(s)\n", failures)
+			os.Exit(1)
 		}
 		return
 	}
@@ -2132,6 +2251,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	complete := make(map[int]string, len(entries))
+	for _, e := range entries {
+		complete[e.offset] = e.name
+	}
+	if err := fillDerivedThreadFields(complete, *tagFlag, *archFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: derived fields: %v\n", err)
+		os.Exit(1)
+	}
+	entries = entries[:0]
+	for off, name := range complete {
+		entries = append(entries, struct {
+			offset int
+			name   string
+		}{off, name})
+	}
 
 	fmt.Fprintf(os.Stderr, "Found %d Thread field entries for %s %s compressed=%v product=%v\n",
 		len(entries), *tagFlag, *archFlag, compressed, product)
@@ -2150,44 +2284,6 @@ func main() {
 // rather than a procedure.
 // ---------------------------------------------------------------------
 
-// tagID is the identifier form of a tag: 3.10.7 -> "3107".
-func tagID(tag string) string { return strings.ReplaceAll(tag, ".", "") }
-
-// sdkStubOffsetsFor returns the Thread-cached stub offsets for a tag, per
-// architecture. Same derivation runEmitStubOffsets prints.
-func sdkStubOffsetsFor(tag string) (arm, x64 map[int]string, err error) {
-	fieldToStub, err := sdkThreadStubNames(tag)
-	if err != nil {
-		return nil, nil, err
-	}
-	header, err := fetchHeader(tag)
-	if err != nil {
-		return nil, nil, err
-	}
-	target, ok := arm64ProductTarget(tag)
-	if !ok {
-		return nil, nil, fmt.Errorf("no arm64 PRODUCT target")
-	}
-	out := map[string]map[int]string{}
-	for _, arch := range []string{"arm64", "x64"} {
-		fields, ferr := extractTHRFields(header, arch, target.compressed, true)
-		if ferr != nil {
-			continue
-		}
-		m := map[int]string{}
-		for _, f := range fields {
-			if stub, ok := fieldToStub[strings.TrimSuffix(f.name, "_offset")]; ok {
-				m[f.offset] = stub
-			}
-		}
-		out[arch] = m
-	}
-	if len(out["arm64"]) == 0 {
-		return nil, nil, fmt.Errorf("no stub offsets in the arm64 PRODUCT block")
-	}
-	return out["arm64"], out["x64"], nil
-}
-
 // sdkStubNamesFor returns VM_STUB_CODE_LIST minus the type-testing stubs,
 // in declaration order -- the same list runEmitStubNames prints.
 func sdkStubNamesFor(tag string) ([]string, error) {
@@ -2195,10 +2291,18 @@ func sdkStubNamesFor(tag string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	macros := cmacro.ParseMacros(src)
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
 	full, err := cmacro.Expand(macros, "VM_STUB_CODE_LIST")
 	if err != nil {
 		return nil, err
+	}
+	// Dart 2.10 predates the split list: the type-testing stubs are inline in
+	// VM_STUB_CODE_LIST and therefore are part of the committed storage itself.
+	if _, ok := macros["VM_TYPE_TESTING_STUB_CODE_LIST"]; !ok {
+		return full, nil
 	}
 	tts, err := cmacro.Expand(macros, "VM_TYPE_TESTING_STUB_CODE_LIST")
 	if err != nil {
@@ -2235,7 +2339,10 @@ func sdkRuntimeEntriesFor(tag string) (runtime, leaf []string, contiguous bool, 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	macros := cmacro.ParseMacros(src)
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, nil, false, err
+	}
 	runtime, err = cmacro.Expand(macros, "RUNTIME_ENTRY_LIST")
 	if err != nil {
 		return nil, nil, false, err
@@ -2255,7 +2362,182 @@ func sdkRuntimeEntriesFor(tag string) (runtime, leaf []string, contiguous bool, 
 var runtimeEntryCache = map[string]struct {
 	runtime, leaf []string
 	contiguous    bool
+	err           error
 }{}
+
+var cachedConstantFieldCache = map[string]struct {
+	names []string
+	err   error
+}{}
+
+// sdkCachedConstantFields expands Thread::CACHED_CONSTANTS_LIST in exact SDK
+// declaration order. The list contains cached VM objects/stubs and raw
+// addresses. runtime_offsets_extracted.h intentionally exports only the subset
+// referenced directly by compiler code, so parsing that generated header alone
+// leaves real Thread slots unnamed.
+func sdkCachedConstantFields(tag string) ([]string, error) {
+	if cached, ok := cachedConstantFieldCache[tag]; ok {
+		return cached.names, cached.err
+	}
+	var cached struct {
+		names []string
+		err   error
+	}
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	rows, err := cmacro.ExpandRaw(macros, "CACHED_CONSTANTS_LIST")
+	if err != nil {
+		cached.err = err
+		cachedConstantFieldCache[tag] = cached
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for i, row := range rows {
+		if len(row) != 4 {
+			cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST row %d has %d columns, want 4", tag, i, len(row))
+			cachedConstantFieldCache[tag] = cached
+			return nil, cached.err
+		}
+		name := strings.TrimSuffix(strings.TrimSpace(row[1]), "_")
+		if name == "" || seen[name] {
+			cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST has invalid/duplicate field %q", tag, name)
+			cachedConstantFieldCache[tag] = cached
+			return nil, cached.err
+		}
+		seen[name] = true
+		cached.names = append(cached.names, name)
+	}
+	if len(cached.names) == 0 {
+		cached.err = fmt.Errorf("thread.h@%s CACHED_CONSTANTS_LIST expanded to zero fields", tag)
+	}
+	cachedConstantFieldCache[tag] = cached
+	return cached.names, cached.err
+}
+
+// fillCachedConstantFields reconstructs the complete CACHED_CONSTANTS_LIST
+// layout from exact SDK evidence rather than a per-version handwritten list.
+// object_null is the first cached constant and AllocateArray_entry_point is the
+// first field immediately after the block. Both offsets are exported by the SDK
+// for every supported target, so their distance proves the per-field stride.
+// Every header-exported field already present in m is then a conflict check.
+func fillCachedConstantFields(m map[int]string, tag, arch string) error {
+	names, err := sdkCachedConstantFields(tag)
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]int, len(m))
+	for off, name := range m {
+		byName[name] = off
+	}
+	base, ok := byName["object_null"]
+	if !ok {
+		return fmt.Errorf("%s/%s: cached-constant anchor object_null absent from header", tag, arch)
+	}
+	after, ok := byName["AllocateArray_entry_point"]
+	if !ok {
+		return fmt.Errorf("%s/%s: cached-constant end anchor AllocateArray_entry_point absent from header", tag, arch)
+	}
+	span := after - base
+	if span <= 0 || span%len(names) != 0 {
+		return fmt.Errorf("%s/%s: cached constants span %#x..%#x is not divisible by %d declarations", tag, arch, base, after, len(names))
+	}
+	stride := span / len(names)
+	// Every supported target is 64-bit. A different result means declaration
+	// order/layout changed and must be audited rather than silently generalized.
+	if stride != 8 {
+		return fmt.Errorf("%s/%s: cached constants derived stride %d, want 8 for 64-bit target", tag, arch, stride)
+	}
+	for i, name := range names {
+		off := base + i*stride
+		if existing, taken := m[off]; taken && existing != name {
+			return fmt.Errorf("%s/%s: cached-constant conflict at 0x%x: header holds %q, thread.h predicts %q", tag, arch, off, existing, name)
+		}
+		m[off] = name
+	}
+	return nil
+}
+
+var reDeferredMarkingStackBlock = regexp.MustCompile(
+	`(?s)MarkingStackBlock\*\s+([A-Za-z0-9_]+)_\s*(?:=\s*nullptr)?\s*;\s*` +
+		`MarkingStackBlock\*\s+deferred_marking_stack_block_\s*(?:=\s*nullptr)?\s*;\s*` +
+		`uword(?:\s+volatile)?\s+vm_tag_`,
+)
+
+// fillDeferredMarkingStackBlock recovers a Thread field that the compiler
+// offsets header does not export on some releases. This is still an exact SDK
+// fact, not a handwritten exception: thread.h proves the declaration is exactly
+// between another MarkingStackBlock* and vm_tag_, while the generated offsets
+// header exports both surrounding anchors.
+//
+// SDK @3.2.5 runtime/vm/thread.h:1208-1213 declares
+// marking_stack_block_, deferred_marking_stack_block_, vm_tag_ consecutively;
+// runtime/vm/compiler/runtime_offsets_extracted.h:15031,15135 exports the two
+// anchors as 0x710 and 0x720 for the PRODUCT ARM64 compressed target. Later SDKs
+// use the same shape with new_marking_stack_block_ as the preceding anchor.
+func fillDeferredMarkingStackBlock(m map[int]string, tag, arch string) error {
+	src, err := fetchSDKFile("runtime/vm/thread.h", tag)
+	if err != nil {
+		return err
+	}
+	return fillDeferredMarkingStackBlockFromSource(m, tag, arch, src)
+}
+
+func fillDeferredMarkingStackBlockFromSource(m map[int]string, tag, arch, src string) error {
+	if !strings.Contains(src, "deferred_marking_stack_block_") {
+		return nil
+	}
+	match := reDeferredMarkingStackBlock.FindStringSubmatch(src)
+	if match == nil {
+		return fmt.Errorf("%s/%s: deferred_marking_stack_block_ exists but its exact declaration neighborhood is unrecognised", tag, arch)
+	}
+	prevName := match[1]
+	prev, prevOK := -1, false
+	vmTag, vmOK := -1, false
+	for off, name := range m {
+		switch name {
+		case prevName:
+			prev, prevOK = off, true
+		case "vm_tag":
+			vmTag, vmOK = off, true
+		}
+	}
+	if !prevOK || !vmOK {
+		return fmt.Errorf("%s/%s: deferred marking anchors missing: %s=%v vm_tag=%v", tag, arch, prevName, prevOK, vmOK)
+	}
+	span := vmTag - prev
+	if span != 16 {
+		return fmt.Errorf("%s/%s: %s..vm_tag span is %#x, want two 8-byte Thread slots", tag, arch, prevName, span)
+	}
+	off := prev + 8
+	if existing, taken := m[off]; taken && existing != "deferred_marking_stack_block" {
+		return fmt.Errorf("%s/%s: deferred marking conflict at 0x%x: header holds %q", tag, arch, off, existing)
+	}
+	m[off] = "deferred_marking_stack_block"
+	return nil
+}
+
+func fillDerivedThreadFields(m map[int]string, tag, arch string) error {
+	if err := fillCachedConstantFields(m, tag, arch); err != nil {
+		return fmt.Errorf("cached constants: %w", err)
+	}
+	if err := fillRuntimeEntries(m, tag, arch); err != nil {
+		return fmt.Errorf("runtime entries: %w", err)
+	}
+	if err := fillDeferredMarkingStackBlock(m, tag, arch); err != nil {
+		return fmt.Errorf("deferred marking stack: %w", err)
+	}
+	return nil
+}
 
 // fillRuntimeEntries names the runtime-entry and leaf-runtime-entry blocks
 // of a single extracted Thread table.
@@ -2279,17 +2561,20 @@ var runtimeEntryCache = map[string]struct {
 // the predicted slot disagreeing with the header means the contiguity
 // assumption has broken for that version, which must not be papered over by
 // overwriting the header's own answer.
-func fillRuntimeEntries(m map[int]string, tag, arch string) {
+func fillRuntimeEntries(m map[int]string, tag, arch string) error {
 	lists, ok := runtimeEntryCache[tag]
 	if !ok {
 		runtime, leaf, contiguous, err := sdkRuntimeEntriesFor(tag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  runtime-entries SKIP %s: %v\n", tag, err)
+			lists.err = err
 			runtimeEntryCache[tag] = lists
-			return
+			return err
 		}
 		lists.runtime, lists.leaf, lists.contiguous = runtime, leaf, contiguous
 		runtimeEntryCache[tag] = lists
+	}
+	if lists.err != nil {
+		return lists.err
 	}
 
 	// Both target architectures are 64-bit, so entry points are 8 bytes
@@ -2330,9 +2615,8 @@ func fillRuntimeEntries(m map[int]string, tag, arch string) {
 			// length locates the leaf block exactly.
 			anchor = runtimeAnchor + len(lists.runtime)*stride
 		default:
-			fmt.Fprintf(os.Stderr, "  runtime-entries SKIP %s/%s: %s block anchor %q absent from the header\n",
+			return fmt.Errorf("%s/%s: %s block anchor %q absent from the header",
 				tag, arch, block.label, block.names[0]+"_entry_point")
-			continue
 		}
 		if block.label == "runtime" {
 			runtimeAnchor = anchor
@@ -2345,11 +2629,12 @@ func fillRuntimeEntries(m map[int]string, tag, arch string) {
 			case !taken:
 				m[off] = want
 			case existing != want:
-				fmt.Fprintf(os.Stderr, "  runtime-entries CONFLICT %s/%s: 0x%x holds %q, %s block predicts %q\n",
+				return fmt.Errorf("%s/%s: runtime-entry conflict at 0x%x: header holds %q, %s block predicts %q",
 					tag, arch, off, existing, block.label, want)
 			}
 		}
 	}
+	return nil
 }
 
 // goStringSlice renders names as the body of a []string composite literal.
@@ -2367,22 +2652,6 @@ func goStringSlice(names []string) string {
 	}
 	if len(names)%3 != 0 {
 		b.WriteString("\n")
-	}
-	b.WriteString("}")
-	return b.String()
-}
-
-// goInt64Map renders offsets as the body of a map[int64]string literal.
-func goInt64Map(m map[int]string) string {
-	offs := make([]int, 0, len(m))
-	for off := range m {
-		offs = append(offs, off)
-	}
-	sort.Ints(offs)
-	var b strings.Builder
-	b.WriteString("map[int64]string{\n")
-	for _, off := range offs {
-		fmt.Fprintf(&b, "\t%#x: %q,\n", off, m[off])
 	}
 	b.WriteString("}")
 	return b.String()
@@ -2468,120 +2737,100 @@ func rewriteVarLiterals(path string, gen map[string]string) (rewritten int, miss
 	return len(edits), missing, nil
 }
 
-// writeStubTables regenerates threadstubs.go, stubnames.go and the
-// runtime-entry lists in thrfields.go.
-// varExists reports whether names contains name.
-func varExists(names map[string]bool, name string) bool { return names[name] }
+// writeStubTables regenerates the committed VM stub-name storage. Thread stub
+// offsets are derived from THRFields at runtime and therefore have no second
+// generated offset table to rewrite.
 
-// committedVarNames returns every `var NAME = <composite literal>` in path.
-//
-// The writer only rewrites variables that already exist. A generated table
-// with no committed variable is reported instead of invented: adding one
-// also means wiring it into a version switch, which is a decision rather
-// than a mechanical step.
-func committedVarNames(path string) map[string]bool {
-	out := map[string]bool{}
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return out
+func stubNameStorageVar(tag string) string {
+	switch tag {
+	case "2.10.0":
+		return "stubNames2100"
+	case "2.12.0":
+		return "stubNames2120"
+	case "2.13.0":
+		return "stubNames2130Base"
+	case "2.14.0":
+		return "stubNames2140"
+	case "2.15.0":
+		return "stubNames2150"
+	case "2.16.0":
+		return "stubNames2160"
+	case "2.17.6":
+		return "stubNames2176"
+	case "2.18.0":
+		return "stubNames2180"
+	case "2.19.0":
+		return "stubNames2190"
+	case "3.0.5":
+		return "stubNames305"
+	case "3.1.0":
+		return "stubNames310"
+	case "3.2.5", "3.3.0":
+		return "stubNames325"
+	case "3.4.3":
+		return "stubNames343"
+	case "3.5.0":
+		return "stubNames350"
+	case "3.6.2":
+		return "stubNames362"
+	case "3.7.0":
+		return "stubNames370"
+	case "3.8.1":
+		return "stubNames381"
+	case "3.9.2":
+		return "stubNames392"
+	case "3.10.7":
+		return "stubNames3109"
+	case "3.11.0":
+		return "stubNames3115"
+	case "3.12.2":
+		return "stubNames3122"
+	case "3.13.0":
+		return "stubNames3130"
+	default:
+		return ""
 	}
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, src, 0)
-	if err != nil {
-		return out
-	}
-	for _, decl := range file.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.VAR {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
-				continue
-			}
-			if _, ok := vs.Values[0].(*ast.CompositeLit); ok {
-				out[vs.Names[0].Name] = true
-			}
-		}
-	}
-	return out
 }
 
 func writeStubTables() int {
-	stubOffsetVars := committedVarNames("internal/vmtables/threadstubs.go")
-	stubOffTags := map[string]bool{}
-	for _, t := range stubOffsetTargets {
-		stubOffTags[t.tag] = true
-	}
-	tags := make([]string, 0, len(stubOffTags))
-	for t := range stubOffTags {
-		tags = append(tags, t)
-	}
-	sort.Strings(tags)
-
-	genStubOff := map[string]string{}
 	genStubNames := map[string]string{}
-	genRuntime := map[string]string{}
 	var failed []string
 
-	for _, tag := range tags {
-		id := tagID(tag)
-		if arm, x64, err := sdkStubOffsetsFor(tag); err != nil {
-			failed = append(failed, fmt.Sprintf("stub-offsets %s: %v", tag, err))
-		} else {
-			// A version stores either one table (offsets identical on
-			// both architectures) or an ARM64/X64 pair. Emitting all
-			// three names would report two phantom "missing" tables per
-			// version, which buries the real ones.
-			switch {
-			case varExists(stubOffsetVars, "threadStubOffsets"+id+"ARM64"):
-				genStubOff["threadStubOffsets"+id+"ARM64"] = goInt64Map(arm)
-				if len(x64) > 0 {
-					genStubOff["threadStubOffsets"+id+"X64"] = goInt64Map(x64)
-				}
-			default:
-				genStubOff["threadStubOffsets"+id] = goInt64Map(arm)
-			}
+	for _, tag := range snapshot.SupportedVersions() {
+		storage := stubNameStorageVar(tag)
+		if storage == "" {
+			failed = append(failed, fmt.Sprintf("stub-names %s: no committed storage mapping", tag))
+			continue
 		}
 		if names, err := sdkStubNamesFor(tag); err != nil {
 			failed = append(failed, fmt.Sprintf("stub-names %s: %v", tag, err))
 		} else {
-			genStubNames["stubNames"+id] = goStringSlice(names)
-		}
-		// Runtime-entry names are no longer emitted as standalone
-		// []string tables to be merged in at init() time. fillRuntimeEntries
-		// writes them straight into each Thread table, anchored on the
-		// offsets the SDK exports, so there is no base offset left to get
-		// wrong and no per-version variable to forget to wire up.
-	}
-
-	total := 0
-	for _, job := range []struct {
-		path string
-		gen  map[string]string
-		what string
-	}{
-		{"internal/vmtables/threadstubs.go", genStubOff, "thread-stub offset"},
-		{"internal/vmtables/stubnames.go", genStubNames, "VM stub name"},
-		{"internal/vmtables/thrfields.go", genRuntime, "runtime-entry"},
-	} {
-		n, missing, err := rewriteVarLiterals(job.path, job.gen)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "write: %v\n", err)
-			return 1
-		}
-		total += n
-		fmt.Printf("write: %d %s table(s) rewritten in %s\n", n, job.what, job.path)
-		if len(missing) > 0 {
-			fmt.Printf("       %d SDK table(s) have no committed variable (add + wire the switch by hand): %s\n",
-				len(missing), strings.Join(missing, " "))
+			generated := goStringSlice(names)
+			if prev, exists := genStubNames[storage]; exists && prev != generated {
+				failed = append(failed, fmt.Sprintf("stub-names %s: storage %s is shared by releases with different exact lists", tag, storage))
+				continue
+			}
+			genStubNames[storage] = generated
 		}
 	}
 	for _, f := range failed {
-		fmt.Fprintf(os.Stderr, "write: SKIP %s\n", f)
+		fmt.Fprintf(os.Stderr, "write: ERROR %s\n", f)
 	}
-	fmt.Printf("write: %d stub/runtime table(s) rewritten\n", total)
+	if len(failed) > 0 {
+		fmt.Fprintf(os.Stderr, "write: refusing partial stub-name rewrite after %d failure(s)\n", len(failed))
+		return 1
+	}
+
+	n, missing, err := rewriteVarLiterals("internal/vmtables/stubnames.go", genStubNames)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "write: %v\n", err)
+		return 1
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "write: refusing incomplete stub-name rewrite; missing variables: %s\n", strings.Join(missing, " "))
+		return 1
+	}
+	fmt.Printf("write: %d VM stub-name table(s) rewritten\n", n)
 	return 0
 }
 
@@ -2606,28 +2855,28 @@ func runWriteObjectStoreStubs() int {
 		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: %v\n", err)
 		return 1
 	}
-	versions := make([]string, 0, len(committed))
-	for v := range committed {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
+	versions := snapshot.SupportedVersions()
 
 	type entry struct {
 		idx  int
 		name string
 	}
 	byVersion := map[string][]entry{}
+	recordFieldNamesIndex := map[string]int{}
+	var failed []string
 	for _, v := range versions {
-		if strings.IndexByte(v, '-') >= 0 {
-			continue // pre-release, no SDK tag
+		wantCount, ok := committed[v]
+		if !ok {
+			failed = append(failed, fmt.Sprintf("%s: supported version has no committed ObjectStoreAOTFieldCount", v))
+			continue
 		}
 		names, _, err := objectStoreFields(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %-12s SKIP (%v)\n", v, err)
+			failed = append(failed, fmt.Sprintf("%s: %v", v, err))
 			continue
 		}
-		if len(names) != committed[v] {
-			fmt.Fprintf(os.Stderr, "  %-12s SKIP (field count %d != committed %d)\n", v, len(names), committed[v])
+		if len(names) != wantCount {
+			failed = append(failed, fmt.Sprintf("%s: field count %d != committed %d", v, len(names), wantCount))
 			continue
 		}
 		var es []entry
@@ -2635,9 +2884,19 @@ func runWriteObjectStoreStubs() int {
 			if strings.HasSuffix(n, "_stub") {
 				es = append(es, entry{i, n})
 			}
+			if n == "record_field_names" {
+				recordFieldNamesIndex[v] = i
+			}
 		}
 		byVersion[v] = es
 		fmt.Fprintf(os.Stderr, "  %-12s %d stub fields of %d\n", v, len(es), len(names))
+	}
+	if len(failed) > 0 {
+		for _, f := range failed {
+			fmt.Fprintf(os.Stderr, "write-objectstore-stubs: ERROR %s\n", f)
+		}
+		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: refusing partial output after %d failure(s)\n", len(failed))
+		return 1
 	}
 
 	var b strings.Builder
@@ -2659,7 +2918,11 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 `)
 	for _, v := range versions {
 		es, ok := byVersion[v]
-		if !ok || len(es) == 0 {
+		if !ok {
+			continue
+		}
+		if len(es) == 0 {
+			fmt.Fprintf(&b, "\t%q: {},\n", v)
 			continue
 		}
 		fmt.Fprintf(&b, "\t%q: {\n", v)
@@ -2668,10 +2931,27 @@ var objectStoreStubFields = map[string][]objectStoreStubField{
 		}
 		b.WriteString("\t},\n")
 	}
+	b.WriteString("}\n\n")
+	b.WriteString("// objectStoreRecordFieldNamesIndex is the serialized ObjectStore root\n")
+	b.WriteString("// containing RecordShape's field-name arrays. Absent means the field is\n")
+	b.WriteString("// outside the Full-AOT root range or does not exist in that SDK.\n")
+	b.WriteString("var objectStoreRecordFieldNamesIndex = map[string]int{\n")
+	for _, v := range versions {
+		idx, ok := recordFieldNamesIndex[v]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "\t%q: %d,\n", v, idx)
+	}
 	b.WriteString("}\n")
 
 	path := "internal/vmtables/objectstorestubs.go"
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+	formatted, err := format.Source([]byte(b.String()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: format generated source: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(path, formatted, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "write-objectstore-stubs: %v\n", err)
 		return 1
 	}

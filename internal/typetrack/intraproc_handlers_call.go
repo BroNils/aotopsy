@@ -10,27 +10,57 @@ import (
 // handleUBFX handles case 5b-ubfx: UBFX/UBFM bitfield extract for class ID.
 func handleUBFX(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, rn, _, _, ok := arm64.UBFX(raw); ok {
+	// LSL #1 of a class id is the Smi tagging of LoadTaggedClassIdMayBeSmi.
+	// Anything else shifted is ordinary arithmetic and falls through to the
+	// generic destination kill.
+	if rd, rn, ok := arm64.LSL1(raw); ok {
 		if rd >= 31 {
 			return true
 		}
-		if rn < 31 && tc.state[rn].Kind == LatticeKnownClass {
-			tc.state[rd] = tc.state[rn]
-			tc.ctx.UBFXHits++
+		if rn < 31 && isClassID(tc.state[rn].Kind) {
+			cid := -1
+			if tc.state[rn].Kind == LatticeExactClassID {
+				cid = tc.state[rn].ClassID
+			}
+			src := tc.state[rn].SrcReg
+			tc.state[rd] = TypeLattice{Kind: LatticeTaggedClassID, ClassID: cid, SrcReg: src}
+			if src-1 == rd {
+				tc.state[rd].SrcReg = 0
+			}
 			return true
 		}
-		// UBFX from Bottom: extracting class ID bits from an unknown
-		// header still yields "a class ID, but unknown which one" —
-		// Bottom, not Top. The previous code only preserved Bottom
-		// when the immediately preceding instruction was a LDUR at
-		// offset -1, which missed cases with intervening instructions
-		// (e.g., LDR W0, [X1, #-1] → MOV W2, W0 → UBFX W0, W2, ...).
-		// Bottom is strictly more useful than Top: it enables narrowing
-		// via CMP+BEQ downstream, and it enables SelectorDispatch
-		// (selector-only) instead of Top (no info at all) at the ADD.
-		if rn < 31 && tc.state[rn].Kind == LatticeBottom {
-			tc.state[rd] = Bottom()
-			tc.ctx.UBFXHits++
+		tc.state[rd] = Top()
+		return true
+	}
+	if rd, rn, lsb, width, ok := arm64.UBFX(raw); ok {
+		// UBFM has several aliases (including LSR) with the same basic decode.
+		// Only the exact ClassIdTag slice is evidence that the result is a class
+		// id. Anything else is ordinary bit manipulation and must fall through to
+		// the generic destination kill instead of copying a type fact.
+		if lsb != tc.ctx.ClassIDTagPos || width != tc.ctx.ClassIDTagSize {
+			return false
+		}
+		if rd >= 31 {
+			return true
+		}
+		if rn < 31 && tc.state[rn].Kind == LatticeExactHeaderTags {
+			src, bound := tc.state[rn].SrcReg, tc.state[rn].RecvBound // read before rd (possibly == rn) is overwritten
+			tc.state[rd] = ExactClassID(tc.state[rn].ClassID)
+			tc.state[rd].RecvBound = bound
+			if src-1 != rd {
+				tc.state[rd].SrcReg = src
+			}
+			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
+			return true
+		}
+		if rn < 31 && tc.state[rn].Kind == LatticeUnknownHeaderTags {
+			src, bound := tc.state[rn].SrcReg, tc.state[rn].RecvBound // read before rd (possibly == rn) is overwritten
+			tc.state[rd] = UnknownClassID()
+			tc.state[rd].RecvBound = bound
+			if src-1 != rd {
+				tc.state[rd].SrcReg = src
+			}
+			tc.ctx.hitMetric(metricUBFX, tc.inst.Addr, &tc.ctx.UBFXHits)
 			return true
 		}
 		if rd >= 0 && rd < 31 {
@@ -44,8 +74,7 @@ func handleUBFX(tc *transferCtx) bool {
 // handleMOV handles case 6: MOV (ORR Xd, XZR, Xm) → copy type.
 func handleMOV(tc *transferCtx) bool {
 	raw := tc.inst.Raw
-	if rd, ok := arm64.MOVOrr(raw); ok {
-		rm := int((raw >> 16) & 0x1F)
+	if rd, rm, ok := arm64.MOVOrr(raw); ok {
 		if rd >= 31 {
 			return true
 		}
@@ -66,62 +95,6 @@ func handleBLR(tc *transferCtx) bool {
 		if rn < 31 {
 			resolveBLR(tc.state, rn, tc.inst, tc.ctx, tc.result)
 		}
-		if rn < 31 && tc.state[rn].Kind == LatticeKnownStub {
-			sn := tc.state[rn].StubName
-			if strings.HasPrefix(sn, "UnlinkedCall:") {
-				methodName := sn[len("UnlinkedCall:"):]
-				if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-					res := BlrResolution{
-						PC: tc.inst.Addr, Reg: rn, SlotIndex: -1,
-						Confidence: "static_inferred",
-					}
-					var allTargets []string
-					for _, selOff := range selectorOffsets {
-						allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
-					}
-					applySelectorCandidates(&res, allTargets)
-					if res.Polymorphic {
-						res.Confidence = "polymorphic"
-					}
-					tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
-				} else {
-					tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-						PC: tc.inst.Addr, Reg: rn, TargetName: methodName, Resolved: true,
-						Confidence: "stub",
-					})
-				}
-			} else if strings.HasPrefix(sn, "PPCode:") {
-				funcName := sn[len("PPCode:"):]
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
-					Confidence: "stub",
-				})
-			} else if strings.HasPrefix(sn, "TTS:") {
-				stubName := sn[len("TTS:"):]
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: stubName, Resolved: true,
-					Confidence: "stub",
-				})
-			} else if strings.HasPrefix(sn, "Closure:") || strings.HasPrefix(sn, "ClosureEntry:") {
-				// ClosureEntry is the cached entry_point_ of the same
-				// closure, and it is what the call actually branches to.
-				// Both resolve through the same pool index.
-				poolIdx := tc.state[rn].StubOff
-				if tc.ctx.PoolClosureFunctionNames != nil {
-					if funcName, ok := tc.ctx.PoolClosureFunctionNames[poolIdx]; ok && funcName != "" {
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-							PC: tc.inst.Addr, Reg: rn, TargetName: funcName, Resolved: true,
-							Confidence: "stub",
-						})
-					}
-				}
-			} else if sn != "" && !strings.HasPrefix(sn, "Allocate") && !strings.HasPrefix(sn, "allocate") {
-				tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-					PC: tc.inst.Addr, Reg: rn, TargetName: sn, Resolved: true,
-					Confidence: "stub",
-				})
-			}
-		}
 		isAllocation := false
 		if rn < 31 && tc.state[rn].Kind == LatticeKnownStub {
 			sn := tc.state[rn].StubName
@@ -139,19 +112,8 @@ func handleBLR(tc *transferCtx) bool {
 				}
 			}
 		}
-		if isAllocation {
-			if tc.state[0].Kind == LatticeKnownClass {
-				recordAllocationSite(tc.ctx, tc.inst.Addr, tc.state[0].ClassID)
-			}
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
-			}
-		} else {
-			tc.state[0] = Top()
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
-			}
-		}
+		_ = isAllocation // generic indirect allocation has no per-class result fact.
+		killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 		return true
 	}
 	return false
@@ -161,7 +123,7 @@ func handleBLR(tc *transferCtx) bool {
 func handleBL(tc *transferCtx) bool {
 	raw := tc.inst.Raw
 	if target, ok := arm64.BL(raw, tc.inst.Addr); ok {
-		tc.ctx.BLTotal++
+		tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNone)
 		if tc.result.BLCallSiteTypes == nil {
 			tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 		}
@@ -174,45 +136,67 @@ func handleBL(tc *transferCtx) bool {
 		// This is the structural answer -- Code.owner is the Class -- so it
 		// takes precedence over any inferred exit type for the callee.
 		if cid, ok := tc.ctx.AllocationStubCID[target]; ok {
-			tc.ctx.AllocStubHits++
-			tc.state[sdk.ARM64AllocResultReg] = KnownClass(cid)
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
+			tc.ctx.hitMetric(metricAllocStub, tc.inst.Addr, &tc.ctx.AllocStubHits)
+			killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
+			if allocABI, abiOK := sdk.AllocateObjectRegs(tc.ctx.DartVersion, sdk.ArchARM64); abiOK {
+				tc.state[allocABI.ResultReg] = ExactClass(cid)
 			}
 			return true
 		}
 
 		calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[target]
 		if hasFull {
-			tc.ctx.BLHasExitType++
-			if calleeAllExit[0].Kind == LatticeKnownClass {
-				tc.ctx.BLExitKnown++
-			} else if calleeAllExit[0].Kind == LatticeBottom {
-				tc.ctx.BLExitBottom++
-			}
-			for r := 0; r <= 7; r++ {
-				if calleeAllExit[r].Kind != LatticeTop {
-					tc.state[r] = calleeAllExit[r]
-				} else {
-					tc.state[r] = Top()
+			ret := calleeAllExit[0]
+			if ret.Kind == LatticeTop || ret.Kind == LatticeBottom {
+				if seeded, ok := tc.ctx.CalleeExitTypes[target]; ok && seeded.Kind != LatticeTop && seeded.Kind != LatticeBottom {
+					ret = seeded
 				}
 			}
+			if ret.Kind != LatticeTop && ret.Kind != LatticeBottom {
+				if isObjectClass(ret.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNonObject)
+				}
+			} else {
+				ret = Top()
+			}
+			// A callee's exit register file is not the caller's post-call
+			// register file. Only the ABI return register crosses the call
+			// boundary; argument/caller-clobbered registers become unknown.
+			killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
+			tc.state[0] = ret
 		} else {
 			calleeExit := tc.ctx.CalleeExitTypes[target]
-			if calleeExit.Kind != LatticeTop {
-				tc.ctx.BLHasExitType++
-				if calleeExit.Kind == LatticeKnownClass {
-					tc.ctx.BLExitKnown++
+			if calleeExit.Kind != LatticeTop && calleeExit.Kind != LatticeBottom {
+				if isObjectClass(calleeExit.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.Addr, blReturnMetricNonObject)
 				}
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 				tc.state[0] = calleeExit
 			} else {
-				tc.state[0] = Top()
-			}
-			for r := 1; r <= 7; r++ {
-				tc.state[r] = Top()
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, true)
 			}
 		}
 		return true
 	}
 	return false
+}
+
+func killDartCallClobbered(state *[31]TypeLattice, dartVersion string, isARM64 bool) {
+	regs, ok := sdk.DartCallClobberedGPRs(dartVersion, isARM64)
+	if !ok {
+		// Unknown ABI: no register fact is safe across an ordinary Dart call.
+		for i := range state {
+			state[i] = Top()
+		}
+		return
+	}
+	for _, r := range regs {
+		if r >= 0 && r < len(state) {
+			state[r] = Top()
+		}
+	}
 }

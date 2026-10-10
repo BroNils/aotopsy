@@ -2,24 +2,26 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
+	"aotopsy/internal/output"
 )
 
 // cmdParity runs parity checks across sample subdirectories.
 func cmdParity(args []string) error {
-	fs := flag.NewFlagSet("parity", flag.ExitOnError)
+	fs := flag.NewFlagSet("parity", flag.ContinueOnError)
 	samplesDir := fs.String("samples", "", "directory containing sample subdirs (each with libapp.so)")
 	outDir := fs.String("out", "", "output directory for parity.csv and summary")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *samplesDir == "" || *outDir == "" {
@@ -31,10 +33,10 @@ func cmdParity(args []string) error {
 
 // cmdInventory inventories sample ZIP/APK files and extracts version/snapshot metadata.
 func cmdInventory(args []string) error {
-	fs := flag.NewFlagSet("inventory", flag.ExitOnError)
+	fs := flag.NewFlagSet("inventory", flag.ContinueOnError)
 	dir := fs.String("dir", "samples/flutter", "Directory containing zip files")
 	outPath := fs.String("out", "", "Output JSONL file (default: stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 
@@ -45,26 +47,38 @@ func cmdInventory(args []string) error {
 
 	var rows []analysis.InventoryRow
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".zip") {
+		base, ok := archiveInputBase(e.Name())
+		if !ok {
 			continue
 		}
 		path := filepath.Join(*dir, e.Name())
+		if *outPath != "" {
+			same, err := output.SamePath(*outPath, path)
+			if err != nil {
+				return fmt.Errorf("compare inventory output/input paths: %w", err)
+			}
+			if same {
+				return fmt.Errorf("inventory output %s aliases input archive %s", *outPath, path)
+			}
+		}
 		row := analysis.InventoryRow{
-			SampleID: strings.TrimSuffix(e.Name(), ".zip"),
+			SampleID: base,
 			APKPath:  path,
 		}
 
 		libapp, abi, err := analysis.InventoryExtractLibapp(path)
 		if err != nil {
 			row.DeclaredLibapp = false
-			row.Error = err.Error()
+			if !errors.Is(err, analysis.ErrInventoryNoLibapp) {
+				row.Error = err.Error()
+			}
 			rows = append(rows, row)
 			continue
 		}
 		row.DeclaredLibapp = true
 		row.ABI = abi
 
-		hash, dartVer, features, err := analysis.InventoryScanLibapp(libapp)
+		hash, dartVer, features, err := analysis.InventoryScanLibapp(libapp, abi)
 		_ = os.Remove(libapp)
 		if err != nil {
 			row.Error = err.Error()
@@ -83,25 +97,22 @@ func cmdInventory(args []string) error {
 		return rows[i].SampleID < rows[j].SampleID
 	})
 
-	var w io.Writer = os.Stdout
-	if *outPath != "" {
-		if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil {
-			return err
+	writeRows := func(w io.Writer) error {
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		for _, row := range rows {
+			if err := enc.Encode(row); err != nil {
+				return err
+			}
 		}
-		f, err := os.Create(*outPath)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = f.Close() }()
-		w = f
+		return nil
 	}
-
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	for _, row := range rows {
-		if err := enc.Encode(row); err != nil {
+	if *outPath == "" {
+		if err := writeRows(os.Stdout); err != nil {
 			return err
 		}
+	} else if err := output.WriteAtomic(*outPath, 0o644, writeRows); err != nil {
+		return fmt.Errorf("write inventory %s: %w", *outPath, err)
 	}
 
 	// Summary to stderr.
@@ -109,8 +120,12 @@ func cmdInventory(args []string) error {
 	verCount := map[string]int{}
 	hashCount := map[string]int{}
 	for _, r := range rows {
-		if r.Error != "" && !r.DeclaredLibapp {
-			notFound++
+		if !r.DeclaredLibapp {
+			if r.Error == "" {
+				notFound++
+			} else {
+				errCount++
+			}
 			continue
 		}
 		if r.Error != "" {
@@ -128,7 +143,7 @@ func cmdInventory(args []string) error {
 		verCount[ver]++
 	}
 
-	fmt.Fprintf(os.Stderr, "inventory: %d zips, %d with libapp, %d no libapp, %d errors, %d unique hashes\n",
+	cli.Errf("inventory: %d zips, %d with libapp, %d no libapp, %d errors, %d unique hashes\n",
 		len(rows), found, notFound, errCount, len(hashCount))
 	type vc struct {
 		ver   string
@@ -140,7 +155,10 @@ func cmdInventory(args []string) error {
 	}
 	sort.Slice(vcs, func(i, j int) bool { return vcs[i].ver < vcs[j].ver })
 	for _, v := range vcs {
-		fmt.Fprintf(os.Stderr, "  %-10s %d\n", v.ver, v.count)
+		cli.Errf("  %-10s %d\n", v.ver, v.count)
+	}
+	if errCount > 0 {
+		return fmt.Errorf("inventory completed with %d archive error(s)", errCount)
 	}
 	return nil
 }

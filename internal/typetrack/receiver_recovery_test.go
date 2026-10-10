@@ -18,8 +18,9 @@ const (
 
 func newCtxWithOwnerField(ownerCID int, rawFieldOff int32) *TypeContext {
 	ctx := &TypeContext{
+		WordSize: 8,
 		FieldByOwnerOffset: map[int]map[int32]int{
-			// FieldValueClass/OwnerHasFieldAt look up rawOff+1.
+			// FieldValueType/OwnerHasFieldAt look up rawOff+1.
 			ownerCID: {rawFieldOff + 1: 999},
 		},
 		SuperClass: map[int]int{},

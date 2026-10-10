@@ -1,6 +1,7 @@
 package naming
 
 import (
+	"errors"
 	"testing"
 
 	"aotopsy/internal/samplecorpus"
@@ -12,22 +13,22 @@ import (
 // skipped when unset, which meant they never ran -- the same silent-skip
 // problem the analysis package had.
 const (
-	sampleARM64Name   = "dart-3.9.2-gt-arm64.so"
+	sampleARM64Name   = "dart-3.9.2-arm64.so"
 	sample312X64Name  = "dart-3.12.2-x64.so"
 	sampleDart212Name = "dart-2.12.0-arm64.so"
 )
 
 // corpusSample resolves a sample by file name. No samples/ directory at
 // all (fresh clone, CI) skips; a corpus that has one but not this sample
-// fails. See samplecorpus.Available for why those are different.
+// fails. RequireSample/CorpusRoot deliberately preserve that distinction.
 func corpusSample(t *testing.T, name string) string {
 	t.Helper()
-	p := samplecorpus.Path(name)
-	if p == "" {
-		if !samplecorpus.Available() {
-			t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
-		}
-		t.Fatalf("corpus sample %s is missing from samples/; restore it rather than skipping", name)
+	p, err := samplecorpus.RequireSample(name)
+	if errors.Is(err, samplecorpus.ErrNoCorpus) {
+		t.Skipf("no samples/ directory in this checkout; %s cannot be resolved", name)
+	}
+	if err != nil {
+		t.Fatalf("corpus sample %s cannot be used: %v", name, err)
 	}
 	return p
 }

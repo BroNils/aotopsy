@@ -139,8 +139,8 @@ func TestTHRContextAnnotator(t *testing.T) {
 
 	ann := THRContextAnnotator(insts, nil)
 	got := ann(insts[0])
-	if got != "THR+0x48 LDR[UNKNOWN]" {
-		t.Errorf("THRContextAnnotator = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
+	if got != "THR+0x48 read8B[UNRESOLVED]" {
+		t.Errorf("THRContextAnnotator = %q, want %q", got, "THR+0x48 read8B[UNRESOLVED]")
 	}
 
 	// With field map.
@@ -152,25 +152,68 @@ func TestTHRContextAnnotator(t *testing.T) {
 	}
 }
 
-func TestPeepholeState(t *testing.T) {
+func TestTHRContextAnnotatorClassifiesUnresolvedARM64(t *testing.T) {
+	// LDR X16, [X26, #72] followed by BLR X16 is strong runtime-entrypoint
+	// evidence. The inline annotator must preserve ARM64 provenance when it
+	// constructs the temporary audit record, or the classifier returns UNKNOWN.
+	ldr := uint32(0xF9400000 | (9 << 10) | (26 << 5) | 16)
+	blr := uint32(0xd63f0200) // BLR X16
+	insts := []Inst{
+		{Addr: 0x1000, Raw: ldr, Text: "LDR X16, [X26,#72]"},
+		{Addr: 0x1004, Raw: blr, Text: "BLR X16"},
+	}
+
+	ann := THRContextAnnotator(insts, nil)
+	if got, want := ann(insts[0]), "THR+0x48 read8B[HEURISTIC_INDIRECT_CONTROL_TARGET]"; got != want {
+		t.Fatalf("THRContextAnnotator unresolved ARM64 = %q, want %q", got, want)
+	}
+}
+
+func TestTHRContextAnnotatorPreservesBothLDPExactFields(t *testing.T) {
+	insts := []Inst{{Addr: 0x7000, Raw: 0xa9460740, Text: "LDP X0, X1, [X26,#96]"}}
+	ann := THRContextAnnotator(insts, map[int]string{0x60: "top", 0x68: "end"})
+	if got, want := ann(insts[0]), "THR.top; THR.end"; got != want {
+		t.Fatalf("LDP THR annotation = %q, want %q", got, want)
+	}
+}
+
+func TestPPContextAnnotator(t *testing.T) {
 	pool := map[int]string{
 		2046: `"large pool string"`,
 	}
-	ps := NewPeepholeState(pool)
 
 	// ADD X0, X27, #0x4000 (shift=1, imm12=4)
 	addRaw := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
-	got := ps.Annotate(Inst{Raw: addRaw})
-	if got != "" {
-		t.Errorf("ADD alone should not annotate, got %q", got)
-	}
-
 	// LDR X1, [X0, #0] → combined offset = 0x4000, idx = (0x4000-16)/8 = 2046
 	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
-	got = ps.Annotate(Inst{Raw: ldrRaw})
+	insts := []Inst{
+		{Addr: 0x1000, Raw: addRaw},
+		{Addr: 0x1004, Raw: ldrRaw},
+	}
+	ann := PPContextAnnotator(insts, pool)
+	if got := ann(insts[0]); got != "" {
+		t.Errorf("ADD alone should not annotate, got %q", got)
+	}
+	got := ann(insts[1])
 	want := `PP[2046] "large pool string"`
 	if got != want {
-		t.Errorf("peephole = %q, want %q", got, want)
+		t.Errorf("PP context = %q, want %q", got, want)
+	}
+}
+
+func TestPPContextAnnotatorRejectsBypassedBaseAtJoin(t *testing.T) {
+	pool := map[int]string{2046: `"large pool string"`}
+	bEqToLdr := uint32(0x54000000 | (2 << 5))
+	addRaw := uint32(0x91000000 | (1 << 22) | (4 << 10) | (27 << 5))
+	ldrRaw := uint32(0xF9400000 | (0 << 10) | (0 << 5) | 1)
+	insts := []Inst{
+		{Addr: 0x1000, Raw: bEqToLdr},
+		{Addr: 0x1004, Raw: addRaw},
+		{Addr: 0x1008, Raw: ldrRaw},
+	}
+	ann := PPContextAnnotator(insts, pool)
+	if got := ann(insts[2]); got != "" {
+		t.Fatalf("bypassed PP base produced %q at CFG join", got)
 	}
 }
 
@@ -186,8 +229,8 @@ func TestPPAnnotator_RealBytes(t *testing.T) {
 
 	thr := THRContextAnnotator([]Inst{{Addr: 0x1000, Raw: raw}}, nil)
 	got := thr(Inst{Addr: 0x1000, Raw: raw})
-	if got != "THR+0x48 LDR[UNKNOWN]" {
-		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48 LDR[UNKNOWN]")
+	if got != "THR+0x48 read8B[UNRESOLVED]" {
+		t.Errorf("THR from real bytes = %q, want %q", got, "THR+0x48 read8B[UNRESOLVED]")
 	}
 
 	pp := PPAnnotator(pool)

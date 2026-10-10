@@ -12,34 +12,69 @@ import (
 )
 
 // gzipBase64 gzip-compresses data and returns the base64-encoded result.
-// If gzip fails (theoretically unreachable: gzip.NewWriterLevel with
-// BestCompression never fails, and bytes.Buffer never fails on Write/Close),
-// returns empty string rather than uncompressed base64 — the JS client
-// always uses DecompressionStream("gzip"), so uncompressed data would
-// fail to decompress client-side, causing silent data loss.
-func gzipBase64(data []byte) string {
+// Failures propagate because an empty/partial blob makes the self-contained
+// report look successfully written while the browser silently cannot load it.
+func gzipBase64(data []byte) (string, error) {
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("create gzip writer: %w", err)
 	}
 	if _, err := gz.Write(data); err != nil {
-		return ""
+		_ = gz.Close()
+		return "", fmt.Errorf("compress payload: %w", err)
 	}
 	if err := gz.Close(); err != nil {
-		return ""
+		return "", fmt.Errorf("finish compressed payload: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(buf.Bytes())
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // WriteSignalHTML writes a self-contained HTML page for the signal graph.
 // asmSnippets maps function name → first N lines of annotated disasm.
-func WriteSignalHTML(w io.Writer, g *signal.SignalGraph, title, filename, digest string, asmSnippets map[string]string) {
-	graphJSON, err := json.Marshal(g)
+// asmLinks maps the same function name to the exact report-relative file that
+// supplied that snippet; this keeps nested owner directories and legacy flat
+// fallback files in sync with the link the browser opens.
+func WriteSignalHTML(w io.Writer, g *signal.SignalGraph, title, filename, digest string, asmSnippets, asmLinks map[string]string) error {
+	graph := signalGraphHTMLPayload(g)
+	graphJSON, err := json.Marshal(graph)
 	if err != nil {
-		_, _ = fmt.Fprintf(w, "<html><body>error marshaling signal graph: %v</body></html>", err)
-		return
+		return fmt.Errorf("marshal signal graph: %w", err)
 	}
+	if asmSnippets == nil {
+		asmSnippets = map[string]string{}
+	}
+	if asmLinks == nil {
+		asmLinks = map[string]string{}
+	}
+	safeAsmLinks := make(map[string]string, len(asmLinks))
+	for name, rel := range asmLinks {
+		if href, ok := safeRelativeArtifactLink(rel); ok {
+			safeAsmLinks[name] = href
+		}
+	}
+	asmJSON, err := json.Marshal(asmSnippets)
+	if err != nil {
+		return fmt.Errorf("marshal asm snippets: %w", err)
+	}
+	asmLinksJSON, err := json.Marshal(safeAsmLinks)
+	if err != nil {
+		return fmt.Errorf("marshal asm links: %w", err)
+	}
+	gzGraph, err := gzipBase64(graphJSON)
+	if err != nil {
+		return fmt.Errorf("compress signal graph: %w", err)
+	}
+	gzAsm, err := gzipBase64(asmJSON)
+	if err != nil {
+		return fmt.Errorf("compress asm snippets: %w", err)
+	}
+	gzAsmLinks, err := gzipBase64(asmLinksJSON)
+	if err != nil {
+		return fmt.Errorf("compress asm links: %w", err)
+	}
+	ew := &errorWriter{w: w}
+	w = ew
 
 	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="en">
@@ -218,14 +253,23 @@ h1 { font-size: var(--fs); font-weight: 600; color: var(--bright); margin-bottom
 	// Stats bar.
 	_, _ = fmt.Fprintf(w, `<div class="stats">
 <span><b>%d</b> signal</span>
-<span><b>%d</b> context</span>
-<span><b>%d</b> total</span>
-<span><b>%d</b> strings</span>
-<span><b>%d</b> edges</span>
+	<span><b>%d</b> context</span>
+	<span><b>%d</b> total</span>
+	<span><b>%d</b> strings</span>
+	<span><b>%d</b> call sites</span>
+	<span><b>%d</b> static relations</span>
+	<span><b>%d</b> incomplete poly</span>
+	<span><b>%d</b> unknown candidate count</span>
+		<span><b>%d</b> unresolved indirect</span>
+		<span><b>%d</b> unsupported call kind</span>
+		<span><b>%d</b> unclassified THR</span>
+		<span><b>%d</b> runtime-observed sites</span>
 </div>
-`, g.Stats.SignalFuncs, g.Stats.ContextFuncs,
-		g.Stats.TotalFuncs,
-		g.Stats.StringRefCount, g.Stats.TotalEdges)
+			`, graph.Stats.SignalFuncs, graph.Stats.ContextFuncs,
+		graph.Stats.TotalFuncs,
+		graph.Stats.StringRefCount, graph.Stats.CallSites, graph.Stats.StaticRelations,
+		graph.Stats.IncompletePolymorphicSites, graph.Stats.UnknownCandidateCountSites, graph.Stats.UnresolvedIndirectSites,
+		graph.Stats.UnsupportedCallSites, graph.Stats.UnclassifiedTHRSites, graph.Stats.RuntimeObservedSites)
 
 	// Toolbar.
 	_, _ = fmt.Fprint(w, `<div class="toolbar">
@@ -256,14 +300,14 @@ h1 { font-size: var(--fs); font-weight: 600; color: var(--bright); margin-bottom
 	_, _ = fmt.Fprint(w, `<div id="cards"></div>
 `)
 
-	// Embed gzip+base64 data blobs.
-	asmJSON, _ := json.Marshal(asmSnippets)
-	gzGraph := gzipBase64(graphJSON)
-	gzAsm := gzipBase64(asmJSON)
+	// Embed gzip+base64 data blobs. Base64's alphabet cannot terminate the
+	// script element, so the serialized attacker-controlled data never enters an
+	// HTML/JavaScript source context before the runtime escaping layer sees it.
 	_, _ = fmt.Fprintf(w, `<script>
-const _GZ_G = "%s";
-const _GZ_ASM = "%s";
-`, gzGraph, gzAsm)
+	const _GZ_G = "%s";
+	const _GZ_ASM = "%s";
+	const _GZ_ASM_LINKS = "%s";
+	`, gzGraph, gzAsm, gzAsmLinks)
 
 	// JS logic: decompress blobs with progress, then run app.
 	_, _ = fmt.Fprint(w, `
@@ -291,53 +335,117 @@ async function _decompress(b64) {
   return JSON.parse(await blob.text());
 }
 
-let G, ASM;
+let G, ASM, ASM_LINKS;
 (async () => {
   const _frame = () => new Promise(r => requestAnimationFrame(r));
   _emit("decompressing graph data (" + (_GZ_G.length / 1024 | 0) + " KB)..."); await _frame();
   G = await _decompress(_GZ_G);
   _emit("decompressing asm data (" + (_GZ_ASM.length / 1024 | 0) + " KB)..."); await _frame();
-  ASM = await _decompress(_GZ_ASM);
+  ASM = Object.assign(Object.create(null), await _decompress(_GZ_ASM));
+	ASM_LINKS = Object.assign(Object.create(null), await _decompress(_GZ_ASM_LINKS));
   _emit("loaded " + G.funcs.length + " functions, " + G.edges.length + " edges, " + Object.keys(ASM).length + " asm snippets"); await _frame();
   _emit("building indices..."); await _frame();
   _boot();
 })();
 
 function _boot() {
-// Build neighbor index from ALL edges.
-const callers = {}, callees = {};
+// Build name→index map before edge projection so external/runtime targets can
+// be kept as evidence without becoming navigable static function relations.
+const nameIdx = Object.create(null);
+G.funcs.forEach((f, i) => { nameIdx[f.name] = i; });
+
+// Build neighbor index from the known-endpoint STATIC projection. Sets avoid
+// duplicate caller/callee rows when multiple call sites express one relation.
+const callers = Object.create(null), callees = Object.create(null);
+function staticResolution(r) {
+  return r === "direct" || r === "monomorphic" || r === "polymorphic_candidate";
+}
 G.edges.forEach(e => {
-  if ((e.kind === "bl" || e.kind === "call") && e.to) {
-    if (!callees[e.from]) callees[e.from] = [];
-    callees[e.from].push(e.to);
-    if (!callers[e.to]) callers[e.to] = [];
-    callers[e.to].push(e.from);
+  if (e.to && staticResolution(e.resolution) && nameIdx[e.to] !== undefined) {
+    if (!callees[e.from]) callees[e.from] = new Set();
+    callees[e.from].add(e.to);
+    if (!callers[e.to]) callers[e.to] = new Set();
+    callers[e.to].add(e.from);
   }
 });
+Object.keys(callers).forEach(k => { callers[k] = Array.from(callers[k]).sort(); });
+Object.keys(callees).forEach(k => { callees[k] = Array.from(callees[k]).sort(); });
 
-// Build name→index map for fast lookup.
-const nameIdx = {};
-G.funcs.forEach((f, i) => { nameIdx[f.name] = i; });
+// Preserve non-traversable call-site semantics for each function card.
+const callEvidence = Object.create(null);
+const polyListed = Object.create(null);
+G.edges.forEach(e => {
+  if (e.resolution !== "polymorphic_candidate") return;
+  const key = [e.from, e.from_pc || "", e.kind || "", e.via || ""].join("\u0000");
+  polyListed[key] = (polyListed[key] || 0) + (e.to ? 1 : 0);
+});
+const evidenceSeen = Object.create(null);
+function addEvidence(from, key, text) {
+  const full = from + "\u0000" + key;
+  if (evidenceSeen[full]) return;
+  evidenceSeen[full] = true;
+  if (!callEvidence[from]) callEvidence[from] = [];
+  callEvidence[from].push(text);
+}
+G.edges.forEach(e => {
+  const pc = e.from_pc || "unknown pc";
+  const siteKey = [e.from, e.from_pc || "", e.kind || "", e.via || ""].join("\u0000");
+  if (!staticResolution(e.resolution) && e.resolution !== "runtime_observed" &&
+      e.resolution !== "unresolved" && e.resolution !== "address_only") {
+    addEvidence(e.from, "schema\u0000" + siteKey + "\u0000" + (e.to || ""),
+      "invalid/missing resolution @ " + pc);
+    return;
+  }
+  if (e.resolution === "runtime_observed") {
+    let text = "runtime observed: " + (e.to || "unknown target");
+    if (e.runtime_observations) text += " ×" + e.runtime_observations;
+    if (e.runtime_agreement) text += " (" + e.runtime_agreement + ")";
+    addEvidence(e.from, "runtime\u0000" + siteKey + "\u0000" + (e.to || ""), text);
+    return;
+  }
+  if (e.resolution === "unresolved") {
+    addEvidence(e.from, "unresolved\u0000" + siteKey,
+      "unresolved indirect @ " + pc + (e.via ? " via " + e.via : ""));
+  } else if (e.resolution === "address_only") {
+    addEvidence(e.from, "address\u0000" + siteKey,
+      "direct address " + (e.target_address || "unknown") + " @ " + pc);
+  } else if (e.to && nameIdx[e.to] === undefined) {
+    addEvidence(e.from, "external\u0000" + siteKey + "\u0000" + e.to,
+      "external static target: " + e.to + " @ " + pc);
+  }
+  if (e.resolution === "polymorphic_candidate" && !e.targets_complete) {
+    const listed = polyListed[siteKey] || 0;
+    if (e.candidate_count_known) {
+      addEvidence(e.from, "poly\u0000" + siteKey,
+        "candidate set incomplete @ " + pc + ": " + listed + " listed of " + e.candidate_count);
+    } else {
+      addEvidence(e.from, "poly\u0000" + siteKey,
+        "candidate count unknown @ " + pc + ": " + listed + " listed");
+    }
+  }
+});
+Object.keys(callEvidence).forEach(k => callEvidence[k].sort());
 
 let activeCat = null;
 let scope = "signal"; // "signal", "context", "all"
 let viewMode = "class";
 const revealed = new Set(); // manually revealed function names
 
-function catClass(c) { return "cat-tag cat-" + c; }
+function catToken(c) { return String(c || "").replace(/[^a-zA-Z0-9_-]/g, "_"); }
+function catClass(c) { return "cat-tag cat-" + catToken(c); }
 
 function renderCatBar() {
   const bar = document.getElementById("catbar");
   const cats = Object.entries(G.stats.categories || {}).sort((a,b) => b[1]-a[1]);
   bar.innerHTML = cats.map(([c, n]) =>
-    '<span class="' + catClass(c) + '" data-cat="' + c + '" onclick="toggleCat(\'' + c + '\')">' + c + '</span>'
+    '<span class="' + esc(catClass(c)) + '" data-cat-action="' + esc(c) + '">' + esc(c) + '</span>'
   ).join("");
 }
 
 function toggleCat(c) {
   activeCat = activeCat === c ? null : c;
   document.querySelectorAll("#catbar .cat-tag").forEach(el => {
-    el.classList.toggle("active", el.dataset.cat === activeCat);
+    el.classList.toggle("active", el.dataset.catAction === activeCat);
   });
   filterAll();
 }
@@ -369,13 +477,22 @@ function fmtName(name) {
   return name.replace(/_([0-9a-f]{4,})$/i, function(m, h) { return "_" + h.toUpperCase(); });
 }
 
+function effectiveSeverity(impact, confidence) {
+  impact = String(impact || "").toLowerCase();
+  confidence = String(confidence || "").toLowerCase();
+  if (confidence === "high" || confidence === "exact") return impact;
+  if (confidence === "medium") return impact === "high" ? "medium" : impact;
+  return "low";
+}
+
 function neighborClass(name) {
   const idx = nameIdx[name];
   if (idx === undefined) return "";
   const f = G.funcs[idx];
   if (!f) return "";
-  if (f.severity === "high") return " nb-high";
-  if (f.severity === "medium") return " nb-med";
+	const sev = effectiveSeverity(f.severity, f.confidence);
+	if (sev === "high") return " nb-high";
+	if (sev === "medium") return " nb-med";
   if (f.role === "signal") return " nb-sig";
   return "";
 }
@@ -383,8 +500,15 @@ function neighborClass(name) {
 function renderNeighborList(names) {
   if (names.length === 0) return "";
   return names.map(n =>
-    '<a class="' + neighborClass(n) + '" href="#" onclick="revealAndScroll(\'' + esc(n) + '\');return false">' + esc(fmtName(n)) + '</a>'
+    '<a class="' + esc(neighborClass(n)) + '" href="#" data-reveal="' + esc(n) + '">' + esc(fmtName(n)) + '</a>'
   ).join("");
+}
+
+function renderTraceNode(n) {
+  if (n.startsWith("...") || n.startsWith("[cycle] ")) {
+    return '<span class="bt-arrow">' + esc(n) + '</span>';
+  }
+  return '<a class="' + esc(neighborClass(n)) + '" href="#" data-reveal="' + esc(n) + '">' + esc(fmtName(n)) + '</a>';
 }
 
 // Walk callers backwards up to maxDepth, return array of chains (each is an array of names, root first).
@@ -401,7 +525,7 @@ function getBacktraces(name, maxDepth) {
     for (let i = 0; i < limit; i++) {
       const c = cls[i];
       if (visited.has(c)) {
-        traces.push([c + " (cycle)", ...chain]);
+        traces.push(["[cycle] " + c, ...chain]);
         continue;
       }
       visited.add(c);
@@ -415,11 +539,14 @@ function getBacktraces(name, maxDepth) {
   const cls = callers[name] || [];
   if (cls.length === 0) return [];
   const visited = new Set([name]);
-  cls.forEach(c => {
+  const initialLimit = Math.min(cls.length, 3);
+  for (let i = 0; i < initialLimit; i++) {
+    const c = cls[i];
     visited.add(c);
     walk(c, [c], visited);
     visited.delete(c);
-  });
+  }
+  if (cls.length > initialLimit) traces.push(["... +" + (cls.length - initialLimit) + " more"]);
   return traces;
 }
 
@@ -437,18 +564,13 @@ function renderBacktraces(name) {
   // Render singles as a compact inline list.
   if (singles.length > 0) {
     html += '<div class="backtrace-line">';
-    html += singles.map(n => {
-      return '<a class="' + neighborClass(n) + '" href="#" onclick="revealAndScroll(\'' + esc(n) + '\');return false">' + esc(fmtName(n)) + '</a>';
-    }).join(', ');
+    html += singles.map(renderTraceNode).join(', ');
     html += '</div>';
   }
   // Render chains as before, one per line.
   chains.forEach(chain => {
     html += '<div class="backtrace-line">';
-    html += chain.map(n => {
-      if (n.startsWith("...")) return '<span class="bt-arrow">' + esc(n) + '</span>';
-      return '<a class="' + neighborClass(n) + '" href="#" onclick="revealAndScroll(\'' + esc(n) + '\');return false">' + esc(fmtName(n)) + '</a>';
-    }).join('<span class="bt-arrow"> \u2192 </span>');
+    html += chain.map(renderTraceNode).join('<span class="bt-arrow"> \u2192 </span>');
     html += '</div>';
   });
   html += '</div>';
@@ -456,20 +578,23 @@ function renderBacktraces(name) {
 }
 
 function renderCard(f, i) {
-  const cats = (f.categories || []).map(c => '<span class="' + catClass(c) + '">' + c + '</span>').join("");
+  const cats = (f.categories || []).map(c => '<span class="' + esc(catClass(c)) + '">' + esc(c) + '</span>').join("");
   const role = f.role || "";
   const isSignal = role === "signal";
   let cls = "card";
   if (isSignal) cls += " open"; // signal cards expanded by default
   if (role === "context") cls += " context";
   if (role === "") cls += " other";
-  let html = '<div class="' + cls + '" id="card-' + i + '" data-name="' + esc(f.name) + '" data-role="' + role + '" data-sev="' + (f.severity||"") + '" data-cats="' + (f.categories||[]).join(",") + '" data-strings="' + esc((f.string_refs||[]).map(r=>r.value).join("|")) + '" data-owner="' + esc(f.owner||"") + '">';
-  html += '<div class="card-header" onclick="toggle(' + i + ')">';
-  if (f.is_entry_point) html += '<span class="sev-badge ep">EP</span>';
-  if (f.severity === "high") html += '<span class="sev-badge high">HIGH</span>';
-  else if (f.severity === "medium") html += '<span class="sev-badge medium">MED</span>';
+	const alertSeverity = effectiveSeverity(f.severity, f.confidence);
+	let html = '<div class="' + cls + '" id="card-' + i + '" data-name="' + esc(f.name) + '" data-role="' + esc(role) + '" data-sev="' + esc(alertSeverity) + '" data-cats="' + esc((f.categories||[]).join(",")) + '" data-strings="' + esc((f.string_refs||[]).map(r=>r.value).join("|")) + '" data-owner="' + esc(f.owner||"") + '">';
+	html += '<div class="card-header" onclick="toggle(' + i + ')">';
+	if (f.is_root_candidate) html += '<span class="sev-badge ep">ROOT</span>';
+	if (alertSeverity === "high") html += '<span class="sev-badge high">HIGH</span>';
+	else if (alertSeverity === "medium") html += '<span class="sev-badge medium">MED</span>';
+	if (f.severity) html += '<span class="owner-name">impact: ' + esc(f.severity) + '</span>';
+	if (f.confidence) html += '<span class="owner-name">confidence: ' + esc(f.confidence) + '</span>';
   html += '<span class="func-name">' + esc(fmtName(f.name)) + '</span>';
-  if (ASM[f.name]) html += '<a class="asm-link" href="asm/' + encodeURIComponent(f.name) + '.txt" target="_blank" onclick="event.stopPropagation()">asm</a>';
+  if (ASM[f.name] && ASM_LINKS[f.name]) html += '<a class="asm-link" href="' + esc(ASM_LINKS[f.name]) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">asm</a>';
   if (f.owner) html += ' <span class="owner-name">' + esc(fmtName(f.owner)) + '</span>';
   html += '<div class="card-tags">' + cats + '</div>';
   html += '</div>';
@@ -477,7 +602,7 @@ function renderCard(f, i) {
 
   // 1. Signals (no title, before asm).
   if (f.string_refs && f.string_refs.length > 0) {
-    const seen = {};
+    const seen = Object.create(null);
     f.string_refs.forEach(r => {
       if (seen[r.value]) { seen[r.value].count++; return; }
       seen[r.value] = {r: r, count: 1};
@@ -487,11 +612,12 @@ function renderCard(f, i) {
     rows.forEach(({r, count}) => {
       const strCats = r.categories || [];
       const primary = strCats[0] || "";
-      const colorCls = primary ? "cat-" + primary : "";
+      const colorCls = primary ? "cat-" + catToken(primary) : "";
       const pcDisp = r.pc.startsWith("0x") ? r.pc.substring(2).toUpperCase() : r.pc;
       html += '<tr>';
-      html += '<td class="sig-pc"><a href="#" onclick="scrollAsm(' + i + ',\'' + r.pc + '\');return false">' + pcDisp + '</a>';
-      if (primary) html += '<span class="sig-cat ' + colorCls + '">' + primary + '</span>';
+      html += '<td class="sig-pc"><a href="#" data-scroll-card="' + i + '" data-scroll-pc="' + esc(r.pc) + '">' + esc(pcDisp) + '</a>';
+      if (primary) html += '<span class="sig-cat ' + esc(colorCls) + '">' + esc(primary) + '</span>';
+	  if (r.confidence) html += '<span class="owner-name">' + esc(r.confidence) + '</span>';
       html += '</td>';
       html += '<td class="sig-val">"' + esc(r.value) + '"';
       if (count > 1) html += ' <span class="owner-name">\u00d7' + count + '</span>';
@@ -525,6 +651,13 @@ function renderCard(f, i) {
     html += '</div>';
   }
 
+  const evidence = callEvidence[f.name] || [];
+  if (evidence.length > 0) {
+    html += '<div class="cbox"><div class="section-label">Call-site evidence</div>';
+    html += '<div class="neighbor-list">' + evidence.map(x => '<span>' + esc(x) + '</span>').join('') + '</div>';
+    html += '</div>';
+  }
+
   html += '</div></div>';
   return html;
 }
@@ -544,6 +677,7 @@ G.funcs.forEach((f, i) => {
       owner: f.owner || "",
       role: f.role || "",
       severity: f.severity || "",
+	  confidence: r.confidence || "",
       categories: strCats
     });
   });
@@ -566,19 +700,23 @@ function renderStrings() {
   });
 
   // Group by category.
-  const catGroups = {};
+  const catGroups = Object.create(null);
   const catOrder = [];
   filtered.forEach(s => {
     const cat = (s.categories && s.categories.length > 0) ? s.categories[0] : "(uncategorized)";
     if (!catGroups[cat]) { catGroups[cat] = []; catOrder.push(cat); }
     catGroups[cat].push(s);
   });
-  const sevOrder = {"high": 0, "medium": 1, "low": 2, "": 3};
+	const sevOrder = {"high": 0, "medium": 1, "low": 2, "": 3};
+		const groupSeverity = items => items.reduce((best, item) => {
+		  const rank = sevOrder[effectiveSeverity(item.severity, item.confidence)] ?? 3;
+	  return Math.min(best, rank);
+	}, 3);
   catOrder.sort((a, b) => {
-    const sa = catGroups[a][0] ? (sevOrder[catGroups[a][0].severity] || 3) : 3;
-    const sb = catGroups[b][0] ? (sevOrder[catGroups[b][0].severity] || 3) : 3;
+	const sa = groupSeverity(catGroups[a]);
+	const sb = groupSeverity(catGroups[b]);
     if (sa !== sb) return sa - sb;
-    return a < b ? -1 : 1;
+	return a === b ? 0 : (a < b ? -1 : 1);
   });
 
   // Sort within each group.
@@ -603,19 +741,21 @@ function renderStrings() {
   // Single table, category headers as spanning rows.
   let html = '<table class="str-table"><thead><tr>';
   html += '<th onclick="sortStrings(\'pc\')" style="width:10%">Address' + sortArrow("pc") + '</th>';
-  html += '<th onclick="sortStrings(\'value\')" style="width:52%">Value' + sortArrow("value") + '</th>';
-  html += '<th onclick="sortStrings(\'func\')" style="width:38%">Function' + sortArrow("func") + '</th>';
+	  html += '<th onclick="sortStrings(\'value\')" style="width:45%">Value' + sortArrow("value") + '</th>';
+	  html += '<th style="width:10%">Confidence</th>';
+	  html += '<th onclick="sortStrings(\'func\')" style="width:35%">Function' + sortArrow("func") + '</th>';
   html += '</tr></thead><tbody>';
 
   catOrder.forEach(cat => {
     const items = catGroups[cat];
-    html += '<tr class="str-cat-row"><td colspan="3"><span class="' + catClass(cat) + '">' + cat + '</span> <span class="owner-name">' + items.length + '</span></td></tr>';
+		html += '<tr class="str-cat-row"><td colspan="4"><span class="' + esc(catClass(cat)) + '">' + esc(cat) + '</span> <span class="owner-name">' + items.length + '</span></td></tr>';
     items.forEach(s => {
       const addr = s.pc.startsWith("0x") ? s.pc.substring(2).toUpperCase() : s.pc;
       html += '<tr>';
-      html += '<td class="str-pc-cell">' + addr + '</td>';
+	  html += '<td class="str-pc-cell">' + esc(addr) + '</td>';
       html += '<td class="str-val-cell">"' + esc(s.value) + '"</td>';
-      html += '<td class="str-func-cell"><a href="#" onclick="setView(\'class\');revealAndScroll(\'' + esc(s.funcName) + '\');return false">' + esc(fmtName(s.funcName)) + '</a></td>';
+	  html += '<td class="owner-name">' + esc(s.confidence || "") + '</td>';
+	  html += '<td class="str-func-cell"><a href="#" data-view-reveal="' + esc(s.funcName) + '">' + esc(fmtName(s.funcName)) + '</a></td>';
       html += '</tr>';
     });
   });
@@ -647,7 +787,7 @@ function renderCards() {
     G.funcs.forEach((f, i) => { html += renderCard(f, i); });
     container.innerHTML = html;
   } else {
-    const groups = {};
+	const groups = Object.create(null);
     const order = [];
     G.funcs.forEach((f, i) => {
       const owner = f.owner || "(no class)";
@@ -725,7 +865,8 @@ function matchesFilter(c) {
   const q = document.getElementById("search").value.toLowerCase();
   const name = c.dataset.name.toLowerCase();
   const strings = (c.dataset.strings || "").toLowerCase();
-  const cats = c.dataset.cats || "";
+  const idx = nameIdx[c.dataset.name];
+  const categories = idx === undefined ? [] : (G.funcs[idx].categories || []);
   const role = c.dataset.role || "";
 
   // Scope filter: signal = signal only, context = signal+context, all = everything.
@@ -739,7 +880,7 @@ function matchesFilter(c) {
   if (q && !name.includes(q) && !strings.includes(q)) return false;
 
   // Category filter.
-  if (activeCat && !cats.includes(activeCat)) return false;
+  if (activeCat && !categories.includes(activeCat)) return false;
 
   return true;
 }
@@ -770,6 +911,37 @@ function esc(s) {
   if (!s) return "";
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
+
+document.addEventListener("click", ev => {
+  const target = ev.target instanceof Element ? ev.target : null;
+  if (!target) return;
+  const cat = target.closest("[data-cat-action]");
+  if (cat) {
+    ev.preventDefault();
+    toggleCat(cat.dataset.catAction || "");
+    return;
+  }
+  const viewReveal = target.closest("[data-view-reveal]");
+  if (viewReveal) {
+    ev.preventDefault();
+    const name = viewReveal.dataset.viewReveal || "";
+    setView("class");
+    revealAndScroll(name);
+    return;
+  }
+  const reveal = target.closest("[data-reveal]");
+  if (reveal) {
+    ev.preventDefault();
+    revealAndScroll(reveal.dataset.reveal || "");
+    return;
+  }
+  const asmPC = target.closest("[data-scroll-card][data-scroll-pc]");
+  if (asmPC) {
+    ev.preventDefault();
+    const idx = Number.parseInt(asmPC.dataset.scrollCard || "", 10);
+    if (Number.isInteger(idx)) scrollAsm(idx, asmPC.dataset.scrollPc || "");
+  }
+});
 
 function colorizeLine(s) {
   const m = s.match(/^(0x[0-9a-fA-F]+)(  )([0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})(  )(.*)$/);
@@ -804,7 +976,7 @@ function colorizeAsm(raw) {
   const lines = raw.split("\n");
   // Pass 1: parse addresses.
   const addrs = [];
-  const addrToIdx = {};
+	const addrToIdx = Object.create(null);
   lines.forEach((line, i) => {
     const m = line.match(/^(0x[0-9a-fA-F]+)/);
     const a = m ? parseInt(m[1], 16) : null;
@@ -897,4 +1069,23 @@ setTimeout(() => { _log.style.opacity = "0"; setTimeout(() => _log.remove(), 200
 </body>
 </html>
 `)
+	return ew.err
+}
+
+func signalGraphHTMLPayload(g *signal.SignalGraph) signal.SignalGraph {
+	var graph signal.SignalGraph
+	if g != nil {
+		graph = *g
+	}
+	if graph.Funcs == nil {
+		graph.Funcs = []signal.SignalFunc{}
+	}
+	graph.Edges = signalRenderableEdges(&graph)
+	if graph.Edges == nil {
+		graph.Edges = []signal.SignalEdge{}
+	}
+	if graph.Stats.Categories == nil {
+		graph.Stats.Categories = map[string]int{}
+	}
+	return graph
 }

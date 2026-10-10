@@ -150,8 +150,8 @@ func CopyPropagationStmt(stmts []Stmt) bool {
 	changed := false
 	apply := func(env map[string]string, text string) string {
 		for temp, src := range env {
-			if re := identBoundaryRe(temp); re.MatchString(text) {
-				text = re.ReplaceAllString(text, src)
+			if got := ReplaceIdent(text, temp, src); got != text {
+				text = got
 				changed = true
 			}
 		}
@@ -195,11 +195,6 @@ func CopyPropagationStmt(stmts []Stmt) bool {
 	}
 	walk(stmts, map[string]string{})
 	return changed
-}
-
-// identBoundaryRe builds a whole-word matcher for an identifier.
-func identBoundaryRe(id string) *regexp.Regexp {
-	return regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\b`)
 }
 
 // commonSubexpressionEliminationStmt replaces a repeated expression with the

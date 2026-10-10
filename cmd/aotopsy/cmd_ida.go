@@ -3,18 +3,21 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/elfx"
+	"aotopsy/internal/output"
 )
 
 // cmdIDA handles "aotopsy ida <libapp.so>" — full pipeline + IDA decompilation.
 func cmdIDA(args []string) error {
-	args = reorderPositionalArg(args)
-	fs := flag.NewFlagSet("ida", flag.ExitOnError)
+	fs := flag.NewFlagSet("ida", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	all := fs.Bool("all", false, "decompile ALL functions")
 	pythonBin := fs.String("python", "", "python3 binary (default: auto-detect)")
@@ -22,16 +25,19 @@ func cmdIDA(args []string) error {
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy ida <libapp.so> [flags]")
+	}
+	if *from != "" && flagWasSet(fs, "max-steps") {
+		return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
 	}
 
 	libPath := fs.Arg(0)
@@ -39,30 +45,44 @@ func cmdIDA(args []string) error {
 	if absLibPath == "" {
 		return fmt.Errorf("file not found: %s", libPath)
 	}
-	if ef, err := elfx.Open(absLibPath); err == nil {
-		isARM64 := ef.IsARM64()
-		_ = ef.Close()
-		if !isARM64 {
-			return fmt.Errorf("ida decompilation is ARM64-only for now (register retyping scripts aren't ported to x86_64 yet -- see ARCHITECTURE.md); use `aotopsy _debug decompile-native` for x86_64 pseudocode instead")
-		}
+	ef, err := elfx.Open(absLibPath)
+	if err != nil {
+		return fmt.Errorf("open input ELF: %w", err)
+	}
+	isARM64 := ef.IsARM64()
+	_ = ef.Close()
+	if !isARM64 {
+		return fmt.Errorf("ida decompilation is ARM64-only for now (register retyping scripts aren't ported to x86_64 yet -- see ARCHITECTURE.md); use `aotopsy _debug decompile-native` for x86_64 pseudocode instead")
 	}
 
-	if *outDir == "" {
+	if *from != "" && *outDir == "" {
+		*outDir = *from
+	} else if *outDir == "" {
 		*outDir = defaultOutDir(libPath)
+	}
+	if *from != "" {
+		if _, err := analysis.VerifyProvenanceBinary(*from, absLibPath); err != nil {
+			return fmt.Errorf("verify IDA --from provenance: %w", err)
+		}
 	}
 
 	// Step 1: Run pipeline (disasm + signal + meta).
 	var pipeResult *analysis.Result
 	if *from != "" {
-		_, err := analysis.RunSignalStage(*from, 2, false, quiet, os.Stderr, true, "")
+		var err error
+		pipeResult, err = analysis.Run(analysis.Opts{
+			FromDir:   *from,
+			OutDir:    *outDir,
+			Signal:    true,
+			SignalK:   2,
+			Meta:      analysis.MetaRequired,
+			DecompAll: *all,
+			Quiet:     quiet,
+			Log:       os.Stderr,
+		})
 		if err != nil {
-			return fmt.Errorf("signal: %w", err)
+			return err
 		}
-		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
-		if err != nil {
-			return fmt.Errorf("meta: %w", err)
-		}
-		pipeResult = &analysis.Result{OutDir: *from, MetaPath: metaPath}
 	} else {
 		var err error
 		pipeResult, err = analysis.Run(analysis.Opts{
@@ -70,13 +90,17 @@ func cmdIDA(args []string) error {
 			OutDir:    *outDir,
 			MaxSteps:  *maxSteps,
 			Signal:    true,
-			Meta:      true,
+			Meta:      analysis.MetaRequired,
 			DecompAll: *all,
 			Quiet:     quiet,
 		})
 		if err != nil {
 			return err
 		}
+	}
+	prov, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, absLibPath)
+	if err != nil {
+		return fmt.Errorf("verify IDA binary provenance: %w", err)
 	}
 
 	metaPath := pipeResult.MetaPath
@@ -91,37 +115,93 @@ func cmdIDA(args []string) error {
 	if err != nil {
 		return fmt.Errorf("ida script: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "script: %s\n", scriptPath)
+	cli.Errf("script: %s\n", scriptPath)
 
 	// Step 3: Find python3 with idapro.
 	python, err := analysis.FindPython(*pythonBin)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "python: %s\n", python)
+	cli.Errf("python: %s\n", python)
 
 	// Step 5: Run idalib.
 	decompDir := filepath.Join(pipeResult.OutDir, "decompiled")
+	decompTx, err := output.BeginDirTransaction(decompDir)
+	if err != nil {
+		return fmt.Errorf("begin IDA decompile generation: %w", err)
+	}
+	decompCommitted := false
+	defer func() {
+		if !decompCommitted {
+			decompTx.Abort()
+		}
+	}()
 	absMetaPath, _ := filepath.Abs(metaPath)
-	absDecompDir, _ := filepath.Abs(decompDir)
+	absDecompStage, _ := filepath.Abs(decompTx.StageDir())
+	workDir, workBinary, err := stageIDAWorkBinary(absDecompStage, absLibPath)
+	if err != nil {
+		return fmt.Errorf("stage private IDA work binary: %w", err)
+	}
+	if _, err := analysis.VerifyProvenanceBinary(pipeResult.OutDir, workBinary); err != nil {
+		return fmt.Errorf("verify private IDA work binary provenance: %w", err)
+	}
 
 	if *all {
-		fmt.Fprintf(os.Stderr, "running IDA idalib analysis (decompiling ALL functions)...\n")
+		cli.Errf("running IDA idalib analysis (decompiling ALL functions)...\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "running IDA idalib analysis (signal functions only, use --all for everything)...\n")
+		cli.Errf("running IDA idalib analysis (signal functions only, use --all for everything)...\n")
 	}
-	fmt.Fprintf(os.Stderr, "  decompile output: %s\n", absDecompDir)
+	cli.Errf("  decompile output: %s\n", decompDir)
 
-	cmd := exec.Command(python, scriptPath, absLibPath, absMetaPath, absDecompDir)
+	cmd := exec.Command(python, scriptPath, workBinary, absMetaPath, absDecompStage)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ida script failed: %w", err)
 	}
+	applyResult, err := analysis.ReadApplyResult(decompTx.StageDir())
+	if err != nil {
+		return fmt.Errorf("IDA apply did not complete: %w", err)
+	}
+	if !strings.EqualFold(applyResult.BinarySHA256, prov.SHA256) {
+		return fmt.Errorf("IDA apply completion sentinel does not match binary provenance")
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		return fmt.Errorf("remove private IDA work directory: %w", err)
+	}
+	for _, name := range []string{analysis.ApplyOKFileName, analysis.ApplyFailedFileName} {
+		if err := decompTx.RemoveStageFile(name); err != nil {
+			return fmt.Errorf("remove IDA apply sentinel: %w", err)
+		}
+	}
+	if err := decompTx.Commit(); err != nil {
+		return fmt.Errorf("publish IDA decompile generation: %w", err)
+	}
+	decompCommitted = true
 
-	cCount := analysis.CountDecompiledFiles(absDecompDir)
-	fmt.Fprintf(os.Stderr, "decompiled %d functions → %s\n", cCount, absDecompDir)
+	cli.Errf("decompiled %d functions (%d failed) → %s\n", applyResult.Decompiled, applyResult.Failed, decompDir)
 
 	return nil
+}
+
+func stageIDAWorkBinary(stageDir, sourcePath string) (string, string, error) {
+	workDir := filepath.Join(stageDir, ".ida-work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		return "", "", err
+	}
+	workBinary := filepath.Join(workDir, "libapp.so")
+	err := output.WriteAtomic(workBinary, 0o600, func(w io.Writer) error {
+		src, err := os.Open(sourcePath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = src.Close() }()
+		_, err = io.Copy(w, src)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return workDir, workBinary, nil
 }

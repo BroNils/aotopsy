@@ -3,10 +3,11 @@ package frida
 import (
 	"aotopsy/internal/arch/x86"
 	"fmt"
-	"os"
+	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
@@ -24,12 +25,13 @@ import (
 //	runtime/vm/compiler/assembler/assembler_x64.cc, LoadDispatchTable():
 //	    movq(dst, Address(THR, Thread::dispatch_table_array_offset()));
 //
-//	runtime/vm/constants_x64.h: DispatchTableNullErrorABI::kClassIdReg = RCX
+// Dart 2.10/2.12 pass cid_reg as a Register parameter. From 2.13 onward
+// constants_x64.h fixes DispatchTableNullErrorABI::kClassIdReg = RCX.
 //
 // So the concrete instruction sequence is:
 //
 //	mov  <table_reg>, [r14 + dispatch_table_array_offset]   ; THR field load
-//	call [<table_reg> + rcx*8 + disp]                       ; indirect, Mem operand
+//	call [<table_reg> + cid_reg*8 + disp]                   ; indirect, Mem operand
 //
 // x64refs.go's existing findCallersOf only matches `CALL` with a Rel
 // (rip-relative immediate) operand -- direct calls. A GDT call is a CALL
@@ -84,6 +86,12 @@ func (rt *X86RegTracker) kill(idx int) {
 	rt.defs[idx] = regProvenance{}
 }
 
+func (rt *X86RegTracker) reset() {
+	for i := range rt.defs {
+		rt.defs[i] = regProvenance{}
+	}
+}
+
 func (rt *X86RegTracker) lookup(idx int) string {
 	if idx < 0 || idx > 15 {
 		return ""
@@ -106,7 +114,7 @@ type IndirectCall struct {
 // every CALL whose operand is a Reg or Mem (never a Rel), classifying GDT
 // calls per the exact pattern above and annotating pool/THR-sourced
 // register calls where the provenance is still in the tracking window.
-func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, poolDisplay map[int]string, maxHits int) ([]IndirectCall, error) {
+func ScanIndirectCalls(dartVersion string, ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint64, pl *naming.PoolLookups, poolDisplay map[int]string, maxHits int) ([]IndirectCall, error) {
 	var out []IndirectCall
 	hits := 0
 
@@ -131,7 +139,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			addr := d.VA
 			inst := d.Inst
 			if d.Bad {
-				rt.tick()
+				rt.reset()
 				return true
 			}
 
@@ -161,9 +169,10 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					if mem, ok := arg.(x86asm.Mem); ok {
 						baseNote := rt.lookup(x86.CanonReg(mem.Base))
 						ic := IndirectCall{FuncName: funcName, FuncVA: funcVA, Addr: addr, Text: inst.String()}
-						if x86.CanonReg(mem.Index) == sdk.X86ClassIdReg && mem.Scale == 8 && baseNote == "dispatch_table" {
+						idxReg := x86.CanonReg(mem.Index)
+						if sdk.IsDispatchTableClassIDReg(dartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8 && baseNote == "dispatch_table" {
 							ic.Kind = "gdt"
-							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via RCX)", mem.Disp)
+							ic.Detail = fmt.Sprintf("GDT call, selector-derived offset=0x%x (cid via %s)", mem.Disp, strings.ToUpper(sdk.X86RegName(idxReg)))
 						} else if baseNote != "" {
 							ic.Kind = "pool-indirect"
 							ic.Detail = fmt.Sprintf("base=%s", baseNote)
@@ -176,9 +185,13 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 						break
 					}
 				}
+				for _, dst := range x86.DstRegsOfInst(inst) {
+					rt.kill(dst)
+				}
+				rt.kill(sdk.X86ReturnReg)
 				rt.tick()
 				if maxHits > 0 && hits >= maxHits {
-					fmt.Fprintf(os.Stderr, "stopping at --max=%d indirect-call hits\n", maxHits)
+					cli.Errf("stopping at --max=%d indirect-call hits\n", maxHits)
 					maxHitReached = true
 					return false
 				}
@@ -188,7 +201,7 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 			// Track MOV dst, [R14+disp] (THR field load) / [R15+disp] (pool load)
 			// so a later indirect CALL through dst can be annotated. Mirrors
 			// LoadDispatchTable's exact shape: movq(dst, Address(THR, dispatch_table_array_offset())).
-			if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
+			if inst.Op == x86asm.MOV && len(inst.Args) >= 2 {
 				dstReg, dstOK := inst.Args[0].(x86asm.Reg)
 				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && dstOK && inst.Op == x86asm.MOV {
 					// Register-to-register copy: propagate provenance so a
@@ -228,13 +241,13 @@ func ScanIndirectCalls(ranges []cluster.CodeRange, code []byte, codeOff, codeVA 
 					rt.tick()
 					return true
 				}
-				if dstOK {
-					rt.kill(x86.CanonReg(dstReg))
-				}
-			} else if len(inst.Args) >= 1 {
-				if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-					rt.kill(x86.CanonReg(dstReg))
-				}
+			}
+
+			// Invalidate exactly the GP registers the shared x86 decoder says are
+			// written. The old operand-0 heuristic killed read-only CMP/TEST/BT/
+			// PUSH operands and missed implicit or multi-register writes.
+			for _, dst := range x86.DstRegsOfInst(inst) {
+				rt.kill(dst)
 			}
 
 			rt.tick()

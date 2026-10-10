@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/samplecorpus"
 )
 
 // TestSwitchJumpTableRecovery checks the one property that makes switch
@@ -25,17 +24,11 @@ import (
 func TestSwitchJumpTableRecovery(t *testing.T) {
 	samples := []string{
 		"dart-3.12.2-x64.so",
-		"dart-3.9.2-gt-arm64.so",
+		"dart-3.9.2-arm64.so",
 		"dart-2.12.0-arm64.so",
 	}
-	anyRun := false
 	for _, name := range samples {
-		path := samplecorpus.Path(name)
-		if path == "" {
-			t.Logf("%s: absent", name)
-			continue
-		}
-		anyRun = true
+		path := corpusSample(t, name)
 		t.Run(name, func(t *testing.T) {
 			ctx, err := LoadContext(path)
 			if err != nil {
@@ -140,8 +133,5 @@ func TestSwitchJumpTableRecovery(t *testing.T) {
 			t.Logf("%d functions with a recovered jump table, %d emitted a switch",
 				withTable, emittedSwitch)
 		})
-	}
-	if !anyRun {
-		t.Skip("no samples/ directory in this checkout")
 	}
 }

@@ -28,6 +28,9 @@ type CFGVerification struct {
 	MismatchedBranches int
 	MatchedReturns     int
 	MismatchedReturns  int
+	TotalEdges         int
+	MatchedEdges       int
+	MismatchedEdges    int
 	// CoveragePct is the percentage of binary CFG nodes that appear
 	// in the pseudocode. Below 100% means some blocks were omitted
 	// (budget exceeded, visit count limit, etc).
@@ -65,24 +68,19 @@ func VerifyCFG(fir *FuncIR, artifact Artifact) CFGVerification {
 	}
 	v.TotalLoops = len(identifyLoopHeaders(fir, dominators(fir)))
 
-	// Count pseudocode structures by scanning emitted lines.
+	// Count pseudocode return structures by scanning emitted lines. Branch
+	// correctness is verified from the emitter's recorded source->target edges
+	// below; token counts cannot distinguish two unrelated CFGs with the same
+	// number of `if` statements.
 	src := artifact.Source
 	lines := strings.Split(src, "\n")
 
-	pseudocodeBranches := 0
 	pseudocodeReturns := 0
-	pseudocodeLoops := 0
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		// Count if/else as branches (exclude comments).
 		if !strings.HasPrefix(trimmed, "//") {
-			if strings.HasPrefix(trimmed, "if (") || strings.HasPrefix(trimmed, "if(") {
-				pseudocodeBranches++
-			}
-			if strings.HasPrefix(trimmed, "while (") || strings.HasPrefix(trimmed, "while(") {
-				pseudocodeLoops++
-			}
 			if strings.HasPrefix(trimmed, "return ") || trimmed == "return;" {
 				pseudocodeReturns++
 			}
@@ -112,9 +110,62 @@ func VerifyCFG(fir *FuncIR, artifact Artifact) CFGVerification {
 		}
 	}
 
-	// Match counts (structural, not semantic).
-	v.MatchedBranches = min(v.TotalBranches, pseudocodeBranches)
-	v.MismatchedBranches = abs(v.TotalBranches - pseudocodeBranches)
+	// Exact edge-set comparison. A branch is matched only when every valid CFG
+	// successor from its source block was actually represented by the emitter.
+	expected := make(map[uint64]bool)
+	branchBlocks := make(map[int]bool)
+	for bi := range fir.Blocks {
+		for _, ins := range fir.Blocks[bi].Instrs {
+			if ins.Op == OpBranch {
+				branchBlocks[bi] = true
+				break
+			}
+		}
+		for _, s := range fir.Blocks[bi].Succs {
+			if s.BlockID < 0 || s.BlockID >= len(fir.Blocks) {
+				continue
+			}
+			expected[uint64(uint32(bi))<<32|uint64(uint32(s.BlockID))] = true
+		}
+	}
+	emitted := make(map[uint64]bool, len(artifact.EmittedEdges))
+	for _, edge := range artifact.EmittedEdges {
+		if edge.From < 0 || edge.To < 0 {
+			continue
+		}
+		emitted[uint64(uint32(edge.From))<<32|uint64(uint32(edge.To))] = true
+	}
+	v.TotalEdges = len(expected)
+	for edge := range expected {
+		if emitted[edge] {
+			v.MatchedEdges++
+		} else {
+			v.MismatchedEdges++
+		}
+	}
+	for edge := range emitted {
+		if !expected[edge] {
+			v.MismatchedEdges++
+		}
+	}
+	for bi := range branchBlocks {
+		matched := true
+		for _, s := range fir.Blocks[bi].Succs {
+			if s.BlockID < 0 || s.BlockID >= len(fir.Blocks) {
+				continue
+			}
+			key := uint64(uint32(bi))<<32 | uint64(uint32(s.BlockID))
+			if !emitted[key] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			v.MatchedBranches++
+		} else {
+			v.MismatchedBranches++
+		}
+	}
 	v.MatchedReturns = min(v.TotalReturns, pseudocodeReturns)
 	v.MismatchedReturns = abs(v.TotalReturns - pseudocodeReturns)
 
@@ -123,9 +174,10 @@ func VerifyCFG(fir *FuncIR, artifact Artifact) CFGVerification {
 
 // Summary renders a one-line verification summary.
 func (v CFGVerification) Summary() string {
-	return fmt.Sprintf("blocks=%d coverage=%.1f%% branches=%d/%d returns=%d/%d loops=%d",
+	return fmt.Sprintf("blocks=%d coverage=%.1f%% branches=%d/%d edges=%d/%d returns=%d/%d loops=%d",
 		v.TotalBlocks, v.CoveragePct,
 		v.MatchedBranches, v.TotalBranches,
+		v.MatchedEdges, v.TotalEdges,
 		v.MatchedReturns, v.TotalReturns,
 		v.TotalLoops)
 }

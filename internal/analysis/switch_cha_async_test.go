@@ -31,7 +31,7 @@ func TestSwitchDispatchDetected(t *testing.T) {
 		}
 	}
 	if bigSwitchRef < 0 {
-		t.Skip("bigSwitch not in this sample (stale binary? see AGENTS.md)")
+		t.Fatal("bigSwitch not found in canonical compare_sample corpus binary")
 	}
 
 	// Find Code entry for bigSwitch.
@@ -41,7 +41,7 @@ func TestSwitchDispatchDetected(t *testing.T) {
 	}
 	code, ok := codeByOwner[bigSwitchRef]
 	if !ok {
-		t.Skip("no Code for bigSwitch")
+		t.Fatal("canonical bigSwitch fixture has no Code object")
 	}
 
 	// Verify the function has PcDescriptors (jump table dispatch points
@@ -117,7 +117,7 @@ func TestCHASubclassesBuilt(t *testing.T) {
 	// Find Shape's class ID.
 	shapeCID, ok := classIDByName["Shape"]
 	if !ok {
-		t.Skip("Shape class not found (stale binary?)")
+		t.Fatal("Shape class not found in canonical compare_sample corpus binary")
 	}
 
 	// Shape should have subclasses (Circle, Square, Triangle).
@@ -170,7 +170,7 @@ func TestAsyncFunctionExists(t *testing.T) {
 		}
 	}
 	if asyncRef < 0 {
-		t.Skip("asyncCompute not in this sample (stale binary?)")
+		t.Fatal("asyncCompute not found in canonical compare_sample corpus binary")
 	}
 
 	// Verify Code object exists.
@@ -202,7 +202,7 @@ func TestAsyncFunctionExists(t *testing.T) {
 func countWithInline(csm *cluster.CodeSourceMapInfo) int {
 	count := 0
 	for _, e := range csm.Entries {
-		if len(e.InlineStack) > 0 {
+		if e.InlineDepth() > 0 {
 			count++
 		}
 	}

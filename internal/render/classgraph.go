@@ -28,6 +28,9 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 	funcOwner := make(map[string]string, len(funcs))
 	ownerMethodCount := make(map[string]int)
 	for _, f := range funcs {
+		if _, seen := funcOwner[f.Name]; seen {
+			continue
+		}
 		owner := f.Owner
 		if owner == "" {
 			owner = unowned
@@ -36,52 +39,65 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 		ownerMethodCount[owner]++
 	}
 
-	// Aggregate inter-class edges.
-	// For BLR (indirect) edges, attempt to resolve the target class via
-	// e.Via (the annotated call target name, e.g. "PP[36] foo" or
-	// "THR.allocateArray_ep"). If Via matches a known function name in
-	// funcOwner, use that function's owner as the destination class.
-	// This makes inter-class indirect calls (virtual dispatch, dispatch
-	// table) visible in the class graph. (P1-5 / G-014)
+	// Aggregate inter-class edges. Only endpoints present in funcs participate:
+	// a raw address or external runtime symbol is not an "unowned" Dart class.
+	// Known functions whose Owner is empty were mapped to unowned above.
 	type classEdge struct {
 		from, to string
 	}
 	classCounts := make(map[classEdge]int)
 	indirectCounts := make(map[classEdge]int) // separate count for indirect edges
-	for _, e := range edges {
-		srcOwner := funcOwner[e.FromFunc]
-		if srcOwner == "" {
-			srcOwner = unowned
+	incompleteSites := make(map[string]bool)
+	unknownCandidateSites := make(map[string]bool)
+	unsupportedSites := make(map[string]bool)
+	seenClassRelations := make(map[string]bool)
+	for edgeIndex, e := range edges {
+		srcOwner, ok := funcOwner[e.FromFunc]
+		if !ok {
+			continue
+		}
+		siteKey := callSitePopulationKey(e, edgeIndex)
+		if !isSupportedCallKind(e.Kind) {
+			unsupportedSites[siteKey] = true
+			continue
+		}
+		sem := inspectCallSite(e)
+		if sem.omittedCandidates() > 0 {
+			incompleteSites[siteKey] = true
+		}
+		if sem.candidateCountUnknown() {
+			unknownCandidateSites[siteKey] = true
 		}
 
-		// For BL/call edges, resolve target owner directly.
-		// For BLR/call_indirect edges, try to resolve via ResolvedTargets.
-		// x86_64 uses "call"/"call_indirect" edge kinds, ARM64 uses "bl"/"blr".
-		var dstOwner string
-		resolved := false
-		for _, t := range e.ResolvedTargets() {
+		// Resolve every semantic target owner. A polymorphic call can have
+		// implementations in several classes; keeping only the first candidate
+		// silently deletes valid class-level reachability. Deduplicate owners per
+		// call site so multiple implementations in one class count once.
+		dstOwners := make(map[string]bool)
+		for _, t := range concreteCallTargets(e) {
 			owner := funcOwner[t]
 			if owner != "" {
-				dstOwner = owner
-				resolved = true
-				break
+				dstOwners[owner] = true
 			}
 		}
-		if !resolved {
-			if e.Kind == "bl" || e.Kind == "call" {
-				dstOwner = unowned
-			} else {
-				continue // Can't resolve target class — skip this indirect edge
-			}
+		if len(dstOwners) == 0 {
+			continue
 		}
 
-		if srcOwner == dstOwner {
-			continue // skip intra-class calls
-		}
-		ce := classEdge{srcOwner, dstOwner}
-		classCounts[ce]++
-		if e.Kind == "blr" || e.Kind == "call_indirect" {
-			indirectCounts[ce]++
+		for dstOwner := range dstOwners {
+			if srcOwner == dstOwner {
+				continue // skip intra-class calls
+			}
+			relationKey := siteKey + "\x00" + dstOwner
+			if seenClassRelations[relationKey] {
+				continue
+			}
+			seenClassRelations[relationKey] = true
+			ce := classEdge{srcOwner, dstOwner}
+			classCounts[ce]++
+			if e.Kind == "blr" || e.Kind == "call_indirect" {
+				indirectCounts[ce]++
+			}
 		}
 	}
 
@@ -102,12 +118,17 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 		ranked = append(ranked, rankedClass{name, inv})
 	}
 	sort.Slice(ranked, func(i, j int) bool {
-		return ranked[i].involvement > ranked[j].involvement
+		if ranked[i].involvement != ranked[j].involvement {
+			return ranked[i].involvement > ranked[j].involvement
+		}
+		return ranked[i].name < ranked[j].name
 	})
 
 	renderSet := make(map[string]bool)
 	limit := len(ranked)
+	omittedClasses := 0
 	if maxNodes > 0 && limit > maxNodes {
+		omittedClasses = limit - maxNodes
 		limit = maxNodes
 	}
 	for _, rc := range ranked[:limit] {
@@ -173,10 +194,22 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 		}
 	}
 
-	for ce, count := range classCounts {
+	edgesSorted := make([]classEdge, 0, len(classCounts))
+	for ce := range classCounts {
 		if !renderSet[ce.from] || !renderSet[ce.to] {
 			continue
 		}
+		edgesSorted = append(edgesSorted, ce)
+	}
+	sort.Slice(edgesSorted, func(i, j int) bool {
+		if edgesSorted[i].from != edgesSorted[j].from {
+			return edgesSorted[i].from < edgesSorted[j].from
+		}
+		return edgesSorted[i].to < edgesSorted[j].to
+	})
+
+	for _, ce := range edgesSorted {
+		count := classCounts[ce]
 		fromID := dotID(ce.from)
 		toID := dotID(ce.to)
 
@@ -194,6 +227,21 @@ func ClassgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, tit
 				t.ExternalText, count)
 		}
 		fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
+	}
+	if len(incompleteSites) > 0 || len(unknownCandidateSites) > 0 {
+		label := fmt.Sprintf("class edges are a lower bound: %d polymorphic site(s) have unlisted candidates; %d site(s) have unknown candidate counts", len(incompleteSites), len(unknownCandidateSites))
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-completeness"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
+	}
+	if len(unsupportedSites) > 0 {
+		label := fmt.Sprintf("%d call site(s) have unsupported call kinds and were not aggregated into class relations", len(unsupportedSites))
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-unsupported-kind"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
+	}
+	if omittedClasses > 0 {
+		label := fmt.Sprintf("display truncated by maxNodes: %d participating class(es) and their incident relation(s) omitted", omittedClasses)
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00classgraph-display-truncation"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
 	}
 
 	b.WriteString("}\n")

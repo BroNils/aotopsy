@@ -3,7 +3,9 @@ package cluster
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,9 +33,10 @@ import (
 // So: the tests are driven by samplecorpus.Registry, and every per-binary
 // number lives in a committed record keyed by the input's SHA-256 -- the same
 // arrangement internal/analysis's golden test uses, for the same reason. A
-// different local binary skips rather than fails, because a different input is
-// not a regression. A MISSING record fails, because self-recording baselines
-// cannot catch anything.
+// different local binary FAILS: once a canonical corpus is populated, changing
+// the input under a stable filename is fixture drift, not a legitimate skip. A
+// MISSING record also fails, because self-recording baselines cannot catch
+// anything.
 //
 //	AOTOPSY_UPDATE_CORPUS=1 go test ./internal/cluster/ -run Corpus
 
@@ -77,24 +80,27 @@ type corpusSample struct {
 // this machine, after checking the file really is the version its name claims.
 func eachCorpusSample(t *testing.T, fn func(t *testing.T, s corpusSample)) {
 	t.Helper()
+	if err := samplecorpus.RequireCompleteCorpus(); err != nil {
+		if errors.Is(err, samplecorpus.ErrNoCorpus) {
+			t.Skip("no samples/ directory in this checkout")
+		}
+		t.Fatalf("sample corpus is incomplete or inconsistent: %v", err)
+	}
 	present := 0
 	for _, entry := range samplecorpus.Registry {
 		entry := entry
 		t.Run(entry.FileName(), func(t *testing.T) {
-			path := samplecorpus.Path(entry.FileName())
-			if path == "" {
-				t.Skip(samplecorpus.MissingMessage(entry))
+			path, err := samplecorpus.RequireSample(entry.FileName())
+			if err != nil {
+				t.Fatalf("resolve %s: %v", entry.FileName(), err)
 			}
 			present++
-			if entry.ProfileIncomplete != "" {
-				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
-			}
-			if entry.GroundTruth {
-				// An unstripped twin is the same program as its stripped
-				// counterpart, so its cluster facts are already pinned by that
-				// sample's record. Recording them twice would double the
-				// corpus for no extra coverage. See Sample.GroundTruth.
-				t.Skipf("%s: kembaran ground-truth, fakta cluster-nya sudah dijamin sampel terstripnya", entry.FileName())
+			if entry.SymbolOracle {
+				// Symbol-oracle builds exist to provide an ELF .symtab ground truth,
+				// not a second cluster baseline. True twins declare TwinOf; the
+				// standalone 3.10.7/3.11.0 oracles deliberately do not pretend their
+				// different-source stripped sample pins these facts.
+				t.Skipf("%s: symbol-oracle build; cluster corpus records cover analysis samples only", entry.FileName())
 			}
 			info := openSample(t, path)
 			if info.Version == nil || info.Version.DartVersion != entry.DartVersion {
@@ -160,12 +166,6 @@ func TestCorpusClusterFacts(t *testing.T) {
 				"  Record it deliberately, then read the diff before committing:\n"+
 				"    AOTOPSY_UPDATE_CORPUS=1 go test ./internal/cluster/ -run Corpus", recPath)
 		}
-		if want.InputSHA256 != got.InputSHA256 {
-			t.Skipf("samples/%s is a different binary than the record\n"+
-				"  record: %s\n  actual: %s\n"+
-				"  (a different input of the same Dart version is not a regression)",
-				s.FileName(), want.InputSHA256, got.InputSHA256)
-		}
 		compareCorpusRecords(t, want, got)
 	})
 }
@@ -207,7 +207,7 @@ func measureSample(t *testing.T, s corpusSample) corpusRecord {
 	if s.info.IsolateHeader != nil {
 		isoSize = s.info.IsolateHeader.TotalSize
 	}
-	if err := ReadFill(data, iso, s.info.Version, false, isoSize); err != nil {
+	if err := ReadFill(data, iso, s.info.Version, false, isoSize, dartfmt.Options{}); err != nil {
 		t.Fatalf("ReadFill: %v", err)
 	}
 	rec.Strings, rec.Named, rec.Codes = len(iso.Strings), len(iso.Named), len(iso.Codes)
@@ -261,6 +261,15 @@ func measureSample(t *testing.T, s corpusSample) corpusRecord {
 
 func compareCorpusRecords(t *testing.T, want, got corpusRecord) {
 	t.Helper()
+	if want.Sample != got.Sample {
+		t.Errorf("sample = %q, want %q", got.Sample, want.Sample)
+	}
+	if want.DartVersion != got.DartVersion {
+		t.Errorf("dart_version = %q, want %q", got.DartVersion, want.DartVersion)
+	}
+	if want.InputSHA256 != got.InputSHA256 {
+		t.Errorf("input_sha256 = %s, want %s -- corpus records are pinned to exact binaries", got.InputSHA256, want.InputSHA256)
+	}
 	type field struct {
 		name       string
 		want, got  int64
@@ -314,12 +323,49 @@ func writeCorpusRecord(t *testing.T, path string, rec corpusRecord) {
 
 func fileSHA256(t *testing.T, path string) string {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("open %s: %v", path, err)
 	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum)
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatalf("hash %s: %v", path, err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func TestCorpusRecordManifest(t *testing.T) {
+	want := make(map[string]struct{})
+	for _, s := range samplecorpus.Registry {
+		if !s.SymbolOracle {
+			want[s.FileName()+".json"] = struct{}{}
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join("testdata", "corpus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		got[entry.Name()] = struct{}{}
+	}
+	if len(got) != len(want) {
+		t.Errorf("cluster corpus record count = %d, want %d non-ground-truth records", len(got), len(want))
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("missing cluster corpus record %s", name)
+		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			t.Errorf("orphan cluster corpus record %s", name)
+		}
+	}
 }
 
 // TestCorpusHeaderFieldCount checks each sample's header shape against its own
@@ -443,7 +489,7 @@ func TestCorpusTypeClassIDsResolve(t *testing.T) {
 		if s.info.IsolateHeader != nil {
 			isoSize = s.info.IsolateHeader.TotalSize
 		}
-		if err := ReadFill(data, iso, s.info.Version, false, isoSize); err != nil {
+		if err := ReadFill(data, iso, s.info.Version, false, isoSize, dartfmt.Options{}); err != nil {
 			t.Fatalf("ReadFill: %v", err)
 		}
 

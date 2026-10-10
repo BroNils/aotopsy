@@ -34,16 +34,15 @@ import (
 func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	// Every version the table claims, not a sample of them: a row nobody
-	// checked is exactly how 2.10 and 2.18 went wrong.
-	versions := make([]string, 0, len(funcKindLayouts))
-	for v := range funcKindLayouts {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
-
-	for _, v := range versions {
+	// Every supported release, not merely every committed row. Iterating the
+	// table itself lets a newly-supported version with a missing row disappear
+	// from the drift gate entirely.
+	for _, v := range snapshot.SupportedVersions() {
 		t.Run(v, func(t *testing.T) {
+			layout, ok := funcKindLayouts[v]
+			if !ok {
+				t.Fatalf("supported Dart %s has no FunctionKind layout", v)
+			}
 			kinds, err := sdkFunctionKinds(v)
 			if err != nil {
 				t.Fatalf("could not read FOR_EACH_RAW_FUNCTION_KIND at %s: %v", v, err)
@@ -51,8 +50,6 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 			if len(kinds) == 0 {
 				t.Fatalf("no kinds parsed at %s", v)
 			}
-			layout := funcKindLayouts[v]
-
 			// KindBits width is BitLength(last ordinal).
 			wantMask := uint32(1)<<bits.Len(uint(len(kinds)-1)) - 1
 			if layout.mask != wantMask {
@@ -60,9 +57,26 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 					layout.mask, len(kinds), kinds[len(kinds)-1], wantMask)
 			}
 
-			// Every ordinal the table claims must name the kind the SDK has
-			// at that index.
-			for i, want := range layout.order {
+			// The production layout intentionally carries every raw SDK kind:
+			// downstream calling-convention decisions need to distinguish the
+			// stack-only kinds from register-eligible ones. Exact cardinality is
+			// therefore part of the contract; checking only the sparse ordinals
+			// already present would let a newly-added SDK kind disappear from the
+			// gate while the mask still happened to remain the same width.
+			if len(layout.known) != len(kinds) {
+				t.Fatalf("known FunctionKind rows = %d, SDK has %d exact-order kinds: %v",
+					len(layout.known), len(kinds), kinds)
+			}
+			ordinals := make([]int, 0, len(layout.known))
+			for i := range layout.known {
+				ordinals = append(ordinals, i)
+			}
+			sort.Ints(ordinals)
+			for wantOrdinal, i := range ordinals {
+				if i != wantOrdinal {
+					t.Fatalf("FunctionKind ordinal coverage is not contiguous: sorted ordinals=%v", ordinals)
+				}
+				want := layout.known[i]
 				if i >= len(kinds) {
 					t.Errorf("table claims ordinal %d but the SDK only has %d kinds", i, len(kinds))
 					break
@@ -72,6 +86,62 @@ func TestFunctionKindLayoutsMatchSDK(t *testing.T) {
 						i, want, got, kinds[i], kinds)
 					break
 				}
+			}
+		})
+	}
+}
+
+// TestFunctionKindTagFlagLayoutsMatchSDK pins the version-sensitive single-bit
+// flags that share kind_tag_ with Function kind/modifier. Function::is_ffi_native
+// is defined as is_native() && is_external(), so reading either neighbouring
+// SDK bit is a plausible-looking but incorrect FFI classification.
+func TestFunctionKindTagFlagLayoutsMatchSDK(t *testing.T) {
+	sdktest.SkipIfNoSDKTools(t)
+
+	for _, v := range snapshot.SupportedVersions() {
+		t.Run(v, func(t *testing.T) {
+			if _, ok := funcKindLayouts[v]; !ok {
+				t.Fatalf("supported Dart %s has no FunctionKind layout", v)
+			}
+			src, err := sdktest.SDKFileAtTag("runtime/vm/object.h", v)
+			if err != nil {
+				t.Fatalf("fetch object.h: %v", err)
+			}
+			macros, err := cmacro.ParseMacros(src)
+			if err != nil {
+				t.Fatalf("parse object.h macros: %v", err)
+			}
+			flags, err := cmacro.Expand(macros, "FOR_EACH_FUNCTION_KIND_BIT")
+			if err != nil {
+				t.Fatalf("expand FOR_EACH_FUNCTION_KIND_BIT: %v", err)
+			}
+			index := func(name string) int {
+				for i, got := range flags {
+					if got == name {
+						return i
+					}
+				}
+				return -1
+			}
+			staticIdx, nativeIdx, externalIdx := index("Static"), index("Native"), index("External")
+			if staticIdx < 0 || nativeIdx < 0 || externalIdx < 0 {
+				t.Fatalf("SDK flags missing Static/Native/External: %v", flags)
+			}
+			layout, ok := functionKindTagFlagLayoutFor(&snapshot.VersionProfile{DartVersion: v})
+			if !ok {
+				t.Fatal("no local kind_tag flag layout")
+			}
+			// ModifierBits occupies bits 14..15 at every supported version;
+			// TestKindTagModifierPositionMatchesSDK derives that independently.
+			const firstFlagBit = 16
+			if want := uint(firstFlagBit + staticIdx); layout.staticBit != want {
+				t.Errorf("Static bit = %d, SDK macro gives %d", layout.staticBit, want)
+			}
+			if want := uint(firstFlagBit + nativeIdx); layout.nativeBit != want {
+				t.Errorf("Native bit = %d, SDK macro gives %d", layout.nativeBit, want)
+			}
+			if want := uint(firstFlagBit + externalIdx); layout.externalBit != want {
+				t.Errorf("External bit = %d, SDK macro gives %d", layout.externalBit, want)
 			}
 		})
 	}
@@ -106,6 +176,17 @@ func TestConstructorOrdinalMovedIn212(t *testing.T) {
 	for _, v := range []string{"2.12.0", "2.18.0", "2.19.0", "3.9.2", "3.12.2"} {
 		if got := decodeFunctionKind(5, &snapshot.VersionProfile{DartVersion: v}); got != FunctionKindConstructor {
 			t.Errorf("%s ordinal 5 = %v, want FunctionKindConstructor", v, got)
+		}
+	}
+}
+
+func TestFfiTrampolineOrdinalIsNormalized(t *testing.T) {
+	if got := decodeFunctionKind(16, &snapshot.VersionProfile{DartVersion: "2.10.0"}); got != FunctionKindFfiTrampoline {
+		t.Errorf("2.10.0 ordinal 16 = %v, want FunctionKindFfiTrampoline", got)
+	}
+	for _, v := range []string{"2.12.0", "2.18.0", "2.19.0", "3.9.2", "3.12.2", "3.13.0"} {
+		if got := decodeFunctionKind(15, &snapshot.VersionProfile{DartVersion: v}); got != FunctionKindFfiTrampoline {
+			t.Errorf("%s ordinal 15 = %v, want FunctionKindFfiTrampoline", v, got)
 		}
 	}
 }
@@ -145,6 +226,24 @@ func sdkKindName(k FunctionKind) string {
 		return "ImplicitGetter"
 	case FunctionKindImplicitSetter:
 		return "ImplicitSetter"
+	case FunctionKindImplicitStaticGetter:
+		return "ImplicitStaticGetter"
+	case FunctionKindFieldInitializer:
+		return "FieldInitializer"
+	case FunctionKindMethodExtractor:
+		return "MethodExtractor"
+	case FunctionKindNoSuchMethodDispatcher:
+		return "NoSuchMethodDispatcher"
+	case FunctionKindInvokeFieldDispatcher:
+		return "InvokeFieldDispatcher"
+	case FunctionKindIrregexp:
+		return "IrregexpFunction"
+	case FunctionKindDynamicInvocationForwarder:
+		return "DynamicInvocationForwarder"
+	case FunctionKindFfiTrampoline:
+		return "FfiTrampoline"
+	case FunctionKindRecordFieldGetter:
+		return "RecordFieldGetter"
 	}
 	return "<unmapped>"
 }
@@ -157,9 +256,13 @@ func sdkKindName(k FunctionKind) string {
 // "narrower mask", which is one of the two silent failure modes this
 // gate exists to catch. It goes through the shared macro expander now.
 func sdkFunctionKinds(tag string) ([]string, error) {
-	src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", tag)
+	src, err := sdktest.SDKFileAtTag("runtime/vm/raw_object.h", tag)
 	if err != nil {
 		return nil, err
 	}
-	return cmacro.Expand(cmacro.ParseMacros(src), "FOR_EACH_RAW_FUNCTION_KIND")
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return nil, err
+	}
+	return cmacro.Expand(macros, "FOR_EACH_RAW_FUNCTION_KIND")
 }

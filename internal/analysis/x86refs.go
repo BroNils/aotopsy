@@ -3,15 +3,16 @@ package analysis
 import (
 	"aotopsy/internal/arch/x86"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/sdk"
 )
 
 // DumpFuncDisasm finds the range containing targetVA and prints a full
@@ -30,7 +31,7 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 	funcName := fs.Name
 	funcVA := fs.VA
 	funcCode := fs.Code
-	fmt.Fprintf(os.Stderr, "found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
+	cli.Errf("found %s @ 0x%x, size=%d, target=0x%x\n", funcName, funcVA, r.Size, targetVA)
 	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
 		if d.Bad {
 			fmt.Printf("0x%x: <decode error>\n", d.VA)
@@ -40,14 +41,17 @@ func DumpFuncDisasm(targetVA uint64, ranges []cluster.CodeRange, code []byte, co
 		annotation := ""
 		for _, arg := range d.Inst.Args {
 			if mem, ok := arg.(x86asm.Mem); ok {
-				if mem.Base == x86asm.R15 {
-					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); static {
+					poolIdx, idxOK := disasm.X64PoolIndex(mem.Disp)
+					if !idxOK {
+						continue
+					}
 					if disp, ok := poolDisplay[poolIdx]; ok {
 						annotation = "  ; [pp+idx=" + fmt.Sprint(poolIdx) + "] " + disp
 					} else {
 						annotation = fmt.Sprintf("  ; [pp+idx=%d]", poolIdx)
 					}
-				} else if mem.Base == x86asm.R14 {
+				} else if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); static {
 					annotation = fmt.Sprintf("  ; [THR+0x%x]", mem.Disp)
 				}
 			}
@@ -88,7 +92,7 @@ func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 				}
 			}
 			if maxHits > 0 && hits >= maxHits {
-				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", maxHits)
+				cli.Errf("stopping at --max=%d hits\n", maxHits)
 				capped = true
 				return false
 			}
@@ -98,7 +102,7 @@ func FindCallersOf(targetVA uint64, ranges []cluster.CodeRange, code []byte, cod
 			return nil
 		}
 	}
-	fmt.Fprintf(os.Stderr, "total callers of 0x%x: %d\n", targetVA, hits)
+	cli.Errf("total callers of 0x%x: %d\n", targetVA, hits)
 	return nil
 }
 
@@ -172,7 +176,7 @@ func ScanHashShapedFunctions(ranges []cluster.CodeRange, code []byte, codeOff, c
 		fmt.Printf("%s @ 0x%x  size=%d  hashOps=%d  rotateOps=%d  totalInstrs=%d  density=%.2f\n",
 			res.funcName, res.funcVA, res.size, res.hashOps, res.rotateOps, res.total, density)
 	}
-	fmt.Fprintf(os.Stderr, "total functions with >= %d hash-shaped ops: %d\n", minOps, len(results))
+	cli.Errf("total functions with >= %d hash-shaped ops: %d\n", minOps, len(results))
 	return nil
 }
 
@@ -203,10 +207,16 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 			if !d.Bad {
 				for _, arg := range d.Inst.Args {
 					mem, ok := arg.(x86asm.Mem)
-					if !ok || mem.Base != x86asm.R15 {
+					if !ok {
 						continue
 					}
-					poolIdx, _ := disasm.X64PoolIndex(mem.Disp)
+					if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+						continue
+					}
+					poolIdx, idxOK := disasm.X64PoolIndex(mem.Disp)
+					if !idxOK {
+						continue
+					}
 					display, resolved := poolDisplay[poolIdx]
 					if !resolved {
 						continue
@@ -219,7 +229,7 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 				}
 			}
 			if maxHits > 0 && hits >= maxHits {
-				fmt.Fprintf(os.Stderr, "stopping at --max=%d hits\n", maxHits)
+				cli.Errf("stopping at --max=%d hits\n", maxHits)
 				capped = true
 				return false
 			}
@@ -229,6 +239,6 @@ func ScanPoolRefs(ranges []cluster.CodeRange, code []byte, codeOff, codeVA uint6
 			return nil
 		}
 	}
-	fmt.Fprintf(os.Stderr, "total hits: %d\n", hits)
+	cli.Errf("total hits: %d\n", hits)
 	return nil
 }

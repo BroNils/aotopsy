@@ -29,9 +29,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Go and staticcheck are pinned together, to exact versions. staticcheck
+      # reads the compiler's export data, and a release only understands the
+      # formats of the Go versions it was built against: `stable` moved from
+      # 1.27.1 to 1.27.2 and staticcheck@latest could no longer import the
+      # standard library ("export data version 5 is greater than maximum
+      # supported version 4"), so a patch release turned this job red with
+      # no change in the repo. staticcheck v0.8.1 (2026.2.1) needs Go 1.26+.
+      # Bump both in one commit, and check the new pair locally first.
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: '1.26.9'
           cache: true
       - name: gofmt
         run: |
@@ -48,7 +56,7 @@ jobs:
       # conditions, misuses of the standard library.
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           "$(go env GOPATH)/bin/staticcheck" ./...
 
   test:
@@ -77,6 +85,106 @@ jobs:
       # for whoever next added a test in the middle.
       - name: Test
         run: go test ./... -count=1 -shuffle=on -timeout 20m
+
+  # SDK-derived tables need an external ground truth. The ordinary test matrix
+  # intentionally runs without network-dependent gates, so give those gates a
+  # dedicated authenticated job instead of letting AOTOPSY_TEST_SDK remain
+  # unset and reporting green after every drift check skipped.
+  sdk-drift:
+    name: SDK drift gates
+    runs-on: ubuntu-latest
+    # A pull request from a branch of this repository is the same commit the
+    # push to that branch already checks, and it could not reuse that push's
+    # cache anyway: a cache is only visible to the ref that wrote it and to the
+    # default branch. Running both just doubles the API traffic. Pull requests
+    # from forks still run the gate.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # Filling an empty cache takes most of the hourly request quota (about 900
+    # requests), so two cold runs at once cannot both finish. Queue them.
+    concurrency:
+      group: sdk-drift
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      # Every SDK file these gates read is addressed by an exact release tag,
+      # so it never changes, yet the disk cache lived in runner.temp and was
+      # thrown away after each run. Each run then re-fetched hundreds of files
+      # from the GitHub API, and a push plus a pull request running together
+      # used up the 1000 requests/hour the job token gets ("API rate limit
+      # exceeded for installation"). Keep the cache between runs. Entries
+      # carry their own provenance envelope, which sdktest checks on read.
+      - name: Restore SDK cache
+        id: sdkrestore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/aotopsy-sdk-cache
+          key: aotopsy-sdk-${{ runner.os }}-none
+          restore-keys: |
+            aotopsy-sdk-${{ runner.os }}-
+      - name: Verify SDK-derived tests
+        env:
+          AOTOPSY_TEST_SDK: '1'
+          AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          go test -p 1 -v -count=1 -timeout 30m \
+            ./internal/cluster \
+            ./internal/disasm \
+            ./internal/evidence \
+            ./internal/sdk \
+            ./internal/sdktest \
+            ./internal/snapshot \
+            ./internal/strutil \
+            ./internal/typetrack \
+            ./internal/vmtables | tee "$log"
+          # Sentinel PASS lines make an accidentally all-skipped SDK run fail
+          # instead of reporting green after a test rename/package omission.
+          grep -q -- '--- PASS: TestEvidenceSDKReferencesMatchExactSDK' "$log"
+          grep -q -- '--- PASS: TestDartIdentifierAlphabetMatchesSDK' "$log"
+          grep -q -- '--- PASS: TestWireDimensionsMatchSDK' "$log"
+          grep -q -- '--- PASS: TestArgumentsDescriptorCountOffsetMatchesSDK' "$log"
+          grep -q -- '--- PASS: TestClosureEntryPointDispMatchesSDK' "$log"
+      - name: Verify generated SDK tables
+        env:
+          AOTOPSY_TEST_SDK: '1'
+          AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          go run ./tools/extract_thr.go
+          -check
+          -check-objectstore
+          -check-stubs
+          -check-roots
+          -check-classid-tag
+          -check-runtime-entries
+          -check-stub-offsets
+      # Keyed by the list of cached files, so a new cache is only written when
+      # the set grew, and written even if a step above failed: a run that hit
+      # the quota still leaves the next one further along instead of at zero.
+      - name: Fingerprint SDK cache
+        id: sdkcache
+        if: always()
+        env:
+          AOTOPSY_SDK_CACHE_DIR: ${{ runner.temp }}/aotopsy-sdk-cache
+        run: |
+          if [ -d "$AOTOPSY_SDK_CACHE_DIR" ]; then
+            h=$(cd "$AOTOPSY_SDK_CACHE_DIR" && find . -type f | LC_ALL=C sort | sha256sum | cut -c1-16)
+            echo "hash=$h" >> "$GITHUB_OUTPUT"
+          fi
+      # Skipped when the cache that was restored already holds exactly these
+      # files; saving an existing key only produces a warning.
+      - name: Save SDK cache
+        if: always() && steps.sdkcache.outputs.hash != '' && steps.sdkrestore.outputs.cache-matched-key != format('aotopsy-sdk-{0}-{1}', runner.os, steps.sdkcache.outputs.hash)
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/aotopsy-sdk-cache
+          key: aotopsy-sdk-${{ runner.os }}-${{ steps.sdkcache.outputs.hash }}
 
   race-coverage:
     name: race + coverage (linux/amd64)

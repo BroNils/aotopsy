@@ -21,13 +21,16 @@ func readFillStrings(s *dartfmt.Stream, cm *ClusterMeta, oldFormat bool, ct *sna
 	// In old format, the CID determines one-byte vs two-byte for the entire cluster.
 	cidIsTwoByte := oldFormat && ct != nil && cm.CID == ct.TwoByteString
 
-	strings := make([]ParsedString, 0, count)
+	strings := make([]ParsedString, 0, initialCaptureCap(cm.Count, s.Remaining()))
 	ref := cm.StartRef
 
 	for i := 0; i < count; i++ {
 		encoded, err := s.ReadUnsigned()
 		if err != nil {
 			return strings, fmt.Errorf("string %d/%d encoded: %w", i, count, err)
+		}
+		if err := validateFillLength(cm, int64(i), encoded, "string"); err != nil {
+			return strings, err
 		}
 
 		var length int
@@ -83,7 +86,10 @@ func readFillStrings(s *dartfmt.Stream, cm *ClusterMeta, oldFormat bool, ct *sna
 //   - CID decode: uses DecodeTags (bits 12-31, 20-bit mask) for v3.x+
 //     (was hardcoded >> 16 & 0xFFFF, wrong for CIDs > 65535 — P0-4/D-002)
 func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, dataImageObjStart int64, profile *snapshot.VersionProfile, isVM bool) []ParsedString {
-	classIDTagPos, classIDTagSize := snapshot.ClassIdTagLayout(profile.DartVersion)
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 {
 		return nil
 	}
@@ -121,11 +127,22 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		// Delta sequence: 1, 2, 2, 2... → runningOffset: 16, 48, 80...
 		// But strings are at 32, 64, 96... = runningOffset + 16.
 		// Fix: add kHeaderSize (= align = 16) to objPos.
-		runningOffset += cm.Lengths[i] << alignShift
-		objPos := dataImageObjStart + runningOffset + headerAdjust
+		nextOffset, ok := advanceRODataOffset(runningOffset, cm.Lengths[i], alignShift)
+		if !ok {
+			break
+		}
+		runningOffset = nextOffset
+		objPos, ok := checkedAddNonnegativeInt64(dataImageObjStart, runningOffset)
+		if !ok {
+			break
+		}
+		objPos, ok = checkedAddNonnegativeInt64(objPos, headerAdjust)
+		if !ok {
+			break
+		}
 
 		// Need at least 16 bytes for header (tags + length).
-		if objPos+16 > int64(len(data)) {
+		if len(data) < 16 || objPos > int64(len(data))-16 {
 			ref++
 			continue
 		}
@@ -167,7 +184,7 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 		var value string
 		if isTwoByte {
 			nbytes := strLen * 2
-			if dataStart+nbytes > int64(len(data)) {
+			if dataStart < 0 || dataStart > int64(len(data)) || nbytes > int64(len(data))-dataStart {
 				strings = append(strings, ParsedString{RefID: ref, Value: "", IsOneByte: false})
 				ref++
 				continue
@@ -179,7 +196,7 @@ func extractRODataStrings(data []byte, cm *ClusterMeta, ct *snapshot.CIDTable, d
 			}
 			value = string(runes)
 		} else {
-			if dataStart+strLen > int64(len(data)) {
+			if dataStart < 0 || dataStart > int64(len(data)) || strLen > int64(len(data))-dataStart {
 				strings = append(strings, ParsedString{RefID: ref, Value: "", IsOneByte: true})
 				ref++
 				continue

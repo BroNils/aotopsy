@@ -3,6 +3,7 @@ package cluster
 import (
 	"testing"
 
+	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
 )
 
@@ -92,6 +93,147 @@ func TestTypeClassIDDecode(t *testing.T) {
 			t.Errorf("%s: shift %d also yields %d, so the shifts are indistinguishable",
 				c.name, other, classID)
 		}
+	}
+}
+
+func TestDecodeTypeNullabilityAcrossPackedLayouts(t *testing.T) {
+	cases := []struct {
+		name  string
+		shift uint
+		raw   uint64
+		want  TypeNullability
+	}{
+		{"pre-3.5 nullable", 4, 0, TypeNullabilityNullable},
+		{"pre-3.5 non-nullable", 4, 1, TypeNullabilityNonNullable},
+		{"pre-3.5 legacy", 4, 2, TypeNullabilityLegacy},
+		{"pre-3.5 invalid", 4, 3, TypeNullabilityUnknown},
+		{"3.5+ nullable", 3, 0, TypeNullabilityNullable},
+		{"3.5+ non-nullable", 3, 1, TypeNullabilityNonNullable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := decodeTypeNullability(c.raw, c.shift); got != c.want {
+				t.Fatalf("decodeTypeNullability(raw=%d, shift=%d) = %v, want %v", c.raw, c.shift, got, c.want)
+			}
+		})
+	}
+}
+
+func TestReadTypeParameterScalarVersionedLayouts(t *testing.T) {
+	t.Run("2.10 token position and implicit base zero", func(t *testing.T) {
+		profile := &snapshot.VersionProfile{
+			DartVersion:         "2.10.0",
+			CIDs:                &snapshot.CIDTable{Function: 6},
+			HasTypeParamClassId: true,
+			TypeHasTokenPos:     true,
+		}
+		// class-id 6, token_pos 0, index 2, nullable combined byte 0.
+		s := dartfmt.NewStream([]byte{198, 192, 194, 0})
+		var state scalarState
+		ops := []ScalarOp{OpTagged32, OpTagged32, OpInt16, OpUint8}
+		for i, op := range ops {
+			if err := readTypeParameterScalar(s, i, &state, profile, op); err != nil {
+				t.Fatalf("scalar %d: %v", i, err)
+			}
+		}
+		if !state.typeParamCaptured || !state.typeParamIsFunction || state.typeParamBase != 0 || state.typeParamIndex != 2 {
+			t.Fatalf("2.10 metadata = %+v", state)
+		}
+		if state.typeParamNullability != TypeNullabilityNullable {
+			t.Fatalf("2.10 nullability = %v, want nullable", state.typeParamNullability)
+		}
+	})
+
+	t.Run("2.13 wide base/index with class id", func(t *testing.T) {
+		profile := &snapshot.VersionProfile{
+			DartVersion:          "2.13.0",
+			CIDs:                 &snapshot.CIDTable{Function: 6},
+			HasTypeParamClassId:  true,
+			TypeParamByteScalars: true,
+			TypeParamWideScalars: true,
+		}
+		// Small signed VLEs encode as endByteMarker(192)+value. The final
+		// flags byte is raw: class-id 6, base 2, index 3, non-nullable flags 1.
+		s := dartfmt.NewStream([]byte{198, 194, 195, 1})
+		var state scalarState
+		ops := []ScalarOp{OpTagged32, OpUint16, OpUint16, OpUint8}
+		for i, op := range ops {
+			if err := readTypeParameterScalar(s, i, &state, profile, op); err != nil {
+				t.Fatalf("scalar %d: %v", i, err)
+			}
+		}
+		if !state.typeParamCaptured || !state.typeParamIsFunction || state.typeParamBase != 2 || state.typeParamIndex != 3 {
+			t.Fatalf("2.13 metadata = %+v", state)
+		}
+		if state.typeParamNullability != TypeNullabilityNonNullable {
+			t.Fatalf("2.13 nullability = %v, want non-nullable", state.typeParamNullability)
+		}
+	})
+
+	t.Run("3.1 kind moved into flags", func(t *testing.T) {
+		profile := &snapshot.VersionProfile{
+			DartVersion: "3.1.0",
+			CIDs:        &snapshot.CIDTable{Function: 6},
+		}
+		// base=0, index=1 as uint16 VLEs; bit 4 marks a function type
+		// parameter and low bits 0 encode nullable.
+		s := dartfmt.NewStream([]byte{192, 193, 0x10})
+		var state scalarState
+		ops := []ScalarOp{OpUint16, OpUint16, OpUint8}
+		for i, op := range ops {
+			if err := readTypeParameterScalar(s, i, &state, profile, op); err != nil {
+				t.Fatalf("scalar %d: %v", i, err)
+			}
+		}
+		if !state.typeParamCaptured || !state.typeParamIsFunction || state.typeParamBase != 0 || state.typeParamIndex != 1 {
+			t.Fatalf("3.1 metadata = %+v", state)
+		}
+		if state.typeParamNullability != TypeNullabilityNullable {
+			t.Fatalf("3.1 nullability = %v, want nullable", state.typeParamNullability)
+		}
+	})
+
+	t.Run("3.5 one-bit nullability moves function bit", func(t *testing.T) {
+		profile := &snapshot.VersionProfile{
+			DartVersion: "3.5.0",
+			CIDs:        &snapshot.CIDTable{Function: 6},
+		}
+		// TypeStateBits::kNextBit is 3 from Dart 3.5 onward. Bit 3 marks
+		// a function type parameter; low bit 1 is non-nullable.
+		s := dartfmt.NewStream([]byte{192, 193, 0x09})
+		var state scalarState
+		ops := []ScalarOp{OpUint16, OpUint16, OpUint8}
+		for i, op := range ops {
+			if err := readTypeParameterScalar(s, i, &state, profile, op); err != nil {
+				t.Fatalf("scalar %d: %v", i, err)
+			}
+		}
+		if !state.typeParamCaptured || !state.typeParamIsFunction || state.typeParamIndex != 1 {
+			t.Fatalf("3.5 metadata = %+v", state)
+		}
+		if state.typeParamNullability != TypeNullabilityNonNullable {
+			t.Fatalf("3.5 nullability = %v, want non-nullable", state.typeParamNullability)
+		}
+	})
+}
+
+func TestTypeParameterSerializedNameBoundary(t *testing.T) {
+	legacy := snapshot.ProfileForVersion("2.13.0")
+	if legacy == nil || legacy.CIDs == nil {
+		t.Fatal("missing Dart 2.13.0 profile")
+	}
+	legacySpec := GetFillSpec(legacy.CIDs.TypeParameter, &ClusterMeta{CID: legacy.CIDs.TypeParameter}, legacy)
+	if legacySpec.NumRefs != 5 || legacySpec.NameIdx != 1 {
+		t.Fatalf("2.13 TypeParameter spec = refs=%d nameIdx=%d, want 5/1", legacySpec.NumRefs, legacySpec.NameIdx)
+	}
+
+	modern := snapshot.ProfileForVersion("2.14.0")
+	if modern == nil || modern.CIDs == nil {
+		t.Fatal("missing Dart 2.14.0 profile")
+	}
+	modernSpec := GetFillSpec(modern.CIDs.TypeParameter, &ClusterMeta{CID: modern.CIDs.TypeParameter}, modern)
+	if modernSpec.NumRefs != 3 || modernSpec.NameIdx != -1 {
+		t.Fatalf("2.14 TypeParameter spec = refs=%d nameIdx=%d, want 3/-1", modernSpec.NumRefs, modernSpec.NameIdx)
 	}
 }
 

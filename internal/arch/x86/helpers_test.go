@@ -1,6 +1,7 @@
 package x86
 
 import (
+	"math"
 	"testing"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -62,6 +63,20 @@ func TestCanonRegRejectsNonGP(t *testing.T) {
 	}
 }
 
+func TestStaticBaseDispRejectsFoldedIndex(t *testing.T) {
+	plain := x86asm.Mem{Base: x86asm.R15, Disp: 0x27}
+	if disp, ok := StaticBaseDisp(plain, 15); !ok || disp != 0x27 {
+		t.Fatalf("plain base+disp = (%#x,%v), want (0x27,true)", disp, ok)
+	}
+	indexed := x86asm.Mem{Base: x86asm.R15, Index: x86asm.RCX, Scale: 8, Disp: 0x27}
+	if disp, ok := StaticBaseDisp(indexed, 15); ok {
+		t.Fatalf("indexed address fabricated static displacement %#x", disp)
+	}
+	if _, ok := StaticBaseDisp(plain, 14); ok {
+		t.Fatal("wrong base register accepted as static base+disp")
+	}
+}
+
 // A rel displacement is measured from the END of the instruction, and it is
 // signed. The copies this replaced disagreed in form -- one computed in
 // int64, the others added a wrapped uint64 -- so a backward branch is the
@@ -95,6 +110,17 @@ func TestRelTargetIsSignedAndEndRelative(t *testing.T) {
 	}
 }
 
+func TestRelTargetRejectsAddressWrap(t *testing.T) {
+	call := x86asm.Inst{Op: x86asm.CALL, Len: 5, Args: [4]x86asm.Arg{x86asm.Rel(16)}}
+	if target, ok := RelTarget(call, math.MaxUint64-2, 5); ok {
+		t.Fatalf("overflowing relative target resolved to %#x", target)
+	}
+	back := x86asm.Inst{Op: x86asm.CALL, Len: 5, Args: [4]x86asm.Arg{x86asm.Rel(-16)}}
+	if target, ok := RelTarget(back, 4, 5); ok {
+		t.Fatalf("underflowing relative target resolved to %#x", target)
+	}
+}
+
 func TestIsCondJump(t *testing.T) {
 	for _, op := range []x86asm.Op{x86asm.JE, x86asm.JNE, x86asm.JA, x86asm.JBE, x86asm.JRCXZ} {
 		if !IsCondJump(op) {
@@ -104,6 +130,32 @@ func TestIsCondJump(t *testing.T) {
 	for _, op := range []x86asm.Op{x86asm.JMP, x86asm.CALL, x86asm.RET, x86asm.MOV, x86asm.CMP} {
 		if IsCondJump(op) {
 			t.Errorf("%v is not a conditional jump", op)
+		}
+	}
+}
+
+func TestIsSemanticBarrier(t *testing.T) {
+	for _, op := range []x86asm.Op{x86asm.UD2, x86asm.HLT} {
+		if !IsSemanticBarrier(x86asm.Inst{Op: op}) {
+			t.Errorf("%v should be a semantic barrier", op)
+		}
+	}
+	int3, err := x86asm.Decode([]byte{0xcc}, 64)
+	if err != nil {
+		t.Fatalf("decode int3: %v", err)
+	}
+	if int3.Op != x86asm.INT {
+		t.Fatalf("0xCC decoded as %v, want INT", int3.Op)
+	}
+	if !IsSemanticBarrier(int3) {
+		t.Error("INT $0x3 (0xCC) should be a semantic barrier")
+	}
+	if IsSemanticBarrier(x86asm.Inst{Op: x86asm.INT, Args: [4]x86asm.Arg{x86asm.Imm(0x80)}}) {
+		t.Error("INT $0x80 is not a Dart AOT break filler")
+	}
+	for _, op := range []x86asm.Op{x86asm.NOP, x86asm.CALL, x86asm.RET, x86asm.JMP} {
+		if IsSemanticBarrier(x86asm.Inst{Op: op}) {
+			t.Errorf("%v is not a semantic barrier", op)
 		}
 	}
 }
@@ -149,5 +201,134 @@ func TestDstRegsOfInstX86(t *testing.T) {
 	idivInst := x86asm.Inst{Op: x86asm.IDIV, Args: [4]x86asm.Arg{x86asm.RCX, nil, nil, nil}}
 	if dsts := DstRegsOfInst(idivInst); len(dsts) != 2 || dsts[0] != 0 || dsts[1] != 2 {
 		t.Errorf("IDIV RCX dsts = %v, want [0, 2]", dsts)
+	}
+
+	oneMul := x86asm.Inst{Op: x86asm.MUL, Args: [4]x86asm.Arg{x86asm.RBX, nil, nil, nil}}
+	if dsts := DstRegsOfInst(oneMul); len(dsts) != 2 || dsts[0] != 0 || dsts[1] != 2 {
+		t.Errorf("MUL RBX dsts = %v, want [0, 2]", dsts)
+	}
+	oneIMul := x86asm.Inst{Op: x86asm.IMUL, Args: [4]x86asm.Arg{x86asm.R11, nil, nil, nil}}
+	if dsts := DstRegsOfInst(oneIMul); len(dsts) != 2 || dsts[0] != 0 || dsts[1] != 2 {
+		t.Errorf("IMUL R11 dsts = %v, want [0, 2]", dsts)
+	}
+	// Byte one-operand forms use AX, not RDX:RAX. Keeping RDX in the write set
+	// loses unrelated RDX provenance on valid byte arithmetic.
+	for _, tc := range []struct {
+		name string
+		code []byte
+	}{
+		{"MUL BL", []byte{0xF6, 0xE3}},
+		{"IMUL BL", []byte{0xF6, 0xEB}},
+		{"DIV BL", []byte{0xF6, 0xF3}},
+		{"IDIV BL", []byte{0xF6, 0xFB}},
+		{"MUL byte ptr [RBX]", []byte{0xF6, 0x23}},
+	} {
+		inst, err := x86asm.Decode(tc.code, 64)
+		if err != nil {
+			t.Fatalf("decode %s: %v", tc.name, err)
+		}
+		if dsts := DstRegsOfInst(inst); len(dsts) != 1 || dsts[0] != 0 {
+			t.Errorf("%s dsts = %v, want [0]", tc.name, dsts)
+		}
+	}
+	bt := x86asm.Inst{Op: x86asm.BT, Args: [4]x86asm.Arg{x86asm.RAX, x86asm.R11, nil, nil}}
+	if dsts := DstRegsOfInst(bt); len(dsts) != 0 {
+		t.Errorf("BT RAX,R11 dsts = %v, want nil", dsts)
+	}
+	xchg := x86asm.Inst{Op: x86asm.XCHG, Args: [4]x86asm.Arg{x86asm.R8, x86asm.R9, nil, nil}}
+	if dsts := DstRegsOfInst(xchg); len(dsts) != 2 || dsts[0] != 8 || dsts[1] != 9 {
+		t.Errorf("XCHG R8,R9 dsts = %v, want [8,9]", dsts)
+	}
+	xadd := x86asm.Inst{Op: x86asm.XADD, Args: [4]x86asm.Arg{x86asm.R10, x86asm.R11, nil, nil}}
+	if dsts := DstRegsOfInst(xadd); len(dsts) != 2 || dsts[0] != 10 || dsts[1] != 11 {
+		t.Errorf("XADD R10,R11 dsts = %v, want [10,11]", dsts)
+	}
+}
+
+func TestLoopFamilyIsConditionalAndWritesCounter(t *testing.T) {
+	for _, op := range []x86asm.Op{x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE} {
+		if !IsCondJump(op) {
+			t.Errorf("%v must be classified as conditional control flow", op)
+		}
+		inst := x86asm.Inst{Op: op}
+		if dsts := DstRegsOfInst(inst); len(dsts) != 1 || dsts[0] != 1 {
+			t.Errorf("%v dsts = %v, want [1] (RCX counter)", op, dsts)
+		}
+	}
+}
+
+func TestDstRegsCallTargetIsReadAndHighByteWriteKillsParent(t *testing.T) {
+	call := x86asm.Inst{Op: x86asm.CALL, Args: [4]x86asm.Arg{x86asm.RDI, nil, nil, nil}}
+	if got := DstRegsOfInst(call); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("CALL RDI writes = %v, want [4] (RSP only; target RDI is read)", got)
+	}
+
+	movAH := x86asm.Inst{Op: x86asm.MOV, Args: [4]x86asm.Arg{x86asm.AH, x86asm.Imm(1), nil, nil}}
+	if got := DstRegsOfInst(movAH); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("MOV AH,1 writes = %v, want [0] to invalidate RAX family", got)
+	}
+	// Value propagation must remain stricter: AH is not a low-width alias of RAX.
+	if got := CanonReg(x86asm.AH); got != -1 {
+		t.Fatalf("CanonReg(AH) = %d, want -1", got)
+	}
+}
+
+func TestDstRegsImplicitStackPointerWrites(t *testing.T) {
+	push, err := x86asm.Decode([]byte{0x55}, 64) // PUSH RBP
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DstRegsOfInst(push); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("PUSH writes = %v, want [4] (RSP)", got)
+	}
+
+	pop, err := x86asm.Decode([]byte{0x41, 0x5b}, 64) // POP R11
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DstRegsOfInst(pop); len(got) != 2 || got[0] != 11 || got[1] != 4 {
+		t.Fatalf("POP R11 writes = %v, want [11 4]", got)
+	}
+
+	ret, err := x86asm.Decode([]byte{0xc3}, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DstRegsOfInst(ret); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("RET writes = %v, want [4] (RSP)", got)
+	}
+}
+
+func TestDstRegsImplicitStringMoveAndSignExtendWrites(t *testing.T) {
+	plain, err := x86asm.Decode([]byte{0xA4}, 64) // MOVSB
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DstRegsOfInst(plain); len(got) != 2 || got[0] != 6 || got[1] != 7 {
+		t.Fatalf("MOVSB writes = %v, want [6 7] (RSI,RDI)", got)
+	}
+
+	rep, err := x86asm.Decode([]byte{0xF3, 0xA4}, 64) // REP MOVSB
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DstRegsOfInst(rep); len(got) != 3 || got[0] != 6 || got[1] != 7 || got[2] != 1 {
+		t.Fatalf("REP MOVSB writes = %v, want [6 7 1] (RSI,RDI,RCX)", got)
+	}
+
+	for _, tc := range []struct {
+		bytes []byte
+		name  string
+	}{
+		{[]byte{0x99}, "CDQ"},
+		{[]byte{0x48, 0x99}, "CQO"},
+	} {
+		inst, err := x86asm.Decode(tc.bytes, 64)
+		if err != nil {
+			t.Fatalf("decode %s: %v", tc.name, err)
+		}
+		if got := DstRegsOfInst(inst); len(got) != 1 || got[0] != 2 {
+			t.Fatalf("%s writes = %v, want [2] (RDX)", tc.name, got)
+		}
 	}
 }

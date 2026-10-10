@@ -10,7 +10,7 @@ func dispatchFIR(linkReg string, srcs []struct {
 	src, target string
 	call        bool
 }) *FuncIR {
-	fir := &FuncIR{LinkReg: linkReg, ArgRegs: []string{"a"}}
+	fir := &FuncIR{DartVersion: "3.12.2", LinkReg: linkReg, ArgRegs: []string{"a"}}
 	var ins []Instr
 	for _, s := range srcs {
 		i := Instr{Src: s.src, Target: s.target}
@@ -27,7 +27,10 @@ func dispatchFIR(linkReg string, srcs []struct {
 // Scaled))` assembles to a load through x21 followed by `blr x30`, with the
 // selector in the `add`/`sub` that set LR.
 func TestARM64DispatchCallRecovery(t *testing.T) {
-	origin := sdk.DispatchTableOriginElement(true)
+	origin, ok := sdk.DispatchTableOriginElement("3.12.2", true)
+	if !ok {
+		t.Fatal("missing 3.12.2 ARM64 dispatch-table origin")
+	}
 
 	t.Run("add form", func(t *testing.T) {
 		fir := dispatchFIR("x30", []struct {
@@ -100,17 +103,124 @@ func TestARM64DispatchCallRecovery(t *testing.T) {
 			t.Errorf("selector = %d, want unknown", got.DispatchSelector)
 		}
 	})
+
+	// 2.10/2.12 take cid_reg as a free Register parameter and mutate it in
+	// place; LR only receives the loaded code target. A modern-only x30 index
+	// assumption misses these calls entirely.
+	t.Run("2.12 legacy in-place cid register", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"sub x7, x7, #0x20", "", false},
+			{"ldr x30, [x21,x7,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		fir.DartVersion = "2.12.0"
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[2]
+		if !got.IsDispatchCall {
+			t.Fatal("legacy dispatch call was not recognised")
+		}
+		if want := origin - 0x20; got.DispatchSelector != want {
+			t.Errorf("selector = %d, want %d", got.DispatchSelector, want)
+		}
+	})
+
+	t.Run("modern SDK rejects legacy index register", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"sub x7, x7, #0x20", "", false},
+			{"ldr x30, [x21,x7,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		annotateDispatchCalls(fir)
+		if fir.Blocks[0].Instrs[2].IsDispatchCall {
+			t.Fatal("modern SDK accepted legacy in-place dispatch index register")
+		}
+	})
+
+	t.Run("large selector materialized through TMP2", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x30, x0, x17", "", false},
+			{"ldr x30, [x21,x30,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		fir.Blocks[0].Instrs[0].DefRegs = []string{"x17"}
+		fir.Blocks[0].Instrs[1].DefRegs = []string{"x30"}
+		fir.Blocks[0].Instrs[2].DefRegs = []string{"x30"}
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall {
+			t.Fatal("TMP2 large-selector call was not recognised")
+		}
+		if want := 0x1388 + origin; got.DispatchSelector != want {
+			t.Fatalf("selector = %d, want %d", got.DispatchSelector, want)
+		}
+	})
+
+	t.Run("2.12 large selector materialized through TMP2", func(t *testing.T) {
+		legacyOrigin, ok := sdk.DispatchTableOriginElement("2.12.0", true)
+		if !ok {
+			t.Fatal("missing 2.12.0 ARM64 dispatch-table origin")
+		}
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x0, x0, x17", "", false},
+			{"ldr x30, [x21,x0,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		fir.DartVersion = "2.12.0"
+		fir.Blocks[0].Instrs[0].DefRegs = []string{"x17"}
+		fir.Blocks[0].Instrs[1].DefRegs = []string{"x0"}
+		fir.Blocks[0].Instrs[2].DefRegs = []string{"x30"}
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall || got.DispatchSelector != 0x1388+legacyOrigin {
+			t.Fatalf("legacy TMP2 dispatch = %+v, want selector %d", got, 0x1388+legacyOrigin)
+		}
+	})
+
+	t.Run("TMP2 add must use SDK dispatch index registers", func(t *testing.T) {
+		fir := dispatchFIR("x30", []struct {
+			src, target string
+			call        bool
+		}{
+			{"movz x17, #0x1388", "", false},
+			{"add x5, x0, x17", "", false},
+			{"ldr x30, [x21,x30,lsl #3]", "", false},
+			{"blr x30", "x30", true},
+		})
+		annotateDispatchCalls(fir)
+		got := fir.Blocks[0].Instrs[3]
+		if !got.IsDispatchCall || got.DispatchSelector != dispatchSelectorUnknown {
+			t.Fatalf("non-dispatch TMP2 add fabricated selector: %+v", got)
+		}
+	})
 }
 
 // TestX64DispatchCallRecovery: `call [RAX + cid*8 + offset]` with
 // offset = (selector - kOriginElement) * kWordSize.
 func TestX64DispatchCallRecovery(t *testing.T) {
-	origin := sdk.DispatchTableOriginElement(false)
+	origin, ok := sdk.DispatchTableOriginElement("3.12.2", false)
+	if !ok {
+		t.Fatal("missing 3.12.2 x64 dispatch-table origin")
+	}
 	for _, tc := range []struct {
 		target string
 		want   int
 	}{
 		{"[rax+8*rcx+0x200a8]", 0x200a8/8 + origin},
+		{"[rax+8*rcx-0x80]", origin - 0x80/8},
 		{"[rax+8*rcx]", origin},
 	} {
 		fir := dispatchFIR("", []struct {
@@ -138,5 +248,56 @@ func TestX64DispatchCallRecovery(t *testing.T) {
 		if fir.Blocks[0].Instrs[0].IsDispatchCall {
 			t.Errorf("%s claimed as a dispatch call", target)
 		}
+	}
+
+	t.Run("class id register follows SDK boundary", func(t *testing.T) {
+		legacy := dispatchFIR("", []struct {
+			src, target string
+			call        bool
+		}{{"call [rax+8*rdx+0x20]", "[rax+8*rdx+0x20]", true}})
+		legacy.DartVersion = "2.12.0"
+		annotateDispatchCalls(legacy)
+		if !legacy.Blocks[0].Instrs[0].IsDispatchCall {
+			t.Fatal("2.12 arbitrary cid_reg was rejected")
+		}
+
+		modern := dispatchFIR("", []struct {
+			src, target string
+			call        bool
+		}{{"call [rax+8*rdx+0x20]", "[rax+8*rdx+0x20]", true}})
+		annotateDispatchCalls(modern)
+		if modern.Blocks[0].Instrs[0].IsDispatchCall {
+			t.Fatal("3.12 accepted RDX where the SDK fixes dispatch cid_reg to RCX")
+		}
+	})
+}
+
+func TestX64DispatchCallRecoveryFromDecodedNegativeDisplacement(t *testing.T) {
+	// ff 54 c8 80 = call qword ptr [rax+rcx*8-0x80], a real GDT shape seen in
+	// the Dart 3.12.2 x64 corpus. Decode it through the same x86asm path the
+	// production lifter uses so this also pins the target-string spelling.
+	insts, err := DecodeX86Range([]byte{0xff, 0x54, 0xc8, 0x80}, 0x1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, ok := sdk.DartRegisterCallingConvention("3.12.2", sdk.ArchX86)
+	if !ok {
+		t.Fatal("missing x86 calling convention")
+	}
+	fir := BuildX86IR("dispatch", "3.12.2", insts, cc)
+	annotateDispatchCalls(fir)
+	if len(fir.Blocks) != 1 || len(fir.Blocks[0].Instrs) != 1 {
+		t.Fatalf("unexpected IR shape: %+v", fir.Blocks)
+	}
+	got := fir.Blocks[0].Instrs[0]
+	if !got.IsDispatchCall {
+		t.Fatalf("decoded target %q was not recognised as a dispatch call", got.Target)
+	}
+	origin, ok := sdk.DispatchTableOriginElement("3.12.2", false)
+	if !ok {
+		t.Fatal("missing 3.12.2 x64 dispatch-table origin")
+	}
+	if want := origin - 0x80/8; got.DispatchSelector != want {
+		t.Fatalf("selector = %d, want %d (target %q)", got.DispatchSelector, want, got.Target)
 	}
 }

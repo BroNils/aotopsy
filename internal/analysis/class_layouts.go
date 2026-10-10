@@ -71,6 +71,7 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 		byteOffset int32
 	}
 	fieldsByOwner := make(map[int][]resolvedField)
+	owners := NewLibraryResolver(result, pl)
 	for _, fi := range result.Fields {
 		if fi.OwnerRefID <= 0 || fi.HostOffset < 0 {
 			continue
@@ -79,7 +80,8 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 		if !ok {
 			continue
 		}
-		fieldsByOwner[fi.OwnerRefID] = append(fieldsByOwner[fi.OwnerRefID], resolvedField{
+		effectiveOwner := owners.EffectiveClassRef(fi.OwnerRefID)
+		fieldsByOwner[effectiveOwner] = append(fieldsByOwner[effectiveOwner], resolvedField{
 			nameRefID:  fi.NameRefID,
 			byteOffset: int32(wordOff) * wordSize,
 		})
@@ -114,7 +116,7 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 		}
 		className := ""
 		if ci.NameRefID >= 0 {
-			if s, ok := pl.RefToStr[ci.NameRefID]; ok {
+			if s, ok := pl.StringForRef(ci.NameRefID); ok {
 				className = s
 			}
 		}
@@ -140,14 +142,7 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 				}
 				name := ""
 				if rf.nameRefID >= 0 {
-					if s, ok := pl.RefToStr[rf.nameRefID]; ok {
-						name = s
-					}
-					if name == "" {
-						if s, ok := pl.VmRefToStr[rf.nameRefID]; ok {
-							name = s
-						}
-					}
+					name, _ = pl.StringForRef(rf.nameRefID)
 				}
 				if name == "" {
 					name = fmt.Sprintf("field_0x%x", rf.byteOffset)
@@ -169,7 +164,14 @@ func BuildClassLayouts(result *cluster.Result, pl *naming.PoolLookups, compresse
 			endWords = ci.InstanceSize
 		}
 
-		for w := int32(1); w < endWords; w++ {
+		// The object header is one 8-byte word without pointer compression and
+		// two 4-byte compressed words with it. Starting compressed layouts at
+		// word 1 invents a field at byte offset 4 inside the 8-byte header.
+		startWords := int32(1)
+		if compressedPtrs {
+			startWords = 2
+		}
+		for w := startWords; w < endWords; w++ {
 			off := w * wordSize
 			slot := DartFieldLayout{
 				ByteOffset:  off,

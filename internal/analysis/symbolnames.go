@@ -46,20 +46,24 @@ func BuildSymbolNames(
 	table *cluster.InstructionsTable,
 	fmtOpts dartfmt.Options,
 	isolateData []byte,
-) SymbolNameSet {
+) (SymbolNameSet, error) {
 	out := SymbolNameSet{
 		Names:  make(map[uint64]string, len(ranges)),
 		VMForm: make(map[uint64]string),
 		Sizes:  make(map[uint64]uint32, len(ranges)),
 	}
 
-	// Isolate stubs: their Code objects have no owner, so the only place
-	// their name survives is the ObjectStore field list in the roots
-	// section. See naming.BuildIsolateStubSymbols.
+	// Isolate stubs: their Code objects have no owner, so the only place their
+	// name survives is the ObjectStore field list in the roots section. Normal
+	// LoadSnapshot callers already populated ObjectStoreRefs before building pool
+	// lookups; keep this fallback for lower-level/test callers that construct a
+	// cluster.Result directly.
 	var isoStubs map[int]string
 	if len(isolateData) > 0 {
-		if err := cluster.ReadObjectStoreRefs(isolateData, clResult, info.Version); err != nil {
-			clResult.ObjectStoreRefs = nil
+		if clResult.ObjectStoreRefs == nil {
+			if err := cluster.ReadObjectStoreRefs(isolateData, clResult, info.Version); err != nil {
+				return SymbolNameSet{}, fmt.Errorf("read ObjectStore roots for isolate-stub naming: %w", err)
+			}
 		}
 		isoStubs = naming.BuildIsolateStubSymbols(clResult, info.Version.DartVersion)
 	}
@@ -102,5 +106,5 @@ func BuildSymbolNames(
 		image.CodeVA, image.CodeOff, info.Version.CodeIndexOneBased) {
 		out.Names[va] = name
 	}
-	return out
+	return out, nil
 }

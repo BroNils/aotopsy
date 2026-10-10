@@ -23,10 +23,11 @@ import (
 // affected range existed and golden had nothing to compare against anyway.
 //
 // This one compares a version against its SIBLINGS. The samples in a
-// samplecorpus source set were compiled from byte-identical lib/*.dart by
-// different SDKs, so the analyser should recover broadly the same facts from
-// all of them. Where it does not, the difference is a property of this tool,
-// not of the app.
+// samplecorpus source set keep the metric-bearing Dart sources byte-identical
+// across SDKs (with only documented syntax-only compatibility lowering outside
+// those metric files), so the analyser should recover broadly the same facts
+// from all of them. Where it does not, the difference is a property of this
+// tool, not of the app.
 //
 // The distinction that makes it usable:
 //
@@ -269,9 +270,10 @@ func TestCrossVersionDifferential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping heavy cross-version differential in short mode")
 	}
-	sets := samplecorpus.SourceSets()
+	requireCompleteCorpus(t)
+	sets := samplecorpus.DifferentialSourceSets()
 	if len(sets) == 0 {
-		t.Skip("no source set with two or more members in samplecorpus.Registry")
+		t.Fatal("validated registry contains no differential source set")
 	}
 	names := make([]string, 0, len(sets))
 	for n := range sets {
@@ -284,22 +286,14 @@ func TestCrossVersionDifferential(t *testing.T) {
 		t.Run(setName, func(t *testing.T) {
 			measured := make([]*sampleMetrics, 0, len(sets[setName]))
 			for _, s := range sets[setName] {
-				path := samplecorpus.Path(s.FileName())
-				if path == "" {
-					t.Logf("skipping %s: %s", s.FileName(), samplecorpus.MissingMessage(s))
-					continue
-				}
-				if s.ProfileIncomplete != "" {
-					t.Logf("skipping %s: %s", s.FileName(), s.ProfileIncomplete)
-					continue
-				}
+				path := corpusSample(t, s.FileName())
 				m := measureCrossVersion(t, s, path)
 				if m != nil {
 					measured = append(measured, m)
 				}
 			}
 			if len(measured) < 2 {
-				t.Skipf("source set %q has %d sample(s) present; a differential needs two",
+				t.Fatalf("source set %q produced only %d measured sample(s); a differential needs two",
 					setName, len(measured))
 			}
 			// Deterministic AND readable: version first, then architecture.
@@ -328,12 +322,10 @@ func measureCrossVersion(t *testing.T, s samplecorpus.Sample, path string) *samp
 		MaxSteps: 100000,
 	})
 	if err != nil {
-		t.Errorf("%s: pipeline failed: %v", s.FileName(), err)
-		return nil
+		t.Fatalf("%s: pipeline failed: %v", s.FileName(), err)
 	}
 	if result.DartVersion != s.DartVersion {
-		t.Errorf("%s", samplecorpus.VersionMismatch(s, result.DartVersion))
-		return nil
+		t.Fatalf("%s", samplecorpus.VersionMismatch(s, result.DartVersion))
 	}
 
 	m := &sampleMetrics{version: s.DartVersion, arch: s.Arch, lines: map[string]int{}}

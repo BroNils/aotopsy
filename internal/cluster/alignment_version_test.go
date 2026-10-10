@@ -48,17 +48,23 @@ func TestDataImageAlignment(t *testing.T) {
 		{"2.17.6", 16},
 		{"2.18.0", 16},
 		{"2.19.0", 64},
-		{"2.19.1", 64},
 		{"3.0.5", 64},
 		{"3.9.2", 64},
 		{"3.12.2", 64},
-		{"4.0.0", 64},
 	}
 	for _, tt := range tests {
-		profile := &snapshot.VersionProfile{DartVersion: tt.version}
+		profile := snapshot.ProfileForVersion(tt.version)
+		if profile == nil {
+			t.Fatalf("missing exact profile for %s", tt.version)
+		}
 		got := dataImageAlignment(profile)
 		if got != tt.want {
 			t.Errorf("dataImageAlignment(version=%q) = %d, want %d", tt.version, got, tt.want)
+		}
+	}
+	for _, version := range []string{"2.19.1", "4.0.0"} {
+		if p := snapshot.ProfileForVersion(version); p != nil {
+			t.Fatalf("unknown version %s inherited exact profile %+v", version, *p)
 		}
 	}
 }

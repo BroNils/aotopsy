@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 )
 
 // ColorMode specifies terminal color capability.
@@ -44,45 +45,97 @@ func (c Color) ANSI(mode ColorMode) string {
 	}
 }
 
-// S wraps text with this color and Reset if color is enabled.
-func (c Color) S(text string) string {
-	if currentMode == ColorNone || text == "" {
-		return text
+// SafeLine makes untrusted text safe for one terminal line. Terminal escape
+// sequences and terminal controls are removed; embedded line separators and
+// tabs become spaces so an argument, path or error cannot forge extra output
+// lines. Bidirectional formatting controls are dropped to keep visually-spoofed
+// terminal text from reordering trusted labels around untrusted data. Malformed
+// UTF-8 is normalized to U+FFFD by strings.Map. Ordinary Unicode is preserved.
+func SafeLine(text string) string {
+	text = sanitizeTerminalText(text, false)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t', '\u2028', '\u2029':
+			return ' '
+		}
+		if unicode.IsControl(r) || isBidiControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+func isBidiControl(r rune) bool {
+	switch r {
+	case '\u061c', '\u200e', '\u200f',
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+		'\u2066', '\u2067', '\u2068', '\u2069':
+		return true
+	default:
+		return false
 	}
-	return c.ANSI(currentMode) + text + Reset
-}
-
-// F formats text with this color and Reset if color is enabled.
-func (c Color) F(format string, args ...any) string {
-	return c.S(fmt.Sprintf(format, args...))
 }
 
 var (
-	GreenColor  = Color{0, 255, 0, 46, "\033[92m"}
-	GoldColor   = Color{255, 200, 0, 220, "\033[93m"}
-	BlueColor   = Color{135, 206, 235, 117, "\033[96m"}
-	PinkColor   = Color{255, 128, 192, 217, "\033[95m"}
-	OrangeColor = Color{255, 128, 0, 208, "\033[33m"}
-	RedColor    = Color{255, 68, 68, 196, "\033[91m"}
-	MutedColor  = Color{128, 128, 128, 244, "\033[90m"}
-	WhiteColor  = Color{255, 255, 255, 231, "\033[97m"}
+	greenColor  = Color{0, 255, 0, 46, "\033[92m"}
+	goldColor   = Color{255, 200, 0, 220, "\033[93m"}
+	blueColor   = Color{135, 206, 235, 117, "\033[96m"}
+	pinkColor   = Color{255, 128, 192, 217, "\033[95m"}
+	orangeColor = Color{255, 128, 0, 208, "\033[33m"}
+	redColor    = Color{255, 68, 68, 196, "\033[91m"}
+	mutedColor  = Color{128, 128, 128, 244, "\033[90m"}
+	whiteColor  = Color{255, 255, 255, 231, "\033[97m"}
 )
 
-// CRT neon palette from signal.html — BBS/Amiga aesthetic.
-var (
-	Green  = GreenColor.ANSI(ColorTrue)
-	Gold   = GoldColor.ANSI(ColorTrue)
-	Blue   = BlueColor.ANSI(ColorTrue)
-	Pink   = PinkColor.ANSI(ColorTrue)
-	Orange = OrangeColor.ANSI(ColorTrue)
-	Red    = RedColor.ANSI(ColorTrue)
-	Muted  = MutedColor.ANSI(ColorTrue)
-	White  = WhiteColor.ANSI(ColorTrue)
-	Bold   = "\033[1m"
-	Reset  = "\033[0m"
+// style is an immutable semantic formatting token understood by Logger. It is
+// deliberately not a raw escape string: the logger renders it for the actual
+// destination writer, so terminal capability is never inherited from some
+// unrelated global stream. Callers receive only the exported constants below,
+// so arbitrary data cannot be cast into a trusted style token.
+type style uint8
+
+const (
+	Green style = iota
+	Gold
+	Blue
+	Pink
+	Orange
+	Red
+	Muted
+	White
+	Bold
+	Reset
 )
 
-var currentMode = ColorTrue
+func (s style) ansi(mode ColorMode) string {
+	if mode == ColorNone {
+		return ""
+	}
+	switch s {
+	case Green:
+		return greenColor.ANSI(mode)
+	case Gold:
+		return goldColor.ANSI(mode)
+	case Blue:
+		return blueColor.ANSI(mode)
+	case Pink:
+		return pinkColor.ANSI(mode)
+	case Orange:
+		return orangeColor.ANSI(mode)
+	case Red:
+		return redColor.ANSI(mode)
+	case Muted:
+		return mutedColor.ANSI(mode)
+	case White:
+		return whiteColor.ANSI(mode)
+	case Bold:
+		return "\033[1m"
+	case Reset:
+		return "\033[0m"
+	default:
+		return ""
+	}
+}
 
 // IsColorDisabled reports whether the environment asks for no color,
 // resolving the two conventions against each other the way they are
@@ -119,27 +172,25 @@ func DetectColorMode(f *os.File) ColorMode {
 	// A forced run skips the TTY test -- that is the whole point of the
 	// flag: piping into a pager or a CI log that renders escapes.
 	if !forced && f != nil {
-		fi, err := f.Stat()
-		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		if !isTerminalFile(f) {
 			return ColorNone
 		}
 	}
-	if isTrueColorSupported() {
-		return ColorTrue
-	}
 	term := os.Getenv("TERM")
-	if strings.Contains(term, "256color") {
-		return Color256
-	}
 	if term == "dumb" {
-		// Forced output still gets plain ANSI on a dumb terminal, matching
-		// termenv: "if the terminal does not support any colors, but
-		// CLICOLOR_FORCE is set and not 0, then the ANSI color profile
-		// will be returned".
+		// TERM=dumb is an explicit statement that the terminal has no color
+		// capability. COLORTERM/24-bit hints must not override it. A forced run
+		// still gets basic ANSI, matching the force contract.
 		if forced {
 			return Color16
 		}
 		return ColorNone
+	}
+	if isTrueColorSupported() {
+		return ColorTrue
+	}
+	if strings.Contains(term, "256color") {
+		return Color256
 	}
 	return Color16
 }
@@ -149,42 +200,4 @@ func isTrueColorSupported() bool {
 	ct := os.Getenv("COLORTERM")
 	return strings.Contains(term, "24bit") || strings.Contains(term, "truecolor") ||
 		strings.Contains(ct, "24bit") || strings.Contains(ct, "truecolor")
-}
-
-// SetColorMode updates global escape strings to match the desired ColorMode.
-func SetColorMode(mode ColorMode) {
-	currentMode = mode
-	if mode == ColorNone {
-		DisableColor()
-		return
-	}
-	Green = GreenColor.ANSI(mode)
-	Gold = GoldColor.ANSI(mode)
-	Blue = BlueColor.ANSI(mode)
-	Pink = PinkColor.ANSI(mode)
-	Orange = OrangeColor.ANSI(mode)
-	Red = RedColor.ANSI(mode)
-	Muted = MutedColor.ANSI(mode)
-	White = WhiteColor.ANSI(mode)
-	Bold = "\033[1m"
-	Reset = "\033[0m"
-}
-
-// DisableColor sets all color codes to empty strings.
-func DisableColor() {
-	currentMode = ColorNone
-	Green = ""
-	Gold = ""
-	Blue = ""
-	Pink = ""
-	Orange = ""
-	Red = ""
-	Muted = ""
-	White = ""
-	Bold = ""
-	Reset = ""
-}
-
-func init() {
-	SetColorMode(DetectColorMode(os.Stderr))
 }

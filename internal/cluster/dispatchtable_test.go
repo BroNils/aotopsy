@@ -45,7 +45,7 @@ func encTagged64(v int64) []byte {
 func TestEncodersRoundTripRealReader(t *testing.T) {
 	unsignedCases := []int64{0, 1, 63, 127, 128, 200, 1000, 1 << 20}
 	for _, v := range unsignedCases {
-		s := dartfmt.NewStreamAt(encUnsigned(v), 0)
+		s := dartfmt.NewStream(encUnsigned(v))
 		got, err := s.ReadUnsigned()
 		if err != nil || got != v {
 			t.Errorf("encUnsigned(%d) round-trip: got=%d err=%v", v, got, err)
@@ -53,7 +53,7 @@ func TestEncodersRoundTripRealReader(t *testing.T) {
 	}
 	tagged64Cases := []int64{0, 1, -1, 63, -64, 64, -65, 1000, -1000, 73, -2, 67}
 	for _, v := range tagged64Cases {
-		s := dartfmt.NewStreamAt(encTagged64(v), 0)
+		s := dartfmt.NewStream(encTagged64(v))
 		got, err := s.ReadTagged64()
 		if err != nil || got != v {
 			t.Errorf("encTagged64(%d) round-trip: got=%d err=%v", v, got, err)
@@ -89,6 +89,19 @@ var rootsShapes = []rootsShape{
 	{name: "no_field_tables", dartVersion: "2.17.6"},
 	{name: "initial_only", dartVersion: "3.1.0", initialFieldTab: true},
 	{name: "initial_and_shared", dartVersion: "3.7.0", initialFieldTab: true, sharedFieldTable: true},
+}
+
+func rootsProfile(t *testing.T, shape rootsShape) *snapshot.VersionProfile {
+	t.Helper()
+	p := snapshot.ProfileForVersion(shape.dartVersion)
+	if p == nil || !p.Supported {
+		t.Fatalf("missing supported profile %s", shape.dartVersion)
+	}
+	if p.RootsHasInitialFieldTable != shape.initialFieldTab || p.RootsHasSharedInitialFieldTable != shape.sharedFieldTable {
+		t.Fatalf("fixture shape %s disagrees with profile %s: initial=%v shared=%v",
+			shape.name, shape.dartVersion, p.RootsHasInitialFieldTable, p.RootsHasSharedInitialFieldTable)
+	}
+	return p
 }
 
 // buildDispatchTableStream assembles a synthetic roots-section byte
@@ -169,16 +182,12 @@ func TestParseDispatchTable_NullCodeRecentRepeatStub(t *testing.T) {
 	for _, shape := range rootsShapes {
 		shape := shape
 		t.Run(shape.name, func(t *testing.T) {
-			data := buildDispatchTableStream(shape, 2, rle, 7)
+			profile := rootsProfile(t, shape)
+			data := buildDispatchTableStream(shape, profile.ObjectStoreAOTFieldCount, rle, 7)
 			result := &Result{FillEnd: dispatchTableTestFillEnd}
-			profile := &snapshot.VersionProfile{
-				DartVersion:              shape.dartVersion,
-				ObjectStoreAOTFieldCount: 2,
-				CodeIndexOneBased:        true, // Dart >=2.16: recent update only for code entries
-			}
 			table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
 
-			entries, err := ParseDispatchTable(data, result, profile, table)
+			entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 			if err != nil {
 				t.Fatalf("ParseDispatchTable: %v", err)
 			}
@@ -212,16 +221,14 @@ func TestParseDispatchTable_WrongRootsShapeIsDetected(t *testing.T) {
 				continue
 			}
 			t.Run(built.name+"_read_as_"+parsedAs.name, func(t *testing.T) {
-				data := buildDispatchTableStream(built, 1, rle, 3)
+				profile := rootsProfile(t, parsedAs)
+				// Keep ObjectStore width consistent with the parser profile so this
+				// fixture isolates the field-table shape mismatch itself.
+				data := buildDispatchTableStream(built, profile.ObjectStoreAOTFieldCount, rle, 3)
 				result := &Result{FillEnd: dispatchTableTestFillEnd}
-				profile := &snapshot.VersionProfile{
-					DartVersion:              parsedAs.dartVersion,
-					ObjectStoreAOTFieldCount: 1,
-					CodeIndexOneBased:        true,
-				}
 				table := &InstructionsTable{FirstEntryWithCode: firstEntryWithCode}
 
-				entries, err := ParseDispatchTable(data, result, profile, table)
+				entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 				if err == nil && len(entries) == 3 {
 					t.Errorf("a %s stream read as %s produced a plausible 3-entry table; "+
 						"the version gate is not doing anything",
@@ -237,12 +244,12 @@ func TestParseDispatchTable_WrongRootsShapeIsDetected(t *testing.T) {
 // style builds or apps with no polymorphic dispatch sites at all)
 // reports nil with no error, not a fabricated empty-but-confusing result.
 func TestParseDispatchTable_ZeroLengthReturnsNilNoError(t *testing.T) {
-	data := buildDispatchTableStream(rootsShapes[2], 1, nil, 0)
+	profile := rootsProfile(t, rootsShapes[2])
+	data := buildDispatchTableStream(rootsShapes[2], profile.ObjectStoreAOTFieldCount, nil, 0)
 	result := &Result{FillEnd: dispatchTableTestFillEnd}
-	profile := &snapshot.VersionProfile{DartVersion: rootsShapes[2].dartVersion, ObjectStoreAOTFieldCount: 1}
 	table := &InstructionsTable{FirstEntryWithCode: 0}
 
-	entries, err := ParseDispatchTable(data, result, profile, table)
+	entries, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,7 +268,7 @@ func TestParseDispatchTable_UnverifiedVersionReturnsError(t *testing.T) {
 	profile := &snapshot.VersionProfile{DartVersion: "9.9.9-unverified"}
 	table := &InstructionsTable{}
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, table); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, table, dartfmt.Options{}); err == nil {
 		t.Error("expected an error for ObjectStoreAOTFieldCount == 0, got nil")
 	}
 }
@@ -272,21 +279,51 @@ func TestParseDispatchTable_UnverifiedVersionReturnsError(t *testing.T) {
 // were meaningful.
 func TestParseDispatchTable_FillEndUnsetReturnsError(t *testing.T) {
 	result := &Result{} // FillEnd left unset
-	profile := &snapshot.VersionProfile{DartVersion: "test", ObjectStoreAOTFieldCount: 5}
+	profile := snapshot.ProfileForVersion("3.7.0")
 	table := &InstructionsTable{}
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, table); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, table, dartfmt.Options{}); err == nil {
 		t.Error("expected an error when FillEnd is unset, got nil")
 	}
 }
 
-// TestParseDispatchTable_NilInstructionsTableReturnsError verifies a nil
-// table is rejected explicitly rather than panicking on a nil deref.
+// TestParseDispatchTable_NilInstructionsTableReturnsError verifies a modern
+// profile cannot silently enter the legacy TextOffset fallback when its
+// InstructionsTable is unavailable.
 func TestParseDispatchTable_NilInstructionsTableReturnsError(t *testing.T) {
 	result := &Result{FillEnd: dispatchTableTestFillEnd}
-	profile := &snapshot.VersionProfile{DartVersion: "test", ObjectStoreAOTFieldCount: 1}
+	profile := snapshot.ProfileForVersion("3.7.0")
 
-	if _, err := ParseDispatchTable([]byte{0}, result, profile, nil); err == nil {
+	if _, err := ParseDispatchTable([]byte{0}, result, profile, nil, dartfmt.Options{}); err == nil {
 		t.Error("expected an error for a nil InstructionsTable, got nil")
+	}
+}
+
+func TestParseDispatchTableHonorsDecodedOutputBudgets(t *testing.T) {
+	shape := rootsShapes[2]
+	rle := make([][]byte, 20)
+	for i := range rle {
+		rle[i] = encTagged64(0)
+	}
+	profile := rootsProfile(t, shape)
+	data := buildDispatchTableStream(shape, profile.ObjectStoreAOTFieldCount, rle, int64(len(rle)))
+	result := &Result{FillEnd: dispatchTableTestFillEnd}
+	table := &InstructionsTable{}
+
+	if _, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{MaxSteps: 10}); err == nil {
+		t.Fatal("dispatch table length above MaxSteps was accepted")
+	}
+	if _, err := ParseDispatchTable(data, result, profile, table, dartfmt.Options{MaxBytes: 1}); err == nil {
+		t.Fatal("dispatch table decoded output above MaxBytes was accepted")
+	}
+}
+
+func TestParseDispatchTableRejectsRepeatPastDeclaredEnd(t *testing.T) {
+	shape := rootsShapes[2]
+	profile := rootsProfile(t, shape)
+	data := buildDispatchTableStream(shape, profile.ObjectStoreAOTFieldCount, [][]byte{encTagged64(10)}, 1)
+	result := &Result{FillEnd: dispatchTableTestFillEnd}
+	if _, err := ParseDispatchTable(data, result, profile, &InstructionsTable{}, dartfmt.Options{}); err == nil {
+		t.Fatal("repeat marker extending past declared table length was accepted")
 	}
 }

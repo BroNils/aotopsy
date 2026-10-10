@@ -3,18 +3,19 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 )
 
 // cmdCompareBlutter compares aotopsy output against blutter output.
 // Usage: aotopsy compare-blutter <blutter_dir> <aotopsy_dir>
 func cmdCompareBlutter(args []string) error {
-	if len(args) < 2 {
+	if len(args) != 2 {
 		return fmt.Errorf("usage: aotopsy compare-blutter <blutter_dir> <aotopsy_dir>")
 	}
 	blutterDir := args[0]
@@ -28,8 +29,12 @@ func cmdCompareBlutter(args []string) error {
 
 	// Write full report as JSON.
 	reportPath := filepath.Join(aotopsyDir, "blutter_comparison.json")
-	data, _ := json.MarshalIndent(result, "", "  ")
-	if err := os.WriteFile(reportPath, data, 0o644); err != nil {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode report: %w", err)
+	}
+	data = append(data, '\n')
+	if err := output.WriteFileAtomic(reportPath, data, 0o644); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	fmt.Printf("\nFull report: %s\n", reportPath)
@@ -39,18 +44,25 @@ func cmdCompareBlutter(args []string) error {
 // cmdImportDarter imports darter output for older Dart versions.
 // Usage: aotopsy import-darter <darter.json> <output.r2>
 func cmdImportDarter(args []string) error {
-	if len(args) < 2 {
+	if len(args) != 2 {
 		return fmt.Errorf("usage: aotopsy import-darter <darter.json> <output.r2>")
 	}
 	darterPath := args[0]
 	outputPath := args[1]
-	data, err := os.ReadFile(darterPath)
+	same, err := output.SamePath(darterPath, outputPath)
 	if err != nil {
-		return fmt.Errorf("read darter output: %w", err)
+		return fmt.Errorf("compare darter input/output paths: %w", err)
 	}
-	var snap compare.DarterSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
+	if same {
+		return fmt.Errorf("import-darter output must not replace its input JSON")
+	}
+	const maxDarterImportBytes = int64(64 << 20)
+	snap, err := jsonutil.ReadJSONFile[compare.DarterSnapshot](darterPath, maxDarterImportBytes)
+	if err != nil {
 		return fmt.Errorf("parse darter JSON: %w", err)
+	}
+	if strings.TrimSpace(snap.DartVersion) == "" || strings.TrimSpace(snap.Arch) == "" {
+		return fmt.Errorf("parse darter JSON: missing DartVersion or Arch")
 	}
 	fmt.Printf("Darter snapshot: %s %s, %d functions, %d classes, %d strings\n",
 		snap.DartVersion, snap.Arch,

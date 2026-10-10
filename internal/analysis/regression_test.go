@@ -13,9 +13,6 @@ import (
 // Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
 	libPath := sampleARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_arm64_")
 	if err != nil {
@@ -94,9 +91,6 @@ func TestPipelineRegression_CompareSample_ARM64(t *testing.T) {
 // Runs on the Dart 3.12.2 ARM64 sample from the corpus.
 func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 	libPath := sample312ARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_sample_arm64_")
 	if err != nil {
@@ -128,9 +122,14 @@ func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 	if result.ClassCount < 1500 || result.ClassCount > 2500 {
 		t.Errorf("Class count: got %d, expected 1500-2500", result.ClassCount)
 	}
-	// Signal should be ~136 after C-1 fix (was 247 before)
-	if result.SignalCount < 50 || result.SignalCount > 300 {
-		t.Errorf("Signal count: got %d, expected 50-300", result.SignalCount)
+	// Measured on this sample: 104 signal functions before the signal rework, of
+	// which 80 were the `thr` category (a Thread-field access is not a behavioural
+	// signal), 5 base64 (radix-digit / hex tables, not keys: the category now
+	// requires text that decodes), 2 webview (the Flutter `Intent` string) -- 17
+	// remain (url, async, device, encryption, cloaking, gambling, ...). The band
+	// is wide on purpose; metric floors in golden_test.go carry the precise gate.
+	if result.SignalCount < 10 || result.SignalCount > 100 {
+		t.Errorf("Signal count: got %d, expected 10-100", result.SignalCount)
 	}
 }
 
@@ -139,9 +138,6 @@ func TestPipelineRegression_Sample312_ARM64(t *testing.T) {
 // Runs on the Dart 3.12.2 x86_64 sample from the corpus.
 func TestPipelineRegression_Sample312_X64(t *testing.T) {
 	libPath := sample312X64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping regression test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_regression_sample_x64_")
 	if err != nil {
@@ -208,9 +204,6 @@ func TestPipelineRegression_Sample312_X64(t *testing.T) {
 // Runs on the Dart 3.9.2 ARM64 ground-truth sample from the corpus.
 func TestDecompilerAccuracy_Factorial(t *testing.T) {
 	libPath := sampleARM64(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping decompiler test", libPath)
-	}
 
 	// Run the pipeline first to get output.
 	outDir, err := os.MkdirTemp("", "aotopsy_decomp_test_")
@@ -261,9 +254,6 @@ func TestDecompilerAccuracy_Factorial(t *testing.T) {
 // Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtraction(t *testing.T) {
 	libPath := sampleDart212(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping string extraction test", libPath)
-	}
 
 	outDir, err := os.MkdirTemp("", "aotopsy_dart212_test_")
 	if err != nil {
@@ -307,9 +297,6 @@ func TestDart212StringExtraction(t *testing.T) {
 // Runs on the Dart 2.12.0 ARM64 sample from the corpus.
 func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	libPath := sampleDart212(t)
-	if _, err := os.Stat(libPath); os.IsNotExist(err) {
-		t.Skipf("sample binary not found at %s, skipping cluster-only string extraction test", libPath)
-	}
 
 	res := clusterOnly(t, libPath)
 
@@ -324,5 +311,54 @@ func TestDart212StringExtractionClusterOnly(t *testing.T) {
 	// Class cluster was captured.
 	if len(res.Classes) < 100 {
 		t.Errorf("Classes: got %d, expected >100 (Class cluster fill should yield >100 classes)", len(res.Classes))
+	}
+}
+
+func TestPipelineLimitBoundsPerFunctionArtifacts(t *testing.T) {
+	libPath := sample312X64(t)
+	outDir := filepath.Join(t.TempDir(), "limited")
+	const limit = 10
+	result, err := Run(Opts{
+		LibPath: libPath,
+		OutDir:  outDir,
+		Limit:   limit,
+		Quiet:   true,
+	})
+	if err != nil {
+		t.Fatalf("limited pipeline failed: %v", err)
+	}
+	if result.FuncCount != limit {
+		t.Fatalf("FuncCount = %d, want %d", result.FuncCount, limit)
+	}
+
+	funcRows := readJSONL(t, filepath.Join(outDir, "functions.jsonl"))
+	if len(funcRows) != limit {
+		t.Fatalf("functions.jsonl records = %d, want %d", len(funcRows), limit)
+	}
+	funcNames := make(map[string]bool, limit)
+	for _, rec := range funcRows {
+		if name, _ := rec["name"].(string); name != "" {
+			funcNames[name] = true
+		}
+	}
+
+	// Type-inference field accesses and unified evidence are function-scoped.
+	// None may refer to a function outside functions.jsonl in a limited run.
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "field_accessor_xref.jsonl")) {
+		for _, key := range []string{"readers", "writers"} {
+			vals, _ := rec[key].([]any)
+			for _, v := range vals {
+				name, _ := v.(string)
+				if name != "" && !funcNames[name] {
+					t.Fatalf("field_accessor_xref contains out-of-population function %q", name)
+				}
+			}
+		}
+	}
+	for _, rec := range readJSONL(t, filepath.Join(outDir, "evidence.jsonl")) {
+		name, _ := rec["function"].(string)
+		if name != "" && !funcNames[name] {
+			t.Fatalf("evidence contains out-of-population function %q", name)
+		}
 	}
 }

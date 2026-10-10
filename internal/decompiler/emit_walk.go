@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/strutil"
 )
 
 func identifyLoopHeaders(fir *FuncIR, idom []int) map[int]bool {
@@ -71,6 +72,21 @@ func (e *emitter) emitOrphanBlocks(indent int) {
 		if e.omittedSet != nil && e.omittedSet[i] {
 			continue
 		}
+		// Runtime stack-overflow / write-barrier stub paths were elided on
+		// purpose (see markElidedSlowPath); they are not lost code.
+		if e.elidedSlowPaths[i] {
+			continue
+		}
+		// The check that guards a runtime slow path may be in a block that is
+		// emitted as a helper AFTER this scan, so its stub path is not marked
+		// yet. A block that is nothing but a call to a write-barrier or
+		// stack-overflow stub is never source code, whichever way it is reached.
+		if e.isRuntimeSlowPathBlock(i) || e.isPaddingBlock(i) {
+			if e.elidedSlowPaths != nil {
+				e.elidedSlowPaths[i] = true
+			}
+			continue
+		}
 		orphans = append(orphans, i)
 	}
 	if len(orphans) == 0 {
@@ -89,8 +105,21 @@ func (e *emitter) emitOrphanBlocks(indent int) {
 			e.emit(indent, "// --- code omitted by the structured walk, shown verbatim ---")
 		}
 		emitted++
+		if e.orphanBlocks == nil {
+			e.orphanBlocks = make(map[int]bool)
+		}
+		e.orphanBlocks[id] = true
 		e.emit(indent, "// orphan block %d @ 0x%x", id, e.fir.Blocks[id].StartVA)
+		// A genuinely unreached block has no path state from the main walk. Do
+		// not let it inherit a temporary, comparison, receiver class, or entry
+		// argument merely because it is emitted afterwards. Keep only VM-pinned
+		// register meanings and let the block/fixpoint establish everything else.
+		savedState := e.state
+		e.state = seedPinnedState(e.fir)
+		e.state.Pool = e.pool
+		e.state.AttachSpillSink(e.spillSeq)
 		e.emitBlock(id, indent, 0)
+		e.state = savedState
 	}
 	if emitted > 0 {
 		e.stats.OrphanBlocks += emitted
@@ -128,7 +157,10 @@ func (e *emitter) emitBlock(id, indent, depth int) {
 
 	e.active[id] = true
 	e.visits[id]++
+	prevBlock := e.currentBlock
+	e.currentBlock = id
 	defer delete(e.active, id)
+	defer func() { e.currentBlock = prevBlock }()
 
 	// Real try/catch structuring.
 	//
@@ -200,6 +232,12 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	// a single-predecessor block still gets `goto block_N;` when it was
 	// already visited, and the label it needed was never emitted -- a
 	// dangling goto.
+	// A new block starts with no outgoing-argument slots written (they are
+	// consumed within the block that stores them, see outargs.go).
+	e.blockLineStart = len(e.lines)
+	e.state.OutSlots = nil
+	e.state.Pushed = nil
+	e.state.ICSite = nil
 	e.emit(indent, "block_%d:;", id)
 	if e.emittedAnywhere != nil {
 		e.emittedAnywhere[id] = true
@@ -214,15 +252,28 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 		// instruction overwrites BEFORE lifting it, so a stale type can never
 		// survive a redefinition (see LiftState.RegClass).
 		e.state.clearWrittenRegClasses(ins)
+		// The CallSiteData in IC_DATA_REG is only meaningful until the register
+		// is overwritten (the instruction that loads it sets it again below).
+		if e.state.ICSite != nil && instrWritesReg(ins, e.fir.ICDataReg) {
+			e.state.ICSite = nil
+		}
 		switch ins.Op {
 		case OpCall:
+			e.dropAfterCall = 0
+			if !isLast {
+				e.dropAfterCall = parseSPAdjust(e.fir, blk.Instrs[i+1].Src)
+			}
 			e.emitCall(ins, indent)
+			e.state.ICSite = nil
 		case OpLoadPool:
 			e.emitLoadPool(ins)
 		case OpReturn:
 			// P3-feasible-3: Emit bare "return;" if the return register
 			// holds a void-call result or is empty/uninitialized.
-			retVal := e.state.lookupReg(e.fir.ReturnReg)
+			retVal := ""
+			if full, ok := e.state.Regs[canonReg(e.fir.ReturnReg)]; ok {
+				retVal = readRegView(e.fir.ReturnReg, full)
+			}
 			if retVal = e.returnValue(retVal); retVal == "" {
 				e.emit(indent, "return;")
 			} else {
@@ -256,21 +307,23 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 					len(e.fir.Blocks[takenID].Preds) == 1 && e.visits[takenID] == 0
 				canInlineFall := fallID >= 0 && fallID < len(e.fir.Blocks) &&
 					len(e.fir.Blocks[fallID].Preds) == 1 && e.visits[fallID] == 0
+				// The conditional itself represents both CFG transitions. Record
+				// them from the actual parent before entering either child; child
+				// emission then owns any edges it follows from there.
+				e.recordEmittedEdge(blk.ID, takenID)
+				e.recordEmittedEdge(blk.ID, fallID)
 
 				if canInlineTaken && canInlineFall {
 					// Both branches can be inlined — emit real if/else
 					e.emit(indent, "if (%s) {", cond)
-					e.emitBlockBody(takenID, indent+1, depth+1)
-					e.visits[takenID]++
+					e.emitBlock(takenID, indent+1, depth+1)
 					e.emit(indent, "} else {")
-					e.emitBlockBody(fallID, indent+1, depth+1)
-					e.visits[fallID]++
+					e.emitBlock(fallID, indent+1, depth+1)
 					e.emit(indent, "}")
 				} else if canInlineTaken {
 					// Only taken branch can be inlined
 					e.emit(indent, "if (%s) {", cond)
-					e.emitBlockBody(takenID, indent+1, depth+1)
-					e.visits[takenID]++
+					e.emitBlock(takenID, indent+1, depth+1)
 					e.emit(indent, "}")
 					if fallID >= 0 {
 						e.emit(indent, "goto block_%d;", fallID)
@@ -306,6 +359,7 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 			}
 		default:
 			line, ok := ApplyOther(e.fir, e.state, ins)
+			e.applyPairedPoolLoad(ins)
 			// Declarations first: `line` may read a name that was just spilled.
 			e.drainSpills(indent)
 			if ok && !sdk.IsWriteBarrierStmt(line) {
@@ -327,11 +381,22 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 	if len(blk.Instrs) == 0 || !isControlFlowOp(blk.Instrs[len(blk.Instrs)-1].Op) {
 		for _, s := range blk.Succs {
 			if s.Cond == "" {
-				e.emitSuccessor(s.BlockID, indent, depth)
+				e.emitContinuation(s.BlockID, indent, depth)
 				return
 			}
 		}
 	}
+}
+
+func (e *emitter) recordEmittedEdge(from, to int) {
+	if from < 0 || from >= len(e.fir.Blocks) || to < 0 || to >= len(e.fir.Blocks) {
+		return
+	}
+	if e.emittedEdges == nil {
+		e.emittedEdges = make(map[uint64]bool)
+	}
+	key := uint64(uint32(from))<<32 | uint64(uint32(to))
+	e.emittedEdges[key] = true
 }
 
 // emitSuccessor dispatches control to a successor block: inline it if the
@@ -348,11 +413,38 @@ func (e *emitter) emitBlockBody(id, indent, depth int) {
 // covers back-edges reached via a conditional branch or fallthrough/jump
 // successor dispatch (emitBranch/emitBlock); emitJump had its own
 // equivalent special case already.
+// emitContinuation follows an edge that stays at the SAME indentation -- a
+// fallthrough, an unconditional jump, or the normal edge of an elided
+// stack-overflow/write-barrier check. No construct is opened for it, so it adds
+// no nesting and must not consume nesting depth: maxDepth bounds how deeply the
+// output nests, not how many blocks a straight-line function has. Charging a
+// block per chain link pushed ordinary 20+ block functions over the budget and
+// turned the rest of the function into `// orphan block` text.
+//
+// Termination is unchanged: a block already on the walk stack (active), the
+// per-block re-emission cap (maxVisitCount) and the step budget
+// (maxStepsPerEmitter) still bound the walk, and the step budget bounds the Go
+// recursion depth.
+func (e *emitter) emitContinuation(id, indent, depth int) {
+	e.emitSuccessor(id, indent, depth-1)
+}
+
 func (e *emitter) emitSuccessor(id, indent, depth int) {
-	if id < 0 {
+	if id < 0 || id >= len(e.fir.Blocks) {
 		e.emit(indent, "// unresolved branch target")
 		e.stats.UnresolvedCF++
 		return
+	}
+	e.recordEmittedEdge(e.currentBlock, id)
+	// A source-level try may only contain blocks whose full extents were proven
+	// protected by buildBlockTryIndex. Do not let the recursive CFG walk inline a
+	// successor outside the currently open region before the try brace closes.
+	if e.curTryRegion != 0 {
+		want := e.curTryRegion - 1
+		if got, ok := e.blockTryRegion[id]; !ok || got != want {
+			e.emit(indent, "goto block_%d;", id)
+			return
+		}
 	}
 	if e.active[id] {
 		// Back-edge: emit continue; (inside while loop if loop header was emitted)
@@ -429,96 +521,22 @@ func isControlFlowOp(op Op) bool {
 	return op == OpBranch || op == OpJump || op == OpReturn
 }
 
-// isStateIndexValue reports whether a register value looks like a
-// SuspendState state index — a small integer loaded from a field or
-// pool slot. This is a heuristic: the state index is typically a small
-// integer (0, 1, 2, ...) loaded from the SuspendState object.
-func isStateIndexValue(val string) bool {
-	if val == "" {
-		return false
-	}
-	// State index is typically a small integer literal or a field load
-	// from a SuspendState object. Check for common patterns:
-	// - "0", "1", "2" (literal state index)
-	// - "state" or "stateIndex" (named local)
-	// - A value containing "state" (from SuspendState field access)
-	if val == "0" || val == "1" || val == "2" || val == "3" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(val), "state")
-}
-
-// emitAsyncStateBranch emits an async state machine dispatch as a
-// switch statement on the state index, making the state machine
-// structure visible. Each branch becomes a case in the switch,
-// with the state index value as the case label.
-//
-// This is the structural collapse that item 9 calls for: instead of
-// a bare if/else with a comment, the reader sees a real switch/case
-// that maps directly to the async state machine's dispatch table.
-func (e *emitter) emitAsyncStateBranch(blk *Block, ins Instr, indent, depth int) {
-	var takenID, fallID = -1, -1
-	for _, s := range blk.Succs {
-		switch s.Cond {
-		case "T":
-			takenID = s.BlockID
-		case "F":
-			fallID = s.BlockID
-		}
-	}
-	regVal := e.state.lookupReg(ins.CondReg)
-	condKind := ins.CondKind
-
-	savedState := e.state
-
-	// Emit as a switch on the state index.
-	// For eqz: "if (state == 0) { ... } else { ... }" becomes
-	//   switch (state) { case 0: ... default: ... }
-	// For nez: "if (state != 0) { ... } else { ... }" becomes
-	//   switch (state) { default: ... case 0: ... }
-	e.emit(indent, "// async state machine dispatch")
-	e.emit(indent, "switch (%s) {", regVal)
-
-	// Determine which branch is "state == 0" and which is "state != 0".
-	// eqz: taken = state==0, fall = state!=0
-	// nez: taken = state!=0, fall = state==0
-	var zeroID, nonzeroID int
-	if condKind == "eqz" {
-		zeroID = takenID
-		nonzeroID = fallID
-	} else {
-		zeroID = fallID
-		nonzeroID = takenID
-	}
-
-	// Case 0: initial entry / first execution
-	e.emit(indent+1, "case 0:")
-	zeroState := savedState.Clone()
-	e.state = zeroState
-	e.emitSuccessor(zeroID, indent+2, depth)
-
-	// Default: resumed from await
-	e.emit(indent+1, "default:")
-	nonzeroState := savedState.Clone()
-	e.state = nonzeroState
-	e.emitSuccessor(nonzeroID, indent+2, depth)
-
-	// Merge branch states (Item 7 dataflow join).
-	e.state = savedState.MergeJoin(zeroState, nonzeroState)
-	e.emit(indent, "}")
-}
-
 func (e *emitter) canInline(id, depth int) bool {
 	return depth < maxDepth && !e.active[id] && e.visits[id] < maxVisitCount && id >= 0 && id < len(e.fir.Blocks)
 }
 
 func (e *emitter) emitOmittedPath(id, indent int) {
-	if id < 0 {
+	if id < 0 || id >= len(e.fir.Blocks) {
 		e.emit(indent, "// unresolved branch target")
 		e.stats.UnresolvedCF++
 		return
 	}
-	if !e.omittedSet[id] && len(e.omitted) < maxHelpers {
+	if !e.omittedSet[id] && len(e.omitted) >= maxHelpers {
+		e.emit(indent, "// unresolved block_%d: helper budget exhausted", id)
+		e.stats.UnresolvedCF++
+		return
+	}
+	if !e.omittedSet[id] {
 		e.omittedSet[id] = true
 		e.omitted = append(e.omitted, id)
 		// Capture live register state at extraction point for helper.
@@ -534,29 +552,12 @@ func (e *emitter) emitOmittedPath(id, indent int) {
 // emits "if (cond) { <taken> } else { <fallthrough> }" (or a placeholder
 // if the condition can't be resolved -- e.g. no preceding cmp was seen).
 //
-// Item 7: After both branches complete, merges the two branch states
-// via MergeJoin instead of restoring the pre-branch state. This is the
-// dataflow join that was missing — the old code lost every register
-// write inside either branch, so code after an if/else saw stale
-// pre-branch values. MergeJoin keeps branch-specific values for
-// registers that only one branch wrote, and conservatively keeps
-// the pre-branch value for registers that both branches wrote
-// differently (a text-based emitter cannot emit phi nodes).
-//
-// Item 9: When the function is async and the branch is on a state index
-// (eqz/nez on a register loaded from SuspendState), emit it as a
-// labeled state-machine case instead of a bare if/else, making the
-// async state machine structure visible.
+// After both branches complete, MergeJoin keeps a register only when BOTH
+// paths prove the same value. A write on just one branch, or two different
+// writes, is a phi/disagreement and is dropped to unknown rather than choosing
+// one path or resurrecting the pre-branch value. Loop-carried phis are handled
+// separately by the bounded SSA pass.
 func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
-	// Item 9: Async state machine dispatch detection.
-	if e.fir.IsAsync && (ins.CondKind == "eqz" || ins.CondKind == "nez") {
-		regVal := e.state.lookupReg(ins.CondReg)
-		if isStateIndexValue(regVal) {
-			e.emitAsyncStateBranch(blk, ins, indent, depth)
-			return
-		}
-	}
-
 	cond, ok := e.buildCondition(ins)
 	var takenID, fallID = -1, -1
 	for _, s := range blk.Succs {
@@ -590,7 +591,8 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 			}
 		}
 		if normalID >= 0 {
-			e.emitSuccessor(normalID, indent, depth)
+			e.markElidedSlowPath(takenID, fallID, normalID)
+			e.emitContinuation(normalID, indent, depth)
 			return
 		}
 	}
@@ -605,7 +607,8 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 			normalID = fallID
 		}
 		if normalID >= 0 {
-			e.emitSuccessor(normalID, indent, depth)
+			e.markElidedSlowPath(takenID, fallID, normalID)
+			e.emitContinuation(normalID, indent, depth)
 			return
 		}
 	}
@@ -625,6 +628,127 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 	e.emit(indent, "}")
 }
 
+// isPaddingBlock reports whether block i is unreachable alignment padding: no
+// predecessor, and nothing but `int3` (0xCC, the x86-64 code-range fill) and
+// `nop`s. A function's code range on x86-64 is padded to its alignment with 0xCC,
+// so the tail after the final jump/ret decodes as a block of its own; it carries
+// no code, so listing it as an orphan was noise (91% of the x64 orphans of the
+// first 3000 functions of the 3.9.2 sample).
+func (e *emitter) isPaddingBlock(i int) bool {
+	if i < 0 || i >= len(e.fir.Blocks) {
+		return false
+	}
+	blk := &e.fir.Blocks[i]
+	if len(blk.Instrs) == 0 || len(blk.Preds) != 0 {
+		return false
+	}
+	for _, ins := range blk.Instrs {
+		s := strings.ToLower(strings.TrimSpace(ins.Src))
+		if s != "int3" && s != "int 0x3" && !strings.HasPrefix(s, "nop") {
+			return false
+		}
+	}
+	return true
+}
+
+// isRuntimeSlowPathBlock reports whether block i only calls a GC write-barrier
+// or stack-overflow stub (plus register moves and the jump back): the body of the
+// slow path that BranchIf*/StoreBarrier skip in the common case. The callee is
+// identified by its resolved symbol name, so a block that calls anything else, or
+// has more than that one call, is not matched.
+func (e *emitter) isRuntimeSlowPathBlock(i int) bool {
+	if e.symbols == nil || i < 0 || i >= len(e.fir.Blocks) {
+		return false
+	}
+	blk := &e.fir.Blocks[i]
+	if len(blk.Instrs) == 0 || len(blk.Instrs) > 8 || len(blk.Succs) > 1 {
+		return false
+	}
+	calls := 0
+	thrLoaded := map[string]string{} // register -> Thread-cached stub it was just loaded with (ARM64 ldr+blr)
+	for _, ins := range blk.Instrs {
+		switch ins.Op {
+		case OpCall:
+			if !isSlowPathStubName(e.slowPathCalleeName(ins, thrLoaded)) {
+				return false
+			}
+			calls++
+		case OpOther:
+			// `ldr x30, [THR, #off]` / `mov` of a Thread-cached stub entry point.
+			s := strings.ToLower(strings.TrimSpace(ins.Src))
+			if strings.HasPrefix(s, "ldr ") || strings.HasPrefix(s, "mov ") {
+				if dst, src, ok := strings.Cut(s[4:], ","); ok {
+					if name := e.thrStubAt(strings.TrimSpace(src)); name != "" {
+						thrLoaded[strings.TrimSpace(dst)] = name
+					}
+				}
+			}
+		case OpJump:
+		default:
+			return false
+		}
+	}
+	return calls == 1
+}
+
+// slowPathCalleeName names the callee of a call instruction from IR facts only:
+// a direct target's symbol, a register loaded from a known Thread-cached stub
+// slot, or an x86-64 `call [THR+disp]` memory operand.
+func (e *emitter) slowPathCalleeName(ins Instr, thrLoaded map[string]string) string {
+	if va, ok := parseHexVA(ins.Target); ok {
+		if name, ok := e.symbols(va); ok {
+			return name
+		}
+		return ""
+	}
+	if name, ok := thrLoaded[strings.ToLower(ins.Target)]; ok {
+		return name
+	}
+	s := strings.ToLower(strings.TrimSpace(ins.Src))
+	if strings.HasPrefix(s, "call ") {
+		return e.thrStubAt(strings.TrimSpace(s[5:]))
+	}
+	return ""
+}
+
+// thrStubAt resolves a memory operand `[THR + disp]` to its Thread-cached stub
+// name, or "".
+func (e *emitter) thrStubAt(operand string) string {
+	if e.fir.ThreadStubOffsets == nil {
+		return ""
+	}
+	op := parseOperand(operand)
+	if !op.isMem || !op.hasDisp || strings.ToLower(op.memBase) != e.fir.ThreadReg {
+		return ""
+	}
+	return e.fir.ThreadStubOffsets[op.memDisp]
+}
+
+// isSlowPathStubName reports whether a stub name is a GC write-barrier or
+// stack-overflow slow path (symbol spellings and the snake_case Thread-table
+// spellings).
+func isSlowPathStubName(name string) bool {
+	l := strings.ToLower(strings.ReplaceAll(name, "_", ""))
+	return strings.Contains(l, "writebarrier") || strings.Contains(l, "stackoverflow")
+}
+
+// markElidedSlowPath records the successor of an elided stack-overflow or
+// write-barrier check that is NOT the normal continuation, so the orphan scan
+// does not list the runtime stub block as lost code.
+func (e *emitter) markElidedSlowPath(takenID, fallID, normalID int) {
+	if e.elidedSlowPaths == nil {
+		return
+	}
+	for _, id := range []int{takenID, fallID} {
+		if id >= 0 && id != normalID {
+			e.elidedSlowPaths[id] = true
+			// The edge exists in the CFG and was consciously dropped: record it
+			// so CFG verification does not report it as a lost branch.
+			e.recordEmittedEdge(e.currentBlock, id)
+		}
+	}
+}
+
 // isStackOverflowCond and isWriteBarrierCond/Stmt are now in internal/sdk —
 // shared with disasm, typetrack, and signal. The SDK ground-truth comments
 // moved with them.
@@ -632,10 +756,11 @@ func (e *emitter) emitBranch(blk *Block, ins Instr, indent, depth int) {
 func (e *emitter) buildCondition(ins Instr) (string, bool) {
 	switch ins.CondKind {
 	case "cmp":
-		if !e.state.HasCmp || ins.CondOp == "?" {
-			return "", false
+		cond, ok := rememberedCmpCondition(e.state, ins.CondOp, ins.CondUnsigned)
+		if ok {
+			cond = annotateClassIDCondition(e.fir, cond)
 		}
-		return fmt.Sprintf("%s %s %s", e.state.LastCmp[0], ins.CondOp, e.state.LastCmp[1]), true
+		return cond, ok
 	case "eqz":
 		return e.state.lookupReg(ins.CondReg) + " == 0", true
 	case "nez":
@@ -658,7 +783,7 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 		targetID = s.BlockID
 	}
 	if targetID >= 0 {
-		e.emitSuccessor(targetID, indent, depth)
+		e.emitContinuation(targetID, indent, depth)
 		return
 	}
 	// P6: Indirect branch (br xN) — jump-table dispatch or tail call.
@@ -728,7 +853,7 @@ func (e *emitter) emitJump(blk *Block, ins Instr, indent, depth int) {
 			e.emit(indent, "return %s(%s);", name, argsText)
 			return
 		}
-		e.emit(indent, "return tailCall_%s();", sanitizeTailCallName(ins.Target))
+		e.emit(indent, "return tailCall_%s();", strutil.SanitizeDartIdent(ins.Target))
 		return
 	}
 	e.emit(indent, "// unresolved jump target")

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler/stmt"
+	"aotopsy/internal/sdk"
 )
 
 // --- countArgs tests ---
@@ -65,23 +66,6 @@ func TestSimplifyExpressions(t *testing.T) {
 
 // --- CSE tests ---
 
-// --- Null-safety annotation tests ---
-
-func TestNullSafetyAnnotation(t *testing.T) {
-	source := `dynamic foo(int x) {
-  if (x == null) { return 0; }
-  if (x != null) { return x; }
-  return null;
-}`
-	result := nullSafetyAnnotation(source)
-	if !strings.Contains(result, "null-safety") {
-		t.Error("null-safety annotation should detect null checks")
-	}
-	if !strings.Contains(result, "x") {
-		t.Error("null-safety annotation should list 'x' as nullable")
-	}
-}
-
 // --- Local type inference tests ---
 
 func TestLocalTypeInference(t *testing.T) {
@@ -99,8 +83,8 @@ func TestLocalTypeInference(t *testing.T) {
 	if !strings.Contains(result, "local_8: int") {
 		t.Error("local type inference should infer local_8 as int from arg0")
 	}
-	if !strings.Contains(result, "t1: int") {
-		t.Error("local type inference should infer t1 as int from literal 42")
+	if strings.Contains(result, "t1:") {
+		t.Error("a bare integer literal may be a raw immediate and must not be typed as int")
 	}
 	if !strings.Contains(result, "t2: String") {
 		t.Error("local type inference should infer t2 as String from literal 'hello'")
@@ -199,64 +183,23 @@ func TestApplyLocalTypeHints(t *testing.T) {
 	}
 }
 
-// --- A1: inferReturnTypeFromName tests ---
-
-func TestInferReturnTypeFromName(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"toString", "String"},
-		{"toStringDeep", "String"},
-		{"hashCode", "int"},
-		{"length", "int"},
-		{"isEmpty", "bool"},
-		{"isNotEmpty", "bool"},
-		{"contains", "bool"},
-		{"startsWith", "bool"},
-		{"endsWith", "bool"},
-		{"forEach", "void"},
-		{"add", "void"},
-		{"clear", "void"},
-		{"sort", "void"},
-		{"map", "Iterable"},
-		{"where", "Iterable"},
-		{"join", "String"},
-		{"any", "bool"},
-		{"every", "bool"},
-		{"indexOf", "int"},
-		{"compareTo", "int"},
-		{"sublist", "List"},
-		{"toList", "List"},
-		{"runtimeType", "Type"},
-		{"set:foo", "void"},
-		{"get:foo", "dynamic"},
-		{"isFinite", "bool"},
-		{"isEven", "bool"},
-		{"hasNext", "bool"},
-		{"canFly", "bool"},
-		{"toList", "List"},
-		{"toSet", "Set"},
-		{"toInt", "int"},
-		{"toDouble", "double"},
-		{"toBool", "bool"},
-		{"asString", "String"},
-		{"asInt", "int"},
-		{"operator ==", "bool"},
-		{"operator !=", "bool"},
-		{"operator <", "bool"},
-		{"operator >=", "bool"},
-		{"operator ~/", "int"},
-		{"operator ~", "int"},
-		{"sub_b0", "dynamic"},
-		{"_throwNew@0150898", "dynamic"},
-		{"Foo.bar@3099033", "dynamic"},
-	}
-	for _, tt := range tests {
-		got := inferReturnTypeFromName(tt.name)
-		if got != tt.want {
-			t.Errorf("inferReturnTypeFromName(%q) = %q, want %q", tt.name, got, tt.want)
+// A function name is not type metadata. Application code can legally declare
+// `int clear()` or `String isReady()`, so familiar SDK spellings must stay
+// dynamic unless serialized signature enrichment supplied an exact type.
+func TestReturnTypeIsNeverInferredFromName(t *testing.T) {
+	for _, name := range []string{"toString", "hashCode", "isEmpty", "clear", "operator =="} {
+		fir := simpleRetFir(nil, nil)
+		fir.Name = name
+		got := EmitPseudocode(fir, nil, nil).Source
+		if !strings.HasPrefix(got, "dynamic ") {
+			t.Errorf("%q fabricated a return type:\n%s", name, got)
 		}
+	}
+	fir := simpleRetFir(nil, nil)
+	fir.Name = "clear"
+	fir.ReturnType = "String"
+	if got := EmitPseudocode(fir, nil, nil).Source; !strings.HasPrefix(got, "String clear(") {
+		t.Errorf("serialized return type was not honored:\n%s", got)
 	}
 }
 
@@ -332,15 +275,21 @@ func TestSimplifyExpressionsKeepsMask(t *testing.T) {
 
 // A dead store may only be dropped when the value it computes has no effect,
 // and when the reassignment does not read the variable.
-// Two parameters of the same type must not collapse onto one name.
-func TestApplyArgRenamingIsCollisionFree(t *testing.T) {
-	src := "dynamic foo(String arg0, String arg1) {\n  return arg0 + arg1;\n}"
-	got := applyArgRenaming(src, []string{"String", "String"})
-	if strings.Contains(got, "str + str") {
-		t.Errorf("two params collapsed onto one name:\n%s", got)
-	}
-	if strings.Contains(got, "arg0") || strings.Contains(got, "arg1") {
-		t.Errorf("signature and body disagree on parameter names:\n%s", got)
+// Parameters are never given invented role names: positional parameter names
+// are absent from every Full-AOT snapshot, so the emitted signature keeps the
+// declared type and the neutral `argN` name.
+func TestParametersKeepNeutralNames(t *testing.T) {
+	fir := newFuncIR("foo", 0x4000)
+	fir.ArgRegs = arm64ArgRegs
+	fir.FrameReg = sdk.ARM64FrameRegStr
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ParamTypeNames = []string{"String", "bool"}
+	fir.addBlock(Block{ID: 0, StartVA: 0x4000, Instrs: []Instr{{Addr: 0x4000, Op: OpReturn, Src: "ret"}}})
+	got := EmitPseudocode(fir, nil, nil).Source
+	for _, bad := range []string{"str0", "flag1"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("invented parameter name %q in:\n%s", bad, got)
+		}
 	}
 }
 

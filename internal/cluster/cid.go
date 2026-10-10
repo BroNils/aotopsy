@@ -3,7 +3,6 @@
 package cluster
 
 import (
-	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 )
 
@@ -108,18 +107,21 @@ const (
 	CidTwoByteString = 95
 )
 
-// Tag bit positions for v3.4.3+ object header tag encoding.
+// Fixed flag bits for the object-header cluster tag encoding. The class-id
+// field itself is versioned and comes from snapshot.ClassIdTagLayout.
 const (
 	tagCanonicalBit = 1
 	tagImmutableBit = 6
-	tagClassIdShift = sdk.ClassIdTagPosV3
-	tagClassIdMask  = (1 << sdk.ClassIdTagSizeV3) - 1
 )
 
 // DecodeTags extracts CID, canonical, and immutable flags from v3.4.3+
 // object header tag encoding. For old-style encoding, use DecodeTagsOld.
-func DecodeTags(tags uint32) (cid int, isCanonical, isImmutable bool) {
-	cid = int((tags >> tagClassIdShift) & tagClassIdMask)
+func DecodeTags(tags uint32, dartVersion string) (cid int, isCanonical, isImmutable bool) {
+	pos, size, ok := snapshot.ClassIdTagLayout(dartVersion)
+	if !ok {
+		return 0, false, false
+	}
+	cid = int((tags >> pos) & ((1 << size) - 1))
 	isCanonical = (tags>>tagCanonicalBit)&1 != 0
 	isImmutable = (tags>>tagImmutableBit)&1 != 0
 	return
@@ -138,29 +140,68 @@ func DecodeTagsOld(cidAndCanonical int64) (cid int, isCanonical bool) {
 type AllocKind int
 
 const (
-	AllocSimple            AllocKind = iota // count = ReadUnsigned()
-	AllocCanonicalSet                       // count + optional canonical set
-	AllocString                             // count + per-string length + optional canonical set
-	AllocMint                               // count + per-mint int64
-	AllocArray                              // count + per-element length
-	AllocWeakArray                          // count + per-element length
-	AllocTypeArguments                      // count + per-item length + optional canonical set
-	AllocClass                              // predefined_count + per-class cid + new_count
-	AllocCode                               // count + per-code state_bits + deferred
-	AllocObjectPool                         // count + per-pool length
-	AllocROData                             // count + per-item offset + optional canonical set
-	AllocExceptionHandlers                  // count + per-handler length
-	AllocContext                            // count + per-context num_variables
-	AllocContextScope                       // count + per-scope length
-	AllocRecord                             // count + per-record num_fields
-	AllocTypedData                          // count + per-item length
-	AllocInstance                           // count + next_field_offset + instance_size
-	AllocEmpty                              // no alloc data at all (WeakSerializationReference)
-	AllocUnknown                            // unrecognized CID
+	AllocSimple              AllocKind = iota // count = ReadUnsigned()
+	AllocCanonicalSet                         // count + optional canonical set
+	AllocString                               // count + per-string length + optional canonical set
+	AllocMint                                 // count + per-mint int64
+	AllocArray                                // count + per-element length
+	AllocWeakArray                            // count + per-element length
+	AllocTypeArguments                        // count + per-item length + optional canonical set
+	AllocClass                                // predefined_count + per-class cid + new_count
+	AllocCode                                 // count + per-code state_bits + deferred
+	AllocObjectPool                           // count + per-pool length
+	AllocROData                               // count + per-item offset + optional canonical set
+	AllocExceptionHandlers                    // count + per-handler length
+	AllocContext                              // count + per-context num_variables
+	AllocContextScope                         // count + per-scope length
+	AllocRecord                               // count + per-record num_fields
+	AllocTypedData                            // count + per-item length
+	AllocLocalVarDescriptors                  // count + per-descriptor entry count
+	AllocInstance                             // count + next_field_offset + instance_size
+	AllocEmpty                                // no alloc data at all (WeakSerializationReference)
+	AllocUnknown                              // unrecognized CID
 )
+
+// notSerializedInFullAOT reports CIDs that never own a cluster in a Full-AOT
+// snapshot, in any supported SDK. A cluster under one of them is malformed and
+// must fail closed in both alloc and fill: predefined CIDs do not take the
+// generic InstanceSerializationCluster path, and guessing a shape would shift
+// every following tag or fill boundary while looking plausible.
+//
+//   - Runtime-only / cache / meta predefined classes have no case in
+//     Serializer::NewClusterForClass (Capability, ReceivePort, SendPort,
+//     SuspendState, WeakReference, FutureOr, UserTag, TransferableTypedData,
+//     SingleTargetCache, MonomorphicSmiableCall, CallSiteData, Sentinel).
+//   - KernelProgramInfo is explicitly not written into Full-AOT snapshots, and
+//     its dormant deserializer layout changes across releases.
+//   - Mutable Set is UNREACHABLE from its introduction onward.
+//   - TypedData, TypedDataView and ExternalTypedData are abstract base CIDs;
+//     NewClusterForClass only handles the concrete stride family (3.13 also
+//     lists all three in IsAbsentCid).
+//
+// Every field is guarded on non-zero: a CID absent from an older table is 0 and
+// would otherwise claim cid 0.
+func notSerializedInFullAOT(cid int, ct *snapshot.CIDTable) bool {
+	for _, c := range [...]int{
+		ct.KernelProgramInfo,
+		ct.Capability, ct.ReceivePort, ct.SendPort, ct.SuspendState,
+		ct.WeakReference, ct.FutureOr, ct.UserTag, ct.TransferableTypedData,
+		ct.SingleTargetCache, ct.MonomorphicSmiableCall, ct.CallSiteData,
+		ct.Sentinel, ct.Set,
+		ct.TypedData, ct.TypedDataView, ct.ExternalTypedData,
+	} {
+		if c != 0 && cid == c {
+			return true
+		}
+	}
+	return false
+}
 
 // ClassifyAlloc determines the alloc kind for a CID given a CID table.
 func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
+	if notSerializedInFullAOT(cid, ct) {
+		return AllocUnknown
+	}
 	// LocalVarDescriptors, new in Dart 3.13.0. Its ReadAlloc is byte-for-byte
 	// the same shape as CompressedStackMaps' -- count = ReadUnsigned(), then
 	// one ReadUnsigned(length) per object -- so it takes the same path.
@@ -169,7 +210,7 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 	// 0 in every older CID table and a bare `case ct.LocalVarDescriptors:`
 	// would then silently claim cid 0.
 	if ct.LocalVarDescriptors != 0 && cid == ct.LocalVarDescriptors {
-		return AllocROData
+		return AllocLocalVarDescriptors
 	}
 	switch cid {
 	case ct.String, ct.OneByteString, ct.TwoByteString:
@@ -203,14 +244,23 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 		return AllocContext
 	case ct.ContextScope:
 		return AllocContextScope
-	case ct.Map, ct.ConstMap, ct.Set, ct.ConstSet:
-		// Map/Set clusters use plain SerializationCluster, not
-		// CanonicalSetSerializationCluster. Alloc is just count.
+	case ct.Map:
+		// LinkedHashMap itself is serializable only through 2.13. Starting
+		// at 2.14 the mutable map case is explicitly UNREACHABLE; 2.15 adds
+		// a separate immutable/const CID. Presence of Set (2.14+) cleanly
+		// distinguishes the old era without needing a VersionProfile here.
+		if ct.Set != 0 || ct.ConstMap != 0 {
+			return AllocUnknown
+		}
 		return AllocSimple
-	case ct.TypedData:
-		return AllocTypedData
-	case ct.TypedDataView, ct.ExternalTypedData:
-		return AllocSimple
+	case ct.ConstMap:
+		if ct.ConstMap != 0 {
+			return AllocSimple
+		}
+	case ct.ConstSet:
+		if ct.ConstSet != 0 {
+			return AllocSimple
+		}
 	case ct.GrowableObjectArray:
 		return AllocSimple
 	}
@@ -234,19 +284,20 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 	// Simple alloc types: just count = ReadUnsigned().
 	simples := []int{
 		ct.Function, ct.ClosureData, ct.Field, ct.Script, ct.Library,
-		ct.Namespace, ct.KernelProgramInfo, ct.Closure,
+		ct.Namespace, ct.Closure,
 		ct.UnlinkedCall, ct.ICData, ct.MegamorphicCache,
 		ct.SubtypeTestCache, ct.LoadingUnit, ct.WeakProperty,
-		ct.WeakReference, ct.LibraryPrefix, ct.LanguageError,
+		ct.LibraryPrefix, ct.LanguageError,
 		ct.UnhandledException, ct.RegExp, ct.PatchClass,
-		ct.FfiTrampolineData, ct.TypeParameters, ct.Sentinel, ct.SignatureData,
-		ct.SingleTargetCache, ct.MonomorphicSmiableCall,
-		ct.CallSiteData,
-		ct.SendPort, ct.StackTrace, ct.Capability, ct.ReceivePort,
-		ct.FutureOr, ct.TransferableTypedData, ct.UserTag,
+		ct.FfiTrampolineData, ct.TypeParameters, ct.SignatureData,
+		ct.RedirectionData, ct.ParameterTypeCheck,
+		ct.StackTrace,
 	}
-	if ct.SuspendState != 0 {
-		simples = append(simples, ct.SuspendState)
+	if ct.ApiError != 0 {
+		simples = append(simples, ct.ApiError)
+	}
+	if ct.UnwindError != 0 {
+		simples = append(simples, ct.UnwindError)
 	}
 	if ct.TypeRef != 0 {
 		simples = append(simples, ct.TypeRef)
@@ -262,29 +313,55 @@ func ClassifyAlloc(cid int, ct *snapshot.CIDTable) AllocKind {
 		return AllocTypedData
 	}
 
-	// TypedData internal CIDs (kTypedDataInt8ArrayCid through kByteDataViewCid-1).
-	// IsTypedDataClassId: cid in range AND (cid - base) % stride == 0.
+	// Concrete TypedData-family CIDs. Dart's snapshot factory dispatches the
+	// first three remainders separately: internal -> TypedData, view ->
+	// TypedDataView, external -> ExternalTypedData. Internal objects carry a
+	// length in alloc; views/external objects are fixed-size and alloc is only a
+	// count. Newer SDKs add a fourth remainder for unmodifiable views, but the
+	// Full-AOT snapshot factory does not serialize those through any of these
+	// clusters, so fail closed rather than falling through to generic Instance.
 	if ct.TypedDataInt8ArrayCid != 0 && ct.ByteDataViewCid != 0 &&
-		cid >= ct.TypedDataInt8ArrayCid && cid < ct.ByteDataViewCid &&
-		(cid-ct.TypedDataInt8ArrayCid)%ct.TypedDataCidStride == 0 {
-		return AllocTypedData
+		ct.TypedDataCidStride > 0 && cid >= ct.TypedDataInt8ArrayCid && cid < ct.ByteDataViewCid {
+		rem := (cid - ct.TypedDataInt8ArrayCid) % ct.TypedDataCidStride
+		switch rem {
+		case 0:
+			return AllocTypedData
+		case 1, 2:
+			return AllocSimple
+		default:
+			return AllocUnknown
+		}
 	}
-
-	// Instance: CID >= Instance and not otherwise matched.
-	// App-defined classes (>= NumPredefinedCids) always use Instance alloc.
-	// Predefined CIDs that reach here also use Instance alloc unless they
-	// have their own serialization cluster (handled above or as special cases).
-	if ct.Instance != 0 && cid >= ct.Instance {
-		return AllocInstance
-	}
-
-	// Unrecognized predefined CIDs (e.g. SignatureData, RedirectionData, Bytecode
-	// in v2.10.0 that were removed in later versions) default to AllocSimple.
-	// All predefined types with non-simple alloc are matched above.
-	if ct.NumPredefinedCids != 0 && cid > 0 && cid < ct.NumPredefinedCids {
+	// ByteDataView sits just after the stride-based typed-data family but
+	// IsTypedDataViewClassId() handles it explicitly in every supported SDK.
+	// It therefore uses the same fixed-size alloc as the remainder-1 views.
+	if ct.ByteDataViewCid != 0 && cid == ct.ByteDataViewCid {
 		return AllocSimple
 	}
 
+	// Generic InstanceSerializationCluster is exact, not a blanket fallback for
+	// every predefined class after kInstanceCid. The SDK routes only:
+	//   * kInstanceCid itself,
+	//   * app-defined classes (cid >= kNumPredefinedCids), and
+	//   * CLASS_LIST_FFI_TYPE_MARKER cids (explicit switch cases).
+	// Accepting every predefined cid >= Instance made malformed Smi/Bool/Null/
+	// ByteBuffer/etc. clusters look like plausible Instance clusters.
+	if ct.Instance != 0 && cid == ct.Instance {
+		return AllocInstance
+	}
+	if ct.FfiMarkerFirstCid != 0 && cid >= ct.FfiMarkerFirstCid && cid <= ct.FfiMarkerLastCid {
+		return AllocInstance
+	}
+	if ct.NumPredefinedCids > 0 && cid >= ct.NumPredefinedCids {
+		return AllocInstance
+	}
+
+	// Do not guess for an unrecognized predefined CID. Predefined classes do not
+	// fall through to InstanceSerializationCluster; every valid Full-AOT case is
+	// selected explicitly by NewClusterForClass (or the typed-data/ROData gates
+	// mirrored above). Treating an unknown predefined CID as count-only made
+	// unsupported families such as 2.10 Bytecode/Instructions look plausible
+	// while shifting every following alloc tag.
 	return AllocUnknown
 }
 

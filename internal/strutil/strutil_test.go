@@ -1,24 +1,32 @@
 package strutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"aotopsy/internal/artifactfs"
+)
 
 func TestSanitizeFilename(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"simple", "simple"},
-		{"path/to/file", "path_to_file"},
-		{"name:with*special?chars", "name_with_special_chars"},
-		{"with space", "with_space"},
-		{`with"quotes<and>brackets`, "with_quotes_and_brackets"},
-		{"with|pipe\\backslash", "with_pipe_backslash"},
-		{"正常中文", "正常中文"}, // CJK should be preserved
+	if got := SanitizeFilename("simple"); got != "simple" {
+		t.Fatalf("safe lowercase ASCII name changed: %q", got)
 	}
-	for _, tt := range tests {
-		got := SanitizeFilename(tt.input)
-		if got != tt.want {
-			t.Errorf("SanitizeFilename(%q) = %q, want %q", tt.input, got, tt.want)
+	for _, input := range []string{
+		"path/to/file", "name:with*special?chars", "with space",
+		`with"quotes<and>brackets`, "with|pipe\\backslash", "正常中文",
+		"CON", "con.txt", "NUL", "COM1", "LPT9", "trailing.",
+	} {
+		got := SanitizeFilename(input)
+		if got == "" {
+			t.Errorf("SanitizeFilename(%q) returned empty", input)
+			continue
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("SanitizeFilename(%q) returned invalid UTF-8 %q", input, got)
+		}
+		if err := artifactfs.ValidateRelativePath(got); err != nil {
+			t.Errorf("SanitizeFilename(%q) returned non-portable component %q: %v", input, got, err)
 		}
 	}
 }
@@ -29,34 +37,61 @@ func TestSanitizeFilename_Truncation(t *testing.T) {
 		long += "a"
 	}
 	got := SanitizeFilename(long)
-	if len(got) > 200 {
-		t.Errorf("SanitizeFilename should truncate to 200 chars, got %d", len(got))
+	if len(got) > portableFilenameMaxBytes {
+		t.Errorf("SanitizeFilename should truncate to %d bytes, got %d", portableFilenameMaxBytes, len(got))
 	}
 }
 
-func TestSanitizeIdentifier(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"", "unknown_fn"},
-		{"simple_name", "simple_name"},
-		{"name.with.dots", "name_with_dots"},
-		{"name/slash", "name_slash"},
-		{"123starts_with_digit", "_123starts_with_digit"},
-		{"name:with*special", "name_with_special"},
+func TestSanitizeFilename_TruncationKeepsValidUTF8AndUniqueness(t *testing.T) {
+	prefix := strings.Repeat("界", 80)
+	a := SanitizeFilename(prefix + "_first")
+	b := SanitizeFilename(prefix + "_second")
+	if !utf8.ValidString(a) || !utf8.ValidString(b) {
+		t.Fatalf("truncation produced invalid UTF-8: %q / %q", a, b)
 	}
-	for _, tt := range tests {
-		got := SanitizeIdentifier(tt.input)
-		if got != tt.want {
-			t.Errorf("SanitizeIdentifier(%q) = %q, want %q", tt.input, got, tt.want)
+	if len(a) > portableFilenameMaxBytes || len(b) > portableFilenameMaxBytes {
+		t.Fatalf("truncation exceeded 200 bytes: %d / %d", len(a), len(b))
+	}
+	if a == b {
+		t.Fatalf("distinct long names collided after truncation: %q", a)
+	}
+}
+
+func TestSanitizeFilenameDoesNotCollapseDistinctRawNames(t *testing.T) {
+	pairs := [][2]string{
+		{"a:b", "a?b"},
+		{"a:b", "a_b"},
+		{"Foo", "foo"},
+		{"CON", "_CON"},
+		{"é", "É"},
+	}
+	for _, pair := range pairs {
+		a, b := SanitizeFilename(pair[0]), SanitizeFilename(pair[1])
+		if strings.EqualFold(a, b) {
+			t.Errorf("distinct raw names still collide under Windows case-folding: %q -> %q, %q -> %q", pair[0], a, pair[1], b)
 		}
 	}
+	generated := SanitizeFilename("a:b")
+	if literal := SanitizeFilename(generated); literal == generated {
+		t.Fatalf("generated filename namespace collides with literal raw input %q", generated)
+	}
 }
 
-func TestSanitizeFilename_MatchesOldImplementation(t *testing.T) {
-	// Verify that the shared implementation handles the same characters
-	// that the old safeFuncNameHTML handled.
+func TestSanitizeFilenameDistinguishesReplacementRuneFromInvalidUTF8(t *testing.T) {
+	valid := SanitizeFilename("a\uFFFDb")
+	invalid := SanitizeFilename(string([]byte{'a', 0xff, 'b'}))
+	if !strings.ContainsRune(valid, '\uFFFD') {
+		t.Fatalf("legitimate U+FFFD was discarded: %q", valid)
+	}
+	if !utf8.ValidString(invalid) {
+		t.Fatalf("invalid UTF-8 was not repaired: %q", invalid)
+	}
+	if valid == invalid {
+		t.Fatalf("valid U+FFFD and malformed byte sequence collapsed to %q", valid)
+	}
+}
+
+func TestSanitizeFilenameRejectsUnsafeCharacters(t *testing.T) {
 	inputs := []string{
 		"simple",
 		"path/to/file",

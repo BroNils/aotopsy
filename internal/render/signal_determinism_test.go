@@ -23,11 +23,16 @@ func buildWobbleGraph() *signal.SignalGraph {
 		})
 	}
 	edge := func(from, to, kind string) {
-		g.Edges = append(g.Edges, signal.SignalEdge{From: from, To: to, Kind: kind, Via: "v_" + to})
+		resolution := signal.ResolutionDirect
+		if kind == "blr" || kind == "call_indirect" {
+			resolution = signal.ResolutionMonomorphic
+		}
+		g.Edges = append(g.Edges, signal.SignalEdge{From: from, To: to, Kind: kind, Via: "v_" + to, Resolution: resolution})
 	}
 	for i := 0; i < 12; i++ {
 		root := fmt.Sprintf("root_%02d", i)
 		add(root, "", "", "", nil)
+		g.Funcs[len(g.Funcs)-1].IsRootCandidate = true
 		prev := root
 		// A collapsible chain of context nodes.
 		for j := 0; j < 3; j++ {

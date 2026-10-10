@@ -4,44 +4,60 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/funcdiff"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/symbolmap"
 )
 
 // cmdSymbolMap implements "aotopsy _debug symbolmap": resolves stripped binary direct call targets against unstripped build.
 func cmdSymbolMap(args []string) error {
-	fs := flag.NewFlagSet("symbolmap", flag.ExitOnError)
+	fs := flag.NewFlagSet("symbolmap", flag.ContinueOnError)
 	strippedPath := fs.String("stripped", "", "path to the stripped libapp.so")
 	unstrippedPath := fs.String("unstripped", "", "path to an unstripped/debug build of the SAME libapp.so")
-	outDir := fs.String("out", "", "output directory for symbol_call_sites.tsv + symbol_target_summary.json + symbol_map_report.json (default: stdout summary only)")
-	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest-symbol-below match (0 disables nearest matching)")
+	outDir := fs.String("out", "", "output directory for symbolmap artifacts (default: stdout summary only)")
+	nearestMaxDistance := fs.Uint64("nearest-max-distance", 64, "max byte distance for a nearest FUNC/IFUNC match within its proven executable extent (0 disables nearest matching)")
 	includeBranches := fs.Bool("include-branches", false, "also scan unconditional direct branches/jumps, not just calls")
-	requireExecMatch := fs.Bool("require-exec-match", false, "abort if exec section bytes differ between the two binaries")
-	if err := fs.Parse(args); err != nil {
+	importSymbols := fs.Bool("import-symbols", false, "import the full executable symbol table from the verified unstripped twin")
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *strippedPath == "" || *unstrippedPath == "" {
 		return fmt.Errorf("--stripped and --unstripped are required")
 	}
+	if *outDir != "" {
+		for _, input := range []struct {
+			label string
+			path  string
+		}{{"stripped", *strippedPath}, {"unstripped", *unstrippedPath}} {
+			contains, err := output.ContainsPath(*outDir, input.path)
+			if err != nil {
+				return fmt.Errorf("symbolmap: compare output/%s input paths: %w", input.label, err)
+			}
+			if contains {
+				return fmt.Errorf("symbolmap output directory must not contain the %s input binary", input.label)
+			}
+		}
+	}
 
 	rep, err := symbolmap.Compare(*strippedPath, *unstrippedPath, symbolmap.Options{
 		NearestMaxDistance: *nearestMaxDistance,
 		IncludeBranches:    *includeBranches,
-		RequireExecMatch:   *requireExecMatch,
+		ImportSymbols:      *importSymbols,
 	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "machine=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
-		rep.Machine, rep.ExecLayoutMatch, rep.ExecBytesMatch, rep.UnstrippedSymCnt)
-	fmt.Fprintf(os.Stderr, "call sites: %d (exact=%d nearest=%d unresolved=%d), unique targets=%d\n",
-		len(rep.CallSites), rep.ExactCount, rep.NearestCount, rep.UnresolvedCount, len(rep.Targets))
+	cli.Errf("machine=%s build_id_match=%v build_id=%s exec_layout_match=%v exec_bytes_match=%v unstripped_symbols=%d\n",
+		rep.Machine, rep.BuildIDMatch, rep.StrippedBuildID, rep.ExecLayoutMatch, rep.ExecBytesMatch, rep.UnstrippedSymCnt)
+	cli.Errf("sites: %d (exact=%d nearest=%d unresolved=%d indirect=%d), unique direct targets=%d\n",
+		len(rep.CallSites), rep.ExactCount, rep.NearestCount, rep.UnresolvedCount, rep.IndirectCount, len(rep.Targets))
 	for _, n := range rep.Notes {
-		fmt.Fprintf(os.Stderr, "note: %s\n", n)
+		cli.Errf("note: %s\n", n)
 	}
 
 	if *outDir == "" {
@@ -50,36 +66,43 @@ func cmdSymbolMap(args []string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("symbolmap: mkdir %s: %w", *outDir, err)
-	}
-	if err := symbolmap.WriteCallSitesTSV(filepath.Join(*outDir, "symbol_call_sites.tsv"), rep.CallSites); err != nil {
+	if err := symbolmap.WriteArtifacts(*outDir, rep); err != nil {
 		return err
 	}
-	targetsData, _ := json.MarshalIndent(rep.Targets, "", "  ")
-	if err := os.WriteFile(filepath.Join(*outDir, "symbol_target_summary.json"), targetsData, 0o644); err != nil {
-		return fmt.Errorf("symbolmap: write target summary: %w", err)
-	}
-	reportData, _ := json.MarshalIndent(rep, "", "  ")
-	if err := os.WriteFile(filepath.Join(*outDir, "symbol_map_report.json"), reportData, 0o644); err != nil {
-		return fmt.Errorf("symbolmap: write report: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "wrote %s/{symbol_call_sites.tsv,symbol_target_summary.json,symbol_map_report.json}\n", *outDir)
+	cli.Errf("wrote symbolmap artifacts under %s\n", filepath.Join(*outDir, "symbolmap"))
 	return nil
 }
 
-// cmdFuncDiff implements "aotopsy _debug funcdiff": diffs the Dart function set between two libapp.so builds.
+// cmdFuncDiff implements "aotopsy _debug funcdiff": compares source-identity-
+// shaped Function descriptors and, separately, raw instruction bytes.
 func cmdFuncDiff(args []string) error {
-	fs := flag.NewFlagSet("funcdiff", flag.ExitOnError)
+	fs := flag.NewFlagSet("funcdiff", flag.ContinueOnError)
 	oldPath := fs.String("old", "", "path to the OLD build's libapp.so")
 	newPath := fs.String("new", "", "path to the NEW build's libapp.so")
-	topN := fs.Int("top", 200, "max added/removed entries to report each (0 = unlimited)")
+	topN := fs.Int("top", 200, "max identity-added/removed and instruction-byte different/indeterminate entries to report each (0 = unlimited)")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("top", *topN); err != nil {
 		return err
 	}
 	if *oldPath == "" || *newPath == "" {
 		return fmt.Errorf("--old and --new are required")
+	}
+	if *out != "" {
+		for _, input := range []struct {
+			label string
+			path  string
+		}{{"old", *oldPath}, {"new", *newPath}} {
+			same, err := output.SamePath(input.path, *out)
+			if err != nil {
+				return fmt.Errorf("funcdiff: compare %s input/output paths: %w", input.label, err)
+			}
+			if same {
+				return fmt.Errorf("funcdiff output must not replace the %s input binary", input.label)
+			}
+		}
 	}
 
 	rep, err := funcdiff.Diff(*oldPath, *newPath, *topN)
@@ -87,8 +110,16 @@ func cmdFuncDiff(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "old: %d functions (%s)\nnew: %d functions (%s)\ncommon=%d added=%d removed=%d\n",
-		rep.OldCount, rep.OldVersion, rep.NewCount, rep.NewVersion, rep.CommonCount, rep.AddedTotal, rep.RemovedTotal)
+	cli.Errf("old: resolved=%d/%d descriptors=%d collisions=%d (%s, %s)\nnew: resolved=%d/%d descriptors=%d collisions=%d (%s, %s)\n",
+		rep.OldIdentity.ResolvedFunctions, rep.OldIdentity.FunctionObjects, rep.OldIdentity.DescriptorBuckets, rep.OldIdentity.CollisionBuckets, rep.OldVersion, rep.OldMachine,
+		rep.NewIdentity.ResolvedFunctions, rep.NewIdentity.FunctionObjects, rep.NewIdentity.DescriptorBuckets, rep.NewIdentity.CollisionBuckets, rep.NewVersion, rep.NewMachine)
+	cli.Errf("identity: matched=%d added=%d removed=%d\ninstruction bytes: equal=%d different=%d indeterminate=%d\n",
+		rep.MatchedIdentityTotal, rep.IdentityAddedTotal, rep.IdentityRemovedTotal,
+		rep.InstructionBytesEqualTotal, rep.InstructionBytesDifferentTotal, rep.InstructionBytesIndeterminateTotal)
+	if !rep.InstructionBytesComparable {
+		cli.Errf("instruction-byte comparison disabled: %s\n", rep.InstructionBytesIncomparableReason)
+	}
+	cli.Errf("note: instruction-byte differences are not proof of Dart source-semantic changes; pool/layout/relocation/codegen drift can change bytes\n")
 
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
@@ -98,9 +129,9 @@ func cmdFuncDiff(args []string) error {
 		fmt.Println(string(data))
 		return nil
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := jsonutil.WriteJSONFile(*out, rep); err != nil {
 		return fmt.Errorf("funcdiff: write %s: %w", *out, err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
+	cli.Errf("wrote %s\n", *out)
 	return nil
 }

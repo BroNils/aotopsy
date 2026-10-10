@@ -15,8 +15,12 @@ import "testing"
 //	kFpuRegistersForArgs[] = {XMM1, XMM2, XMM3, XMM4, XMM5, XMM6}
 //	kReturnFpuReg = XMM0
 func TestFpuCallingConvention(t *testing.T) {
+	armCC, ok := DartRegisterCallingConvention("3.12.2", ArchARM64)
+	if !ok {
+		t.Fatal("3.12.2 ARM64 register calling convention unavailable")
+	}
 	// ARM64 FPU args.
-	armFpu := ARM64FpuArgRegNames()
+	armFpu := armCC.FPUName
 	if len(armFpu) != 6 {
 		t.Fatalf("ARM64: want 6 FPU arg registers, got %d", len(armFpu))
 	}
@@ -26,12 +30,16 @@ func TestFpuCallingConvention(t *testing.T) {
 			t.Errorf("ARM64 FPU arg[%d] = %s, want %s", i, armFpu[i], w)
 		}
 	}
-	if ARM64FpuReturnRegName != "v0" {
-		t.Errorf("ARM64 FPU return = %s, want v0", ARM64FpuReturnRegName)
+	if armCC.FPUReturn != "v0" {
+		t.Errorf("ARM64 FPU return = %s, want v0", armCC.FPUReturn)
 	}
 
+	x64CC, ok := DartRegisterCallingConvention("3.12.2", ArchX86)
+	if !ok {
+		t.Fatal("3.12.2 x86_64 register calling convention unavailable")
+	}
 	// x86_64 FPU args.
-	x64Fpu := X86FpuArgRegNames()
+	x64Fpu := x64CC.FPUName
 	if len(x64Fpu) != 6 {
 		t.Fatalf("x86_64: want 6 FPU arg registers, got %d", len(x64Fpu))
 	}
@@ -41,23 +49,11 @@ func TestFpuCallingConvention(t *testing.T) {
 			t.Errorf("x86_64 FPU arg[%d] = %s, want %s", i, x64Fpu[i], w)
 		}
 	}
-	if X86FpuReturnRegName != "xmm0" {
-		t.Errorf("x86_64 FPU return = %s, want xmm0", X86FpuReturnRegName)
+	if x64CC.FPUReturn != "xmm0" {
+		t.Errorf("x86_64 FPU return = %s, want xmm0", x64CC.FPUReturn)
 	}
 
-	// DartFpuArgRegNames dispatch.
-	if got := DartFpuArgRegNames(ArchARM64); len(got) != 6 || got[0] != "v0" {
-		t.Errorf("DartFpuArgRegNames(ARM64) = %v, want v0..v5", got)
-	}
-	if got := DartFpuArgRegNames(ArchX86); len(got) != 6 || got[0] != "xmm1" {
-		t.Errorf("DartFpuArgRegNames(x86) = %v, want xmm1..xmm6", got)
-	}
-
-	// FpuReturnRegName dispatch.
-	if FpuReturnRegName(ArchARM64) != "v0" {
-		t.Errorf("FpuReturnRegName(ARM64) = %s, want v0", FpuReturnRegName(ArchARM64))
-	}
-	if FpuReturnRegName(ArchX86) != "xmm0" {
-		t.Errorf("FpuReturnRegName(x86) = %s, want xmm0", FpuReturnRegName(ArchX86))
+	if _, ok := DartRegisterCallingConvention("3.3.0", ArchX86); ok {
+		t.Error("3.3.0 must not expose FPU argument registers: Dart register CC does not exist yet")
 	}
 }

@@ -2,10 +2,8 @@ package analysis
 
 import (
 	"archive/zip"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -27,7 +25,7 @@ type FindResult struct {
 // FindCandidate is one .so file probed for Dart AOT indicators.
 type FindCandidate struct {
 	PathInAPK   string `json:"path_in_apk"`
-	Hit         string `json:"hit"` // "symbols", "magic", "none"
+	Hit         string `json:"hit"` // "symbols" or "none"
 	SHA256      string `json:"sha256"`
 	Size        int64  `json:"size"`
 	SnapHash    string `json:"snapshot_hash,omitempty"`
@@ -43,24 +41,37 @@ func FindLibappInZip(zipPath string) (*FindResult, error) {
 	defer func() { _ = zr.Close() }()
 
 	result := &FindResult{APK: zipPath}
+	work := &archiveWorkBudget{}
 
-	// Collect all .so paths in lib/arm64-v8a/.
+	// Collect all native libraries for architectures the analyser supports.
 	var soFiles []*zip.File
 	var hasNestedAPK bool
+	var soBudget uint64
+	nestedCount := 0
 	for _, f := range zr.File {
-		if strings.HasPrefix(f.Name, "lib/arm64-v8a/") && strings.HasSuffix(f.Name, ".so") {
+		if isSupportedNativeLibraryPath(f.Name) {
+			if len(soFiles) >= maxArchiveCandidates {
+				return nil, fmt.Errorf("archive has more than %d supported native-library candidates", maxArchiveCandidates)
+			}
+			if err := checkedArchiveBudget(&soBudget, f, maxLibappEntryBytes, maxArchiveProbeBytes); err != nil {
+				return nil, err
+			}
 			soFiles = append(soFiles, f)
 		}
 		if strings.HasSuffix(f.Name, ".apk") {
 			hasNestedAPK = true
+			nestedCount++
+			if nestedCount > maxNestedAPKCandidates {
+				return nil, fmt.Errorf("archive has more than %d nested APK candidates", maxNestedAPKCandidates)
+			}
 		}
 	}
 
 	// Probe direct .so files.
 	for _, f := range soFiles {
-		c, err := probeSOFile(f, f.Name)
+		c, err := probeSOFile(f, f.Name, work)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("probe %q: %w", f.Name, err)
 		}
 		result.Candidates = append(result.Candidates, *c)
 	}
@@ -71,9 +82,9 @@ func FindLibappInZip(zipPath string) (*FindResult, error) {
 			if !strings.HasSuffix(f.Name, ".apk") {
 				continue
 			}
-			nested, err := probeNestedAPK(f)
+			nested, err := probeNestedAPK(f, work)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("probe nested APK %q: %w", f.Name, err)
 			}
 			result.Candidates = append(result.Candidates, nested...)
 		}
@@ -84,34 +95,12 @@ func FindLibappInZip(zipPath string) (*FindResult, error) {
 	return result, nil
 }
 
-func probeSOFile(f *zip.File, pathLabel string) (*FindCandidate, error) {
-	rc, err := f.Open()
+func probeSOFile(f *zip.File, pathLabel string, work *archiveWorkBudget) (*FindCandidate, error) {
+	tmpPath, n, sha, err := extractZipEntryToTemp(f, "probe-*.so", maxLibappEntryBytes, work)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rc.Close() }()
-
-	tmp, err := os.CreateTemp("", "probe-*.so")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	n, err := io.Copy(tmp, rc)
-	if err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	_ = tmp.Close()
-
-	// Compute SHA256.
-	h := sha256.New()
-	data, err := os.ReadFile(tmp.Name())
-	if err != nil {
-		return nil, err
-	}
-	h.Write(data)
-	sha := hex.EncodeToString(h.Sum(nil))
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	c := &FindCandidate{
 		PathInAPK: pathLabel,
@@ -121,81 +110,72 @@ func probeSOFile(f *zip.File, pathLabel string) (*FindCandidate, error) {
 	}
 
 	// Try ELF + snapshot extract (symbol-based detection).
-	ef, err := elfx.Open(tmp.Name())
+	ef, err := elfx.Open(tmpPath)
 	if err != nil {
-		// Not a valid ARM64 ELF — check for magic in raw data anyway.
-		if off := snapshot.ProbeSnapshotMagic(data); off >= 0 {
-			c.Hit = "magic"
+		if errors.Is(err, elfx.ErrMalformed) || errors.Is(err, elfx.ErrChanged) {
+			return c, fmt.Errorf("inspect ELF: %w", err)
 		}
+		// A real supported libapp.so is an ELF64 ET_DYN for a supported machine.
+		// Raw magic in a non-ELF/unsupported file is not enough to claim a Dart
+		// binary; doing so let four attacker-controlled bytes become Found=true.
 		return c, nil
 	}
 	defer func() { _ = ef.Close() }()
+	if abi, ok := nativeLibraryABI(pathLabel); ok {
+		if err := validateNativeELFABI(ef, abi); err != nil {
+			return c, err
+		}
+	}
 
 	opts := dartfmt.Options{Mode: dartfmt.ModeBestEffort}
 	info, err := snapshot.Extract(ef, opts)
-	if err == nil && info.VmHeader != nil && info.VmHeader.SnapshotHash != "" {
+	if err != nil {
+		if errors.Is(err, snapshot.ErrNoSnapshotSymbols) {
+			return c, nil
+		}
+		return c, fmt.Errorf("inspect snapshot: %w", err)
+	}
+	if err == nil && info.PrimaryHeader() != nil && info.SnapshotHash() != "" {
 		c.Hit = "symbols"
-		c.SnapHash = info.VmHeader.SnapshotHash
+		c.SnapHash = info.SnapshotHash()
 		if info.Version != nil {
 			c.DartVersion = info.Version.DartVersion
 		}
 		return c, nil
 	}
 
-	// Symbols not found — try magic probe on loadable segments.
-	segs := ef.LoadSegments()
-	for _, seg := range segs {
-		if seg.Filesz == 0 {
-			continue
-		}
-		// Read first 4KB of each segment.
-		sz := int(seg.Filesz)
-		if sz > 4096 {
-			sz = 4096
-		}
-		buf := make([]byte, sz)
-		_, err := ef.ReadAt(buf, int64(seg.Offset))
-		if err != nil {
-			continue
-		}
-		if snapshot.ProbeSnapshotMagic(buf) >= 0 {
-			c.Hit = "magic"
-			return c, nil
-		}
-	}
-
 	return c, nil
 }
 
-func probeNestedAPK(f *zip.File) ([]FindCandidate, error) {
-	rc, err := f.Open()
+func probeNestedAPK(f *zip.File, work *archiveWorkBudget) ([]FindCandidate, error) {
+	tmpPath, _, _, err := extractZipEntryToTemp(f, "nested-*.apk", maxNestedAPKBytes, work)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = os.Remove(tmpPath) }()
 
-	tmp, err := os.CreateTemp("", "nested-*.apk")
-	if err != nil {
-		_ = rc.Close()
-		return nil, err
-	}
-	_, _ = io.Copy(tmp, rc)
-	_ = rc.Close()
-	_ = tmp.Close()
-	defer func() { _ = os.Remove(tmp.Name()) }()
-
-	inner, err := zip.OpenReader(tmp.Name())
+	inner, err := zip.OpenReader(tmpPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = inner.Close() }()
 
 	var results []FindCandidate
+	var budget uint64
+	candidates := 0
 	for _, inf := range inner.File {
-		if strings.HasPrefix(inf.Name, "lib/arm64-v8a/") && strings.HasSuffix(inf.Name, ".so") {
+		if isSupportedNativeLibraryPath(inf.Name) {
+			candidates++
+			if candidates > maxArchiveCandidates {
+				return nil, fmt.Errorf("nested APK %q has more than %d native-library candidates", f.Name, maxArchiveCandidates)
+			}
+			if err := checkedArchiveBudget(&budget, inf, maxLibappEntryBytes, maxArchiveProbeBytes); err != nil {
+				return nil, fmt.Errorf("nested APK %q: %w", f.Name, err)
+			}
 			label := f.Name + "!" + inf.Name
-			c, err := probeSOFile(inf, label)
+			c, err := probeSOFile(inf, label, work)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("nested APK %q probe %q: %w", f.Name, inf.Name, err)
 			}
 			results = append(results, *c)
 		}
@@ -205,7 +185,7 @@ func probeNestedAPK(f *zip.File) ([]FindCandidate, error) {
 
 func hasAnyHit(candidates []FindCandidate) bool {
 	for _, c := range candidates {
-		if c.Hit != "none" {
+		if c.Hit == "symbols" {
 			return true
 		}
 	}
@@ -213,7 +193,7 @@ func hasAnyHit(candidates []FindCandidate) bool {
 }
 
 func classifyFindResult(r *FindResult) {
-	// Sort candidates: symbols first, then magic, then none. Stable secondary key on PathInAPK.
+	// Sort verified symbol hits first, then non-matches. Stable secondary key on PathInAPK.
 	sort.Slice(r.Candidates, func(i, j int) bool {
 		pi := hitPriority(r.Candidates[i].Hit)
 		pj := hitPriority(r.Candidates[j].Hit)
@@ -230,8 +210,6 @@ func classifyFindResult(r *FindResult) {
 			switch r.Candidates[i].Hit {
 			case "symbols":
 				r.Reason = "MATCHED_SYMBOLS"
-			case "magic":
-				r.Reason = "MATCHED_MAGIC"
 			}
 			return
 		}
@@ -240,20 +218,62 @@ func classifyFindResult(r *FindResult) {
 	// No hits.
 	r.Found = false
 	if len(r.Candidates) == 0 {
-		// Check if the issue is split APK or no arm64.
-		r.Reason = "NO_ARM64"
+		r.Reason = "NO_SUPPORTED_ABI"
 	} else {
 		r.Reason = "NOT_FLUTTER"
 	}
+}
+
+func isSupportedNativeLibraryPath(name string) bool {
+	_, ok := nativeLibraryABI(name)
+	return ok && strings.HasSuffix(name, ".so")
+}
+
+func nativeLibraryABI(name string) (string, bool) {
+	if bang := strings.LastIndex(name, "!"); bang >= 0 {
+		name = name[bang+1:]
+	}
+	switch {
+	case strings.HasPrefix(name, "lib/arm64-v8a/"):
+		return "arm64-v8a", true
+	case strings.HasPrefix(name, "lib/x86_64/"):
+		return "x86_64", true
+	default:
+		return "", false
+	}
+}
+
+func validateNativeELFABI(ef *elfx.File, abi string) error {
+	if ef == nil {
+		return fmt.Errorf("native ABI %s: missing ELF", abi)
+	}
+	switch abi {
+	case "arm64-v8a":
+		if !ef.IsARM64() {
+			return fmt.Errorf("native ABI path %s contradicts ELF machine %s", abi, ef.Machine())
+		}
+	case "x86_64":
+		if ef.IsARM64() {
+			return fmt.Errorf("native ABI path %s contradicts ELF machine %s", abi, ef.Machine())
+		}
+	default:
+		return fmt.Errorf("unsupported native ABI %q", abi)
+	}
+	return nil
+}
+
+func IsStandardLibappPath(name string) bool {
+	if bang := strings.LastIndex(name, "!"); bang >= 0 {
+		name = name[bang+1:]
+	}
+	return name == "lib/arm64-v8a/libapp.so" || name == "lib/x86_64/libapp.so"
 }
 
 func hitPriority(hit string) int {
 	switch hit {
 	case "symbols":
 		return 0
-	case "magic":
-		return 1
 	default:
-		return 2
+		return 1
 	}
 }

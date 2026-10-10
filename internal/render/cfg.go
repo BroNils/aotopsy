@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,13 @@ import (
 // maxBlockCalls caps how many callees are drawn out of one block, so a
 // dispatch-heavy block does not bury the control flow it belongs to.
 const maxBlockCalls = 10
+
+func cfgBlockID(id int) string {
+	if id < 0 {
+		return "bb_n" + strings.TrimPrefix(strconv.Itoa(id), "-")
+	}
+	return fmt.Sprintf("bb%d", id)
+}
 
 // CFGDOT renders a per-function basic-block CFG as DOT.
 // Each basic block is a node; edges represent control flow. Call sites in
@@ -30,20 +38,51 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 	if len(cfg.Blocks) == 0 {
 		return ""
 	}
+	blockRange := func(blk disasm.BasicBlock) (int, int) {
+		start, end := blk.Start, blk.End
+		if start < 0 {
+			start = 0
+		} else if start > len(cfg.Insts) {
+			start = len(cfg.Insts)
+		}
+		if end < start {
+			end = start
+		} else if end > len(cfg.Insts) {
+			end = len(cfg.Insts)
+		}
+		return start, end
+	}
+	blockIDs := make(map[int]bool, len(cfg.Blocks))
+	for _, blk := range cfg.Blocks {
+		blockIDs[blk.ID] = true
+	}
 
 	// Call sites by the PC they occur at, so each can be attributed to the
-	// block containing that instruction.
-	calleeAt := make(map[uint64]string, len(edges))
+	// block containing that instruction without flattening polymorphic,
+	// unresolved, or runtime evidence into a fake callee name.
+	type cfgCallSite struct {
+		edge      disasm.CallEdgeRecord
+		sem       callSiteSemantics
+		supported bool
+	}
+	callSitesAt := make(map[uint64][]cfgCallSite, len(edges))
 	for _, e := range edges {
-		pc, err := strconv.ParseUint(strings.TrimPrefix(e.FromPC, "0x"), 16, 64)
+		if e.FromFunc != cfg.Name {
+			continue
+		}
+		pcText := strings.TrimSpace(e.FromPC)
+		pcText = strings.TrimPrefix(pcText, "0x")
+		pcText = strings.TrimPrefix(pcText, "0X")
+		pc, err := strconv.ParseUint(pcText, 16, 64)
 		if err != nil {
 			continue
 		}
-		targets := e.ResolvedTargets()
-		if len(targets) == 0 {
-			continue
+		supported := isSupportedCallKind(e.Kind)
+		sem := callSiteSemantics{}
+		if supported {
+			sem = inspectCallSite(e)
 		}
-		calleeAt[pc] = targets[0]
+		callSitesAt[pc] = append(callSitesAt[pc], cfgCallSite{edge: e, sem: sem, supported: supported})
 	}
 
 	var b strings.Builder
@@ -62,15 +101,12 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 
 	// Render blocks as nodes.
 	for _, blk := range cfg.Blocks {
-		id := fmt.Sprintf("bb%d", blk.ID)
+		id := cfgBlockID(blk.ID)
 
 		// Build label: one line per instruction.
 		var lines []string
-		end := blk.End
-		if end > len(cfg.Insts) {
-			end = len(cfg.Insts)
-		}
-		for i := blk.Start; i < end; i++ {
+		start, end := blockRange(blk)
+		for i := start; i < end; i++ {
 			inst := cfg.Insts[i]
 			line := fmt.Sprintf("0x%x: %s", inst.Addr, inst.Text)
 			lines = append(lines, dotEscape(line))
@@ -95,44 +131,139 @@ func CFGDOT(cfg disasm.FuncCFG, edges []disasm.CallEdgeRecord, t Theme) string {
 	}
 	b.WriteByte('\n')
 
-	// Render callee nodes and the call edges into them.
+	// Render semantic target/evidence nodes and the call edges into them.
 	externalSeen := map[string]bool{}
+	type blockRelation struct {
+		target string
+		prov   string
+		label  string
+	}
 	for _, blk := range cfg.Blocks {
-		from := fmt.Sprintf("bb%d", blk.ID)
-		end := blk.End
-		if end > len(cfg.Insts) {
-			end = len(cfg.Insts)
+		from := cfgBlockID(blk.ID)
+		start, end := blockRange(blk)
+		relations := make(map[blockRelation]bool)
+		nodeLabels := make(map[string]string)
+		namedTargets := make(map[string]bool)
+		for i := start; i < end; i++ {
+			for _, site := range callSitesAt[cfg.Insts[i].Addr] {
+				if !site.supported {
+					key := callSiteKey(site.edge, "cfg-unsupported-kind")
+					nodeLabels[key] = unsupportedCallKindLabel(site.edge)
+					relations[blockRelation{target: key, prov: ProvUnresolved, label: "unsupported call kind"}] = true
+					continue
+				}
+				prov := ClassifyEdgeProv(site.edge)
+				for _, target := range site.sem.StaticTargets {
+					namedTargets[target] = true
+					relations[blockRelation{target: target, prov: prov}] = true
+				}
+				if site.sem.RawTarget != "" {
+					key := callSiteKey(site.edge, "cfg-direct-address")
+					nodeLabels[key] = directAddressLabel(site.edge, site.sem.RawTarget)
+					relations[blockRelation{target: key, prov: ProvDirect, label: "address only"}] = true
+				}
+				if site.sem.Unresolved {
+					key := callSiteKey(site.edge, "cfg-unresolved")
+					nodeLabels[key] = unresolvedCallSiteLabel(site.edge)
+					relations[blockRelation{target: key, prov: ProvUnresolved, label: "unresolved"}] = true
+				}
+				if omitted := site.sem.omittedCandidates(); omitted > 0 {
+					key := callSiteKey(site.edge, "cfg-incomplete")
+					nodeLabels[key] = incompleteCallSiteLabel(site.edge, omitted)
+					relations[blockRelation{target: key, prov: ProvUnresolved, label: "candidate set incomplete"}] = true
+				}
+				if site.sem.candidateCountUnknown() {
+					key := callSiteKey(site.edge, "cfg-candidate-count-unknown")
+					nodeLabels[key] = unknownCandidateCountLabel(site.edge)
+					relations[blockRelation{target: key, prov: ProvUnresolved, label: "candidate completeness unknown"}] = true
+				}
+				for _, observed := range site.sem.RuntimeTargets {
+					if observed.Target == "" {
+						continue
+					}
+					namedTargets[observed.Target] = true
+					label := "runtime"
+					if site.sem.RuntimeAgreement != "" {
+						label += " " + string(site.sem.RuntimeAgreement)
+					}
+					if observed.Count > 1 {
+						label += fmt.Sprintf(" ×%d", observed.Count)
+					}
+					relations[blockRelation{target: observed.Target, prov: ProvRuntime, label: label}] = true
+				}
+			}
 		}
-		drawn := 0
-		for i := blk.Start; i < end; i++ {
-			callee, ok := calleeAt[cfg.Insts[i].Addr]
-			if !ok {
+
+		// Display bounds are explicit. The first maxBlockCalls named target nodes
+		// are deterministic, and a marker states exactly how many listed targets
+		// were omitted from this visual projection.
+		targetNames := make([]string, 0, len(namedTargets))
+		for name := range namedTargets {
+			targetNames = append(targetNames, name)
+		}
+		slices.Sort(targetNames)
+		visibleTargets := make(map[string]bool, len(targetNames))
+		limit := len(targetNames)
+		if limit > maxBlockCalls {
+			limit = maxBlockCalls
+		}
+		for _, name := range targetNames[:limit] {
+			visibleTargets[name] = true
+		}
+		if omitted := len(targetNames) - limit; omitted > 0 {
+			key := fmt.Sprintf("\x00cfg-display-cap\x00%s\x00%d", cfg.Name, blk.ID)
+			nodeLabels[key] = fmt.Sprintf("+%d more listed/observed target(s) hidden by display cap", omitted)
+			relations[blockRelation{target: key, prov: ProvUnresolved, label: "display cap"}] = true
+		}
+
+		relationList := make([]blockRelation, 0, len(relations))
+		for rel := range relations {
+			if _, evidenceNode := nodeLabels[rel.target]; !evidenceNode && !visibleTargets[rel.target] {
 				continue
 			}
-			if drawn >= maxBlockCalls {
-				break
+			relationList = append(relationList, rel)
+		}
+		slices.SortFunc(relationList, func(a, b blockRelation) int {
+			if a.target != b.target {
+				return strings.Compare(a.target, b.target)
 			}
-			drawn++
-			id := dotID(callee)
-			if !externalSeen[callee] {
-				externalSeen[callee] = true
+			if a.prov != b.prov {
+				return strings.Compare(a.prov, b.prov)
+			}
+			return strings.Compare(a.label, b.label)
+		})
+		for _, rel := range relationList {
+			id := dotID(rel.target)
+			if !externalSeen[rel.target] {
+				externalSeen[rel.target] = true
+				label := rel.target
+				if evidenceLabel := nodeLabels[rel.target]; evidenceLabel != "" {
+					label = evidenceLabel
+				}
 				font := "Helvetica Neue,Helvetica"
-				if IsAllCaps(callee) {
+				if IsAllCaps(label) {
 					font = "Courier,monospace"
 				}
 				fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontname=%q, fontcolor=%q, fontsize=8];\n",
-					id, truncLabel(callee, 50), font, t.EdgeDirect)
+					id, truncLabel(label, 70), font, edgeColor(rel.prov, t))
 			}
-			fmt.Fprintf(&b, "  %s -> %s [color=%q, style=dashed, arrowsize=0.4];\n", from, id, t.EdgeDirect)
+			attrs := fmt.Sprintf("color=%q, style=%q, arrowsize=0.4", edgeColor(rel.prov, t), edgeStyle(rel.prov))
+			if rel.label != "" {
+				attrs += fmt.Sprintf(", label=%q, fontsize=7, fontcolor=%q", truncLabel(rel.label, 32), edgeColor(rel.prov, t))
+			}
+			fmt.Fprintf(&b, "  %s -> %s [%s];\n", from, id, attrs)
 		}
 	}
 	b.WriteByte('\n')
 
 	// Render edges.
 	for _, blk := range cfg.Blocks {
-		from := fmt.Sprintf("bb%d", blk.ID)
+		from := cfgBlockID(blk.ID)
 		for _, s := range blk.Succs {
-			to := fmt.Sprintf("bb%d", s.BlockID)
+			if !blockIDs[s.BlockID] {
+				continue
+			}
+			to := cfgBlockID(s.BlockID)
 			switch s.Cond {
 			case "T":
 				fmt.Fprintf(&b, "  %s -> %s [color=%q, label=<<font point-size=\"7\" color=\"%s\">T</font>>];\n",

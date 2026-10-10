@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/strutil"
 )
 
 // namedIndirectTarget maps well-known ABI registers to a readable alias,
@@ -20,7 +21,7 @@ func namedIndirectTarget(reg string, fir *FuncIR) string {
 	case fir.ArgRegAt(2):
 		return "cachedTarget"
 	}
-	return "indirectTarget_" + sanitizeTailCallName(reg)
+	return "indirectTarget_" + strutil.SanitizeDartIdent(reg)
 }
 
 // ArgRegAt returns the i'th calling-convention argument register name,
@@ -56,13 +57,16 @@ func (e *emitter) callArgExprs(n int, calleeVA uint64) []string {
 	// samples by zero bytes, so it was machinery with no effect to keep.
 	//
 	// An indirect call is a switchable/dynamic call, and those pass their
-	// arguments on the STACK. The register at sdk.ICDataArgRegIndex holds the
+	// arguments on the STACK. The register at the index returned by
+	// sdk.ICDataArgRegIndex holds the
 	// UnlinkedCall/MegamorphicCache the call sequence just loaded, so it is
 	// provably not an argument -- and arguments being positional, nothing above
 	// it is either. See sdk.ICDataArgRegIndex for the SDK sequence and for why
 	// this hurt x86_64 far more than ARM64.
-	if calleeVA == 0 && len(out) > sdk.ICDataArgRegIndex {
-		out = out[:sdk.ICDataArgRegIndex]
+	if calleeVA == 0 {
+		if idx, ok := sdk.ICDataArgRegIndex(e.fir.DartVersion, e.fir.LinkReg != ""); ok && len(out) > idx {
+			out = out[:idx]
+		}
 	}
 	// D2: Truncate trailing unassigned argument registers (where lookupReg(reg) == reg or argN)
 	for len(out) > 0 {
@@ -101,6 +105,9 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 	e.stats.TotalCalls++
 	e.callIdx++
 	tmpName := fmt.Sprintf("t%d", e.callIdx)
+	// Even though CALL/BL itself need not modify flags, arbitrary callee code may.
+	// Never let a comparison from before a call feed a branch after it.
+	e.state.clearCmp()
 
 	// Resolve the target first: the callee's identity is what bounds the
 	// argument list.
@@ -109,6 +116,35 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 		calleeVA = 0
 	}
 	args := e.callArgExprs(len(e.fir.ArgRegs), calleeVA)
+	// Stack-passed arguments (MoveArgument model, >= 3.0.5): the slots written
+	// since the previous call. The callee's name bounds what may be bound.
+	calleeName := ""
+	if isDirect && e.symbols != nil {
+		if sym, ok := e.symbols(calleeVA); ok {
+			calleeName = cleanCalleeName(sym)
+		}
+	}
+	var boundArgs []string // stack/pushed arguments bound to this call (switchable.go)
+	if stackArgs := e.takeOutgoingStackArgs(calleeName); len(stackArgs) > 0 {
+		boundArgs = stackArgs
+		if e.hasRegisterCC() {
+			// >= 3.4.x: the first max_arguments_in_registers arguments of an
+			// eligible callee are in registers and the rest on the stack, so the
+			// register list is kept and the stack arguments follow it.
+			args = append(args, stackArgs...)
+		} else {
+			// 3.0.5..3.3.x pass EVERY argument on the stack (no
+			// DartCallingConvention yet): the registers listed above are not
+			// arguments, only whatever those registers happened to hold.
+			args = stackArgs
+		}
+	}
+	if pushed := e.takePushedArgs(calleeName); len(pushed) > 0 {
+		// <= 2.19.0: every argument is pushed; the registers listed above are
+		// not arguments.
+		args = pushed
+		boundArgs = pushed
+	}
 	selectorHint := sniffSelectorHint(args)
 	argsText := strings.Join(args, ", ")
 
@@ -132,6 +168,11 @@ func (e *emitter) emitCall(ins Instr, indent int) {
 				tmpName, ins.DispatchSelector, argsText)
 		}
 		e.stats.IndirectCalls++
+		bound = true
+	} else if text, ok := e.switchableCallExpr(boundArgs); !isDirect && ok {
+		e.stats.IndirectCalls++
+		e.stats.SemanticIndirectCalls++
+		e.emit(indent, "final %s = %s;", tmpName, text)
 		bound = true
 	} else if isDirect {
 		bound = e.emitDirectCall(tmpName, calleeVA, argsText, selectorHint, indent)
@@ -184,66 +225,77 @@ func parseHexVA(target string) (uint64, bool) {
 	return v, true
 }
 
-// knownVoidSelectors is a set of Dart method names that are known to return
-// void. Calls to these should not be assigned to a temp variable.
-// (P3-feasible-3 / E-018)
-//
-// M-2 (oracle-audit): "add" and "remove" were removed because they are
-// NOT universally void — Set.add returns bool, List.remove returns bool,
-// Set.remove returns bool. Since the decompiler can't distinguish List.add
-// (void) from Set.add (bool) by selector name alone, it's safer to not
-// mark them as void and keep the temp assignment.
-//
-// Additional removals (bug-fix): "apply", "close", "cancel", "start",
-// "stop", "resume", "pause", "reset" were removed because they are NOT
-// universally void:
-//   - Function.apply returns dynamic (dart:core)
-//   - IOSink.close returns Future, File.close returns Future
-//   - Timer.cancel returns void, but StreamSubscription.cancel returns Future
-//   - Stopwatch.start/stop return void, but many start/stop methods return Future
-//   - StreamSubscription.resume/pause return void, but Isolate.resume/pause
-//     return Future/void depending on overload
-//   - List.reset doesn't exist, but many custom reset methods return values
-//
-// Keeping these as void would silently drop return values in decompiled output.
-var knownVoidSelectors = map[string]bool{
-	"setState":          true,
-	"print":             true,
-	"notifyListeners":   true,
-	"addListener":       true,
-	"removeListener":    true,
-	"clear":             true,
-	"dispose":           true,
-	"markNeedsBuild":    true,
-	"requestLayout":     true,
-	"markNeedsLayout":   true,
-	"scheduleMicrotask": true,
-	"complete":          true,
-	"completeError":     true,
-	"insert":            true,
-	"forEach":           true,
-	"sort":              true,
-	"shuffle":           true,
-	"clearCache":        true,
-	"notifyClients":     true,
-	"performRebuild":    true,
-	"performLayout":     true,
-	"assemble":          true,
-	"reassemble":        true,
-	"visitChildren":     true,
-	"visitAncestors":    true,
-	"visitDescendants":  true,
+// markSuspendableStubRole records the Dart function kind proved by a VM
+// suspendable-function stub. Async, async*, and sync* share low-level suspend
+// machinery, but only the first two are async Dart functions and only the
+// ordinary async Await stub corresponds to an `await` expression.
+func markSuspendableStubRole(fir *FuncIR, role sdk.StubRole) bool {
+	if fir.SuspendModifierKnown {
+		switch role {
+		case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn,
+			sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn,
+			sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn,
+			sdk.StubRoleSuspendResume:
+			return true
+		default:
+			return false
+		}
+	}
+	switch role {
+	case sdk.StubRoleAsyncInit, sdk.StubRoleAsyncAwait, sdk.StubRoleAsyncReturn:
+		fir.IsAsync = true
+		return true
+	case sdk.StubRoleAsyncStarInit, sdk.StubRoleAsyncStarYield, sdk.StubRoleAsyncStarReturn:
+		fir.IsAsync = true
+		fir.IsAsyncStar = true
+		return true
+	case sdk.StubRoleSyncStarInit, sdk.StubRoleSyncStarSuspend, sdk.StubRoleSyncStarReturn:
+		fir.IsSyncStar = true
+		return true
+	case sdk.StubRoleSuspendResume:
+		return true
+	default:
+		return false
+	}
 }
 
-// isVoidCall returns true if the call target is a known void function/method.
-func isVoidCall(name, selectorHint string) bool {
-	if knownVoidSelectors[name] {
-		return true
+// emitAsyncStubSemantics handles only ordinary async stub calls whose source
+// meaning is established: init and await. Generator stubs still mark
+// async*/sync* above, but fall through to a normal call so we do not fabricate
+// an `await` or `yield` from runtime suspension bookkeeping. ReturnAsync also
+// falls through: normal DartReturn lowering TAIL-JUMPS to that stub rather than
+// calling it, so seeing it as a call is not proof of a source `return`.
+func (e *emitter) emitAsyncStubSemantics(role sdk.StubRole, tmpName, argsText string, indent int) (handled, bound bool) {
+	markSuspendableStubRole(e.fir, role)
+	// Exact FunctionModifierNone/sync* metadata contradicts an async source
+	// interpretation. Keep the low-level call visible rather than rewriting it
+	// into `await` on the strength of a symbol alone.
+	if e.fir.SuspendModifierKnown && !e.fir.IsAsync {
+		return false, false
 	}
-	if selectorHint != "" && knownVoidSelectors[selectorHint] {
-		return true
+	switch role {
+	case sdk.StubRoleAsyncInit:
+		e.emit(indent, "// async function entry (InitAsync stub)")
+		return true, false
+	case sdk.StubRoleAsyncAwait:
+		// SuspendStubABI::kArgumentReg is R0 on ARM64 and RAX on x64 in
+		// every compact-suspendable release (2.18+), i.e. the ordinary Dart
+		// return register. It is NOT a Dart parameter register: from 3.4.0 the
+		// latter are R1... / RDI..., so using generic argsText here reads the
+		// wrong machine value. AwaitWithTypeCheck has an additional kTypeArgsReg
+		// (R1 / RDX), but the source `await` operand is still kArgumentReg. SDK
+		// constants_{arm64,x64}.h SuspendStubABI. The exact-source SDK drift
+		// gate checks every supported release: AwaitWithTypeCheckStub is absent
+		// before 3.0.5 and present from that supported release onward.
+		awaited := e.state.lookupReg(e.fir.ReturnReg)
+		if awaited == "" {
+			awaited = e.fir.ReturnReg
+		}
+		e.emit(indent, "final %s = await %s;", tmpName, awaited)
+		return true, true
+	default:
+		return false, false
 	}
-	return false
 }
 
 // emitDirectCall emits the call and returns true when it bound the result into
@@ -270,39 +322,10 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 	//
 	// Name matching lives in asyncStubRole (asyncstub.go), shared with the
 	// pre-pass in emit.go so the two cannot drift apart.
-	switch sdk.ClassifyStubRole(name) {
-	case sdk.StubRoleAsyncInit:
-		e.fir.IsAsync = true
-		e.emit(indent, "// async function entry (InitAsync stub)")
-		return false
-	case sdk.StubRoleAsyncAwait:
-		e.fir.IsAsync = true
-		if argsText != "" {
-			e.emit(indent, "final %s = await %s;", tmpName, argsText)
-		} else {
-			e.emit(indent, "final %s = await;", tmpName)
-		}
-		return true
-	case sdk.StubRoleAsyncReturn:
-		e.fir.IsAsync = true
-		if argsText != "" {
-			e.emit(indent, "return %s;", argsText)
-		} else {
-			e.emit(indent, "return %s;", tmpName)
-		}
-		return false
+	if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(e.fir.DartVersion, name), tmpName, argsText, indent); handled {
+		return bound
 	}
 	intent := resolveCallIntent(name, selectorHint)
-	// P3-feasible-3: Skip temp assignment for known void calls.
-	if isVoidCall(name, selectorHint) {
-		if intent != "" {
-			e.stats.SemanticDirectCalls++
-			e.emit(indent, "%s(%s); // %s", name, argsText, intent)
-			return false
-		}
-		e.emit(indent, "%s(%s);", name, argsText)
-		return false
-	}
 	if intent != "" {
 		e.stats.SemanticDirectCalls++
 		e.emit(indent, "final %s = %s(%s); // %s", tmpName, name, argsText, intent)
@@ -317,27 +340,19 @@ func (e *emitter) emitDirectCall(tmpName string, va uint64, argsText, selectorHi
 func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint string, indent int) bool {
 	e.stats.IndirectCalls++
 
-	// A structural signal, checked before anything else: the target
-	// register was JUST stored into a Thread field (see lift.go's
-	// applyStore) -- Dart AOT's native/FFI-leaf-call bookkeeping idiom
-	// (Thread::vm_tag_offset(), recording what's about to run for the
-	// profiler). No other call convention stores the call target itself
-	// into Thread state right before dispatching it, so this is a
-	// confirmed call kind, not a guess -- takes priority over
-	// selector-hint sniffing.
-	if e.state.Regs[canonReg(targetText)] == ffiCallTargetSentinel {
+	// A structural signal, checked before selector hints: the target register was
+	// just stored into Thread::vm_tag by TransitionGeneratedToNative. This proves
+	// a generated->native transition, but not its FFI direction: the same VM
+	// sequence is used by outbound FfiCall code and by NativeReturn when a
+	// native-to-Dart callback returns to native code.
+	if e.state.Regs[canonReg(targetText)] == nativeTransitionTargetSentinel {
 		e.stats.SemanticIndirectCalls++
-		// Emit typed FFI call with argument count for signature inference.
-		// In a full implementation, this would resolve the FFI signature
-		// from FfiTrampolineData (callback_target → Function → signature).
-		// For now, we emit ffi_call with the args and a comment indicating
-		// this is a native FFI call with N arguments.
 		argCount := countArgs(argsText)
-		e.emit(indent, "final %s = %s%s); // FFI native call (%d args, Thread vm_tag bookkeeping)", tmpName, FFICallMarker, argsText, argCount)
+		e.emit(indent, "final %s = %s%s); // generated-to-native transition (%d args, Thread vm_tag bookkeeping; direction requires metadata)", tmpName, nativeTransitionCallMarker, argsText, argCount)
 		return true
 	}
 
-	// A second structural signal, same priority as the FFI check above:
+	// A second structural signal, same priority as the native-transition check above:
 	// the target register was just loaded from a KNOWN Thread-cached stub
 	// entry-point offset (see lift.go's ldr/mov THR-stub-offset check) --
 	// Dart AOT's fast path for calling a small set of extremely hot
@@ -353,27 +368,8 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 		// P7: Detect async/await stubs loaded from THR. Same classifier as
 		// emitDirectCall -- this is the path that actually sees the
 		// snake_case Thread-table spellings.
-		switch sdk.ClassifyStubRole(stubName) {
-		case sdk.StubRoleAsyncInit:
-			e.fir.IsAsync = true
-			e.emit(indent, "// async function entry (InitAsync stub)")
-			return false
-		case sdk.StubRoleAsyncAwait:
-			e.fir.IsAsync = true
-			if argsText != "" {
-				e.emit(indent, "final %s = await %s;", tmpName, argsText)
-			} else {
-				e.emit(indent, "final %s = await;", tmpName)
-			}
-			return true
-		case sdk.StubRoleAsyncReturn:
-			e.fir.IsAsync = true
-			if argsText != "" {
-				e.emit(indent, "return %s;", argsText)
-			} else {
-				e.emit(indent, "return %s;", tmpName)
-			}
-			return false
+		if handled, bound := e.emitAsyncStubSemantics(sdk.ClassifyStubRole(e.fir.DartVersion, stubName), tmpName, argsText, indent); handled {
+			return bound
 		}
 		e.stats.SemanticIndirectCalls++
 		e.emit(indent, "final %s = %s(%s); // Dart AOT runtime stub call (Thread cached entry point)", tmpName, stubName, argsText)
@@ -402,26 +398,14 @@ func (e *emitter) emitIndirectCall(tmpName, targetText, argsText, selectorHint s
 
 	named := namedIndirectTarget(targetText, e.fir)
 
-	// P3-feasible-3: Skip temp assignment for known void calls (indirect).
-	if isVoidCall("", selectorHint) {
-		intent := resolveCallIntent("", selectorHint)
-		if intent != "" {
-			e.stats.SemanticIndirectCalls++
-			e.emit(indent, "%s(%s); // %s, indirect via: %s", sanitizeCallName(selectorHint), argsText, intent, named)
-			return false
-		}
-		if selectorHint != "" {
-			if fallback := fallbackCallNameFromSelector(selectorHint); fallback != "" {
-				e.emit(indent, "%s(%s); // indirect via: %s", fallback, argsText, named)
-				return false
-			}
-		}
-	}
-
 	intent := resolveCallIntent("", selectorHint)
 	if intent != "" {
 		e.stats.SemanticIndirectCalls++
-		e.emit(indent, "final %s = %s(%s); // %s, indirect via: %s", tmpName, sanitizeCallName(selectorHint), argsText, intent, named)
+		callName := "call"
+		if selectorHint != "" {
+			callName = strutil.SanitizeDartIdent(selectorHint)
+		}
+		e.emit(indent, "final %s = %s(%s); // %s, indirect via: %s", tmpName, callName, argsText, intent, named)
 		return true
 	}
 	if selectorHint != "" {
@@ -456,13 +440,6 @@ func countArgs(argsText string) int {
 		}
 	}
 	return count
-}
-
-func sanitizeCallName(s string) string {
-	if s == "" {
-		return "call"
-	}
-	return safeFuncName(s)
 }
 
 // CallTargetsOf extracts every resolved direct-call target VA from a

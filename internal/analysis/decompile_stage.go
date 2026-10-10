@@ -1,14 +1,18 @@
 package analysis
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 
 	"aotopsy/internal/cli"
+	"aotopsy/internal/cluster"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/naming"
+	"aotopsy/internal/output"
 )
 
 // RunDecompileStage writes one .dart pseudocode file per function under
@@ -24,13 +28,20 @@ import (
 // app roughly triples the output directory (127 MB -> ~370 MB measured on
 // dart-3.9.2-gt-arm64). Run() says so on every run that does not use it,
 // so the capability is discoverable instead of merely present.
-func RunDecompileStage(opts *Opts) (int, error) {
-	ctx, err := LoadContext(opts.LibPath)
-	if err != nil {
-		return 0, fmt.Errorf("load context: %w", err)
+func RunDecompileStage(opts *Opts, ctx *AnalysisContext) (int, error) {
+	if ctx == nil || ctx.EF == nil {
+		return 0, fmt.Errorf("decompile: missing analysis context")
 	}
-	defer func() { _ = ctx.Close() }()
+	oldProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(oldProcs)
+	oldLimit := debug.SetMemoryLimit(1536 << 20)
+	defer debug.SetMemoryLimit(oldLimit)
 
+	// FuncIRFor only wires register-CC parameters after whole-binary call-site
+	// setup masks are available. The standalone batch decompiler builds these
+	// before entering its loop; the pipeline path must use the same enrichment or
+	// the two surfaces produce different pseudocode for Dart 3.4.3+.
+	ctx.BuildArgRegMasks()
 	dartDir := filepath.Join(opts.OutDir, "dart")
 	if err := os.MkdirAll(dartDir, 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir dart: %w", err)
@@ -51,13 +62,32 @@ func RunDecompileStage(opts *Opts) (int, error) {
 	}
 
 	written, orphanBlocks, orphanFuncs := 0, 0, 0
+	failures := FailureLog{Strict: opts.Strict}
+	image := cluster.CodeImage{CodeVA: ctx.CodeVA, CodeOff: ctx.CodeOff}
 	for i := 0; i < n; i++ {
 		r := ctx.Ranges[i]
 		if r.Size == 0 {
 			continue
 		}
-		fir, err := ctx.FuncIRFor(r)
-		if err != nil || fir == nil || len(fir.Blocks) == 0 {
+		fir, err := func() (fir *decompiler.FuncIR, err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					err = fmt.Errorf("panic: %v", rec)
+				}
+			}()
+			return ctx.FuncIRFor(r)
+		}()
+		if err == nil && fir == nil {
+			err = fmt.Errorf("FuncIRFor returned nil IR without error")
+		}
+		if err != nil {
+			funcVA, _ := image.FuncVA(r)
+			if ferr := failures.Record(funcVA, r.RefID, ctx.SymbolNames[funcVA], err); ferr != nil {
+				return written, ferr
+			}
+			continue
+		}
+		if len(fir.Blocks) == 0 {
 			continue
 		}
 		art := decompiler.EmitPseudocode(fir, symLk, poolLk)
@@ -75,14 +105,17 @@ func RunDecompileStage(opts *Opts) (int, error) {
 			funcName = fmt.Sprintf("stub_%x", r.PCOffset)
 		}
 		rel := naming.FuncRelPath(ownerName, funcName, r.PCOffset)
-		path := filepath.Join(dartDir, rel+".dart")
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return written, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
-		}
-		if err := writeDartFile(path, art.Source); err != nil {
+		if err := writeDartFile(opts.OutDir, "dart/"+rel+".dart", art.Source); err != nil {
 			return written, err
 		}
 		written++
+		if written%100 == 0 {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}
+	if err := failures.Finish(opts.OutDir, opts.log()); err != nil {
+		return written, err
 	}
 
 	opts.stagef("decompile", "%s%d%s functions -> %s%s%s",
@@ -94,19 +127,9 @@ func RunDecompileStage(opts *Opts) (int, error) {
 	return written, nil
 }
 
-func writeDartFile(path, source string) error {
-	f, err := os.Create(path) //nolint:gosec // path is built from this run's own --out directory
-	if err != nil {
+func writeDartFile(root, rel, source string) error {
+	return output.WriteArtifactAtomic(root, rel, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, source)
 		return err
-	}
-	w := bufio.NewWriter(f)
-	if _, err := w.WriteString(source); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := w.Flush(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	})
 }

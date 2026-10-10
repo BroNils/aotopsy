@@ -133,7 +133,7 @@ func BuildFuncTypeParamNames(result *cluster.Result, pl *PoolLookups) map[int][]
 		if !ok {
 			continue
 		}
-		var params []TypeParam
+		params := make([]TypeParam, 0, len(arr.ElementRefIDs))
 		for idx, elemRef := range arr.ElementRefIDs {
 			// StringForRef, not RefToStr: type parameter names are short,
 			// heavily shared strings ("T", "K", "V") that live in the VM
@@ -141,7 +141,10 @@ func BuildFuncTypeParamNames(result *cluster.Result, pl *PoolLookups) map[int][]
 			// of them (measured: 12 of 84 generic FunctionTypes).
 			name, ok := pl.StringForRef(elemRef)
 			if !ok || name == "" {
-				continue
+				// Preserve declaration arity/order even when one name was not
+				// captured. Silently skipping this slot turns <T,U> into <U>,
+				// which is a stronger and false claim than admitting an unknown.
+				name = "?"
 			}
 			params = append(params, TypeParam{
 				Name:  name,
@@ -216,20 +219,28 @@ func BuildClosureParents(result *cluster.Result, pl *PoolLookups) map[int]string
 			continue
 		}
 		parent, ok := pl.RefToNamed[parentRef]
-		if !ok && pl.VmRefToNamed != nil {
+		if !ok && parentRef < pl.BaseObjLimit && pl.VmRefToNamed != nil {
 			parent, ok = pl.VmRefToNamed[parentRef]
 		}
 		if !ok {
 			continue
 		}
-		name := pl.ResolveName(parent)
-		if name == "" {
-			name = pl.ResolveVMName(parent)
+		name := ""
+		if _, appParent := pl.RefToNamed[parentRef]; appParent {
+			name = pl.ResolveIsolateName(parent)
+		} else {
+			name = pl.resolveVMName(parent)
 		}
 		if name == "" {
 			continue
 		}
-		if owner := pl.ResolveOwnerName(parent); owner != "" {
+		if parent.IsConstructor() {
+			// FunctionPrintNameHelper prints a constructor parent as `new ` plus
+			// its Function name and deliberately skips the class-name branch. The
+			// Function name already contains the class, so prepending the owner
+			// would produce `Future.Future.delayed`.
+			name = "new " + name
+		} else if owner := pl.ResolveOwnerName(parent); owner != "" {
 			name = owner + "." + name
 		}
 		out[no.RefID] = name

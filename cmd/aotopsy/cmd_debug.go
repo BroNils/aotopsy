@@ -6,7 +6,7 @@ import (
 
 // cmdDebug handles "aotopsy _debug <cmd>" — internal/debug commands.
 func cmdDebug(args []string) error {
-	if len(args) < 1 {
+	if len(args) < 1 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		printDebugUsage()
 		return nil
 	}

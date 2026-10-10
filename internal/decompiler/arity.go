@@ -4,14 +4,19 @@ import (
 	"strings"
 )
 
-// inferLiveInArgIndices deduces a function's incoming argument registers
+// LiveInArgIndices deduces a function's incoming argument registers
 // by analyzing which argument registers (fir.ArgRegs) are read before being
 // written across the function's basic blocks.
 //
 // When cross-function call-site evidence (fir.ArgRegIndices) is unavailable,
 // this replaces the blind 8-argument (arg0..arg7) fallback with real
 // intraprocedural liveness, cutting false parameter declarations by >90%.
-func inferLiveInArgIndices(fir *FuncIR) []int {
+//
+// It is exported because typetrack uses the same callee-side evidence to
+// distinguish a real incoming receiver register from a stack-called function.
+// Keeping one liveness implementation prevents the decompiler and typetrack
+// from making contradictory calling-convention claims.
+func LiveInArgIndices(fir *FuncIR) []int {
 	if fir == nil || len(fir.ArgRegs) == 0 {
 		return nil
 	}
@@ -46,61 +51,89 @@ func inferLiveInArgIndices(fir *FuncIR) []int {
 			aliasMap["edx"] = i
 			aliasMap["dx"] = i
 			aliasMap["dl"] = i
+			aliasMap["dh"] = i
+		case "rbx":
+			aliasMap["ebx"] = i
+			aliasMap["bx"] = i
+			aliasMap["bl"] = i
+			aliasMap["bh"] = i
 		case "rcx":
 			aliasMap["ecx"] = i
 			aliasMap["cx"] = i
 			aliasMap["cl"] = i
+			aliasMap["ch"] = i
 		case "r8":
 			aliasMap["r8d"] = i
+			aliasMap["r8l"] = i
 			aliasMap["r8w"] = i
 			aliasMap["r8b"] = i
 		case "r9":
 			aliasMap["r9d"] = i
+			aliasMap["r9l"] = i
 			aliasMap["r9w"] = i
 			aliasMap["r9b"] = i
 		}
 	}
 
-	written := make([]bool, numArgs)
-	read := make([]bool, numArgs)
-
+	// Compute block-local upward-exposed uses and defs, then solve argument
+	// liveness over the CFG. The old global scan let a write in one block/path
+	// suppress a read in an unrelated block simply because that block appeared
+	// later in the slice. It also returned every slot 0..max(read), inventing
+	// dense parameters when only sparse registers were live on entry.
+	use := make([]uint16, len(fir.Blocks))
+	def := make([]uint16, len(fir.Blocks))
 	for bi := range fir.Blocks {
-		blk := &fir.Blocks[bi]
-		for _, ins := range blk.Instrs {
+		var seenDef uint16
+		for _, ins := range fir.Blocks[bi].Instrs {
 			reads, writes := inspectInstrRegUsage(ins, fir.ReturnReg)
-			// Process reads first (if an instruction reads then writes, like add Rd, Rn)
 			for _, r := range reads {
-				if idx, ok := aliasMap[r]; ok {
-					if !written[idx] {
-						read[idx] = true
+				if idx, ok := aliasMap[r]; ok && idx < 16 {
+					bit := uint16(1) << idx
+					if seenDef&bit == 0 {
+						use[bi] |= bit
 					}
 				}
 			}
-			// Process writes
 			for _, w := range writes {
-				if idx, ok := aliasMap[w]; ok {
-					if !read[idx] {
-						written[idx] = true
-					}
+				if idx, ok := aliasMap[w]; ok && idx < 16 {
+					seenDef |= uint16(1) << idx
 				}
+			}
+		}
+		def[bi] = seenDef
+	}
+
+	liveIn := make([]uint16, len(fir.Blocks))
+	liveOut := make([]uint16, len(fir.Blocks))
+	for changed := true; changed; {
+		changed = false
+		for bi := len(fir.Blocks) - 1; bi >= 0; bi-- {
+			var out uint16
+			for _, succ := range fir.Blocks[bi].Succs {
+				if succ.BlockID >= 0 && succ.BlockID < len(liveIn) {
+					out |= liveIn[succ.BlockID]
+				}
+			}
+			in := use[bi] | (out &^ def[bi])
+			if in != liveIn[bi] || out != liveOut[bi] {
+				liveIn[bi], liveOut[bi] = in, out
+				changed = true
 			}
 		}
 	}
 
-	maxIdx := -1
-	for i := 0; i < numArgs; i++ {
-		if read[i] {
-			maxIdx = i
-		}
+	entryID := 0
+	if id, ok := fir.BlockByVA(fir.EntryVA); ok {
+		entryID = id
 	}
-
-	if maxIdx < 0 {
+	if entryID < 0 || entryID >= len(liveIn) {
 		return nil
 	}
-
-	idx := make([]int, maxIdx+1)
-	for i := 0; i <= maxIdx; i++ {
-		idx[i] = i
+	var idx []int
+	for i := 0; i < numArgs; i++ {
+		if liveIn[entryID]&(uint16(1)<<i) != 0 {
+			idx = append(idx, i)
+		}
 	}
 	return idx
 }
@@ -141,6 +174,13 @@ func inspectInstrRegUsage(ins Instr, returnReg string) (reads []string, writes [
 	tokens := tokenizeOperands(opsText)
 
 	switch {
+	case mnemonic == "call" || mnemonic == "blr" || mnemonic == "br":
+		// Indirect call/branch targets are operands that are READ to obtain the
+		// destination. Treating operand 0 as the generic destination register
+		// erases a legitimate incoming function-pointer argument from liveness.
+		for _, t := range tokens {
+			reads = append(reads, extractRegsFromToken(t)...)
+		}
 	case mnemonic == "cmp" || mnemonic == "cmn" || mnemonic == "tst" || mnemonic == "test":
 		for _, t := range tokens {
 			reads = append(reads, extractRegsFromToken(t)...)
@@ -171,14 +211,35 @@ func inspectInstrRegUsage(ins Instr, returnReg string) (reads []string, writes [
 				reads = append(reads, extractRegsFromToken(t)...)
 			}
 		}
-	case mnemonic == "mov" || mnemonic == "movz" || mnemonic == "movn" || mnemonic == "movk" || mnemonic == "fmov":
+	case mnemonic == "movk":
+		// ARM64 MOVK replaces one 16-bit lane and preserves every other bit of
+		// the destination. The old destination is therefore both read and
+		// written. Treating it as a pure write can hide a genuine live-in arg.
+		if len(tokens) > 0 {
+			regs := extractRegsFromToken(tokens[0])
+			reads = append(reads, regs...)
+			writes = append(writes, regs...)
+		}
+		for _, t := range tokens[1:] {
+			reads = append(reads, extractRegsFromToken(t)...)
+		}
+	case mnemonic == "mov" || mnemonic == "movz" || mnemonic == "movn" || mnemonic == "fmov":
 		if len(tokens) > 0 {
 			writes = append(writes, extractRegsFromToken(tokens[0])...)
 		}
 		if len(tokens) > 1 {
 			reads = append(reads, extractRegsFromToken(tokens[1])...)
 		}
-	case mnemonic == "xor" || mnemonic == "sub":
+	case mnemonic == "sub" && len(tokens) >= 3:
+		// ARM64 SUB is three-address: sub Rd, Rn, Operand. Rd is a pure
+		// destination; only Rn/Operand are read. The x86 form below is
+		// two-address and therefore has different liveness.
+		writes = append(writes, extractRegsFromToken(tokens[0])...)
+		for _, t := range tokens[1:] {
+			reads = append(reads, extractRegsFromToken(t)...)
+		}
+	case mnemonic == "xor" || mnemonic == "sub" ||
+		(len(tokens) == 2 && isX86TwoOperandRMW(mnemonic)):
 		// Check for x86 zeroing idiom: xor reg, reg / sub reg, reg
 		if len(tokens) >= 2 && strings.EqualFold(tokens[0], tokens[1]) {
 			writes = append(writes, extractRegsFromToken(tokens[0])...)
@@ -191,6 +252,23 @@ func inspectInstrRegUsage(ins Instr, returnReg string) (reads []string, writes [
 		if len(tokens) > 1 {
 			reads = append(reads, extractRegsFromToken(tokens[1])...)
 		}
+	case len(tokens) == 1 && isX86UnaryRMW(mnemonic):
+		// x86 INC/DEC/NEG/NOT update their sole operand in place.
+		regs := extractRegsFromToken(tokens[0])
+		reads = append(reads, regs...)
+		writes = append(writes, regs...)
+	case len(tokens) == 1 && (mnemonic == "mul" || mnemonic == "imul"):
+		// One-operand x86 MUL/IMUL multiply the explicit source by RAX and
+		// write RDX:RAX. The explicit source is not a destination.
+		reads = append(reads, extractRegsFromToken(tokens[0])...)
+		reads = append(reads, "rax")
+		writes = append(writes, "rax", "rdx")
+	case len(tokens) == 1 && (mnemonic == "div" || mnemonic == "idiv"):
+		// DIV/IDIV consume RDX:RAX and the explicit divisor, then replace
+		// RDX:RAX with remainder/quotient.
+		reads = append(reads, extractRegsFromToken(tokens[0])...)
+		reads = append(reads, "rax", "rdx")
+		writes = append(writes, "rax", "rdx")
 	case mnemonic == "lea":
 		if len(tokens) > 0 {
 			writes = append(writes, extractRegsFromToken(tokens[0])...)
@@ -211,6 +289,23 @@ func inspectInstrRegUsage(ins Instr, returnReg string) (reads []string, writes [
 	}
 
 	return reads, writes
+}
+
+func isX86TwoOperandRMW(mnemonic string) bool {
+	switch mnemonic {
+	case "add", "adc", "sbb", "and", "or", "imul",
+		"shl", "sal", "shr", "sar", "rol", "ror":
+		return true
+	}
+	return false
+}
+
+func isX86UnaryRMW(mnemonic string) bool {
+	switch mnemonic {
+	case "inc", "dec", "neg", "not":
+		return true
+	}
+	return false
 }
 
 func tokenizeOperands(ops string) []string {
@@ -279,8 +374,10 @@ func isRegisterToken(tok string) bool {
 		"r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
 		"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
 		"r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+		"r8l", "r9l", "r10l", "r11l", "r12l", "r13l", "r14l", "r15l",
 		"ax", "bx", "cx", "dx", "si", "di", "bp",
-		"al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl",
+		"al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "bpl", "spl",
+		"r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
 		"r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b":
 		return true
 	}

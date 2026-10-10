@@ -10,7 +10,7 @@ import (
 // buildTestIR lifts a hand-written ARM64 instruction sequence.
 func liftARM64Ops(t *testing.T, srcs []string) *LiftState {
 	t.Helper()
-	fir := &FuncIR{FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr, NullReg: sdk.ARM64NullRegStr}
+	fir := &FuncIR{DartVersion: "3.12.2", FrameReg: sdk.ARM64FrameRegStr, PoolReg: sdk.ARM64PoolRegStr, ThreadReg: sdk.ARM64ThreadRegStr, NullReg: sdk.ARM64NullRegStr}
 	s := newLiftState(fir.NullReg)
 	for _, src := range srcs {
 		ApplyOther(fir, s, Instr{Src: src})

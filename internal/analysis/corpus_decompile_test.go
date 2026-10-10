@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -25,7 +24,7 @@ const decompileCorpusFuncs = 200
 // cliff, which is what a version-specific structuring failure looks like.
 const decompileCorpusMinCoverage = 95.0
 
-// TestDecompileCorpus runs every registered sample through the decompiler.
+// TestDecompileCorpus runs every registered analysis sample through the decompiler.
 //
 // This test exists because nothing did. The golden test covers pipeline
 // ARTIFACTS, and pseudocode is not one of them (it is written only under
@@ -42,8 +41,12 @@ func TestDecompileCorpus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("corpus decompile sweep is slow; skipped under -short")
 	}
+	requireCompleteCorpus(t)
 	seen := map[string]bool{}
 	for _, s := range samplecorpus.Registry {
+		if s.SymbolOracle {
+			continue
+		}
 		name := s.FileName()
 		if seen[name] {
 			continue
@@ -51,10 +54,7 @@ func TestDecompileCorpus(t *testing.T) {
 		seen[name] = true
 
 		t.Run(name, func(t *testing.T) {
-			path := samplecorpus.Path(name)
-			if path == "" {
-				t.Skip(samplecorpus.MissingMessage(s))
-			}
+			path := corpusSample(t, name)
 			ctx, err := LoadContext(path)
 			if err != nil {
 				t.Fatalf("%s (Dart %s %s): LoadContext: %v", name, s.DartVersion, s.Arch, err)
@@ -110,13 +110,5 @@ func TestDecompileCorpus(t *testing.T) {
 // the registry disagrees with it, so a sample added to disk without a
 // registry entry does not silently escape the sweep above.
 func TestDecompileCorpusRegistryPresent(t *testing.T) {
-	if samplecorpus.Path(samplecorpus.Registry[0].FileName()) == "" {
-		t.Skip("samples/ not present")
-	}
-	for _, s := range samplecorpus.Registry {
-		if _, err := os.Stat(samplecorpus.Path(s.FileName())); err != nil {
-			t.Errorf("registered sample %s (Dart %s %s) is missing from samples/",
-				s.FileName(), s.DartVersion, s.Arch)
-		}
-	}
+	requireCompleteCorpus(t)
 }

@@ -1,39 +1,46 @@
 package cluster
 
 import (
+	"math/bits"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
+	"aotopsy/internal/cmacro"
 	"aotopsy/internal/sdktest"
 )
 
 // TestKindTagModifierPositionMatchesSDK re-derives kindTagModifierMask from
-// object.h's KindTagBits enum at every version AOTopsy supports below 3.4.3 --
-// the range where the modifier decides whether a receiver has a static frame
-// slot at all (Function::MakesCopyOfParameters).
+// the SDK at EVERY supported version.
 //
-// Nothing local can catch drift here. A wrong ModifierBits position reads some
-// other field as the async modifier, which makes ReceiverFrameSlot decline for
-// functions that do have a slot and accept for ones that do not -- in both
-// directions a silently missing or fabricated receiver type, never an error.
+// The modifier decides two things. Below 3.4.3 it decides whether a receiver
+// has a static frame slot at all (Function::MakesCopyOfParameters); at every
+// version it is how a Function is recognised as async, sync* or async*
+// (FunctionModifier). Nothing local can catch drift: a wrong ModifierBits
+// position reads some other field as the modifier, which mislabels a function
+// as async or makes ReceiverFrameSlot decline or accept wrongly -- a plausible
+// wrong answer, never an error.
 //
-// The position has been constant (kKindTagSize=5, kRecognizedTagSize=9,
-// kModifierPos=14, kModifierSize=2) at every version read so far, which is
-// exactly why a gate is worth more than a comment: a constant nobody rechecks
-// is a constant that drifts unnoticed.
+// The layout is two different things in the SDK, and both are handled:
+//   - through 3.5.0, object.h hardcodes kKindTagSize=5, kRecognizedTagSize=9,
+//     kModifierPos/kModifierSize=2;
+//   - from 3.6.0 it is computed: KindBits at 0 of width BitLength(last Kind),
+//     RecognizedBits after it of width BitLength(kNumRecognizedMethods - 1), and
+//     ModifierBits after that of width BitLength(kAsyncGen). The widths are
+//     re-derived from FOR_EACH_RAW_FUNCTION_KIND and RECOGNIZED_LIST, so a
+//     method added to the recognized list past 512 (which would shift the
+//     modifier to bit 15) fails here instead of silently mislabelling async.
+//
+// The AsyncModifier ordinals (kNoModifier=0, kAsync, kSyncGen, kAsyncGen) that
+// decodeFunctionModifier relies on are checked at every version too, and so is
+// the fact that the single-bit flags start right after the modifier (bit 16),
+// which functionKindTagFlagLayoutFor assumes.
 //
 //	AOTOPSY_TEST_SDK=1 go test ./internal/cluster/ -run KindTagModifier
 func TestKindTagModifierPositionMatchesSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	// Every version in scope below 3.4.3, plus 3.4.3 itself as the boundary.
-	versions := []string{
-		"2.10.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0", "2.16.0",
-		"2.17.6", "2.18.0", "2.19.0", "3.0.5", "3.1.0", "3.2.5", "3.3.0",
-		"3.4.3",
-	}
 	num := regexp.MustCompile(`=\s*(\d+)`)
 	field := func(src, name string) (int, bool) {
 		for _, line := range strings.Split(src, "\n") {
@@ -47,26 +54,87 @@ func TestKindTagModifierPositionMatchesSDK(t *testing.T) {
 		}
 		return 0, false
 	}
+	// Chain of BitField declarations that the computed layout is built from.
+	chain := []*regexp.Regexp{
+		regexp.MustCompile(`(?s)using KindBits = BitField<[^;]*?,\s*0,\s*UntaggedFunction::kKindBitSize>;`),
+		regexp.MustCompile(`(?s)using RecognizedBits = BitField<[^;]*?KindBits::kNextBit,\s*MethodRecognizer::kKindBitSize>;`),
+		regexp.MustCompile(`(?s)using ModifierBits = BitField<[^;]*?RecognizedBits::kNextBit,\s*UntaggedFunction::kAsyncModifierBitSize>;`),
+	}
+	// The enum is spelled with bit flags; kNoModifier=0, kAsync=1, kSyncGen=2 and
+	// kAsyncGen=1|2=3 are the values decodeFunctionModifier assumes.
+	asyncEnum := regexp.MustCompile(`enum AsyncModifier\s*\{\s*kNoModifier\s*=\s*0x0,\s*kAsyncBit\s*=\s*0x1,\s*kGeneratorBit\s*=\s*0x2,\s*` +
+		`kAsync\s*=\s*kAsyncBit,\s*kSyncGen\s*=\s*kGeneratorBit,\s*kAsyncGen\s*=\s*kAsyncBit\s*\|\s*kGeneratorBit,`)
+	asyncBitSize := regexp.MustCompile(`kAsyncModifierBitSize\s*=\s*Utils::BitLength\(kAsyncGen\)`)
 
-	for _, v := range versions {
-		src, err := sdktest.GHFileAtTag("runtime/vm/object.h", v)
-		if err != nil {
-			t.Fatalf("%s: fetch object.h: %v", v, err)
-		}
-		kindSize, ok1 := field(src, "kKindTagSize")
-		recSize, ok2 := field(src, "kRecognizedTagSize")
-		modSize, ok3 := field(src, "kModifierSize")
-		if !ok1 || !ok2 || !ok3 {
-			t.Fatalf("%s: KindTagBits sizes not found (kind=%v recognized=%v modifier=%v) -- "+
-				"the enum became computed rather than hardcoded, so this gate needs rewriting "+
-				"rather than deleting", v, ok1, ok2, ok3)
-		}
-		wantPos := uint(kindSize + recSize)
-		wantMask := uint32((1<<uint(modSize) - 1)) << wantPos
-		if wantMask != kindTagModifierMask {
-			t.Errorf("%s: SDK ModifierBits at pos %d width %d -> mask %#x, kindTagModifierMask = %#x",
-				v, wantPos, modSize, wantMask, kindTagModifierMask)
-		}
+	for _, v := range fillLayoutTags {
+		t.Run(v, func(t *testing.T) {
+			obj, err := sdktest.SDKFileAtTag("runtime/vm/object.h", v)
+			if err != nil {
+				t.Fatalf("fetch object.h: %v", err)
+			}
+			raw, err := sdktest.SDKFileAtTag("runtime/vm/raw_object.h", v)
+			if err != nil {
+				t.Fatalf("fetch raw_object.h: %v", err)
+			}
+			if !asyncEnum.MatchString(raw) {
+				t.Fatalf("AsyncModifier is no longer kNoModifier=0, kAsync, kSyncGen, kAsyncGen: decodeFunctionModifier is wrong")
+			}
+
+			// Widths derived from the two lists (valid wherever they exist).
+			kinds, err := sdkFunctionKinds(v)
+			if err != nil {
+				t.Fatalf("FOR_EACH_RAW_FUNCTION_KIND: %v", err)
+			}
+			list, err := sdktest.SDKFileAtTag("runtime/vm/compiler/recognized_methods_list.h", v)
+			if err != nil {
+				t.Fatalf("fetch recognized_methods_list.h: %v", err)
+			}
+			macros, err := cmacro.ParseMacros(list)
+			if err != nil {
+				t.Fatalf("parse recognized_methods_list.h: %v", err)
+			}
+			rows, err := cmacro.ExpandRaw(macros, "RECOGNIZED_LIST")
+			if err != nil {
+				t.Fatalf("expand RECOGNIZED_LIST: %v", err)
+			}
+			derivedKind := bits.Len(uint(len(kinds) - 1)) // BitLength(last Kind ordinal)
+			derivedRec := bits.Len(uint(len(rows)))       // BitLength(kNumRecognizedMethods - 1), kUnknown + rows
+			derivedMod := bits.Len(3)                     // BitLength(kAsyncGen)
+
+			kindSize, ok1 := field(obj, "kKindTagSize")
+			recSize, ok2 := field(obj, "kRecognizedTagSize")
+			modSize, ok3 := field(obj, "kModifierSize")
+			switch {
+			case ok1 && ok2 && ok3:
+				// Hardcoded layout: it must agree with what the lists imply.
+				if recSize != derivedRec || modSize != derivedMod {
+					t.Errorf("hardcoded kRecognizedTagSize=%d kModifierSize=%d, lists imply %d and %d",
+						recSize, modSize, derivedRec, derivedMod)
+				}
+			case !ok1 && !ok2 && !ok3:
+				for _, re := range chain {
+					if !re.MatchString(obj) {
+						t.Fatalf("computed KindTagBits chain changed (%s missing): this gate needs rewriting", re)
+					}
+				}
+				if !asyncBitSize.MatchString(raw) {
+					t.Fatalf("kAsyncModifierBitSize is no longer BitLength(kAsyncGen)")
+				}
+				kindSize, recSize, modSize = derivedKind, derivedRec, derivedMod
+			default:
+				t.Fatalf("KindTagBits partly hardcoded (kind=%v recognized=%v modifier=%v): unexpected layout", ok1, ok2, ok3)
+			}
+
+			wantPos := uint(kindSize + recSize)
+			wantMask := uint32((1<<uint(modSize) - 1)) << wantPos
+			if wantMask != kindTagModifierMask {
+				t.Errorf("SDK ModifierBits at pos %d width %d -> mask %#x, kindTagModifierMask = %#x",
+					wantPos, modSize, wantMask, kindTagModifierMask)
+			}
+			if first := wantPos + uint(modSize); first != 16 {
+				t.Errorf("single-bit flags start at bit %d, functionKindTagFlagLayoutFor assumes 16", first)
+			}
+		})
 	}
 }
 
@@ -92,5 +160,25 @@ func TestReceiverFrameSlotDeclinesWithoutStaticSlot(t *testing.T) {
 	// is behind a WeakSerializationReference the AOT serializer drops.
 	if got, ok := ReceiverFrameSlot(0, 0, false, 8); ok {
 		t.Errorf("unknown arity: got (%d, true), want no slot", got)
+	}
+}
+
+// Parameters descend one word per index from the receiver's slot.
+func TestParamFrameSlotDescendsFromTheReceiver(t *testing.T) {
+	for i, want := range []int64{24, 16} { // two fixed parameters (receiver + 1), 2.12.0 arm64 operator+
+		if got, ok := ParamFrameSlot(2, 0, false, i, 8); !ok || got != want {
+			t.Errorf("param %d: got (%d, %v), want (%d, true)", i, got, ok, want)
+		}
+	}
+	if got, ok := ParamFrameSlot(3, 0, false, 2, 8); !ok || got != 16 {
+		t.Errorf("last of three: got (%d, %v), want (16, true)", got, ok)
+	}
+	for _, bad := range []int{-1, 2} {
+		if got, ok := ParamFrameSlot(2, 0, false, bad, 8); ok {
+			t.Errorf("index %d out of range returned slot %d", bad, got)
+		}
+	}
+	if got, ok := ParamFrameSlot(2, 1, false, 1, 8); ok {
+		t.Errorf("optional params: got slot %d", got)
 	}
 }

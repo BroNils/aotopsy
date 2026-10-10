@@ -1,9 +1,5 @@
 package vmtables
 
-import (
-	"aotopsy/internal/snapshot"
-)
-
 // THR field name tables for ARM64.
 // Extracted from dartsdk/v*/runtime/vm/compiler/runtime_offsets_extracted.h
 //
@@ -20,63 +16,80 @@ import (
 // variant real binaries of that version actually use. Add more by running
 // tools/extract_thr.go with the appropriate flags.
 
-// THRFields returns the Thread offset→name map for a given Dart version string.
-// Returns nil if no table is available (annotations fall back to THR+0xNN).
-//
-// H-2/H-3 fix: now supports x86_64 for all versions with compressed pointers
-// (2.18+). x86_64 tables are in thrfieldsx86.go (auto-generated).
-// Dart 2.10–2.16 ARM64 tables (non-compressed pointers) extracted via
-// tools/extract_thr.go (M-4 fix).
-//
-// Compression-aware when a profile is supplied: 3.9.2 ships both a compressed
-// and a non-compressed table, and the non-compressed one is selected for
-// snapshots without the "compressed-pointers" feature.
-func THRFields(dartVersion string, isARM64 bool) map[int]string {
-	return THRFieldsWithProfile(dartVersion, isARM64, nil)
-}
+// THRFields returns the exact Thread offset -> name table for target. Every
+// layout dimension is mandatory. Unsupported tuples return nil rather than
+// falling back to a table with different pointer compression or build mode.
+func THRFields(target TargetProfile) map[int]string {
+	if !target.supportedProduct() {
+		return nil
+	}
 
-// THRFieldsWithProfile is the profile-aware version of THRFields.
-//
-// A nil profile means "assume PRODUCT + compressed", i.e. identical to the
-// pre-existing THRFields behaviour.
-//
-// BuildMode is deliberately NOT used to pick a table. Non-PRODUCT snapshots
-// have no shipped tables (see the note above thrV392_nocompress), and an
-// earlier revision selected empty maps for them, silently wiping out every
-// THR annotation. Falling through to the PRODUCT table keeps annotations —
-// with possibly-wrong offsets — and snapshot.Extract already emits a
-// diagnostic saying a non-PRODUCT snapshot is unsupported outright. A wrong
-// label the user is warned about beats no label at all.
-func THRFieldsWithProfile(dartVersion string, isARM64 bool, profile *snapshot.VersionProfile) map[int]string {
-	// Only pointer compression selects between shipped variants.
-	useNonCompressed := profile != nil && !profile.CompressedPointers
-
-	// 3.9.2 is the one version with both compression variants extracted.
-	if dartVersion == "3.9.2" && useNonCompressed {
-		if isARM64 {
-			return thrV392_nocompress
+	if target.Architecture == ArchitectureX64 {
+		if !target.CompressedPointers {
+			switch target.DartVersion {
+			case "2.10.0":
+				return thrV2100_x64_nocompress
+			case "2.12.0":
+				return thrV2120_x64_nocompress
+			case "2.13.0":
+				return thrV2130_x64_nocompress
+			case "2.14.0":
+				return thrV2140_x64_nocompress
+			case "2.15.0":
+				return thrV2150_x64_nocompress
+			case "2.16.0":
+				return thrV2160_x64_nocompress
+			case "2.17.6":
+				return thrV2176_x64_nocompress
+			case "3.9.2":
+				return thrV392_x64_nocompress
+			case "3.12.2":
+				return thrV3122_x64_nocompress
+			default:
+				return nil
+			}
 		}
-		return thrV392_x64_nocompress
+		return thrFieldsX64Compressed(target.DartVersion)
 	}
 
-	if !isARM64 {
-		return thrFieldsX64(dartVersion)
+	if !target.CompressedPointers {
+		switch target.DartVersion {
+		case "2.10.0":
+			return thrV2100
+		case "2.12.0":
+			return thrV2120
+		case "2.13.0":
+			return thrV2130
+		case "2.14.0":
+			return thrV2140
+		case "2.15.0":
+			return thrV2150
+		case "2.16.0":
+			return thrV2160
+		case "2.17.6":
+			return thrV2176_nocompress
+		case "3.9.2":
+			return thrV392_nocompress
+		default:
+			return nil
+		}
 	}
-	switch dartVersion {
+
+	switch target.DartVersion {
 	case "2.10.0":
-		return thrV2100
+		return nil
 	case "2.12.0":
-		return thrV2120
+		return nil
 	case "2.13.0":
-		return thrV2130
+		return nil
 	case "2.14.0":
-		return thrV2140
+		return nil
 	case "2.15.0":
-		return thrV2150
+		return nil
 	case "2.16.0":
-		return thrV2160
+		return nil
 	case "2.17.6":
-		return thrV217
+		return nil
 	case "2.18.0":
 		return thrV2180
 	case "2.19.0":
@@ -111,9 +124,12 @@ func THRFieldsWithProfile(dartVersion string, isARM64 bool, profile *snapshot.Ve
 	return nil
 }
 
-// v2.17.6: PRODUCT AOT + ARM64 + DART_COMPRESSED_POINTERS
-// Source: dartsdk/v2.17.6/runtime/vm/compiler/runtime_offsets_extracted.h:16818-17478
-var thrV217 = map[int]string{
+// v2.17.6: PRODUCT AOT + ARM64 + !DART_COMPRESSED_POINTERS.
+// Re-derived by tools/extract_thr.go from the exact 2.17.6 generated SDK
+// header. Keep the compression mode in the identifier: the compressed and
+// non-compressed Thread layouts are materially different later in the table.
+// Source: dartsdk/v2.17.6/runtime/vm/compiler/runtime_offsets_extracted.h
+var thrV2176_nocompress = map[int]string{
 	0x20:  "top_resource",
 	0x38:  "stack_limit",
 	0x40:  "write_barrier_mask",
@@ -128,6 +144,7 @@ var thrV217 = map[int]string{
 	0x90:  "top_exit_frame_info",
 	0x98:  "store_buffer_block",
 	0xa0:  "marking_stack_block",
+	0xa8:  "deferred_marking_stack_block",
 	0xb0:  "vm_tag",
 	0xb8:  "unboxed_int64_runtime_arg",
 	0xc0:  "unboxed_double_runtime_arg",
@@ -156,6 +173,9 @@ var thrV217 = map[int]string{
 	0x178: "stack_overflow_shared_without_fpu_regs_stub",
 	0x180: "stack_overflow_shared_with_fpu_regs_stub",
 	0x188: "switchable_call_miss_stub",
+	0x190: "throw_stub",
+	0x198: "re_throw_stub",
+	0x1a0: "assert_boolean_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -187,6 +207,7 @@ var thrV217 = map[int]string{
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "predefined_symbols_address",
+	0x2a0: "double_nan_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
@@ -338,12 +359,14 @@ var thrV2180 = map[int]string{
 	0x90:  "top_exit_frame_info",
 	0x98:  "store_buffer_block",
 	0xa0:  "marking_stack_block",
+	0xa8:  "deferred_marking_stack_block",
 	0xb0:  "vm_tag",
 	0xb8:  "unboxed_int64_runtime_arg",
 	0xc0:  "unboxed_double_runtime_arg",
 	0xc8:  "object_null",
 	0xd0:  "bool_true",
 	0xd8:  "bool_false",
+	0xe0:  "dynamic_type",
 	0xe8:  "fix_callers_target_code",
 	0xf0:  "fix_allocation_stub_code",
 	0xf8:  "invoke_dart_code_stub",
@@ -372,6 +395,9 @@ var thrV2180 = map[int]string{
 	0x1b0: "stack_overflow_shared_without_fpu_regs_stub",
 	0x1b8: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1c0: "switchable_call_miss_stub",
+	0x1c8: "throw_stub",
+	0x1d0: "re_throw_stub",
+	0x1d8: "assert_boolean_stub",
 	0x1e0: "optimize_stub",
 	0x1e8: "deoptimize_stub",
 	0x1f0: "lazy_deopt_from_return_stub",
@@ -403,6 +429,7 @@ var thrV2180 = map[int]string{
 	0x2c0: "no_scope_native_wrapper_entry_point",
 	0x2c8: "auto_scope_native_wrapper_entry_point",
 	0x2d0: "predefined_symbols_address",
+	0x2d8: "double_nan_address",
 	0x2e0: "double_negate_address",
 	0x2e8: "double_abs_address",
 	0x2f0: "float_not_address",
@@ -572,11 +599,14 @@ var thrV2190 = map[int]string{
 	0x98:  "top_exit_frame_info",
 	0xa0:  "store_buffer_block",
 	0xa8:  "marking_stack_block",
+	0xb0:  "deferred_marking_stack_block",
 	0xb8:  "vm_tag",
 	0xc0:  "unboxed_runtime_arg",
 	0xd0:  "object_null",
 	0xd8:  "bool_true",
 	0xe0:  "bool_false",
+	0xe8:  "empty_array",
+	0xf0:  "dynamic_type",
 	0xf8:  "fix_callers_target_code",
 	0x100: "fix_allocation_stub_code",
 	0x108: "invoke_dart_code_stub",
@@ -606,6 +636,9 @@ var thrV2190 = map[int]string{
 	0x1c8: "stack_overflow_shared_without_fpu_regs_stub",
 	0x1d0: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1d8: "switchable_call_miss_stub",
+	0x1e0: "throw_stub",
+	0x1e8: "re_throw_stub",
+	0x1f0: "assert_boolean_stub",
 	0x1f8: "optimize_stub",
 	0x200: "deoptimize_stub",
 	0x208: "lazy_deopt_from_return_stub",
@@ -637,6 +670,7 @@ var thrV2190 = map[int]string{
 	0x2d8: "no_scope_native_wrapper_entry_point",
 	0x2e0: "auto_scope_native_wrapper_entry_point",
 	0x2e8: "predefined_symbols_address",
+	0x2f0: "double_nan_address",
 	0x2f8: "double_negate_address",
 	0x300: "double_abs_address",
 	0x308: "float_not_address",
@@ -834,6 +868,9 @@ var thrV325 = map[int]string{
 	0x168: "stack_overflow_shared_without_fpu_regs_stub",
 	0x170: "stack_overflow_shared_with_fpu_regs_stub",
 	0x178: "switchable_call_miss_stub",
+	0x180: "throw_stub",
+	0x188: "re_throw_stub",
+	0x190: "assert_boolean_stub",
 	0x198: "optimize_stub",
 	0x1a0: "deoptimize_stub",
 	0x1a8: "lazy_deopt_from_return_stub",
@@ -865,6 +902,7 @@ var thrV325 = map[int]string{
 	0x278: "no_scope_native_wrapper_entry_point",
 	0x280: "auto_scope_native_wrapper_entry_point",
 	0x288: "predefined_symbols_address",
+	0x290: "double_nan_address",
 	0x298: "double_negate_address",
 	0x2a0: "double_abs_address",
 	0x2a8: "float_not_address",
@@ -1077,6 +1115,9 @@ var thrV343 = map[int]string{
 	0x170: "stack_overflow_shared_without_fpu_regs_stub",
 	0x178: "stack_overflow_shared_with_fpu_regs_stub",
 	0x180: "switchable_call_miss_stub",
+	0x188: "throw_stub",
+	0x190: "re_throw_stub",
+	0x198: "assert_boolean_stub",
 	0x1a0: "optimize_stub",
 	0x1a8: "deoptimize_stub",
 	0x1b0: "lazy_deopt_from_return_stub",
@@ -1108,6 +1149,7 @@ var thrV343 = map[int]string{
 	0x280: "no_scope_native_wrapper_entry_point",
 	0x288: "auto_scope_native_wrapper_entry_point",
 	0x290: "predefined_symbols_address",
+	0x298: "double_nan_address",
 	0x2a0: "double_negate_address",
 	0x2a8: "double_abs_address",
 	0x2b0: "float_not_address",
@@ -1253,6 +1295,7 @@ var thrV343 = map[int]string{
 	0x710: "top_exit_frame_info",
 	0x718: "store_buffer_block",
 	0x720: "marking_stack_block",
+	0x728: "deferred_marking_stack_block",
 	0x730: "vm_tag",
 	0x738: "unboxed_runtime_arg",
 	0x748: "active_exception",
@@ -1306,6 +1349,8 @@ var thrV305 = map[int]string{
 	0x70:  "object_null",
 	0x78:  "bool_true",
 	0x80:  "bool_false",
+	0x88:  "empty_array",
+	0x90:  "dynamic_type",
 	0x98:  "fix_callers_target_code",
 	0xa0:  "fix_allocation_stub_code",
 	0xa8:  "invoke_dart_code_stub",
@@ -1335,6 +1380,9 @@ var thrV305 = map[int]string{
 	0x168: "stack_overflow_shared_without_fpu_regs_stub",
 	0x170: "stack_overflow_shared_with_fpu_regs_stub",
 	0x178: "switchable_call_miss_stub",
+	0x180: "throw_stub",
+	0x188: "re_throw_stub",
+	0x190: "assert_boolean_stub",
 	0x198: "optimize_stub",
 	0x1a0: "deoptimize_stub",
 	0x1a8: "lazy_deopt_from_return_stub",
@@ -1366,6 +1414,7 @@ var thrV305 = map[int]string{
 	0x278: "no_scope_native_wrapper_entry_point",
 	0x280: "auto_scope_native_wrapper_entry_point",
 	0x288: "predefined_symbols_address",
+	0x290: "double_nan_address",
 	0x298: "double_negate_address",
 	0x2a0: "double_abs_address",
 	0x2a8: "float_not_address",
@@ -1508,6 +1557,7 @@ var thrV305 = map[int]string{
 	0x6f0: "top_exit_frame_info",
 	0x6f8: "store_buffer_block",
 	0x700: "marking_stack_block",
+	0x708: "deferred_marking_stack_block",
 	0x710: "vm_tag",
 	0x718: "unboxed_runtime_arg",
 	0x728: "active_exception",
@@ -1563,6 +1613,8 @@ var thrV310 = map[int]string{
 	0x70:  "object_null",
 	0x78:  "bool_true",
 	0x80:  "bool_false",
+	0x88:  "empty_array",
+	0x90:  "dynamic_type",
 	0x98:  "fix_callers_target_code",
 	0xa0:  "fix_allocation_stub_code",
 	0xa8:  "invoke_dart_code_stub",
@@ -1592,6 +1644,9 @@ var thrV310 = map[int]string{
 	0x168: "stack_overflow_shared_without_fpu_regs_stub",
 	0x170: "stack_overflow_shared_with_fpu_regs_stub",
 	0x178: "switchable_call_miss_stub",
+	0x180: "throw_stub",
+	0x188: "re_throw_stub",
+	0x190: "assert_boolean_stub",
 	0x198: "optimize_stub",
 	0x1a0: "deoptimize_stub",
 	0x1a8: "lazy_deopt_from_return_stub",
@@ -1623,6 +1678,7 @@ var thrV310 = map[int]string{
 	0x278: "no_scope_native_wrapper_entry_point",
 	0x280: "auto_scope_native_wrapper_entry_point",
 	0x288: "predefined_symbols_address",
+	0x290: "double_nan_address",
 	0x298: "double_negate_address",
 	0x2a0: "double_abs_address",
 	0x2a8: "float_not_address",
@@ -1766,6 +1822,7 @@ var thrV310 = map[int]string{
 	0x6f8: "top_exit_frame_info",
 	0x700: "store_buffer_block",
 	0x708: "marking_stack_block",
+	0x710: "deferred_marking_stack_block",
 	0x718: "vm_tag",
 	0x720: "unboxed_runtime_arg",
 	0x730: "active_exception",
@@ -1820,6 +1877,9 @@ var thrV350 = map[int]string{
 	0x78:  "object_null",
 	0x80:  "bool_true",
 	0x88:  "bool_false",
+	0x90:  "empty_array",
+	0x98:  "empty_type_arguments",
+	0xa0:  "dynamic_type",
 	0xa8:  "fix_callers_target_code",
 	0xb0:  "fix_allocation_stub_code",
 	0xb8:  "invoke_dart_code_stub",
@@ -1849,6 +1909,9 @@ var thrV350 = map[int]string{
 	0x178: "stack_overflow_shared_without_fpu_regs_stub",
 	0x180: "stack_overflow_shared_with_fpu_regs_stub",
 	0x188: "switchable_call_miss_stub",
+	0x190: "throw_stub",
+	0x198: "re_throw_stub",
+	0x1a0: "assert_boolean_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -1880,6 +1943,7 @@ var thrV350 = map[int]string{
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "predefined_symbols_address",
+	0x2a0: "double_nan_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
@@ -2028,6 +2092,7 @@ var thrV350 = map[int]string{
 	0x730: "store_buffer_block",
 	0x738: "old_marking_stack_block",
 	0x740: "new_marking_stack_block",
+	0x748: "deferred_marking_stack_block",
 	0x750: "vm_tag",
 	0x758: "unboxed_runtime_arg",
 	0x768: "active_exception",
@@ -2082,6 +2147,9 @@ var thrV370 = map[int]string{
 	0x78:  "object_null",
 	0x80:  "bool_true",
 	0x88:  "bool_false",
+	0x90:  "empty_array",
+	0x98:  "empty_type_arguments",
+	0xa0:  "dynamic_type",
 	0xa8:  "fix_callers_target_code",
 	0xb0:  "fix_allocation_stub_code",
 	0xb8:  "invoke_dart_code_stub",
@@ -2112,6 +2180,8 @@ var thrV370 = map[int]string{
 	0x180: "stack_overflow_shared_without_fpu_regs_stub",
 	0x188: "stack_overflow_shared_with_fpu_regs_stub",
 	0x190: "switchable_call_miss_stub",
+	0x198: "throw_stub",
+	0x1a0: "re_throw_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -2145,6 +2215,7 @@ var thrV370 = map[int]string{
 	0x298: "auto_scope_native_wrapper_entry_point",
 	0x2a0: "interpret_call_entry_point",
 	0x2a8: "predefined_symbols_address",
+	0x2b0: "double_nan_address",
 	0x2b8: "double_negate_address",
 	0x2c0: "double_abs_address",
 	0x2c8: "float_not_address",
@@ -2300,6 +2371,7 @@ var thrV370 = map[int]string{
 	0x778: "store_buffer_block",
 	0x780: "old_marking_stack_block",
 	0x788: "new_marking_stack_block",
+	0x790: "deferred_marking_stack_block",
 	0x798: "vm_tag",
 	0x7a0: "unboxed_runtime_arg",
 	0x7b0: "active_exception",
@@ -2370,6 +2442,8 @@ var thrV362 = map[int]string{
 	0x180: "stack_overflow_shared_without_fpu_regs_stub",
 	0x188: "stack_overflow_shared_with_fpu_regs_stub",
 	0x190: "switchable_call_miss_stub",
+	0x198: "throw_stub",
+	0x1a0: "re_throw_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -2403,6 +2477,7 @@ var thrV362 = map[int]string{
 	0x298: "auto_scope_native_wrapper_entry_point",
 	0x2a0: "interpret_call_entry_point",
 	0x2a8: "predefined_symbols_address",
+	0x2b0: "double_nan_address",
 	0x2b8: "double_negate_address",
 	0x2c0: "double_abs_address",
 	0x2c8: "float_not_address",
@@ -2559,6 +2634,7 @@ var thrV362 = map[int]string{
 	0x780: "store_buffer_block",
 	0x788: "old_marking_stack_block",
 	0x790: "new_marking_stack_block",
+	0x798: "deferred_marking_stack_block",
 	0x7a0: "vm_tag",
 	0x7a8: "unboxed_runtime_arg",
 	0x7b8: "active_exception",
@@ -2628,6 +2704,8 @@ var thrV381 = map[int]string{
 	0x180: "stack_overflow_shared_without_fpu_regs_stub",
 	0x188: "stack_overflow_shared_with_fpu_regs_stub",
 	0x190: "switchable_call_miss_stub",
+	0x198: "throw_stub",
+	0x1a0: "re_throw_stub",
 	0x1a8: "optimize_stub",
 	0x1b0: "deoptimize_stub",
 	0x1b8: "lazy_deopt_from_return_stub",
@@ -2660,6 +2738,7 @@ var thrV381 = map[int]string{
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "interpret_call_entry_point",
 	0x2a0: "predefined_symbols_address",
+	0x2a8: "double_nan_address",
 	0x2b0: "double_negate_address",
 	0x2b8: "double_abs_address",
 	0x2c0: "float_not_address",
@@ -2814,6 +2893,7 @@ var thrV381 = map[int]string{
 	0x768: "store_buffer_block",
 	0x770: "old_marking_stack_block",
 	0x778: "new_marking_stack_block",
+	0x780: "deferred_marking_stack_block",
 	0x788: "vm_tag",
 	0x790: "unboxed_runtime_arg",
 	0x7a0: "active_exception",
@@ -2848,6 +2928,9 @@ var thrV392 = map[int]string{
 	0x78:  "object_null",
 	0x80:  "bool_true",
 	0x88:  "bool_false",
+	0x90:  "empty_array",
+	0x98:  "empty_type_arguments",
+	0xa0:  "dynamic_type",
 	0xa8:  "fix_callers_target_code",
 	0xb0:  "fix_allocation_stub_code",
 	0xb8:  "invoke_dart_code_stub",
@@ -2880,6 +2963,8 @@ var thrV392 = map[int]string{
 	0x190: "stack_overflow_shared_without_fpu_regs_stub",
 	0x198: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1a0: "switchable_call_miss_stub",
+	0x1a8: "throw_stub",
+	0x1b0: "re_throw_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -2912,6 +2997,7 @@ var thrV392 = map[int]string{
 	0x2a0: "auto_scope_native_wrapper_entry_point",
 	0x2a8: "interpret_call_entry_point",
 	0x2b0: "predefined_symbols_address",
+	0x2b8: "double_nan_address",
 	0x2c0: "double_negate_address",
 	0x2c8: "double_abs_address",
 	0x2d0: "float_not_address",
@@ -3070,6 +3156,7 @@ var thrV392 = map[int]string{
 	0x798: "store_buffer_block",
 	0x7a0: "old_marking_stack_block",
 	0x7a8: "new_marking_stack_block",
+	0x7b0: "deferred_marking_stack_block",
 	0x7b8: "vm_tag",
 	0x7c0: "unboxed_runtime_arg",
 	0x7d0: "active_exception",
@@ -3136,6 +3223,8 @@ var thrV3107 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
 	0x1b0: "optimize_stub",
 	0x1b8: "deoptimize_stub",
 	0x1c0: "lazy_deopt_from_return_stub",
@@ -3168,6 +3257,7 @@ var thrV3107 = map[int]string{
 	0x298: "auto_scope_native_wrapper_entry_point",
 	0x2a0: "interpret_call_entry_point",
 	0x2a8: "predefined_symbols_address",
+	0x2b0: "double_nan_address",
 	0x2b8: "double_negate_address",
 	0x2c0: "double_abs_address",
 	0x2c8: "float_not_address",
@@ -3294,6 +3384,7 @@ var thrV3107 = map[int]string{
 	0x690: "store_buffer_block",
 	0x698: "old_marking_stack_block",
 	0x6a0: "new_marking_stack_block",
+	0x6a8: "deferred_marking_stack_block",
 	0x6b0: "vm_tag",
 	0x6b8: "active_exception",
 	0x6c0: "active_stacktrace",
@@ -3421,6 +3512,8 @@ var thrV3110 = map[int]string{
 	0x190: "stack_overflow_shared_without_fpu_regs_stub",
 	0x198: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1a0: "switchable_call_miss_stub",
+	0x1a8: "throw_stub",
+	0x1b0: "re_throw_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -3453,6 +3546,7 @@ var thrV3110 = map[int]string{
 	0x2a0: "auto_scope_native_wrapper_entry_point",
 	0x2a8: "interpret_call_entry_point",
 	0x2b0: "predefined_symbols_address",
+	0x2b8: "double_nan_address",
 	0x2c0: "double_negate_address",
 	0x2c8: "double_abs_address",
 	0x2d0: "float_not_address",
@@ -3580,6 +3674,7 @@ var thrV3110 = map[int]string{
 	0x6a0: "store_buffer_block",
 	0x6a8: "old_marking_stack_block",
 	0x6b0: "new_marking_stack_block",
+	0x6b8: "deferred_marking_stack_block",
 	0x6c0: "vm_tag",
 	0x6c8: "active_exception",
 	0x6d0: "active_stacktrace",
@@ -3664,8 +3759,12 @@ var thrV3122 = map[int]string{
 	0x78:  "field_table_values",
 	0x80:  "shared_field_table_values",
 	0x88:  "object_null",
+	0x90:  "object_sentinel",
 	0x98:  "bool_true",
 	0xa0:  "bool_false",
+	0xa8:  "empty_array",
+	0xb0:  "empty_type_arguments",
+	0xb8:  "dynamic_type",
 	0xc0:  "fix_callers_target_code",
 	0xc8:  "fix_allocation_stub_code",
 	0xd0:  "invoke_dart_code_stub",
@@ -3695,6 +3794,8 @@ var thrV3122 = map[int]string{
 	0x190: "stack_overflow_shared_without_fpu_regs_stub",
 	0x198: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1a0: "switchable_call_miss_stub",
+	0x1a8: "throw_stub",
+	0x1b0: "re_throw_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -3727,6 +3828,7 @@ var thrV3122 = map[int]string{
 	0x2a0: "auto_scope_native_wrapper_entry_point",
 	0x2a8: "interpret_call_entry_point",
 	0x2b0: "predefined_symbols_address",
+	0x2b8: "double_nan_address",
 	0x2c0: "double_negate_address",
 	0x2c8: "double_abs_address",
 	0x2d0: "float_not_address",
@@ -3855,6 +3957,7 @@ var thrV3122 = map[int]string{
 	0x6a8: "store_buffer_block",
 	0x6b0: "old_marking_stack_block",
 	0x6b8: "new_marking_stack_block",
+	0x6c0: "deferred_marking_stack_block",
 	0x6c8: "vm_tag",
 	0x6d0: "active_exception",
 	0x6d8: "active_stacktrace",
@@ -3942,6 +4045,7 @@ var thrV2100 = map[int]string{
 	0x98:  "top_exit_frame_info",
 	0xa0:  "store_buffer_block",
 	0xa8:  "marking_stack_block",
+	0xb0:  "deferred_marking_stack_block",
 	0xb8:  "vm_tag",
 	0xc0:  "async_stack_trace",
 	0xc8:  "unboxed_int64_runtime_arg",
@@ -3971,6 +4075,9 @@ var thrV2100 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
+	0x1b0: "assert_boolean_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -4001,6 +4108,7 @@ var thrV2100 = map[int]string{
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "interpret_call_entry_point",
 	0x2a0: "predefined_symbols_address",
+	0x2a8: "double_nan_address",
 	0x2b0: "double_negate_address",
 	0x2b8: "double_abs_address",
 	0x2c0: "float_not_address",
@@ -4134,6 +4242,7 @@ var thrV2120 = map[int]string{
 	0x90:  "top_exit_frame_info",
 	0x98:  "store_buffer_block",
 	0xa0:  "marking_stack_block",
+	0xa8:  "deferred_marking_stack_block",
 	0xb0:  "vm_tag",
 	0xb8:  "unboxed_int64_runtime_arg",
 	0xc0:  "object_null",
@@ -4163,6 +4272,9 @@ var thrV2120 = map[int]string{
 	0x180: "stack_overflow_shared_without_fpu_regs_stub",
 	0x188: "stack_overflow_shared_with_fpu_regs_stub",
 	0x190: "switchable_call_miss_stub",
+	0x198: "throw_stub",
+	0x1a0: "re_throw_stub",
+	0x1a8: "assert_boolean_stub",
 	0x1b0: "optimize_stub",
 	0x1b8: "deoptimize_stub",
 	0x1c0: "lazy_deopt_from_return_stub",
@@ -4192,6 +4304,7 @@ var thrV2120 = map[int]string{
 	0x280: "no_scope_native_wrapper_entry_point",
 	0x288: "auto_scope_native_wrapper_entry_point",
 	0x290: "predefined_symbols_address",
+	0x298: "double_nan_address",
 	0x2a0: "double_negate_address",
 	0x2a8: "double_abs_address",
 	0x2b0: "float_not_address",
@@ -4322,6 +4435,7 @@ var thrV2130 = map[int]string{
 	0x98:  "top_exit_frame_info",
 	0xa0:  "store_buffer_block",
 	0xa8:  "marking_stack_block",
+	0xb0:  "deferred_marking_stack_block",
 	0xb8:  "vm_tag",
 	0xc0:  "unboxed_int64_runtime_arg",
 	0xc8:  "object_null",
@@ -4351,6 +4465,9 @@ var thrV2130 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
+	0x1b0: "assert_boolean_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -4380,6 +4497,7 @@ var thrV2130 = map[int]string{
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "predefined_symbols_address",
+	0x2a0: "double_nan_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
@@ -4513,6 +4631,7 @@ var thrV2140 = map[int]string{
 	0x98:  "top_exit_frame_info",
 	0xa0:  "store_buffer_block",
 	0xa8:  "marking_stack_block",
+	0xb0:  "deferred_marking_stack_block",
 	0xb8:  "vm_tag",
 	0xc0:  "unboxed_int64_runtime_arg",
 	0xc8:  "object_null",
@@ -4542,6 +4661,9 @@ var thrV2140 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
+	0x1b0: "assert_boolean_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -4571,6 +4693,7 @@ var thrV2140 = map[int]string{
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "predefined_symbols_address",
+	0x2a0: "double_nan_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
@@ -4711,6 +4834,7 @@ var thrV2150 = map[int]string{
 	0x90:  "top_exit_frame_info",
 	0x98:  "store_buffer_block",
 	0xa0:  "marking_stack_block",
+	0xa8:  "deferred_marking_stack_block",
 	0xb0:  "vm_tag",
 	0xb8:  "unboxed_int64_runtime_arg",
 	0xc0:  "unboxed_double_runtime_arg",
@@ -4741,6 +4865,9 @@ var thrV2150 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
+	0x1b0: "assert_boolean_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -4770,6 +4897,7 @@ var thrV2150 = map[int]string{
 	0x288: "no_scope_native_wrapper_entry_point",
 	0x290: "auto_scope_native_wrapper_entry_point",
 	0x298: "predefined_symbols_address",
+	0x2a0: "double_nan_address",
 	0x2a8: "double_negate_address",
 	0x2b0: "double_abs_address",
 	0x2b8: "float_not_address",
@@ -4913,6 +5041,7 @@ var thrV2160 = map[int]string{
 	0x90:  "top_exit_frame_info",
 	0x98:  "store_buffer_block",
 	0xa0:  "marking_stack_block",
+	0xa8:  "deferred_marking_stack_block",
 	0xb0:  "vm_tag",
 	0xb8:  "unboxed_int64_runtime_arg",
 	0xc0:  "unboxed_double_runtime_arg",
@@ -4943,6 +5072,9 @@ var thrV2160 = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
+	0x1b0: "assert_boolean_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -4973,6 +5105,7 @@ var thrV2160 = map[int]string{
 	0x290: "no_scope_native_wrapper_entry_point",
 	0x298: "auto_scope_native_wrapper_entry_point",
 	0x2a0: "predefined_symbols_address",
+	0x2a8: "double_nan_address",
 	0x2b0: "double_negate_address",
 	0x2b8: "double_abs_address",
 	0x2c0: "float_not_address",
@@ -5148,6 +5281,9 @@ var thrV392_nocompress = map[int]string{
 	0x70:  "object_null",
 	0x78:  "bool_true",
 	0x80:  "bool_false",
+	0x88:  "empty_array",
+	0x90:  "empty_type_arguments",
+	0x98:  "dynamic_type",
 	0xa0:  "fix_callers_target_code",
 	0xa8:  "fix_allocation_stub_code",
 	0xb0:  "invoke_dart_code_stub",
@@ -5180,6 +5316,8 @@ var thrV392_nocompress = map[int]string{
 	0x188: "stack_overflow_shared_without_fpu_regs_stub",
 	0x190: "stack_overflow_shared_with_fpu_regs_stub",
 	0x198: "switchable_call_miss_stub",
+	0x1a0: "throw_stub",
+	0x1a8: "re_throw_stub",
 	0x1b0: "optimize_stub",
 	0x1b8: "deoptimize_stub",
 	0x1c0: "lazy_deopt_from_return_stub",
@@ -5212,6 +5350,7 @@ var thrV392_nocompress = map[int]string{
 	0x298: "auto_scope_native_wrapper_entry_point",
 	0x2a0: "interpret_call_entry_point",
 	0x2a8: "predefined_symbols_address",
+	0x2b0: "double_nan_address",
 	0x2b8: "double_negate_address",
 	0x2c0: "double_abs_address",
 	0x2c8: "float_not_address",
@@ -5370,6 +5509,7 @@ var thrV392_nocompress = map[int]string{
 	0x790: "store_buffer_block",
 	0x798: "old_marking_stack_block",
 	0x7a0: "new_marking_stack_block",
+	0x7a8: "deferred_marking_stack_block",
 	0x7b0: "vm_tag",
 	0x7b8: "unboxed_runtime_arg",
 	0x7c8: "active_exception",
@@ -5401,8 +5541,12 @@ var thrV3130 = map[int]string{
 	0x78:  "field_table_values",
 	0x80:  "shared_field_table_values",
 	0x88:  "object_null",
+	0x90:  "object_sentinel",
 	0x98:  "bool_true",
 	0xa0:  "bool_false",
+	0xa8:  "empty_array",
+	0xb0:  "empty_type_arguments",
+	0xb8:  "dynamic_type",
 	0xc0:  "fix_callers_target_code",
 	0xc8:  "fix_allocation_stub_code",
 	0xd0:  "invoke_dart_code_stub",
@@ -5432,6 +5576,8 @@ var thrV3130 = map[int]string{
 	0x190: "stack_overflow_shared_without_fpu_regs_stub",
 	0x198: "stack_overflow_shared_with_fpu_regs_stub",
 	0x1a0: "switchable_call_miss_stub",
+	0x1a8: "throw_stub",
+	0x1b0: "re_throw_stub",
 	0x1b8: "optimize_stub",
 	0x1c0: "deoptimize_stub",
 	0x1c8: "lazy_deopt_from_return_stub",
@@ -5464,6 +5610,7 @@ var thrV3130 = map[int]string{
 	0x2a0: "auto_scope_native_wrapper_entry_point",
 	0x2a8: "interpret_call_entry_point",
 	0x2b0: "predefined_symbols_address",
+	0x2b8: "double_nan_address",
 	0x2c0: "double_negate_address",
 	0x2c8: "double_abs_address",
 	0x2d0: "float_not_address",
@@ -5594,6 +5741,7 @@ var thrV3130 = map[int]string{
 	0x6b8: "store_buffer_block",
 	0x6c0: "old_marking_stack_block",
 	0x6c8: "new_marking_stack_block",
+	0x6d0: "deferred_marking_stack_block",
 	0x6d8: "vm_tag",
 	0x6e0: "active_exception",
 	0x6e8: "active_stacktrace",

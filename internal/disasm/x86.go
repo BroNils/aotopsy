@@ -80,10 +80,18 @@ type X86ScanResult struct {
 // R8=8, R9=9). This is Dart's OWN convention
 // (DartCallingConvention::kCpuRegistersForArgs in constants_x64.h), NOT
 // the SysV C ABI — the C ABI's 4th arg is RCX, but Dart uses RBX.
-// RCX is kClassIdReg, not an argument register.
-// Shared via sdk.DartArgRegisters(sdk.ArchX86).
+// On every release that has this register calling convention, RCX is the
+// fixed dispatch kClassIdReg, not an argument register.
+// Shared via sdk.DartRegisterCallingConvention at the first SDK version that
+// actually has the convention. This table only maps hardware registers to mask
+// positions; callers must still decide whether the analyzed function/version
+// uses register arguments at all.
 var x86ArgRegCanon = func() [6]int {
-	r := sdk.DartArgRegisters(sdk.ArchX86)
+	cc, ok := sdk.DartRegisterCallingConvention(sdk.RegisterCallingConventionReferenceVersion, sdk.ArchX86)
+	if !ok {
+		panic("sdk: x86_64 register calling convention missing at first supported version")
+	}
+	r := cc.GPR
 	var arr [6]int
 	copy(arr[:], r)
 	return arr
@@ -109,7 +117,7 @@ const maxX86ArgSetupBack = 16
 
 // inferX86CallArgRegMaskLocal is inferCallArgRegMaskLocal's x86_64
 // counterpart: scans backward from insts[callIdx] (a CALL instruction)
-// counting which of RDI/RSI/RDX/RCX/R8/R9 (bit i = x86ArgRegCanon[i]) were
+// counting which of RDI/RSI/RDX/RBX/R8/R9 (bit i = x86ArgRegCanon[i]) were
 // freshly defined via MOV/LEA in the immediate lead-up to this call. Stops
 // at the first earlier CALL (a previous, unrelated call's own setup) or
 // after maxX86ArgSetupBack instructions. Same caveats as the ARM64
@@ -120,9 +128,12 @@ const maxX86ArgSetupBack = 16
 // bitwise-AND intersection, not trust one site alone (see
 // cmd/aotopsy/decompile_native_cmd.go's resolveArgRegIndices and its
 // doc comment for why intersection, not exact-equality or majority).
-func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx int) uint8 {
+func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx, blockStart int) uint8 {
 	var mask uint8
-	for i, steps := callIdx-1, 0; i >= 0 && steps < maxX86ArgSetupBack; i, steps = i-1, steps+1 {
+	if blockStart < 0 {
+		blockStart = 0
+	}
+	for i, steps := callIdx-1, 0; i >= blockStart && steps < maxX86ArgSetupBack; i, steps = i-1, steps+1 {
 		d := insts[i]
 		if d.Inst.Op == x86asm.CALL {
 			break
@@ -137,15 +148,20 @@ func inferX86CallArgRegMaskLocal(insts []x86.Decoded, callIdx int) uint8 {
 	return mask
 }
 
-func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
+func classifyX86Call(dartVersion string, inst x86asm.Inst, addr uint64, length int, symbols SymbolLookup, rt *x86RegTracker, poolDisplay map[int]string, thrFields map[int]string) CallEdge {
 	e := CallEdge{FromPC: addr, Kind: "call"}
 	for _, arg := range inst.Args {
 		if arg == nil {
 			continue
 		}
 		if rel, ok := arg.(x86asm.Rel); ok {
-			target := addr + uint64(length) + uint64(int64(rel)) //nolint:gosec // rel is a decoded rel32; result is a valid address by construction
+			target, valid := x86.RelTarget(inst, addr, length)
+			if !valid {
+				return e
+			}
+			_ = rel // the type check above distinguishes direct from indirect CALL
 			e.TargetPC = target
+			e.TargetValid = true
 			// Nil-safe, matching ARM64: arm64.go's Format and
 			// dataflowarm64.go's touchInstrEffect both guard their lookup,
 			// so the same call with the same arguments worked on one
@@ -165,11 +181,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 		}
 		if mem, ok := arg.(x86asm.Mem); ok {
 			e.Kind = "call_indirect"
-			if mem.Index == 0 {
-				e.Reg = fmt.Sprintf("[%s+0x%x]", mem.Base, mem.Disp)
-			} else {
-				e.Reg = fmt.Sprintf("[%s+%s*%d+0x%x]", mem.Base, mem.Index, mem.Scale, mem.Disp)
-			}
+			e.Reg = x86.FormatMemoryTarget(mem)
 			// CALL [reg+disp] can address the dispatch table / object pool
 			// directly as the call's own memory operand -- e.g. `call
 			// [r14+0x238]` -- with no prior MOV loading it into a plain
@@ -204,7 +216,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 				// the MOV path next door already does (dataflowx86.go), and
 				// it makes them resolve as stubs, which is what ARM64's
 				// `LDR lr, [THR, #off]; BLR lr` sites have always done.
-				if mem.Index == 0 {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); static {
 					if name, ok := thrFields[int(mem.Disp)]; ok {
 						baseNote = "THR." + name
 					} else {
@@ -212,10 +224,11 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 						// Report the slot rather than inventing a category.
 						baseNote = fmt.Sprintf("THR+0x%x", mem.Disp)
 					}
-				} else {
-					baseNote = "dispatch_table"
 				}
 			case sdk.X86PP:
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+					break
+				}
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				if disp, ok := poolDisplay[poolIdx]; poolIdxOK && ok {
 					baseNote = fmt.Sprintf("pp[%d] %s", poolIdx, disp)
@@ -225,7 +238,7 @@ func classifyX86Call(inst x86asm.Inst, addr uint64, length int, symbols SymbolLo
 			default:
 				baseNote = rt.lookup(x86.CanonReg(mem.Base))
 			}
-			if x86.CanonReg(mem.Index) == 1 /* RCX: DispatchTableNullErrorABI::kClassIdReg */ && mem.Scale == 8 && baseNote == "dispatch_table" {
+			if sdk.IsDispatchTableClassIDReg(dartVersion, sdk.ArchX86, x86.CanonReg(mem.Index)) && mem.Scale == 8 && baseNote == "dispatch_table" {
 				e.Via = "dispatch_table"
 			} else {
 				e.Via = baseNote
@@ -260,11 +273,11 @@ func DecodeX86Simple(funcCode []byte, funcVA uint64) []X86Inst {
 	return out
 }
 
-// ExtractX86THRAccesses scans a function's raw bytes for MOV instructions
-// whose memory operand is THR-relative ([R14+disp]), mirroring
-// ExtractTHRAccesses's ARM64 X26 scan. Load = THR field read into a
-// register; store = register written into a THR field. fields is
-// optional (marks Resolved when the offset has a known name).
+// ExtractX86THRAccesses scans decoded instructions for static THR-relative
+// memory operands ([R14+disp]), mirroring ExtractTHRAccesses's ARM64 X26 scan.
+// Access direction is retained, including read-modify-write operations; GPR
+// roles are recorded only when the instruction semantics actually transfer the
+// memory value to/from that register. fields is optional (marks exact matches).
 func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string) []THRAccess {
 	var out []THRAccess
 	x86.Walk(funcCode, funcVA, func(d x86.Decoded) bool {
@@ -273,13 +286,20 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 		}
 		addr := d.VA
 		inst := d.Inst
+		if inst.Op == x86asm.LEA {
+			// LEA's memory syntax is an address expression, not a Thread read.
+			return true
+		}
 
 		for argIdx, arg := range inst.Args {
 			if arg == nil {
 				continue
 			}
 			mem, ok := arg.(x86asm.Mem)
-			if !ok || x86.CanonReg(mem.Base) != sdk.X86THR {
+			if !ok {
+				continue
+			}
+			if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); !static {
 				continue
 			}
 
@@ -300,29 +320,32 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 				width = inst.DataSize / 8
 			}
 
-			disp := int(mem.Disp)
-			_, resolved := fields[disp]
+			disp := mem.Disp
+			fieldName, resolved := resolveTHRField(fields, disp)
 			acc := THRAccess{
 				PC:        addr,
 				InsnText:  inst.String(),
 				THROffset: disp,
+				Access:    thraudit.AccessRead,
 				Width:     width,
 				Resolved:  resolved,
+				FieldName: fieldName,
 			}
 
-			if argIdx == 0 && (inst.Op == x86asm.MOV || inst.Op == x86asm.MOVZX || inst.Op == x86asm.MOVSX || inst.Op == x86asm.MOVSXD) {
-				acc.IsStore = true
-				if len(inst.Args) > 1 {
-					if srcReg, ok := inst.Args[1].(x86asm.Reg); ok {
-						acc.SrcReg = x86.CanonReg(srcReg)
-					}
-				}
+			if inst.Op == x86asm.XCHG {
+				// XCHG reads and writes both operands regardless of which operand
+				// happens to be the memory one.
+				acc.Access = thraudit.AccessReadWrite
+			} else if argIdx == 0 {
+				acc.Access = x86MemDestinationAccess(inst.Op)
+			}
+			if acc.Access == thraudit.AccessWrite || acc.Access == thraudit.AccessReadWrite {
+				acc.SrcReg = x86ExplicitGPROtherThanMemory(inst, argIdx)
 			} else {
-				if len(inst.Args) > 0 {
-					if dstReg, ok := inst.Args[0].(x86asm.Reg); ok {
-						acc.DstReg = x86.CanonReg(dstReg)
-					}
-				}
+				acc.DstReg = x86DirectLoadGPR(inst, argIdx)
+			}
+			if acc.Access == thraudit.AccessReadWrite {
+				acc.DstReg = x86ReadWriteResultGPR(inst, argIdx)
 			}
 
 			out = append(out, acc)
@@ -333,10 +356,89 @@ func ExtractX86THRAccesses(funcCode []byte, funcVA uint64, fields map[int]string
 	return out
 }
 
+// x86MemDestinationAccess classifies instructions whose first operand is a THR
+// memory operand. Read-modify-write instructions remain read_write; collapsing
+// them to a store loses the fact that the old Thread value also influenced the
+// instruction.
+func x86MemDestinationAccess(op x86asm.Op) thraudit.AccessMode {
+	switch op {
+	case x86asm.MOV,
+		x86asm.MOVSD_XMM, x86asm.MOVSS, x86asm.MOVUPS, x86asm.MOVAPS,
+		x86asm.MOVDQU, x86asm.VMOVDQU, x86asm.POP:
+		return thraudit.AccessWrite
+	case x86asm.ADD, x86asm.ADC, x86asm.SUB, x86asm.SBB,
+		x86asm.AND, x86asm.OR, x86asm.XOR,
+		x86asm.INC, x86asm.DEC, x86asm.NEG, x86asm.NOT,
+		x86asm.XADD, x86asm.XCHG, x86asm.CMPXCHG,
+		x86asm.BTC, x86asm.BTR, x86asm.BTS:
+		return thraudit.AccessReadWrite
+	default:
+		return thraudit.AccessRead
+	}
+}
+
+func x86ExplicitGPROtherThanMemory(inst x86asm.Inst, memArgIdx int) *int {
+	for i, arg := range inst.Args {
+		if i == memArgIdx || arg == nil {
+			continue
+		}
+		reg, ok := arg.(x86asm.Reg)
+		if !ok {
+			continue
+		}
+		if idx := x86.CanonReg(reg); idx >= 0 {
+			out := idx
+			return &out
+		}
+	}
+	return nil
+}
+
+// x86DirectLoadGPR returns a register only when the instruction copies or
+// extends the THR memory value into operand 0. Comparisons and arithmetic reads
+// intentionally return nil: e.g. ADD RAX,[R14+off] does not make RAX equal to
+// the Thread field and therefore must not seed indirect-call provenance.
+func x86DirectLoadGPR(inst x86asm.Inst, memArgIdx int) *int {
+	if memArgIdx == 0 {
+		return nil
+	}
+	switch inst.Op {
+	case x86asm.MOV, x86asm.MOVSX, x86asm.MOVSXD, x86asm.MOVZX:
+	default:
+		return nil
+	}
+	reg, ok := inst.Args[0].(x86asm.Reg)
+	if !ok {
+		return nil
+	}
+	idx := x86.CanonReg(reg)
+	if idx < 0 {
+		return nil
+	}
+	out := idx
+	return &out
+}
+
+// x86ReadWriteResultGPR records the architectural register that receives the
+// old memory value for RMW instructions. Dart's x64 safepoint transition uses
+// LOCK CMPXCHG on Thread::safepoint_state and immediately consumes RAX, exactly
+// as specified by CMPXCHG (SDK 3.12.2 assembler_x64.cc:155-163,229-239).
+func x86ReadWriteResultGPR(inst x86asm.Inst, memArgIdx int) *int {
+	switch inst.Op {
+	case x86asm.XADD, x86asm.XCHG:
+		return x86ExplicitGPROtherThanMemory(inst, memArgIdx)
+	case x86asm.CMPXCHG:
+		rax := 0
+		return &rax
+	default:
+		return nil
+	}
+}
+
 // BuildX86AuditRecords is ExtractX86THRAccesses's counterpart to
 // BuildAuditRecords, operating on []X86Inst instead of []Inst for
 // context-window lookup.
-func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dartVersion, funcName string) []thraudit.THRAuditRecord {
+func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, provenance thraudit.Provenance, funcName string) []thraudit.THRAuditRecord {
 	pcIdx := make(map[uint64]int, len(allInsts))
 	for i, inst := range allInsts {
 		pcIdx[inst.VA] = i
@@ -359,14 +461,10 @@ func BuildX86AuditRecords(accesses []THRAccess, allInsts []X86Inst, sample, dart
 		}
 
 		rec := thraudit.THRAuditRecord{
-			Sample: sample, DartVersion: dartVersion, PC: fmt.Sprintf("0x%x", a.PC),
-			Insn: a.InsnText, THROffset: fmt.Sprintf("0x%x", a.THROffset), IsStore: a.IsStore,
-			Width: a.Width, FuncName: funcName, Resolved: a.Resolved, Context: ctx,
-		}
-		if a.IsStore {
-			rec.SrcReg = a.SrcReg
-		} else {
-			rec.DstReg = a.DstReg
+			Provenance: provenance, SchemaVersion: thraudit.SchemaV1, PC: fmt.Sprintf("0x%x", a.PC),
+			Insn: a.InsnText, THROffset: a.THROffset, Access: a.Access,
+			DstReg: a.DstReg, SrcReg: a.SrcReg, Width: a.Width, FuncName: funcName,
+			Resolved: a.Resolved, FieldName: a.FieldName, Context: ctx,
 		}
 		records = append(records, rec)
 	}

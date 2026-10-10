@@ -52,11 +52,11 @@ func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, profile *snapshot.Vers
 
 	var bitmap uint64
 	if instanceCarriesUnboxedBitmap(profile) {
-		v, err := s.ReadUnsigned()
+		v, err := s.ReadUnsigned64()
 		if err != nil {
 			return result, fmt.Errorf("instance(%d) bitmap: %w", cm.CID, err)
 		}
-		bitmap = uint64(v)
+		bitmap = v
 	} else {
 		bitmap = classBitmaps[int32(cm.CID)]
 	}
@@ -71,10 +71,14 @@ func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, profile *snapshot.Vers
 		headerWords = 2
 		wordSize = 4
 	}
-	numFields := nfo - headerWords
-	if numFields < 0 {
-		numFields = 0
+	if nfo < headerWords {
+		return result, fmt.Errorf("instance(%d) next_field_offset %d is inside %d-word object header", cm.CID, nfo, headerWords)
 	}
+	if cm.InstanceSizeInWords > 0 && nfo > int(cm.InstanceSizeInWords) {
+		return result, fmt.Errorf("instance(%d) next_field_offset %d exceeds instance_size %d",
+			cm.CID, nfo, cm.InstanceSizeInWords)
+	}
+	numFields := nfo - headerWords
 
 	ref := cm.StartRef
 	for i := int64(0); i < cm.Count; i++ {
@@ -142,8 +146,11 @@ func readFillInstance(s *dartfmt.Stream, cm *ClusterMeta, profile *snapshot.Vers
 			// Byte offset in the same coordinate system BuildClassLayouts
 			// uses for FieldInfo: word index from the object start times the
 			// word size (4 under compressed pointers, else 8).
+			if fieldWordIdx > int(^uint32(0)>>1)/wordSize {
+				return result, fmt.Errorf("instance(%d) field word index %d overflows int32 byte offset", cm.CID, fieldWordIdx)
+			}
 			inst.Fields = append(inst.Fields, InstanceFieldRef{
-				ByteOffset: int32(fieldWordIdx) * int32(wordSize),
+				ByteOffset: int32(fieldWordIdx * wordSize),
 				Ref:        int(fieldRef),
 			})
 		}

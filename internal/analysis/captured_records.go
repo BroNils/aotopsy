@@ -17,7 +17,7 @@ type ScriptRecord struct {
 func BuildScripts(result *cluster.Result, pl *naming.PoolLookups) []ScriptRecord {
 	var records []ScriptRecord
 	for _, si := range result.Scripts {
-		url := pl.RefToStr[si.URLRef]
+		url, _ := pl.StringForRef(si.URLRef)
 		rec := ScriptRecord{
 			RefID:             si.RefID,
 			URL:               url,
@@ -37,7 +37,7 @@ const RefNull = cluster.RefNull
 type LoadingUnitRecord struct {
 	RefID     int   `json:"ref_id"`
 	ParentRef int   `json:"parent_ref,omitempty"`
-	UnitID    int32 `json:"unit_id,omitempty"`
+	UnitID    int64 `json:"unit_id,omitempty"`
 	// IsRoot is true when parent_ is null, i.e. this is the base unit whose
 	// Code objects live in the snapshot we just parsed.
 	IsRoot bool `json:"is_root,omitempty"`
@@ -70,7 +70,7 @@ type LoadingUnitRecord struct {
 type LoadingUnitPartition struct {
 	// RootUnitID is the id of the unit this snapshot defines, or 0 if no
 	// LoadingUnit cluster was present.
-	RootUnitID int32
+	RootUnitID int64
 	// UnitCount is the number of LoadingUnit objects described in this
 	// snapshot (including non-root ones, which are metadata-only here).
 	UnitCount int
@@ -110,7 +110,7 @@ func PartitionCodesByLoadingUnit(result *cluster.Result) *LoadingUnitPartition {
 // UnitOf reports which bucket a Code ref belongs to: the root unit id when the
 // Code is defined in this snapshot, or 0 with deferred=true when it is defined
 // in another unit. found is false for a ref that is not a Code at all.
-func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int32, deferred, found bool) {
+func (p *LoadingUnitPartition) UnitOf(codeRef int) (unitID int64, deferred, found bool) {
 	for _, r := range p.MainCodeRefs {
 		if r == codeRef {
 			return p.RootUnitID, false, true
@@ -139,35 +139,6 @@ func BuildLoadingUnits(result *cluster.Result) []LoadingUnitRecord {
 		if rec.IsRoot {
 			rec.MainCodeCount = len(part.MainCodeRefs)
 			rec.DeferredCodeCount = len(part.DeferredCodeRefs)
-		}
-		records = append(records, rec)
-	}
-	return records
-}
-
-// KPIRecord is one KernelProgramInfo entry in kpi.jsonl.
-type KPIRecord struct {
-	RefID              int `json:"ref_id"`
-	KernelComponentRef int `json:"kernel_component_ref,omitempty"`
-	StringOffsetsRef   int `json:"string_offsets_ref,omitempty"`
-	StringDataRef      int `json:"string_data_ref,omitempty"`
-	CanonicalNamesRef  int `json:"canonical_names_ref,omitempty"`
-	ConstantsRef       int `json:"constants_ref,omitempty"`
-	ConstantsTableRef  int `json:"constants_table_ref,omitempty"`
-}
-
-// BuildKPI converts cluster.KernelProgramInfoRef → output records.
-func BuildKPI(result *cluster.Result) []KPIRecord {
-	var records []KPIRecord
-	for _, kpi := range result.KernelProgramInfo {
-		rec := KPIRecord{
-			RefID:              kpi.RefID,
-			KernelComponentRef: kpi.KernelComponentRef,
-			StringOffsetsRef:   kpi.StringOffsetsRef,
-			StringDataRef:      kpi.StringDataRef,
-			CanonicalNamesRef:  kpi.CanonicalNamesRef,
-			ConstantsRef:       kpi.ConstantsRef,
-			ConstantsTableRef:  kpi.ConstantsTableRef,
 		}
 		records = append(records, rec)
 	}

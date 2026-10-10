@@ -56,14 +56,7 @@ func (r *LibraryResolver) LibraryURLForClassRef(classRef int) string {
 	if !ok || ci.LibraryRefID < 0 {
 		return ""
 	}
-	libObj, ok := r.pl.RefToNamed[ci.LibraryRefID]
-	if !ok {
-		return ""
-	}
-	if url := r.pl.ResolveName(libObj); url != "" {
-		return url
-	}
-	return r.pl.ResolveVMName(libObj)
+	return r.pl.ResolveObjectName(ci.LibraryRefID)
 }
 
 // IsFrameworkLibraryURL reports whether a URL belongs to the SDK or Flutter
@@ -120,17 +113,15 @@ func BuildLibraryFunctions(result *cluster.Result, pl *naming.PoolLookups) []Lib
 		case pl.CT.Function:
 			classRef := res.EffectiveClassRef(no.OwnerRefID)
 			url := res.LibraryURLForClassRef(classRef)
-			name := pl.ResolveName(no)
-			if name == "" {
-				name = pl.ResolveVMName(no)
-			}
-			if ownerName := ownerDisplayName(pl, classRef); ownerName != "" && name != "" {
-				name = ownerName + "." + name
-			}
+			name := pl.FunctionDisplayName(no.RefID)
 			get(url).funcs = append(get(url).funcs, name)
 		case pl.CT.Class:
 			url := res.LibraryURLForClassRef(no.RefID)
-			if name := pl.ResolveName(no); name != "" {
+			// "::" is the VM's synthetic per-library top-level class (it owns the
+			// library's top-level functions, which are already listed under
+			// `functions`). It is not a class the source declares, so counting it
+			// made class_count one too high for every library.
+			if name := pl.ResolveIsolateName(no); name != "" && name != "::" {
 				get(url).classes = append(get(url).classes, name)
 			}
 		}
@@ -157,16 +148,4 @@ func BuildLibraryFunctions(result *cluster.Result, pl *naming.PoolLookups) []Lib
 		return records[i].URL < records[j].URL
 	})
 	return records
-}
-
-// ownerDisplayName resolves a class ref to its name for qualification.
-func ownerDisplayName(pl *naming.PoolLookups, classRef int) string {
-	no, ok := pl.RefToNamed[classRef]
-	if !ok {
-		return ""
-	}
-	if name := pl.ResolveName(no); name != "" {
-		return name
-	}
-	return pl.ResolveVMName(no)
 }

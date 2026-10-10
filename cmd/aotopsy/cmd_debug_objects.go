@@ -7,8 +7,10 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/sdk"
 )
 
 type poolRecord struct {
@@ -21,12 +23,15 @@ type poolRecord struct {
 }
 
 func cmdObjects(args []string) error {
-	fs := flag.NewFlagSet("objects", flag.ExitOnError)
+	fs := flag.NewFlagSet("objects", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	jsonOut := fs.Bool("json", false, "output JSONL instead of text")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 	if *libapp == "" {
@@ -49,13 +54,13 @@ func cmdObjects(args []string) error {
 	poolDisplay := sc.PoolDisplay
 
 	if info.Version != nil && info.Version.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
 	}
 	if sc.VMResult != nil {
-		fmt.Fprintf(os.Stderr, "vm snapshot: %d clusters, %d strings, %d named\n",
+		cli.Errf("vm snapshot: %d clusters, %d strings, %d named\n",
 			len(sc.VMResult.Clusters), len(sc.VMResult.Strings), len(sc.VMResult.Named))
 	}
-	fmt.Fprintf(os.Stderr, "pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
+	cli.Errf("pool: %d entries (%d resolved)\n", len(result.Pool), len(poolDisplay))
 
 	// Output.
 	if *jsonOut {
@@ -64,7 +69,7 @@ func cmdObjects(args []string) error {
 		for _, pe := range result.Pool {
 			rec := poolRecord{
 				Index:  pe.Index,
-				Offset: fmt.Sprintf("0x%x", (pe.Index+2)*8),
+				Offset: fmt.Sprintf("0x%x", objectPoolByteOffset(pe.Index, sc.IsARM64)),
 				Kind:   poolKindString(pe.Kind),
 			}
 			if d, ok := poolDisplay[pe.Index]; ok {
@@ -82,7 +87,7 @@ func cmdObjects(args []string) error {
 		}
 	} else {
 		for _, pe := range result.Pool {
-			offset := (pe.Index + 2) * 8
+			offset := objectPoolByteOffset(pe.Index, sc.IsARM64)
 			display := poolDisplay[pe.Index]
 			switch pe.Kind {
 			case cluster.PoolTagged:
@@ -102,6 +107,14 @@ func cmdObjects(args []string) error {
 	}
 
 	return nil
+}
+
+func objectPoolByteOffset(index int, arm64 bool) int {
+	offset := sdk.PoolElementsStartOffset + index*sdk.PoolElementSize
+	if !arm64 {
+		offset -= sdk.HeapObjectTag
+	}
+	return offset
 }
 
 func poolKindString(k cluster.PoolEntryKind) string {

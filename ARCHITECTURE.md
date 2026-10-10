@@ -71,7 +71,8 @@ The central source of truth for ground-truth Dart VM architecture facts, registe
 
 **Every table has an SDK drift gate, and each one exists because its absence
 cost something.** They re-derive the table from `dart-lang/sdk` at the pinned tag
-via `gh api` and diff it against what is committed:
+(local `~/dev/dartsdk-research/<version>/` first, then the disk cache, and `gh api`
+only as a fallback — see `internal/sdktest`) and diff it against what is committed:
 `TestThreadStubOffsetsMatchSDK`, `TestStubNamesMatchSDK`,
 `TestRuntimeEntriesMatchSDK`, `TestThreadFieldNamesMatchSDK`.
 
@@ -145,7 +146,7 @@ Dart-AOT-aware native pseudocode decompiler (ARM64 + x86_64):
 2. **Exception Handling**: PC bounds bound mathematically via `ExceptionHandlerTable` and `PcDescriptors`.
 3. **Multi-Pass AST Compaction**:
    - Control-flow restructuring: `for-in`, `while`, `for`, `try-catch-finally` (`stmt_for_in.go`, `stmt_loops.go`).
-   - Async/Await linearizer: Unwraps `_SuspendState` state machines into linear `await` expressions (`async_linearizer.go`).
+   - Async/Await linearizer: Rewrites `_SuspendState._await` helper calls and `_StreamIterator` loops into `await` / `await for`. It does not flatten the `state == N` branch tree: the resume value is a PC, and user branches on an integer would be removed with it (`async_linearizer.go`).
    - Closure synthesis: Inlines `AllocateClosure` callbacks as arrow functions at call sites (`stmt_closure.go`).
    - Idiom recognition: Cascades (`..`), null-aware navigation (`?.`, `??`), Set/List/Map literals, string interpolation (`stmt_idioms.go`).
 4. **Whole-Project Synthesizer** (`project_synthesizer.go`): Reconstructs full modular `.dart` projects mapped by library URIs.

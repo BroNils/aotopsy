@@ -1,56 +1,9 @@
 package cluster
 
-import "testing"
-
-// TestReadSLEB128 pins the signed-LEB128 decoding Dart's ReadStream uses.
-// Sign extension from the final byte's bit 6 is the part that is easy to get
-// wrong, and a wrong sign there silently corrupts every pc_offset delta after
-// it, so negative and boundary values are covered explicitly.
-func TestReadSLEB128(t *testing.T) {
-	cases := []struct {
-		name string
-		buf  []byte
-		want int64
-	}{
-		{"zero", []byte{0x00}, 0},
-		{"one", []byte{0x01}, 1},
-		{"63 max positive single byte", []byte{0x3f}, 63},
-		{"minus one", []byte{0x7f}, -1},
-		{"minus 64 min single byte", []byte{0x40}, -64},
-		// 64 needs two bytes: 0x40 alone would be -64.
-		{"64", []byte{0xc0, 0x00}, 64},
-		{"minus 65", []byte{0xbf, 0x7f}, -65},
-		{"128", []byte{0x80, 0x01}, 128},
-		{"minus 128", []byte{0x80, 0x7f}, -128},
-		{"1000", []byte{0xe8, 0x07}, 1000},
-		{"minus 1000", []byte{0x98, 0x78}, -1000},
-		// 0x123456: the third group is 0x48, whose bit 6 is set, so a positive
-		// value needs a fourth continuation byte -- otherwise it sign-extends.
-		{"large 0x123456", []byte{0xd6, 0xe8, 0xc8, 0x00}, 0x123456},
-		// The same three bytes without that continuation really are negative.
-		{"0xd6 0xe8 0x48 is negative", []byte{0xd6, 0xe8, 0x48}, -904106},
-	}
-	for _, c := range cases {
-		got, next, err := readSLEB128(c.buf, 0)
-		if err != nil {
-			t.Errorf("%s: unexpected error %v", c.name, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
-		}
-		if next != len(c.buf) {
-			t.Errorf("%s: consumed %d bytes, want %d", c.name, next, len(c.buf))
-		}
-	}
-
-	if _, _, err := readSLEB128([]byte{0x80}, 0); err == nil {
-		t.Error("truncated input did not error")
-	}
-	if _, _, err := readSLEB128(nil, 0); err == nil {
-		t.Error("empty input did not error")
-	}
-}
+import (
+	"strings"
+	"testing"
+)
 
 // TestDecodeKindAndMetadata pins the bit layout of
 // UntaggedPcDescriptors::KindAndMetadata.
@@ -145,6 +98,14 @@ func TestDecodePcDescriptors(t *testing.T) {
 	// A record missing its delta must be reported, not silently dropped.
 	if _, err := DecodePcDescriptors([]byte{enc(1, 0)}); err == nil {
 		t.Error("truncated record did not error")
+	} else if !strings.Contains(err.Error(), "pc_offset delta at 1") {
+		t.Fatalf("truncated record diagnostic = %q, want field start offset 1", err)
+	}
+	// A large positive delta must not wrap through uint32 into a plausible PC.
+	// 2^32 as canonical SLEB128: four zero data groups followed by 0x10.
+	oversizedDelta := []byte{enc(1, -1), 0x80, 0x80, 0x80, 0x80, 0x10}
+	if _, err := DecodePcDescriptors(oversizedDelta); err == nil {
+		t.Error("pc offset beyond uint32 was accepted")
 	}
 }
 

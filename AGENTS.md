@@ -13,6 +13,15 @@ another. So a fresh clone won't have it — that's normal, not missing.
 If it doesn't exist yet, create your own with sample paths and integration
 test env vars for your machine.
 
+## Project purpose and sample provenance
+
+AOTopsy is a static analyzer for Dart AOT snapshots, built for defensive and
+educational use: security research, malware analysis, audits of one's own apps, and
+documenting the snapshot format (see README "Intended Use" and SECURITY.md "Responsible
+use"). `samples/` is gitignored and test binaries are never committed or redistributed.
+Real app names and anything extracted from a binary (keys, domains) stay out of tracked
+files and commit messages; use the pseudonyms from AGENTS-local.md.
+
 ## ⚠️ Host memory limits — read before running anything heavy
 
 This repo's analysis pipeline is memory-intensive. The specific host RAM,
@@ -186,7 +195,14 @@ gate permanently red, which is exactly why that gate could not exist before.
 
 - `gofmt -l` over `cmd/ internal/ tools/` — must be empty.
 - `staticcheck ./...` — must be clean. Fix findings; do not suppress them. A gate
-  whose baseline is a list of exceptions is not a gate.
+  whose baseline is a list of exceptions is not a gate. This job pins Go (1.26.9)
+  and staticcheck (v0.8.1) to exact versions: staticcheck only reads the export
+  data of the Go versions it was built against, and `stable` + `@latest` went red
+  on a Go patch release with no change in the repo. Bump both in one commit and
+  run the new pair locally first.
+- `SDK drift gates` read Dart SDK sources through the GitHub API; their disk cache
+  is persisted with `actions/cache`, because refetching it every run exhausts the
+  1000 requests/hour job-token quota.
 - `go build`, `go vet`, `go test -shuffle=on` on ubuntu, macos and windows.
 - race + coverage, with a floor (currently 18%, measured 20.0% without the
   corpus). Raise it when it is comfortably clear; never lower it to make a red
@@ -249,8 +265,9 @@ baseline noise, not your edit's fault, and **do not** run `gofmt -w` to
 - **Do not settle for "approximate" or "good enough"** when a real fix is
   achievable. The kHeapObjectTag off-by-one fix seemed trivial but unlocked
   11550 field hits from 11.
-- **Root cause analysis must be deep.** Use gh search + gh api to the SDK
-  source to verify every assumption. Do not guess. Example:
+- **Root cause analysis must be deep.** Grep the local SDK tree
+  (`~/dev/dartsdk-research/<version>/`) to find, then `Read` the surrounding files to
+  verify every assumption (a grep hit alone is still a guess). Do not guess. Example:
   ObjectStoreAOTFieldCount was wrong because it only counted RW fields,
   when there are also CW, FW, LAZY_CORE, LAZY_FFI, etc.
 - **"Data limitation" is not the end of research.** If BLR is low, find
@@ -325,7 +342,8 @@ doesn't buy anything.
   The earlier "chicken-and-egg genuine" conclusion was wrong — the root
   cause was not 2.x stack-based receiver passing, but a type tracker bug.
   2.x does pass the receiver via the stack (`DartCallingConvention` does
-  not exist in `constants_arm64.h` at 2.12.0, first appears at 3.4.3),
+  not exist in `constants_arm64.h` at 2.12.0, first appears at SDK 3.4.0 --
+  absent at 3.3.4; 3.4.3 is only the first supported profile),
   but the selector scan fallback does not need the receiver class — it
   scans all dispatch table entries at a given selector offset.
   Seeding `this` from a frame slot was tried and discarded for a different
@@ -386,9 +404,26 @@ explicitly in the tool, not silently tolerated.
 
 ## Source of Truth: SDK Verification
 
-Two-step technique for verifying against Dart SDK source:
+**Local first.** The source of truth is `~/dev/dartsdk-research/<exact-version>/`
+(one plain directory per Dart SDK version, no `.git`; the directory name is the
+version). **`grep` finds, `Read` proves.** Locate with `grep -n -B3 -A20 'pattern'
+<tree>/runtime/vm/<file>`, `grep -rln` to find the file, a `for v in ...; do grep ...; done`
+loop across versions (`rg` is not installed on every host); then open the matching files
+with `Read` (whole file if small, otherwise a range wide enough to cover the enclosing
+function/class/enum/macro, its counterpart such as Serialize vs Deserialize or x64 vs
+arm64, its callers, and the siblings it is compared against). A conclusion drawn from
+grep output alone is a guess, not a fact: a snippet hides `#if` branches, macros,
+defaults and other users, so mark it "not verified: context too narrow". Do not use
+`cat`, `sed` or `awk` on SDK files; use `Read`. The trees cover every version, have no
+rate limits, and are what `internal/sdktest` already resolves first.
 
-1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`).
+Grep MCP and `gh api` are a **fallback only**: use them when the version you need is
+missing from the local trees, or when the user names them explicitly. Never reach for
+them first. Never rely on training memory.
+
+Fallback technique (two steps):
+
+1. **Grep MCP (`searchGitHub` by Vercel)**: Fast literal/regex search across millions of GitHub repos (`https://mcp.grep.app`). Searches `main` only.
    - Use ONLY `query` + `repo` (e.g. `repo: "dart-lang/sdk"`). Do **NOT** pass `path` —
      leaving it off returns wider results across the whole repo and surfaces more
      knowledge (related call sites, other files, cross-arch counterparts) you would
@@ -406,3 +441,21 @@ Both are necessary: Grep MCP finds the file/line fast, `gh api` gives versioned 
 - **from() differs between versions**: 2.12.0 ObjectStore::from() = &object_class_, 3.9.2 = &list_class_. IsolateObjectStore::from() is different and NOT used for serialization.
 - **Class ID extraction differs**: 2.x uses LDURH (16-bit, kClassIdTagPos=16), 3.x uses LDUR+UBFX (64-bit, kClassIdTagPos=12).
 - **Dispatch pattern differs**: 2.x uses cid_reg in-place (SUB X0, X0, #imm), 3.x uses LR as temp (SUB X30, X0, #imm).
+
+## Never copy the SDK (or any research data) into this repo
+
+The Dart SDK trees already live on this machine at
+`~/dev/dartsdk-research/<exact-version>/`. Research and verify **in place**
+there (`grep` finds, `Read` proves).
+
+- **Never** copy, mirror, rsync, extract or pull SDK files into the project
+  (including via `.sh` scripts), not into `.audit_*`, `.audit_closure/`,
+  `.audit_sdktest/`, `.handoff/`, `scratch/` or anywhere else under the repo.
+  Copies go stale, bloat the project to hundreds of MB, and are never the
+  source of truth. A missing version is added to `~/dev/dartsdk-research/`
+  from `~/dev/.dartsdk-mirror.git`, not into this repo.
+- Temporary output (caches, proofs, helper scripts, test leftovers) goes in the
+  session scratchpad outside the repo and is **deleted when the task ends**.
+  If a test or script leaves files in the repo, remove them before finishing.
+- Every `.audit_closure/` folder holds only a `README.md` stating this rule.
+  Do not put anything else in it.

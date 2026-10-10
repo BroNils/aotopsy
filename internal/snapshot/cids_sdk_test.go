@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -37,199 +36,23 @@ import (
 // assumed. Assuming it is how a table silently gains a constant offset
 // across an entire tail.
 func cidEnum(tag string) (map[string]int, int, error) {
-	src, err := sdktest.GHFileAtTag("runtime/vm/class_id.h", tag)
-	if err != nil {
-		return nil, 0, err
-	}
-	macros := cmacro.ParseMacros(src)
-
-	body, err := enumBody(src)
-	if err != nil {
-		return nil, 0, err
-	}
-	// typedDataStride is how many ids CLASS_LIST_TYPED_DATA emits per
-	// class. It went from 3 to 4 when the unmodifiable views landed, and
-	// version.go's TypedDataCidStride has to follow.
-	typedDataStride := 0
-
-	out := map[string]int{}
-	next := 0
-	add := func(name string) {
-		if _, dup := out[name]; !dup {
-			out[name] = next
-		}
-		next++
-	}
-
-	// templates holds per-entry macros as they are defined, tracked
-	// positionally rather than read from the file-wide macro table: the
-	// pre-3.13 enum redefines DEFINE_OBJECT_KIND three times, so the
-	// file-wide table only ever has the last one.
-	templates := map[string]string{}
-
-	var walk func(text string, depth int) error
-	walk = func(text string, depth int) error {
-		if depth > 8 {
-			return cidError("macro nesting too deep at " + tag)
-		}
-		for i := 0; i < len(text); {
-			// A #define inside the region installs a template and runs to
-			// end of line (continuations are already joined). Whichever of
-			// the two patterns starts first wins -- anchoring the define
-			// check at the scan position instead skips every define that is
-			// not exactly there, and then the template is never installed.
-			d := reInlineDefine.FindStringSubmatchIndex(text[i:])
-			loc := reToken.FindStringSubmatchIndex(text[i:])
-			if d != nil && (loc == nil || d[0] <= loc[0]) {
-				templates[text[i+d[2]:i+d[3]]] = text[i+d[8] : i+d[9]]
-				i += d[1]
-				continue
-			}
-			if loc == nil {
-				return nil
-			}
-			tok := text[i+loc[0] : i+loc[1]]
-			i += loc[1]
-
-			// Literal enum entry: kFooCid, or kFoo,
-			if strings.HasPrefix(tok, "k") && strings.HasSuffix(tok, ",") {
-				if m := reEnumEntry.FindStringSubmatch(tok); m != nil {
-					add(m[1])
-				}
-				continue
-			}
-			name, arg, isCall := splitCall(tok)
-			if !isCall {
-				// A bare object-like list macro (3.13's CLASS_ID_LIST).
-				if body, ok := macros[name]; ok && strings.Contains(body, "(") {
-					if err := walk(body, depth+1); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			// NAME(ARG) where NAME is a per-entry template: substitute and
-			// re-walk, because the substitution may itself be a call
-			// (3.13's DEFINE_CLASS_ID(clazz) expands to CID(clazz##Cid)).
-			if tmpl, ok := templates[name]; ok {
-				if err := walk(substParam(tmpl, arg), depth+1); err != nil {
-					return err
-				}
-				continue
-			}
-			// LIST(TEMPLATE): expand the list, apply the template per class.
-			if _, ok := macros[name]; ok && strings.HasPrefix(name, "CLASS_LIST") {
-				tmpl, ok := templates[arg]
-				if !ok {
-					tmpl, ok = macros[arg]
-				}
-				if !ok {
-					return cidError("no template " + arg + " for " + name + " at " + tag)
-				}
-				classes, err := cmacro.Expand(macros, name)
-				if err != nil {
-					return err
-				}
-				if name == "CLASS_LIST_TYPED_DATA" {
-					before := next
-					if err := walk(substParam(tmpl, "Probe"), depth+1); err != nil {
-						return err
-					}
-					typedDataStride = next - before
-					next = before
-					for k, v := range out {
-						if v >= before {
-							delete(out, k)
-						}
-					}
-				}
-				for _, c := range classes {
-					if err := walk(substParam(tmpl, c), depth+1); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-		}
-		return nil
-	}
-
-	if err := walk(body, 0); err != nil {
-		return nil, 0, err
-	}
-	if len(out) < 50 {
-		return nil, 0, cidError("class_id.h@" + tag + " yielded too few ids to be the ClassId enum")
-	}
-	if typedDataStride == 0 {
-		return nil, 0, cidError("CLASS_LIST_TYPED_DATA not expanded at " + tag)
-	}
-	return out, typedDataStride, nil
-}
-
-// splitCall recognises NAME(ARG) with a single argument.
-func splitCall(tok string) (name, arg string, ok bool) {
-	open := strings.IndexByte(tok, '(')
-	if open < 0 || !strings.HasSuffix(tok, ")") {
-		return strings.TrimSuffix(tok, ","), "", false
-	}
-	return tok[:open], strings.TrimSpace(tok[open+1 : len(tok)-1]), true
-}
-
-// substParam replaces a macro's single parameter with an argument,
-// honouring the ## paste operator.
-func substParam(tmpl, arg string) string {
-	t := strings.ReplaceAll(tmpl, "##", "\x00")
-	for _, p := range []string{"clazz", "cid", "class"} {
-		t = regexp.MustCompile(`\b`+p+`\b`).ReplaceAllString(t, arg)
-	}
-	return strings.ReplaceAll(t, "\x00", "")
-}
-
-var (
-	reEnumOpen = regexp.MustCompile(`enum\s+ClassId[^{]*\{`)
-	// A #define inside the walked region: name, optional parameter list, body.
-	reInlineDefine = regexp.MustCompile(`#define\s+(\w+)(\(\s*(\w+)\s*\))?([^\n]*)`)
-	// One token: a call NAME(ARG), a literal enum entry kFoo, or a bare
-	// identifier (an object-like list macro reference).
-	reToken = regexp.MustCompile(`(\w+\([^()]*\))|(k\w+\s*(?:=\s*\d+\s*)?,)|(\w+)`)
-	// An enum entry is kFooCid or kFoo (kNativePointer, kFreeListElement).
-	// The trailing "= 0" on kIllegalCid is ignored: position is what counts,
-	// and the enum starts at 0 anyway.
-	reEnumEntry = regexp.MustCompile(`\bk(\w+?)(?:Cid)?\s*(?:=\s*\d+\s*)?,`)
-	reBlockCmt  = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	reLineCmt   = regexp.MustCompile(`//[^\n]*`)
-)
-
-// enumBody returns the ClassId enum's contents with comments stripped and
-// line continuations joined.
-func enumBody(src string) (string, error) {
-	loc := reEnumOpen.FindStringIndex(src)
-	if loc == nil {
-		return "", cidError("enum ClassId not found")
-	}
-	rest := src[loc[1]:]
-	end := strings.Index(rest, "};")
-	if end < 0 {
-		return "", cidError("unterminated enum ClassId")
-	}
-	body := rest[:end]
-	body = strings.ReplaceAll(body, "\\\r\n", "")
-	body = strings.ReplaceAll(body, "\\\n", "")
-	body = reBlockCmt.ReplaceAllString(body, "")
-	body = reLineCmt.ReplaceAllString(body, "")
-	return body, nil
+	return sdktest.CIDEnumAtTag(tag)
 }
 
 type cidError string
 
 func (e cidError) Error() string { return string(e) }
 
-// cidTags maps each committed table to the SDK tag it was derived from.
-// Every table gets probed: a row nobody checked is the whole failure mode.
-var cidTags = []struct {
+type cidCase struct {
 	tag   string
 	table *CIDTable
-}{
+}
+
+// cidTags keeps one canonical release per distinct committed table for local
+// invariants. Source drift tests do NOT iterate this list: releases such as
+// 3.1.0 alias cidsV325, but that alias itself must be proved against 3.1.0's
+// exact source rather than inherited from the 3.2.5 proof.
+var cidTags = []cidCase{
 	{"2.10.0", &cidsV210},
 	{"2.12.0", &cidsV212},
 	{"2.13.0", &cidsV213},
@@ -245,6 +68,20 @@ var cidTags = []struct {
 	{"3.6.2", &cidsV362},
 	{"3.9.2", &cidsV392},
 	{"3.13.0", &cidsV3130},
+}
+
+func supportedCIDCases(t *testing.T) []cidCase {
+	t.Helper()
+	versions := SupportedVersions()
+	out := make([]cidCase, 0, len(versions))
+	for _, tag := range versions {
+		profile := ProfileForVersion(tag)
+		if profile == nil || profile.CIDs == nil {
+			t.Fatalf("supported Dart %s has no CID table", tag)
+		}
+		out = append(out, cidCase{tag: tag, table: profile.CIDs})
+	}
+	return out
 }
 
 // cidFieldClass maps a CIDTable field to the SDK class whose enum
@@ -281,7 +118,7 @@ var cidFieldFallback = map[string][]string{
 func TestCIDTablesMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
 
-	for _, c := range cidTags {
+	for _, c := range supportedCIDCases(t) {
 		t.Run(c.tag, func(t *testing.T) {
 			enum, stride, err := cidEnum(c.tag)
 			if err != nil {
@@ -294,23 +131,52 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 					c.tag, c.table.TypedDataCidStride, stride)
 			}
 
+			ffiFirst, ffiLast, err := ffiMarkerRange(c.tag, enum)
+			if err != nil {
+				t.Fatalf("derive FFI type-marker range @%s: %v", c.tag, err)
+			}
+
 			v := reflect.ValueOf(*c.table)
 			ty := v.Type()
-			checked, skipped := 0, 0
+			checked, absent := 0, 0
 			for i := 0; i < ty.NumField(); i++ {
 				f := ty.Field(i)
 				if f.Type.Kind() != reflect.Int {
 					continue
 				}
 				got := int(v.Field(i).Int())
-				if got == 0 {
-					skipped++ // recorded as absent for this version
-					continue
-				}
 				if f.Name == "TypedDataCidStride" {
 					continue // checked above, against the macro template
 				}
+				if f.Name == "FfiMarkerFirstCid" || f.Name == "FfiMarkerLastCid" {
+					want := ffiFirst
+					if f.Name == "FfiMarkerLastCid" {
+						want = ffiLast
+					}
+					if got != want {
+						t.Errorf("%s: %s = %d, but CLASS_LIST_FFI_TYPE_MARKER routed by NewClusterForClass @%s gives %d\n"+
+							"  Before 2.16.0 the serializer has no such case and the range must be 0/0;\n"+
+							"  a non-zero range there accepts a cluster the SDK never writes.",
+							c.tag, f.Name, got, c.tag, want)
+					}
+					if want == 0 {
+						absent++
+					} else {
+						checked++
+					}
+					continue
+				}
 				want, ok := lookupCID(enum, f.Name)
+				if got == 0 {
+					if !cidRecordedZeroIsValid(c.tag, f.Name, want, ok) {
+						t.Errorf("%s: field %s is recorded as 0, but class_id.h@%s defines it as CID %d and no no-cluster exception applies\n"+
+							"  Zero is not a wildcard: dropping a mapped CID silently disables its cluster reader.",
+							c.tag, f.Name, c.tag, want)
+						continue
+					}
+					absent++
+					continue
+				}
 				if !ok {
 					t.Errorf("%s: field %s = %d, but no matching class in class_id.h@%s\n"+
 						"  Either the field names a class that does not exist at this version\n"+
@@ -329,8 +195,40 @@ func TestCIDTablesMatchSDK(t *testing.T) {
 			if checked < 30 {
 				t.Errorf("%s: only %d fields checked; the mapping is not covering the table", c.tag, checked)
 			}
-			t.Logf("%s: %d fields verified, %d recorded absent", c.tag, checked, skipped)
+			t.Logf("%s: %d non-zero fields verified, %d zero fields verified unsupported", c.tag, checked, absent)
 		})
+	}
+}
+
+func cidRecordedZeroIsValid(tag, field string, sdkCID int, found bool) bool {
+	if !found || sdkCID == 0 {
+		return true
+	}
+	// These classes existed in class_id.h before they acquired snapshot
+	// serialization clusters. Their CID alone is therefore insufficient evidence
+	// that CIDTable should map them. app_snapshot.cc gains all three cluster
+	// handlers in 3.13.0; exact older release tags are immutable.
+	if !VersionAtLeast(tag, "3.13.0") {
+		switch field {
+		case "LocalVarDescriptors", "ApiError", "UnwindError":
+			return true
+		}
+	}
+	return false
+}
+
+func TestCIDRecordedAbsentRequiresSDKAbsence(t *testing.T) {
+	if cidRecordedZeroIsValid("3.12.2", "Function", 17, true) {
+		t.Fatal("zero-valued CID accepted even though the SDK defines the class")
+	}
+	if !cidRecordedZeroIsValid("3.12.2", "Record", 0, false) {
+		t.Fatal("zero-valued CID rejected for a class absent from the SDK")
+	}
+	if !cidRecordedZeroIsValid("3.12.2", "LocalVarDescriptors", 27, true) {
+		t.Fatal("pre-3.13 class with no snapshot cluster was rejected")
+	}
+	if cidRecordedZeroIsValid("3.13.0", "LocalVarDescriptors", 27, true) {
+		t.Fatal("3.13 LocalVarDescriptors zero accepted after its snapshot cluster was added")
 	}
 }
 
@@ -358,12 +256,71 @@ func lookupCID(enum map[string]int, field string) (int, bool) {
 	return 0, false
 }
 
+// ffiMarkerRange derives what CIDTable.FfiMarkerFirstCid/FfiMarkerLastCid must
+// hold for one SDK tag: the id range Serializer::NewClusterForClass routes
+// through InstanceSerializationCluster via CLASS_LIST_FFI_TYPE_MARKER.
+//
+// Two things decide it and both are read from the tag rather than assumed:
+//   - the serializer must actually have that case. It appears in 2.16.0; before
+//     that, NewClusterForClass returns nullptr for these classes, so a cluster
+//     under them is malformed and the table must hold 0/0.
+//   - the range is the macro's expansion, whose first and last entries (and
+//     length) change between releases.
+func ffiMarkerRange(tag string, enum map[string]int) (first, last int, err error) {
+	snap, err := sdktest.SDKFileAtTagAny(tag,
+		"runtime/vm/app_snapshot.cc",
+		"runtime/vm/clustered_snapshot.cc",
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	start := strings.Index(snap, "Serializer::NewClusterForClass")
+	if start < 0 {
+		return 0, 0, cidError("Serializer::NewClusterForClass not found at " + tag)
+	}
+	body := snap[start:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "CLASS_LIST_FFI_TYPE_MARKER(") {
+		return 0, 0, nil
+	}
+	src, err := sdktest.SDKFileAtTag("runtime/vm/class_id.h", tag)
+	if err != nil {
+		return 0, 0, err
+	}
+	macros, err := cmacro.ParseMacros(src)
+	if err != nil {
+		return 0, 0, err
+	}
+	classes, err := cmacro.Expand(macros, "CLASS_LIST_FFI_TYPE_MARKER")
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(classes) == 0 {
+		return 0, 0, cidError("CLASS_LIST_FFI_TYPE_MARKER expanded to nothing at " + tag)
+	}
+	for i, c := range classes {
+		id, ok := enum["Ffi"+c]
+		if !ok {
+			return 0, 0, cidError("kFfi" + c + "Cid missing from the ClassId enum at " + tag)
+		}
+		if i == 0 {
+			first = id
+		} else if id != first+i {
+			return 0, 0, cidError("CLASS_LIST_FFI_TYPE_MARKER is not a contiguous id range at " + tag)
+		}
+		last = id
+	}
+	return first, last, nil
+}
+
 // TestNumPredefinedCidsMatchSDK checks the derived enum terminates where
 // the SDK says it does, which is the one number every range check and the
 // TagStyle probe depend on.
 func TestNumPredefinedCidsMatchSDK(t *testing.T) {
 	sdktest.SkipIfNoSDKTools(t)
-	for _, c := range cidTags {
+	for _, c := range supportedCIDCases(t) {
 		t.Run(c.tag, func(t *testing.T) {
 			enum, _, err := cidEnum(c.tag)
 			if err != nil {

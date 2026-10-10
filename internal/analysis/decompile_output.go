@@ -3,9 +3,9 @@ package analysis
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/decompiler"
 	"aotopsy/internal/frida"
 )
@@ -38,23 +38,20 @@ func AggregateStats(agg *decompiler.Stats, s decompiler.Stats) {
 func EmitSingleFuncFrida(libPath string, isARM64 bool, fir *decompiler.FuncIR, art decompiler.Artifact, targetVA uint64, genFridaOut string, opts frida.FridaOptions) error {
 	hook := frida.FridaHook{VA: targetVA, Name: art.FunctionName, ArgRegs: frida.RealArgRegs(fir)}
 	probes := frida.CollectIndirectCallProbes(fir)
-	script := frida.GenerateFridaScriptWithOptions(libPath, isARM64, []frida.FridaHook{hook}, probes, opts)
 	if genFridaOut == "" {
+		script := frida.GenerateFridaScriptWithOptions(libPath, isARM64, []frida.FridaHook{hook}, probes, opts)
 		fmt.Println("\n// --- Frida script (--gen-frida) ---")
 		fmt.Println(script)
-	} else if err := os.WriteFile(genFridaOut, []byte(script), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", genFridaOut, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "Frida script written to %s\n", genFridaOut)
+		return nil
 	}
-	return nil
+	return frida.WriteFridaScript(genFridaOut, "", libPath, isARM64, []frida.FridaHook{hook}, probes, opts)
 }
 
 // FinalizeFridaOutput writes the Frida script at the end of a batch
 // (--all / --from-main) run.
 func FinalizeFridaOutput(genFridaOut, outDir, libPath string, isARM64 bool, hooks []frida.FridaHook, probes []frida.FridaProbe, probesDropped int, opts frida.FridaOptions) error {
 	if probesDropped > 0 {
-		fmt.Fprintf(os.Stderr, "--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", probesDropped, frida.MaxFridaProbes)
+		cli.Errf("--gen-frida: %d indirect-call probe(s) dropped past the %d cap (maxFridaProbes) -- rerun with --filter/--func on a narrower target to see the rest\n", probesDropped, frida.MaxFridaProbes)
 	}
 	return frida.WriteFridaScript(genFridaOut, outDir, libPath, isARM64, hooks, probes, opts)
 }
@@ -62,5 +59,5 @@ func FinalizeFridaOutput(genFridaOut, outDir, libPath string, isARM64 bool, hook
 // PrintAggregateStats marshals and prints the aggregate stats to stderr.
 func PrintAggregateStats(agg decompiler.Stats) {
 	statsData, _ := json.MarshalIndent(agg, "", "  ")
-	fmt.Fprintf(os.Stderr, "aggregate stats: %s\n", statsData)
+	cli.Errf("aggregate stats: %s\n", statsData)
 }

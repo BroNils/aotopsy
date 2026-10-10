@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/dartfmt"
 )
 
 // ResolvedDispatchEntry is one DispatchTable slot with its real name
@@ -40,7 +41,7 @@ func ResolveDispatchTable(ctx *AnalysisContext) ([]ResolvedDispatchEntry, error)
 	// For Dart 3.x, InstrTable is required.
 	if ctx.InstrTable == nil && ctx.Info.Version.CodeTextOffsetDelta {
 		// Dart 2.x: use TextOffset fallback (first_code_id based).
-		raw, err := cluster.ParseDispatchTable(ctx.Info.IsolateData.Data, ctx.Result, ctx.Info.Version, nil)
+		raw, err := cluster.ParseDispatchTable(ctx.Info.IsolateData.Data, ctx.Result, ctx.Info.Version, nil, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 		if err != nil {
 			return nil, err
 		}
@@ -50,7 +51,7 @@ func ResolveDispatchTable(ctx *AnalysisContext) ([]ResolvedDispatchEntry, error)
 		return nil, fmt.Errorf("dispatch table: no InstructionsTable available for this snapshot")
 	}
 
-	raw, err := cluster.ParseDispatchTable(ctx.Info.IsolateData.Data, ctx.Result, ctx.Info.Version, ctx.InstrTable)
+	raw, err := cluster.ParseDispatchTable(ctx.Info.IsolateData.Data, ctx.Result, ctx.Info.Version, ctx.InstrTable, dartfmt.Options{Mode: dartfmt.ModeBestEffort})
 	if err != nil {
 		return nil, err
 	}

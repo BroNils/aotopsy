@@ -14,8 +14,7 @@ import (
 // The ones below are typetrack-specific (not in the SDK's reserved-register
 // set, but used by the type lattice for class-id and allocation tracking).
 const (
-	x86RegRCX = sdk.X86ClassIdReg // kClassIdReg (DispatchTableNullErrorABI)
-	x86RegRAX = 0                 // return value / allocation result
+	x86RegRAX = 0 // return value / allocation result
 )
 
 // x86RegRDI is deliberately absent. It was defined here as "SysV arg 0
@@ -24,26 +23,6 @@ const (
 // kTypeArgumentsReg RDX, kTagsReg R8} -- RDI is not in it, and inside
 // GenerateAllocateObjectHelper it is only a scratch register. The class is
 // now read from Code.owner via TypeContext.AllocationStubCID.
-
-// x86ArgRegCanon lists Dart's OWN calling-convention integer argument
-// registers as canonical indices, parameter 0 first. This is NOT the
-// SysV C ABI — Dart declares its own convention (verified via gh api to
-// constants_x64.h @3.9.2):
-//
-//	DartCallingConvention::kCpuRegistersForArgs[] = {RDI, RSI, RDX, RBX, R8, R9}
-//
-// The previous value used RCX (1) for parameter 3 instead of RBX (3) —
-// the SysV C ABI order. RCX is DispatchTableNullErrorABI::kClassIdReg
-// in Dart, not an argument register. killX86ArgRegs was killing RCX
-// (losing class-id type info needed for dispatch resolution) and NOT
-// killing RBX (leaving stale type info after calls that could propagate
-// incorrect types).
-var x86ArgRegCanon = func() [6]int {
-	r := sdk.DartArgRegisters(sdk.ArchX86)
-	var arr [6]int
-	copy(arr[:], r)
-	return arr
-}()
 
 // AnalyzeFunctionX86 runs intra-procedural type dataflow on one x86_64 function.
 // It mirrors AnalyzeFunction (ARM64) but uses x86_64 instruction decoders.
@@ -60,7 +39,8 @@ func AnalyzeFunctionX86(
 	// Pre-scan: find x86_64 dispatch table call patterns.
 	// Pattern from SDK (flow_graph_compiler_x64.cc):
 	//   MOV RAX, [R14 + dispatch_table_array_offset]  (LoadDispatchTable)
-	//   CALL [RAX + RCX*8 + disp32]                    (dispatch table call)
+	//   CALL [RAX + cid_reg*8 + disp32]                (dispatch table call)
+	// cid_reg is caller-selected in 2.10/2.12 and fixed to RCX from 2.13.
 	// disp32 = (selector_offset - kOriginElement) * kWordSize
 	//
 	// SelectorOffsets stores the SELECTOR IMMEDIATE -- the same quantity the
@@ -75,6 +55,9 @@ func AnalyzeFunctionX86(
 	// We store it keyed by the CALL's address.
 	for i := 0; i < len(insts); i++ {
 		inst := insts[i]
+		if inst.Bad {
+			continue
+		}
 		if inst.Inst.Op != x86asm.CALL {
 			continue
 		}
@@ -84,8 +67,11 @@ func AnalyzeFunctionX86(
 		}
 		baseReg := x86.CanonReg(mem.Base)
 		idxReg := x86.CanonReg(mem.Index)
-		// Check: CALL [RAX + RCX*8 + disp32]
-		if baseReg == x86RegRAX && idxReg == x86RegRCX && mem.Scale == 8 {
+		// Dart 2.10/2.12 pass cid_reg as an arbitrary register parameter to
+		// EmitDispatchTableCall. From 2.13 onward the SDK fixes it to RCX via
+		// DispatchTableNullErrorABI. Accept exactly the register shape valid for
+		// this version instead of projecting RCX backwards.
+		if baseReg == x86RegRAX && sdk.IsDispatchTableClassIDReg(ctx.DartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8 && mem.Disp%8 == 0 {
 			ctx.SelectorOffsets[inst.VA] = int(mem.Disp / 8)
 		}
 	}
@@ -106,7 +92,9 @@ func AnalyzeFunctionX86(
 
 	blockEntry := make([][31]TypeLattice, len(blocks))
 	blockExit := make([][31]TypeLattice, len(blocks))
+	blockVisited := make([]bool, len(blocks))
 	blockEntry[0] = entryTypes
+	blockVisited[0] = true
 
 	for off, t := range entryStack {
 
@@ -136,27 +124,37 @@ func AnalyzeFunctionX86(
 
 		// prevInst is the previous instruction in this block (nil at block
 		// start). Used by the SHR/AND handler to detect the header-load →
-		// class-ID-extract pattern and preserve Bottom, mirroring ARM64's
-		// prevRaw UBFX fix (which unlocked 11550 field hits). Without this,
-		// x86_64 kills Bottom on the header load and the selector-offset-scan
+		// class-ID-extract pattern and preserve HeaderTags/CID provenance. Without
+		// this, x86_64 kills the header fact and the selector-offset-scan
 		// dispatch path never fires, explaining the BLR gap vs ARM64.
 		var prevInst *x86.Decoded
 		// Flow-sensitive narrowing, the x86 counterpart of the ARM64 rule in
 		// intraproc.go: a `CMP reg, #imm` against a class id means that on
 		// the edge where the comparison SUCCEEDED, the register holds
-		// exactly that class. It is step 3 of the chain that turns a header
-		// load into a resolved dispatch -- header load gives Bottom, the
-		// SHR extract preserves it, the compare turns it into a real class,
-		// the dispatch call consumes it -- and x86 had steps 1, 2 and 4 but
-		// not this one, which is why supplying the Bottom producer alone
-		// moved nothing.
+		// exactly that CID scalar. It is step 3 of the chain that turns a header
+		// load into a resolved dispatch -- header load gives HeaderTags, the
+		// SHR extract turns it into UnknownClassID, the compare narrows to an
+		// exact CID, and the dispatch call consumes it. Keeping header tags and
+		// class-ID scalars as distinct lattice states is what lets this chain
+		// survive without overloading Bottom as "unknown CID".
 		var cmpReg, cmpImm int
 		var hasCmp bool
+		copies := make(map[int]int) // register -> the register it is an intact copy of (updateSrcLinksX86)
 		for _, inst := range blk.insts {
+			if inst.Bad {
+				hasCmp = false
+				transferInstructionX86(&state, inst, nil, ctx, result, lca, stackTypes)
+				prevInst = nil
+				continue
+			}
 			if r, imm, ok := isX86CmpRegImm(inst); ok {
 				cmpReg, cmpImm, hasCmp = r, imm, true
+			} else if hasCmp && !x86PreservesCompareFlags(inst.Inst.Op) {
+				hasCmp = false
 			}
 			transferInstructionX86(&state, inst, prevInst, ctx, result, lca, stackTypes)
+			stampReceiverBounds(&state)
+			updateSrcLinksX86(&state, inst.Inst, copies)
 			prevInst = &inst
 		}
 
@@ -171,47 +169,41 @@ func AnalyzeFunctionX86(
 			eqSucc = x86.EqualitySuccessor(blk.insts[len(blk.insts)-1].Inst.Op, len(blk.successors))
 		}
 		if eqSucc >= 0 {
-			ctx.NarrowShape++
-			if state[cmpReg].Kind != LatticeBottom && state[cmpReg].Kind != LatticeKnownClass {
-				ctx.NarrowNoType++
+			branchPC := blk.insts[len(blk.insts)-1].VA
+			if isClassID(state[cmpReg].Kind) {
+				ctx.recordNarrowMetric(branchPC, narrowMetricHit)
+			} else {
+				ctx.recordNarrowMetric(branchPC, narrowMetricNoType)
 			}
 		}
 		for succIdx, succ := range blk.successors {
 			var newEntry [31]TypeLattice
 			narrowedState := state
-			if succIdx == eqSucc &&
-				(state[cmpReg].Kind == LatticeBottom || state[cmpReg].Kind == LatticeKnownClass) {
-				narrowedState[cmpReg] = KnownClass(cmpImm)
-				ctx.NarrowHits++
+			if succIdx == eqSucc && isClassID(state[cmpReg].Kind) {
+				// The compared register is exactly cmpImm, and when it still
+				// remembers the object its header was read from, that object is
+				// exactly that class on this edge (shared with ARM64).
+				narrowByClassIDCompare(&narrowedState, cmpReg, cmpImm, ctx, blk.insts[len(blk.insts)-1].VA)
 			}
-			if isFirstVisit := allTop(blockEntry[succ]) && succ != 0; isFirstVisit {
+			if !blockVisited[succ] {
 				newEntry = narrowedState
 			} else {
 				for r := 0; r < 31; r++ {
-					newEntry[r] = meetType(blockEntry[succ][r], narrowedState[r], lca)
+					newEntry[r] = joinType(blockEntry[succ][r], narrowedState[r], lca)
 				}
 			}
 
-			changed := !typesEqual(newEntry, blockEntry[succ])
-
-			// H-7 fix: propagate stack types to successor (merge/meet).
-			newStackEntry := blockStackEntry[succ]
-			for k, v := range stackTypes {
-				oldV, exists := newStackEntry[k]
-				if !exists {
-					newStackEntry[k] = v
-					changed = true
-				} else if !v.Equal(oldV) {
-					meetV := meetType(oldV, v, lca)
-					if !meetV.Equal(oldV) {
-						newStackEntry[k] = meetV
-						changed = true
-					}
-				}
+			firstVisit := !blockVisited[succ]
+			changed := firstVisit || !typesEqual(newEntry, blockEntry[succ])
+			newStackEntry, stackChanged := mergeStackFacts(blockStackEntry[succ], stackTypes, firstVisit, lca)
+			if stackChanged {
+				blockStackEntry[succ] = newStackEntry
+				changed = true
 			}
 
 			if changed {
 				blockEntry[succ] = newEntry
+				blockVisited[succ] = true
 				if !inWorklist[succ] {
 					worklist = append(worklist, succ)
 					inWorklist[succ] = true
@@ -223,13 +215,29 @@ func AnalyzeFunctionX86(
 	for i := range blocks {
 		if len(blocks[i].successors) == 0 {
 			for r := 0; r < 31; r++ {
-				result.ExitTypes[r] = meetType(result.ExitTypes[r], blockExit[i][r], lca)
+				result.ExitTypes[r] = joinType(result.ExitTypes[r], blockExit[i][r], lca)
 			}
 		}
 	}
 
 	result.ParamTypes = entryTypes
 	return result
+}
+
+// x86PreservesCompareFlags is intentionally small. Any operation not proven
+// flag-transparent invalidates a prior CMP before JE/JNE narrowing. This makes
+// CMP; TEST; JE correct and is safer than trying to maintain an incomplete
+// model of every x86 EFLAGS writer.
+func x86PreservesCompareFlags(op x86asm.Op) bool {
+	if x86.IsCondJump(op) || op == x86asm.JMP || op == x86asm.RET {
+		return true
+	}
+	switch op {
+	case x86asm.MOV, x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD,
+		x86asm.LEA, x86asm.NOP, x86asm.PUSH, x86asm.POP, x86asm.XCHG:
+		return true
+	}
+	return false
 }
 
 // x86BasicBlock is a straight-line sequence of x86_64 instructions with successors.
@@ -248,9 +256,6 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 	if len(insts) == 0 {
 		return nil
 	}
-	funcStart := insts[0].VA
-	funcEnd := insts[len(insts)-1].VA + uint64(insts[len(insts)-1].Len)
-
 	addrToIdx := make(map[uint64]int, len(insts))
 	for i, d := range insts {
 		addrToIdx[d.VA] = i
@@ -258,13 +263,19 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 
 	leaders := map[int]bool{0: true}
 	for i, d := range insts {
+		if d.Bad || x86.IsSemanticBarrier(d.Inst) {
+			if i+1 < len(insts) {
+				leaders[i+1] = true
+			}
+			continue
+		}
 		isBranch := false
 		switch d.Inst.Op {
 		case x86asm.RET:
 			isBranch = true
 		case x86asm.JMP:
 			isBranch = true
-			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok && t >= funcStart && t < funcEnd {
+			if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 				if idx, ok2 := addrToIdx[t]; ok2 {
 					leaders[idx] = true
 				}
@@ -272,7 +283,7 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 		default:
 			if x86.IsCondJump(d.Inst.Op) {
 				isBranch = true
-				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok && t >= funcStart && t < funcEnd {
+				if t, ok := x86.RelTarget(d.Inst, d.VA, d.Len); ok {
 					if idx, ok2 := addrToIdx[t]; ok2 {
 						leaders[idx] = true
 					}
@@ -307,6 +318,11 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 			continue
 		}
 		last := blk.insts[len(blk.insts)-1]
+		if last.Bad || x86.IsSemanticBarrier(last.Inst) {
+			// A failed decode or architectural trap is not an instruction we can
+			// safely execute through.
+			continue
+		}
 		switch last.Inst.Op {
 		case x86asm.RET:
 			// terminal
@@ -329,14 +345,10 @@ func buildBlocksX86(insts []x86.Decoded) []x86BasicBlock {
 					}
 				}
 			}
-			// Fall-through successor (for non-jump and cond-jump false branch).
-			lastInst := blk.insts[len(blk.insts)-1]
-			fallThroughAddr := lastInst.VA + uint64(lastInst.Len)
-			if idx, ok := addrToIdx[fallThroughAddr]; ok {
-				if nb, ok2 := leaderToBlock[idx]; ok2 {
-					blk.successors = append(blk.successors, nb)
-				}
-			} else if bi+1 < len(blocks) {
+			// The next block in instruction order is the real fallthrough. Do
+			// not reconstruct it with VA+Len: near MaxUint64 that arithmetic can
+			// wrap even though the block order itself is already known.
+			if bi+1 < len(blocks) {
 				blk.successors = append(blk.successors, bi+1)
 			}
 		}
@@ -372,7 +384,7 @@ func isX86CmpRegImm(inst x86.Decoded) (reg, imm int, ok bool) {
 // L-3 fix: stackTypes is now passed as a parameter instead of using a package global.
 // prevInst is the previous instruction in the block (nil at block start); used
 // by the SHR/AND handler to detect the header-load → class-ID-extract pattern
-// and preserve Bottom, mirroring ARM64's prevRaw UBFX fix.
+// while preserving header/CID provenance, mirroring ARM64's prevRaw UBFX fix.
 type transferCtxX86 struct {
 	state      *[31]TypeLattice
 	inst       x86.Decoded
@@ -385,13 +397,9 @@ type transferCtxX86 struct {
 
 // handleX86Store handles stack stores and object field stores.
 //
-// Only the RBP (stack) case existed here originally. An object field store
-// was not handled at all, which meant two things on x86_64 that were true
-// on ARM64: field_accessor_xref.jsonl had no store rows, and
-// TypeContext.FieldStoreTypes -- the whole-program field-store to
-// field-load type channel -- was never written to. It stayed empty on
-// every x86_64 run, so one of the three type sources FieldValueClass
-// consults simply did not exist for this architecture.
+// Only the RBP (stack) case existed originally. Object stores are recorded for
+// field-access xrefs, but their observed value class is deliberately not promoted
+// into a whole-program field type: a scanned store is not an exhaustive value set.
 //
 // PP/THR/SP bases address the pool, the Thread and the stack, none of
 // which are Dart objects with fields; the same exclusions ARM64's STUR
@@ -401,26 +409,22 @@ func handleX86Store(tc *transferCtxX86) bool {
 	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			baseIdx := x86.CanonReg(mem.Base)
-			if baseIdx == 5 { // RBP = frame register
-				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := x86.CanonReg(srcReg)
-					if srcIdx >= 0 && srcIdx < 31 {
-						tc.stackTypes[int(mem.Disp)] = tc.state[srcIdx]
+			if baseIdx == sdk.X86FrameReg {
+				if mem.Index == 0 {
+					if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
+						srcIdx := x86.CanonReg(srcReg)
+						if srcIdx >= 0 && srcIdx < 31 {
+							tc.stackTypes[int(mem.Disp)] = tc.state[srcIdx]
+						}
 					}
 				}
 				return true
 			}
 			// Not the frame, not a reserved register: an object field.
 			if baseIdx >= 0 && baseIdx < 31 &&
-				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR && baseIdx != sdk.X86SPReg &&
-				tc.state[baseIdx].Kind == LatticeKnownClass {
-				recordFieldAccess(tc.result, tc.state[baseIdx].ClassID, int32(mem.Disp), true, tc.inst.VA)
-				if srcReg, srcOK := ins.Args[1].(x86asm.Reg); srcOK {
-					srcIdx := x86.CanonReg(srcReg)
-					if srcIdx >= 0 && srcIdx < 31 && tc.state[srcIdx].Kind == LatticeKnownClass {
-						recordFieldStore(tc.ctx, tc.state[baseIdx].ClassID, int32(mem.Disp), tc.state[srcIdx].ClassID)
-					}
-				}
+				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR && baseIdx != sdk.X86SPReg && mem.Index == 0 &&
+				isObjectClass(tc.state[baseIdx].Kind) {
+				recordFieldAccess(tc.result, tc.ctx, tc.state[baseIdx].ClassID, int32(mem.Disp), true, tc.inst.VA)
 			}
 		}
 	}
@@ -437,7 +441,11 @@ func handleX86Load(tc *transferCtxX86) bool {
 			if dstIdx >= 0 && dstIdx < 31 {
 				if mem, ok := ins.Args[1].(x86asm.Mem); ok {
 					baseIdx := x86.CanonReg(mem.Base)
-					if baseIdx == 5 { // RBP
+					if baseIdx == sdk.X86FrameReg {
+						if mem.Index != 0 {
+							tc.state[dstIdx] = Top()
+							return true
+						}
 						if t, ok2 := tc.stackTypes[int(mem.Disp)]; ok2 {
 							tc.state[dstIdx] = t
 						} else {
@@ -462,14 +470,19 @@ func handleX86Load(tc *transferCtxX86) bool {
 		}
 		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
 			baseIdx := x86.CanonReg(mem.Base)
-			// PP load: MOV reg, [R15+disp] → KnownClass.
+			// PP load: MOV reg, [R15+disp] → runtime-object fact or named stub.
 			if baseIdx == sdk.X86PP {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+					tc.state[dstIdx] = Top()
+					return true
+				}
+				tc.ctx.hitMetric(metricPPLoad, tc.inst.VA, &tc.ctx.PPLoads)
 				poolIdx, poolIdxOK := disasm.X64PoolIndex(mem.Disp)
 				if !poolIdxOK {
 					// Same rule as disasm's provenance tracker: the load
 					// executed, so the destination's old type is gone.
 					// Returning without touching state[dstIdx] left the
-					// PREVIOUS type in place, and a KnownClass surviving a
+					// PREVIOUS type in place, and an exact object-class fact surviving a
 					// load it did not survive is authoritative downstream
 					// -- it picks dispatch targets.
 					tc.state[dstIdx] = Top()
@@ -478,12 +491,16 @@ func handleX86Load(tc *transferCtxX86) bool {
 				lat, hit := ResolvePoolEntry(tc.ctx, poolIdx, int(mem.Disp))
 				tc.state[dstIdx] = lat
 				if hit {
-					tc.ctx.PPHits++
+					tc.ctx.hitMetric(metricPPHit, tc.inst.VA, &tc.ctx.PPHits)
 				}
 				return true
 			}
 			// THR load: MOV reg, [R14+disp] → KnownStub.
 			if baseIdx == sdk.X86THR {
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); !static {
+					tc.state[dstIdx] = Top()
+					return true
+				}
 				byteOff := int(mem.Disp)
 				stubName := ""
 				if tc.ctx.AllocStubOffsets != nil {
@@ -504,7 +521,7 @@ func handleX86Load(tc *transferCtxX86) bool {
 				return true
 			}
 			// Closure field load: MOV reg, [closure + function/entry_point].
-			if baseIdx >= 0 && baseIdx < 31 {
+			if mem.Index == 0 && baseIdx >= 0 && baseIdx < 31 {
 				if lat, ok := ResolveClosureField(tc.ctx, tc.state[baseIdx], int(mem.Disp)); ok {
 					tc.state[dstIdx] = lat
 					return true
@@ -530,64 +547,61 @@ func handleX86Load(tc *transferCtxX86) bool {
 			// the selector-offset scan possible, so x86_64 dispatch
 			// resolution was dead on every version up to 2.18.
 			hwDisp, hasHalfWord := tc.ctx.HalfWordClassIDDisp()
-			if hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
+			if mem.Index == 0 && hasHalfWord && ins.Op == x86asm.MOVZX && mem.Disp == hwDisp && baseIdx >= 0 && baseIdx < 31 &&
 				baseIdx != sdk.X86PP && baseIdx != sdk.X86THR {
-				if tc.state[baseIdx].Kind == LatticeKnownClass {
-					tc.state[dstIdx] = KnownClass(tc.state[baseIdx].ClassID)
+				if cid, exact := exactObjectClassID(tc.state[baseIdx]); exact {
+					tc.state[dstIdx] = ExactClassID(cid).linkedTo(baseIdx, dstIdx)
 				} else {
-					tc.state[dstIdx] = Bottom()
+					tc.state[dstIdx] = UnknownClassID().linkedTo(baseIdx, dstIdx)
 				}
-				tc.ctx.HeaderHits++
+				tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 				return true
 			}
-			// Field type lookup — MOV reg, [reg+offset] where base has KnownClass.
-			if baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownClass {
+			// Field type lookup — MOV reg, [reg+offset] where base has an object-class fact.
+			if mem.Index == 0 && baseIdx >= 0 && baseIdx < 31 && isObjectClass(tc.state[baseIdx].Kind) {
 				// Displacement -1 is the object header (FieldAddress
 				// subtracts the heap tag), i.e. a class-ID extraction, not
 				// a field. Matching 0 as well was too broad; ARM64 checks
 				// only -1.
 				if mem.Disp == -1 {
-					tc.state[dstIdx] = KnownClass(tc.state[baseIdx].ClassID)
-					tc.ctx.HeaderHits++
+					if cid, exact := exactObjectClassID(tc.state[baseIdx]); exact {
+						tc.state[dstIdx] = ExactHeaderTags(cid).linkedTo(baseIdx, dstIdx)
+					} else {
+						tc.state[dstIdx] = UnknownHeaderTags().linkedTo(baseIdx, dstIdx)
+					}
+					tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 					return true
 				}
 				// ARM64 has recorded field accesses since the file
 				// existed; x86_64 never called recordFieldAccess at all,
 				// which is why field_accessor_xref.jsonl was absent from
 				// an x86_64 run rather than merely empty.
-				recordFieldAccess(tc.result, tc.state[baseIdx].ClassID, int32(mem.Disp), false, tc.inst.VA)
-				// Declared type first, then the type observed in const
-				// Instance objects -- shared with ARM64 through
-				// TypeContext.FieldValueClass so the precedence rule has
-				// one definition.
-				if classID, ok2 := tc.ctx.FieldValueClass(tc.state[baseIdx].ClassID, int32(mem.Disp)); ok2 {
-					tc.state[dstIdx] = KnownClass(classID)
+				recordFieldAccess(tc.result, tc.ctx, tc.state[baseIdx].ClassID, int32(mem.Disp), false, tc.inst.VA)
+				// Only the declared static field bound is authoritative here;
+				// observed instances and scanned stores are not exhaustive value sets.
+				// The resolver is shared with ARM64 so this rule has one definition.
+				if fieldType, ok2 := tc.ctx.FieldValueType(tc.state[baseIdx].ClassID, int32(mem.Disp), tc.inst.VA); ok2 {
+					tc.state[dstIdx] = fieldType
 					return true
 				}
 				// An unknown field types NOTHING, so this deliberately
 				// falls through. It used to end in
-				// `state[dstIdx] = KnownClass(state[baseIdx].ClassID)`,
-				// commented "keep KnownClass as approximation" -- claiming
+				// an exact receiver-class copy, effectively claiming
 				// a field's value has the same class as the object holding
 				// it. True for a linked-list `next`, false for nearly
-				// everything else, and KnownClass is authoritative
+				// everything else, and exact runtime class identity is authoritative
 				// downstream: it selects dispatch targets. ARM64 has no
 				// such fallback and never did. It also incremented
 				// HeaderHits, so the counter meant to measure header loads
 				// was partly measuring this guess.
 			}
-			// Header load with an UNKNOWN receiver type. ARM64 sets Bottom
-			// here rather than Top, and the distinction is load-bearing:
-			// the SHR/AND handler only recognises a class-ID extraction
-			// when its source is Bottom, which is what keeps the
-			// selector-offset scan alive when the receiver class is
-			// unknown. x86 had the consumer of that signal but never the
-			// producer -- this path fell through to Top, so the check could
-			// not fire. Measured consequence: 91.6% of x86_64 dispatch
-			// calls reached the call site with no class in cid_reg.
-			if mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
-				tc.state[dstIdx] = Bottom()
-				tc.ctx.HeaderHits++
+			// Header load with an UNKNOWN receiver type. Preserve the semantic
+			// fact as UnknownHeaderTags rather than collapsing it to Top; an exact
+			// SDK class-ID extraction can then produce UnknownClassID, which keeps
+			// selector-only dispatch possible without pretending the CID is known.
+			if mem.Index == 0 && mem.Disp == -1 && baseIdx >= 0 && baseIdx < 31 {
+				tc.state[dstIdx] = UnknownHeaderTags().linkedTo(baseIdx, dstIdx)
+				tc.ctx.hitMetric(metricHeader, tc.inst.VA, &tc.ctx.HeaderHits)
 				return true
 			}
 			// Other memory load — kill dst.
@@ -611,7 +625,10 @@ func handleX86Load(tc *transferCtxX86) bool {
 	return false
 }
 
-// handleX86LEA handles dispatch table base loading and slot arithmetic.
+// handleX86LEA treats LEA as address arithmetic only. The exact Dart x64
+// dispatch lowering loads the table with MOV from THR and uses folded addressing
+// in CALL; LEA [THR+disp] does not dereference Thread and therefore cannot prove
+// a dispatch-table base or callee slot.
 func handleX86LEA(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.LEA && len(ins.Args) >= 2 {
@@ -623,27 +640,6 @@ func handleX86LEA(tc *transferCtxX86) bool {
 		if dstIdx < 0 || dstIdx >= 31 {
 			return false
 		}
-		if mem, ok := ins.Args[1].(x86asm.Mem); ok {
-			baseIdx := x86.CanonReg(mem.Base)
-			// LEA reg, [THR+disp] → load dispatch table base.
-			if baseIdx == sdk.X86THR && mem.Disp != 0 {
-				tc.state[dstIdx] = KnownDispatch(0)
-				return true
-			}
-			// LEA reg, [reg+imm] where base is KnownClass → dispatch slot.
-			if baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownClass {
-				slot := tc.state[baseIdx].ClassID + int(mem.Disp/8)
-				tc.state[dstIdx] = KnownDispatch(slot)
-				tc.ctx.ADDClassHits++
-				return true
-			}
-			// LEA reg, [reg+imm] where base is KnownDispatchIndex → adjust slot.
-			if baseIdx >= 0 && baseIdx < 31 && tc.state[baseIdx].Kind == LatticeKnownDispatchIndex {
-				slot := tc.state[baseIdx].DispatchIndex + int(mem.Disp/8)
-				tc.state[dstIdx] = KnownDispatch(slot)
-				return true
-			}
-		}
 		tc.state[dstIdx] = Top()
 		return true
 	}
@@ -653,15 +649,14 @@ func handleX86LEA(tc *transferCtxX86) bool {
 // handleX86Bitwise handles class ID bitfield extraction from headers.
 //
 // SHR/AND reg, imm is the 2.19+ form of LoadClassId (movl + shrl). If the
-// source has KnownClass, preserve it -- the same rule as ARM64's UBFX. If
-// it is Bottom, preserve Bottom: extracting class-ID bits from an unknown
-// header still yields "a class id, but not known which", which is what the
-// selector-offset dispatch path consumes. Killing Bottom here is what left
-// x86_64 dispatch resolution far behind ARM64; the matching ARM64 fix
-// unlocked 11550 field hits.
+// source has exact header tags, preserve the exact CID -- the same rule as
+// ARM64's UBFX. Unknown header tags still yield a proven class-ID scalar whose
+// numeric value is unknown, which is what the selector-offset dispatch path
+// consumes. These dedicated states replace the historical use of Bottom as a
+// reachable "unknown header/CID" signal.
 func handleX86Bitwise(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
-	if (ins.Op == x86asm.SHR || ins.Op == x86asm.AND) && len(ins.Args) >= 2 {
+	if ins.Op == x86asm.SHR && len(ins.Args) >= 2 {
 		dstReg, dstOK := ins.Args[0].(x86asm.Reg)
 		if !dstOK {
 			return false
@@ -670,20 +665,36 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 		if dstIdx < 0 || dstIdx >= 31 {
 			return false
 		}
-		if srcReg, ok := ins.Args[0].(x86asm.Reg); ok {
-			srcIdx := x86.CanonReg(srcReg)
-			if srcIdx >= 0 && srcIdx < 31 {
-				if tc.state[srcIdx].Kind == LatticeKnownClass {
-					tc.state[dstIdx] = tc.state[srcIdx]
-					tc.ctx.UBFXHits++
-					return true
-				}
-				if tc.state[srcIdx].Kind == LatticeBottom {
-					tc.state[dstIdx] = Bottom()
-					tc.ctx.UBFXHits++
-					return true
-				}
-			}
+		// Only the exact LoadClassId lowering may preserve the class-id
+		// abstraction through SHR.  Modern x64 Dart emits:
+		//
+		//   movl result, FieldAddress(object, tags_offset)
+		//   shrl result, kClassIdTagPos
+		//
+		// A generic SHR (or AND) is merely integer arithmetic.  Preserving a
+		// object/header fact through arbitrary bitwise operations turns an
+		// object/type fact into a confidently wrong dispatch receiver.  Require
+		// both the SDK-defined shift and the immediately preceding header load.
+		shift, shiftOK := ins.Args[1].(x86asm.Imm)
+		if !shiftOK || int(shift) != tc.ctx.ClassIDTagPos || !x86PrevLoadsHeaderInto(tc.prevInst, dstIdx) {
+			tc.state[dstIdx] = Top()
+			return true
+		}
+		// The object the header was read from stays linked through the shift
+		// (the ARM64 UBFX path does the same), so the dispatch call can ask what
+		// that object is known to be.
+		src, bound := tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound
+		if tc.state[dstIdx].Kind == LatticeExactHeaderTags {
+			tc.state[dstIdx] = ExactClassID(tc.state[dstIdx].ClassID)
+			tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound = src, bound
+			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
+			return true
+		}
+		if tc.state[dstIdx].Kind == LatticeUnknownHeaderTags {
+			tc.state[dstIdx] = UnknownClassID()
+			tc.state[dstIdx].SrcReg, tc.state[dstIdx].RecvBound = src, bound
+			tc.ctx.hitMetric(metricUBFX, tc.inst.VA, &tc.ctx.UBFXHits)
+			return true
 		}
 		tc.state[dstIdx] = Top()
 		return true
@@ -691,15 +702,38 @@ func handleX86Bitwise(tc *transferCtxX86) bool {
 	return false
 }
 
+func x86PrevLoadsHeaderInto(prev *x86.Decoded, dstIdx int) bool {
+	if prev == nil || prev.Bad || prev.Inst.Op != x86asm.MOV || len(prev.Inst.Args) < 2 {
+		return false
+	}
+	dst, ok := prev.Inst.Args[0].(x86asm.Reg)
+	if !ok || x86.CanonReg(dst) != dstIdx {
+		return false
+	}
+	mem, ok := prev.Inst.Args[1].(x86asm.Mem)
+	if !ok {
+		return false
+	}
+	return mem.Index == 0 && mem.Disp == -1 && x86.CanonReg(mem.Base) >= 0
+}
+
 // handleX86Call handles dispatch calls, allocation stubs, and direct calls.
 func handleX86Call(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.CALL && len(ins.Args) >= 1 {
-		callTarget := uint64(0)
-		if rel, ok := ins.Args[0].(x86asm.Rel); ok {
-			callTarget = tc.inst.VA + uint64(tc.inst.Len) + uint64(int64(rel))
+		// Apply architectural implicit writes even though CALL has a dedicated
+		// semantic handler and therefore bypasses the generic write-set path.
+		// In particular every CALL updates RSP.
+		for _, dst := range x86.DstRegsOfInst(ins) {
+			if dst >= 0 && dst < len(tc.state) {
+				tc.state[dst] = Top()
+			}
 		}
-		if callTarget != 0 {
+		callTarget, hasDirectTarget := x86.RelTarget(ins, tc.inst.VA, tc.inst.Len)
+		if _, ok := ins.Args[0].(x86asm.Rel); !ok {
+			hasDirectTarget = false
+		}
+		if hasDirectTarget {
 			if tc.result.BLCallSiteTypes == nil {
 				tc.result.BLCallSiteTypes = make(map[uint64][31]TypeLattice)
 			}
@@ -710,48 +744,50 @@ func handleX86Call(tc *transferCtxX86) bool {
 		if mem, ok := ins.Args[0].(x86asm.Mem); ok {
 			idxReg := x86.CanonReg(mem.Index)
 			baseReg := x86.CanonReg(mem.Base)
-			if idxReg == x86RegRCX && mem.Scale == 8 {
-				tc.ctx.X86DispatchShape++
+			isDispatchCID := sdk.IsDispatchTableClassIDReg(tc.ctx.DartVersion, sdk.ArchX86, idxReg) && mem.Scale == 8 && mem.Disp%8 == 0
+			if isDispatchCID {
+				tc.ctx.hitMetric(metricX86DispatchShape, tc.inst.VA, &tc.ctx.X86DispatchShape)
 				tableKnown := baseReg >= 0 && baseReg < 31 &&
 					tc.state[baseReg].Kind == LatticeKnownDispatchIndex
-				classKnown := tc.state[x86RegRCX].Kind == LatticeKnownClass
+				classKnown := idxReg >= 0 && idxReg < len(tc.state) && tc.state[idxReg].Kind == LatticeExactClassID
 				switch {
 				case tableKnown && classKnown:
-					tc.ctx.X86DispatchResolved++
+					tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricResolved)
 				case !classKnown:
-					tc.ctx.X86DispatchNoClass++
-					switch tc.state[x86RegRCX].Kind {
+					if idxReg < 0 || idxReg >= len(tc.state) {
+						tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricNoClassOther)
+						break
+					}
+					switch tc.state[idxReg].Kind {
 					case LatticeTop:
-						tc.ctx.X86DispatchClassTop++
-					case LatticeBottom:
-						tc.ctx.X86DispatchClassBottom++
+						tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricNoClassTop)
+					case LatticeUnknownClassID:
+						tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricNoClassUnknownCID)
 					default:
-						tc.ctx.X86DispatchClassOther++
+						tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricNoClassOther)
 					}
 				default:
-					tc.ctx.X86DispatchNoTable++
+					tc.ctx.recordX86DispatchMetric(tc.inst.VA, x86DispatchMetricNoTable)
 				}
 			}
 			if baseReg >= 0 && baseReg < 31 && tc.state[baseReg].Kind == LatticeKnownDispatchIndex {
-				if idxReg == x86RegRCX && tc.state[x86RegRCX].Kind == LatticeKnownClass {
-					slot := int(tc.state[x86RegRCX].ClassID) + int(mem.Disp/8)
-					resolveX86Dispatch(tc.state, slot, tc.inst, tc.ctx, tc.result)
-				} else if idxReg == x86RegRCX {
-					resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result)
+				if isDispatchCID && tc.state[idxReg].Kind == LatticeExactClassID {
+					slot := int(tc.state[idxReg].ClassID) + int(mem.Disp/8)
+					resolveX86Dispatch(tc.state, idxReg, slot, tc.inst, tc.ctx, tc.result)
+				} else if isDispatchCID {
+					resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result, x86ReceiverBound(tc, idxReg))
 				}
-			} else if idxReg == x86RegRCX && tc.state[x86RegRCX].Kind == LatticeKnownClass {
-				slot := int(tc.state[x86RegRCX].ClassID) + int(mem.Disp/8)
-				resolveX86Dispatch(tc.state, slot, tc.inst, tc.ctx, tc.result)
-			} else if idxReg == x86RegRCX && mem.Scale == 8 {
-				resolveX86DispatchSelectorOffset(tc.state, tc.inst, tc.ctx, tc.result)
 			}
-			tc.state[x86RegRAX] = Top()
-			killX86ArgRegs(tc.state)
+			killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
 			return true
 		}
 		// CALL rel32 — direct call (allocation stub or regular function).
-		if rel, ok := ins.Args[0].(x86asm.Rel); ok {
-			callTarget = tc.inst.VA + uint64(tc.inst.Len) + uint64(int64(rel))
+		if _, ok := ins.Args[0].(x86asm.Rel); ok {
+			tc.ctx.recordBLReturnMetric(tc.inst.VA, blReturnMetricNone)
+			if !hasDirectTarget {
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
+				return true
+			}
 			// A call to a per-class allocation stub returns an instance of
 			// that class, exactly, from Code.owner. This replaces a rule that
 			// copied RDI's class into RAX whenever the callee's name started
@@ -760,30 +796,56 @@ func handleX86Call(tc *transferCtxX86) bool {
 			// the class never travels in a caller register: the per-class stub
 			// materialises the tags word itself.
 			if cid, ok := tc.ctx.AllocationStubCID[callTarget]; ok {
-				tc.ctx.AllocStubHits++
-				tc.state[sdk.X86AllocResultReg] = KnownClass(cid)
-				killX86ArgRegs(tc.state)
+				tc.ctx.hitMetric(metricAllocStub, tc.inst.VA, &tc.ctx.AllocStubHits)
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
+				if allocABI, abiOK := sdk.AllocateObjectRegs(tc.ctx.DartVersion, sdk.ArchX86); abiOK {
+					tc.state[allocABI.ResultReg] = ExactClass(cid)
+				}
 				return true
 			}
 			if calleeAllExit, hasFull := tc.ctx.CalleeAllExitTypes[callTarget]; hasFull {
-				for r := 0; r < 31; r++ {
-					if calleeAllExit[r].Kind != LatticeTop {
-						tc.state[r] = calleeAllExit[r]
+				// The full exit array can know nothing about RAX even when snapshot
+				// metadata provides a concrete return type. Keep that stronger seed.
+				ret := calleeAllExit[x86RegRAX]
+				if ret.Kind == LatticeTop || ret.Kind == LatticeBottom {
+					if seeded, ok := tc.ctx.CalleeExitTypes[callTarget]; ok && seeded.Kind != LatticeTop && seeded.Kind != LatticeBottom {
+						ret = seeded
 					}
 				}
+				if ret.Kind == LatticeTop || ret.Kind == LatticeBottom {
+					ret = Top()
+				} else if isObjectClass(ret.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.VA, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.VA, blReturnMetricNonObject)
+				}
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
+				tc.state[x86RegRAX] = ret
 			} else if calleeExit, hasExit := tc.ctx.CalleeExitTypes[callTarget]; hasExit {
+				if calleeExit.Kind == LatticeTop || calleeExit.Kind == LatticeBottom {
+					calleeExit = Top()
+				} else if isObjectClass(calleeExit.Kind) {
+					tc.ctx.recordBLReturnMetric(tc.inst.VA, blReturnMetricObject)
+				} else {
+					tc.ctx.recordBLReturnMetric(tc.inst.VA, blReturnMetricNonObject)
+				}
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
 				tc.state[x86RegRAX] = calleeExit
 			} else {
-				tc.state[x86RegRAX] = Top()
+				killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
 			}
-			killX86ArgRegs(tc.state)
 			return true
 		}
 		// CALL reg — indirect call through register.
 		if reg, ok := ins.Args[0].(x86asm.Reg); ok {
 			regIdx := x86.CanonReg(reg)
-			if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
-				sn := tc.state[regIdx].StubName
+			// `call RCX` right after RBX <- UnlinkedCall is EmitInstanceCallAOT:
+			// RCX holds the SwitchableCallMiss stub, which names nothing, while
+			// RBX's target_name is the call's selector. Resolve by the selector.
+			if regIdx == sdk.X86CallStub && tc.state[sdk.X86ICData].Kind == LatticeKnownStub &&
+				strings.HasPrefix(tc.state[sdk.X86ICData].StubName, "UnlinkedCall:") {
+				appendKnownStubResolution(tc.state[sdk.X86ICData], tc.inst.VA, regIdx, tc.ctx, tc.result)
+			} else if regIdx >= 0 && regIdx < 31 && tc.state[regIdx].Kind == LatticeKnownStub {
 				// No allocation case here. An indirect call through a THR
 				// stub slot reaches the GENERIC AllocateObject stub, which
 				// allocates whatever the tags word says -- there is no
@@ -791,30 +853,10 @@ func handleX86Call(tc *transferCtxX86) bool {
 				// not hold the class in a register. The rule that used to sit
 				// here copied RDI's class into RAX, which the ABI does not
 				// support; see AllocationStubCID.
-				if strings.HasPrefix(sn, "UnlinkedCall:") {
-					methodName := sn[len("UnlinkedCall:"):]
-					if selectorOffsets, hasOffsets := tc.ctx.MethodNameToSelectorOffsets[methodName]; hasOffsets && len(selectorOffsets) > 0 {
-						res := BlrResolution{PC: tc.inst.VA, Reg: regIdx, SlotIndex: -1, Confidence: "static_inferred"}
-						var allTargets []string
-						for _, selOff := range selectorOffsets {
-							allTargets = append(allTargets, tc.ctx.selectorCandidates(selOff)...)
-						}
-						applySelectorCandidates(&res, allTargets)
-						if res.Polymorphic {
-							res.Confidence = "polymorphic"
-						}
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, res)
-					} else {
-						tc.result.BLRResolutions = append(tc.result.BLRResolutions, BlrResolution{
-							PC: tc.inst.VA, Reg: regIdx, TargetName: methodName, Resolved: true,
-							Confidence: "stub",
-						})
-					}
-				}
+				appendKnownStubResolution(tc.state[regIdx], tc.inst.VA, regIdx, tc.ctx, tc.result)
 			}
 		}
-		tc.state[x86RegRAX] = Top()
-		killX86ArgRegs(tc.state)
+		killDartCallClobbered(tc.state, tc.ctx.DartVersion, false)
 		return true
 	}
 	return false
@@ -825,7 +867,7 @@ func handleX86Decompress(tc *transferCtxX86) bool {
 	ins := tc.inst.Inst
 	if ins.Op == x86asm.ADD && len(ins.Args) >= 2 && tc.ctx.THRFields != nil {
 		if mem, memOK := ins.Args[1].(x86asm.Mem); memOK &&
-			x86.CanonReg(mem.Base) == sdk.X86THR {
+			mem.Index == 0 && x86.CanonReg(mem.Base) == sdk.X86THR {
 			if name, found := tc.ctx.THRFields[int(mem.Disp)]; found && name == "heap_base" {
 				return true
 			}
@@ -843,6 +885,17 @@ func transferInstructionX86(
 	lca func(int, int) int,
 	stackTypes map[int]TypeLattice,
 ) {
+	clearFieldAccessAtPC(result, inst.VA)
+	if inst.Bad || x86.IsSemanticBarrier(inst.Inst) {
+		for i := range state {
+			state[i] = Top()
+		}
+		for k := range stackTypes {
+			delete(stackTypes, k)
+		}
+		return
+	}
+
 	tc := &transferCtxX86{
 		state:      state,
 		inst:       inst,
@@ -853,7 +906,13 @@ func transferInstructionX86(
 		stackTypes: stackTypes,
 	}
 
+	if handleArgsDescReceiverX86(tc) {
+		return
+	}
 	if handleX86Store(tc) {
+		return
+	}
+	if handleX86SmiClassID(tc) {
 		return
 	}
 	if handleX86Load(tc) {
@@ -883,6 +942,7 @@ func transferInstructionX86(
 // resolveX86Dispatch resolves a dispatch table call to a target function.
 func resolveX86Dispatch(
 	state *[31]TypeLattice,
+	classReg int,
 	slot int,
 	inst x86.Decoded,
 	ctx *TypeContext,
@@ -891,39 +951,16 @@ func resolveX86Dispatch(
 	res := BlrResolution{
 		PC:         inst.VA,
 		SlotIndex:  slot,
-		Confidence: "unknown",
+		Confidence: ResolutionUnknown,
+		Derivation: DerivationDispatchTable,
 	}
 	if name, ok := ctx.ResolveDispatchTarget(slot); ok {
 		res.TargetName = name
 		res.Resolved = true
-		res.Confidence = "exact"
-		ctx.DispatchHits++
-	} else {
-		// When selector offset is known, check CHA first for receiver class
-		if selectorImm, ok := ctx.SelectorOffsets[inst.VA]; ok && state[x86RegRCX].Kind == LatticeKnownClass {
-			chaTargets := ctx.ResolveDispatchCHA(state[x86RegRCX].ClassID, selectorImm)
-			if len(chaTargets) > 0 {
-				applySelectorCandidates(&res, chaTargets)
-				if res.Polymorphic {
-					res.Confidence = "polymorphic"
-				} else if res.Resolved {
-					res.Confidence = "static_inferred"
-				}
-			}
-		}
-		if !res.Resolved && !res.Polymorphic {
-			// P4 reverse dispatch scan: if the slot doesn't directly resolve,
-			// scan nearby slots for monomorphic targets (same as ARM64).
-			candidates, candidateName, allCandidates := scanDispatchSlots(ctx, slot)
-			applyDispatchCandidates(&res, candidates, candidateName, allCandidates)
-			if res.Polymorphic {
-				res.Confidence = "polymorphic"
-			} else if res.Resolved {
-				res.Confidence = "static_inferred"
-			}
-		}
+		res.Confidence = ResolutionStaticInferred
+		ctx.hitMetric(metricDispatch, inst.VA, &ctx.DispatchHits)
 	}
-	result.BLRResolutions = append(result.BLRResolutions, res)
+	recordBLRResolution(result, res)
 }
 
 // resolveX86DispatchSelectorOffset resolves a dispatch table call using
@@ -934,6 +971,7 @@ func resolveX86DispatchSelectorOffset(
 	inst x86.Decoded,
 	ctx *TypeContext,
 	result *IntraResult,
+	recvBound int,
 ) {
 	selectorImm, ok := ctx.SelectorOffsets[inst.VA]
 	if !ok {
@@ -945,24 +983,94 @@ func resolveX86DispatchSelectorOffset(
 	res := BlrResolution{
 		PC:         inst.VA,
 		SlotIndex:  -1,
-		Confidence: "static_inferred",
+		Confidence: ResolutionStaticInferred,
+		Derivation: DerivationDispatchTable,
 	}
-	applySelectorCandidates(&res, ctx.selectorCandidates(selectorImm))
+	applySelectorCandidates(&res, ctx.selectorCandidatesFor(selectorImm, recvBound))
 	if res.Polymorphic {
-		res.Confidence = "polymorphic"
+		res.Confidence = ResolutionPolymorphic
 	}
-	result.BLRResolutions = append(result.BLRResolutions, res)
+	if res.Resolved {
+		ctx.hitMetric(metricDispatch, inst.VA, &ctx.DispatchHits)
+	}
+	recordBLRResolution(result, res)
 }
 
-// killX86ArgRegs kills all Dart calling-convention argument registers
-// (RDI, RSI, RDX, RBX, R8, R9) after a CALL instruction.
-func killX86ArgRegs(state *[31]TypeLattice) {
-	for _, r := range x86ArgRegCanon {
-		if r < 31 {
-			state[r] = Top()
+// x86ReceiverBound is the x86_64 counterpart of selectorReceiverBound: the class
+// the object whose class id feeds this dispatch is known to be an instance of
+// (0 when nothing is known), counted once per site in the same sel_recv_*
+// metrics. The class-id register's source link survives only while the object
+// register is unchanged (updateSrcLinksX86).
+func x86ReceiverBound(tc *transferCtxX86, cidReg int) int {
+	return receiverBound(tc.state, cidReg, tc.ctx, tc.inst.VA)
+}
+
+// updateSrcLinksX86 keeps the header/class-id source links honest after an
+// instruction (the x86_64 counterpart of dropWrittenSrcLinks).
+//
+// A link names the register that holds the object; when the instruction writes
+// that register the link is dropped -- unless a 64-bit register copy of it is
+// still intact, in which case the link moves to the copy. That is the shape of
+// every dispatch call the compiler emits:
+//
+//	mov ecx, [rax-1]; shr ecx, 12   ; class id of the object in RAX
+//	mov rdi, rax                    ; receiver argument: a copy of the object
+//	mov rax, [r14+DT]               ; RAX is now the dispatch table
+//	call [rax + 8*rcx + imm]
+//
+// Dropping at the third instruction (RAX overwritten) lost the receiver at 1753
+// of the 1924 unlinked x86_64 selector sites of the 3.12.2 sample. copies maps a
+// register to the register it is a copy of, per basic block.
+func updateSrcLinksX86(state *[31]TypeLattice, ins x86asm.Inst, copies map[int]int) {
+	written := x86.DstRegsOfInst(ins)
+	isWritten := func(reg int) bool {
+		for _, w := range written {
+			if w == reg {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range written {
+		if w < 0 || w >= 31 {
+			continue
+		}
+		// An intact copy of w that this instruction does not touch inherits the links.
+		heir := -1
+		for c, of := range copies {
+			if of == w && !isWritten(c) && (heir < 0 || c < heir) {
+				heir = c
+			}
+		}
+		for r := range state {
+			if state[r].SrcReg == w+1 {
+				if heir >= 0 && heir != r {
+					state[r].SrcReg = heir + 1
+				} else {
+					state[r].SrcReg = 0
+				}
+			}
+		}
+		delete(copies, w)
+		for c, of := range copies {
+			if of == w {
+				delete(copies, c)
+			}
+		}
+	}
+	if ins.Op == x86asm.MOV && len(ins.Args) >= 2 {
+		dst, ok1 := ins.Args[0].(x86asm.Reg)
+		src, ok2 := ins.Args[1].(x86asm.Reg)
+		if ok1 && ok2 && is64BitGPR(dst) && is64BitGPR(src) {
+			d, s := x86.CanonReg(dst), x86.CanonReg(src)
+			if d >= 0 && d < 31 && s >= 0 && s < 31 && d != s {
+				copies[d] = s
+			}
 		}
 	}
 }
+
+func is64BitGPR(r x86asm.Reg) bool { return r >= x86asm.RAX && r <= x86asm.R15 }
 
 // DecodeX86Function decodes a function's raw bytes into x86.Decoded slice.
 func DecodeX86Function(funcCode []byte, funcVA uint64) []x86.Decoded {
@@ -972,4 +1080,47 @@ func DecodeX86Function(funcCode []byte, funcVA uint64) []x86.Decoded {
 		out = append(out, x86.Decoded{VA: d.VA, Inst: d.Inst, Len: d.Len, Bad: d.Bad})
 	}
 	return out
+}
+
+// handleX86SmiClassID recognizes the immediate of Assembler::LoadClassIdMayBeSmi:
+//
+//	test obj8, 1        ; BranchIfSmi's test
+//	mov  result32, kSmiCid
+//	je   done           ; the Smi path keeps kSmiCid
+//	mov  result32, [obj-1] ; shr result32, kClassIdTagPos   (heap path, linked)
+//
+// On the Smi path the register IS the class id of `obj` (it is a Smi), so it is
+// linked to `obj` exactly like the heap path is; the two paths then join with the
+// same link instead of losing it (a link only survives a join when both sides
+// agree). The immediate must be the snapshot's own Smi class id, otherwise any
+// `test; mov r, imm` pair would be taken for a class id.
+func handleX86SmiClassID(tc *transferCtxX86) bool {
+	ins := tc.inst.Inst
+	if ins.Op != x86asm.MOV || len(ins.Args) < 2 || tc.prevInst == nil || tc.prevInst.Bad {
+		return false
+	}
+	dst, ok := ins.Args[0].(x86asm.Reg)
+	imm, immOK := ins.Args[1].(x86asm.Imm)
+	if !ok || !immOK {
+		return false
+	}
+	smi, known := tc.ctx.smiCID()
+	if !known || int(imm) != smi {
+		return false
+	}
+	prev := tc.prevInst.Inst
+	if prev.Op != x86asm.TEST || len(prev.Args) < 2 {
+		return false
+	}
+	obj, objOK := prev.Args[0].(x86asm.Reg)
+	one, oneOK := prev.Args[1].(x86asm.Imm)
+	if !objOK || !oneOK || one != 1 {
+		return false
+	}
+	dstIdx, objIdx := x86.CanonReg(dst), x86.CanonReg(obj)
+	if dstIdx < 0 || dstIdx >= 31 || objIdx < 0 || objIdx >= 31 {
+		return false
+	}
+	tc.state[dstIdx] = ExactClassID(smi).linkedTo(objIdx, dstIdx)
+	return true
 }

@@ -68,7 +68,16 @@ const (
 	FunctionKindConstructor
 	FunctionKindImplicitGetter
 	FunctionKindImplicitSetter
-	FunctionKindOther // a kind past the ones this project acts on
+	FunctionKindImplicitStaticGetter
+	FunctionKindFieldInitializer
+	FunctionKindMethodExtractor
+	FunctionKindNoSuchMethodDispatcher
+	FunctionKindInvokeFieldDispatcher
+	FunctionKindIrregexp
+	FunctionKindDynamicInvocationForwarder
+	FunctionKindFfiTrampoline
+	FunctionKindRecordFieldGetter
+	FunctionKindOther // a future/otherwise-unmodelled kind
 )
 
 func (k FunctionKind) String() string {
@@ -91,6 +100,24 @@ func (k FunctionKind) String() string {
 		return "implicit-getter"
 	case FunctionKindImplicitSetter:
 		return "implicit-setter"
+	case FunctionKindImplicitStaticGetter:
+		return "implicit-static-getter"
+	case FunctionKindFieldInitializer:
+		return "field-initializer"
+	case FunctionKindMethodExtractor:
+		return "method-extractor"
+	case FunctionKindNoSuchMethodDispatcher:
+		return "no-such-method-dispatcher"
+	case FunctionKindInvokeFieldDispatcher:
+		return "invoke-field-dispatcher"
+	case FunctionKindIrregexp:
+		return "irregexp"
+	case FunctionKindDynamicInvocationForwarder:
+		return "dynamic-invocation-forwarder"
+	case FunctionKindFfiTrampoline:
+		return "ffi-trampoline"
+	case FunctionKindRecordFieldGetter:
+		return "record-field-getter"
 	case FunctionKindOther:
 		return "other"
 	}
@@ -100,37 +127,58 @@ func (k FunctionKind) String() string {
 // funcKindLayout is one version's raw ordinal numbering.
 type funcKindLayout struct {
 	mask  uint32 // (1 << BitLength(numKinds-1)) - 1
-	order []FunctionKind
+	known map[int]FunctionKind
 }
 
-// The prefix of FOR_EACH_RAW_FUNCTION_KIND that this project distinguishes.
-// Anything past it normalises to FunctionKindOther, which is correct: no
-// caller acts on those, and listing them would be extra surface to keep in
-// sync for no gain.
+// Keep every SDK kind whose calling-convention behaviour matters. A sparse
+// prefix was sufficient while kind was only used to identify constructors and
+// FFI trampolines; it became actively unsafe once Function::Kind started
+// gating register-vs-stack parameter recovery because several stack-only kinds
+// (MethodExtractor, dispatchers, FieldInitializer, Irregexp) collapsed into
+// `Other` and could not be distinguished from register-eligible kinds.
 var (
 	// 2.10.0 -- SignatureFunction present at index 3.
 	layout210 = funcKindLayout{
 		mask: 0x1F,
-		order: []FunctionKind{
-			FunctionKindRegular, FunctionKindClosure, FunctionKindImplicitClosure,
-			FunctionKindSignature, FunctionKindGetter, FunctionKindSetter,
-			FunctionKindConstructor, FunctionKindImplicitGetter, FunctionKindImplicitSetter,
+		known: map[int]FunctionKind{
+			0: FunctionKindRegular, 1: FunctionKindClosure, 2: FunctionKindImplicitClosure,
+			3: FunctionKindSignature, 4: FunctionKindGetter, 5: FunctionKindSetter,
+			6: FunctionKindConstructor, 7: FunctionKindImplicitGetter, 8: FunctionKindImplicitSetter,
+			9: FunctionKindImplicitStaticGetter, 10: FunctionKindFieldInitializer,
+			11: FunctionKindMethodExtractor, 12: FunctionKindNoSuchMethodDispatcher,
+			13: FunctionKindInvokeFieldDispatcher, 14: FunctionKindIrregexp,
+			15: FunctionKindDynamicInvocationForwarder,
+			16: FunctionKindFfiTrampoline,
 		},
 	}
 	// 2.12.0 - 2.18.0 -- SignatureFunction gone, still 16 kinds so 4 bits.
 	layout212 = funcKindLayout{
 		mask: 0x0F,
-		order: []FunctionKind{
-			FunctionKindRegular, FunctionKindClosure, FunctionKindImplicitClosure,
-			FunctionKindGetter, FunctionKindSetter, FunctionKindConstructor,
-			FunctionKindImplicitGetter, FunctionKindImplicitSetter,
+		known: map[int]FunctionKind{
+			0: FunctionKindRegular, 1: FunctionKindClosure, 2: FunctionKindImplicitClosure,
+			3: FunctionKindGetter, 4: FunctionKindSetter, 5: FunctionKindConstructor,
+			6: FunctionKindImplicitGetter, 7: FunctionKindImplicitSetter,
+			8: FunctionKindImplicitStaticGetter, 9: FunctionKindFieldInitializer,
+			10: FunctionKindMethodExtractor, 11: FunctionKindNoSuchMethodDispatcher,
+			12: FunctionKindInvokeFieldDispatcher, 13: FunctionKindIrregexp,
+			14: FunctionKindDynamicInvocationForwarder,
+			15: FunctionKindFfiTrampoline,
 		},
 	}
 	// 2.19.0 onward -- RecordFieldGetter added, 17 kinds so 5 bits. Same
 	// ordinals as layout212 for everything below it.
 	layout219 = funcKindLayout{
-		mask:  0x1F,
-		order: layout212.order,
+		mask: 0x1F,
+		known: map[int]FunctionKind{
+			0: FunctionKindRegular, 1: FunctionKindClosure, 2: FunctionKindImplicitClosure,
+			3: FunctionKindGetter, 4: FunctionKindSetter, 5: FunctionKindConstructor,
+			6: FunctionKindImplicitGetter, 7: FunctionKindImplicitSetter,
+			8: FunctionKindImplicitStaticGetter, 9: FunctionKindFieldInitializer,
+			10: FunctionKindMethodExtractor, 11: FunctionKindNoSuchMethodDispatcher,
+			12: FunctionKindInvokeFieldDispatcher, 13: FunctionKindIrregexp,
+			14: FunctionKindDynamicInvocationForwarder, 15: FunctionKindFfiTrampoline,
+			16: FunctionKindRecordFieldGetter,
+		},
 	}
 )
 
@@ -160,7 +208,7 @@ var funcKindLayouts = map[string]*funcKindLayout{
 	"3.10.7": &layout219,
 	"3.11.0": &layout219,
 	"3.12.2": &layout219,
-	"3.13.0": &layout219, // 30 kinds, but first 8 (RegularFunction..ImplicitSetter) unchanged, mask 0x1F still valid
+	"3.13.0": &layout219,
 }
 
 // funcKindLayoutFor returns the raw-ordinal numbering for a Dart version, or
@@ -188,6 +236,57 @@ func funcKindLayoutFor(profile *snapshot.VersionProfile) *funcKindLayout {
 // nonzero field means suspendable.
 const kindTagModifierMask uint32 = 0b11 << 14
 
+// FunctionModifier is UntaggedFunction::AsyncModifier normalized directly from
+// kind_tag_. Unlike FunctionKind, these ordinals and their two-bit position are
+// stable across every supported SDK release:
+//
+//	kNoModifier = 0, kAsync = 1, kSyncGen = 2, kAsyncGen = 3
+//
+// Verified in raw_object.h/object.h at 2.10.0, 2.17.6, 2.18.0 and 3.13.0;
+// Function::IsAsyncFunction/IsSyncGenerator/IsAsyncGenerator compare the field
+// to exactly these values. HasKindTag on NamedObject distinguishes a genuine
+// FunctionModifierNone from metadata that was not captured.
+type FunctionModifier uint8
+
+const (
+	FunctionModifierNone FunctionModifier = iota
+	FunctionModifierAsync
+	FunctionModifierSyncStar
+	FunctionModifierAsyncStar
+)
+
+func decodeFunctionModifier(kindTag uint32) FunctionModifier {
+	return FunctionModifier((kindTag & kindTagModifierMask) >> 14)
+}
+
+type functionKindTagFlagLayout struct {
+	staticBit   uint
+	nativeBit   uint
+	externalBit uint
+}
+
+// functionKindTagFlagLayoutFor returns the exact SDK bit positions of the
+// stable Function flags we expose. The positions changed before Dart 2.13 as
+// Redirecting was removed and Inlinable moved to the volatile flag list.
+// TestFunctionKindTagFlagLayoutsMatchSDK derives every row from the exact-tag
+// FOR_EACH_FUNCTION_KIND_BIT macro.
+func functionKindTagFlagLayoutFor(profile *snapshot.VersionProfile) (functionKindTagFlagLayout, bool) {
+	if profile == nil {
+		return functionKindTagFlagLayout{}, false
+	}
+	if _, ok := funcKindLayouts[profile.DartVersion]; !ok {
+		return functionKindTagFlagLayout{}, false
+	}
+	switch profile.DartVersion {
+	case "2.10.0":
+		return functionKindTagFlagLayout{staticBit: 16, nativeBit: 24, externalBit: 26}, true
+	case "2.12.0":
+		return functionKindTagFlagLayout{staticBit: 16, nativeBit: 24, externalBit: 25}, true
+	default:
+		return functionKindTagFlagLayout{staticBit: 16, nativeBit: 23, externalBit: 24}, true
+	}
+}
+
 // decodeFunctionKind extracts and normalises the kind from a raw kind_tag_.
 func decodeFunctionKind(kindTag uint32, profile *snapshot.VersionProfile) FunctionKind {
 	layout := funcKindLayoutFor(profile)
@@ -195,8 +294,8 @@ func decodeFunctionKind(kindTag uint32, profile *snapshot.VersionProfile) Functi
 		return FunctionKindUnknown
 	}
 	ordinal := int(kindTag & layout.mask)
-	if ordinal < len(layout.order) {
-		return layout.order[ordinal]
+	if kind, ok := layout.known[ordinal]; ok {
+		return kind
 	}
 	return FunctionKindOther
 }

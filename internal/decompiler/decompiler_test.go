@@ -1,10 +1,11 @@
 package decompiler
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
-	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 )
 
@@ -122,12 +123,28 @@ func TestDecodeX86RangeMultipleReturns(t *testing.T) {
 		0x90, // nop
 		0xc3, // ret
 	}
-	insts := DecodeX86Range(code, 0x1000)
+	insts, err := DecodeX86Range(code, 0x1000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(insts) != 5 {
 		t.Fatalf("DecodeX86Range: got %d instructions, want 5 (decoding must not stop at the first RET); insts=%+v", len(insts), insts)
 	}
 	if insts[len(insts)-1].VA != 0x1006 {
 		t.Errorf("last decoded instruction at 0x%x, want 0x1006 (the second ret)", insts[len(insts)-1].VA)
+	}
+}
+
+func TestDecodeX86RangeReportsMalformedCodeRange(t *testing.T) {
+	// 0xc4 starts a VEX3 prefix and is truncated here. This is inside a
+	// declared CodeRange, so silently returning a zero-instruction prefix would
+	// make the decompiler present incomplete code as complete.
+	insts, err := DecodeX86Range([]byte{0x90, 0xc4}, 0x2000)
+	if err == nil {
+		t.Fatalf("malformed CodeRange returned success with %d decoded instructions", len(insts))
+	}
+	if len(insts) != 1 || insts[0].VA != 0x2000 {
+		t.Fatalf("decoded prefix = %+v, want one NOP before explicit failure", insts)
 	}
 }
 
@@ -162,12 +179,12 @@ func TestParseOperandNegativeDisplacement(t *testing.T) {
 	}
 }
 
-func TestReplaceIdentToken(t *testing.T) {
+func TestReplaceIdent(t *testing.T) {
 	in := "x29.f0 + x2 - x29foo"
-	out := compare.ReplaceIdentToken(in, "x29", "framePointer")
+	out := stmt.ReplaceIdent(in, "x29", "framePointer")
 	want := "framePointer.f0 + x2 - x29foo"
 	if out != want {
-		t.Errorf("ReplaceIdentToken: got %q want %q", out, want)
+		t.Errorf("ReplaceIdent: got %q want %q", out, want)
 	}
 }
 
@@ -199,15 +216,16 @@ func simpleRetFir(argRegIndices []int, paramTypeNames []string) *FuncIR {
 func TestEmitPseudocode_ParamTypeNames_CountMatchShowsRealTypes(t *testing.T) {
 	fir := simpleRetFir([]int{0, 1}, []string{"int", "String"})
 	art := EmitPseudocode(fir, nil, nil)
-	// Trusted types also drive arg renaming, so the parameters are shown as
-	// "<semantic-name><index>" -- the index keeps the mapping back to argN
-	// unambiguous and prevents two same-typed params sharing a name.
-	if !strings.Contains(art.Source, "int n0") || !strings.Contains(art.Source, "String str1") {
-		t.Errorf("expected real param types in signature, got:\n%s", art.Source)
+	// The declared type is shown; the name stays the neutral `argN` because
+	// positional parameter names are not in a Full-AOT snapshot (no invented
+	// role names).
+	if !strings.Contains(art.Source, "int arg0") || !strings.Contains(art.Source, "String arg1") {
+		t.Errorf("expected real param types with neutral names in signature, got:\n%s", art.Source)
 	}
-	// The signature and the body must agree on the parameter name.
-	if strings.Contains(art.Source, "arg0") {
-		t.Errorf("renamed parameter must not still appear as arg0, got:\n%s", art.Source)
+	for _, invented := range []string{"n0", "str1"} {
+		if strings.Contains(art.Source, invented) {
+			t.Errorf("invented parameter name %q in:\n%s", invented, art.Source)
+		}
 	}
 }
 
@@ -253,7 +271,7 @@ func TestEmitPseudocode_ParamTypeNames_UnresolvedArityFallsBackToDynamic(t *test
 func TestEmitPseudocode_ParamTypeNames_QuestionMarkFallsBackPerArgument(t *testing.T) {
 	fir := simpleRetFir([]int{0, 1}, []string{"String", "?"})
 	art := EmitPseudocode(fir, nil, nil)
-	if !strings.Contains(art.Source, "String str0") {
+	if !strings.Contains(art.Source, "String arg0") {
 		t.Errorf("expected real type for arg0, got:\n%s", art.Source)
 	}
 	if !strings.Contains(art.Source, "dynamic arg1") {
@@ -320,7 +338,6 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 		{"movsxd", "movsxd x0, x1", "x0", "(int64)(x1)"},
 		{"movsx", "movsx x0, x1", "x0", "(int)(x1)"},
 		{"cmove", "cmove rax, rbx", "rax", "(/* e */ ? rbx : rax)"},
-		{"sete", "sete al", "al", "(/* e */ ? 1 : 0)"},
 	}
 
 	for _, tt := range tests {
@@ -336,19 +353,106 @@ func TestApplyOther_NewMnemonics(t *testing.T) {
 	}
 }
 
-// TestVoidCallDetection (P3-feasible-3) verifies that known void calls
-// are emitted without a temp variable assignment.
-func TestVoidCallDetection(t *testing.T) {
-	if !isVoidCall("print", "") {
-		t.Error("print should be detected as void")
+func TestSetccByteWritePreservesX86UpperBits(t *testing.T) {
+	fir := newFuncIR("test_setcc", 0x1000)
+	s := newLiftState("")
+	s.setReg("rax", "old64")
+	ApplyOther(fir, s, Instr{Src: "sete al"})
+
+	low := s.lookupReg("al")
+	if !strings.Contains(low, "? 1 : 0") || !strings.Contains(low, "0xff") {
+		t.Fatalf("AL after SETE = %q, want low-byte conditional value", low)
 	}
-	if !isVoidCall("", "setState") {
-		t.Error("setState selector hint should be detected as void")
+	full := s.lookupReg("rax")
+	if !strings.Contains(full, "old64") || !strings.Contains(full, "0xffffffffffffff00") {
+		t.Fatalf("RAX after SETE lost preserved upper bits: %q", full)
 	}
-	if isVoidCall("someFunction", "") {
-		t.Error("someFunction should not be detected as void")
+}
+
+// Selector names do not prove a return type: application code may define a
+// method named `clear`, `dispose`, etc. A normal call must keep its result until
+// real signature metadata proves void.
+func TestCallNameDoesNotDiscardReturnValue(t *testing.T) {
+	fir := newFuncIR("caller", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ArgRegs = arm64ArgRegs
+	e := &emitter{
+		fir:   fir,
+		state: newLiftState(""),
+		symbols: func(va uint64) (string, bool) {
+			if va == 0x2000 {
+				return "clear", true
+			}
+			return "", false
+		},
 	}
-	if isVoidCall("", "unknownMethod") {
-		t.Error("unknownMethod should not be detected as void")
+	e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+	if len(e.lines) != 1 || !strings.Contains(e.lines[0], "final t1 = clear(") {
+		t.Fatalf("call result was discarded by name heuristic: %v", e.lines)
+	}
+	if got := e.state.lookupReg(fir.ReturnReg); got != "t1" {
+		t.Fatalf("return register = %q, want t1", got)
+	}
+}
+
+func TestAwaitStubUsesSuspendABIArgumentRegister(t *testing.T) {
+	tests := []struct {
+		name      string
+		returnReg string
+		argRegs   []string
+		stub      string
+	}{
+		{"arm64", sdk.ARM64ReturnRegStr, arm64ArgRegs, "AwaitStub"},
+		{"x64", sdk.X86ReturnRegStr, x86ArgRegs, "AwaitWithTypeCheckStub"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fir := newFuncIR("caller", 0x1000)
+			fir.DartVersion = "3.12.2"
+			fir.ReturnReg = tt.returnReg
+			fir.ArgRegs = tt.argRegs
+			e := &emitter{
+				fir:   fir,
+				state: newLiftState(""),
+				symbols: func(va uint64) (string, bool) {
+					if va == 0x2000 {
+						return tt.stub, true
+					}
+					return "", false
+				},
+			}
+			e.state.setReg(tt.returnReg, "futureValue")
+			for i, reg := range tt.argRegs {
+				e.state.setReg(reg, fmt.Sprintf("wrongArg%d", i))
+			}
+
+			e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+			if len(e.lines) != 1 || e.lines[0] != "final t1 = await futureValue;" {
+				t.Fatalf("Await stub used generic Dart args instead of SuspendStubABI argument: %v", e.lines)
+			}
+		})
+	}
+}
+
+func TestReturnAsyncCallIsNotFabricatedAsSourceReturn(t *testing.T) {
+	fir := newFuncIR("caller", 0x1000)
+	fir.DartVersion = "3.12.2"
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ArgRegs = arm64ArgRegs
+	e := &emitter{
+		fir:   fir,
+		state: newLiftState(""),
+		symbols: func(va uint64) (string, bool) {
+			if va == 0x2000 {
+				return "ReturnAsyncStub", true
+			}
+			return "", false
+		},
+	}
+	e.state.setReg(fir.ReturnReg, "resultValue")
+
+	e.emitCall(Instr{Op: OpCall, Target: "0x2000"}, 0)
+	if len(e.lines) != 1 || strings.HasPrefix(strings.TrimSpace(e.lines[0]), "return ") {
+		t.Fatalf("a CALL to ReturnAsyncStub was fabricated into a source return: %v", e.lines)
 	}
 }

@@ -34,6 +34,12 @@ func TestShannonEntropy(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEntropyRejectsNilSource(t *testing.T) {
+	if findings, err := AnalyzeEntropy(nil); err == nil {
+		t.Fatalf("nil ELF produced entropy findings instead of validation error: %+v", findings)
+	}
+}
+
 func makeAllBytes() []byte {
 	b := make([]byte, 256)
 	for i := 0; i < 256; i++ {
@@ -51,18 +57,12 @@ func abs(x float64) float64 {
 
 // --- Crypto algorithm identification tests ---
 
-func TestIdentifyCryptoFromBinary(t *testing.T) {
-	scan := func(t *testing.T, name string, data []byte) []CryptoFinding {
+func TestIdentifyCryptoFromRawBytes(t *testing.T) {
+	scan := func(t *testing.T, _ string, data []byte) []CryptoFinding {
 		t.Helper()
-		tmpFile := filepath.Join(t.TempDir(), name)
-		if err := writeFile(tmpFile, data); err != nil {
-			t.Fatalf("write temp file: %v", err)
-		}
-		findings, err := IdentifyCryptoFromBinary(tmpFile)
-		if err != nil {
-			t.Fatalf("IdentifyCryptoFromBinary: %v", err)
-		}
-		return findings
+		acc := newCryptoAccumulator()
+		identifyCryptoFromRawBytes(data, 0, cryptoPatterns(), acc)
+		return acc.finish()
 	}
 	has := func(findings []CryptoFinding, algo string) bool {
 		for _, f := range findings {
@@ -118,6 +118,12 @@ func TestIdentifyCryptoFromBinary(t *testing.T) {
 	})
 }
 
+func TestIdentifyCryptoFromELFRejectsNilSource(t *testing.T) {
+	if findings, err := IdentifyCryptoFromELF(nil); err == nil {
+		t.Fatalf("nil ELF produced crypto findings instead of validation error: %+v", findings)
+	}
+}
+
 func TestIsDistinctiveConstant(t *testing.T) {
 	distinctive := []string{"0x61707865", "0x428a2f98", "0xedb88320", "0x9e3779b9",
 		"0x428a2f98d728ae22"}
@@ -132,6 +138,33 @@ func TestIsDistinctiveConstant(t *testing.T) {
 		if isDistinctiveConstant(h) {
 			t.Errorf("isDistinctiveConstant(%s) = true, want false", h)
 		}
+	}
+}
+
+func TestIdentifyCryptoFromPoolImmediatesUsesDistinctivenessPolicy(t *testing.T) {
+	dir := t.TempDir()
+	data := "{\"index\":1,\"value\":16777216,\"hex\":\"0x01000000\"}\n" +
+		"{\"index\":2,\"value\":1116352408,\"hex\":\"0x428a2f98\"}\n"
+	if err := os.WriteFile(dir+"/pool_immediates.jsonl", []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := IdentifyCryptoFromPoolImmediates(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.Constant == "0x01000000" {
+			t.Fatalf("trivial AES Rcon constant was reported from pool: %+v", findings)
+		}
+	}
+	foundSHA := false
+	for _, f := range findings {
+		if f.Constant == "0x428a2f98" {
+			foundSHA = true
+		}
+	}
+	if !foundSHA {
+		t.Fatalf("distinctive SHA-256 constant was lost: %+v", findings)
 	}
 }
 
@@ -154,6 +187,9 @@ func TestEnumerateMethodChannels(t *testing.T) {
 	for _, f := range findings {
 		if f.Channel == "flutter/platform" {
 			found = true
+			if f.Confidence != "medium" {
+				t.Errorf("flutter/platform confidence = %q, want medium", f.Confidence)
+			}
 		}
 	}
 	if !found {
@@ -174,8 +210,27 @@ func TestEnumeratePlugins(t *testing.T) {
 	findings := EnumeratePlugins(sigRefs)
 	// "not a plugin" contains "plugin" but not any of the specific patterns
 	// video_player, path_provider, MissingPluginException should match
-	if len(findings) < 2 {
-		t.Errorf("expected at least 2 plugin findings, got %d", len(findings))
+	if len(findings) != 3 {
+		t.Errorf("expected 3 plugin findings, got %d: %+v", len(findings), findings)
+	}
+	for _, f := range findings {
+		if f.Confidence != "low" {
+			t.Errorf("plugin indicator confidence = %q, want low: %+v", f.Confidence, f)
+		}
+	}
+}
+
+func TestEnumeratePluginsRejectsGenericPackageURI(t *testing.T) {
+	refs := []StringRefRecord{
+		{Value: "package:flutter/widgets.dart", Func: "framework"},
+		{Value: "camera", Func: "feature"},
+		{Value: "WebView", Func: "feature2"},
+		{Value: "connectivity", Func: "feature3"},
+		{Value: "MissingPluginException", Func: "pluginDispatch"},
+	}
+	findings := EnumeratePlugins(refs)
+	if len(findings) != 1 || findings[0].Plugin != "MissingPluginException" {
+		t.Fatalf("plugin enumeration = %+v, want only low-confidence MissingPluginException indicator", findings)
 	}
 }
 
@@ -199,6 +254,24 @@ func TestExtractNetworkEndpoints(t *testing.T) {
 		if f.Value == "0.0.0.0" || f.Value == "127.0.0.1" {
 			t.Error("local IP should be skipped: " + f.Value)
 		}
+		if f.Type == "domain" && f.Confidence != "low" {
+			t.Errorf("bare domain confidence = %q, want low: %+v", f.Confidence, f)
+		}
+		if (f.Type == "url" || f.Type == "ip") && f.Confidence != "medium" {
+			t.Errorf("validated %s confidence = %q, want medium: %+v", f.Type, f.Confidence, f)
+		}
+	}
+}
+
+func TestExtractNetworkEndpointsValidatesIPv4(t *testing.T) {
+	refs := []StringRefRecord{
+		{Value: "999.999.999.999", Func: "invalid"},
+		{Value: "127.0.0.2", Func: "loopback"},
+		{Value: "10.1.2.3", Func: "private"},
+	}
+	findings := ExtractNetworkEndpoints(refs)
+	if len(findings) != 1 || findings[0].Type != "ip" || findings[0].Value != "10.1.2.3" {
+		t.Fatalf("IPv4 endpoint validation = %+v, want 10.1.2.3 only", findings)
 	}
 }
 
@@ -223,6 +296,16 @@ func TestDetectObfuscatedStrings(t *testing.T) {
 	}
 	if !found {
 		t.Error("base64 'SGVsbG8gV29ybGQ=' was not decoded to 'Hello World'")
+	}
+}
+
+func TestDetectObfuscatedStringsRejectsUndecodableBase64Shape(t *testing.T) {
+	refs := []StringRefRecord{
+		{Value: "abcdefghijklmnop", Func: "identifier"},
+		{Value: "MissingPluginException", Func: "identifier2"},
+	}
+	if findings := DetectObfuscatedStrings(refs); len(findings) != 0 {
+		t.Fatalf("ordinary base64-shaped identifiers were reported: %+v", findings)
 	}
 }
 
@@ -259,9 +342,9 @@ func TestYaraMatching(t *testing.T) {
 	}
 }
 
-// --- Taint analysis tests ---
+// --- Source/sink proximity analysis tests ---
 
-func TestTaintAnalysis(t *testing.T) {
+func TestSourceSinkAnalysis(t *testing.T) {
 	tmpDir := t.TempDir()
 	refs := []disasm.StringRefRecord{
 		// A qualified token name: bare "token" is not a source pattern any
@@ -275,25 +358,49 @@ func TestTaintAnalysis(t *testing.T) {
 		{FromFunc: "getCredential", Target: "sendData"},
 		{FromFunc: "getPassword", Target: "saveData"},
 	}
-	err := WriteTaintFindings(tmpDir, refs, edges)
+	err := WriteSourceSinkFindings(tmpDir, nil, refs, edges)
 	if err != nil {
-		t.Fatalf("WriteTaintFindings: %v", err)
+		t.Fatalf("WriteSourceSinkFindings: %v", err)
 	}
-	findings, err := readTaintFindings(tmpDir + "/taint_findings.jsonl")
+	findings, err := readSourceSinkFindings(tmpDir + "/source_sink_findings.jsonl")
 	if err != nil {
-		t.Fatalf("read taint findings: %v", err)
+		t.Fatalf("read source/sink findings: %v", err)
 	}
 	if len(findings) == 0 {
-		t.Error("expected taint findings, got 0")
+		t.Error("expected source/sink findings, got 0")
 	}
 	foundTokenFlow := false
 	for _, f := range findings {
-		if f.Source == "auth_token" && f.Sink == "network_http" {
+		if f.Source == "auth_token" && f.Sink == "network_http" && f.Relation == "direct_static_call" && f.Confidence == "low" {
 			foundTokenFlow = true
 		}
 	}
 	if !foundTokenFlow {
-		t.Error("token→http taint flow not found")
+		t.Error("token/http source-sink proximity finding not found")
+	}
+}
+
+func TestSourceSinkHTTPSDoesNotDuplicateHTTPFamilySink(t *testing.T) {
+	dir := t.TempDir()
+	refs := []disasm.StringRefRecord{
+		{Value: "authToken:value", Func: "send"},
+		{Value: "https://api.example.com/upload", Func: "send"},
+	}
+	if err := WriteSourceSinkFindings(dir, nil, refs, nil); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := readSourceSinkFindings(filepath.Join(dir, "source_sink_findings.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var networkSinks []string
+	for _, f := range findings {
+		if strings.HasPrefix(f.Sink, "network_http") {
+			networkSinks = append(networkSinks, f.Sink)
+		}
+	}
+	if len(networkSinks) != 1 || networkSinks[0] != "network_http" {
+		t.Fatalf("HTTPS lexical evidence produced duplicate HTTP-family sinks: %v", networkSinks)
 	}
 }
 
@@ -318,10 +425,6 @@ func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
-func writeFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0644)
-}
-
 func readYaraFindings(path string) ([]YaraFinding, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -340,17 +443,17 @@ func readYaraFindings(path string) ([]YaraFinding, error) {
 	return findings, nil
 }
 
-func readTaintFindings(path string) ([]TaintFinding, error) {
+func readSourceSinkFindings(path string) ([]SourceSinkFinding, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var findings []TaintFinding
+	var findings []SourceSinkFinding
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" {
 			continue
 		}
-		var f TaintFinding
+		var f SourceSinkFinding
 		if err := json.Unmarshal([]byte(line), &f); err == nil {
 			findings = append(findings, f)
 		}
@@ -367,7 +470,7 @@ func TestSecurityKeywordsAreNormalized(t *testing.T) {
 	for _, list := range [][]string{
 		rootingKeywords, antiAnalysisKeywords, sslPinningKeywords,
 		accessibilityKeywords, fraudKeywords, dynamicLoadKeywords,
-		ipcKeywords, covertChannelKeywords, drmBypassKeywords, pluginKeywords,
+		ipcKeywords, covertChannelKeywords, drmKeywords, pluginKeywords,
 	} {
 		for _, kw := range list {
 			if kw != normalizeForMatch(kw) {
@@ -382,15 +485,14 @@ func TestSecurityCategoriesFireOnRealStrings(t *testing.T) {
 		value string
 		want  string
 	}{
-		{"frida-server", CatRooting},
 		{"ro.debuggable", CatRooting},
 		{"which su", CatRooting},
-		{"network_security_config", CatSSLPinning},
+		{"certificatePinner", CatSSLPinning},
 		{"android.os.Debug", CatAntiAnalysis},
 	}
 	for _, tt := range tests {
-		if !containsCat(ClassifyString(tt.value), tt.want) {
-			t.Errorf("ClassifyString(%q) = %v, want it to contain %q", tt.value, ClassifyString(tt.value), tt.want)
+		if !containsCat(ClassifyString("3.12.2", tt.value), tt.want) {
+			t.Errorf("ClassifyString(3.12.2, %q) = %v, want it to contain %q", tt.value, ClassifyString("3.12.2", tt.value), tt.want)
 		}
 	}
 }
@@ -403,11 +505,49 @@ func TestSecurityCategoriesNoFalsePositives(t *testing.T) {
 		"serialize", "deserializer", "allocation", "relocation", "tokenizer",
 	}
 	for _, v := range clean {
-		cats := ClassifyString(v)
+		cats := ClassifyString("3.12.2", v)
 		for _, bad := range []string{CatCovertChannel, CatFraud, CatIPC, CatObfuscation, CatDynamicLoad} {
 			if containsCat(cats, bad) {
-				t.Errorf("ClassifyString(%q) = %v, must not contain %q", v, cats, bad)
+				t.Errorf("ClassifyString(3.12.2, %q) = %v, must not contain %q", v, cats, bad)
 			}
+		}
+	}
+}
+
+func TestSecurityCategoriesDoNotOverclaimGenericTechnologyUse(t *testing.T) {
+	tests := []struct {
+		value string
+		bad   string
+	}{
+		{"privateKey", CatBlockchain},
+		{"publicKey", CatBlockchain},
+		{"keystore", CatBlockchain},
+		{"deposit", CatGambling},
+		{"reward", CatGambling},
+		{"topup", CatGambling},
+		{"startActivity", CatWebView},
+		{"CookieManager", CatWebView},
+		{"network_security_config", CatSSLPinning},
+		{"X509TrustManager", CatSSLPinning},
+		{"frida-server", CatRooting},
+	}
+	for _, tt := range tests {
+		if cats := ClassifyString("3.12.2", tt.value); containsCat(cats, tt.bad) {
+			t.Errorf("ClassifyString(3.12.2, %q) = %v, must not overclaim %q", tt.value, cats, tt.bad)
+		}
+	}
+	for _, tt := range []struct {
+		value string
+		want  string
+	}{
+		{"walletAddress", CatBlockchain},
+		{"placeBet", CatGambling},
+		{"evaluateJavascript", CatWebView},
+		{"Widevine", CatDRM},
+		{"frida-server", CatAntiAnalysis},
+	} {
+		if cats := ClassifyString("3.12.2", tt.value); !containsCat(cats, tt.want) {
+			t.Errorf("ClassifyString(3.12.2, %q) = %v, want %q", tt.value, cats, tt.want)
 		}
 	}
 }

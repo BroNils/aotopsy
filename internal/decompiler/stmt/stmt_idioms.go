@@ -128,8 +128,9 @@ func CollectionIdiomsStmt(stmts []Stmt) ([]Stmt, bool) {
 }
 
 var (
-	// interpolateCallRe matches `_StringBase._interpolate(...)`, `_interpolate(...)`, or `_StringBase.concat(...)`.
-	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\._interpolate|_interpolate|_StringBase\.concat)\((.+)\)`)
+	// interpolateCallRe matches `_StringBase._interpolate(...)` / `_interpolate(...)`
+	// and `_StringBase._interpolateSingle(...)` / `_interpolateSingle(...)`.
+	interpolateCallRe = regexp.MustCompile(`(?:_StringBase\.)?(_interpolateSingle|_interpolate)\((.*)\)`)
 )
 
 // stringInterpolationIdiomStmt rewrites runtime string interpolation calls to clean Dart template literals:
@@ -138,11 +139,27 @@ var (
 //	->
 //	final t0 = "Hello, $name!";
 //
-// And:
-//
-//	final t0 = _StringBase.concat(a, b);
+//	final t0 = _StringBase._interpolateSingle(x);
 //	->
-//	final t0 = "$a$b";
+//	final t0 = "$x";
+//
+// Only the two shapes the SDK actually produces are recognised, and only when
+// the call has exactly ONE argument:
+//
+//   - `_StringBase._interpolate(final List values)` and
+//     `_StringBase._interpolateSingle(Object? o)` exist, with those single
+//     parameters, in sdk/lib/_internal/vm/lib/string_patch.dart of all 23
+//     supported SDK trees (2.10.0 .. 3.13.0).
+//   - kernel_to_il.cc StringInterpolate/StringInterpolateSingle emit
+//     `StaticCall(..., /* argument_count = */ 1, ...)`: the parts are the
+//     elements of the one List argument (built by CreateArray + StoreIndexed in
+//     kernel_binary_flowgraph.cc BuildStringConcatenation), never separate call
+//     arguments. A call whose arguments are a comma list (type-args/receiver/
+//     array registers in real output) therefore says nothing about the parts and
+//     is left untouched -- rewriting it produced `"$null$accumulator$..."`.
+//   - There is NO `_StringBase.concat`: string `+` is the operator method
+//     (String_concat native behind `operator +`), and a concatenation of two
+//     operands is not an interpolation. That rewrite was removed.
 func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 	anyChanged := false
 
@@ -163,12 +180,27 @@ func StringInterpolationIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 			}
 
 			if interpolateCallRe.MatchString(line.Text) {
-				newText := interpolateCallRe.ReplaceAllStringFunc(line.Text, func(match string) string {
+				newText := replaceRegexpMatchesOutsideStrings(line.Text, interpolateCallRe, func(match string) string {
 					m := interpolateCallRe.FindStringSubmatch(match)
-					if len(m) < 2 {
+					if len(m) < 3 {
 						return match
 					}
-					return formatStringInterpolation(m[1])
+					args := strings.TrimSpace(m[2])
+					if args == "" || !bracketsBalanced(args) || topLevelCommaCount(args) != 0 {
+						return match // not exactly one argument
+					}
+					isList := strings.HasPrefix(args, "[") && strings.HasSuffix(args, "]")
+					switch m[1] {
+					case "_interpolate":
+						if !isList {
+							return match // the parts are not visible in the call
+						}
+					case "_interpolateSingle":
+						if isList {
+							return match
+						}
+					}
+					return formatStringInterpolation(args)
 				})
 				if newText != line.Text {
 					line.Text = newText
@@ -197,15 +229,21 @@ func formatStringInterpolation(argsText string) string {
 	}
 	var sb strings.Builder
 	sb.WriteByte('"')
-	for _, p := range parts {
+	for pi, p := range parts {
 		p = strings.TrimSpace(p)
 		if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
 			inner := p[1 : len(p)-1]
+			// Pool strings arrive Go-quoted. `$` is not escaped by Go's %q,
+			// but it starts interpolation in a Dart double-quoted string. This
+			// branch represents literal runtime data, so preserve dollars as data;
+			// the expression branches below deliberately emit interpolation syntax.
+			inner = escapeLiteralDollars(inner)
 			sb.WriteString(inner)
 		} else if len(p) >= 2 && strings.HasPrefix(p, `'`) && strings.HasSuffix(p, `'`) {
 			inner := p[1 : len(p)-1]
+			inner = escapeLiteralDollars(inner)
 			sb.WriteString(inner)
-		} else if isSimpleIdent(p) {
+		} else if isSimpleIdent(p) && !identContinues(parts, pi) {
 			sb.WriteString("$")
 			sb.WriteString(p)
 		} else {
@@ -216,6 +254,39 @@ func formatStringInterpolation(argsText string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+// identContinues reports whether the piece after parts[i] starts with a
+// character that would extend a bare `$ident` interpolation into a longer
+// identifier (`"$a" "_b"` must not become `"$a_b"`); such a piece needs `${a}`.
+func identContinues(parts []string, i int) bool {
+	if i+1 >= len(parts) {
+		return false
+	}
+	next := strings.TrimSpace(parts[i+1])
+	if len(next) < 3 || (next[0] != '"' && next[0] != '\'') || next[len(next)-1] != next[0] {
+		return false
+	}
+	c := next[1]
+	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func escapeLiteralDollars(s string) string {
+	var b strings.Builder
+	backslashes := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '$' && backslashes%2 == 0 {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+		if c == '\\' {
+			backslashes++
+		} else {
+			backslashes = 0
+		}
+	}
+	return b.String()
 }
 
 func splitInterpolationParts(s string) []string {
@@ -382,7 +453,7 @@ func NullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 
 			text := line.Text
 			if strings.Contains(text, "?") && strings.Contains(text, "null") {
-				text = ternaryNotNullRe.ReplaceAllStringFunc(text, func(match string) string {
+				text = replaceRegexpMatchesOutsideStrings(text, ternaryNotNullRe, func(match string) string {
 					m := ternaryNotNullRe.FindStringSubmatch(match)
 					if len(m) < 4 {
 						return match
@@ -408,7 +479,7 @@ func NullAwareIdiomStmt(stmts []Stmt) ([]Stmt, bool) {
 					return match
 				})
 
-				text = ternaryEqualsNullRe.ReplaceAllStringFunc(text, func(match string) string {
+				text = replaceRegexpMatchesOutsideStrings(text, ternaryEqualsNullRe, func(match string) string {
 					m := ternaryEqualsNullRe.FindStringSubmatch(match)
 					if len(m) < 4 {
 						return match

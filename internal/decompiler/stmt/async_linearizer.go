@@ -3,14 +3,10 @@ package stmt
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
 var (
-	// stateCondRe matches `state == 0`, `t0 == 1`, `(state == 2)`, `s == 0`.
-	stateCondRe = regexp.MustCompile(`^(?:\(?\s*([A-Za-z_]\w*)\s*==\s*(\d+)\s*\)?)$`)
-
 	// rawAwaitCallRe matches `await t1(fut); // await` or `await t1(fut);`
 	rawAwaitCallRe = regexp.MustCompile(`^await\s+([A-Za-z_]\w*)\((.*)\);\s*(?://.*)?$`)
 
@@ -27,26 +23,17 @@ var (
 	streamMoveNextCondRe = regexp.MustCompile(`^await\s+([A-Za-z_]\w*)\.moveNext\(\)(?:\s*==\s*true)?$`)
 )
 
-// linearizeAsyncStmt unwraps Dart AOT async state machine dispatch trees into clean linear Dart code:
+// LinearizeAsyncStmt rewrites async helper idioms whose source meaning is
+// explicit in the emitted text (await helper calls and StreamIterator await-for
+// loops). It deliberately does NOT flatten `if (state == 0/1/...)` trees.
 //
-//	if (state == 0) {
-//	  final fut = fetch();
-//	  await t1(fut);
-//	} else if (state == 1) {
-//	  return t1;
-//	}
-//	->
-//	final fut = fetch();
-//	final t1 = await fut;
-//	return t1;
+// Compact SuspendState lowering stores a resume PC, not a small source-level
+// state ordinal. More importantly, an async function may contain ordinary user
+// branches comparing an integer named `state`; removing those branches changes
+// program semantics. Structural control flow is therefore preserved unless a
+// separate lowering-specific proof exists.
 func LinearizeAsyncStmt(stmts []Stmt) ([]Stmt, bool) {
 	anyChanged := false
-
-	// The state-machine flatten (below) is only sound inside an async function.
-	// A plain `if (x == 0) {} else if (x == 1) {}` on non-async code is NOT a
-	// suspend-state dispatch and must not be linearized (audit B4). Gate it on
-	// real async evidence anywhere in the tree.
-	asyncEvidence := treeHasAsyncEvidence(stmts)
 
 	var walk func([]Stmt) ([]Stmt, bool)
 	walk = func(body []Stmt) ([]Stmt, bool) {
@@ -149,137 +136,20 @@ func LinearizeAsyncStmt(stmts []Stmt) ([]Stmt, bool) {
 				}
 			}
 
-			// Check for state machine dispatch construct
-			c := asConstruct(body[i])
-			if c == nil || !c.isIf() || len(c.Clauses) < 2 {
-				if c != nil {
-					for ci := range c.Clauses {
-						var cChanged bool
-						c.Clauses[ci].Body, cChanged = walk(c.Clauses[ci].Body)
-						bodyChanged = bodyChanged || cChanged
-					}
-				}
-				continue
-			}
-
-			// Check if all clauses match state == N in sequential order (0, 1, 2, ...)
-			isStateMachine := true
-			var stateVar string
-			numStateConds := 0
-			for ci := range c.Clauses {
-				cond := c.clauseCond(ci)
-				if cond == "" {
-					if ci == len(c.Clauses)-1 && numStateConds >= 2 {
-						// else clause at the end is allowed only if >= 2 states precede it
-						break
-					}
-					isStateMachine = false
-					break
-				}
-				m := stateCondRe.FindStringSubmatch(strings.TrimSpace(cond))
-				if m == nil {
-					isStateMachine = false
-					break
-				}
-				if stateVar == "" {
-					stateVar = m[1]
-				} else if m[1] != stateVar {
-					isStateMachine = false
-					break
-				}
-				val, err := strconv.Atoi(m[2])
-				if err != nil || val != ci {
-					isStateMachine = false
-					break
-				}
-				numStateConds++
-			}
-
-			if numStateConds < 2 {
-				isStateMachine = false
-			}
-
-			if !isStateMachine || !asyncEvidence {
+			// Recurse into ordinary control-flow constructs, but preserve their
+			// structure. Async evidence elsewhere in the function is not proof that
+			// this particular branch is compiler suspension machinery.
+			if c := asConstruct(body[i]); c != nil {
 				for ci := range c.Clauses {
 					var cChanged bool
 					c.Clauses[ci].Body, cChanged = walk(c.Clauses[ci].Body)
 					bodyChanged = bodyChanged || cChanged
 				}
-				continue
 			}
-
-			// Flatten state machine clauses sequentially
-			var flattened []Stmt
-			for _, cl := range c.Clauses {
-				recBody, _ := walk(cl.Body)
-				for _, st := range recBody {
-					st.shift(-1) // adjust indentation
-					flattened = append(flattened, st)
-				}
-			}
-
-			out := append([]Stmt{}, body[:i]...)
-			out = append(out, flattened...)
-			out = append(out, body[i+1:]...)
-
-			body = out
-			bodyChanged = true
-			anyChanged = true
-			break
 		}
 		return body, bodyChanged
 	}
 
 	res, changed := walk(stmts)
 	return res, changed || anyChanged
-}
-
-// treeHasAsyncEvidence reports whether any line in the statement tree carries a
-// marker of async lowering (await, _SuspendState, _StreamIterator, _returnAsync).
-// Used to gate the state-machine flatten so it never fires on ordinary
-// integer-dispatch if/else chains.
-func treeHasAsyncEvidence(stmts []Stmt) bool {
-	found := false
-	var scan func([]Stmt)
-	scan = func(body []Stmt) {
-		for _, s := range body {
-			if found {
-				return
-			}
-			if l := asLine(s); l != nil {
-				t := l.Text
-				if strings.Contains(t, "await") || strings.Contains(t, "_SuspendState") ||
-					strings.Contains(t, "_StreamIterator") || strings.Contains(t, "_returnAsync") {
-					found = true
-					return
-				}
-			}
-			if c := asConstruct(s); c != nil {
-				for ci := range c.Clauses {
-					scan(c.Clauses[ci].Body)
-				}
-			}
-		}
-	}
-	scan(stmts)
-	return found
-}
-
-// clauseCond extracts the condition string from clause ci.
-func (c *Construct) clauseCond(ci int) string {
-	if ci < 0 || ci >= len(c.Clauses) {
-		return ""
-	}
-	h := c.Clauses[ci].Header
-	if strings.HasPrefix(h, "if (") {
-		h = strings.TrimPrefix(h, "if (")
-	} else if strings.HasPrefix(h, "} else if (") {
-		h = strings.TrimPrefix(h, "} else if (")
-	} else {
-		return ""
-	}
-	if idx := strings.LastIndex(h, ") {"); idx >= 0 {
-		return h[:idx]
-	}
-	return ""
 }

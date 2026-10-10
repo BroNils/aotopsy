@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+
+	"aotopsy/internal/thraudit"
 )
 
 // jsonKeys marshals v and returns its top-level key set, sorted.
@@ -48,8 +50,8 @@ func TestJSONLSchema(t *testing.T) {
 	}{
 		{
 			artifact: "functions.jsonl",
-			value:    FuncRecord{PC: "0x1", Size: 1, Name: "n", Owner: "o", ParamCount: 1},
-			want:     []string{"name", "owner", "param_count", "pc", "size"},
+			value:    FuncRecord{PC: "0x1", PCOffset: 1, RefID: 7, Size: 1, Name: "n", Owner: "o", ParamCount: 1},
+			want:     []string{"name", "owner", "param_count", "pc", "pc_offset", "ref_id", "size"},
 		},
 		{
 			artifact: "call_edges.jsonl",
@@ -67,10 +69,10 @@ func TestJSONLSchema(t *testing.T) {
 		{
 			artifact: "unresolved_thr.jsonl",
 			value: UnresolvedTHRRecord{
-				FuncName: "f", PC: "0x1", THROffset: "0x8", Width: 8,
-				IsStore: true, Class: "UNKNOWN",
+				FuncName: "f", PC: "0x1", THROffset: 8, Width: 8,
+				Access: thraudit.AccessWrite, HeuristicClass: thraudit.ClassUnknown, Confidence: thraudit.ConfidenceUnresolved,
 			},
-			want: []string{"class", "func_name", "is_store", "pc", "thr_offset", "width"},
+			want: []string{"access", "confidence", "func_name", "heuristic_class", "pc", "thr_offset", "width"},
 		},
 	} {
 		got := jsonKeys(t, tc.value)
@@ -84,7 +86,7 @@ func TestJSONLSchema(t *testing.T) {
 // is a schema property too: a consumer written against a fully-populated
 // sample will not see these keys on a sparse record.
 func TestJSONLOmitEmpty(t *testing.T) {
-	if got := jsonKeys(t, FuncRecord{}); !slices.Equal(got, []string{"name", "pc", "size"}) {
+	if got := jsonKeys(t, FuncRecord{}); !slices.Equal(got, []string{"name", "pc", "pc_offset", "ref_id", "size"}) {
 		t.Errorf("empty FuncRecord keys = %v", got)
 	}
 	if got := jsonKeys(t, CallEdgeRecord{}); !slices.Equal(got, []string{"from_func", "from_pc", "kind"}) {

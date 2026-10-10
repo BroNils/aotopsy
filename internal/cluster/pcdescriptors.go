@@ -3,8 +3,10 @@ package cluster
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 
+	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
 )
 
@@ -78,43 +80,6 @@ type PcDescriptorsInfo struct {
 	Entries []PcDescriptorEntry
 }
 
-// readSLEB128 decodes one signed LEB128 value starting at buf[pos].
-//
-// Dart writes these with ReadStream::ReadSLEB128 (runtime/vm/datastream.h):
-// 7 payload bits per byte, low byte first, high bit set means "more bytes
-// follow", and the final byte's bit 6 is the sign bit which must be extended.
-func readSLEB128(buf []byte, pos int) (val int64, next int, err error) {
-	const (
-		moreBit = 0x80
-		signBit = 0x40
-		maskLow = 0x7f
-	)
-	var shift uint
-	var b byte
-	for {
-		if pos >= len(buf) {
-			return 0, pos, fmt.Errorf("sleb128: truncated at %d", pos)
-		}
-		b = buf[pos]
-		pos++
-		if shift < 64 {
-			val |= int64(b&maskLow) << shift
-		}
-		shift += 7
-		if b&moreBit == 0 {
-			break
-		}
-		if shift > 70 {
-			return 0, pos, fmt.Errorf("sleb128: value too long at %d", pos)
-		}
-	}
-	// Sign-extend from the last byte's sign bit.
-	if shift < 64 && b&signBit != 0 {
-		val |= -1 << shift
-	}
-	return val, pos, nil
-}
-
 // decodeKindAndMetadata splits the packed first field of a descriptor.
 //
 // Bit layout from UntaggedPcDescriptors::KindAndMetadata. kLastKind == kOther
@@ -144,21 +109,24 @@ func decodeKindAndMetadata(kam int64) (kind PcDescriptorKind, tryIndex, yieldInd
 // there would desync the whole stream.
 func DecodePcDescriptors(payload []byte) ([]PcDescriptorEntry, error) {
 	var entries []PcDescriptorEntry
-	pos := 0
+	s := dartfmt.NewStream(payload)
 	var pc int64
-	for pos < len(payload) {
-		kam, next, err := readSLEB128(payload, pos)
+	for s.Remaining() > 0 {
+		kamPos := s.Position()
+		kam, err := s.ReadSLEB128(32)
 		if err != nil {
-			return entries, fmt.Errorf("pc_descriptors: kind_and_metadata: %w", err)
+			return entries, fmt.Errorf("pc_descriptors: kind_and_metadata at %d: %w", kamPos, err)
 		}
-		pos = next
-		delta, next, err := readSLEB128(payload, pos)
+		deltaPos := s.Position()
+		delta, err := s.ReadSLEB128(64)
 		if err != nil {
-			return entries, fmt.Errorf("pc_descriptors: pc_offset delta: %w", err)
+			return entries, fmt.Errorf("pc_descriptors: pc_offset delta at %d: %w", deltaPos, err)
 		}
-		pos = next
+		if (delta > 0 && pc > math.MaxInt64-delta) || (delta < 0 && pc < math.MinInt64-delta) {
+			return entries, fmt.Errorf("pc_descriptors: pc_offset arithmetic overflow")
+		}
 		pc += delta
-		if pc < 0 {
+		if pc < 0 || pc > math.MaxUint32 {
 			return entries, fmt.Errorf("pc_descriptors: negative pc_offset %d", pc)
 		}
 		kind, tryIdx, yieldIdx := decodeKindAndMetadata(kam)
@@ -252,6 +220,13 @@ type rodataPayload struct {
 // Shared by PcDescriptors and CodeSourceMap because their in-image layout is
 // identical: both are UntaggedObject + a uword length_ + that many bytes.
 func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageObjStart int64, profile *snapshot.VersionProfile) []rodataPayload {
+	if cm == nil || profile == nil || profile.CIDs == nil {
+		return nil
+	}
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
 	if len(cm.Lengths) == 0 || dataImageObjStart <= 0 || wantCID == 0 {
 		return nil
 	}
@@ -285,10 +260,21 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 	var out []rodataPayload
 
 	for i := 0; i < len(cm.Lengths); i++ {
-		runningOffset += cm.Lengths[i] << alignShift
-		objPos := dataImageObjStart + runningOffset + headerAdjust
+		nextOffset, ok := advanceRODataOffset(runningOffset, cm.Lengths[i], alignShift)
+		if !ok {
+			break
+		}
+		runningOffset = nextOffset
+		objPos, ok := checkedAddNonnegativeInt64(dataImageObjStart, runningOffset)
+		if !ok {
+			break
+		}
+		objPos, ok = checkedAddNonnegativeInt64(objPos, headerAdjust)
+		if !ok {
+			break
+		}
 
-		if objPos < 0 || objPos+16 > int64(len(data)) {
+		if len(data) < 16 || objPos < 0 || objPos > int64(len(data))-16 {
 			ref++
 			continue
 		}
@@ -296,12 +282,7 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 		// Confirm the object really is what we want before trusting the length
 		// word: an ROData cluster can hold other object kinds.
 		tags := binary.LittleEndian.Uint64(data[objPos : objPos+8])
-		var cid int
-		if profile.PreV32Format {
-			cid = int((uint32(tags) >> 16) & 0xFFFF)
-		} else {
-			cid = int((uint32(tags) >> 12) & ((1 << 20) - 1))
-		}
+		cid := int((uint32(tags) >> classIDTagPos) & ((1 << classIDTagSize) - 1))
 		if cid != wantCID {
 			ref++
 			continue
@@ -310,12 +291,87 @@ func extractRODataPayloads(data []byte, cm *ClusterMeta, wantCID int, dataImageO
 		length := int64(binary.LittleEndian.Uint64(data[objPos+8 : objPos+16]))
 		// These streams are at least a couple of bytes and realistically far
 		// under 1 MiB; anything else means we are not looking at what we think.
-		if length <= 0 || length > 1<<20 || objPos+16+length > int64(len(data)) {
+		dataStart := objPos + 16 // safe because the header bound above proved it fits
+		if length <= 0 || length > 1<<20 || length > int64(len(data))-dataStart {
 			ref++
 			continue
 		}
 
-		out = append(out, rodataPayload{RefID: ref, Payload: data[objPos+16 : objPos+16+length]})
+		out = append(out, rodataPayload{RefID: ref, Payload: data[dataStart : dataStart+length]})
+		ref++
+	}
+	return out
+}
+
+// extractRODataCompressedStackMaps extracts CSM objects from the read-only data
+// image used by non-compressed-pointer Full AOT snapshots. CSM is deliberately
+// separate from extractRODataPayloads: PcDescriptors/CodeSourceMap have a uword
+// length_ at +8, whereas CompressedStackMaps has a uint32 flags_and_size_ at +8
+// followed immediately by its byte payload.
+//
+// The payload offset is version-specific on the supported 64-bit targets:
+// Dart 2.10.0's generated runtime_offsets_extracted.h reports
+// AOT_CompressedStackMaps_HeaderSize=12, while 2.12.0 through 2.15.0 report 16.
+// The latter reflects the UntaggedObject layout change in that interval. These
+// are the only supported non-compressed releases that serialize CSMs as ROData;
+// later Full AOT builds put stack-map bytes in the InstructionsTable image.
+// Treating CSM like PcDescriptors combines flags with payload bytes into a
+// fictitious uint64 length; treating 2.10 like 2.12 drops the first four bytes
+// of every 2.10 stack-map payload.
+func extractRODataCompressedStackMaps(data []byte, cm *ClusterMeta, dataImageObjStart int64, profile *snapshot.VersionProfile) []CompressedStackMapsInfo {
+	if profile == nil || profile.CIDs == nil || profile.CompressedPointers ||
+		len(cm.Lengths) == 0 || dataImageObjStart <= 0 || profile.CIDs.CompressedStackMaps == 0 {
+		return nil
+	}
+	classIDTagPos, classIDTagSize, ok := snapshot.ClassIdTagLayout(profile.DartVersion)
+	if !ok {
+		return nil
+	}
+
+	const (
+		alignShift  = uint(4) // ROData running-offset units are 16 bytes.
+		flagsOffset = int64(8)
+	)
+	headerSize := int64(16)
+	if !snapshot.VersionAtLeast(profile.DartVersion, "2.12.0") {
+		headerSize = 12
+	}
+	runningOffset := int64(0)
+	ref := cm.StartRef
+	out := make([]CompressedStackMapsInfo, 0, len(cm.Lengths))
+	for i := 0; i < len(cm.Lengths); i++ {
+		nextOffset, ok := advanceRODataOffset(runningOffset, cm.Lengths[i], alignShift)
+		if !ok {
+			break
+		}
+		runningOffset = nextOffset
+		objPos, ok := checkedAddNonnegativeInt64(dataImageObjStart, runningOffset)
+		if !ok {
+			break
+		}
+		if objPos < 0 || objPos > int64(len(data))-headerSize {
+			ref++
+			continue
+		}
+
+		tags := binary.LittleEndian.Uint64(data[objPos : objPos+8])
+		cid := int((uint32(tags) >> classIDTagPos) & ((1 << classIDTagSize) - 1))
+		if cid != profile.CIDs.CompressedStackMaps {
+			ref++
+			continue
+		}
+
+		flagsAndSize := binary.LittleEndian.Uint32(data[objPos+flagsOffset : objPos+flagsOffset+4])
+		length := int64(flagsAndSize >> 2)
+		dataStart := objPos + headerSize
+		if length > 1<<30 || length > int64(len(data))-dataStart {
+			ref++
+			continue
+		}
+		payload := make([]byte, 4+int(length))
+		binary.LittleEndian.PutUint32(payload[:4], flagsAndSize)
+		copy(payload[4:], data[dataStart:dataStart+length])
+		out = append(out, CompressedStackMapsInfo{RefID: ref, Payload: payload})
 		ref++
 	}
 	return out

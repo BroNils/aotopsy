@@ -1,21 +1,25 @@
 package signal
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
 )
 
-// TaintFinding represents a potential source→sink data flow.
-type TaintFinding struct {
+// SourceSinkFinding represents lexical source/sink evidence connected by static
+// function proximity. It deliberately does not claim value-level data flow:
+// AOTopsy does not track the source value through SSA/memory into the sink.
+type SourceSinkFinding struct {
 	Source     string `json:"source"`
 	Sink       string `json:"sink"`
 	SourceFn   string `json:"source_func,omitempty"`
 	SinkFn     string `json:"sink_func,omitempty"`
-	FlowType   string `json:"flow_type"` // "imei_to_network", "token_to_storage", etc.
+	Relation   string `json:"relation"` // same_function, direct_static_call, two_hop_static_call
 	Confidence string `json:"confidence"`
 }
 
@@ -66,8 +70,9 @@ var sourcePatterns = map[string]string{
 // catalog, algorithm, fingerprint, blueprint, sprint), so they use the
 // call-site form "log(" / "print(" or the Dart-specific API names instead.
 var sinkPatterns = map[string]string{
+	// HTTP is a protocol family here; "https" already contains "http", so a
+	// separate https entry would emit two source/sink findings for one endpoint.
 	"http":              "network_http",
-	"https":             "network_https",
 	"socket":            "network_socket",
 	"MethodChannel":     "platform_channel",
 	"writeFile":         "file_write",
@@ -86,13 +91,13 @@ var sinkPatterns = map[string]string{
 	"firebase":      "firebase_upload",
 }
 
-// WriteTaintFindings performs taint analysis by identifying functions that
-// access source patterns and functions that access sink patterns, then
-// checking the call graph for source→sink flows (including cross-function).
-func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edges []disasm.CallEdgeRecord) error {
+// WriteSourceSinkFindings identifies functions containing sensitive-source and sink
+// lexical indicators, then records their static call-graph proximity. This is
+// a triage aid, not value-level taint propagation.
+func WriteSourceSinkFindings(outDir string, funcs []disasm.FuncRecord, stringRefs []disasm.StringRefRecord, edges []disasm.CallEdgeRecord) error {
 	// Build function → patterns map
-	funcSources := map[string][]string{}
-	funcSinks := map[string][]string{}
+	funcSources := map[string]map[string]bool{}
+	funcSinks := map[string]map[string]bool{}
 
 	for _, sr := range stringRefs {
 		if sr.Value == "" || sr.Func == "" {
@@ -101,12 +106,18 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 		val := strings.ToLower(sr.Value)
 		for pat, label := range sourcePatterns {
 			if strings.Contains(val, pat) {
-				funcSources[sr.Func] = append(funcSources[sr.Func], label)
+				if funcSources[sr.Func] == nil {
+					funcSources[sr.Func] = map[string]bool{}
+				}
+				funcSources[sr.Func][label] = true
 			}
 		}
 		for pat, label := range sinkPatterns {
 			if strings.Contains(strings.ToLower(sr.Value), strings.ToLower(pat)) {
-				funcSinks[sr.Func] = append(funcSinks[sr.Func], label)
+				if funcSinks[sr.Func] == nil {
+					funcSinks[sr.Func] = map[string]bool{}
+				}
+				funcSinks[sr.Func][label] = true
 			}
 		}
 	}
@@ -114,116 +125,136 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 	// Build call graph from in-memory edges (same source as
 	// WriteBehavioralFindings) instead of re-reading call_edges.jsonl
 	// from disk, so the two analyses share identical edge data.
-	callerCallees := map[string]map[string]bool{}
-	for _, e := range edges {
-		targets := e.ResolvedTargets()
-		if len(targets) == 0 {
-			continue
+	callerCallees := staticCallerCallees(funcs, edges)
+
+	var findings []SourceSinkFinding
+	seenFlows := map[string]bool{}
+	const maxSourceSinkFindings = 10_000
+	const maxSourceSinkTraversalLinks = 2_000_000
+	addFinding := func(f SourceSinkFinding) error {
+		// Witness identity is source/sink proximity, not the arbitrary
+		// intermediate node used to discover it. The previous key included the
+		// middle function, so a dense N-node graph emitted O(N^3) duplicate
+		// witnesses for the same source→sink relationship.
+		key := f.SourceFn + ":" + f.SinkFn + ":" + f.Source + ":" + f.Sink + ":" + f.Relation
+		if seenFlows[key] {
+			return nil
 		}
-		if callerCallees[e.FromFunc] == nil {
-			callerCallees[e.FromFunc] = map[string]bool{}
+		if len(findings) >= maxSourceSinkFindings {
+			return fmt.Errorf("%w: more than %d findings", errSourceSinkBudget, maxSourceSinkFindings)
 		}
-		for _, t := range targets {
-			callerCallees[e.FromFunc][t] = true
-		}
+		seenFlows[key] = true
+		findings = append(findings, f)
+		return nil
 	}
 
-	var findings []TaintFinding
-	seenFlows := map[string]bool{}
-
-	// Pattern 1: same-function taint (source and sink in same function)
-	for fn, sources := range funcSources {
-		sinks, ok := funcSinks[fn]
-		if !ok {
-			continue
-		}
-		for _, src := range sources {
-			for _, sink := range sinks {
-				key := fn + ":" + src + ":" + sink
-				if !seenFlows[key] {
-					seenFlows[key] = true
-					findings = append(findings, TaintFinding{
+	walk := func() error {
+		// Pattern 1: source and sink indicators in the same function.
+		for _, fn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[fn]
+			sinks, ok := funcSinks[fn]
+			if !ok {
+				continue
+			}
+			for _, src := range sortedSet(sourceSet) {
+				for _, sink := range sortedSet(sinks) {
+					if err := addFinding(SourceSinkFinding{
 						Source:     src,
 						Sink:       sink,
 						SourceFn:   fn,
 						SinkFn:     fn,
-						FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
+						Relation:   "same_function",
 						Confidence: "low",
-					})
-				}
-			}
-		}
-	}
-
-	// Pattern 2: cross-function taint (source function calls sink function)
-	for srcFn, sources := range funcSources {
-		callees := callerCallees[srcFn]
-		if callees == nil {
-			continue
-		}
-		for sinkFn := range callees {
-			sinks, ok := funcSinks[sinkFn]
-			if !ok {
-				continue
-			}
-			for _, src := range sources {
-				for _, sink := range sinks {
-					key := srcFn + ":" + sinkFn + ":" + src + ":" + sink
-					if !seenFlows[key] {
-						seenFlows[key] = true
-						findings = append(findings, TaintFinding{
-							Source:     src,
-							Sink:       sink,
-							SourceFn:   srcFn,
-							SinkFn:     sinkFn,
-							FlowType:   fmt.Sprintf("%s_to_%s", src, sink),
-							Confidence: "medium",
-						})
+					}); err != nil {
+						return err
 					}
 				}
 			}
 		}
-	}
 
-	// Pattern 3: 2-hop taint (source → intermediate → sink)
-	for srcFn, sources := range funcSources {
-		callees1 := callerCallees[srcFn]
-		if callees1 == nil {
-			continue
-		}
-		for midFn := range callees1 {
-			callees2 := callerCallees[midFn]
-			if callees2 == nil {
+		// Pattern 2: source-indicator function directly calls sink-indicator function.
+		for _, srcFn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[srcFn]
+			callees := callerCallees[srcFn]
+			if callees == nil {
 				continue
 			}
-			for sinkFn := range callees2 {
-				sinks, ok := funcSinks[sinkFn]
+			for _, sinkFn := range sortedKeys(callees) {
+				sinkSet, ok := funcSinks[sinkFn]
 				if !ok {
 					continue
 				}
-				for _, src := range sources {
-					for _, sink := range sinks {
-						key := srcFn + ":" + midFn + ":" + sinkFn + ":" + src + ":" + sink
-						if !seenFlows[key] {
-							seenFlows[key] = true
-							findings = append(findings, TaintFinding{
-								Source:     src,
-								Sink:       sink,
-								SourceFn:   srcFn,
-								SinkFn:     sinkFn,
-								FlowType:   fmt.Sprintf("%s_to_%s_via_%s", src, sink, midFn),
-								Confidence: "low",
-							})
+				for _, src := range sortedSet(sourceSet) {
+					for _, sink := range sortedSet(sinkSet) {
+						if err := addFinding(SourceSinkFinding{
+							Source:     src,
+							Sink:       sink,
+							SourceFn:   srcFn,
+							SinkFn:     sinkFn,
+							Relation:   "direct_static_call",
+							Confidence: "low",
+						}); err != nil {
+							return err
 						}
 					}
 				}
 			}
 		}
-	}
 
-	if len(findings) == 0 {
+		// Pattern 3: source and sink functions are separated by one static call hop.
+		traversedLinks := 0
+		for _, srcFn := range sortedKeys(funcSources) {
+			sourceSet := funcSources[srcFn]
+			callees1 := callerCallees[srcFn]
+			if callees1 == nil {
+				continue
+			}
+			for _, midFn := range sortedKeys(callees1) {
+				callees2 := callerCallees[midFn]
+				if callees2 == nil {
+					continue
+				}
+				for _, sinkFn := range sortedKeys(callees2) {
+					traversedLinks++
+					if traversedLinks > maxSourceSinkTraversalLinks {
+						return fmt.Errorf("%w: more than %d call-graph links", errSourceSinkBudget, maxSourceSinkTraversalLinks)
+					}
+					sinkSet, ok := funcSinks[sinkFn]
+					if !ok {
+						continue
+					}
+					for _, src := range sortedSet(sourceSet) {
+						for _, sink := range sortedSet(sinkSet) {
+							if err := addFinding(SourceSinkFinding{
+								Source:     src,
+								Sink:       sink,
+								SourceFn:   srcFn,
+								SinkFn:     sinkFn,
+								Relation:   "two_hop_static_call",
+								Confidence: "low",
+							}); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+		}
 		return nil
 	}
+	var summary SourceSinkSummary
+	if err := walk(); err != nil {
+		if !errors.Is(err, errSourceSinkBudget) {
+			return err
+		}
+		// The budget bounds a hostile graph, but this stage is advisory: keep
+		// what was found (deterministic, thanks to the sorted walk) and say so
+		// explicitly instead of failing the whole analysis.
+		summary.Truncated = true
+		summary.Reason = err.Error()
+	}
+	summary.Findings = len(findings)
+
 	// Findings are discovered by iterating maps, so sort before writing:
 	// otherwise the same binary produces a differently-ordered file on every
 	// run, which breaks diffing two reports.
@@ -241,43 +272,72 @@ func WriteTaintFindings(outDir string, stringRefs []disasm.StringRefRecord, edge
 		if a.Sink != b.Sink {
 			return a.Sink < b.Sink
 		}
-		return a.FlowType < b.FlowType
+		return a.Relation < b.Relation
 	})
-	return writeJSONLFile(filepath.Join(outDir, "taint_findings.jsonl"), findings)
+	if err := writeSignalJSONL(filepath.Join(outDir, "source_sink_findings.jsonl"), findings); err != nil {
+		return err
+	}
+	return jsonutil.WriteJSONFile(filepath.Join(outDir, SourceSinkSummaryFile), summary)
+}
+
+// SourceSinkSummaryFile states whether source_sink_findings.jsonl is complete. It is
+// written on every run so a stale "truncated" verdict cannot outlive a rerun.
+const SourceSinkSummaryFile = "source_sink_summary.json"
+
+// SourceSinkSummary is the completeness verdict for source_sink_findings.jsonl.
+type SourceSinkSummary struct {
+	Findings  int    `json:"findings"`
+	Truncated bool   `json:"truncated"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+var errSourceSinkBudget = errors.New("source/sink proximity budget exceeded")
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // YaraFinding represents a YARA-style rule match.
 type YaraFinding struct {
-	RuleName  string   `json:"rule_name"`
-	Category  string   `json:"category"`
-	Strings   []string `json:"matched_strings"`
-	Functions []string `json:"matched_functions,omitempty"`
+	RuleName   string   `json:"rule_name"`
+	Category   string   `json:"category"`
+	Strings    []string `json:"matched_strings"`
+	Functions  []string `json:"matched_functions,omitempty"`
+	Confidence string   `json:"confidence"`
 }
 
-// YARA-style rules for common malware behaviors.
+// YARA-style rules for security-relevant lexical indicators. A rule match is
+// still lexical evidence; confidence below records how many distinct patterns
+// were corroborated, and the category names avoid claiming malware identity.
 var yaraRules = []struct {
-	Name     string
-	Category string
-	Strings  []string
+	Name        string
+	Category    string
+	Strings     []string
+	MinPatterns int
 }{
-	{"root_check_magisk", "anti_root", []string{"magisk", "MagiskManager", "/sbin/magisk", "magisk.db"}},
-	{"root_check_supersu", "anti_root", []string{"supersu", "Superuser", "/system/app/Superuser.apk", "eu.chainfire.supersu"}},
-	{"root_check_xposed", "anti_root", []string{"xposed", "XposedBridge", "de.robv.android.xposed", "XposedHelpers"}},
-	{"root_check_frida", "anti_frida", []string{"frida-server", "frida-gadget", "frida-agent", "re.frida.server"}},
-	{"root_check_su", "anti_root", []string{"/system/bin/su", "/system/xbin/su", "which su", "superuser.apk"}},
-	{"anti_debug_ptrace", "anti_debug", []string{"ptrace", "TracerPid", "/proc/self/status", "isDebuggerAttached"}},
-	{"anti_debug_debugger", "anti_debug", []string{"debugger", "android.os.Debug", "isDebuggerConnected"}},
-	{"ssl_pinning_cert", "ssl_pinning", []string{"certificatePinner", "CertificatePinning", "X509TrustManager", "OkHttp"}},
-	{"ssl_pinning_sha", "ssl_pinning", []string{"sha256/", "sha1/", "pinning", "publicKey"}},
-	{"keylogger_accessibility", "spyware", []string{"AccessibilityService", "onAccessibilityEvent", "keylogger", "KEY_EVENT"}},
-	{"screen_capture", "spyware", []string{"MediaProjection", "screenCapture", "createVirtualDisplay", "Screenshot"}},
-	{"data_exfil_http", "data_theft", []string{"imei", "android_id", "http://", "upload"}},
-	{"crypto_mining", "crypto_mining", []string{"monero", "xmrig", "cryptonight", "hashrate", "mining_pool"}},
-	{"banking_trojan", "fraud", []string{"otp", "sms_intercept", "banking", "credit_card", "cvv"}},
-	{"ad_fraud", "ad_fraud", []string{"click_injection", "ad_fraud", "impression_fraud", "click_bot"}},
+	{"root_check_magisk", "anti_root", []string{"magisk", "MagiskManager", "/sbin/magisk", "magisk.db"}, 1},
+	{"root_check_supersu", "anti_root", []string{"supersu", "Superuser", "/system/app/Superuser.apk", "eu.chainfire.supersu"}, 1},
+	{"root_check_xposed", "anti_root", []string{"xposed", "XposedBridge", "de.robv.android.xposed", "XposedHelpers"}, 1},
+	{"anti_frida_runtime", "anti_frida", []string{"frida-server", "frida-gadget", "frida-agent", "re.frida.server"}, 1},
+	{"root_check_su", "anti_root", []string{"/system/bin/su", "/system/xbin/su", "which su", "superuser.apk"}, 1},
+	{"anti_debug_ptrace", "anti_debug", []string{"ptrace", "TracerPid", "/proc/self/status", "isDebuggerAttached"}, 1},
+	{"anti_debug_debugger", "anti_debug", []string{"android.os.Debug", "isDebuggerConnected"}, 1},
+	{"ssl_pinning_cert", "ssl_pinning", []string{"certificatePinner", "CertificatePinning"}, 1},
+	{"ssl_pinning_sha", "ssl_pinning", []string{"sha256/", "sha1/", "pinning", "publicKey"}, 2},
+	{"accessibility_input_indicators", "accessibility_input", []string{"AccessibilityService", "onAccessibilityEvent", "keylogger", "KEY_EVENT"}, 2},
+	{"screen_capture_indicators", "screen_capture", []string{"MediaProjection", "screenCapture", "createVirtualDisplay", "Screenshot"}, 2},
+	{"sensitive_network_indicators", "source_network", []string{"imei", "android_id", "http://", "upload"}, 2},
+	{"crypto_mining", "crypto_mining", []string{"monero", "xmrig", "cryptonight", "hashrate", "mining_pool"}, 2},
+	{"banking_fraud_indicators", "fraud", []string{"otp", "sms_intercept", "banking", "credit_card", "cvv"}, 2},
+	{"ad_fraud", "ad_fraud", []string{"click_injection", "ad_fraud", "impression_fraud", "click_bot"}, 2},
 }
 
-// WriteYaraFindings performs YARA-style string matching against known malware patterns.
+// WriteYaraFindings performs YARA-style string matching against security-relevant patterns.
 func WriteYaraFindings(outDir string, stringRefs []disasm.StringRefRecord) error {
 	// Build string → functions map
 	stringFuncs := map[string][]string{}
@@ -293,6 +353,8 @@ func WriteYaraFindings(outDir string, stringRefs []disasm.StringRefRecord) error
 		var matchedStrings []string
 		var matchedFuncs []string
 		seenFuncs := map[string]bool{}
+		matchedPatterns := map[int]bool{}
+		patternsByFunc := map[string]map[int]bool{}
 		// Pre-lowercase the rule patterns once per rule instead of calling
 		// strings.ToLower(pattern) on every (pattern, val) pair.
 		lowerPatterns := make([]string, len(rule.Strings))
@@ -302,39 +364,59 @@ func WriteYaraFindings(outDir string, stringRefs []disasm.StringRefRecord) error
 		for val, funcs := range stringFuncs {
 			lowerVal := strings.ToLower(val) // pre-lowercase val once per string
 			matched := false
-			for _, lp := range lowerPatterns {
+			var matchedHere []int
+			for pi, lp := range lowerPatterns {
 				if strings.Contains(lowerVal, lp) {
+					matchedPatterns[pi] = true
+					matchedHere = append(matchedHere, pi)
 					matched = true
-					break
 				}
 			}
 			if matched {
 				matchedStrings = append(matchedStrings, val)
 				for _, fn := range funcs {
+					if fn == "" {
+						continue
+					}
 					if !seenFuncs[fn] {
 						seenFuncs[fn] = true
 						matchedFuncs = append(matchedFuncs, fn)
 					}
+					if patternsByFunc[fn] == nil {
+						patternsByFunc[fn] = map[int]bool{}
+					}
+					for _, pi := range matchedHere {
+						patternsByFunc[fn][pi] = true
+					}
 				}
 			}
 		}
-		if len(matchedStrings) > 0 {
+		minPatterns := rule.MinPatterns
+		if minPatterns < 1 {
+			minPatterns = 1
+		}
+		if len(matchedStrings) > 0 && len(matchedPatterns) >= minPatterns {
 			// stringFuncs is a map, so both slices come out in random order.
 			sort.Strings(matchedStrings)
 			sort.Strings(matchedFuncs)
+			confidence := "low"
+			for _, patternSet := range patternsByFunc {
+				if len(patternSet) >= 2 {
+					confidence = "medium"
+					break
+				}
+			}
 			findings = append(findings, YaraFinding{
-				RuleName:  rule.Name,
-				Category:  rule.Category,
-				Strings:   matchedStrings,
-				Functions: matchedFuncs,
+				RuleName:   rule.Name,
+				Category:   rule.Category,
+				Strings:    matchedStrings,
+				Functions:  matchedFuncs,
+				Confidence: confidence,
 			})
 		}
 	}
 
-	if len(findings) == 0 {
-		return nil
-	}
-	return writeJSONLFile(filepath.Join(outDir, "yara_findings.jsonl"), findings)
+	return writeSignalJSONL(filepath.Join(outDir, "yara_findings.jsonl"), findings)
 }
 
 // BehavioralFinding represents a call-graph behavioral pattern.
@@ -346,8 +428,56 @@ type BehavioralFinding struct {
 	Confidence string   `json:"confidence"`
 }
 
-// WriteBehavioralFindings performs call-graph behavioral analysis.
-// Identifies common malware behavioral patterns from the call graph.
+// staticCallerCallees projects only static function identities. Runtime
+// observations stay separate, and a raw direct address becomes a function only
+// when it exactly matches a functions.jsonl PC.
+func staticCallerCallees(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) map[string]map[string]bool {
+	pcToName := make(map[string]string, len(funcs))
+	for _, f := range funcs {
+		if f.PC != "" && f.Name != "" {
+			pcToName[strings.ToLower(strings.TrimSpace(f.PC))] = f.Name
+		}
+	}
+	callerCallees := make(map[string]map[string]bool)
+	for _, e := range edges {
+		seen := make(map[string]bool)
+		var targets []string
+		for _, target := range e.ResolvedTargets() {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+			if name := pcToName[strings.ToLower(target)]; name != "" {
+				target = name
+			} else if isRawSignalTarget(target) {
+				continue
+			}
+			if !seen[target] {
+				seen[target] = true
+				targets = append(targets, target)
+			}
+		}
+		if len(targets) == 0 && e.TargetAddress != "" {
+			if name := pcToName[strings.ToLower(strings.TrimSpace(e.TargetAddress))]; name != "" {
+				targets = append(targets, name)
+			}
+		}
+		if len(targets) == 0 {
+			continue
+		}
+		if callerCallees[e.FromFunc] == nil {
+			callerCallees[e.FromFunc] = make(map[string]bool)
+		}
+		for _, target := range targets {
+			callerCallees[e.FromFunc][target] = true
+		}
+	}
+	return callerCallees
+}
+
+// WriteBehavioralFindings finds security-relevant adjacency patterns in the
+// static call graph. Function categories are name heuristics, so these records
+// describe graph relationships and never claim value flow or malicious intent.
 func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) error {
 	// Build function name → category map based on name patterns.
 	// Patterns are chosen to avoid false positives from framework names
@@ -415,37 +545,9 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 		}
 	}
 
-	// Build a PC → function name map so hex VA call targets (e.Target == "0x...")
-	// can be resolved to a function name before category lookup. Without this,
-	// funcCategory["0x1234"] is always "" and hex VA targets are never matched.
-	pcToName := map[string]string{}
-	for _, f := range funcs {
-		if f.PC != "" && f.Name != "" {
-			pcToName[f.PC] = f.Name
-		}
-	}
-	// Build call graph: caller → callees
-	callerCallees := map[string]map[string]bool{}
-	for _, e := range edges {
-		targets := e.ResolvedTargets()
-		if len(targets) == 0 {
-			continue
-		}
-		// Resolve hex VA targets to their function name when possible.
-		for i, t := range targets {
-			if strings.HasPrefix(t, "0x") {
-				if resolved, ok := pcToName[t]; ok && resolved != "" {
-					targets[i] = resolved
-				}
-			}
-		}
-		if callerCallees[e.FromFunc] == nil {
-			callerCallees[e.FromFunc] = map[string]bool{}
-		}
-		for _, t := range targets {
-			callerCallees[e.FromFunc][t] = true
-		}
-	}
+	// Build the static call graph from semantic identities. Exact direct
+	// addresses are resolved only when they match a functions.jsonl PC.
+	callerCallees := staticCallerCallees(funcs, edges)
 
 	// Identify behavioral patterns
 	var findings []BehavioralFinding
@@ -472,14 +574,14 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 						Category:   "anti_analysis",
 						Functions:  []string{rootFn, antiFn},
 						EdgeCount:  1,
-						Confidence: "medium",
+						Confidence: "low",
 					})
 				}
 			}
 		}
 	}
 
-	// Pattern 2: credential → network (credential access followed by network send)
+	// Pattern 2: credential-named function statically calls network-named function.
 	credFuncs := []string{}
 	netFuncs := []string{}
 	for fn, cat := range funcCategory {
@@ -496,18 +598,18 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 			for netFn := range callees {
 				if funcCategory[netFn] == "network" {
 					findings = append(findings, BehavioralFinding{
-						Pattern:    "credential_to_network",
-						Category:   "data_exfil",
+						Pattern:    "credential_function_calls_network_function",
+						Category:   "credential_network_adjacency",
 						Functions:  []string{credFn, netFn},
 						EdgeCount:  1,
-						Confidence: "medium",
+						Confidence: "low",
 					})
 				}
 			}
 		}
 	}
 
-	// Pattern 3: location → network (location access followed by network send)
+	// Pattern 3: location-named function statically calls network-named function.
 	locFuncs := []string{}
 	for fn, cat := range funcCategory {
 		if cat == "location" {
@@ -520,18 +622,18 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 			for netFn := range callees {
 				if funcCategory[netFn] == "network" {
 					findings = append(findings, BehavioralFinding{
-						Pattern:    "location_to_network",
-						Category:   "tracking",
+						Pattern:    "location_function_calls_network_function",
+						Category:   "location_network_adjacency",
 						Functions:  []string{locFn, netFn},
 						EdgeCount:  1,
-						Confidence: "medium",
+						Confidence: "low",
 					})
 				}
 			}
 		}
 	}
 
-	// Pattern 4: crypto → network (encryption followed by network send)
+	// Pattern 4: crypto-named function statically calls network-named function.
 	cryptoFuncs := []string{}
 	for fn, cat := range funcCategory {
 		if cat == "crypto" {
@@ -544,8 +646,8 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 			for netFn := range callees {
 				if funcCategory[netFn] == "network" {
 					findings = append(findings, BehavioralFinding{
-						Pattern:    "crypto_to_network",
-						Category:   "encrypted_exfil",
+						Pattern:    "crypto_function_calls_network_function",
+						Category:   "crypto_network_adjacency",
 						Functions:  []string{cryptoFn, netFn},
 						EdgeCount:  1,
 						Confidence: "low",
@@ -572,9 +674,6 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 		}
 	}
 
-	if len(findings) == 0 {
-		return nil
-	}
 	// funcCategory and callerCallees are maps: sort so the output file is
 	// reproducible across runs.
 	sort.Slice(findings, func(i, j int) bool {
@@ -584,5 +683,5 @@ func WriteBehavioralFindings(outDir string, funcs []disasm.FuncRecord, edges []d
 		}
 		return strings.Join(a.Functions, ",") < strings.Join(b.Functions, ",")
 	})
-	return writeJSONLFile(filepath.Join(outDir, "behavioral_findings.jsonl"), findings)
+	return writeSignalJSONL(filepath.Join(outDir, "behavioral_findings.jsonl"), findings)
 }

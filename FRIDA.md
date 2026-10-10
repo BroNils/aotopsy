@@ -2,6 +2,10 @@
 
 AOTopsy generates ready-to-run [Frida](https://frida.re) scripts that hook functions resolved during static analysis. This bridges the gap between what static analysis can determine (function names, call graphs, pseudocode) and what only runtime observation can reveal (argument values, virtual dispatch targets, code path reachability).
 
+> **Authorized use only.** Attach generated scripts only to apps you own or are
+> authorized to test (see [SECURITY.md](SECURITY.md#responsible-use)). The scripts are
+> read-only observers: they log calls and arguments, they do not modify the target.
+
 ```mermaid
 sequenceDiagram
     participant User
@@ -40,9 +44,17 @@ aotopsy _debug decompile-native --lib libapp.so --all --filter MyClass \
 aotopsy _debug decompile-native --lib libapp.so --from-main \
   --gen-frida --out out/
 
-# Pipeline export / import commands:
-aotopsy frida-export --lib libapp.so --out frida_hooks.js
-aotopsy frida-import --lib libapp.so --in frida_log.txt --out ./imported
+# Pipeline export / import commands. --out is metadata JSON; --gen-script
+# publishes the matching JavaScript in the same generation.
+aotopsy frida-export --lib libapp.so --gen-script
+# Reuse an existing static generation instead of rerunning analysis:
+aotopsy frida-export --from libapp.aotopsy --gen-script
+
+# Run the generated script and capture stdout/events:
+frida -U -f com.example.app -l libapp.aotopsy/frida_hooks.js > frida_log.txt
+
+# Merge only into the exact static generation that produced the script:
+aotopsy frida-import --static libapp.aotopsy --in frida_log.txt --out libapp.aotopsy_merged
 ```
 
 The script hooks by module-relative offset (`Process.getModuleByName(...).base.add(offset)`), so it works regardless of ASLR slide. The offset numbering matches `decompile-native`'s VA numbering — no manual math needed.
@@ -50,11 +62,24 @@ The script hooks by module-relative offset (`Process.getModuleByName(...).base.a
 ## Running It
 
 ```bash
-frida -U -f <package.name> -l hooks.js --no-pause    # spawn fresh
-frida -U <package.name> -l hooks.js                   # attach to running
+frida -U -f <package.name> -l hooks.js    # spawn fresh
+frida -U <package.name> -l hooks.js       # attach to running
 ```
 
-Multiple scripts compose: `frida -U -f <pkg> -l hooks.js -l my_other_script.js --no-pause`
+Multiple scripts compose: `frida -U -f <pkg> -l hooks.js -l my_other_script.js`
+
+`frida-export` writes `frida_binding.json`, which hashes the static artifacts
+consumed by the script/import path and records the exact capped hook/probe set.
+Before installing any hook, the generated script SHA-256 checks immutable
+file-backed regions of the module that is actually loaded in memory (including
+executable/read-only ELF loads) and verifies the runtime architecture. Every
+machine-readable event then carries that generation ID plus the verified source
+identity. `frida-import` rejects stale/mixed artifact generations and events from
+sites outside the recorded installed subset.
+
+Function-entry events are function coverage only. They do not mark every outgoing
+callsite in that function as observed. An indirect edge is runtime-confirmed only
+when its exact instrumented callsite emitted a dispatch event.
 
 ## What It Hooks
 
@@ -71,7 +96,14 @@ Multiple scripts compose: `frida -U -f <pkg> -l hooks.js -l my_other_script.js -
 [aotopsy] probe ListBase._filter @ 0x7f8a2c137ee6: rcx=0x7f8a2c... (module+0x1a2b3c)
 ```
 
-Probes are capped at a few hundred per script and skip memory-operand dispatch-table call shapes (no single register to read for those).
+Probes are capped at a few hundred per script, and the exact selected subset is
+recorded in the generation binding. ARM64/register-indirect targets
+read the live target register. x86_64 memory-indirect targets are also supported:
+`[base+index*scale±disp]` is evaluated with pointer-width arithmetic and then
+dereferenced safely. Class IDs are recorded only for probes statically proven to
+be dispatch-table calls. ARM64 Dart versions before 2.13 do not record a class ID
+because those SDKs reuse/mutate the CID register while forming the dispatch-table
+index; generic/object-field indirect calls likewise do not fabricate one.
 
 ## Safety for Hardened Targets
 

@@ -3,24 +3,23 @@ package decompiler
 import (
 	"strings"
 
-	"aotopsy/internal/decompiler/compare"
+	"aotopsy/internal/decompiler/stmt"
+	"aotopsy/internal/strutil"
 )
 
 // applyNamingPass replaces raw ABI register tokens that leaked through
 // into the emitted pseudocode (frame pointer / link register, mainly --
 // most other registers are already replaced with symbolic expressions by
-// the lifter) with friendlier names. Mirrors the register-alias half of
-// flutterdec's passes/naming.rs apply_name_and_type_hints (the
-// arg0..arg7 semantic-renaming half is not ported: this project's
-// pseudocode already names call results/locals descriptively enough via
-// the lifter's own local/temp naming, and a full IdentStats-based
-// re-classification pass is a documented future extension).
+// the lifter) with friendlier names. It never invents a role for a temp:
+// the usage-count re-classification (result/flag/counter/accumulator) was
+// removed because it asserted roles the binary does not have and was not
+// stable across unrelated edits (AUDIT-2026-10 section 7.2).
 func applyNamingPass(source string, fir *FuncIR) string {
 	if fir.FrameReg != "" {
-		source = compare.ReplaceIdentToken(source, fir.FrameReg, "framePointer")
+		source = stmt.ReplaceIdent(source, fir.FrameReg, "framePointer")
 	}
 	if fir.LinkReg != "" {
-		source = compare.ReplaceIdentToken(source, fir.LinkReg, "returnAddress")
+		source = stmt.ReplaceIdent(source, fir.LinkReg, "returnAddress")
 	}
 	return source
 }
@@ -42,16 +41,9 @@ func cleanCalleeName(name string) string {
 	if name == "" {
 		return name
 	}
-	// Strip library hash: ClassName@123456.method -> ClassName.method or ClassName@123456 -> ClassName
-	if atIdx := strings.Index(name, "@"); atIdx >= 0 {
-		rest := name[atIdx+1:]
-		end := strings.IndexAny(rest, "._ \t")
-		if end >= 0 {
-			name = name[:atIdx] + rest[end:]
-		} else {
-			name = name[:atIdx]
-		}
-	}
+	// Exact SDK private-key scrub: only @ followed by decimal digits is VM
+	// mangling. A nonnumeric '@' is not proven to be removable and is preserved.
+	name = strutil.ScrubDartPrivateKeys(name)
 	name = compactMixinOwner(name)
 	// D7: Strip trailing PCOffset hex suffix (_564794, _14b90, _233d64)
 	if lastUnder := strings.LastIndex(name, "_"); lastUnder > 0 {

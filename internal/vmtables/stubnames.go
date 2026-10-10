@@ -20,6 +20,89 @@ package vmtables
 // are deliberately left unnamed rather than guessed -- see
 // BuildVMStubNames's caller for how the boundary is enforced.
 var (
+	// stubNames2100 is the exact VM_STUB_CODE_LIST expansion for Dart 2.10.0.
+	// This SDK predates VM_TYPE_TESTING_STUB_CODE_LIST: the 9 type-testing
+	// stubs are inline in VM_STUB_CODE_LIST after Subtype6TestCache.
+	stubNames2100 = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler",
+		"DeoptForRewind", "WriteBarrier", "WriteBarrierWrappers",
+		"ArrayWriteBarrier", "AllocateArray", "AllocateMintSharedWithFPURegs",
+		"AllocateMintSharedWithoutFPURegs", "AllocateContext", "AllocateObject",
+		"AllocateObjectParameterized", "AllocateObjectSlow", "AllocateUnhandledException",
+		"CloneContext", "CallToRuntime", "LazyCompile",
+		"InterpretCall", "CallBootstrapNative", "CallNoScopeNative",
+		"CallAutoScopeNative", "FixCallersTarget", "CallStaticFunction",
+		"OptimizeFunction", "InvokeDartCode", "InvokeDartCodeFromBytecode",
+		"DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck",
+		"SingleTargetCall", "ICCallThroughCode", "MegamorphicCall",
+		"FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn",
+		"DeoptimizeLazyFromThrow", "UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck",
+		"ICCallBreakpoint", "UnoptStaticCallBreakpoint", "RuntimeCallBreakpoint",
+		"OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache",
+		"SmiLessInlineCache", "SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache",
+		"TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall",
+		"TwoArgsUnoptimizedStaticCall", "Subtype1TestCache", "Subtype2TestCache",
+		"Subtype4TestCache", "Subtype6TestCache", "DefaultTypeTest",
+		"DefaultNullableTypeTest", "TopTypeTypeTest", "UnreachableTypeTest",
+		"TypeParameterTypeTest", "NullableTypeParameterTypeTest", "SlowTypeTest",
+		"LazySpecializeTypeTest", "LazySpecializeNullableTypeTest", "CallClosureNoSuchMethod",
+		"FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded",
+		"DispatchTableNullError", "NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs",
+		"NullArgErrorSharedWithFPURegs", "NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs",
+		"NullCastErrorSharedWithoutFPURegs", "RangeErrorSharedWithFPURegs", "RangeErrorSharedWithoutFPURegs",
+		"StackOverflowSharedWithFPURegs", "StackOverflowSharedWithoutFPURegs", "OneArgCheckInlineCacheWithExactnessCheck",
+		"OneArgOptimizedCheckInlineCacheWithExactnessCheck", "EnterSafepoint", "ExitSafepoint",
+		"CallNativeThroughSafepoint", "InitStaticField", "InitInstanceField",
+		"InitLateInstanceField", "InitLateFinalInstanceField", "Throw",
+		"ReThrow", "AssertBoolean", "InstanceOf",
+		"InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA", "InstantiateTypeArgumentsMayShareFunctionTA",
+		"NoSuchMethodDispatcher",
+	} // count: 97
+
+	// stubNames2130Base is Dart 2.13.0's VM_STUB_CODE_LIST with the nested
+	// VM_TYPE_TESTING_STUB_CODE_LIST expansion removed. vmStubBaseNames returns
+	// it only to the exact-order VMStubNames boundary, which inserts the 9 TTS
+	// entries once at their SDK-defined Subtype7TestCache position.
+	stubNames2130Base = []string{
+		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler",
+		"DeoptForRewind", "WriteBarrier", "WriteBarrierWrappers",
+		"ArrayWriteBarrier", "AllocateArray", "AllocateInt8Array",
+		"AllocateUint8Array", "AllocateUint8ClampedArray", "AllocateInt16Array",
+		"AllocateUint16Array", "AllocateInt32Array", "AllocateUint32Array",
+		"AllocateInt64Array", "AllocateUint64Array", "AllocateFloat32Array",
+		"AllocateFloat64Array", "AllocateFloat32x4Array", "AllocateInt32x4Array",
+		"AllocateFloat64x2Array", "AllocateMintSharedWithFPURegs", "AllocateMintSharedWithoutFPURegs",
+		"AllocateContext", "AllocateObject", "AllocateObjectParameterized",
+		"AllocateObjectSlow", "AllocateUnhandledException", "CloneContext",
+		"CallToRuntime", "LazyCompile", "CallBootstrapNative",
+		"CallNoScopeNative", "CallAutoScopeNative", "FixCallersTarget",
+		"CallStaticFunction", "OptimizeFunction", "InvokeDartCode",
+		"DebugStepCheck", "SwitchableCallMiss", "MonomorphicSmiableCheck",
+		"SingleTargetCall", "ICCallThroughCode", "MegamorphicCall",
+		"FixAllocationStubTarget", "Deoptimize", "DeoptimizeLazyFromReturn",
+		"DeoptimizeLazyFromThrow", "UnoptimizedIdenticalWithNumberCheck", "OptimizedIdenticalWithNumberCheck",
+		"ICCallBreakpoint", "UnoptStaticCallBreakpoint", "RuntimeCallBreakpoint",
+		"OneArgCheckInlineCache", "TwoArgsCheckInlineCache", "SmiAddInlineCache",
+		"SmiLessInlineCache", "SmiEqualInlineCache", "OneArgOptimizedCheckInlineCache",
+		"TwoArgsOptimizedCheckInlineCache", "ZeroArgsUnoptimizedStaticCall", "OneArgUnoptimizedStaticCall",
+		"TwoArgsUnoptimizedStaticCall", "AssertSubtype", "AssertAssignable",
+		"TypeIsTopTypeForSubtyping", "TypeIsTopTypeForSubtypingNullSafe", "NullIsAssignableToType",
+		"NullIsAssignableToTypeNullSafe", "Subtype1TestCache", "Subtype3TestCache",
+		"Subtype5TestCache", "Subtype7TestCache", "CallClosureNoSuchMethod",
+		"FrameAwaitingMaterialization", "AsynchronousGapMarker", "NotLoaded",
+		"DispatchTableNullError", "LateInitializationErrorSharedWithFPURegs", "LateInitializationErrorSharedWithoutFPURegs",
+		"NullErrorSharedWithFPURegs", "NullErrorSharedWithoutFPURegs", "NullArgErrorSharedWithFPURegs",
+		"NullArgErrorSharedWithoutFPURegs", "NullCastErrorSharedWithFPURegs", "NullCastErrorSharedWithoutFPURegs",
+		"RangeErrorSharedWithFPURegs", "RangeErrorSharedWithoutFPURegs", "StackOverflowSharedWithFPURegs",
+		"StackOverflowSharedWithoutFPURegs", "OneArgCheckInlineCacheWithExactnessCheck", "OneArgOptimizedCheckInlineCacheWithExactnessCheck",
+		"EnterSafepoint", "ExitSafepoint", "CallNativeThroughSafepoint",
+		"InitStaticField", "InitInstanceField", "InitLateInstanceField",
+		"InitLateFinalInstanceField", "Throw", "ReThrow",
+		"AssertBoolean", "InstanceOf", "InstantiateType",
+		"InstantiateTypeArguments", "InstantiateTypeArgumentsMayShareInstantiatorTA", "InstantiateTypeArgumentsMayShareFunctionTA",
+		"NoSuchMethodDispatcher", "UnknownDartCode",
+	} // count: 110 (+9 nested TTS = 119 exact)
+
 	stubNames370 = []string{
 		"GetCStackPointer", "JumpToFrame", "RunExceptionHandler",
 		"DeoptForRewind", "WriteBarrier", "WriteBarrierWrappers",
@@ -1147,11 +1230,10 @@ var (
 	} // count: 157
 )
 
-// VMStubNames returns the ordered VM_STUB_CODE_LIST expansion for a known
-// Dart version, or nil if this version hasn't been verified yet. Index i
-// names the i'th stub Code object in the VM-isolate snapshot's Code
-// cluster (in cluster order) -- see the package doc comment above for the
-// full derivation, verification method, and the deliberate +9 unnamed tail.
+// VMStubNames returns the exact ordered VM_STUB_CODE_LIST expansion for a
+// known Dart version, including type-testing stubs at their SDK-defined
+// position. Index i names the i'th stub Code object in VM snapshot cluster
+// order. Returns nil when the version has no independently verified table.
 //
 // The "3.10.7"/"3.11.0" cases below are matched against real Dart 3.10.9/
 // 3.11.5 samples: internal/snapshot's version-hash table only records a
@@ -1164,9 +1246,26 @@ var (
 // verified against the REAL 3.10.9/3.11.5/3.12.2 dart-lang/sdk tags this
 // session, not merely assumed to carry over from the older label.
 func VMStubNames(dartVersion string) []string {
+	if dartVersion == "2.10.0" {
+		return append([]string(nil), stubNames2100...)
+	}
+	base := vmStubBaseNames(dartVersion)
+	if base == nil {
+		return nil
+	}
+	return composeVMStubEmissionOrder(base)
+}
+
+// vmStubBaseNames returns the post-2.10 storage representation: the SDK main
+// stub list with VM_TYPE_TESTING_STUB_CODE_LIST removed. It is private so no
+// consumer can accidentally treat this implementation detail as emission
+// order; VMStubNames is the only public semantic boundary.
+func vmStubBaseNames(dartVersion string) []string {
 	switch dartVersion {
 	case "2.12.0":
 		return stubNames2120
+	case "2.13.0":
+		return stubNames2130Base
 	case "2.14.0":
 		return stubNames2140
 	case "2.15.0":

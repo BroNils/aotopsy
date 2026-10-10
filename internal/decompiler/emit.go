@@ -3,9 +3,10 @@ package decompiler
 import (
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
-	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 	"aotopsy/internal/strutil"
@@ -35,6 +36,16 @@ type Artifact struct {
 	Source        string       `json:"source"`
 	Stats         Stats        `json:"stats"`
 	VisitedBlocks map[int]bool `json:"visited_blocks,omitempty"`
+	// EmittedEdges is the CFG edge set the emitter actually followed or
+	// represented. It is internal verification evidence, not a serialized output
+	// contract; VerifyCFG uses it to compare targets instead of merely comparing
+	// the number of `if` tokens in the rendered text.
+	EmittedEdges []CFGEdge `json:"-"`
+}
+
+type CFGEdge struct {
+	From int
+	To   int
 }
 
 const (
@@ -152,6 +163,27 @@ type emitter struct {
 	// subtree from a fresh visit map and re-emitted join blocks the main
 	// body had already shown.
 	emittedAnywhere map[int]bool
+	// elidedSlowPaths holds the successor blocks of stack-overflow and
+	// write-barrier checks that the emitter deliberately drops (runtime/GC
+	// bookkeeping with no source meaning). They are unreached by design, so they
+	// must not be reported as orphans. Shared with helper sub-emitters.
+	elidedSlowPaths map[int]bool
+	// emittedEdges is shared with helper sub-emitters, like emittedAnywhere.
+	// Key packs source/target block ids into one uint64.
+	emittedEdges map[uint64]bool
+	currentBlock int
+	// blockLineStart is the index in lines where the block being emitted begins;
+	// outgoing-argument slot stores are only dropped from there on (outargs.go).
+	blockLineStart int
+	// dropAfterCall is the byte count released by the stack-pointer adjustment
+	// that immediately follows the call being emitted (0 if none); it carries
+	// the argument count of a <= 2.19.0 push-model call (outargs.go).
+	dropAfterCall int64
+	// orphanBlocks records predecessorless/unreached blocks emitted after the
+	// main structured walk. Their labels are semantic control-flow boundaries for
+	// the compactor even when no goto references them; pruning those labels would
+	// let dead-code elimination delete the orphan body after an earlier return.
+	orphanBlocks map[int]bool
 
 	// spillSeq numbers the `_tN` temporaries setReg materializes for
 	// expressions too large to keep inlining. Shared with helper sub-emitters
@@ -169,25 +201,45 @@ func (e *emitter) drainSpills(indent int) {
 	}
 }
 
-// buildBlockTryIndex assigns each block to the try region covering its start.
+// buildBlockTryIndex assigns a block to a try region only when the recovered
+// region proves the WHOLE block is protected. PcDescriptor ranges are sparse
+// evidence at exact PCs; they are not permission to widen a region to a block.
+// A region that starts/ends mid-block is therefore left unstructured rather
+// than fabricating a source-level try around unprotected instructions.
 //
-// Regions are block-aligned by SnapTryRegionsToBlocks, so a block is either
-// wholly inside a region or wholly outside it; testing StartVA is enough. When
-// regions overlap (nested trys that descriptors could not separate) the
-// innermost — smallest — one wins, which matches Dart semantics where the
-// nearest enclosing handler runs first.
+// Block ends are known exactly only when there is a following basic-block start.
+// The final block has no instruction-width metadata in FuncIR (x86 is variable
+// width), so it is intentionally not wrapped unless future IR carries an exact
+// exclusive end. Under-claiming here is honest; over-claiming changes semantics.
 func (e *emitter) buildBlockTryIndex() {
 	if len(e.fir.TryRegions) == 0 {
 		return
 	}
 	e.blockTryRegion = make(map[int]int, len(e.fir.Blocks))
+	type blockExtent struct {
+		id         int
+		start, end uint64
+	}
+	extents := make([]blockExtent, 0, len(e.fir.Blocks))
 	for bi := range e.fir.Blocks {
-		va := e.fir.Blocks[bi].StartVA
+		if len(e.fir.Blocks[bi].Instrs) == 0 {
+			continue
+		}
+		extents = append(extents, blockExtent{id: bi, start: e.fir.Blocks[bi].StartVA})
+	}
+	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
+	for i := 0; i+1 < len(extents); i++ {
+		extents[i].end = extents[i+1].start
+	}
+	for _, b := range extents {
+		if b.end == 0 || b.end <= b.start {
+			continue
+		}
 		best := -1
 		var bestSize uint64
 		for ri := range e.fir.TryRegions {
 			r := &e.fir.TryRegions[ri]
-			if va < r.StartVA || va >= r.EndVA {
+			if b.start < r.StartVA || b.end > r.EndVA {
 				continue
 			}
 			size := r.EndVA - r.StartVA
@@ -196,7 +248,7 @@ func (e *emitter) buildBlockTryIndex() {
 			}
 		}
 		if best >= 0 {
-			e.blockTryRegion[bi] = best
+			e.blockTryRegion[b.id] = best
 		}
 	}
 }
@@ -257,6 +309,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		phiDeclared: make(map[int]bool),
 
 		emittedAnywhere: make(map[int]bool),
+		elidedSlowPaths: make(map[int]bool),
+		emittedEdges:    make(map[uint64]bool),
+		currentBlock:    -1,
 		spillSeq:        new(int),
 	}
 	// One sequence per function, shared with every clone and helper
@@ -281,9 +336,11 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// Pre-emission reaching-definition fixpoint: correct value state at each
 	// block entry regardless of the recursive walk's path (ssa.go). The same
 	// fixpoint's exit states drive loop-carried phi detection.
-	entryStates, exitStates := runFixpoint(fir, pool)
-	e.blockEntryState = entryStates
-	e.loopPhis = computeLoopPhis(fir, exitStates)
+	entryStates, exitStates, fixpointConverged := runFixpoint(fir, pool)
+	if fixpointConverged {
+		e.blockEntryState = entryStates
+		e.loopPhis = computeLoopPhis(fir, exitStates)
+	}
 	// Map blocks to the try region covering them, for per-block annotation.
 	e.buildBlockTryIndex()
 	// Allocate up front so sub-emitters for helper functions share the same
@@ -309,15 +366,15 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// aggregating cross-function call-site evidence -- NOT a positional
 	// arg0..argN-1 run necessarily starting at ArgRegs[0].
 	// When cross-site evidence is empty, we deduce arity from intraprocedural
-	// liveness (inferLiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
+	// liveness (LiveInArgIndices) rather than blindly declaring 8 fake arguments (D2).
 	argRegIdx := fir.ArgRegIndices
 	if len(argRegIdx) == 0 {
-		argRegIdx = inferLiveInArgIndices(fir)
+		argRegIdx = LiveInArgIndices(fir)
 	}
 	// Real per-parameter type names are only trusted when their count EXACTLY
 	// matches arity that was CONFIDENTLY resolved from cross-call-site evidence
 	// (fir.ArgRegIndices) -- NOT the intraprocedural-liveness heuristic
-	// (inferLiveInArgIndices) that fills argRegIdx when cross-site evidence is
+	// (LiveInArgIndices) that fills argRegIdx when cross-site evidence is
 	// empty. Trusting types on a heuristic arity (audit C1) leaks confident-wrong
 	// parameter types; the liveness count is good enough to stop declaring 8 fake
 	// args, but not to vouch for per-parameter TYPES. Gate stays on ArgRegIndices.
@@ -354,27 +411,21 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			e.state.setReg(fir.ArgRegs[ri], paramName)
 		}
 	}
-	// FP argument registers, matching the fixpoint's entry seed (ssa.go).
-	// Arity recovery is integer-register based, so there is no per-slot
-	// parameter name to use here; fpargN names the ABI slot, which is what
-	// is actually known.
-	for i, reg := range fir.FpuArgRegs {
-		e.state.setReg(reg, fmt.Sprintf("fparg%d", i))
-	}
+	// FPU argument registers are deliberately not seeded. Dart's register CC
+	// chooses GPR vs FPU from per-parameter Representation; a bank index alone
+	// does not identify the corresponding source parameter, and `fpargN` would be
+	// an undeclared pseudo-parameter in otherwise-Dart output. See ssa.go.
 	// Type-testing stubs are entered with the TypeTestABI registers already
 	// holding their operands; see seedTypeTestABI.
 	seedTypeTestABI(fir, e.state)
-	// P7: Pre-scan for async stub calls to set IsAsync before the signature
-	// is emitted. The signature needs `async` prefix, but IsAsync is set
-	// during block walking which happens after the signature. A pre-scan
-	// of call targets is the clean solution.
+	// Pre-scan direct suspendable-function stub calls before emitting the
+	// signature. The shared SDK classifier distinguishes async, async*, and
+	// sync*; the block walk repeats the same classification for indirect THR
+	// calls discovered later.
 	//
-	// Two sources of async detection:
-	// 1. Direct BL calls to symbols containing "init_async"/"return_async"
-	// 2. THR stub calls (indirect BLR) — detected during walking, but
-	//    those set IsAsync AFTER the signature is emitted. To handle both,
-	//    we record the signature line index and patch it post-walk.
-	if !fir.IsAsync && e.symbols != nil {
+	// Direct calls can therefore select the right modifier up front; indirect
+	// calls still use the post-walk signature patch below.
+	if e.symbols != nil {
 		for bi := range fir.Blocks {
 			for _, ins := range fir.Blocks[bi].Instrs {
 				if ins.Op != OpCall {
@@ -382,56 +433,9 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 				}
 				if va, ok := parseHexVA(ins.Target); ok {
 					if name, ok2 := e.symbols(va); ok2 && name != "" {
-						// P7: Async detection via call targets.
-						// Direct BL to async stubs (rare in AOT — usually inlined).
-						//
-						// This carried the same loose `Contains(name,
-						// "init_async")` that was flagged in call.go, and was
-						// left untouched when that one was changed -- so the
-						// "fix" hardened the path that never fires and left
-						// the one that does. Both now share asyncStubRole.
-						if sdk.IsAsyncStubName(name) {
-							fir.IsAsync = true
-							break
-						}
-						// P7: Async detection via SuspendState runtime helpers.
-						// Functions that call _SuspendState._await, _SuspendState._resume,
-						// or _SuspendState._yieldAsyncStar are async/async* functions.
-						if strings.Contains(name, "_SuspendState") &&
-							(strings.Contains(name, "_await") ||
-								strings.Contains(name, "_resume") ||
-								strings.Contains(name, "_yield") ||
-								strings.Contains(name, "_handleException") ||
-								strings.Contains(name, "_initAsync") ||
-								strings.Contains(name, "_returnAsync")) {
-							fir.IsAsync = true
-							break
-						}
-						// P7: Async detection via Future method calls.
-						if strings.Contains(name, "Future.delayed") ||
-							strings.Contains(name, "Future._asyncComplete") ||
-							strings.Contains(name, "Future._thenAwait") {
-							fir.IsAsync = true
-							break
-						}
-						// Generator detection: sync* and async*
-						if strings.Contains(name, "InitSyncStar") || strings.Contains(name, "_initSyncStar") {
-							fir.IsSyncStar = true
-						}
-						if strings.Contains(name, "YieldAsyncStar") || strings.Contains(name, "_yieldAsyncStar") ||
-							strings.Contains(name, "SuspendSyncStarAtStart") || strings.Contains(name, "_suspendSyncStarAtStart") ||
-							strings.Contains(name, "SuspendSyncStarAtYield") || strings.Contains(name, "_suspendSyncStarAtYield") {
-							if strings.Contains(name, "Async") {
-								fir.IsAsyncStar = true
-							} else {
-								fir.IsSyncStar = true
-							}
-						}
+						markSuspendableStubRole(fir, sdk.ClassifyStubRole(fir.DartVersion, name))
 					}
 				}
-			}
-			if fir.IsAsync {
-				break
 			}
 		}
 	}
@@ -440,7 +444,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// recovered: `dynamic foo<T>(...)`. These are type PARAMETERS from
 	// FunctionType.type_parameters, not type arguments -- see
 	// FuncIR.TypeParamNames.
-	sig := safeFuncName(fir.Name)
+	sig := strutil.SanitizeDartIdent(fir.Name)
 	if len(fir.TypeParamNames) > 0 {
 		sig += "<" + strings.Join(fir.TypeParamNames, ", ") + ">"
 	}
@@ -449,58 +453,62 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	if fir.EnclosingFunction != "" {
 		e.lines = append(e.lines, fmt.Sprintf("// closure declared in: %s", fir.EnclosingFunction))
 	}
-	// Most specific modifier wins. An async* body calls
-	// _SuspendState._yieldAsyncStar, which also matches the "_SuspendState +
-	// _yield" rule that sets IsAsync -- so testing IsAsync first labelled
-	// every async* function `async`. Same for sync*, whose Resume stub use
-	// matches the `_resume` rule.
-	asyncPrefix := ""
+	// Most specific modifier wins. async* intentionally also sets IsAsync for
+	// shared state-machine handling, while sync* remains a distinct non-async
+	// generator kind.
+	modifier := ""
 	if fir.IsAsyncStar {
-		asyncPrefix = "async* "
+		modifier = "async*"
 	} else if fir.IsSyncStar {
-		asyncPrefix = "sync* "
+		modifier = "sync*"
 	} else if fir.IsAsync {
-		asyncPrefix = "async "
+		modifier = "async"
 	}
 	sigLineIdx := len(e.lines) // P7: record signature line index for post-walk patching
-	// A1: Use LocalTypeHints for typed return when available, otherwise
-	// infer from function name heuristic.
+	// A declared return type is emitted only when enrichment recovered an exact
+	// serialized AbstractType. Function names do not constrain return types in
+	// Dart (an application is free to declare `int clear()` or `String isReady()`),
+	// so unresolved metadata must stay dynamic rather than being guessed from a
+	// familiar SDK method spelling.
 	returnType := "dynamic"
-	if fir.LocalTypeHints != nil {
-		if hint, ok := fir.LocalTypeHints["return"]; ok && hint != "" {
-			returnType = hint
-		}
-	}
-	if returnType == "dynamic" && fir.ReturnType != "" && fir.ReturnType != "?" {
+	if fir.ReturnType != "" && fir.ReturnType != "?" {
 		returnType = fir.ReturnType
 	}
-	if returnType == "dynamic" {
-		returnType = inferReturnTypeFromName(fir.Name)
+	baseSignature := fmt.Sprintf("%s %s(%s)", returnType, sig, strings.Join(argList, ", "))
+	modifierSuffix := ""
+	if modifier != "" {
+		modifierSuffix = " " + modifier
 	}
-	e.lines = append(e.lines, fmt.Sprintf("%s%s %s(%s) {", asyncPrefix, returnType, sig, strings.Join(argList, ", ")))
+	e.lines = append(e.lines, baseSignature+modifierSuffix+" {")
+	if !fixpointConverged {
+		e.lines = append(e.lines, "  // reaching-definition fixpoint did not converge; SSA enrichment disabled")
+		e.stats.UnresolvedCF++
+	}
 	e.state.setReg(fir.ThreadReg, sdk.SymTHR)
 	e.state.setReg(fir.PoolReg, sdk.SymPP)
-	// SPREG (ARM64 x15 / x86 rsp) and HEAP_BITS (ARM64 x28) are reserved
-	// registers with fixed meanings, verified against constants_arm64.h
-	// (SPREG=R15, HEAP_BITS=R28). Seeding them by name keeps computed
-	// stack addresses and write-barrier-mask math from leaking raw register
-	// tokens into the pseudocode.
+	// SPREG and the versioned ARM64 heap/GC pinned registers have fixed VM
+	// meanings. Seeding them by name keeps stack addresses, pointer
+	// decompression, and write-barrier math from leaking raw register tokens.
 	if fir.StackReg != "" {
 		e.state.setReg(fir.StackReg, sdk.SymSP)
 	}
 	if fir.HeapBitsReg != "" {
 		e.state.setReg(fir.HeapBitsReg, sdk.SymHeapBits)
 	}
+	if fir.HeapBaseReg != "" {
+		e.state.setReg(fir.HeapBaseReg, sdk.SymHeapBase)
+	}
+	if fir.BarrierMaskReg != "" {
+		e.state.setReg(fir.BarrierMaskReg, sdk.SymBarrierMask)
+	}
 
-	// P7: Async state machine annotation. Dart compiles async functions
-	// into state machines: the function body is split at each await point,
-	// and a switch on the SuspendState's state index selects which
-	// continuation to run on resume. The if/switch chain the compiler
-	// generates is visible in the CFG as branches on a loaded state index.
-	// Annotate it so the reader knows the if/else chain is the async
-	// state machine dispatch, not application logic.
+	// Async/async* is a source-level modifier recovered from suspendable runtime
+	// calls/metadata. Do not claim a numeric state-index dispatcher here:
+	// SuspendState stores a resume PC in supported AOT releases (2.18+), and
+	// ordinary application comparisons inside an async function are still just
+	// ordinary branches. Await sites are annotated only where the call lowering
+	// itself proves them.
 	if fir.IsAsync {
-		e.lines = append(e.lines, "  // async state machine: branches on SuspendState state index")
 		e.lines = append(e.lines, "  // await points are marked with `await` below")
 	}
 
@@ -600,18 +608,14 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 		modifier := ""
 		switch {
 		case fir.IsAsyncStar:
-			modifier = "async* "
+			modifier = "async*"
 		case fir.IsSyncStar:
-			modifier = "sync* "
+			modifier = "sync*"
 		case fir.IsAsync:
-			modifier = "async "
+			modifier = "async"
 		}
 		if modifier != "" {
-			line := e.lines[sigLineIdx]
-			if !strings.HasPrefix(line, "async ") && !strings.HasPrefix(line, "async* ") &&
-				!strings.HasPrefix(line, "sync* ") {
-				e.lines[sigLineIdx] = modifier + line
-			}
+			e.lines[sigLineIdx] = baseSignature + " " + modifier + " {"
 		}
 	}
 
@@ -620,7 +624,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	e.appendHelperFunctions() // appends sibling "_block_N()" top-level functions, if any
 
 	source := strings.Join(e.lines, "\n")
-	source = dropUnusedLabels(source)
+	source = dropUnusedLabels(source, e.orphanBlocks)
 	// Structural compaction, dataflow and expression cleanup all run inside
 	// compactLines, on the statement/expression trees, to a shared fixed
 	// point -- the expression passes used to be four separate regex sweeps
@@ -634,8 +638,6 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	source = hoistStringLiterals(source)
 	// Expression simplification (algebraic identities)
 	source = simplifyExpressions(source)
-	// Null-safety annotation (detect null-check patterns)
-	source = nullSafetyAnnotation(source)
 	// A1: Local variable type inference — consolidated pass that combines
 	// IR-level hints (from typetrack KnownClass) with heuristic text-based
 	// inference from ParamTypeNames. One split + one join instead of two.
@@ -643,15 +645,7 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 	// For-loop recovery, guard merging and null-check annotation now run
 	// inside compactLines, on the statement tree -- see stmt_loops.go, which
 	// records what each of them used to get wrong as a text pass.
-	// Arg renaming with type hints (from flutterdec naming.rs). Uses the
-	// types the signature actually displayed, so a name never implies a type
-	// the trust gate rejected.
-	source = applyArgRenaming(source, effectiveParamTypes)
 	source = applyNamingPass(source, fir)
-	// Item 17: IdentStats-based re-classification pass from flutterdec.
-	// Renames generic temps (t0, t1) to semantic names (result, flag,
-	// counter, accumulator) based on usage patterns.
-	source = compare.ApplyIdentReclassification(source)
 
 	visited := make(map[int]bool, len(e.visits))
 	for id, count := range e.visits {
@@ -659,12 +653,30 @@ func EmitPseudocode(fir *FuncIR, symbols SymbolLookup, pool PoolLookup) Artifact
 			visited[id] = true
 		}
 	}
+	// A deliberately elided runtime stub block (stack-overflow / write-barrier
+	// slow path) is accounted for, not lost.
+	for id, elided := range e.elidedSlowPaths {
+		if elided && e.visits[id] == 0 {
+			visited[id] = true
+		}
+	}
+	emittedEdges := make([]CFGEdge, 0, len(e.emittedEdges))
+	for key := range e.emittedEdges {
+		emittedEdges = append(emittedEdges, CFGEdge{From: int(uint32(key >> 32)), To: int(uint32(key))})
+	}
+	sort.Slice(emittedEdges, func(i, j int) bool {
+		if emittedEdges[i].From != emittedEdges[j].From {
+			return emittedEdges[i].From < emittedEdges[j].From
+		}
+		return emittedEdges[i].To < emittedEdges[j].To
+	})
 
 	return Artifact{
 		FunctionName:  fir.Name,
 		Source:        source,
 		Stats:         e.stats,
 		VisitedBlocks: visited,
+		EmittedEdges:  emittedEdges,
 	}
 }
 
@@ -680,7 +692,7 @@ var gotoRefRe = regexp.MustCompile(`goto block_(\d+);`)
 //   - a `goto block_N;` whose target block was never emitted -- it can be
 //     unreachable from the walk, or dropped by the step budget -- becomes a
 //     comment, rather than naming a label that does not exist.
-func dropUnusedLabels(source string) string {
+func dropUnusedLabels(source string, preserve map[int]bool) string {
 	lines := strings.Split(source, "\n")
 	used := map[string]bool{}
 	declared := map[string]bool{}
@@ -695,7 +707,8 @@ func dropUnusedLabels(source string) string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if m := stmt.LabelDeclRe.FindStringSubmatch(line); m != nil {
-			if !used[m[1]] {
+			id, _ := strconv.Atoi(m[1])
+			if !used[m[1]] && !preserve[id] {
 				continue
 			}
 			out = append(out, line)
@@ -711,12 +724,6 @@ func dropUnusedLabels(source string) string {
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
-}
-
-func safeFuncName(name string) string {
-	// P4-5: Use shared strutil.SanitizeIdentifier for consistent
-	// identifier sanitization across all packages.
-	return strutil.SanitizeIdentifier(name)
 }
 
 func indentStr(n int) string { return strings.Repeat("  ", n) }
@@ -736,11 +743,21 @@ func indentStr(n int) string { return strings.Repeat("  ", n) }
 // so that case is rejected explicitly -- otherwise this would trade a
 // missing return for `return v0;`, which is a leak, not a fix.
 func (e *emitter) returnValue(intVal string) string {
+	if e.fir.ReturnType == "void" {
+		return ""
+	}
 	if usableReturnValue(intVal) {
 		return intVal
 	}
 	if e.fir.FpuReturnReg != "" {
-		fp := e.state.lookupReg(e.fir.FpuReturnReg)
+		full, tracked := e.state.Regs[canonReg(e.fir.FpuReturnReg)]
+		if !tracked {
+			return ""
+		}
+		fp := readRegView(e.fir.FpuReturnReg, full)
+		// Entry no longer seeds FPU registers (nothing produces "fparg0"), so an
+		// untracked register is already handled above and any tracked value is a
+		// computed one.
 		if usableReturnValue(fp) && fp != e.fir.FpuReturnReg {
 			return fp
 		}

@@ -1,6 +1,10 @@
 package sdk
 
-import "strings"
+import (
+	"strings"
+
+	"aotopsy/internal/snapshot"
+)
 
 // ── Stub role classification ──────────────────────────────────────────
 //
@@ -23,17 +27,24 @@ import "strings"
 type StubRole int
 
 const (
-	StubRoleNone          StubRole = iota // not a recognized stub
-	StubRoleAsyncInit                     // enters an async function
-	StubRoleAsyncAwait                    // suspends at an await point
-	StubRoleAsyncReturn                   // completes an async function
-	StubRoleAllocate                      // allocation stub (AllocateObject, etc.)
-	StubRoleWriteBarrier                  // write barrier stub
-	StubRoleStackOverflow                 // stack overflow check stub
-	StubRoleTypeTest                      // type test / subtype check stub
-	StubRoleSafepoint                     // safepoint / deoptimization stub
-	StubRoleRuntime                       // call_to_runtime / other runtime stub
-	StubRoleError                         // null_error / range_error / etc.
+	StubRoleNone            StubRole = iota // not a recognized stub
+	StubRoleAsyncInit                       // enters an async function
+	StubRoleAsyncAwait                      // suspends at an await point
+	StubRoleAsyncReturn                     // completes an async function
+	StubRoleAsyncStarInit                   // enters an async* generator
+	StubRoleAsyncStarYield                  // suspends an async* generator at yield/yield*
+	StubRoleAsyncStarReturn                 // completes an async* generator
+	StubRoleSyncStarInit                    // enters a sync* generator
+	StubRoleSyncStarSuspend                 // suspends a sync* generator at start/yield
+	StubRoleSyncStarReturn                  // completes a legacy sync* generator
+	StubRoleSuspendResume                   // resumes a suspendable function; kind-neutral
+	StubRoleAllocate                        // allocation stub (AllocateObject, etc.)
+	StubRoleWriteBarrier                    // write barrier stub
+	StubRoleStackOverflow                   // stack overflow check stub
+	StubRoleTypeTest                        // type test / subtype check stub
+	StubRoleSafepoint                       // safepoint / deoptimization stub
+	StubRoleRuntime                         // call_to_runtime / other runtime stub
+	StubRoleError                           // null_error / range_error / etc.
 )
 
 // vmStubTerminators are how a Thread-table stub slot name ends. Requiring one
@@ -67,15 +78,30 @@ func HasSegmentPair(name, a, b string) bool {
 	return false
 }
 
-// ClassifyStubRole classifies a call target or THR stub name into its role.
-// Returns StubRoleNone for anything that is not a recognized VM stub.
-func ClassifyStubRole(name string) StubRole {
-	// Dart-side symbols first: these carry their own word boundary.
-	switch {
-	case strings.Contains(name, "InitAsync") || strings.Contains(name, "_initAsync"):
-		return StubRoleAsyncInit
-	case strings.Contains(name, "ReturnAsync") || strings.Contains(name, "_returnAsync"):
-		return StubRoleAsyncReturn
+// ClassifyStubRole classifies a call target or THR stub name into its role for
+// an exact Dart version. Suspendable-function roles are versioned because the
+// compact SuspendStubABI and its stub vocabulary do not exist before 2.18.0.
+func ClassifyStubRole(dartVersion, name string) StubRole {
+	if !isSupportedDartVersion(dartVersion) {
+		return StubRoleNone
+	}
+	// Dart-side helpers and named stubs use a finite SDK vocabulary, but their
+	// ownership is part of that identity. Bare PascalCase names are VM stubs only
+	// when unqualified; private Dart helpers belong specifically to
+	// _SuspendState. Stripping an arbitrary owner here makes Retry._await or
+	// Widget._resume indistinguishable from SDK machinery.
+	qualifier, leaf := splitQualifiedStubName(name)
+	trimmed := strings.TrimSuffix(leaf, "Stub")
+	allowSuspendable := false
+	if strings.HasPrefix(trimmed, "_") {
+		allowSuspendable = terminalQualifier(qualifier) == "_SuspendState"
+	} else {
+		allowSuspendable = qualifier == ""
+	}
+	if allowSuspendable {
+		if role, ok := classifySuspendableLeaf(dartVersion, trimmed); ok {
+			return role
+		}
 	}
 
 	// VM stub slots require a terminator.
@@ -84,30 +110,100 @@ func ClassifyStubRole(name string) StubRole {
 		return classifyMundanePattern(name)
 	}
 
-	// Async stubs: await checked first because suspend_state_await_entry_point
-	// contains neither init nor return.
-	switch {
-	case HasSegmentPair(name, "state", "await") || HasSegmentPair(name, "suspend", "await"):
-		return StubRoleAsyncAwait
-	case HasSegmentPair(name, "init", "async"):
-		return StubRoleAsyncInit
-	case HasSegmentPair(name, "return", "async"):
-		return StubRoleAsyncReturn
-	// Generators suspend through the same machinery. Keying only on
-	// "async" left suspend_state_init_sync_star_entry_point and
-	// suspend_state_suspend_sync_star_at_start_entry_point classified as
-	// unrecognised stubs, which reported them as a gap in our tables when
-	// they are in fact the strongest evidence a function is a generator.
-	case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
-		return StubRoleAsyncInit
-	case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "state", "suspend"):
-		return StubRoleAsyncAwait
-	case HasSegmentPair(name, "return", "sync"), HasSegmentPair(name, "yield", "async"):
-		return StubRoleAsyncReturn
+	if isSupportedDartVersion(dartVersion) && snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		// Thread-slot spellings. These names come from the exact Thread table, so
+		// broad segment matching is acceptable only after the version proves the
+		// SuspendStubABI exists.
+		switch {
+		case HasSegmentPair(name, "state", "await") || HasSegmentPair(name, "suspend", "await"):
+			return StubRoleAsyncAwait
+		case HasSegmentPair(name, "yield", "async"):
+			return StubRoleAsyncStarYield
+		case HasSegmentPair(name, "init", "async") && strings.Contains(name, "async_star"):
+			return StubRoleAsyncStarInit
+		case HasSegmentPair(name, "return", "async") && strings.Contains(name, "async_star"):
+			return StubRoleAsyncStarReturn
+		case HasSegmentPair(name, "init", "async"):
+			return StubRoleAsyncInit
+		case HasSegmentPair(name, "return", "async"):
+			return StubRoleAsyncReturn
+		case HasSegmentPair(name, "init", "sync"), HasSegmentPair(name, "init", "syncstar"):
+			return StubRoleSyncStarInit
+		case HasSegmentPair(name, "suspend", "sync"), HasSegmentPair(name, "yield", "sync"):
+			return StubRoleSyncStarSuspend
+		case HasSegmentPair(name, "return", "sync"):
+			return StubRoleSyncStarReturn
+		case name == "resume_stub":
+			return StubRoleSuspendResume
+		}
 	}
 
 	// Other VM stub roles.
 	return classifyMundanePattern(name)
+}
+
+func splitQualifiedStubName(name string) (qualifier, leaf string) {
+	lastDot := strings.LastIndexByte(name, '.')
+	lastColon := strings.LastIndex(name, "::")
+	switch {
+	case lastColon >= 0 && lastColon+1 > lastDot:
+		return name[:lastColon], name[lastColon+2:]
+	case lastDot >= 0:
+		return name[:lastDot], name[lastDot+1:]
+	default:
+		return "", name
+	}
+}
+
+func terminalQualifier(qualifier string) string {
+	if i := strings.LastIndex(qualifier, "::"); i >= 0 {
+		qualifier = qualifier[i+2:]
+	}
+	if i := strings.LastIndexByte(qualifier, '.'); i >= 0 {
+		qualifier = qualifier[i+1:]
+	}
+	return qualifier
+}
+
+func classifySuspendableLeaf(dartVersion, leaf string) (StubRole, bool) {
+	if !isSupportedDartVersion(dartVersion) || !snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		return StubRoleNone, false
+	}
+	switch leaf {
+	case "InitAsync", "_initAsync":
+		return StubRoleAsyncInit, true
+	case "Await", "_await":
+		return StubRoleAsyncAwait, true
+	case "AwaitWithTypeCheck", "_awaitWithTypeCheck":
+		if snapshot.VersionAtLeast(dartVersion, "3.0.5") {
+			return StubRoleAsyncAwait, true
+		}
+	case "ReturnAsync", "ReturnAsyncNotFuture", "_returnAsync", "_returnAsyncNotFuture":
+		return StubRoleAsyncReturn, true
+	case "InitAsyncStar", "_initAsyncStar":
+		return StubRoleAsyncStarInit, true
+	case "YieldAsyncStar", "_yieldAsyncStar":
+		return StubRoleAsyncStarYield, true
+	case "ReturnAsyncStar", "_returnAsyncStar":
+		return StubRoleAsyncStarReturn, true
+	case "InitSyncStar", "_initSyncStar":
+		return StubRoleSyncStarInit, true
+	case "YieldSyncStar", "_yieldSyncStar":
+		if dartVersion == "2.18.0" {
+			return StubRoleSyncStarSuspend, true
+		}
+	case "SuspendSyncStarAtStart", "SuspendSyncStarAtYield", "_suspendSyncStarAtStart", "_suspendSyncStarAtYield":
+		if snapshot.VersionAtLeast(dartVersion, "2.19.0") {
+			return StubRoleSyncStarSuspend, true
+		}
+	case "ReturnSyncStar", "_returnSyncStar":
+		if dartVersion == "2.18.0" {
+			return StubRoleSyncStarReturn, true
+		}
+	case "Resume", "_resume":
+		return StubRoleSuspendResume, true
+	}
+	return StubRoleNone, false
 }
 
 // classifyMundanePattern classifies names by the same patterns signal's
@@ -172,21 +268,30 @@ func classifyMundanePattern(name string) StubRole {
 }
 
 // IsAsyncStubName reports whether a call to this name proves the caller is an
-// async function, regardless of which of the three async roles it plays.
-func IsAsyncStubName(name string) bool {
-	role := ClassifyStubRole(name)
-	return role == StubRoleAsyncInit || role == StubRoleAsyncAwait || role == StubRoleAsyncReturn
+// async or async* function. sync* and the kind-neutral Resume stub deliberately
+// return false: both use the same suspension machinery but are not async Dart
+// functions.
+func IsAsyncStubName(dartVersion, name string) bool {
+	role := ClassifyStubRole(dartVersion, name)
+	switch role {
+	case StubRoleAsyncInit, StubRoleAsyncAwait, StubRoleAsyncReturn,
+		StubRoleAsyncStarInit, StubRoleAsyncStarYield, StubRoleAsyncStarReturn:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsMundaneStub reports whether a stub name represents compiler bookkeeping
 // (allocation, write barrier, stack overflow, type test, deoptimization, etc.)
 // that carries no source-level meaning. This is the shared replacement for
 // signal.IsMundaneTHR.
-func IsMundaneStub(name string) bool {
-	role := ClassifyStubRole(name)
+func IsMundaneStub(dartVersion, name string) bool {
+	role := ClassifyStubRole(dartVersion, name)
 	switch role {
 	case StubRoleAllocate, StubRoleWriteBarrier, StubRoleStackOverflow,
-		StubRoleTypeTest, StubRoleSafepoint, StubRoleRuntime, StubRoleError:
+		StubRoleTypeTest, StubRoleSafepoint, StubRoleRuntime, StubRoleError,
+		StubRoleSuspendResume:
 		return true
 	default:
 		return false

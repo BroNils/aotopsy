@@ -8,18 +8,19 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-func sanitizeTailCallName(target string) string {
-	return safeFuncName(target)
-}
-
 func (e *emitter) emitLoadPool(ins Instr) {
 	if ins.Target == "" {
 		return
 	}
 	dst := strings.ToLower(ins.Target)
+	// x64 loads the CallSiteData with its own pool load into RBX; arm64 uses one
+	// LDP (applyPairedPoolLoad).
+	if e.fir.ICDataReg == sdk.X86ICDataStr {
+		e.noteCallSiteLoad(dst, ins.PoolIndex)
+	}
 	if e.pool != nil && ins.PoolIndex >= 0 {
 		if disp, ok := e.pool(ins.PoolIndex); ok {
-			e.state.setReg(dst, disp)
+			e.state.setReg(dst, dartPoolDisplay(disp))
 			return
 		}
 	}
@@ -84,7 +85,10 @@ func (e *emitter) appendHelperFunctions() {
 			pinnedPhi:       make(map[string]string),
 			phiDeclared:     make(map[int]bool),
 			// Shared, unlike visits: see emitter.emittedAnywhere.
-			emittedAnywhere: e.emittedAnywhere}
+			emittedAnywhere: e.emittedAnywhere,
+			elidedSlowPaths: e.elidedSlowPaths,
+			emittedEdges:    e.emittedEdges,
+			currentBlock:    -1}
 		sub.state.Pool = e.pool
 		// Pass live register state from extraction point to helper.
 		// This gives the helper knowledge of register aliases (e.g. arg0,
@@ -287,198 +291,6 @@ func invertCondition(cond string) string {
 	}
 	// Can't flip — wrap with !()
 	return "!(" + cond + ")"
-}
-
-// inferReturnTypeFromName infers a Dart function's return type from its name
-// using Dart naming conventions. Returns "dynamic" when unknown.
-//
-// Conventions:
-//   - "get:foo" → dynamic (getter, type depends on field — can't infer from name alone)
-//   - "set:foo" → void (setter)
-//   - "is_foo" / "isFoo" → bool (type check / predicate)
-//   - "toFoo" / "to_Foo" → dynamic (conversion, type depends)
-//   - "operator ==" → bool
-//   - "operator <" → bool
-//   - "operator +" → same as receiver (dynamic)
-//   - "hashCode" → int
-//   - "toString" → String
-//   - "noSuchMethod" → dynamic
-//   - "runtimeType" → Type
-//   - "length" → int
-//   - "isEmpty" → bool
-//   - "isNotEmpty" → bool
-//   - "contains" → bool
-//   - "startsWith" → bool
-//   - "endsWith" → bool
-//   - "indexOf" → int
-//   - "lastIndexOf" → int
-//   - "compareTo" → int
-//   - "forEach" → void
-//   - "add" → void (List.add)
-//   - "remove" → bool (List.remove) or void (Set.remove)
-//   - "clear" → void
-//   - "sort" → void
-//   - "map" → Iterable
-//   - "where" → Iterable
-//   - "filter" → Iterable
-//   - "fold" → dynamic
-//   - "reduce" → dynamic
-//   - "any" → bool
-//   - "every" → bool
-//   - "firstWhere" → dynamic
-//   - "lastWhere" → dynamic
-//   - "singleWhere" → dynamic
-//   - "elementAt" → dynamic
-//   - "getRange" → Iterable
-//   - "sublist" → List
-//   - "join" → String
-//   - "toString" → String
-//   - "hashCode" → int
-func inferReturnTypeFromName(name string) string {
-	// Strip library/class prefix for pattern matching
-	short := name
-	if idx := strings.LastIndex(short, "."); idx >= 0 {
-		short = short[idx+1:]
-	}
-	// Strip @NNNNNN suffix (library hash)
-	if idx := strings.Index(short, "@"); idx >= 0 {
-		short = short[:idx]
-	}
-	// Strip _NNNN suffix (function hash)
-	if idx := strings.LastIndex(short, "_"); idx >= 0 {
-		suffix := short[idx+1:]
-		if isAllDigits(suffix) && len(suffix) >= 4 {
-			short = short[:idx]
-		}
-	}
-
-	// Check specific method names
-	switch short {
-	case "set", "set:":
-		return "void"
-	case "toString", "toStringDeep", "toStringShallow":
-		return "String"
-	case "hashCode", "length", "offset", "index", "count", "size",
-		"numberOfArguments", "parameterCount", "arity",
-		"microsecondsSinceEpoch", "millisecondsSinceEpoch":
-		return "int"
-	case "isEmpty", "isNotEmpty", "isFinite", "isInfinite", "isNaN",
-		"isEven", "isOdd", "isLowerCase", "isUpperCase",
-		"contains", "startsWith", "endsWith", "matches",
-		"any", "every", "equals", "isEqual",
-		"hasNext", "hasMore", "isRegistered", "isAttached",
-		"isMounted", "isCurrent", "isDisposed", "isListening":
-		return "bool"
-	case "forEach", "add", "clear", "sort", "removeWhere",
-		"retainWhere", "insertAll", "setAll", "fillRange",
-		"setRange", "writeTo", "writeAsString":
-		return "void"
-	case "map", "where", "filter", "expand", "skip", "take",
-		"getRange", "followedBy", "distinct", "reversed":
-		return "Iterable"
-	case "sublist", "toList":
-		return "List"
-	case "join":
-		return "String"
-	case "runtimeType":
-		return "Type"
-	case "first", "last", "single":
-		return "dynamic" // element type, can't infer from name
-	case "firstWhere", "lastWhere", "singleWhere",
-		"elementAt", "fold", "reduce", "min", "max":
-		return "dynamic"
-	case "indexOf", "lastIndexOf", "compareTo":
-		return "int"
-	case "keys":
-		return "Iterable"
-	case "values":
-		return "Iterable"
-	case "entries":
-		return "Iterable"
-	case "putIfAbsent":
-		return "dynamic"
-	case "containsKey", "containsValue":
-		return "bool"
-	}
-
-	// Check prefixes
-	if strings.HasPrefix(short, "get:") {
-		return "dynamic" // getter — type depends on field
-	}
-	if strings.HasPrefix(short, "set:") {
-		return "void"
-	}
-	if strings.HasPrefix(short, "is") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
-		return "bool"
-	}
-	if strings.HasPrefix(short, "has") && len(short) > 3 && short[3] >= 'A' && short[3] <= 'Z' {
-		return "bool"
-	}
-	if strings.HasPrefix(short, "can") && len(short) > 3 && short[3] >= 'A' && short[3] <= 'Z' {
-		return "bool"
-	}
-	if strings.HasPrefix(short, "to") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
-		// toList, toSet, toMap, etc.
-		suffix := short[2:]
-		switch suffix {
-		case "String":
-			return "String"
-		case "List":
-			return "List"
-		case "Set":
-			return "Set"
-		case "Map":
-			return "Map"
-		case "Int":
-			return "int"
-		case "Double":
-			return "double"
-		case "Bool":
-			return "bool"
-		}
-		return "dynamic"
-	}
-	if strings.HasPrefix(short, "as") && len(short) > 2 && short[2] >= 'A' && short[2] <= 'Z' {
-		// asString, asInt, etc.
-		suffix := short[2:]
-		switch suffix {
-		case "String":
-			return "String"
-		case "Int":
-			return "int"
-		case "Double":
-			return "double"
-		case "Bool":
-			return "bool"
-		case "List":
-			return "List"
-		case "Map":
-			return "Map"
-		case "Set":
-			return "Set"
-		}
-		return "dynamic"
-	}
-	if strings.HasPrefix(short, "operator ") {
-		op := strings.TrimSpace(strings.TrimPrefix(short, "operator "))
-		switch op {
-		case "==", "!=", "<", "<=", ">", ">=":
-			return "bool"
-		case "[]", "[]=":
-			return "dynamic"
-		case "~/", "%":
-			return "int"
-		case "&&", "||":
-			return "bool"
-		case "unary-":
-			return "dynamic" // same type as receiver
-		case "~":
-			return "int"
-		}
-		return "dynamic"
-	}
-
-	return "dynamic"
 }
 
 func isAllDigits(s string) bool {

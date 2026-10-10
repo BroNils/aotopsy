@@ -17,7 +17,21 @@ const (
 	ProvObject     = "object_field"
 	ProvDirect     = "direct"
 	ProvUnresolved = "unresolved"
+	ProvRuntime    = "runtime_observed"
 )
+
+func isSupportedCallKind(kind string) bool {
+	switch kind {
+	case "bl", "call", "blr", "call_indirect":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDirectCallKind(kind string) bool {
+	return kind == "bl" || kind == "call"
+}
 
 // ClassifyEdgeProv returns the provenance category for a call edge.
 func ClassifyEdgeProv(e disasm.CallEdgeRecord) string {
@@ -58,6 +72,8 @@ func edgeColor(prov string, t Theme) string {
 		return t.EdgeDirect
 	case ProvUnresolved:
 		return t.EdgeUnresolved
+	case ProvRuntime:
+		return t.EdgeRuntime
 	default:
 		return t.EdgeDirect
 	}
@@ -70,111 +86,180 @@ func edgeStyle(prov string) string {
 		return "dotted"
 	case ProvObject:
 		return "dotted"
-	case ProvUnresolved:
+	case ProvUnresolved, ProvRuntime:
 		return "dashed"
 	default:
 		return "solid"
 	}
 }
 
-// CallgraphDOT renders a callgraph from functions and call edges as DOT.
-// Only edges between known functions are rendered (internal edges).
-// External targets (stubs, runtime) are shown as plaintext nodes.
-// maxNodes limits the number of function nodes rendered (0 = all).
+// CallgraphDOT renders static call relations plus explicitly separate runtime
+// observations. Unknown indirect sites and truncated candidate sets are shown as
+// per-call-site evidence nodes; they are never collapsed into a fake function.
+// maxNodes limits known function nodes only (0 = all).
 func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, title string, t Theme, maxNodes int) string {
-	// Build set of known function names.
-	funcSet := make(map[string]bool, len(funcs))
+	origFuncSet := make(map[string]bool, len(funcs))
+	funcByName := make(map[string]disasm.FuncRecord, len(funcs))
 	for _, f := range funcs {
-		funcSet[f.Name] = true
+		origFuncSet[f.Name] = true
+		funcByName[f.Name] = f
 	}
 
-	// Deduplicate edges: caller→callee→prov.
 	type edgeKey struct {
-		from, to, prov string
+		from, to, prov, label string
 	}
 	type edgeVal struct {
 		count int
 	}
 	dedupEdges := make(map[edgeKey]*edgeVal)
+	nodeLabels := make(map[string]string)
+	seenSiteRelations := make(map[string]bool)
+	addEdge := func(from, to, prov, label, nodeLabel string, count int) {
+		if from == "" || to == "" || count <= 0 {
+			return
+		}
+		if nodeLabel != "" {
+			nodeLabels[to] = nodeLabel
+		}
+		k := edgeKey{from: from, to: to, prov: prov, label: label}
+		if v := dedupEdges[k]; v != nil {
+			v.count += count
+		} else {
+			dedupEdges[k] = &edgeVal{count: count}
+		}
+	}
+	addSiteEdge := func(siteKey, from, to, prov, label, nodeLabel string, count int) {
+		relationKey := siteKey + "\x00" + to + "\x00" + prov + "\x00" + label
+		if seenSiteRelations[relationKey] {
+			return
+		}
+		seenSiteRelations[relationKey] = true
+		addEdge(from, to, prov, label, nodeLabel, count)
+	}
 
-	for _, e := range edges {
+	for edgeIndex, e := range edges {
+		if !origFuncSet[e.FromFunc] {
+			continue
+		}
+		siteKey := callSitePopulationKey(e, edgeIndex)
+		if !isSupportedCallKind(e.Kind) {
+			key := callSiteKey(e, "unsupported-kind")
+			addSiteEdge(siteKey, e.FromFunc, key, ProvUnresolved, "unsupported call kind", unsupportedCallKindLabel(e), 1)
+			continue
+		}
+		sem := inspectCallSite(e)
 		prov := ClassifyEdgeProv(e)
-		targets := e.ResolvedTargets()
-		if len(targets) == 0 {
-			if e.Kind == "blr" || e.Kind == "call_indirect" {
-				targets = []string{"unresolved_blr"}
-			} else {
+		for _, target := range sem.StaticTargets {
+			addSiteEdge(siteKey, e.FromFunc, target, prov, "", "", 1)
+		}
+		if sem.RawTarget != "" {
+			key := callSiteKey(e, "direct-address")
+			addSiteEdge(siteKey, e.FromFunc, key, ProvDirect, "address only", directAddressLabel(e, sem.RawTarget), 1)
+		}
+		if sem.Unresolved {
+			key := callSiteKey(e, "unresolved")
+			addSiteEdge(siteKey, e.FromFunc, key, ProvUnresolved, "unresolved", unresolvedCallSiteLabel(e), 1)
+		}
+		if omitted := sem.omittedCandidates(); omitted > 0 {
+			key := callSiteKey(e, "incomplete")
+			addSiteEdge(siteKey, e.FromFunc, key, ProvUnresolved, "candidate set incomplete", incompleteCallSiteLabel(e, omitted), 1)
+		}
+		if sem.candidateCountUnknown() {
+			key := callSiteKey(e, "candidate-count-unknown")
+			addSiteEdge(siteKey, e.FromFunc, key, ProvUnresolved, "candidate completeness unknown", unknownCandidateCountLabel(e), 1)
+		}
+		for _, observed := range sem.RuntimeTargets {
+			if observed.Target == "" {
 				continue
 			}
+			count := observed.Count
+			if count <= 0 {
+				count = 1
+			}
+			label := "runtime"
+			if sem.RuntimeAgreement != "" {
+				label += " " + string(sem.RuntimeAgreement)
+			}
+			addSiteEdge(siteKey, e.FromFunc, observed.Target, ProvRuntime, label, "", count)
 		}
-		for _, target := range targets {
-			k := edgeKey{e.FromFunc, target, prov}
-			if v, ok := dedupEdges[k]; ok {
-				v.count++
+	}
+
+	// Rank participating known functions by relation involvement, with a lexical
+	// tie-breaker. maxNodes therefore has deterministic semantics independent of
+	// functions.jsonl or edge record ordering.
+	type involvementCount struct{ static, runtime int }
+	involvement := make(map[string]involvementCount)
+	for k, v := range dedupEdges {
+		add := func(name string) {
+			if !origFuncSet[name] {
+				return
+			}
+			count := involvement[name]
+			if k.prov == ProvRuntime {
+				count.runtime++
 			} else {
-				dedupEdges[k] = &edgeVal{count: 1}
+				count.static += v.count
 			}
+			involvement[name] = count
 		}
+		add(k.from)
+		add(k.to)
 	}
-
-	// Identify referenced nodes (callers + callees).
-	refNodes := make(map[string]bool)
-	for k := range dedupEdges {
-		refNodes[k.from] = true
-		refNodes[k.to] = true
+	type rankedFunc struct {
+		name    string
+		static  int
+		runtime int
 	}
-
-	// Filter to functions that participate in edges.
+	ranked := make([]rankedFunc, 0, len(involvement))
+	for name, count := range involvement {
+		ranked = append(ranked, rankedFunc{name: name, static: count.static, runtime: count.runtime})
+	}
+	slices.SortFunc(ranked, func(a, b rankedFunc) int {
+		if c := cmp.Compare(b.static, a.static); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(b.runtime, a.runtime); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+	omittedKnownFunctions := 0
+	if maxNodes > 0 && len(ranked) > maxNodes {
+		omittedKnownFunctions = len(ranked) - maxNodes
+		ranked = ranked[:maxNodes]
+	}
+	funcSet := make(map[string]bool, len(ranked))
 	var renderFuncs []disasm.FuncRecord
-	for _, f := range funcs {
-		if refNodes[f.Name] {
-			renderFuncs = append(renderFuncs, f)
-		}
-	}
-	if maxNodes > 0 && len(renderFuncs) > maxNodes {
-		renderFuncs = renderFuncs[:maxNodes]
-		// Rebuild funcSet to only include rendered functions.
-		funcSet = make(map[string]bool, len(renderFuncs))
-		for _, f := range renderFuncs {
-			funcSet[f.Name] = true
-		}
-		// Filter dedupEdges to only edges where BOTH endpoints are in
-		// funcSet OR the callee is a genuinely external node (not a
-		// truncated function). Without this, truncated functions appear
-		// as undeclared external nodes in the DOT output, which Graphviz
-		// auto-creates with default styling — the maxNodes limit is
-		// effectively bypassed for callees. (G-013)
-		//
-		// A callee is "genuinely external" if it's NOT in the original
-		// funcSet (i.e., not a known function at all, just a stub/runtime
-		// target). Truncated functions ARE in the original funcSet, so
-		// they're distinguishable from real external nodes.
-		origFuncSet := make(map[string]bool, len(funcs))
-		for _, f := range funcs {
-			origFuncSet[f.Name] = true
-		}
-		filteredEdges := make(map[edgeKey]*edgeVal, len(dedupEdges))
-		for k, v := range dedupEdges {
-			if !funcSet[k.from] {
-				continue // edge from non-rendered function — skip
-			}
-			if !funcSet[k.to] && origFuncSet[k.to] {
-				continue // callee is a truncated function — skip edge to avoid orphan
-			}
-			filteredEdges[k] = v
-		}
-		dedupEdges = filteredEdges
+	for _, rf := range ranked {
+		funcSet[rf.name] = true
+		renderFuncs = append(renderFuncs, funcByName[rf.name])
 	}
 
-	// Collect external nodes (targets not in funcSet, reachable from rendered funcs).
-	externalNodes := make(map[string]bool)
-	for k := range dedupEdges {
+	filteredEdges := make(map[edgeKey]*edgeVal, len(dedupEdges))
+	for k, v := range dedupEdges {
 		if !funcSet[k.from] {
-			continue // edge from non-rendered function — skip entirely
+			continue
 		}
-		if !funcSet[k.to] {
-			externalNodes[k.to] = true
+		if origFuncSet[k.to] && !funcSet[k.to] {
+			continue
 		}
+		filteredEdges[k] = v
+	}
+	dedupEdges = filteredEdges
+
+	// External/evidence nodes are named targets absent from functions.jsonl or
+	// per-call-site marker nodes. Keep their display label separate from the DOT
+	// identity so recovered names cannot collide with marker identities.
+	externalNodes := make(map[string]string)
+	for k := range dedupEdges {
+		if funcSet[k.to] {
+			continue
+		}
+		label := nodeLabels[k.to]
+		if label == "" {
+			label = k.to
+		}
+		externalNodes[k.to] = label
 	}
 
 	// Group rendered functions by owner for clustering.
@@ -266,7 +351,7 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 	slices.Sort(extNames)
 	for _, name := range extNames {
 		id := dotID(name)
-		label := truncLabel(name, 50)
+		label := truncLabel(externalNodes[name], 70)
 		fmt.Fprintf(&b, "  %s [label=%q, shape=plaintext, style=\"\", fillcolor=none, fontcolor=%q, fontsize=8];\n",
 			id, label, t.ExternalText)
 	}
@@ -288,12 +373,15 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 		if c := cmp.Compare(a.k.to, b.k.to); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.k.prov, b.k.prov)
+		if c := cmp.Compare(a.k.prov, b.k.prov); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.k.label, b.k.label)
 	})
 
 	for _, e := range sortedEdges {
 		k, v := e.k, e.v
-		if !funcSet[k.from] && !externalNodes[k.from] {
+		if !funcSet[k.from] {
 			continue
 		}
 		fromID := dotID(k.from)
@@ -302,13 +390,21 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 		style := edgeStyle(k.prov)
 
 		attrs := fmt.Sprintf("color=%q, style=%q", color, style)
+		if k.label != "" {
+			attrs += fmt.Sprintf(", label=%q, fontsize=7, fontcolor=%q", truncLabel(k.label, 36), color)
+		}
 		if v.count > 1 {
 			attrs += fmt.Sprintf(", penwidth=%.1f", 0.5+float64(v.count)*0.1)
-			if v.count > 2 {
+			if v.count > 2 && k.label == "" {
 				attrs += fmt.Sprintf(", label=<<font point-size=\"7\" color=\"%s\">%dx</font>>", color, v.count)
 			}
 		}
 		fmt.Fprintf(&b, "  %s -> %s [%s];\n", fromID, toID, attrs)
+	}
+	if omittedKnownFunctions > 0 {
+		label := fmt.Sprintf("display truncated by maxNodes: %d participating known function(s) and their incident relation(s) omitted", omittedKnownFunctions)
+		fmt.Fprintf(&b, "  %s [label=%q, shape=note, style=\"filled\", fillcolor=%q, color=%q, fontcolor=%q, fontsize=8];\n",
+			dotID("\x00callgraph-display-truncation"), label, t.StubFill, t.EdgeUnresolved, t.TextColor)
 	}
 
 	b.WriteString("}\n")
@@ -317,16 +413,25 @@ func CallgraphDOT(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord, titl
 
 // CallgraphStats computes summary statistics from edges.
 type CallgraphStats struct {
-	TotalFunctions int
-	TotalEdges     int
-	BLEdges        int
-	BLREdges       int
-	BLRAnnotated   int
-	UniqueOwners   int
-	ProvCounts     map[string]int
-	TopCallers     []NameCount // sorted desc
-	TopCallees     []NameCount // sorted desc
-	TopOwners      []NameCount // sorted desc by method count
+	TotalFunctions             int
+	TotalCallSites             int
+	DirectCallSites            int
+	IndirectCallSites          int
+	UnsupportedCallSites       int
+	IndirectStaticResolved     int
+	IndirectUnresolved         int
+	PolymorphicSites           int
+	IncompletePolymorphicSites int
+	UnknownCandidateCountSites int
+	StaticTargetRelations      int
+	RuntimeObservedSites       int
+	RuntimeTargetRelations     int
+	UniqueOwners               int
+	ProvCounts                 map[string]int
+	TopCallers                 []NameCount // call-site count, sorted desc
+	TopCallees                 []NameCount // static relation count, sorted desc
+	TopRuntimeCallees          []NameCount // runtime observation count, sorted desc
+	TopOwners                  []NameCount // sorted desc by method count
 }
 
 // NameCount pairs a name with a count.
@@ -338,43 +443,111 @@ type NameCount struct {
 // ComputeStats computes callgraph statistics from JSONL data.
 func ComputeStats(funcs []disasm.FuncRecord, edges []disasm.CallEdgeRecord) CallgraphStats {
 	stats := CallgraphStats{
-		TotalFunctions: len(funcs),
-		TotalEdges:     len(edges),
-		ProvCounts:     make(map[string]int),
+		ProvCounts: make(map[string]int),
 	}
+	funcSet := make(map[string]bool, len(funcs))
+	ownerByFunc := make(map[string]string, len(funcs))
+	for _, f := range funcs {
+		funcSet[f.Name] = true
+		if _, seen := ownerByFunc[f.Name]; !seen {
+			ownerByFunc[f.Name] = f.Owner
+		}
+	}
+	stats.TotalFunctions = len(funcSet)
 
 	callerCount := make(map[string]int)
 	calleeCount := make(map[string]int)
+	runtimeCalleeCount := make(map[string]int)
+	seenSites := make(map[string]bool)
+	seenStaticRelations := make(map[string]bool)
+	seenRuntimeRelations := make(map[string]bool)
+	seenRuntimeSites := make(map[string]bool)
 
-	for _, e := range edges {
-		prov := ClassifyEdgeProv(e)
-		stats.ProvCounts[prov]++
-
-		callerCount[e.FromFunc]++
-		if e.Kind == "bl" || e.Kind == "call" {
-			stats.BLEdges++
-			for _, t := range e.ResolvedTargets() {
-				calleeCount[t]++
+	for edgeIndex, e := range edges {
+		if !funcSet[e.FromFunc] {
+			continue
+		}
+		siteKey := callSitePopulationKey(e, edgeIndex)
+		if !isSupportedCallKind(e.Kind) {
+			if !seenSites[siteKey] {
+				seenSites[siteKey] = true
+				stats.TotalCallSites++
+				stats.UnsupportedCallSites++
+				stats.ProvCounts[ProvUnresolved]++
+				callerCount[e.FromFunc]++
 			}
-		} else {
-			stats.BLREdges++
-			if len(e.ResolvedTargets()) > 0 {
-				stats.BLRAnnotated++
+			continue
+		}
+		sem := inspectCallSite(e)
+		if !seenSites[siteKey] {
+			seenSites[siteKey] = true
+			stats.TotalCallSites++
+			stats.ProvCounts[ClassifyEdgeProv(e)]++
+			callerCount[e.FromFunc]++
+			if isDirectCallKind(e.Kind) {
+				stats.DirectCallSites++
+			} else {
+				stats.IndirectCallSites++
+				if len(sem.StaticTargets) > 0 {
+					stats.IndirectStaticResolved++
+				} else {
+					stats.IndirectUnresolved++
+				}
 			}
+			if len(e.Targets) > 0 || sem.CandidateCount > 1 {
+				stats.PolymorphicSites++
+				if sem.omittedCandidates() > 0 {
+					stats.IncompletePolymorphicSites++
+				}
+				if sem.candidateCountUnknown() {
+					stats.UnknownCandidateCountSites++
+				}
+			}
+		}
+		for _, target := range sem.StaticTargets {
+			relationKey := siteKey + "\x00" + target
+			if !seenStaticRelations[relationKey] {
+				seenStaticRelations[relationKey] = true
+				stats.StaticTargetRelations++
+				calleeCount[target]++
+			}
+		}
+		if e.Runtime != nil && (e.Runtime.Observations > 0 || len(sem.RuntimeTargets) > 0) {
+			if !seenRuntimeSites[siteKey] {
+				seenRuntimeSites[siteKey] = true
+				stats.RuntimeObservedSites++
+			}
+		}
+		for _, observed := range sem.RuntimeTargets {
+			if observed.Target == "" {
+				continue
+			}
+			relationKey := siteKey + "\x00" + observed.Target
+			if seenRuntimeRelations[relationKey] {
+				continue
+			}
+			seenRuntimeRelations[relationKey] = true
+			stats.RuntimeTargetRelations++
+			count := observed.Count
+			if count <= 0 {
+				count = 1
+			}
+			runtimeCalleeCount[observed.Target] += count
 		}
 	}
 
 	// Count methods per owner class.
 	ownerCount := make(map[string]int)
-	for _, f := range funcs {
-		if f.Owner != "" {
-			ownerCount[f.Owner]++
+	for _, owner := range ownerByFunc {
+		if owner != "" {
+			ownerCount[owner]++
 		}
 	}
 	stats.UniqueOwners = len(ownerCount)
 
 	stats.TopCallers = topNMap(callerCount, 20)
 	stats.TopCallees = topNMap(calleeCount, 20)
+	stats.TopRuntimeCallees = topNMap(runtimeCalleeCount, 20)
 	stats.TopOwners = topNMap(ownerCount, 30)
 	return stats
 }
@@ -385,13 +558,16 @@ func topNMap(m map[string]int, n int) []NameCount {
 	for name, count := range m {
 		entries = append(entries, NameCount{name, count})
 	}
-	// Sort descending by count.
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].Count > entries[i].Count {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
+	// O(n log n), with a lexical tie-breaker so map iteration cannot change
+	// equal-count output ordering.
+	slices.SortFunc(entries, func(a, b NameCount) int {
+		if c := cmp.Compare(b.Count, a.Count); c != 0 {
+			return c
 		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	if n <= 0 {
+		return nil
 	}
 	if len(entries) > n {
 		entries = entries[:n]

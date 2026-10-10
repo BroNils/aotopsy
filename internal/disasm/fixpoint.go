@@ -2,16 +2,43 @@ package disasm
 
 import (
 	"slices"
+	"strconv"
+	"strings"
 )
 
 type provBlockEffect struct {
 	touched []bool
 	final   []lvalue
+	// copyFrom records state-dependent definitions such as x86 MOV dst,src or
+	// a Code entry-point load whose result inherits its base provenance. A value
+	// >= 0 means the destination receives that entry register's lattice value.
+	// Untouched/constant/kill effects use -1.
+	copyFrom []int
+}
+
+const provInputPrefix = "\x00aotopsy-prov-input:"
+
+func provInputNote(reg int) string {
+	return provInputPrefix + strconv.Itoa(reg)
+}
+
+func provInputReg(note string) (int, bool) {
+	if !strings.HasPrefix(note, provInputPrefix) {
+		return 0, false
+	}
+	r, err := strconv.Atoi(strings.TrimPrefix(note, provInputPrefix))
+	if err != nil || r < 0 {
+		return 0, false
+	}
+	return r, true
 }
 
 // runProvFixpoint runs the monotonic reaching-definitions dataflow fixpoint
 // across CFG blocks for a given register count.
-// It converges monotonically to the least fixed point or terminates at maxVisits.
+// It converges monotonically to the least fixed point. A defensive visit cap
+// bounds malformed/adversarial inputs; if that cap is ever exhausted, the
+// result fails closed to Bottom rather than publishing a partially-converged
+// Known provenance as if it were trustworthy.
 func runProvFixpoint(
 	nblocks int,
 	nregs int,
@@ -45,7 +72,7 @@ func runProvFixpoint(
 		inWorklist[i] = true
 	}
 
-	maxVisits := nblocks*nblocks + 64
+	maxVisits := provVisitLimit(nblocks)
 	visits := 0
 
 	in := make([]lvalue, nregs)
@@ -84,7 +111,11 @@ func runProvFixpoint(
 		eff := effects[id]
 		for r := 0; r < nregs; r++ {
 			if r < len(eff.touched) && eff.touched[r] {
-				out[r] = eff.final[r]
+				if r < len(eff.copyFrom) && eff.copyFrom[r] >= 0 && eff.copyFrom[r] < nregs {
+					out[r] = in[eff.copyFrom[r]]
+				} else {
+					out[r] = eff.final[r]
+				}
 			}
 		}
 		if !slices.Equal(out, exitState[id]) {
@@ -101,6 +132,25 @@ func runProvFixpoint(
 			}
 		}
 	}
+	if len(worklist) != 0 {
+		for b := range entryState {
+			for r := range entryState[b] {
+				entryState[b][r] = lvalue{kind: lvBottom}
+			}
+		}
+	}
 
 	return entryState
+}
+
+func provVisitLimit(nblocks int) int {
+	const slack = 64
+	maxInt := int(^uint(0) >> 1)
+	if nblocks <= 0 {
+		return slack
+	}
+	if nblocks > (maxInt-slack)/nblocks {
+		return maxInt
+	}
+	return nblocks*nblocks + slack
 }

@@ -1,6 +1,7 @@
 package snapshot_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -27,15 +28,21 @@ import (
 // claims, which pins the same mapping and cannot rot into a magic number.
 func eachSample(t *testing.T, fn func(t *testing.T, s samplecorpus.Sample, info *snapshot.Info)) {
 	t.Helper()
+	if err := samplecorpus.RequireCompleteCorpus(); err != nil {
+		if errors.Is(err, samplecorpus.ErrNoCorpus) {
+			t.Skip("no samples/ directory in this checkout")
+		}
+		t.Fatalf("sample corpus is incomplete or inconsistent: %v", err)
+	}
 	for _, entry := range samplecorpus.Registry {
 		entry := entry
 		t.Run(entry.FileName(), func(t *testing.T) {
-			path := samplecorpus.Path(entry.FileName())
-			if path == "" {
+			path, err := samplecorpus.RequireSample(entry.FileName())
+			if errors.Is(err, samplecorpus.ErrNoCorpus) {
 				t.Skip(samplecorpus.MissingMessage(entry))
 			}
-			if entry.ProfileIncomplete != "" {
-				t.Skipf("%s: %s", entry.FileName(), entry.ProfileIncomplete)
+			if err != nil {
+				t.Fatalf("resolve sample: %v", err)
 			}
 			ef, err := elfx.Open(path)
 			if err != nil {

@@ -1,235 +1,321 @@
-// Package typetrack implements whole-program type inference for Dart AOT
-// snapshots to resolve indirect (BLR) call sites. It infers the runtime
-// ClassID of receiver objects at each call site, then maps
-// class_id + selector_offset → dispatch table slot → target function.
-//
-// The type lattice has six levels:
-//   - Top:      no type information yet (initial state)
-//   - KnownClass: a specific ClassID is known
-//   - KnownDispatchIndex: a dispatch table selector offset is known
-//     (from ADD Xn, X21, #offset — the offset IS the slot index)
-//   - KnownStub: a THR-cached stub entry point is known (e.g. AllocateObject)
-//   - PPBase:   register holds PP + offset (2-level pool addressing)
-//   - Bottom:   conflicting type information (join of incompatible types)
+// Package typetrack implements whole-program abstract interpretation for Dart
+// AOT snapshots. The lattice deliberately separates facts about OBJECT values
+// from facts about the integer CLASS-ID values extracted from object headers.
+// Mixing those two domains is unsound: a class-id integer is not an instance of
+// that class, and a declared static type is not an exact runtime class.
 package typetrack
 
-import (
-	"aotopsy/internal/cluster"
-)
+import "aotopsy/internal/cluster"
 
-// TypeLatticeKind enumerates the five lattice levels.
+// TypeLatticeKind orders neither precision nor subtype relation. Join semantics
+// are implemented explicitly in joinType.
 type TypeLatticeKind int
 
 const (
-	LatticeTop                TypeLatticeKind = iota // no info yet
-	LatticeKnownClass                                // ClassID is known
-	LatticeKnownDispatchIndex                        // dispatch table slot offset is known
-	LatticeKnownStub                                 // THR-cached stub entry point is known
-	LatticePPBase                                    // register holds PP + offset (2-level pool addressing)
-	LatticeBottom                                    // conflicting/unresolvable
+	// Bottom is the unreachable/no-predecessor element. It is an accumulator
+	// identity only and must not be used to mean "reachable but unknown".
+	LatticeBottom TypeLatticeKind = iota
+	// Top is a reachable value for which this analysis has no safe fact.
+	LatticeTop
+	// ExactClass means the register contains a Dart heap object whose runtime CID
+	// is exactly ClassID (for example a canonical pool object or allocation result).
+	LatticeExactClass
+	// ClassBound means the register contains an object whose runtime class is
+	// ClassID or a subclass. Declared parameter/field/return types and an instance
+	// method's declaring owner produce this state; they are not exact runtime CIDs.
+	LatticeClassBound
+	// HeaderTags states mean the register contains the raw object tags word,
+	// before the ClassIdTag bitfield has been extracted. Keeping this separate
+	// prevents arithmetic on a tags word from being mistaken for CID arithmetic.
+	LatticeExactHeaderTags
+	LatticeUnknownHeaderTags
+	// ExactClassID means the register contains the integer CID exactly ClassID.
+	// It is produced by extracting a header from an ExactClass or by equality
+	// narrowing an UnknownClassID.
+	LatticeExactClassID
+	// UnknownClassID means the register is proven to contain a class-id integer,
+	// but its concrete value is unknown. This is useful for selector-only dispatch.
+	LatticeUnknownClassID
+	// TaggedClassID is a class id Smi-tagged by `LSL #1` (ClassID is the
+	// untagged cid, or -1 when unknown). It is deliberately NOT a class-id
+	// kind: dispatch arithmetic must not consume a shifted value. Its only
+	// consumer is the equality narrowing of the object it was read from.
+	LatticeTaggedClassID
+	// KnownDispatchIndex is either an exact dispatch-table-relative slot or, when
+	// SelectorOnly is set, only the selector immediate with an unknown CID.
+	LatticeKnownDispatchIndex
+	LatticeKnownStub
+	LatticePPBase
 )
 
-// TypeLattice is the type abstraction for a register or SSA value.
-// For LatticeKnownClass, ClassID holds the Dart class ID.
-// For LatticeKnownDispatchIndex, DispatchIndex holds the dispatch table slot.
-// For LatticeKnownStub, StubName holds the stub name and StubOff the THR offset.
 type TypeLattice struct {
 	Kind          TypeLatticeKind
-	ClassID       int    // valid when Kind == LatticeKnownClass
-	DispatchIndex int    // valid when Kind == LatticeKnownDispatchIndex
-	StubName      string // valid when Kind == LatticeKnownStub
-	StubOff       int    // valid when Kind == LatticeKnownStub
+	ClassID       int
+	DispatchIndex int
+	StubName      string
+	StubOff       int
 
-	// SelectorOnly marks a LatticeKnownDispatchIndex whose class is UNKNOWN:
-	// the ADD/SUB was applied to a class ID that the analysis could not
-	// resolve, so only the selector immediate is known and DispatchIndex
-	// holds that signed immediate (SelectorImm), not a slot.
-	//
-	// This used to be encoded by storing -imm-1 / imm-1 in DispatchIndex and
-	// testing the sign. That was ambiguous in both directions: SUB with
-	// imm>=1 produced a POSITIVE value indistinguishable from a genuine
-	// cid+imm slot, and it was then looked up in the dispatch table as if it
-	// were one -- resolving the call to whatever function happened to live
-	// at slot (imm-1).
 	SelectorOnly bool
-	SelectorImm  int // signed ADD immediate; valid when SelectorOnly
+	SelectorImm  int
+	// RecvBound is, for a SelectorOnly dispatch, the class the receiver whose
+	// class id fed the selector arithmetic is known to be an instance of (or of a
+	// subtype of); 0 when nothing is known. See subtype_filter.go.
+	//
+	// For header-tag and class-id values it is the bound of the object the value
+	// was READ FROM, stamped while that object was still in its register
+	// (stampReceiverBounds). Unlike SrcReg it survives the object register being
+	// overwritten -- the class id stays the class id of that object.
+	RecvBound int
 
-	// PPBaseOffset holds the byte offset added to PP (X27) for 2-level
-	// pool addressing. Valid when Kind == LatticePPBase.
 	PPBaseOffset int
+
+	// SrcReg is 1+the register whose object header this tags/class-id value
+	// was read from (0 = unlinked). Only meaningful for header-tag and
+	// class-id kinds. The block loop drops the link as soon as that register
+	// is rewritten, so a link that survives always names the same object.
+	SrcReg int
 }
 
-// Top returns the top element of the lattice.
-func Top() TypeLattice { return TypeLattice{Kind: LatticeTop} }
+// linkedTo returns t with its source link set to reg (the link is only kept
+// when it cannot name the destination itself).
+func (t TypeLattice) linkedTo(reg, dst int) TypeLattice {
+	if reg >= 0 && reg < 31 && reg != dst {
+		t.SrcReg = reg + 1
+	}
+	return t
+}
 
-// Bottom returns the bottom element of the lattice.
+func carriesSrcLink(k TypeLatticeKind) bool {
+	return isClassID(k) || isHeaderTags(k) || k == LatticeTaggedClassID
+}
+
 func Bottom() TypeLattice { return TypeLattice{Kind: LatticeBottom} }
+func Top() TypeLattice    { return TypeLattice{Kind: LatticeTop} }
 
-// KnownClass returns a lattice element for a specific ClassID.
-func KnownClass(classID int) TypeLattice {
-	return TypeLattice{Kind: LatticeKnownClass, ClassID: classID}
+func ExactClass(classID int) TypeLattice {
+	return TypeLattice{Kind: LatticeExactClass, ClassID: classID}
 }
 
-// KnownDispatch returns a lattice element for a dispatch table slot offset.
+func ClassBound(classID int) TypeLattice {
+	return TypeLattice{Kind: LatticeClassBound, ClassID: classID}
+}
+
+func ExactHeaderTags(classID int) TypeLattice {
+	return TypeLattice{Kind: LatticeExactHeaderTags, ClassID: classID}
+}
+
+func UnknownHeaderTags() TypeLattice { return TypeLattice{Kind: LatticeUnknownHeaderTags} }
+
+func ExactClassID(classID int) TypeLattice {
+	return TypeLattice{Kind: LatticeExactClassID, ClassID: classID}
+}
+
+func UnknownClassID() TypeLattice { return TypeLattice{Kind: LatticeUnknownClassID} }
+
 func KnownDispatch(slot int) TypeLattice {
 	return TypeLattice{Kind: LatticeKnownDispatchIndex, DispatchIndex: slot}
 }
 
-// SelectorDispatch returns a lattice element for a dispatch-table index whose
-// class ID is unknown but whose selector immediate (the value the SDK's
-// EmitDispatchTableCall passes to AddImmediate, i.e.
-// selector_offset - kOriginElement) is known.
-func SelectorDispatch(imm int) TypeLattice {
-	return TypeLattice{
-		Kind:         LatticeKnownDispatchIndex,
-		SelectorOnly: true,
-		SelectorImm:  imm,
-	}
+// SelectorDispatch is a selector-only dispatch index whose receiver is known to
+// be a subtype of recvBound (0 = unknown).
+func SelectorDispatch(imm, recvBound int) TypeLattice {
+	return TypeLattice{Kind: LatticeKnownDispatchIndex, SelectorOnly: true, SelectorImm: imm, RecvBound: recvBound}
 }
 
-// KnownStub returns a lattice element for a THR-cached stub entry point.
 func KnownStub(name string, off int) TypeLattice {
 	return TypeLattice{Kind: LatticeKnownStub, StubName: name, StubOff: off}
 }
 
-// Equal reports whether two lattice elements are identical.
 func (a TypeLattice) Equal(b TypeLattice) bool {
 	if a.Kind != b.Kind {
 		return false
 	}
+	if carriesSrcLink(a.Kind) && a.SrcReg != b.SrcReg {
+		return false
+	}
+	if (isClassID(a.Kind) || isHeaderTags(a.Kind)) && a.RecvBound != b.RecvBound {
+		return false
+	}
 	switch a.Kind {
-	case LatticeKnownClass:
+	case LatticeExactClass, LatticeClassBound, LatticeExactHeaderTags, LatticeExactClassID, LatticeTaggedClassID:
 		return a.ClassID == b.ClassID
 	case LatticeKnownDispatchIndex:
 		if a.SelectorOnly != b.SelectorOnly {
 			return false
 		}
 		if a.SelectorOnly {
-			return a.SelectorImm == b.SelectorImm
+			return a.SelectorImm == b.SelectorImm && a.RecvBound == b.RecvBound
 		}
 		return a.DispatchIndex == b.DispatchIndex
 	case LatticeKnownStub:
-		return a.StubOff == b.StubOff
+		return a.StubOff == b.StubOff && a.StubName == b.StubName
+	case LatticePPBase:
+		return a.PPBaseOffset == b.PPBaseOffset
+	default:
+		return true
 	}
-	return true
 }
 
-// meetType computes the meet (greatest lower bound) of two lattice elements.
-// The meet rules:
-//   - Top ∧ x = x
-//   - Bottom ∧ x = Bottom
-//   - KnownClass(a) ∧ KnownClass(b) = LCA(a,b) if a≠b, or KnownClass(a) if a==b
-//   - KnownDispatch(a) ∧ KnownDispatch(b) = KnownDispatch(a) if a==b, else Bottom
-//   - KnownStub ∧ anything = Bottom (stubs don't combine with other types)
-//   - KnownClass ∧ KnownDispatch = Bottom (different abstraction levels)
-func meetType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
-	if a.Kind == LatticeTop {
+// joinType computes the least upper bound of facts from two control-flow paths.
+// Bottom is used only for an unreachable/no-predecessor accumulator. Top is a
+// reachable unknown and therefore absorbs any more precise fact. This distinction
+// is essential: the previous implementation used Top as the join identity, so a
+// register killed on one branch stayed exact-class when another branch preserved
+// it, creating confident call targets that were not true on every path.
+func joinType(a, b TypeLattice, lca func(int, int) int) TypeLattice {
+	if a.Kind == LatticeBottom {
 		return b
 	}
-	if b.Kind == LatticeTop {
+	if b.Kind == LatticeBottom {
 		return a
 	}
-	if a.Kind == LatticeBottom || b.Kind == LatticeBottom {
-		return Bottom()
+	if a.Kind == LatticeTop || b.Kind == LatticeTop {
+		return Top()
 	}
-	// KnownStub: identical stubs (same StubOff) combine to themselves;
-	// different stubs or stub+other → Bottom (H-1 fix: previously ALL
-	// KnownStub meets returned Bottom, losing allocation-site info at
-	// join points where both paths load the same stub).
-	if a.Kind == LatticeKnownStub && b.Kind == LatticeKnownStub {
-		if a.StubOff == b.StubOff {
-			return a
-		}
-		return Bottom()
-	}
-	if a.Kind == LatticeKnownStub || b.Kind == LatticeKnownStub {
-		return Bottom()
-	}
-	if a.Kind == LatticeKnownClass && b.Kind == LatticeKnownClass {
+
+	// Object values can safely lose precision to their common static bound.
+	if isObjectClass(a.Kind) && isObjectClass(b.Kind) {
 		if a.ClassID == b.ClassID {
-			return a
-		}
-		if lca != nil {
-			if l := lca(a.ClassID, b.ClassID); l >= 0 {
-				return KnownClass(l)
-			}
-		}
-		return Bottom()
-	}
-	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
-		// Mirror Equal's logic: SelectorOnly and SelectorImm must be
-		// considered, not just DispatchIndex. Two SelectorDispatch
-		// elements with DispatchIndex=0 (unset for SelectorOnly) but
-		// different SelectorImm must meet to Bottom, not to a — the
-		// previous code only checked DispatchIndex and incorrectly
-		// returned a because 0 == 0.
-		if a.SelectorOnly != b.SelectorOnly {
-			return Bottom()
-		}
-		if a.SelectorOnly {
-			if a.SelectorImm == b.SelectorImm {
+			if a.Kind == LatticeExactClass && b.Kind == LatticeExactClass {
 				return a
 			}
-			return Bottom()
+			return ClassBound(a.ClassID)
 		}
-		if a.DispatchIndex == b.DispatchIndex {
+		if lca != nil {
+			if cid := lca(a.ClassID, b.ClassID); cid >= 0 {
+				return ClassBound(cid)
+			}
+		}
+		return Top()
+	}
+
+	// CID scalars remain CID scalars across merges; disagreement loses only the
+	// concrete number, not the fact that selector arithmetic is operating on a CID.
+	if isClassID(a.Kind) && isClassID(b.Kind) {
+		if a.Kind == LatticeExactClassID && b.Kind == LatticeExactClassID && a.ClassID == b.ClassID {
+			if a.SrcReg != b.SrcReg {
+				a.SrcReg = 0
+			}
+			if a.RecvBound != b.RecvBound {
+				a.RecvBound = 0
+			}
 			return a
 		}
-		return Bottom()
+		u := UnknownClassID()
+		if a.SrcReg == b.SrcReg {
+			u.SrcReg = a.SrcReg
+		}
+		if a.RecvBound == b.RecvBound {
+			u.RecvBound = a.RecvBound
+		}
+		return u
 	}
-	// PPBase: identical offsets combine; different or mixed → Bottom
+	if isHeaderTags(a.Kind) && isHeaderTags(b.Kind) {
+		if a.Kind == LatticeExactHeaderTags && b.Kind == LatticeExactHeaderTags && a.ClassID == b.ClassID {
+			if a.SrcReg != b.SrcReg {
+				a.SrcReg = 0
+			}
+			if a.RecvBound != b.RecvBound {
+				a.RecvBound = 0
+			}
+			return a
+		}
+		u := UnknownHeaderTags()
+		if a.SrcReg == b.SrcReg {
+			u.SrcReg = a.SrcReg
+		}
+		if a.RecvBound == b.RecvBound {
+			u.RecvBound = a.RecvBound
+		}
+		return u
+	}
+	if a.Kind == LatticeTaggedClassID && b.Kind == LatticeTaggedClassID {
+		// Only the source link matters for a tagged value; the cid number is
+		// kept when both paths agree.
+		t := TypeLattice{Kind: LatticeTaggedClassID, ClassID: -1}
+		if a.ClassID == b.ClassID {
+			t.ClassID = a.ClassID
+		}
+		if a.SrcReg == b.SrcReg {
+			t.SrcReg = a.SrcReg
+		}
+		return t
+	}
+
+	if a.Kind == LatticeKnownDispatchIndex && b.Kind == LatticeKnownDispatchIndex {
+		if a.Equal(b) {
+			return a
+		}
+		// Same selector reached with different receiver bounds: the selector is
+		// still known, the receiver bound is not.
+		if a.SelectorOnly && b.SelectorOnly && a.SelectorImm == b.SelectorImm {
+			return SelectorDispatch(a.SelectorImm, 0)
+		}
+		return Top()
+	}
+	if a.Kind == LatticeKnownStub && b.Kind == LatticeKnownStub {
+		if a.Equal(b) {
+			return a
+		}
+		return Top()
+	}
 	if a.Kind == LatticePPBase && b.Kind == LatticePPBase {
-		if a.PPBaseOffset == b.PPBaseOffset {
+		if a.Equal(b) {
 			return a
 		}
-		return Bottom()
+		return Top()
 	}
-	if a.Kind == LatticePPBase || b.Kind == LatticePPBase {
-		return Bottom()
+	return Top()
+}
+
+func isObjectClass(k TypeLatticeKind) bool {
+	return k == LatticeExactClass || k == LatticeClassBound
+}
+
+func objectClassID(t TypeLattice) (int, bool) {
+	if !isObjectClass(t.Kind) || t.ClassID < 0 {
+		return 0, false
 	}
-	// Mixed KnownClass ∧ KnownDispatch → Bottom
-	return Bottom()
+	return t.ClassID, true
+}
+
+func exactObjectClassID(t TypeLattice) (int, bool) {
+	if t.Kind != LatticeExactClass || t.ClassID < 0 {
+		return 0, false
+	}
+	return t.ClassID, true
+}
+
+func isClassID(k TypeLatticeKind) bool {
+	return k == LatticeExactClassID || k == LatticeUnknownClassID
+}
+
+func isHeaderTags(k TypeLatticeKind) bool {
+	return k == LatticeExactHeaderTags || k == LatticeUnknownHeaderTags
 }
 
 // BuildClassHierarchy builds a superclass map from cluster.ClassInfo data.
-// Returns a map: classID → superclassID (or -1 if no superclass / unknown).
-func BuildClassHierarchy(classes []cluster.ClassInfo, types []cluster.TypeInfo, refToNamed map[int]*cluster.NamedObject) map[int]int {
+func BuildClassHierarchy(classes []cluster.ClassInfo, types []cluster.TypeInfo) map[int]int {
 	hierarchy := make(map[int]int, len(classes))
-
-	// Build ref→ClassInfo lookup.
-	refToClass := make(map[int]*cluster.ClassInfo, len(classes))
-	for i := range classes {
-		refToClass[classes[i].RefID] = &classes[i]
-	}
-
-	// Build ref→TypeInfo lookup (v3.x: Type.type_class_id gives the CID).
 	refToType := make(map[int]*cluster.TypeInfo, len(types))
 	for i := range types {
 		refToType[types[i].RefID] = &types[i]
 	}
-
 	for i := range classes {
 		c := &classes[i]
 		superID := -1
-
-		// ClassInfo.SuperTypeRefID points to a Type object (v3.x).
 		if c.SuperTypeRefID >= 0 {
 			if ti, ok := refToType[c.SuperTypeRefID]; ok && ti.ClassID >= 0 {
 				superID = int(ti.ClassID)
 			}
 		}
-
 		hierarchy[int(c.ClassID)] = superID
 	}
-
 	return hierarchy
 }
 
-// LCA computes the lowest common ancestor of two class IDs in the
-// hierarchy. Returns -1 if no common ancestor exists (one or both
-// have no superclass chain).
+// LCA computes the lowest common ancestor of two class IDs.
 func LCA(classA, classB int, hierarchy map[int]int) int {
-	// Collect all ancestors of A (including A itself).
 	ancestorsA := make(map[int]bool)
 	c := classA
 	for c >= 0 && !ancestorsA[c] {
@@ -240,10 +326,10 @@ func LCA(classA, classB int, hierarchy map[int]int) int {
 		}
 		c = next
 	}
-
-	// Walk B's chain and return the first match.
 	c = classB
-	for c >= 0 {
+	seenB := make(map[int]bool)
+	for c >= 0 && !seenB[c] {
+		seenB[c] = true
 		if ancestorsA[c] {
 			return c
 		}

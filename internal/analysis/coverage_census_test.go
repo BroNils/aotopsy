@@ -21,17 +21,12 @@ func TestCoverageCensus(t *testing.T) {
 	if os.Getenv("AOTOPSY_COVERAGE") == "" {
 		t.Skip("set AOTOPSY_COVERAGE=1 to run the coverage census")
 	}
-	seen := map[string]bool{}
+	requireCompleteCorpus(t)
+	rows := 0
 	for _, s := range samplecorpus.Registry {
 		name := s.FileName()
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		path := samplecorpus.Path(name)
-		if path == "" {
-			continue // sample not present locally
-		}
+		path := corpusSample(t, name)
+		rows++
 		func() {
 			ctx, err := LoadContext(path)
 			if err != nil {
@@ -43,9 +38,16 @@ func TestCoverageCensus(t *testing.T) {
 			fns := len(ctx.Ranges)
 			symtab := 0
 			if ctx.EF != nil {
-				symtab = len(ctx.EF.FuncSymbols())
+				if syms, err := ctx.EF.FuncSymbols(); err == nil {
+					symtab = len(syms)
+				} else {
+					t.Fatalf("FuncSymbols(%s): %v", name, err)
+				}
 			}
 			t.Logf("COVROW\t%s\t%s\tOK\t%d\t%d\t%s", s.DartVersion, s.Arch, fns, symtab, name)
 		}()
+	}
+	if rows != samplecorpus.ExpectedSampleCount {
+		t.Fatalf("coverage census emitted %d rows, want exactly %d", rows, samplecorpus.ExpectedSampleCount)
 	}
 }

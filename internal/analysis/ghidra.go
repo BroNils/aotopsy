@@ -6,10 +6,12 @@
 package analysis
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -47,17 +49,21 @@ func FindGhidra(explicitHome string) (launcher GhidraLauncher, ghidraHome string
 	}
 
 	// 3. analyzeHeadless in PATH.
-	if ah, err := exec.LookPath("analyzeHeadless"); err == nil {
-		home := filepath.Dir(filepath.Dir(ah))
-		return GhidraLauncher{Cmd: ah}, home, nil
+	for _, name := range launcherNames("analyzeHeadless") {
+		if ah, err := exec.LookPath(name); err == nil {
+			home := filepath.Dir(filepath.Dir(ah))
+			return GhidraLauncher{Cmd: ah}, home, nil
+		}
 	}
 
 	// 4. ghidraRun in PATH → parse to find install dir.
-	if gr, err := exec.LookPath("ghidraRun"); err == nil {
-		home := deriveGhidraHome(gr)
-		if home != "" {
-			if l, h, ok := probeGhidraHome(home); ok {
-				return l, h, nil
+	for _, name := range launcherNames("ghidraRun") {
+		if gr, err := exec.LookPath(name); err == nil {
+			home := deriveGhidraHome(gr)
+			if home != "" {
+				if l, h, ok := probeGhidraHome(home); ok {
+					return l, h, nil
+				}
 			}
 		}
 	}
@@ -92,10 +98,12 @@ Or pass --ghidra-home:
 // For Ghidra 12+ with pyghidraRun, returns a launcher that uses it
 // so Python scripts work (PyGhidra replaces Jython).
 func probeGhidraHome(home string) (launcher GhidraLauncher, ghidraHome string, ok bool) {
-	// Direct: home/support/analyzeHeadless
-	ah := filepath.Join(home, "support", "analyzeHeadless")
-	if _, err := os.Stat(ah); err == nil {
-		return makeLauncher(home, ah), home, true
+	// Direct: home/support/analyzeHeadless[.bat]
+	for _, name := range launcherNames("analyzeHeadless") {
+		ah := filepath.Join(home, "support", name)
+		if regularExecutableFile(ah) {
+			return makeLauncher(home, ah), home, true
+		}
 	}
 	// Caskroom: home/ghidra_*_PUBLIC/support/analyzeHeadless
 	if subs, err := os.ReadDir(home); err == nil {
@@ -104,9 +112,11 @@ func probeGhidraHome(home string) (launcher GhidraLauncher, ghidraHome string, o
 				continue
 			}
 			subHome := filepath.Join(home, sub.Name())
-			ah = filepath.Join(subHome, "support", "analyzeHeadless")
-			if _, err := os.Stat(ah); err == nil {
-				return makeLauncher(subHome, ah), subHome, true
+			for _, name := range launcherNames("analyzeHeadless") {
+				ah := filepath.Join(subHome, "support", name)
+				if regularExecutableFile(ah) {
+					return makeLauncher(subHome, ah), subHome, true
+				}
 			}
 		}
 	}
@@ -117,11 +127,39 @@ func probeGhidraHome(home string) (launcher GhidraLauncher, ghidraHome string, o
 // If pyghidraRun exists (Ghidra 12+), uses it with -H flag so Python scripts work.
 // Otherwise falls back to analyzeHeadless directly.
 func makeLauncher(home, analyzeHeadless string) GhidraLauncher {
-	pyghidra := filepath.Join(home, "support", "pyghidraRun")
-	if _, err := os.Stat(pyghidra); err == nil {
-		return GhidraLauncher{Cmd: pyghidra, Prefix: []string{"-H"}}
+	for _, name := range launcherNames("pyghidraRun") {
+		pyghidra := filepath.Join(home, "support", name)
+		if regularExecutableFile(pyghidra) {
+			return GhidraLauncher{Cmd: pyghidra, Prefix: []string{"-H"}}
+		}
 	}
 	return GhidraLauncher{Cmd: analyzeHeadless}
+}
+
+func launcherNames(base string) []string {
+	if filepath.Ext(base) != "" {
+		return []string{base}
+	}
+	if runtime.GOOS == "windows" {
+		return []string{base + ".bat", base}
+	}
+	return []string{base, base + ".bat"}
+}
+
+func regularExecutableFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
+}
+
+// FindGhidraGUI locates the interactive launcher in a resolved Ghidra home.
+func FindGhidraGUI(home string) (string, error) {
+	for _, name := range launcherNames("ghidraRun") {
+		path := filepath.Join(home, name)
+		if regularExecutableFile(path) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("ghidraRun launcher not found in %s", home)
 }
 
 // deriveGhidraHome reads the ghidraRun shell script to find the real install path.
@@ -243,6 +281,22 @@ func SanitizeProjectName(base string) string {
 		return r
 	}, base)
 	return "aotopsy_" + clean
+}
+
+// GhidraProjectName derives a collision-resistant project identity from the
+// analysed binary rather than from the parent directory chosen for artifacts.
+func GhidraProjectName(sourceName, sha256 string) (string, error) {
+	if sourceName == "" {
+		return "", fmt.Errorf("empty source name")
+	}
+	if len(sha256) != 64 {
+		return "", fmt.Errorf("invalid source sha256 length %d", len(sha256))
+	}
+	if _, err := hex.DecodeString(sha256); err != nil {
+		return "", fmt.Errorf("invalid source sha256: %w", err)
+	}
+	base := strings.TrimSuffix(filepath.Base(sourceName), filepath.Ext(sourceName))
+	return SanitizeProjectName(base + "_" + strings.ToLower(sha256[:12])), nil
 }
 
 // SanitizeGhidraPath returns an absolute path safe for Java/Ghidra.

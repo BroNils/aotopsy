@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/samplecorpus"
 )
 
 // TestDecompilerOutputInvariants is a property check: over the ENTIRE function
@@ -33,11 +32,7 @@ func TestDecompilerOutputInvariants(t *testing.T) {
 	const validFloor = 0.95
 
 	for _, name := range samples {
-		path := samplecorpus.Path(name)
-		if path == "" {
-			t.Logf("%s: absent", name)
-			continue
-		}
+		path := corpusSample(t, name)
 		ctx, err := LoadContext(path)
 		if err != nil {
 			t.Fatalf("%s: LoadContext: %v", name, err)

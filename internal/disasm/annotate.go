@@ -2,6 +2,7 @@ package disasm
 
 import (
 	"fmt"
+	"strings"
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/sdk"
@@ -35,66 +36,30 @@ func PPAnnotator(pool map[int]string) Annotator {
 	}
 }
 
-// THRContextAnnotator pre-computes THR annotations for an instruction stream,
-// including classification labels for unresolved offsets using instruction context.
-// It handles LDR64, LDR32, STR64, and STR32 on X26.
+// THRContextAnnotator pre-computes THR annotations from the same canonical
+// extractor used by the audit JSON. This keeps inline annotations from drifting
+// away from audit semantics and also covers paired LDP Thread reads.
 func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 	anns := make(map[uint64]string)
-
+	byPC := make(map[uint64][]THRAccess)
+	for _, access := range ExtractTHRAccesses(insts, fields) {
+		byPC[access.PC] = append(byPC[access.PC], access)
+	}
 	for i, inst := range insts {
-		raw := inst.Raw
-		var byteOff int
-		var isStore bool
-		var width int
-		detected := false
-
-		// LDR X64 [X26, #imm]
-		if base, off, ok := arm64.LDR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
-			byteOff, width = off, 8
-			detected = true
-		}
-		// LDR W32 [X26, #imm]
-		if !detected {
-			if base, off, _, ok := arm64.LDR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
-				byteOff, width = off, 4
-				detected = true
-			}
-		}
-		// STR X64 [X26, #imm]
-		if !detected {
-			if base, off, _, ok := arm64.STR64UnsignedOffset(raw); ok && base == sdk.ARM64THR {
-				byteOff, width = off, 8
-				isStore = true
-				detected = true
-			}
-		}
-		// STR W32 [X26, #imm]
-		if !detected {
-			if base, off, _, ok := arm64.STR32UnsignedOffset(raw); ok && base == sdk.ARM64THR {
-				byteOff, width = off, 4
-				isStore = true
-				detected = true
-			}
-		}
-
-		if !detected {
+		accesses := byPC[inst.Addr]
+		if len(accesses) == 0 {
 			continue
 		}
-
-		// Resolved?
-		if fields != nil {
-			if name, found := fields[byteOff]; found {
-				anns[inst.Addr] = fmt.Sprintf("THR.%s", name)
+		labels := make([]string, 0, len(accesses))
+		for _, access := range accesses {
+			if access.Resolved {
+				labels = append(labels, fmt.Sprintf("THR.%s", access.FieldName))
 				continue
 			}
+			rec := buildContextRecord(insts, i, access)
+			labels = append(labels, thrAnnotationLabel(access.THROffset, access.Access, access.Width, thraudit.ClassifyFromContext(rec)))
 		}
-
-		// Unresolved — classify from context.
-		rec := buildContextRecord(insts, i, byteOff, isStore, width)
-		cls := thraudit.ClassifyFromContext(rec)
-
-		label := thrAnnotationLabel(byteOff, isStore, width, cls)
-		anns[inst.Addr] = label
+		anns[inst.Addr] = strings.Join(labels, "; ")
 	}
 
 	return func(inst Inst) string {
@@ -107,7 +72,7 @@ func THRContextAnnotator(insts []Inst, fields map[int]string) Annotator {
 
 // buildContextRecord constructs a THRAuditRecord from instruction context
 // for classification. Only the fields needed by classifyFromContext are populated.
-func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int) thraudit.THRAuditRecord {
+func buildContextRecord(insts []Inst, idx int, access THRAccess) thraudit.THRAuditRecord {
 	var ctx []string
 	for d := -2; d <= 2; d++ {
 		j := idx + d
@@ -121,113 +86,64 @@ func buildContextRecord(insts []Inst, idx, byteOff int, isStore bool, width int)
 	}
 
 	return thraudit.THRAuditRecord{
-		THROffset: fmt.Sprintf("0x%x", byteOff),
-		Insn:      insts[idx].Text,
-		IsStore:   isStore,
-		Width:     width,
-		Context:   ctx,
+		Provenance: thraudit.Provenance{Arch: thraudit.ArchARM64},
+		THROffset:  access.THROffset,
+		Insn:       insts[idx].Text,
+		Access:     access.Access,
+		DstReg:     access.DstReg,
+		SrcReg:     access.SrcReg,
+		Width:      access.Width,
+		Context:    ctx,
 	}
 }
 
 // thrAnnotationLabel builds the disasm annotation string for an unresolved THR access.
-func thrAnnotationLabel(byteOff int, isStore bool, width int, cls thraudit.THRClass) string {
+func thrAnnotationLabel(byteOff int64, access thraudit.AccessMode, width int, cls thraudit.THRClass) string {
 	var classTag string
 	switch cls {
-	case thraudit.ClassRuntimeEntrypoint:
-		classTag = "RUNTIME_ENTRY"
-	case thraudit.ClassObjectStoreCache:
-		classTag = "OBJSTORE"
-	case thraudit.ClassIsolateGroupPtr:
-		classTag = "ISO_GROUP"
+	case thraudit.ClassIndirectControlTarget, thraudit.ClassValueStored, thraudit.ClassValueCompared, thraudit.ClassPointerDereference:
+		classTag = "HEURISTIC_" + string(cls)
 	default:
-		classTag = "UNKNOWN"
+		classTag = "UNRESOLVED"
 	}
+	return fmt.Sprintf("THR%s %s%dB[%s]", signedOffsetSuffix(byteOff), access, width, classTag)
+}
 
-	op := "LDR"
-	if isStore {
-		op = "STR"
+func signedOffsetSuffix(off int64) string {
+	if off >= 0 {
+		return "+" + thraudit.FormatTHROffset(off)
 	}
-	wStr := ""
-	if width == 4 {
-		wStr = "w32 "
-	}
-
-	return fmt.Sprintf("THR+0x%x %s%s[%s]", byteOff, wStr, op, classTag)
+	return thraudit.FormatTHROffset(off)
 }
 
-// PeepholeState tracks state for multi-instruction annotation patterns.
-// Fase 7 PART B: tracks register liveness to avoid false positives when
-// the ADD destination register is overwritten between ADD and LDR.
-type PeepholeState struct {
-	pool       map[int]string
-	addDestReg int  // destination register from ADD (for liveness tracking)
-	addImm     int  // immediate from ADD (for combined offset)
-	addValid   bool // true if prev was ADD Xd, X27, #imm
-}
-
-// NewPeepholeState creates a peephole annotator for ADD+LDR PP patterns.
-func NewPeepholeState(pool map[int]string) *PeepholeState {
-	return &PeepholeState{pool: pool, addDestReg: -1}
-}
-
-// Reset clears the peephole state. Call between functions.
-func (p *PeepholeState) Reset() {
-	p.addValid = false
-	p.addDestReg = -1
-}
-
-// Annotate checks for ADD Xd, X27, #upper followed by LDR Xt, [Xd, #lower].
-// Call this for each instruction in sequence. Returns annotation for the
-// current instruction (may annotate the LDR in a two-instruction sequence).
-// Fase 7 PART B: if an instruction between ADD and LDR defines the ADD's
-// destination register, the ADD result is killed and no annotation is made.
-func (p *PeepholeState) Annotate(inst Inst) string {
-	result := ""
-
-	// First, check if current is LDR Xt, [Xd, #lower] matching a pending ADD.
-	// Do this BEFORE checking for register kills, because LDR reads the base
-	// register (addDestReg) before writing the destination register.
-	if p.addValid && p.addDestReg >= 0 {
-		baseReg, ldrOff, ldrOK := arm64.LDR64UnsignedOffset(inst.Raw)
-		if !ldrOK {
-			baseReg, ldrOff, _, ldrOK = arm64.LDR32UnsignedOffset(inst.Raw)
+// PPContextAnnotator renders the canonical per-register pool-load facts from
+// ExtractARM64PoolAccesses. Scalar loads keep the historical single-note format;
+// an LDP with two independent pool slots renders both registers explicitly so
+// one inline comment can never imply that both destination registers hold the
+// same object.
+func PPContextAnnotator(insts []Inst, pool map[int]string) Annotator {
+	anns := make(map[uint64]string)
+	byPC := make(map[uint64][]ARM64PoolAccess)
+	for _, access := range ExtractARM64PoolAccesses(insts, pool) {
+		if access.Kind != ARM64PoolAccessLoad || access.RegClass != ARM64PoolRegGPR {
+			continue
 		}
-		if !ldrOK {
-			base, _, off, ok := arm64.LDUR64(inst.Raw)
-			if ok {
-				baseReg, ldrOff, ldrOK = base, off, true
+		byPC[access.PC] = append(byPC[access.PC], access)
+	}
+	for pc, group := range byPC {
+		if len(group) == 1 {
+			anns[pc] = group[0].Note
+			continue
+		}
+		text := ""
+		for i, access := range group {
+			if i != 0 {
+				text += ", "
 			}
+			text += fmt.Sprintf("X%d=%s", access.Reg, access.Note)
 		}
-		if ldrOK && baseReg == p.addDestReg {
-			combined := p.addImm + ldrOff
-			if idx, idxOK := ARM64PoolIndex(combined); idxOK {
-				if s, found := p.pool[idx]; found {
-					result = fmt.Sprintf("PP[%d] %s", idx, s)
-				} else {
-					result = fmt.Sprintf("PP[%d]", idx)
-				}
-			}
-			p.addValid = false // consumed
-		}
+		anns[pc] = text
 	}
 
-	// If not consumed by LDR, check if current instruction kills the ADD dest.
-	if p.addValid && p.addDestReg >= 0 {
-		for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
-			if rd == p.addDestReg {
-				p.addValid = false
-				break
-			}
-		}
-	}
-
-	// Check if current instruction is a new ADD Xd, X27, #upper.
-	addRd, addRn, addImm, addOK := arm64.ADD64Immediate(inst.Raw)
-	if addOK && addRn == sdk.ARM64PP {
-		p.addDestReg = addRd
-		p.addImm = addImm
-		p.addValid = true
-	}
-
-	return result
+	return func(inst Inst) string { return anns[inst.Addr] }
 }

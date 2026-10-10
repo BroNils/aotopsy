@@ -1,25 +1,9 @@
 package sdk
 
-// Stub calling conventions.
-//
-// Dart AOT calls a handful of stubs with fixed register assignments
-// declared as `struct <Name>ABI` in runtime/vm/constants_{arm64,x64}.h.
-// Recovering what a stub call means requires knowing which register holds
-// which operand, and the assignments differ per architecture -- the
-// instance being type-tested is R0 on ARM64 and RAX on x86_64, but the
-// destination type is R8 there and RBX here.
-//
-// Guessing these is how a probe reads the wrong register and reports a
-// plausible value: DispatchTableNullErrorABI::kClassIdReg holds an
-// integer class id, not a tagged pointer, so treating it as an object and
-// loading a header from it yields whatever happens to sit at that address.
-//
-// Verified against 3.12.2 and re-derived per tag by
-// TestRegisterABIMatchSDK.
+import "aotopsy/internal/snapshot"
 
-// TypeTestABI is the calling convention for type testing stubs.
-//
-// Source: constants_arm64.h struct TypeTestABI, constants_x64.h likewise.
+const AbsentRegister = -1
+
 type TypeTestABI struct {
 	InstanceReg                  int
 	DstTypeReg                   int
@@ -27,11 +11,10 @@ type TypeTestABI struct {
 	FunctionTypeArgumentsReg     int
 	SubtypeTestCacheReg          int
 	ScratchReg                   int
+	ResultReg                    int
 	SubtypeTestCacheResultReg    int
 }
 
-// InstantiationABI is the calling convention for the
-// InstantiateType/InstantiateTypeArguments stubs.
 type InstantiationABI struct {
 	UninstantiatedTypeArgumentsReg int
 	InstantiatorTypeArgumentsReg   int
@@ -41,7 +24,6 @@ type InstantiationABI struct {
 	ScratchReg                     int
 }
 
-// AssertSubtypeABI is the calling convention for AssertSubtypeStub.
 type AssertSubtypeABI struct {
 	SubTypeReg                   int
 	SuperTypeReg                 int
@@ -50,78 +32,215 @@ type AssertSubtypeABI struct {
 	DstNameReg                   int
 }
 
-var (
-	arm64TypeTestABI = TypeTestABI{
-		InstanceReg:                  0, // R0
-		DstTypeReg:                   8, // R8
-		InstantiatorTypeArgumentsReg: 2, // R2
-		FunctionTypeArgumentsReg:     1, // R1
-		SubtypeTestCacheReg:          3, // R3
-		ScratchReg:                   4, // R4
-		SubtypeTestCacheResultReg:    7, // R7
-	}
-	x86TypeTestABI = TypeTestABI{
-		InstanceReg:                  0, // RAX
-		DstTypeReg:                   3, // RBX
-		InstantiatorTypeArgumentsReg: 2, // RDX
-		FunctionTypeArgumentsReg:     1, // RCX
-		SubtypeTestCacheReg:          9, // R9
-		ScratchReg:                   6, // RSI
-		SubtypeTestCacheResultReg:    8, // R8
-	}
+type AllocateObjectABI struct {
+	ResultReg        int
+	TypeArgumentsReg int
+	TagsReg          int
+}
 
-	arm64InstantiationABI = InstantiationABI{
-		UninstantiatedTypeArgumentsReg: 3, // R3
-		InstantiatorTypeArgumentsReg:   2, // R2
-		FunctionTypeArgumentsReg:       1, // R1
-		ResultTypeArgumentsReg:         0, // R0
-		ResultTypeReg:                  0, // R0
-		ScratchReg:                     8, // R8
-	}
-	x86InstantiationABI = InstantiationABI{
-		UninstantiatedTypeArgumentsReg: 3, // RBX
-		InstantiatorTypeArgumentsReg:   2, // RDX
-		FunctionTypeArgumentsReg:       1, // RCX
-		ResultTypeArgumentsReg:         0, // RAX
-		ResultTypeReg:                  0, // RAX
-		ScratchReg:                     9, // R9
-	}
+type SuspendStubABI struct {
+	ArgumentReg int
+	TypeArgsReg int
+}
 
-	arm64AssertSubtypeABI = AssertSubtypeABI{
-		SubTypeReg:                   0, // R0
-		SuperTypeReg:                 8, // R8
-		InstantiatorTypeArgumentsReg: 2, // R2
-		FunctionTypeArgumentsReg:     1, // R1
-		DstNameReg:                   3, // R3
-	}
-	x86AssertSubtypeABI = AssertSubtypeABI{
-		SubTypeReg:                   0, // RAX
-		SuperTypeReg:                 3, // RBX
-		InstantiatorTypeArgumentsReg: 2, // RDX
-		FunctionTypeArgumentsReg:     1, // RCX
-		DstNameReg:                   9, // R9
-	}
-)
+type DispatchTableNullErrorABI struct {
+	ClassIDReg int
+}
 
-// TypeTestRegNames maps each register a type-testing stub receives an
-// operand in to a name for that operand, for the selected architecture.
-//
-// A type-testing stub is entered with its operands already in place, so
-// none of these registers is ever written inside the stub. They are also
-// not the ordinary Dart argument registers -- kInstanceReg is R0 on ARM64
-// and RAX on x86_64, neither of which appears in
-// DartCallingConvention::kCpuRegistersForArgs -- so nothing seeded them
-// and every read printed the bare register. Measured over 1000 functions,
-// that single omission was 511 of 794 leaked register tokens on ARM64
-// (all of them x0, all inside TypeTestingStub_* functions) and 287 of 444
-// on x86_64 (rax).
-func TypeTestRegNames(isARM64 bool) map[string]string {
-	abi := TypeTestRegs(isARM64)
+func TypeTestRegs(dartVersion string, isARM64 bool) (TypeTestABI, bool) {
+	if !isSupportedDartVersion(dartVersion) {
+		return TypeTestABI{}, false
+	}
+	abi := TypeTestABI{ResultReg: AbsentRegister, SubtypeTestCacheResultReg: AbsentRegister}
+	if isARM64 {
+		abi.InstanceReg, abi.DstTypeReg = 0, 8
+		abi.InstantiatorTypeArgumentsReg, abi.FunctionTypeArgumentsReg = 2, 1
+		abi.SubtypeTestCacheReg, abi.ScratchReg = 3, 4
+		if dartVersion == "2.10.0" {
+			abi.ResultReg = 0
+		} else {
+			abi.SubtypeTestCacheResultReg = 7
+		}
+		return abi, true
+	}
+	abi.InstanceReg, abi.DstTypeReg = 0, 3
+	abi.InstantiatorTypeArgumentsReg, abi.FunctionTypeArgumentsReg = 2, 1
+	abi.SubtypeTestCacheReg, abi.ScratchReg = 9, 6
+	if dartVersion == "2.10.0" {
+		abi.ResultReg = 0
+	} else {
+		abi.SubtypeTestCacheResultReg = 8
+	}
+	return abi, true
+}
+
+func InstantiationRegs(dartVersion string, isARM64 bool) (InstantiationABI, bool) {
+	if !isSupportedDartVersion(dartVersion) {
+		return InstantiationABI{}, false
+	}
+	abi := InstantiationABI{ScratchReg: AbsentRegister}
+	if isARM64 {
+		abi.UninstantiatedTypeArgumentsReg, abi.InstantiatorTypeArgumentsReg = 3, 2
+		abi.FunctionTypeArgumentsReg, abi.ResultTypeArgumentsReg, abi.ResultTypeReg = 1, 0, 0
+		if snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+			abi.ScratchReg = 8
+		}
+		return abi, true
+	}
+	abi.UninstantiatedTypeArgumentsReg, abi.InstantiatorTypeArgumentsReg = 3, 2
+	abi.FunctionTypeArgumentsReg, abi.ResultTypeArgumentsReg, abi.ResultTypeReg = 1, 0, 0
+	if snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		abi.ScratchReg = 9
+	}
+	return abi, true
+}
+
+func AssertSubtypeRegs(dartVersion string, isARM64 bool) (AssertSubtypeABI, bool) {
+	if !isSupportedDartVersion(dartVersion) || dartVersion == "2.10.0" {
+		return AssertSubtypeABI{}, false
+	}
+	if isARM64 {
+		return AssertSubtypeABI{SubTypeReg: 0, SuperTypeReg: 8, InstantiatorTypeArgumentsReg: 2, FunctionTypeArgumentsReg: 1, DstNameReg: 3}, true
+	}
+	return AssertSubtypeABI{SubTypeReg: 0, SuperTypeReg: 3, InstantiatorTypeArgumentsReg: 2, FunctionTypeArgumentsReg: 1, DstNameReg: 9}, true
+}
+
+func AllocateObjectRegs(dartVersion string, isARM64 bool) (AllocateObjectABI, bool) {
+	if !isSupportedDartVersion(dartVersion) {
+		return AllocateObjectABI{}, false
+	}
+	abi := AllocateObjectABI{TagsReg: AbsentRegister}
+	if isARM64 {
+		abi.ResultReg, abi.TypeArgumentsReg = 0, 1
+		if snapshot.VersionAtLeast(dartVersion, "2.17.6") {
+			abi.TagsReg = 2
+		}
+		return abi, true
+	}
+	abi.ResultReg, abi.TypeArgumentsReg = 0, 2
+	if snapshot.VersionAtLeast(dartVersion, "2.17.6") {
+		abi.TagsReg = 8
+	}
+	return abi, true
+}
+
+func SuspendStubRegs(dartVersion string, isARM64 bool) (SuspendStubABI, bool) {
+	if !isSupportedDartVersion(dartVersion) || !snapshot.VersionAtLeast(dartVersion, "2.18.0") {
+		return SuspendStubABI{}, false
+	}
+	abi := SuspendStubABI{TypeArgsReg: AbsentRegister}
+	if isARM64 {
+		abi.ArgumentReg = 0
+		if snapshot.VersionAtLeast(dartVersion, "3.0.5") {
+			abi.TypeArgsReg = 1
+		}
+		return abi, true
+	}
+	abi.ArgumentReg = 0
+	if snapshot.VersionAtLeast(dartVersion, "3.0.5") {
+		abi.TypeArgsReg = 2
+	}
+	return abi, true
+}
+
+func DispatchTableNullErrorRegs(dartVersion string, isARM64 bool) (DispatchTableNullErrorABI, bool) {
+	if !isSupportedDartVersion(dartVersion) || !snapshot.VersionAtLeast(dartVersion, "2.13.0") {
+		return DispatchTableNullErrorABI{}, false
+	}
+	if isARM64 {
+		return DispatchTableNullErrorABI{ClassIDReg: 0}, true
+	}
+	return DispatchTableNullErrorABI{ClassIDReg: 1}, true
+}
+
+// DispatchTableClassIDReg returns the class-id index register for an actual
+// dispatch-table call when the SDK fixes that register in an ABI. Dart 2.10 and
+// 2.12 pass an arbitrary cid_reg into EmitDispatchTableCall, so no single global
+// register is correct for those releases. Dart 2.13+ routes the call through
+// DispatchTableNullErrorABI::kClassIdReg and therefore has a fixed register.
+func DispatchTableClassIDReg(dartVersion string, isARM64 bool) (int, bool) {
+	if _, ok := DispatchTableOriginElement(dartVersion, isARM64); !ok {
+		return 0, false
+	}
+	abi, ok := DispatchTableNullErrorRegs(dartVersion, isARM64)
+	if !ok {
+		return 0, false
+	}
+	return abi.ClassIDReg, true
+}
+
+// IsDispatchTableClassIDReg reports whether reg can be the class-id register
+// at a dispatch-table call in this exact SDK. This is deliberately different
+// from DispatchTableClassIDReg: Dart 2.10/2.12 pass cid_reg as an arbitrary
+// Register parameter, so there is no single ABI register to return, but an
+// observed call-site index register is still valid evidence. From 2.13 onward
+// the SDK fixes the register through DispatchTableNullErrorABI.
+func IsDispatchTableClassIDReg(dartVersion string, isARM64 bool, reg int) bool {
+	if !isSupportedDartVersion(dartVersion) {
+		return false
+	}
+	if fixed, ok := DispatchTableClassIDReg(dartVersion, isARM64); ok {
+		return reg == fixed
+	}
+	if dartVersion != "2.10.0" && dartVersion != "2.12.0" {
+		return false
+	}
+	if isARM64 {
+		return reg >= 0 && reg <= 30
+	}
+	return reg >= 0 && reg < 16
+}
+
+// IsARM64DispatchTableIndexReg reports whether reg can hold the computed GDT
+// slot index at the load from DISPATCH_TABLE_REG. Dart 2.10/2.12 update the
+// caller-selected cid_reg in place. From 2.13 onward the compiler computes the
+// index in LR (R30) from the fixed class-id register.
+func IsARM64DispatchTableIndexReg(dartVersion string, reg int) bool {
+	if !isSupportedDartVersion(dartVersion) || reg < 0 || reg > 30 {
+		return false
+	}
+	if dartVersion == "2.10.0" || dartVersion == "2.12.0" {
+		return true
+	}
+	return reg == ARM64LinkReg
+}
+
+// IsARM64DispatchTableIndexComputation reports whether dst = src +/- offset is
+// the register shape emitted by EmitDispatchTableCall for this exact SDK.
+// Legacy releases mutate the arbitrary cid_reg in place; 2.13+ use LR as the
+// destination and DispatchTableNullErrorABI::kClassIdReg (R0) as the source.
+func IsARM64DispatchTableIndexComputation(dartVersion string, dstReg, srcReg int) bool {
+	if !IsARM64DispatchTableIndexReg(dartVersion, dstReg) {
+		return false
+	}
+	if dartVersion == "2.10.0" || dartVersion == "2.12.0" {
+		return dstReg == srcReg
+	}
+	classReg, ok := DispatchTableClassIDReg(dartVersion, ArchARM64)
+	return ok && dstReg == ARM64LinkReg && srcReg == classReg
+}
+
+func ClassIdRegName(dartVersion string, isARM64 bool) (string, bool) {
+	reg, ok := DispatchTableClassIDReg(dartVersion, isARM64)
+	if !ok {
+		return "", false
+	}
+	if isARM64 {
+		return ARM64RegName(reg), true
+	}
+	return X86RegName(reg), true
+}
+
+func TypeTestRegNames(dartVersion string, isARM64 bool) map[string]string {
+	abi, ok := TypeTestRegs(dartVersion, isARM64)
+	if !ok {
+		return nil
+	}
 	name := X86RegName
 	if isARM64 {
 		name = ARM64RegName
 	}
-	out := make(map[string]string, 7)
+	out := make(map[string]string, 5)
 	for reg, role := range map[int]string{
 		abi.InstanceReg:                  "instance",
 		abi.DstTypeReg:                   "dstType",
@@ -135,71 +254,3 @@ func TypeTestRegNames(isARM64 bool) map[string]string {
 	}
 	return out
 }
-
-// TypeTestRegs returns the type-testing stub ABI for an architecture.
-func TypeTestRegs(isARM64 bool) TypeTestABI {
-	if isARM64 {
-		return arm64TypeTestABI
-	}
-	return x86TypeTestABI
-}
-
-// InstantiationRegs returns the instantiation stub ABI for an architecture.
-func InstantiationRegs(isARM64 bool) InstantiationABI {
-	if isARM64 {
-		return arm64InstantiationABI
-	}
-	return x86InstantiationABI
-}
-
-// AssertSubtypeRegs returns the AssertSubtypeStub ABI for an architecture.
-func AssertSubtypeRegs(isARM64 bool) AssertSubtypeABI {
-	if isARM64 {
-		return arm64AssertSubtypeABI
-	}
-	return x86AssertSubtypeABI
-}
-
-// ARM64ClassIdReg is DispatchTableNullErrorABI::kClassIdReg on ARM64 (R0).
-//
-// It holds a raw integer class id, not a tagged object pointer. A probe
-// that dereferences it reads whatever lives at that address and reports
-// it as a class -- the value looks like a small integer precisely because
-// it is one.
-const ARM64ClassIdReg = 0
-
-// ClassIdRegName returns the register holding the receiver's class id at
-// a dispatch-table call site, by architecture.
-//
-// The value is a plain integer class id, NOT a tagged object pointer.
-// FlowGraphCompiler::EmitDispatchTableCall uses it as the table index:
-//
-//	ARM64   add LR, cid_reg, #offset ; call [DISPATCH_TABLE_REG + LR*8]
-//	x86_64  call [table_reg + cid_reg*8 + offset]
-//
-// so anything that dereferences it is reading memory at an address equal
-// to a small integer. ARM64 R0 also serves as the return register,
-// FUNCTION_REG and kExceptionObjectReg; which role applies is positional,
-// and at a dispatch-table call it is the class id.
-func ClassIdRegName(isARM64 bool) string {
-	if isARM64 {
-		return "x0"
-	}
-	return "rcx"
-}
-
-// Allocation stub result registers.
-//
-// AllocateObjectABI::kResultReg -- R0 on ARM64, RAX on x86_64. Source:
-// runtime/vm/constants_arm64.h:334-338 and runtime/vm/constants_x64.h:299-304
-// @3.13.0, stable across every version AOTopsy supports.
-//
-// The rest of that ABI is kTypeArgumentsReg (R1 / RDX) and kTagsReg
-// (R2 / R8); the class id travels in the tags word, which the per-class stub
-// materialises internally. Notably RDI is NOT part of it on x86_64 -- inside
-// GenerateAllocateObjectHelper it is only a scratch register -- which is why
-// reading the allocated class from RDI was never grounded in the ABI.
-const (
-	ARM64AllocResultReg = 0 // R0
-	X86AllocResultReg   = 0 // RAX (canonical index 0)
-)

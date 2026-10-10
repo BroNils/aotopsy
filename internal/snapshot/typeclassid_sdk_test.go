@@ -34,9 +34,9 @@ func TestTypeClassIdIsRefMatchesSDK(t *testing.T) {
 	for _, v := range SupportedVersions() {
 		p := versionProfiles[v]
 		if p == nil {
-			continue
+			t.Fatalf("supported Dart %s has no VersionProfile; refusing an unverified TypeClassIdIsRef gap", v)
 		}
-		src, err := sdktest.GHFileAtTag("runtime/vm/raw_object.h", v)
+		src, err := sdktest.SDKFileAtTag("runtime/vm/raw_object.h", v)
 		if err != nil {
 			t.Fatalf("%s: fetch raw_object.h: %v", v, err)
 		}

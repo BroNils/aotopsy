@@ -104,20 +104,22 @@ func applyFloat(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (line 
 		}
 		return "", false, true
 
-	// --- comparison --------------------------------------------------
-	//
-	// These set the flags a following B.cc / Jcc reads, so they feed
-	// LastCmp exactly like the integer cmp case in lift.go. Without this
-	// an FP comparison produced `if (/* cond */)` -- the placeholder seen
-	// throughout x86_64 pseudocode for Rect/Offset geometry code.
+		// --- comparison --------------------------------------------------
+		//
+		// These set the flags a following B.cc / Jcc reads, so they feed
+		// LastCmp exactly like the integer cmp case in lift.go. Without this
+		// an FP comparison produced `if (/* cond */)` -- the placeholder seen
+		// throughout x86_64 pseudocode for Rect/Offset geometry code.
 	case "fcmp", "fcmpe", "comisd", "comiss", "ucomisd", "ucomiss":
 		if len(ops) >= 2 {
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])}
 			s.HasCmp = true
+			s.CmpBits = 0
 		} else if len(ops) == 1 {
 			// ARM64 `fcmp d0, #0.0` renders with the zero folded away.
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), "0.0"}
 			s.HasCmp = true
+			s.CmpBits = 0
 		}
 		return "", false, true
 

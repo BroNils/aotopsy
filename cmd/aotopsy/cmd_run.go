@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -12,12 +13,7 @@ import (
 
 // cmdRun handles "aotopsy <libapp.so>" — full analysis.
 func cmdRun(args []string) error {
-	// Go's flag package stops at the first non-flag arg.
-	// If the first arg is a file path (not a flag), move it to the end
-	// so flags like --quiet after it are parsed correctly.
-	args = reorderPositionalArg(args)
-
-	fs := flag.NewFlagSet("aotopsy", flag.ExitOnError)
+	fs := flag.NewFlagSet("aotopsy", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	limit := fs.Int("limit", 0, "max functions (0 = all)")
@@ -27,19 +23,33 @@ func cmdRun(args []string) error {
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	signalK := fs.Int("k", 2, "signal context hops")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 	decompile := fs.Bool("decompile", false, "write per-function Dart pseudocode to <out>/dart/ (large)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("limit", *limit); err != nil {
+		return err
+	}
+	if *signalK <= 0 {
+		return fmt.Errorf("--k must be > 0")
 	}
 
 	// --from mode: reuse existing output, just rerun signal+meta.
 	if *from != "" {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("--from does not accept a libapp.so positional argument")
+		}
+		for _, name := range []string{"max-steps", "limit", "graph", "strict", "decompile"} {
+			if flagWasSet(fs, name) {
+				return fmt.Errorf("--%s cannot be used with --from because fresh snapshot/disassembly stages are skipped", name)
+			}
+		}
 		if *outDir == "" {
 			*outDir = *from
 		}
@@ -48,7 +58,7 @@ func cmdRun(args []string) error {
 			OutDir:    *outDir,
 			Signal:    true,
 			SignalK:   *signalK,
-			Meta:      true,
+			Meta:      analysis.MetaIfSupported,
 			DecompAll: *all,
 			Quiet:     quiet,
 		})
@@ -59,7 +69,7 @@ func cmdRun(args []string) error {
 		return nil
 	}
 
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy <libapp.so> [flags]")
 	}
 
@@ -81,7 +91,7 @@ func cmdRun(args []string) error {
 		Strict:    *strict,
 		Signal:    true,
 		SignalK:   *signalK,
-		Meta:      true,
+		Meta:      analysis.MetaIfSupported,
 		DecompAll: *all,
 		Decompile: *decompile,
 		Quiet:     quiet,
@@ -95,29 +105,48 @@ func cmdRun(args []string) error {
 }
 
 func printSummary(result *analysis.Result) {
-	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("summary"))
-	fmt.Fprintf(os.Stderr, "  %s     %s\n", cli.MutedColor.S("output:"), cli.BlueColor.S(result.OutDir))
+	writeSummary(os.Stderr, result)
+}
+
+func writeSummary(w io.Writer, result *analysis.Result) {
+	logger := cli.NewLogger(w, false)
+	logger.Printf("\n%s%s%s\n", cli.Pink, "summary", cli.Reset)
+	logger.Printf("  %soutput:%s     %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.OutDir, cli.Reset)
 	if result.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "  %s       %s\n", cli.MutedColor.S("dart:"), cli.GoldColor.S(result.DartVersion))
+		logger.Printf("  %sdart:%s       %s%s%s\n", cli.Muted, cli.Reset, cli.Gold, result.DartVersion, cli.Reset)
 	}
-	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("ptr_size:"), cli.GoldColor.F("%d", result.PointerSize))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", cli.MutedColor.S("functions:"), cli.GoldColor.F("%d", result.FuncCount))
-	fmt.Fprintf(os.Stderr, "  %s   %s\n", cli.MutedColor.S("classes:"), cli.GoldColor.F("%d", result.ClassCount))
-	fmt.Fprintf(os.Stderr, "  %s    %s\n", cli.MutedColor.S("signal:"), cli.GoldColor.F("%d", result.SignalCount))
+	if result.Arch != "" {
+		logger.Printf("  %sarch:%s       %s%s%s\n", cli.Muted, cli.Reset, cli.Gold, result.Arch, cli.Reset)
+	}
+	if result.PointerSize > 0 {
+		logger.Printf("  %sptr_size:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.PointerSize, cli.Reset)
+	}
+	logger.Printf("  %sfunctions:%s %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.FuncCount, cli.Reset)
+	if result.ClassCount > 0 {
+		logger.Printf("  %sclasses:%s   %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.ClassCount, cli.Reset)
+	}
+	logger.Printf("  %ssignal:%s    %s%d%s\n", cli.Muted, cli.Reset, cli.Gold, result.SignalCount, cli.Reset)
 	if result.MetaPath != "" {
-		fmt.Fprintf(os.Stderr, "  %s      %s\n", cli.MutedColor.S("meta:"), cli.BlueColor.S(result.MetaPath))
+		logger.Printf("  %smeta:%s      %s%s%s\n", cli.Muted, cli.Reset, cli.Blue, result.MetaPath, cli.Reset)
 	}
 	if result.DecompiledCount > 0 {
-		fmt.Fprintf(os.Stderr, "  %s %s functions\n", cli.MutedColor.S("pseudocode:"), cli.GoldColor.F("%d", result.DecompiledCount))
+		logger.Printf("  %spseudocode:%s %s%d%s functions\n", cli.Muted, cli.Reset, cli.Gold, result.DecompiledCount, cli.Reset)
 	}
 
 	// Follow-up commands.
-	absOut, _ := filepath.Abs(result.OutDir)
+	absOut := result.OutDir
+	if resolved, err := filepath.Abs(result.OutDir); err == nil {
+		absOut = resolved
+	}
 	signalHTML := filepath.Join(absOut, "signal.html")
-	fmt.Fprintf(os.Stderr, "\n%s\n", cli.PinkColor.S("next"))
-	fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("open "+signalHTML))
-	if result.LibPath != "" {
-		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ghidra "+result.LibPath+" --from "+absOut))
-		fmt.Fprintf(os.Stderr, "  %s\n", cli.WhiteColor.S("aotopsy ida "+result.LibPath+" --from "+absOut))
+	logger.Printf("\n%s%s%s\n", cli.Pink, "next", cli.Reset)
+	if info, err := os.Stat(signalHTML); err == nil && info.Mode().IsRegular() {
+		logger.Printf("  %s%s%s\n", cli.White, "open "+signalHTML, cli.Reset)
+	}
+	if result.LibPath != "" && result.Arch == "arm64" {
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ghidra "+result.LibPath+" --from "+absOut, cli.Reset)
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy ida "+result.LibPath+" --from "+absOut, cli.Reset)
+	} else if result.LibPath != "" && result.Arch == "x64" {
+		logger.Printf("  %s%s%s\n", cli.White, "aotopsy _debug decompile-native --lib "+result.LibPath+" --from-main", cli.Reset)
 	}
 }

@@ -1,32 +1,48 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
+	"io"
+	"math"
 	"path/filepath"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/thraudit"
 )
 
 // cmdTHRAudit implements "aotopsy _debug thr-audit" for auditing THR-relative memory accesses.
 func cmdTHRAudit(args []string) error {
-	fs := flag.NewFlagSet("thr-audit", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-audit", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	outPath := fs.String("out", "", "output JSONL path")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	limit := fs.Int("limit", 0, "max functions to scan (0 = all)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("limit", *limit); err != nil {
 		return err
 	}
 	if *libapp == "" || *outPath == "" {
 		return fmt.Errorf("--lib and --out are required")
+	}
+	same, err := output.SamePath(*libapp, *outPath)
+	if err != nil {
+		return fmt.Errorf("compare THR audit input/output paths: %w", err)
+	}
+	if same {
+		return fmt.Errorf("thr-audit output must not replace the input binary")
 	}
 
 	opts := dartfmt.Options{
@@ -57,80 +73,105 @@ func cmdTHRAudit(args []string) error {
 		ranges = cluster.MergeRanges(stubRanges, codeRanges)
 	}
 
-	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data)
+	code, codeOff, payloadLen, err := snapshot.CodeRegion(info.IsolateInstructions.Data, info.Version)
 	if err != nil {
 		return fmt.Errorf("code region: %w", err)
 	}
-	codeEndOffset := uint32(codeOff) + uint32(payloadLen)
+	codeEndOffset, err := analysis.CheckedCodeEndOffset(codeOff, payloadLen)
+	if err != nil {
+		return err
+	}
 	cluster.SetLastRangeSize(ranges, codeEndOffset)
 
+	if codeOff > math.MaxUint64-info.IsolateInstructions.VA {
+		return fmt.Errorf("code virtual address overflows uint64: base=0x%x off=0x%x", info.IsolateInstructions.VA, codeOff)
+	}
 	codeVA := info.IsolateInstructions.VA + codeOff
+	sampleSHA256, err := ef.SHA256()
+	if err != nil {
+		return fmt.Errorf("hash audit input: %w", err)
+	}
 
 	return analysis.RunTHRAudit(analysis.THRAuditData{
-		Info:    info,
-		IsARM64: ef.IsARM64(),
-		Result:  result,
-		Ranges:  ranges,
-		Code:    code,
-		CodeOff: codeOff,
-		CodeVA:  codeVA,
+		Info:         info,
+		IsARM64:      ef.IsARM64(),
+		SampleSHA256: sampleSHA256,
+		Result:       result,
+		Table:        table,
+		Ranges:       ranges,
+		Code:         code,
+		CodeOff:      codeOff,
+		CodeVA:       codeVA,
 	}, *libapp, *outPath, *limit)
 }
 
 // cmdTHRClassify implements "aotopsy _debug thr-classify" for classifying unresolved THR offsets.
 func cmdTHRClassify(args []string) error {
-	fs := flag.NewFlagSet("thr-classify", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-classify", flag.ContinueOnError)
 	inputPath := fs.String("in", "", "input thr_loads.jsonl path")
 	outDir := fs.String("out", "", "output directory")
-	maxGap := fs.Int("max-gap", 0x18, "max gap between offsets before splitting bands")
+	maxGap := fs.Int64("max-gap", 0x18, "max byte gap between signed offsets before splitting bands")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if *maxGap < 0 {
+		return fmt.Errorf("--max-gap must be >= 0")
 	}
 	if *inputPath == "" || *outDir == "" {
 		return fmt.Errorf("--in and --out are required")
 	}
 
-	f, err := os.Open(*inputPath)
-	if err != nil {
-		return fmt.Errorf("open input: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	records, err := thraudit.ReadAuditRecords(f)
+	records, err := thraudit.ReadAuditRecords(*inputPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read records: %w", err)
 	}
 
-	bands := thraudit.ClusterBands(records, *maxGap)
-	classified := thraudit.ClassifyRecords(records, bands)
-
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	classPath := filepath.Join(*outDir, "classified.jsonl")
-	cf, err := os.Create(classPath)
+	bands, err := thraudit.ClusterBands(records, *maxGap)
 	if err != nil {
-		return fmt.Errorf("create classified: %w", err)
+		return fmt.Errorf("cluster records: %w", err)
 	}
-	defer func() { _ = cf.Close() }()
-	enc := json.NewEncoder(cf)
-	enc.SetEscapeHTML(false)
-	for _, cr := range classified {
-		if err := enc.Encode(cr); err != nil {
-			return fmt.Errorf("write classified: %w", err)
+	classified, err := thraudit.ClassifyRecords(records, bands)
+	if err != nil {
+		return fmt.Errorf("classify records: %w", err)
+	}
+
+	containsInput, err := output.ContainsPath(*outDir, *inputPath)
+	if err != nil {
+		return fmt.Errorf("compare thr-classify input/output paths: %w", err)
+	}
+	if containsInput {
+		return fmt.Errorf("thr-classify output directory must not contain its input file")
+	}
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return fmt.Errorf("begin thr-classify output generation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
 		}
+	}()
+
+	classPath := filepath.Join(tx.StageDir(), "classified.jsonl")
+	if _, err := jsonutil.WriteJSONLFile(classPath, classified); err != nil {
+		return fmt.Errorf("write classified: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish thr-classify output generation: %w", err)
+	}
+	committed = true
 
 	summary := thraudit.Summarize(classified)
-	fmt.Fprintf(os.Stderr, "%s (Dart %s): %d unresolved\n",
+	cli.Errf("%s (Dart %s): %d unresolved\n",
 		summary.Sample, summary.DartVersion, summary.Total)
 
 	classes := []thraudit.THRClass{
-		thraudit.ClassRuntimeEntrypoint,
-		thraudit.ClassObjectStoreCache,
-		thraudit.ClassIsolateGroupPtr,
+		thraudit.ClassIndirectControlTarget,
+		thraudit.ClassValueStored,
+		thraudit.ClassValueCompared,
+		thraudit.ClassPointerDereference,
 		thraudit.ClassUnknown,
 	}
 	for _, cls := range classes {
@@ -139,66 +180,79 @@ func cmdTHRClassify(args []string) error {
 		if summary.Total > 0 {
 			pct = float64(count) / float64(summary.Total) * 100
 		}
-		fmt.Fprintf(os.Stderr, "  %-30s %4d (%5.1f%%)\n", cls, count, pct)
+		cli.Errf("  %-30s %4d (%5.1f%%)\n", cls, count, pct)
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s\n", classPath)
+	cli.Errf("wrote %s\n", filepath.Join(*outDir, "classified.jsonl"))
 	return nil
 }
 
 // cmdTHRCluster implements "aotopsy _debug thr-cluster" for clustering unresolved THR offsets into bands.
 func cmdTHRCluster(args []string) error {
-	fs := flag.NewFlagSet("thr-cluster", flag.ExitOnError)
+	fs := flag.NewFlagSet("thr-cluster", flag.ContinueOnError)
 	inputPath := fs.String("in", "", "input thr_loads.jsonl path")
 	outDir := fs.String("out", "", "output directory for bands.json and bands.md")
-	maxGap := fs.Int("max-gap", 0x18, "max gap between offsets before splitting bands")
+	maxGap := fs.Int64("max-gap", 0x18, "max byte gap between signed offsets before splitting bands")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if *maxGap < 0 {
+		return fmt.Errorf("--max-gap must be >= 0")
 	}
 	if *inputPath == "" || *outDir == "" {
 		return fmt.Errorf("--in and --out are required")
 	}
 
-	f, err := os.Open(*inputPath)
-	if err != nil {
-		return fmt.Errorf("open input: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	records, err := thraudit.ReadAuditRecords(f)
+	records, err := thraudit.ReadAuditRecords(*inputPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read records: %w", err)
 	}
 
-	br := thraudit.ClusterBands(records, *maxGap)
-
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	jsonPath := filepath.Join(*outDir, "bands.json")
-	jf, err := os.Create(jsonPath)
+	br, err := thraudit.ClusterBands(records, *maxGap)
 	if err != nil {
-		return fmt.Errorf("create json: %w", err)
+		return fmt.Errorf("cluster records: %w", err)
 	}
-	defer func() { _ = jf.Close() }()
-	if err := thraudit.WriteBandsJSON(jf, br); err != nil {
+
+	containsInput, err := output.ContainsPath(*outDir, *inputPath)
+	if err != nil {
+		return fmt.Errorf("compare thr-cluster input/output paths: %w", err)
+	}
+	if containsInput {
+		return fmt.Errorf("thr-cluster output directory must not contain its input file")
+	}
+	tx, err := output.BeginDirTransaction(*outDir)
+	if err != nil {
+		return fmt.Errorf("begin thr-cluster output generation: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Abort()
+		}
+	}()
+	stageOutDir := tx.StageDir()
+
+	jsonPath := filepath.Join(stageOutDir, "bands.json")
+	if err := output.WriteJSONFile(jsonPath, br); err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 
-	mdPath := filepath.Join(*outDir, "bands.md")
-	mf, err := os.Create(mdPath)
-	if err != nil {
-		return fmt.Errorf("create md: %w", err)
+	mdPath := filepath.Join(stageOutDir, "bands.md")
+	if err := output.WriteAtomic(mdPath, 0o644, func(w io.Writer) error {
+		return thraudit.WriteBandsMD(w, br)
+	}); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
 	}
-	defer func() { _ = mf.Close() }()
-	thraudit.WriteBandsMD(mf, br)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("publish thr-cluster output generation: %w", err)
+	}
+	committed = true
 
-	fmt.Fprintf(os.Stderr, "%s: %d bands from %d unresolved accesses\n",
+	cli.Errf("%s: %d bands from %d unresolved accesses\n",
 		br.Sample, len(br.Bands), br.TotalUnresolved)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", jsonPath)
-	fmt.Fprintf(os.Stderr, "wrote %s\n", mdPath)
+	cli.Errf("wrote %s\n", filepath.Join(*outDir, "bands.json"))
+	cli.Errf("wrote %s\n", filepath.Join(*outDir, "bands.md"))
 
 	return nil
 }

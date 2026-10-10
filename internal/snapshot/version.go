@@ -18,7 +18,7 @@ type TagStyle int
 const (
 	// TagStyleCidShift1 is the v2.14+ / early v3.x format:
 	//   Write<uint64_t>((cid << 1) | canonical)
-	// Used in Dart 2.14.0 through 3.2.5.
+	// Used in the supported profiles from Dart 2.14.0 through 3.3.0.
 	TagStyleCidShift1 TagStyle = iota
 
 	// TagStyleObjectHeader is the v3.4.3+ format:
@@ -51,10 +51,15 @@ const (
 type BuildMode int
 
 const (
+	// BuildUnknown means the snapshot feature string did not prove one of the
+	// three SDK-defined build modes. It must never inherit PRODUCT semantics:
+	// PRODUCT changes the serialized Code shape as well as VM offset tables.
+	BuildUnknown BuildMode = iota
+
 	// BuildProduct is defined(PRODUCT): the mode every shipped release APK
 	// uses, and the only mode this tool fully supports. THR offsets come from
 	// the defined(PRODUCT) blocks of runtime_offsets_extracted.h.
-	BuildProduct BuildMode = iota
+	BuildProduct
 
 	// BuildRelease is the non-PRODUCT, non-DEBUG mode -- what a Flutter
 	// profile build ships. Uses the !defined(PRODUCT) offset blocks.
@@ -83,32 +88,96 @@ func (m BuildMode) String() string {
 // should branch on this rather than on individual offset tables.
 func (m BuildMode) IsProduct() bool { return m == BuildProduct }
 
+// SnapshotSymbolLayout identifies the mutually-exclusive AOT export layouts.
+// SDK @3.12.2 runtime/include/dart_api.h exports separate VM/isolate data and
+// instructions symbols; @3.13.0 exports one data/text pair.
+type SnapshotSymbolLayout uint8
+
+const (
+	SnapshotSymbolsUnknown SnapshotSymbolLayout = iota
+	SnapshotSymbolsLegacy
+	SnapshotSymbolsUnified
+)
+
+// CompressionFeatureStyle records how Dart::FeaturesString encodes pointer
+// compression for this format family. Dart 2.10/2.12 have no compressed-pointer
+// build dimension at all; 2.13-2.14 write only the positive token "compressed";
+// 2.15+ write exactly one of "compressed-pointers" and
+// "no-compressed-pointers". Treating those eras as interchangeable silently
+// chooses the wrong object layout.
+type CompressionFeatureStyle uint8
+
+const (
+	CompressionFeatureUnknown CompressionFeatureStyle = iota
+	CompressionFeatureFixedUncompressed
+	CompressionFeatureLegacyPositiveOnly
+	CompressionFeatureExplicit
+)
+
+// TargetFeatureStyle records how Dart::FeaturesString identifies the generated
+// machine-code target. Through Dart 2.18 the architecture token also carries
+// the ABI (for the supported 64-bit targets, arm64-sysv/x64-sysv). Dart 2.19+
+// emits a bare architecture token followed by a separate operating-system
+// token. AOTopsy supports only the SysV/Linux-or-Android variants that match
+// its ELF64 ARM64/x86_64 analysis paths.
+type TargetFeatureStyle uint8
+
+const (
+	TargetFeatureUnknown TargetFeatureStyle = iota
+	TargetFeatureLegacyABI
+	TargetFeatureArchAndOS
+)
+
+// InstructionsImageLayout records the versioned instructions-image header.
+// Dart 2.10's second Image word is a BSS offset and the InstructionsSection
+// starts at Image::kHeaderSize. Dart 2.12+ stores an explicit section offset;
+// its section header is 40 bytes through 3.4 and 64 bytes from 3.5 onward.
+type InstructionsImageLayout uint8
+
+const (
+	InstructionsImageUnknown InstructionsImageLayout = iota
+	InstructionsImageLegacy210
+	InstructionsImageSection40
+	InstructionsImageSection64
+)
+
 // VersionProfile holds format parameters that differ across Dart SDK versions.
 type VersionProfile struct {
-	DartVersion             string   // e.g. "2.17.6", "3.10.7", "" if unknown
-	Supported               bool     // true if full parsing is available (CID table + format flags)
-	HeaderFields            int      // clustered snapshot header field count (5 or 6)
-	Tags                    TagStyle // how cluster tags are encoded
-	CIDs                    *CIDTable
-	CompressedPointers      bool // true if snapshot uses compressed pointers (from features string)
-	FillRefUnsigned         bool // ≤2.17: ReadRef() = ReadUnsigned(); Function has packed_fields
-	CodeIndexOneBased       bool // ≥2.16: Function.code_index is 1-based (0=LazyCompile stub). ≤2.15: 0-based direct ref.
-	PreV32Format            bool // ≤3.1: PatchClass has 3 refs; ObjectPool uses v2 type bits
-	HasTypeParamClassId     bool // ≤3.0: TypeParameter has parameterized_class_id scalar
-	TypeParamByteScalars    bool // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>
-	OldTypeScalars          bool // ≤2.18: Type fill has type_class_id_(unsigned)+combined(uint8) instead of flags(unsigned)
-	TopLevelCid16           bool // ≤2.18: kTopLevelCidOffset = 1<<16 (vs 1<<20 in ≥2.19)
-	OldPoolFormat           bool // ≤3.2: ObjectPool uses 7-bit TypeBits (no SnapshotBehavior)
-	PoolTypeSwapped         bool // ≥3.2: ObjectPool kImmediate=0,kTaggedObject=1 (was swapped in 3.2.0)
-	OldStringFormat         bool // ≤2.14: separate OneByteString/TwoByteString clusters with plain length (no <<1|flag)
-	SplitCanonical          bool // 2.12-2.13: header has separate num_canonical_clusters + num_clusters
-	NoCanonicalSetData      bool // ≤2.12: canonical set rebuilt in-memory post-load, not written to alloc stream (2.13 added CanonicalSetDeserializationCluster/BuildCanonicalSetFromLayout)
-	StringRODataPerSubclass bool // 2.12: OneByteString/TwoByteString clusters each carry their own ROData deltas directly (no abstract kStringCid cluster combining both — that was added in 2.13's NewClusterForClass dispatch)
-	PreCanonicalSplit       bool // ≤2.10: no canonical/non-canonical distinction at all (single cluster loop, no canonical bit)
-	ClassNumRefs            int  // Class pointer field count override. 0 = default (13). v2.10=16, v2.13=15.
-	ClassHasTokenPos        bool // Class fill includes ReadTokenPosition(token_pos) + ReadTokenPosition(end_token_pos)
-	FuncNumRefs             int  // Function pointer field count override. 0 = default (4). v2.10=7, v2.13=5.
-	TypeNumRefs             int  // Type fill ref count override. 0 = default (3). v2.13=4.
+	DartVersion                     string   // e.g. "2.17.6", "3.10.7", "" if unknown
+	Supported                       bool     // true if full parsing is available (CID table + format flags)
+	HeaderFields                    int      // clustered snapshot header field count (5 or 6)
+	Tags                            TagStyle // how cluster tags are encoded
+	CIDs                            *CIDTable
+	SnapshotSymbols                 SnapshotSymbolLayout
+	CompressionFeatures             CompressionFeatureStyle
+	TargetFeatures                  TargetFeatureStyle
+	InstructionsImage               InstructionsImageLayout
+	FullAOTKind                     SnapshotKind // exact enum value written into AOT snapshot headers
+	DataImageAlignment              int64        // Snapshot::DataImage RoundUp alignment on 64-bit AOT
+	ImageHeaderSize                 uint64       // exact Image::kHeaderSize in bytes
+	ClassIdTagPos                   int          // exact bit position of ClassIdTag in object header tags
+	ClassIdTagSize                  int          // exact width of ClassIdTag in object header tags
+	RootsHasInitialFieldTable       bool         // Program roots serialize initial_field_table
+	RootsHasSharedInitialFieldTable bool         // Program roots serialize shared_initial_field_table
+	CompressedPointers              bool         // true if snapshot uses compressed pointers (from features string)
+	FillRefUnsigned                 bool         // ≤2.17: ReadRef() = ReadUnsigned(); Function has packed_fields
+	CodeIndexOneBased               bool         // ≥2.16: Function.code_index is a 1-based InstructionsTable slot (0=LazyCompile stub). ≤2.15: the serialized scalar is an absolute snapshot Code ref ID.
+	PreV32Format                    bool         // ≤3.1: PatchClass has 3 refs; ObjectPool uses v2 type bits
+	HasTypeParamClassId             bool         // ≤3.0: TypeParameter has parameterized_class_id scalar
+	TypeParamByteScalars            bool         // ≤2.19: TypeParameter base_/index_ are Write<uint8_t> not Write<uint16_t>
+	OldTypeScalars                  bool         // ≤2.18: Type fill has type_class_id_(unsigned)+combined(uint8) instead of flags(unsigned)
+	TopLevelCid16                   bool         // ≤2.18: kTopLevelCidOffset = 1<<16 (vs 1<<20 in ≥2.19)
+	OldPoolFormat                   bool         // ≤3.2: ObjectPool uses 7-bit TypeBits (no SnapshotBehavior)
+	PoolTypeSwapped                 bool         // ≥3.2: ObjectPool kImmediate=0,kTaggedObject=1 (was swapped in 3.2.0)
+	OldStringFormat                 bool         // ≤2.14: separate OneByteString/TwoByteString clusters with plain length (no <<1|flag)
+	SplitCanonical                  bool         // 2.12-2.13: header has separate num_canonical_clusters + num_clusters
+	NoCanonicalSetData              bool         // ≤2.12: canonical set rebuilt in-memory post-load, not written to alloc stream (2.13 added CanonicalSetDeserializationCluster/BuildCanonicalSetFromLayout)
+	StringRODataPerSubclass         bool         // 2.12: OneByteString/TwoByteString clusters each carry their own ROData deltas directly (no abstract kStringCid cluster combining both — that was added in 2.13's NewClusterForClass dispatch)
+	PreCanonicalSplit               bool         // ≤2.10: no canonical/non-canonical distinction at all (single cluster loop, no canonical bit)
+	ClassNumRefs                    int          // Class pointer field count override. 0 = default (13). v2.10=16, v2.13=15.
+	ClassHasTokenPos                bool         // Class fill includes ReadTokenPosition(token_pos) + ReadTokenPosition(end_token_pos)
+	FuncNumRefs                     int          // Function pointer field count override. 0 = default (4). v2.10=7, v2.13=5.
+	TypeNumRefs                     int          // Type fill ref count override. 0 = default (3). v2.13=4.
 	// TypeClassIdIsRef marks the era where UntaggedType.type_class_id is a
 	// COMPRESSED_POINTER_FIELD(SmiPtr, ...) inside the visited range rather
 	// than a scalar written after it. That is **v2.10 through v2.14**.
@@ -125,12 +194,12 @@ type VersionProfile struct {
 	// at the wrong field, so 0 of 2228 resolved through MintValues, against
 	// 2254 of 2255 on 2.14.0. See docs/findings-repo/012.
 	TypeClassIdIsRef   bool
-	FuncTypeNumRefs    int  // FunctionType fill ref count override. 0 = default (6). v2.13=6 (different scalars).
-	FuncTypeOldScalars bool // FunctionType v2.13: 2 scalars (uint8+uint32) not 3.
+	FuncTypeNumRefs    int  // FunctionType fill ref count override. 0 = default (6); all supported FunctionType layouts currently consume 6 refs.
+	FuncTypeOldScalars bool // FunctionType v2.12-v2.13: 2 scalars (uint8+uint32) rather than the later 3-scalar layout.
 
 	// BuildMode records the build configuration detected from the features
-	// string. Defaults to BuildProduct, which is what every shipped release
-	// APK is, and is the ONLY mode this tool supports end to end.
+	// string. Its zero value is deliberately BuildUnknown; unreadable or malformed
+	// feature evidence must never acquire PRODUCT wire semantics by default.
 	//
 	// A non-PRODUCT snapshot differs in at least two ways, and the second one
 	// is fatal, so do not read a non-zero BuildMode as "supported":
@@ -172,13 +241,13 @@ type VersionProfile struct {
 	// raw_object.h isn't at the same repo path at that tag) -- left at 0
 	// (unverified) rather than guessed.
 	FuncTypeParamTypesIdx int
-	TypeParamNumRefs      int  // TypeParameter fill ref count override. 0 = default (3). v2.13=5, v2.14/v2.15=2.
-	TypeParamWideScalars  bool // TypeParameter v2.13: base/index use Read<uint16_t> not Read<uint8_t>.
+	TypeParamNumRefs      int  // TypeParameter fill ref count override. 0 = default (3). v2.10-v2.13=5; v2.14+ consume the default 3 refs.
+	TypeParamWideScalars  bool // TypeParameter v2.12-v2.13: base/index use Read<uint16_t> rather than the v2.14-v2.19 uint8 form.
 	TypeRefNumRefs        int  // TypeRef fill ref count override. 0 = default (2). All versions use 2 refs (type_test_stub + type).
 	CodeNumRefs           int  // Code fill ref count override. 0 = default (6). v2.10-v2.15=7 (includes compressed_stackmaps).
 	CodeTextOffsetDelta   bool // Code ReadInstructions reads extra ReadUnsigned (text_offset_delta). v2.10-v2.15.
-	CodeStateBitsAfterRef int  // Code state_bits_ position in fill: 0=not in fill (v2.14+), N=read after first N refs. v2.13=1 (1 ref → state_bits → 6 refs).
-	CodeStateBitsAtEnd    bool // Code state_bits_ Read<int32_t> after ALL refs (no discarded check). v2.10.
+	CodeStateBitsAfterRef int  // Code interleaved state_bits_ position: N=read after first N refs. v2.13=1 (1 ref → state_bits → 6 refs); 0 means use the non-interleaved path.
+	CodeStateBitsAtEnd    bool // Code state_bits_ Read<int32_t> after ALL refs (no discarded check). v2.10 and v2.12.
 
 	// ClassAllocFixedSize marks the Dart 3.13.0+ Class alloc, which is a plain
 	// ReadAllocFixedSize: ONE ReadUnsigned(count) and nothing else. Up to
@@ -200,7 +269,7 @@ type VersionProfile struct {
 	// CompressedStackMaps / LocalVarDescriptors.
 	// SDK-verified: ClosureDeserializationCluster::ReadAlloc @3.13.0 vs @3.12.2.
 	ClosureAllocHasLength bool
-	ClosureDataNumRefs    int  // ClosureData ref count override. 0 = default (2). v2.13=3 (includes default_type_arguments).
+	ClosureDataNumRefs    int  // ClosureData ref count override after 2.13. 2.10-2.13 are selected exactly by version in specClosureData.
 	TypeHasTokenPos       bool // Type/TypeParameter fill has ReadTokenPosition scalar. v2.10 only.
 	ScriptHasLineCol      bool // Script fill has line_offset + col_offset scalars before kernel_script_index. v2.10, v2.13.
 	ScriptHasFlags        bool // Script fill has flags (uint8) scalar between col_offset and kernel_script_index. v2.10 only.
@@ -260,7 +329,8 @@ type VersionProfile struct {
 	//	class table                         = (kNumPredefinedCids - kObjectCid)
 	//	                                      - |IsAbsentCid|
 	//
-	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h):
+	// At 3.13.0 (roots.h, symbol_list.h, stub_code_list.h, class_id.h,
+	// app_snapshot.cc for IsAbsentCid):
 	// 7+35+4+256 = 302, 63+(557+256)+173 = 1049, 6, and (176-4)-11 = 161,
 	// so 1518. Note kNumStubEntries is 173 and not 164: VM_STUB_CODE_LIST
 	// pulls in PROBE_POINT_STUBS_LIST (defined on ONE line, which a
@@ -295,6 +365,7 @@ type CIDTable struct {
 	Function            int
 	ClosureData         int
 	SignatureData       int // 0 if not present (v2.10 only, removed in v2.13)
+	RedirectionData     int // 0 if not present (v2.10 only)
 	Field               int
 	Script              int
 	Library             int
@@ -331,6 +402,7 @@ type CIDTable struct {
 	ExceptionHandlers          int
 	Context                    int
 	ContextScope               int
+	ParameterTypeCheck         int // 0 if not present (v2.10 only)
 	UnlinkedCall               int
 	ICData                     int
 	MegamorphicCache           int
@@ -378,26 +450,47 @@ type CIDTable struct {
 	TypedDataInt8ArrayCid int // first internal TypedData CID
 	ByteDataViewCid       int // end marker (exclusive)
 	TypedDataCidStride    int // 3 for v2.17.6, 4 for v3.x
+	// FfiMarkerFirstCid..FfiMarkerLastCid is the contiguous
+	// CLASS_LIST_FFI_TYPE_MARKER range. NewClusterForClass routes exactly these
+	// predefined FFI CIDs through InstanceSerializationCluster; the neighboring
+	// FfiNativeFunction/FfiNativeType/FfiStruct (and older Pointer/
+	// DynamicLibrary entries) do not take that path.
+	//
+	// 0/0 before Dart 2.16.0: the serializer has no such case there, so a
+	// cluster under these CIDs is malformed and must not be accepted as an
+	// Instance. TestCIDTablesMatchSDK derives both the presence of the case and
+	// the range from each tag.
+	FfiMarkerFirstCid int
+	FfiMarkerLastCid  int
 
 	// DeltaEncodedTypedData pseudo-CID (kNativePointer = 1 in all versions).
 	NativePointerCid int
 
 	// NumPredefinedCids is the count of VM-internal class IDs. CIDs >= this
-	// value are app-defined Instance subclasses. CIDs < this that aren't
-	// explicitly handled should default to AllocSimple, NOT AllocInstance.
+	// value are app-defined Instance subclasses. CIDs below it are accepted only
+	// when their exact Full-AOT cluster shape is explicitly modeled; there is no
+	// generic count-only fallback for unknown predefined CIDs.
 	NumPredefinedCids int
 }
 
-// Known snapshot hashes mapped to Dart SDK versions.
-// Sources: blutter precompiled SDKs + reFlutter enginehash.csv.
+// Known snapshot compatibility hashes mapped to verified parser profiles.
+//
+// This is deliberately not an exact SDK-version identity table: Dart derives
+// SnapshotString from snapshot-format source files, so multiple patch/dev
+// releases can legitimately share one parser shape while carrying distinct
+// hashes. Each target value names the exact profile whose CID/root/fill/image
+// dimensions have been verified for that compatibility family.
+//
+// Canonical hashes for every supported exact local tag were independently
+// re-derived with that tag's tools/make_version.py VM_SNAPSHOT_FILES algorithm.
+// Extra hashes are retained only where a concrete Flutter/Dart build is named;
+// speculative "approximate"/"likely" mappings are not parser evidence.
 var knownHashes = map[string]string{
 	// Dart 2.17.x (Flutter 2.17.0 stable + betas)
 	"1441d6b13b8623fa7fbf61433abebd31": "2.17.6", // Flutter 2.17.0.stable
-	"a0cb0c928b23bc17a26e062b351dc44d": "2.17.6", // Flutter 2.17.0-182.2.beta
-	"ded6ef11c73fdc638d6ff6d3ad22a67b": "2.17.6", // Flutter 2.17.0-69.2.beta
 	// Dart 3.0.x (Flutter 3.10.x)
+	"aa64af18e7d086041ac127cc4bc50c5e": "3.0.5", // Dart 3.0.0-3.0.2; same VM_SNAPSHOT_FILES family except raw_object.h tags() accessor
 	"90b56a561f70cd55e972cb49b79b3d8b": "3.0.5", // Flutter 3.10.4
-	"aa64af18e7d086041ac127cc4bc50c5e": "3.0.5", // Flutter 3.10.0 (approximate)
 	// Dart 3.1.x (Flutter 3.13.x)
 	"7dbbeeb8ef7b91338640dca3927636de": "3.1.0", // Flutter 3.13.9
 	// Dart 3.2.x (Flutter 3.16.x)
@@ -408,8 +501,6 @@ var knownHashes = map[string]string{
 	"d20a1be77c3d3c41b2a5accaee1ce549": "3.4.3", // Flutter 3.22.0
 	// Dart 3.5.x (Flutter 3.24.x)
 	"80a49c7111088100a233b2ae788e1f48": "3.5.0", // Flutter 3.24.0
-	"cda356e9bae476c70de33809fd92e009": "3.5.0", // Dart 3.5.1 (from blutter SDK v3.5.1/runtime/vm/version.cc)
-	"2858c2c0920495f00b9bce9edf6a8cd9": "3.6.2", // CIDs match v3.6.2 (Mint=61, String=93), likely Dart 3.6.0-dev or 3.5.x+1
 	// Dart 3.6.x (Flutter 3.27.x)
 	"f956f595844a2f845a55707faaaa51e4": "3.6.2", // Flutter 3.27.1
 	// Dart 3.7.x (Flutter 3.29.x)
@@ -439,7 +530,6 @@ var knownHashes = map[string]string{
 	// All three now map to one profile. The unknown-hash fallback is what made
 	// this worth chasing: it hands back a 3.9.2-shaped placeholder, under which
 	// 3.12.0 died in the String cluster rather than being reported unsupported.
-	"bf2a89a0870c9457c268c1bc89403fe1": "3.12.2", // dart-lang/sdk main (pre-release)
 	"41be3daaabd524b8aa7423bc24584957": "3.12.2", // Flutter 3.44.0 (Dart 3.12.0)
 	"ace654289f5abc240509fc941453ebc5": "3.12.2", // Flutter 3.44.7 (Dart 3.12.2)
 
@@ -451,11 +541,7 @@ var knownHashes = map[string]string{
 
 	// Dart 2.14-2.19 (supported with CID tables)
 	"9cf77f4405212c45daf608e1cd646852": "2.14.0", // Flutter 2.5.0
-	"659a72e41e3276e882709901c27de33d": "2.14.0", // Flutter 2.4.0
-	"f10776149bf76be288def3c2ca73bdc1": "2.15.0", // Flutter 2.6.0-5.2.pre (NativePointer inserted, CIDs shifted +1 from v2.14)
-	"24d9d411c2f90c8fbe8907f99e89d4b0": "2.15.0", // Flutter 2.7.0-3.0.pre
 	"d56742caf7b3b3f4bd2df93a9bbb5503": "2.16.0", // Flutter 2.16.0-134.1.beta
-	"3318fe66091c0ffbb64faec39976cb7d": "2.16.0", // Flutter 2.16.0-80.1.beta
 	// Flutter 2.8.0 ships Dart 2.15.0, not 2.16.0 -- the comment recorded the
 	// Flutter version correctly and the Dart version wrongly. Proven by
 	// building this exact hash: flutter_for_dart_2.15.0 is Flutter 2.8.0, its
@@ -465,14 +551,8 @@ var knownHashes = map[string]string{
 	"adf563436d12ba0d50ea5beb7f3be1bb": "2.15.0", // Flutter 2.8.0
 	"b0e899ec5a90e4661501f0b69e9dd70f": "2.18.0", // Flutter 3.3.0-0.1.pre
 	"b6d0a1f034d158b0d37b51d559379697": "2.18.0", // Flutter 3.3.10
-	"8e50e448b241be23b9e990094f4dca39": "2.18.0", // Flutter 2.18.0.165
-	"6a9b5a03a7e784a4558b10c769f188d9": "2.18.0", // Flutter 2.18.0.44
 	"adb4292f3ec25074ca70abcd2d5c7251": "2.19.0", // Flutter 3.7.12
 	"501ef5cbd64ca70b6b42672346af6a8a": "2.19.0", // Flutter 3.7.0
-
-	// Dart 3.0-3.1 additional hashes
-	"36b0375d284ee2af0d0fffc6e6e48fde": "3.0.5", // Flutter 3.11.0-0.1.pre
-	"16ad76edd19b537bf6ea64fdd31977a7": "3.0.5", // Flutter 3.12.0
 
 	// Dart 2.10-2.13 (supported with CID tables, int32 tag format)
 	"8ee4ef7a67df9845fba331734198a953": "2.10.0", // Flutter 1.22.6
@@ -491,13 +571,13 @@ var knownHashes = map[string]string{
 // Tag format: raw int32 CID. Single cluster loop (no canonical split).
 var cidsV210 = CIDTable{
 	Class: 4, PatchClass: 5, Function: 6,
-	ClosureData: 7, SignatureData: 8, FfiTrampolineData: 10, Field: 11, Script: 12,
+	ClosureData: 7, SignatureData: 8, RedirectionData: 9, FfiTrampolineData: 10, Field: 11, Script: 12,
 	Library: 13, Namespace: 14, KernelProgramInfo: 15,
 	WeakSerializationReference: 77,
 	// No TypeParameters in v2.10
 	Code: 16, ObjectPool: 20, PcDescriptors: 21, CodeSourceMap: 22,
 	CompressedStackMaps: 23, ExceptionHandlers: 25, Context: 26,
-	ContextScope: 27, SingleTargetCache: 29, UnlinkedCall: 30,
+	ContextScope: 27, ParameterTypeCheck: 28, SingleTargetCache: 29, UnlinkedCall: 30,
 	MonomorphicSmiableCall: 31, CallSiteData: 32,
 	ICData: 33, MegamorphicCache: 34, SubtypeTestCache: 35,
 	LoadingUnit: 36, LanguageError: 39, UnhandledException: 40,
@@ -634,7 +714,8 @@ var cidsV214 = CIDTable{
 // get +0 (NativePointer +1, GOA removal -1), Map/Set/Array/ImmutableArray get +0,
 // GOA moves from CID 57 to CID 81, String and beyond get +1.
 // No ImmutableLinkedHashMap/Set (those were added in v2.16).
-// Hash f10776149bf76be288def3c2ca73bdc1 (Flutter 2.6.0-5.2.pre) uses this layout.
+// The exact 2.15.0 SDK and corpus samples use this layout; SDK drift gates
+// derive the CID table independently from class_id.h.
 var cidsV215 = CIDTable{
 	Class: 5, PatchClass: 6, Function: 7, TypeParameters: 8,
 	ClosureData: 9, FfiTrampolineData: 10, Field: 11, Script: 12,
@@ -698,6 +779,7 @@ var cidsV216 = CIDTable{
 	String: 84, OneByteString: 85, TwoByteString: 86,
 	// TypedData internals: stride 3 (no UnmodifiableView)
 	TypedDataInt8ArrayCid: 106, ByteDataViewCid: 148, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 90, FfiMarkerLastCid: 103,
 	NativePointerCid: 1, NumPredefinedCids: 154,
 }
 
@@ -728,6 +810,7 @@ var cidsV217 = CIDTable{
 	String: 89, OneByteString: 90, TwoByteString: 91,
 	// TypedData internals: stride 3 (no UnmodifiableView in v2.17.6)
 	TypedDataInt8ArrayCid: 110, ByteDataViewCid: 152, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 95, FfiMarkerLastCid: 107,
 	NativePointerCid: 1, NumPredefinedCids: 158,
 }
 
@@ -761,6 +844,7 @@ var cidsV218 = CIDTable{
 	String: 90, OneByteString: 91, TwoByteString: 92,
 	// TypedData internals: stride 3 (no UnmodifiableView in v2.18)
 	TypedDataInt8ArrayCid: 111, ByteDataViewCid: 153, TypedDataCidStride: 3,
+	FfiMarkerFirstCid: 96, FfiMarkerLastCid: 108,
 	NativePointerCid: 1, NumPredefinedCids: 159,
 }
 
@@ -792,6 +876,7 @@ var cidsV219 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 }
 
@@ -822,6 +907,7 @@ var cidsV305 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 114, ByteDataViewCid: 170, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 99, FfiMarkerLastCid: 111,
 	NativePointerCid: 1, NumPredefinedCids: 177,
 }
 
@@ -849,6 +935,7 @@ var cidsV325 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 }
 
@@ -878,6 +965,7 @@ var cidsV343 = CIDTable{
 	Array: 89, ImmutableArray: 90, GrowableObjectArray: 91,
 	String: 92, OneByteString: 93, TwoByteString: 94,
 	TypedDataInt8ArrayCid: 111, ByteDataViewCid: 167, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 96, FfiMarkerLastCid: 108,
 	NativePointerCid: 1, NumPredefinedCids: 174,
 }
 
@@ -907,6 +995,7 @@ var cidsV362 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 112, ByteDataViewCid: 168, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 97, FfiMarkerLastCid: 109,
 	NativePointerCid: 1, NumPredefinedCids: 175,
 }
 
@@ -935,6 +1024,7 @@ var cidsV392 = CIDTable{
 	Array: 90, ImmutableArray: 91, GrowableObjectArray: 92,
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	TypedDataInt8ArrayCid: 112, ByteDataViewCid: 168, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 97, FfiMarkerLastCid: 109,
 	NativePointerCid: 1, NumPredefinedCids: 175,
 }
 
@@ -969,6 +1059,7 @@ var cidsV3130 = CIDTable{
 	String: 93, OneByteString: 94, TwoByteString: 95,
 	// LinkedHashBaseCid = 96 (new in 3.13.0, shifts everything below +1)
 	TypedDataInt8ArrayCid: 113, ByteDataViewCid: 169, TypedDataCidStride: 4,
+	FfiMarkerFirstCid: 98, FfiMarkerLastCid: 110,
 	NativePointerCid: 1, NumPredefinedCids: 176,
 	// New in 3.13.0: see CIDTable.LocalVarDescriptors / .ApiError.
 	LocalVarDescriptors: 27, ApiError: 41, UnwindError: 44,
@@ -983,13 +1074,13 @@ var versionProfiles = map[string]*VersionProfile{
 	// function came out as sub_<addr> and classes.jsonl was not written at all
 	// because no class name would resolve.
 	"2.10.0": {DartVersion: "2.10.0", Supported: true, HeaderFields: 4, Tags: TagStyleCidInt32, CIDs: &cidsV210, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, StringRODataPerSubclass: true, PreCanonicalSplit: true, ClassNumRefs: 16, ClassHasTokenPos: true, FuncNumRefs: 7, TypeNumRefs: 5, TypeClassIdIsRef: true, TypeHasTokenPos: true, TypeParamNumRefs: 5, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ScriptHasLineCol: true, ScriptHasFlags: true, ObjectStoreAOTFieldCount: 176}, // SDK-verified: from()=object_class -> to_snapshot(kFullAOT)=slow_tts_stub = 176 fields (object_store.h @2.10.0)
-	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 8 refs
-	// (object_pool, owner, exception_handlers, pc_descriptors, catch_entry,
-	// compressed_stackmaps, inlined_id_to_function, code_source_map), not interleaved
-	// after compressed_stackmaps like v2.13. Verified against dart-lang/sdk
+	// v2.12.0: Code fill differs from v2.13.0's — state_bits_ is read AFTER all 7 refs
+	// (owner, exception_handlers, pc_descriptors, catch_entry, compressed_stackmaps,
+	// inlined_id_to_function, code_source_map), not interleaved after
+	// compressed_stackmaps like v2.13. Verified against dart-lang/sdk
 	// runtime/vm/clustered_snapshot.cc CodeDeserializationCluster::ReadFill at the
 	// 2.12.0 tag (no Code::IsDiscarded concept either — that's 2.13+/PRECOMPILED_RUNTIME).
-	"2.12.0": {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
+	"2.12.0": {DartVersion: "2.12.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV212, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, NoCanonicalSetData: true, StringRODataPerSubclass: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAtEnd: true, ClosureDataNumRefs: 4, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191}, // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.12.0)
 	"2.13.0": {DartVersion: "2.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidInt32, CIDs: &cidsV213, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, SplitCanonical: true, ClassNumRefs: 15, ClassHasTokenPos: true, FuncNumRefs: 5, TypeNumRefs: 4, TypeClassIdIsRef: true, FuncTypeOldScalars: true, TypeParamNumRefs: 5, TypeParamWideScalars: true, CodeNumRefs: 7, CodeTextOffsetDelta: true, CodeStateBitsAfterRef: 1, ClosureDataNumRefs: 3, ScriptHasLineCol: true, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 191},                                                          // SDK-verified: from()=object_class -> slow_tts_stub = 191 fields (object_store.h @2.13.0)
 	"2.14.0": {DartVersion: "2.14.0", Supported: true, HeaderFields: 5, Tags: TagStyleCidShift1, CIDs: &cidsV214, FillRefUnsigned: true, PreV32Format: true, HasTypeParamClassId: true, TypeParamByteScalars: true, OldTypeScalars: true, TopLevelCid16: true, OldPoolFormat: true, OldStringFormat: true, TypeClassIdIsRef: true, TypeNumRefs: 4, CodeNumRefs: 7, CodeTextOffsetDelta: true, FuncTypeNumRefs: 6, TypeParamNumRefs: 3, TypeRefNumRefs: 2, FuncTypeParamTypesIdx: 3, ObjectStoreAOTFieldCount: 202},                                                                                                                                                                                                                                 // SDK-verified: from()=list_class (LAZY_CORE) -> slow_tts_stub = 202 fields (object_store.h @2.14.0)
 	// 2.15.0 shares 2.16.0's Type layout exactly -- no TypeClassIdIsRef, no
@@ -1032,119 +1123,157 @@ var versionProfiles = map[string]*VersionProfile{
 	"3.13.0": {DartVersion: "3.13.0", Supported: true, HeaderFields: 5, Tags: TagStyleObjectHeader, CIDs: &cidsV3130, FuncTypeParamTypesIdx: 4, ObjectStoreAOTFieldCount: 171, RootsPrefixRefCount: 1518, CodeIndexOneBased: true, ClassAllocFixedSize: true, CodeFillHasIndexRefs: true, ClosureAllocHasLength: true},
 }
 
-// DetectVersion returns a VersionProfile for the given snapshot hash.
-// For supported versions, returns a full profile with Supported=true.
-// For known but unsupported versions (e.g. Dart 2.x without CID tables),
-// returns a minimal profile with Supported=false.
-// For completely unknown hashes, returns a v3.9.2-shaped PLACEHOLDER with
-// DartVersion="" and Supported=false, which callers are expected to refine
-// via ProbeTagStyle (see below).
-func DetectVersion(hash string) *VersionProfile {
-	version := knownHashes[hash]
-	if version == "" {
-		// Unknown hash. Return a v3.9.2-shaped placeholder with an empty
-		// DartVersion so the caller can tell it apart from a real match.
-		//
-		// This deliberately keeps CIDs/HeaderFields/Tags POPULATED. An
-		// earlier revision returned a bare &VersionProfile{Supported:false}
-		// here on the reasoning that the v3.9.2 CID table is wrong for a 2.x
-		// snapshot. That reasoning is right, but a zero-valued profile is
-		// strictly worse than a wrong-but-valid one:
-		//
-		//   - CIDs==nil crashes callers that read a CID field with no nil
-		//     check. cmd/aotopsy/clusters.go:109 is one: it reaches
-		//     DetectVersion("").CIDs exactly when info.Version is nil (no VM
-		//     header, so the !Supported halt above it does not fire) and
-		//     cidNameFromTable then dereferences ct.Class.
-		//   - HeaderFields==0 makes ScanClusters read the wrong number of
-		//     snapshot header words, so a nil profile mis-parses the header
-		//     rather than merely mis-labelling CIDs.
-		//
-		// Supported stays false, unlike the pre-Session-2 code which left the
-		// copied 3.9.2 value of true. That is the intended behaviour change
-		// from the gap-analysis row: an unknown hash now halts rather than
-		// silently analysing with a possibly-wrong CID table. It only halts
-		// when the probe below cannot run -- a successful ProbeTagStyle
-		// replaces this whole profile with a real one.
-		//
-		// The correct place to fix a 2.x mismatch is ProbeTagStyle, which
-		// probes the actual first-cluster tag and swaps in a real profile.
-		// Callers that only have a hash (no snapshot bytes) get a
-		// best-effort table plus Supported=false as the signal to not trust
-		// version-specific behaviour.
-		p := *versionProfiles["3.9.2"]
-		p.DartVersion = ""
-		p.Supported = false
-		return &p
-	}
-	p, ok := versionProfiles[version]
-	if !ok {
-		// Known version but no profile — known but unsupported.
-		return &VersionProfile{
-			DartVersion: version,
-			Supported:   false,
-		}
-	}
-	// P5-4 (G-019/G-035): Return a shallow copy, not the shared pointer.
-	// Callers (e.g., snapshot.go:208) mutate CompressedPointers (a bool,
-	// copied by value) on the returned profile. Without copying, concurrent
-	// calls to DetectVersion with the same version would race on the shared
-	// profile's value fields.
-	//
-	// M-3 (oracle-audit): This is a SHALLOW copy — pointer fields like
-	// CIDs (*CIDTable) still point to the same shared object. Do NOT
-	// mutate CIDs (or any other pointer field) concurrently. If full
-	// thread-safety is needed in the future, deep-copy CIDs here.
-	pCopy := *p
-	return &pCopy
+// verifiedWireDimensions holds format facts that used to be inferred from
+// version comparisons at their consumers. Every supported release has an exact
+// row. This is intentionally a second table instead of broad ranges: the SDK
+// source at each supported tag is the contract, and adding a release without
+// verifying these dimensions must be visible in review.
+//
+// Sources verified locally under ~/dev/dartsdk-research/<tag>/:
+//   - runtime/include/dart_api.h: legacy vs unified exported snapshot symbols.
+//   - runtime/vm/snapshot.h: Snapshot::Kind and DataImage() alignment.
+//   - runtime/vm/dart.cc: pointer-compression feature spelling.
+//   - runtime/vm/image_snapshot.h/object.h/compiler/runtime_api.cc: image layout
+//     and InstructionsSection header size.
+//   - runtime/vm/app_snapshot.cc / clustered_snapshot.cc: roots field tables.
+type wireDimensions struct {
+	symbols                 SnapshotSymbolLayout
+	compression             CompressionFeatureStyle
+	targetFeatures          TargetFeatureStyle
+	instructionsImage       InstructionsImageLayout
+	fullAOTKind             SnapshotKind
+	dataImageAlignment      int64
+	imageHeaderSize         uint64
+	classIDTagPos           int
+	classIDTagSize          int
+	initialFieldTable       bool
+	sharedInitialFieldTable bool
 }
 
-// ProbeTagStyle reads the first cluster tag using both tag styles and returns
-// the profile that produces a valid CID. clusterStart is the byte offset
-// where clustered data begins. This is used for unknown snapshot hashes.
-//
-// The candidate list covers ALL combinations of tag style × header field
-// count that exist in supported Dart versions:
-//   - ObjectHeader (3.4+): 5 header fields
-//   - CidShift1 (2.14–3.3): 5 or 6 header fields
-//   - CidInt32 (2.10–2.13): 4 (pre-canonical-split), 5 (split-canonical), or 5 (non-split)
-//
-// Previously only 5 candidates were tried, missing 2.16 (HF=6, CidShift1)
-// and 2.18 (HF=5, CidShift1, non-split — different from 2.17.6's HF=6).
-// Now all 7 distinct combinations are probed.
-func ProbeTagStyle(data []byte, clusterStart int) *VersionProfile {
-	// Try each candidate profile and check first-cluster CID plausibility.
-	// Ordered by likelihood (newer versions are more common in the wild).
-	candidates := []*VersionProfile{
-		versionProfiles["3.9.2"],  // TagStyleObjectHeader, 5 fields (3.4+)
-		versionProfiles["3.2.5"],  // TagStyleCidShift1, 5 fields (2.18–3.3, non-split)
-		versionProfiles["2.17.6"], // TagStyleCidShift1, 6 fields (2.16–2.17)
-		versionProfiles["2.14.0"], // TagStyleCidShift1, 5 fields (2.14–2.15, FillRefUnsigned)
-		versionProfiles["2.13.0"], // TagStyleCidInt32, 5 fields (split canonical)
-		versionProfiles["2.12.0"], // TagStyleCidInt32, 5 fields (split canonical, NoCanonicalSetData)
-		versionProfiles["2.10.0"], // TagStyleCidInt32, 4 fields (pre-canonical-split)
-	}
+var verifiedWireDimensions = map[string]wireDimensions{
+	"2.10.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureFixedUncompressed, instructionsImage: InstructionsImageLegacy210, fullAOTKind: KindFullAOTV210, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.12.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureFixedUncompressed, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.13.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureLegacyPositiveOnly, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.14.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureLegacyPositiveOnly, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.15.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.16.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.17.6": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16},
+	"2.18.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 16, imageHeaderSize: 16, classIDTagPos: 16, classIDTagSize: 16, initialFieldTable: true},
+	"2.19.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.0.5":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.1.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.2.5":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.3.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.4.3":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection40, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true},
+	"3.5.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.6.2":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.7.0":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.8.1":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.9.2":  {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.10.7": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.11.0": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.12.2": {symbols: SnapshotSymbolsLegacy, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOT, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+	"3.13.0": {symbols: SnapshotSymbolsUnified, compression: CompressionFeatureExplicit, instructionsImage: InstructionsImageSection64, fullAOTKind: KindFullAOTV313, dataImageAlignment: 64, imageHeaderSize: 64, classIDTagPos: 12, classIDTagSize: 20, initialFieldTable: true, sharedInitialFieldTable: true},
+}
 
-	for _, prof := range candidates {
-		cid := probeFirstCID(data, clusterStart, prof)
-		if cid > 0 && cid < 200 {
-			// Valid-looking CID. Confirm it maps to a known type.
-			p := *prof
-			p.DartVersion = ""
-			return &p
+func init() {
+	if len(verifiedWireDimensions) != len(versionProfiles) {
+		panic(fmt.Sprintf("snapshot: wire-dimension rows=%d profiles=%d", len(verifiedWireDimensions), len(versionProfiles)))
+	}
+	for version, p := range versionProfiles {
+		d, ok := verifiedWireDimensions[version]
+		if !ok {
+			panic(fmt.Sprintf("snapshot: supported profile %s has no verified wire dimensions", version))
+		}
+		if p == nil || !p.Supported || p.CIDs == nil {
+			panic(fmt.Sprintf("snapshot: profile %s is incomplete", version))
+		}
+		// SDK @2.10.0..2.18.0 runtime/vm/dart.cc emits the ABI-qualified
+		// arm64-sysv/x64-sysv vocabulary; @2.19.0+ emits arm64/x64 followed by
+		// a separate OS token. TestWireDimensionsMatchSDK re-derives this boundary
+		// from each exact supported SDK tag.
+		if VersionAtLeast(version, "2.19.0") {
+			d.targetFeatures = TargetFeatureArchAndOS
+		} else {
+			d.targetFeatures = TargetFeatureLegacyABI
+		}
+		if d.symbols == SnapshotSymbolsUnknown || d.compression == CompressionFeatureUnknown ||
+			d.targetFeatures == TargetFeatureUnknown ||
+			d.instructionsImage == InstructionsImageUnknown || d.dataImageAlignment <= 0 || d.imageHeaderSize == 0 ||
+			d.classIDTagPos <= 0 || d.classIDTagSize <= 0 ||
+			(d.fullAOTKind != KindFullAOT && d.fullAOTKind != KindFullAOTV210) ||
+			(d.sharedInitialFieldTable && !d.initialFieldTable) {
+			panic(fmt.Sprintf("snapshot: profile %s has invalid wire dimensions: %+v", version, d))
+		}
+		p.SnapshotSymbols = d.symbols
+		p.CompressionFeatures = d.compression
+		p.TargetFeatures = d.targetFeatures
+		p.InstructionsImage = d.instructionsImage
+		p.FullAOTKind = d.fullAOTKind
+		p.DataImageAlignment = d.dataImageAlignment
+		p.ImageHeaderSize = d.imageHeaderSize
+		p.ClassIdTagPos = d.classIDTagPos
+		p.ClassIdTagSize = d.classIDTagSize
+		p.RootsHasInitialFieldTable = d.initialFieldTable
+		p.RootsHasSharedInitialFieldTable = d.sharedInitialFieldTable
+	}
+	for version := range verifiedWireDimensions {
+		if _, ok := versionProfiles[version]; !ok {
+			panic(fmt.Sprintf("snapshot: wire dimensions exist for unknown profile %s", version))
 		}
 	}
-	// Fallback to latest known (ObjectHeader, 5 fields) marked unsupported.
-	p := *versionProfiles["3.9.2"]
-	p.DartVersion = ""
-	p.Supported = false
-	return &p
+}
+
+// DetectVersion returns the parser profile associated with a known snapshot
+// compatibility hash. Unknown hashes return nil. A compatibility-family probe
+// may still be useful for diagnostics, but it is never sufficient evidence to
+// select CIDs, roots, image layout, or other wire-format dimensions.
+func DetectVersion(hash string) *VersionProfile {
+	version, ok := knownHashes[hash]
+	if !ok {
+		return nil
+	}
+	return ProfileForVersion(version)
+}
+
+// FormatProbe is diagnostic-only evidence from the first clustered tag. It
+// intentionally contains no CID table or other parser dimensions: multiple SDK
+// releases share the same header/tag family while differing in roots, CIDs and
+// fill layouts.
+type FormatProbe struct {
+	HeaderFields int      `json:"header_fields"`
+	Tags         TagStyle `json:"tags"`
+	Family       string   `json:"family"`
+}
+
+// ProbeTagStyle identifies a coarse header/tag family for an unknown hash. A
+// successful result must never be promoted to VersionProfile.
+func ProbeTagStyle(data []byte, clusterStart int) *FormatProbe {
+	type candidate struct {
+		family string
+		prof   *VersionProfile
+	}
+	candidates := []candidate{
+		{"object-header/hf5", versionProfiles["3.9.2"]},
+		{"cid-shift1/hf5", versionProfiles["3.2.5"]},
+		{"cid-shift1/hf6", versionProfiles["2.17.6"]},
+		{"cid-int32/hf5", versionProfiles["2.13.0"]},
+		{"cid-int32/hf4", versionProfiles["2.10.0"]},
+	}
+
+	for _, c := range candidates {
+		cid := probeFirstCID(data, clusterStart, c.prof)
+		if c.prof.CIDs != nil && cid > 0 && cid < c.prof.CIDs.NumPredefinedCids {
+			return &FormatProbe{HeaderFields: c.prof.HeaderFields, Tags: c.prof.Tags, Family: c.family}
+		}
+	}
+	return nil
 }
 
 // probeFirstCID reads the header and first cluster tag, returning the CID.
 // Returns -1 on any error.
 func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
-	if clusterStart >= len(data)-20 {
+	if prof == nil || clusterStart < 0 || clusterStart >= len(data) {
 		return -1
 	}
 
@@ -1156,16 +1285,18 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 	// use the same terminal condition: byte > 127. They differ only in
 	// value decoding, which we don't need here.
 	for i := 0; i < prof.HeaderFields; i++ {
-		for pos < len(data) {
-			b := data[pos]
-			pos++
-			if b > 127 { // terminal byte
-				break
-			}
+		var ok bool
+		pos, ok = skipProbeVLE(data, pos)
+		if !ok {
+			return -1
 		}
 	}
 
-	if pos >= len(data)-4 {
+	// Cluster tags are VLEs, not fixed 4-byte words. A valid ObjectHeader CID
+	// such as 5 encodes as three bytes (00 20 c1), so requiring four remaining
+	// bytes rejects a complete minimal tag. The bounded decoders below perform
+	// their own exact EOF/width checks.
+	if pos >= len(data) {
 		return -1
 	}
 
@@ -1175,15 +1306,20 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// ReadTagged64: read until byte > 127, subtract 192.
 		var val int64
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 10 && pos < len(data) && shift < 64; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int64(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int64(b) << shift
 			shift += 7
+		}
+		if !terminated {
+			return -1
 		}
 		cid := int(val >> 1)
 		return cid
@@ -1192,15 +1328,20 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// ReadTagged32: read until byte > 127, subtract 192.
 		var val int32
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 5 && pos < len(data) && shift < 32; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int32(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int32(b) << shift
 			shift += 7
+		}
+		if !terminated {
+			return -1
 		}
 		cid := int((uint32(val) >> 12) & 0xFFFFF)
 		return cid
@@ -1209,19 +1350,35 @@ func probeFirstCID(data []byte, clusterStart int, prof *VersionProfile) int {
 		// Read<int32_t>(cid): signed VLE (endMarker=192), value = CID directly.
 		var val int64
 		var shift uint
-		for pos < len(data) {
+		terminated := false
+		for n := 0; n < 5 && pos < len(data) && shift < 32; n++ {
 			b := data[pos]
 			pos++
 			if b > 127 {
 				val |= int64(int(b)-192) << shift
+				terminated = true
 				break
 			}
 			val |= int64(b) << shift
 			shift += 7
 		}
+		if !terminated {
+			return -1
+		}
 		return int(val)
 	}
 	return -1
+}
+
+func skipProbeVLE(data []byte, pos int) (int, bool) {
+	for n := 0; n < 10 && pos < len(data); n++ {
+		b := data[pos]
+		pos++
+		if b > 127 {
+			return pos, true
+		}
+	}
+	return pos, false
 }
 
 // SupportedVersions returns every Dart version this package can analyse
@@ -1296,7 +1453,42 @@ func (t TagStyle) String() string {
 // a snapshot hash, and it never invents a placeholder: callers asking "is this
 // version supported" need a straight no.
 func ProfileForVersion(version string) *VersionProfile {
-	return versionProfiles[version]
+	p := versionProfiles[version]
+	if p == nil {
+		return nil
+	}
+	// Profiles are templates. Extraction attaches per-binary feature state
+	// (CompressedPointers and BuildMode), so callers must never receive the
+	// mutable global row itself.
+	pCopy := *p
+	return &pCopy
+}
+
+// IsExactSupportedProfile reports whether profile is an unmodified static
+// parser profile for one of the repository's exact supported Dart versions.
+// Extraction is allowed to attach only the two per-binary feature dimensions
+// below; every other field is a version-specific wire/layout fact and must still
+// match the verified template exactly. This keeps internal semantic entry points
+// from accepting a caller-fabricated "Supported" profile for a future/unknown
+// Dart version, or a known version with guessed layout dimensions.
+func IsExactSupportedProfile(profile *VersionProfile) bool {
+	if profile == nil || !profile.Supported || profile.DartVersion == "" {
+		return false
+	}
+	template := versionProfiles[profile.DartVersion]
+	if template == nil || !template.Supported {
+		return false
+	}
+
+	got := *profile
+	want := *template
+	// These are the only VersionProfile fields populated from the binary rather
+	// than fixed by the exact SDK version.
+	got.CompressedPointers = false
+	want.CompressedPointers = false
+	got.BuildMode = BuildUnknown
+	want.BuildMode = BuildUnknown
+	return got == want
 }
 
 // VersionAtLeast reports whether a Dart version string is >= minimum,
@@ -1331,9 +1523,10 @@ func VersionAtLeast(version, minimum string) bool {
 // has 3 refs; ObjectPool uses v2 type bits" and is set for 2.19.0, 3.0.5 and
 // 3.1.0, three versions whose tag layout is already the 20-bit one. One
 // predicate, in one place, so a fourth cannot appear.
-func ClassIdTagLayout(dartVersion string) (pos, size int) {
-	if VersionAtLeast(dartVersion, "2.19.0") {
-		return 12, 20
+func ClassIdTagLayout(dartVersion string) (pos, size int, ok bool) {
+	p := ProfileForVersion(dartVersion)
+	if p == nil || !p.Supported || p.ClassIdTagPos <= 0 || p.ClassIdTagSize <= 0 {
+		return 0, 0, false
 	}
-	return 16, 16
+	return p.ClassIdTagPos, p.ClassIdTagSize, true
 }

@@ -20,15 +20,13 @@ import (
 // ExtractCallEdgesCFG (sharing its lvalue/meetLvalue lattice, just sized
 // for x86_64's 16 GP registers instead of ARM64's 31).
 //
-// internal/disasm cannot import internal/decompiler's own x86 CFG lifter
-// (BuildX86IR) -- the dependency runs the other way, decompiler already
-// imports disasm for ARM64 -- so the leader/block partitioning here is a
-// separate, minimal implementation, using the same JMP/Jcc classification
-// internal/decompiler/x86.go's isX86CondJump already uses (duplicated,
-// not shared, same reasoning as canonX86Reg's duplication from
-// cmd/aotopsy/gdtcall.go).
+// internal/disasm cannot import internal/decompiler's x86 CFG lifter
+// (BuildX86IR) because the dependency runs the other way. The instruction
+// decode/Jcc facts live in internal/arch/x86 and block partitioning is shared
+// with ARM64 through PartitionBlocks, so the architecture rules themselves are
+// not duplicated here.
 // H-3 fix: thrFields parameter added to annotate THR loads with field names.
-func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
+func ScanX86FunctionCFG(dartVersion string, closure ClosureEntry, funcCode []byte, funcVA uint64, symbols SymbolLookup, poolDisplay map[int]string, funcName string, thrFields map[int]string) X86ScanResult {
 	insts := decodeX86Flat(funcCode, funcVA)
 	if len(insts) == 0 {
 		return X86ScanResult{}
@@ -38,16 +36,27 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 	effects := make([]provBlockEffect, len(blocks))
 	for bi, blk := range blocks {
 		var regs x86NoWindowRegs
+		for r := range regs {
+			regs[r] = provInputNote(r)
+		}
 		var touched [16]bool
 		for i := blk.Start; i < blk.End; i++ {
 			touchX86InstrEffect(insts[i], &regs, &touched, poolDisplay, thrFields)
 		}
 		eff := provBlockEffect{
-			touched: touched[:],
-			final:   make([]lvalue, 16),
+			touched:  touched[:],
+			final:    make([]lvalue, 16),
+			copyFrom: make([]int, 16),
+		}
+		for r := range eff.copyFrom {
+			eff.copyFrom[r] = -1
 		}
 		for r := 0; r < 16; r++ {
 			if touched[r] {
+				if src, ok := provInputReg(regs[r]); ok {
+					eff.copyFrom[r] = src
+					continue
+				}
 				if v := regs[r]; v != "" {
 					eff.final[r] = lvalue{kind: lvKnown, note: v}
 				} else {
@@ -79,13 +88,23 @@ func ScanX86FunctionCFG(funcCode []byte, funcVA uint64, symbols SymbolLookup, po
 		for i := blk.Start; i < blk.End; i++ {
 			d := insts[i]
 			if d.Inst.Op == x86asm.CALL {
-				e := classifyX86Call(d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
-				if e.TargetPC != 0 {
-					argMask := inferX86CallArgRegMaskLocal(insts, i)
+				e := classifyX86Call(dartVersion, d.Inst, d.VA, d.Len, symbols, fakeRT, poolDisplay, thrFields)
+				// The generic object_field+disp provenance (if any) names the same load
+				// by displacement only; the exact SDK shape names the field.
+				if e.Kind == "call_indirect" && closureCallX86(insts, i, closure) {
+					e.Via = ClosureEntryVia
+				}
+				if e.Kind == "call" {
+					argMask := inferX86CallArgRegMaskLocal(insts, i, blk.Start)
 					e.ArgRegMask = argMask
 					e.ArgCountHint = popcount8(argMask)
 				}
 				res.Edges = append(res.Edges, e)
+				var callTouched [16]bool
+				touchX86InstrEffect(d, &regs, &callTouched, poolDisplay, thrFields)
+				for r := 0; r < 16; r++ {
+					fakeRT.defs[r] = x86RegProvenance{note: regs[r]}
+				}
 				continue
 			}
 			touchX86InstrEffect(d, &regs, &[16]bool{}, poolDisplay, thrFields)
@@ -130,10 +149,11 @@ func buildX86Blocks(insts []x86.Decoded) []x86BlockCFG {
 	blocks := PartitionBlocks(
 		len(insts),
 		func(i int) uint64 { return insts[i].VA },
-		func(i int) int { return insts[i].Len },
 		func(i int) FlowInfo {
 			d := insts[i]
 			switch {
+			case d.Bad || x86.IsSemanticBarrier(d.Inst):
+				return FlowInfo{Kind: FlowIndirect}
 			case d.Inst.Op == x86asm.RET:
 				return FlowInfo{Kind: FlowRet}
 			case d.Inst.Op == x86asm.JMP:
@@ -208,7 +228,18 @@ func BuildX86CFG(name string, funcCode []byte, funcVA uint64) FuncCFG {
 // caller (ScanX86FunctionCFG), since CALL doesn't define a register the
 // way MOV/LEA do.
 func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool, poolDisplay map[int]string, thrFields map[int]string) {
+	if d.Bad || x86.IsSemanticBarrier(d.Inst) {
+		x86KillAll(regs, touched)
+		return
+	}
 	inst := d.Inst
+	if inst.Op == x86asm.CALL {
+		// Ordinary Dart calls are full register-allocation barriers: the SDK's
+		// linear-scan allocator blocks every CPU register at a non-callee-safe
+		// call. Classify the target first, then discard all temporary provenance.
+		x86KillAll(regs, touched)
+		return
+	}
 	if (inst.Op == x86asm.MOV || inst.Op == x86asm.LEA) && len(inst.Args) >= 2 {
 		dstReg, dstOK := inst.Args[0].(x86asm.Reg)
 		if !dstOK {
@@ -223,10 +254,21 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 			}
 			return
 		}
+		if _, ok := inst.Args[1].(x86asm.Mem); ok && inst.Op == x86asm.LEA {
+			// LEA computes an address; it does not dereference PP/THR/object
+			// memory. The address expression is outside this provenance lattice.
+			x86Kill(regs, touched, x86.CanonReg(dstReg))
+			return
+		}
 		if mem, ok := inst.Args[1].(x86asm.Mem); ok {
 			dstIdx := x86.CanonReg(dstReg)
-			switch x86.CanonReg(mem.Base) {
+			baseIdx := x86.CanonReg(mem.Base)
+			switch baseIdx {
 			case sdk.X86THR:
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86THR); !static {
+					x86Kill(regs, touched, dstIdx)
+					return
+				}
 				// H-3 fix: annotate THR loads with field names when available.
 				if thrFields != nil {
 					if name, ok := thrFields[int(mem.Disp)]; ok {
@@ -238,6 +280,10 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 					x86Define(regs, touched, dstIdx, fmt.Sprintf("THR.f%d", mem.Disp))
 				}
 			case sdk.X86PP:
+				if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
+					x86Kill(regs, touched, dstIdx)
+					return
+				}
 				poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)
 				switch {
 				case !poolIdxOK:
@@ -266,6 +312,13 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 					}
 				}
 			default:
+				if baseIdx == sdk.X86SPReg || baseIdx == sdk.X86FrameReg {
+					// RSP/RBP memory is a stack/frame slot. Without stack-slot
+					// content tracking, labelling it object_field invents heap
+					// provenance for ordinary spills and reloads.
+					x86Kill(regs, touched, dstIdx)
+					return
+				}
 				// Generic memory-dereference load (vtable/closure-style calls
 				// off a non-PP/THR base). Mirrors ARM64's LDUR64 fallback in
 				// touchInstrEffect (dataflow.go) -- annotate rather than kill,
@@ -273,9 +326,13 @@ func touchX86InstrEffect(d x86.Decoded, regs *x86NoWindowRegs, touched *[16]bool
 				// A Code entry-point load inherits its base's provenance --
 				// the entry point OF Code X is X. Same rule as ARM64's
 				// touchInstrEffect; see IsCodeEntryPointDisp.
-				baseIdx := x86.CanonReg(mem.Base)
-				if IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
+				if mem.Index == 0 && sdk.IsCodeEntryPointDisp(int(mem.Disp)) && baseIdx >= 0 && baseIdx < len(regs) && regs[baseIdx] != "" {
 					x86Define(regs, touched, dstIdx, regs[baseIdx])
+				} else if mem.Index != 0 {
+					// The displacement is only one term of the effective address;
+					// retaining it as object_field+disp would claim an exact field
+					// offset that the instruction does not identify.
+					x86Define(regs, touched, dstIdx, ObjectFieldVia)
 				} else {
 					x86Define(regs, touched, dstIdx, ObjectFieldViaAt(int(mem.Disp)))
 				}
@@ -306,6 +363,12 @@ func x86Kill(regs *x86NoWindowRegs, touched *[16]bool, idx int) {
 	touched[idx] = true
 }
 
+func x86KillAll(regs *x86NoWindowRegs, touched *[16]bool) {
+	for r := range regs {
+		x86Kill(regs, touched, r)
+	}
+}
+
 type poolStringRef struct {
 	idx   int
 	value string
@@ -325,7 +388,10 @@ func poolStringRefFor(d x86.Decoded, poolDisplay map[int]string) (poolStringRef,
 		return poolStringRef{}, false
 	}
 	mem, ok := inst.Args[1].(x86asm.Mem)
-	if !ok || x86.CanonReg(mem.Base) != sdk.X86PP {
+	if !ok {
+		return poolStringRef{}, false
+	}
+	if _, static := x86.StaticBaseDisp(mem, sdk.X86PP); !static {
 		return poolStringRef{}, false
 	}
 	poolIdx, poolIdxOK := X64PoolIndex(mem.Disp)

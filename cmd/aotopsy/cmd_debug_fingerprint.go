@@ -4,23 +4,34 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 
+	"aotopsy/internal/cli"
 	"aotopsy/internal/fingerprint"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 // cmdFingerprint implements "aotopsy _debug fingerprint --lib <path>":
-// build-id + Flutter/Dart engine version detection, ported from
-// flutterdec's engine_fingerprint.rs but arch-agnostic (ARM64 and x86_64).
+// bounded ELF/snapshot identity facts plus explicitly heuristic Dart
+// Version::String evidence. The JSON keeps those evidence classes separate.
 func cmdFingerprint(args []string) error {
-	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
-	libPath := fs.String("lib", "", "path to libapp.so (or any ELF) to fingerprint")
+	fs := flag.NewFlagSet("fingerprint", flag.ContinueOnError)
+	libPath := fs.String("lib", "", "path to supported ELF64 little-endian ET_DYN libapp.so to fingerprint")
 	out := fs.String("out", "", "write JSON report to this path (default: stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *libPath == "" {
 		return fmt.Errorf("--lib is required")
+	}
+	if *out != "" {
+		same, err := output.SamePath(*libPath, *out)
+		if err != nil {
+			return fmt.Errorf("fingerprint: compare input/output paths: %w", err)
+		}
+		if same {
+			return fmt.Errorf("fingerprint output must not replace the input binary")
+		}
 	}
 
 	rep, err := fingerprint.Run(*libPath)
@@ -37,9 +48,9 @@ func cmdFingerprint(args []string) error {
 		fmt.Println(string(data))
 		return nil
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := jsonutil.WriteJSONFile(*out, rep); err != nil {
 		return fmt.Errorf("fingerprint: write %s: %w", *out, err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
+	cli.Errf("wrote %s\n", *out)
 	return nil
 }

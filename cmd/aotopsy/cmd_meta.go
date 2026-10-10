@@ -6,47 +6,85 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
+	"aotopsy/internal/elfx"
 )
 
 // cmdMeta handles "aotopsy meta <libapp.so>" — full pipeline producing flutter_meta.json.
 func cmdMeta(args []string) error {
-	args = reorderPositionalArg(args)
-	fs := flag.NewFlagSet("meta", flag.ExitOnError)
+	fs := flag.NewFlagSet("meta", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory (default: <basename>.aotopsy/)")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	all := fs.Bool("all", false, "include all functions in focus list")
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress verbose output")
 	fs.BoolVar(&quiet, "q", false, "suppress verbose output")
-	var _verbose bool // accepted for backwards compat, now default
-	fs.BoolVar(&_verbose, "verbose", false, "")
-	fs.BoolVar(&_verbose, "v", false, "")
 	from := fs.String("from", "", "reuse existing disasm output directory")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("max-steps", *maxSteps); err != nil {
 		return err
 	}
 
 	// If --from is set, skip ELF parse and just regenerate meta.
 	if *from != "" {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("meta --from does not accept a libapp.so positional argument")
+		}
+		if flagWasSet(fs, "max-steps") {
+			return fmt.Errorf("--max-steps cannot be used with --from because snapshot parsing/disassembly is skipped")
+		}
+		prov, ok, err := analysis.ReadProvenance(*from)
+		if err != nil {
+			return fmt.Errorf("read --from provenance: %w", err)
+		}
+		if !ok || prov.Arch != "arm64" {
+			return fmt.Errorf("meta --from requires ARM64 analysis provenance")
+		}
 		if *outDir == "" {
 			*outDir = *from
 		}
-		metaPath, err := analysis.RunMetaStage(*from, "", *all, quiet, os.Stderr)
+		result, err := analysis.Run(analysis.Opts{
+			FromDir: *from,
+			OutDir:  *outDir,
+			// The meta focus set is read from signal_graph.json, and a --from run
+			// without the signal stage deletes every signal-derived artifact of the
+			// cloned generation (see runFromExisting). Rebuild signal like the
+			// fresh-run branch below does.
+			Signal:    true,
+			Meta:      analysis.MetaRequired,
+			DecompAll: *all,
+			Quiet:     quiet,
+			Log:       os.Stderr,
+		})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", metaPath)
+		cli.Errf("wrote %s\n", result.MetaPath)
 		return nil
 	}
 
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: aotopsy meta <libapp.so> [flags]")
 	}
 
 	libPath := fs.Arg(0)
-	if resolvePositionalLib(libPath) == "" {
+	resolvedLib := resolvePositionalLib(libPath)
+	if resolvedLib == "" {
 		return fmt.Errorf("file not found: %s", libPath)
+	}
+	ef, err := elfx.Open(resolvedLib)
+	if err != nil {
+		return fmt.Errorf("open input: %w", err)
+	}
+	isARM64 := ef.IsARM64()
+	if err := ef.Close(); err != nil {
+		return fmt.Errorf("close input: %w", err)
+	}
+	if !isARM64 {
+		return fmt.Errorf("meta generation is ARM64-only for now; x86_64 Ghidra/IDA metadata is not implemented")
 	}
 
 	if *outDir == "" {
@@ -54,11 +92,11 @@ func cmdMeta(args []string) error {
 	}
 
 	result, err := analysis.Run(analysis.Opts{
-		LibPath:   libPath,
+		LibPath:   resolvedLib,
 		OutDir:    *outDir,
 		MaxSteps:  *maxSteps,
 		Signal:    true,
-		Meta:      true,
+		Meta:      analysis.MetaRequired,
 		DecompAll: *all,
 		Quiet:     quiet,
 	})
@@ -66,6 +104,6 @@ func cmdMeta(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s\n", result.MetaPath)
+	cli.Errf("wrote %s\n", result.MetaPath)
 	return nil
 }

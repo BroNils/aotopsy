@@ -39,6 +39,10 @@ type ClusterMeta struct {
 	// next_field_offset_in_words from alloc; used by fill parser
 	// to determine how many pointer fields each instance has.
 	NextFieldOffsetInWords int32
+	// instance_size_in_words from the same alloc record. Keeping both values is
+	// necessary to validate next_field_offset before it drives retained field
+	// allocation and byte-offset arithmetic in the fill parser.
+	InstanceSizeInWords int32
 
 	// Code-specific: main (non-deferred) count from alloc.
 	// In fill, main codes read ReadUnsigned(payload_info) + refs,
@@ -132,17 +136,18 @@ type PoolEntry struct {
 
 // Result holds all parsed cluster data.
 type Result struct {
-	Header    Header
-	Clusters  []ClusterMeta
-	Strings   []ParsedString
-	Named     []NamedObject  // named objects extracted from fill (Function, Class, Library, etc.)
-	FuncTypes []FuncTypeInfo // FunctionType parameter counts extracted from fill
-	Classes   []ClassInfo    // class layout data extracted from fill
-	Types     []TypeInfo     // Type objects' resolved type_class_id, extracted from fill (v3.x only)
-	Fields    []FieldInfo    // field layout data extracted from fill
-	Codes     []CodeEntry    // Code objects with owner refs, extracted from fill
-	Arrays    []ArrayInfo    // Array/ImmutableArray elements, extracted from fill
-	Pool      []PoolEntry    // ObjectPool entries extracted from fill
+	Header      Header
+	Clusters    []ClusterMeta
+	Strings     []ParsedString
+	Named       []NamedObject    // named objects extracted from fill (Function, Class, Library, etc.)
+	FuncTypes   []FuncTypeInfo   // FunctionType parameter counts extracted from fill
+	Classes     []ClassInfo      // class layout data extracted from fill
+	Types       []TypeInfo       // Type objects' resolved type_class_id, extracted from fill (v3.x only)
+	RecordTypes []RecordTypeInfo // RecordType shape/field vector/nullability needed for exact TTS names
+	Fields      []FieldInfo      // field layout data extracted from fill
+	Codes       []CodeEntry      // Code objects with owner refs, extracted from fill
+	Arrays      []ArrayInfo      // Array/ImmutableArray elements, extracted from fill
+	Pool        []PoolEntry      // ObjectPool entries extracted from fill
 	// Int32Arrays maps a TypedDataInt32Array's ref to its raw little-endian
 	// payload. These are captured because one of them is a switch's jump
 	// table: IndirectGotoInstr keeps its targets in `const TypedData& offsets_`
@@ -152,6 +157,12 @@ type Result struct {
 	MintValues  map[int]int64 // Mint/Smi ref→int64 value from alloc phase
 	FillStart   int           // byte offset where the fill section begins
 	FillEnd     int           // byte offset right after the last cluster's fill data (set by ReadFill; 0 if not run). See ParseDispatchTable.
+	// AllocComplete is set only when every declared cluster's alloc record was
+	// consumed successfully and the final reference count agrees with the
+	// snapshot header's num_objects. Best-effort ScanClusters may return a
+	// partial Result with diagnostics, but semantic consumers must not treat the
+	// current stream position as FillStart in that case.
+	AllocComplete bool
 
 	// ObjectStoreRefs holds the isolate roots section's ObjectStore field
 	// refs, in serialized order -- ObjectStore::from() through
@@ -177,9 +188,9 @@ type Result struct {
 	TypeArguments     []TypeArgumentsInfo    // TypeArguments type refs
 	ExceptionHandlers []ExceptionHandlerInfo // Exception handler tables
 	ICData            []ICDataInfo           // ICData call-site→class→target mappings (empty in AOT — JIT-only)
+	CallSites         []CallSiteInfo         // UnlinkedCall / MegamorphicCache objects (call-site pool entries)
 	Scripts           []ScriptInfo           // Script URLs + line/col metadata
 	LoadingUnits      []LoadingUnitInfo      // Loading unit / deferred library metadata
-	KernelProgramInfo []KernelProgramInfoRef // KernelProgramInfo refs (empty in AOT — not serialized)
 
 	// ClosureData: alternative to Context for closure resolution in AOT.
 	// ClosureData objects ARE serialized in AOT (unlike Context objects).
@@ -221,17 +232,21 @@ type Result struct {
 // ScanClusters reads the clustered snapshot header and cluster tags from
 // snapshot data. clusterStart is the offset within data where the clustered
 // section begins (after the snapshot header's null-terminated features string).
-// If profile is nil, the v3.x format is assumed. isVM indicates whether this
-// is the VM snapshot (affects canonical set handling for strings).
+// A concrete supported profile is mandatory: a coarse header/tag family is not
+// enough to choose CIDs, alloc/fill layouts or roots. isVM indicates whether
+// this is the VM snapshot (affects canonical set handling for strings).
 func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfile, isVM bool, opts dartfmt.Options) (*Result, error) {
-	if clusterStart >= len(data) {
+	if clusterStart < 0 || clusterStart >= len(data) {
 		return nil, fmt.Errorf("cluster: start offset %d beyond data length %d", clusterStart, len(data))
 	}
-	if profile == nil {
-		profile = snapshot.DetectVersion("")
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("cluster: exact supported snapshot profile required")
 	}
 
-	s := dartfmt.NewStreamAt(data, clusterStart)
+	s, err := dartfmt.NewStreamAt(data, clusterStart)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: stream start: %w", err)
+	}
 	maxSteps := opts.EffectiveMaxSteps()
 
 	var diags dartfmt.Diags
@@ -239,7 +254,6 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 
 	// Read header values (count depends on version).
 	// Header counts use WriteUnsigned in all versions (even 2.10/2.13).
-	var err error
 	result.Header.NumBaseObjects, err = s.ReadUnsigned()
 	if err != nil {
 		return nil, fmt.Errorf("cluster header: num_base_objects: %w", err)
@@ -247,6 +261,12 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	result.Header.NumObjects, err = s.ReadUnsigned()
 	if err != nil {
 		return nil, fmt.Errorf("cluster header: num_objects: %w", err)
+	}
+	if result.Header.NumObjects < 0 {
+		return nil, fmt.Errorf("cluster: negative num_objects %d", result.Header.NumObjects)
+	}
+	if result.Header.NumObjects < result.Header.NumBaseObjects {
+		return nil, fmt.Errorf("cluster: num_objects %d is smaller than num_base_objects %d", result.Header.NumObjects, result.Header.NumBaseObjects)
 	}
 	// Header field evolution:
 	//   2.10      (HF=4): base, objects, clusters, field_table_len
@@ -289,10 +309,25 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 		}
 	}
 
-	// Total clusters = canonical + non-canonical for split format.
-	nc := int(result.Header.NumCanonicalClusters + result.Header.NumClusters)
-	if nc > maxSteps {
-		return nil, fmt.Errorf("cluster: num_clusters %d exceeds max_steps %d", nc, maxSteps)
+	// Total clusters = canonical + non-canonical for split format. These values
+	// come directly from the snapshot, so validate them before summing or
+	// converting to int. An overflowing int64 sum used to wrap negative, bypass
+	// maxSteps, and reach make(..., cap=negative) below.
+	canonicalClusters := result.Header.NumCanonicalClusters
+	nonCanonicalClusters := result.Header.NumClusters
+	if canonicalClusters < 0 || nonCanonicalClusters < 0 {
+		return nil, fmt.Errorf("cluster: negative cluster count canonical=%d noncanonical=%d", canonicalClusters, nonCanonicalClusters)
+	}
+	if canonicalClusters > int64(maxSteps) || nonCanonicalClusters > int64(maxSteps) ||
+		canonicalClusters > int64(maxSteps)-nonCanonicalClusters {
+		return nil, fmt.Errorf("cluster: total cluster count canonical=%d noncanonical=%d exceeds max_steps %d", canonicalClusters, nonCanonicalClusters, maxSteps)
+	}
+	nc64 := canonicalClusters + nonCanonicalClusters
+	nc := int(nc64)
+
+	maxInt := int64(^uint(0) >> 1)
+	if result.Header.NumBaseObjects < 0 || result.Header.NumBaseObjects >= maxInt {
+		return nil, fmt.Errorf("cluster: num_base_objects %d cannot fit reference index", result.Header.NumBaseObjects)
 	}
 	if debugAlloc {
 		fmt.Fprintf(os.Stderr, "HEADER: base=%d objs=%d canonical=%d clusters=%d nc=%d field_table=%d instr_table=%d instr_offset=%d\n",
@@ -303,22 +338,26 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	}
 
 	// Read cluster tags from alloc section.
-	result.Clusters = make([]ClusterMeta, 0, nc)
+	// Do not reserve the attacker-declared count up front. Valid snapshots grow
+	// this slice normally; malformed snapshots with a huge count must not turn a
+	// tiny file into a gigabyte-scale allocation before the first tag is read.
+	result.Clusters = make([]ClusterMeta, 0, initialCaptureCap(nc64, s.Remaining()))
 	ct := profile.CIDs
 	nextRef := int(result.Header.NumBaseObjects) + 1
+	allocFailed := false
 	for i := 0; i < nc; i++ {
 		tagPos := s.Position()
 
 		var cid int
 		var canonical, immutable bool
 
+		var tagErr error
 		switch profile.Tags {
 		case snapshot.TagStyleCidShift1:
 			// v2.14+ / early v3.x: Read<uint64_t>((cid << 1) | canonical).
 			cidAndCanonical, err := s.ReadTagged64()
 			if err != nil {
-				diags.Addf(uint64(tagPos), dartfmt.DiagTruncated,
-					"cluster %d/%d: tags: %v", i, nc, err)
+				tagErr = err
 				break
 			}
 			cid, canonical = DecodeTagsOld(cidAndCanonical)
@@ -326,28 +365,31 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 			// v3.4.3+: Read<uint32_t>(ClassIdTag | CanonicalBit | ImmutableBit).
 			tags, err := s.ReadTagged32()
 			if err != nil {
-				diags.Addf(uint64(tagPos), dartfmt.DiagTruncated,
-					"cluster %d/%d: tags: %v", i, nc, err)
+				tagErr = err
 				break
 			}
-			cid, canonical, immutable = DecodeTags(tags)
+			cid, canonical, immutable = DecodeTags(tags, profile.DartVersion)
 		case snapshot.TagStyleCidInt32:
 			// v2.10-2.13: Read<int32_t>(cid). Signed VLE (endMarker=192), value = CID directly.
 			// Canonical determined by cluster loop position (first NumCanonicalClusters are canonical).
-			rawCid, err := s.ReadTagged64()
+			rawCid, err := s.ReadTagged32()
 			if err != nil {
-				diags.Addf(uint64(tagPos), dartfmt.DiagTruncated,
-					"cluster %d/%d: tags: %v", i, nc, err)
+				tagErr = err
 				break
 			}
-			cid = int(rawCid)
+			cid = int(int32(rawCid))
 			// In split-canonical format, clusters before NumCanonicalClusters are canonical.
 			if profile.SplitCanonical {
 				canonical = i < int(result.Header.NumCanonicalClusters)
 			}
 		}
-		// Check if we broke out of the switch due to error.
-		if s.Position() == tagPos {
+		if tagErr != nil {
+			if opts.Mode == dartfmt.ModeStrict {
+				return nil, fmt.Errorf("cluster %d/%d tags at 0x%x: %w", i, nc, tagPos, tagErr)
+			}
+			diags.Addf(uint64(tagPos), dartfmt.DiagTruncated,
+				"cluster %d/%d: tags: %v", i, nc, tagErr)
+			allocFailed = true
 			break
 		}
 
@@ -362,6 +404,7 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 
 		// Skip alloc data for this cluster using version-aware CID dispatch.
 		// Mint clusters are handled separately to capture ref→value mapping.
+		allocPos := s.Position()
 		var count int64
 		var err error
 		if ClassifyAlloc(cid, ct) == AllocMint {
@@ -386,12 +429,22 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 				fmt.Fprintf(os.Stderr, "ALLOC[%3d] CID=%-4d %-24s kind=%-2d count=%-6d pos=0x%06x ERR: %v\n",
 					i, cid, name, ak, count, s.Position(), err)
 			}
-			diags.Addf(uint64(s.Position()), dartfmt.DiagTruncated,
+			if opts.Mode == dartfmt.ModeStrict {
+				return nil, fmt.Errorf("cluster %d (CID %d %s) alloc skip at 0x%x: %w", i, cid, name, allocPos, err)
+			}
+			diags.Addf(uint64(allocPos), dartfmt.DiagTruncated,
 				"cluster %d (CID %d %s): alloc skip: %v", i, cid, name, err)
+			allocFailed = true
 			cm.EndOffset = s.Position()
+			if count < 0 || count > maxInt-int64(nextRef) {
+				return nil, fmt.Errorf("cluster %d (CID %d): object count %d overflows reference index %d", i, cid, count, nextRef)
+			}
 			cm.StopRef = nextRef + int(count)
 			result.Clusters = append(result.Clusters, cm)
 			break
+		}
+		if count < 0 || count > maxInt-int64(nextRef) {
+			return nil, fmt.Errorf("cluster %d (CID %d): object count %d overflows reference index %d", i, cid, count, nextRef)
 		}
 		cm.Count = count
 		cm.StopRef = nextRef + int(count)
@@ -411,6 +464,13 @@ func ScanClusters(data []byte, clusterStart int, profile *snapshot.VersionProfil
 	}
 
 	result.FillStart = s.Position()
+	if !allocFailed && len(result.Clusters) == nc {
+		gotObjects := int64(nextRef - 1)
+		if gotObjects != result.Header.NumObjects {
+			return result, fmt.Errorf("cluster: allocated reference count %d disagrees with header num_objects %d", gotObjects, result.Header.NumObjects)
+		}
+		result.AllocComplete = true
+	}
 	if debugAlloc {
 		fmt.Fprintf(os.Stderr, "ALLOC: nc=%d, FillStart=0x%06x totalRefs=%d expectedObjs=%d deficit=%d\n",
 			nc, result.FillStart, nextRef-1, result.Header.NumObjects, result.Header.NumObjects-int64(nextRef-1))

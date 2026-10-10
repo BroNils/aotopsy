@@ -19,9 +19,55 @@ Requires:
 """
 
 import json
+import hashlib
 import os
 import sys
 import time
+
+
+APPLY_OK_FILE = ".aotopsy-apply-ok"
+APPLY_FAILED_FILE = ".aotopsy-apply-failed"
+
+
+def _ensure_output_dir(out_dir):
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+
+def _write_apply_failed(out_dir, message):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    ok_path = os.path.join(out_dir, APPLY_OK_FILE)
+    if os.path.exists(ok_path):
+        os.remove(ok_path)
+    with open(os.path.join(out_dir, APPLY_FAILED_FILE), "w") as f:
+        json.dump({"error": str(message)}, f)
+
+
+def _write_apply_ok(out_dir, functions, decompiled, failed, focus_count, binary_sha256):
+    if not out_dir:
+        return
+    _ensure_output_dir(out_dir)
+    failed_path = os.path.join(out_dir, APPLY_FAILED_FILE)
+    if os.path.exists(failed_path):
+        os.remove(failed_path)
+    payload = {
+        "functions": functions,
+        "decompiled": decompiled,
+        "failed": failed,
+        "focus": focus_count,
+        "binary_sha256": binary_sha256,
+    }
+    with open(os.path.join(out_dir, APPLY_OK_FILE), "w") as f:
+        json.dump(payload, f)
+
+try:
+    _TEXT_TYPES = (basestring,)
+    _INTEGER_TYPES = (int, long)
+except NameError:
+    _TEXT_TYPES = (str,)
+    _INTEGER_TYPES = (int,)
 
 
 def log(msg):
@@ -29,31 +75,190 @@ def log(msg):
     sys.stderr.flush()
 
 
+_C_KEYWORDS = set((
+    "auto", "break", "case", "char", "const", "continue", "default", "do",
+    "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline",
+    "int", "long", "register", "restrict", "return", "short", "signed", "sizeof",
+    "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile",
+    "while", "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+    "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "bool",
+    "catch", "char16_t", "char32_t", "class", "compl", "concept", "consteval",
+    "constexpr", "constinit", "const_cast", "co_await", "co_return", "co_yield",
+    "decltype", "delete", "dynamic_cast", "explicit", "export", "false", "friend",
+    "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator",
+    "or", "or_eq", "private", "protected", "public", "reinterpret_cast", "requires",
+    "static_assert", "static_cast", "template", "this", "thread_local", "throw", "true",
+    "try", "typeid", "typename", "using", "virtual", "wchar_t", "xor", "xor_eq",
+))
+
+
 def sanitize(name):
-    """Sanitize a name for use as C identifier or filename."""
+    """Return an ASCII C-style identifier without merging distinct raw names."""
+    raw = name or ""
     out = []
-    for ch in name:
-        if ch.isalnum() or ch == "_":
+    changed = _has_identity_suffix(raw)
+    for ch in raw:
+        if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch == "_":
             out.append(ch)
         else:
             out.append("_")
+            changed = True
     s = "".join(out)
-    # C identifiers can't start with a digit.
-    if s and s[0].isdigit():
+    if not s:
+        s = "_anon"
+        changed = True
+    if "0" <= s[0] <= "9":
         s = "_" + s
-    return s[:120] if len(s) > 120 else s
+        changed = True
+    if s in _C_KEYWORDS:
+        s = "_" + s
+        changed = True
+    suffix = ""
+    if changed:
+        suffix = "_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    limit = 120 - len(suffix)
+    if len(s) > limit:
+        suffix = "_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+        s = s[:120 - len(suffix)]
+    return s + suffix
 
 
-def sanitize_filename(name):
-    """Sanitize for filenames (allows dots and hyphens)."""
-    out = []
-    for ch in name:
-        if ch.isalnum() or ch in ("_", "-", "."):
-            out.append(ch)
-        else:
-            out.append("_")
-    s = "".join(out)
-    return s[:120] if len(s) > 120 else s
+def _has_identity_suffix(name):
+    pos = name.rfind("_")
+    if pos < 0 or len(name) - pos - 1 != 32:
+        return False
+    return all(ch in "0123456789abcdef" for ch in name[pos + 1:])
+
+
+def function_identifier(name, addr):
+    """Tool-boundary function identifier: readable raw identity + exact VA."""
+    return "%s_a%x" % (sanitize(name), addr)
+
+
+def _canonical_hex_addr(value, label):
+    if not isinstance(value, _TEXT_TYPES) or not value.startswith("0x") or len(value) < 3:
+        raise ValueError("%s must be a canonical 0x-prefixed address" % label)
+    try:
+        parsed = int(value[2:], 16)
+    except Exception:
+        raise ValueError("%s must be a canonical hexadecimal address" % label)
+    if value != "0x%x" % parsed:
+        raise ValueError("%s is not canonical: %r" % (label, value))
+    return parsed
+
+
+def _positive_int(value, label, allow_zero=False):
+    if isinstance(value, bool) or not isinstance(value, _INTEGER_TYPES):
+        raise ValueError("%s must be an integer" % label)
+    if value < 0 or (value == 0 and not allow_zero):
+        raise ValueError("%s has invalid value %r" % (label, value))
+    return value
+
+
+def validate_meta_records(meta):
+    """Reject structurally unsafe/tampered schema-v3 records before mutation."""
+    pointer_size = meta["pointer_size"]
+    functions = meta.get("functions", [])
+    if not isinstance(functions, list):
+        raise ValueError("functions must be an array")
+    function_addrs = set()
+    for i, entry in enumerate(functions):
+        if not isinstance(entry, dict):
+            raise ValueError("functions[%d] must be an object" % i)
+        addr = entry.get("addr")
+        _canonical_hex_addr(addr, "functions[%d].addr" % i)
+        if addr in function_addrs:
+            raise ValueError("duplicate function address %s" % addr)
+        function_addrs.add(addr)
+        name = entry.get("name")
+        if not isinstance(name, _TEXT_TYPES) or not name:
+            raise ValueError("functions[%d].name must be non-empty" % i)
+        size = _positive_int(entry.get("size"), "functions[%d].size" % i)
+        if size > 64 * 1024 * 1024:
+            raise ValueError("functions[%d].size exceeds the 64 MiB artifact limit" % i)
+        _positive_int(entry.get("param_count", 0), "functions[%d].param_count" % i, allow_zero=True)
+
+    focus = meta.get("focus_functions", [])
+    if not isinstance(focus, list):
+        raise ValueError("focus_functions must be an array")
+    seen_focus = set()
+    for i, addr in enumerate(focus):
+        _canonical_hex_addr(addr, "focus_functions[%d]" % i)
+        if addr not in function_addrs:
+            raise ValueError("focus function %s is absent from functions" % addr)
+        if addr in seen_focus:
+            raise ValueError("duplicate focus function %s" % addr)
+        seen_focus.add(addr)
+
+    comments = meta.get("comments", [])
+    if not isinstance(comments, list):
+        raise ValueError("comments must be an array")
+    seen_comments = set()
+    for i, entry in enumerate(comments):
+        if not isinstance(entry, dict):
+            raise ValueError("comments[%d] must be an object" % i)
+        addr = entry.get("addr")
+        _canonical_hex_addr(addr, "comments[%d].addr" % i)
+        if addr in seen_comments:
+            raise ValueError("duplicate comment address %s" % addr)
+        seen_comments.add(addr)
+        if not isinstance(entry.get("text"), _TEXT_TYPES):
+            raise ValueError("comments[%d].text must be a string" % i)
+
+    thr_fields = meta["thr_fields"]
+    seen_thr_offsets = set()
+    for i, field in enumerate(thr_fields):
+        if not isinstance(field, dict):
+            raise ValueError("thr_fields[%d] must be an object" % i)
+        off = _positive_int(field.get("offset"), "thr_fields[%d].offset" % i, allow_zero=True)
+        if off in seen_thr_offsets:
+            raise ValueError("duplicate THR field offset 0x%x" % off)
+        seen_thr_offsets.add(off)
+        if not isinstance(field.get("name"), _TEXT_TYPES) or not field.get("name"):
+            raise ValueError("thr_fields[%d].name must be non-empty" % i)
+
+    classes = meta.get("classes", [])
+    if not isinstance(classes, list):
+        raise ValueError("classes must be an array")
+    seen_cids = set()
+    for i, cls in enumerate(classes):
+        if not isinstance(cls, dict):
+            raise ValueError("classes[%d] must be an object" % i)
+        cname = cls.get("class_name")
+        if not isinstance(cname, _TEXT_TYPES) or not cname:
+            raise ValueError("classes[%d].class_name must be non-empty" % i)
+        cid = _positive_int(cls.get("class_id"), "classes[%d].class_id" % i)
+        if cid in seen_cids:
+            raise ValueError("duplicate class_id %d" % cid)
+        seen_cids.add(cid)
+        size = _positive_int(cls.get("instance_size"), "classes[%d].instance_size" % i)
+        if size < 8 or size % pointer_size != 0:
+            raise ValueError("classes[%d].instance_size is not a valid Dart word layout" % i)
+        fields = cls.get("fields")
+        if not isinstance(fields, list):
+            raise ValueError("classes[%d].fields must be an array" % i)
+        offsets = set()
+        for j, field in enumerate(fields):
+            if not isinstance(field, dict):
+                raise ValueError("classes[%d].fields[%d] must be an object" % (i, j))
+            name = field.get("name")
+            if not isinstance(name, _TEXT_TYPES) or not name:
+                raise ValueError("classes[%d].fields[%d].name must be non-empty" % (i, j))
+            off = _positive_int(field.get("byte_offset"), "classes[%d].fields[%d].byte_offset" % (i, j))
+            if off < 8 or off % pointer_size != 0 or off + pointer_size > size:
+                raise ValueError("classes[%d].fields[%d] has invalid byte_offset" % (i, j))
+            if off in offsets:
+                raise ValueError("classes[%d] has duplicate field offset 0x%x" % (i, off))
+            offsets.add(off)
+            is_reference = field.get("is_reference")
+            if not isinstance(is_reference, bool):
+                raise ValueError("classes[%d].fields[%d].is_reference must be boolean" % (i, j))
+            slot_type = field.get("slot_type")
+            if slot_type not in ("type_arguments_field", "instance_field", "unknown_slot"):
+                raise ValueError("classes[%d].fields[%d] has invalid slot_type" % (i, j))
+            if slot_type == "type_arguments_field" and not is_reference:
+                raise ValueError("classes[%d].fields[%d] has non-reference type_arguments_field" % (i, j))
 
 
 def resolve_meta_path(argv):
@@ -84,7 +289,42 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
         dict with stats: functions_created, functions_named, structs_created,
         signatures_applied, comments_set
     """
-    pointer_size = meta.get("pointer_size", 8)
+    if meta.get("version") != "3" or meta.get("arch") != "arm64":
+        raise ValueError("flutter_meta.json must be schema version 3 for arch arm64")
+    missing = [k for k in ("dart_version", "binary_sha256", "binary_size", "compressed_pointers", "pointer_size", "thr_fields")
+               if k not in meta]
+    if missing:
+        raise ValueError("flutter_meta.json missing required field(s): %s" % ", ".join(missing))
+    if not isinstance(meta["compressed_pointers"], bool):
+        raise ValueError("compressed_pointers must be a boolean")
+    expected_pointer_size = 4 if meta["compressed_pointers"] else 8
+    if meta["pointer_size"] != expected_pointer_size:
+        raise ValueError("pointer_size %r disagrees with compressed_pointers=%r (want %d)" % (
+            meta["pointer_size"], meta["compressed_pointers"], expected_pointer_size))
+    if not isinstance(meta["dart_version"], _TEXT_TYPES) or not meta["dart_version"] or not isinstance(meta["thr_fields"], list):
+        raise ValueError("dart_version must be non-empty and thr_fields must be an array")
+    binary_sha256 = meta["binary_sha256"]
+    binary_size = meta["binary_size"]
+    if not isinstance(binary_sha256, _TEXT_TYPES) or len(binary_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in binary_sha256):
+        raise ValueError("binary_sha256 must be 64 lowercase hex characters")
+    if isinstance(binary_size, bool) or not isinstance(binary_size, _INTEGER_TYPES) or binary_size <= 0:
+        raise ValueError("binary_size must be a positive integer")
+    validate_meta_records(meta)
+    if not binary_path or not os.path.isfile(binary_path):
+        raise ValueError("binary path is required to verify flutter_meta.json provenance")
+    if os.path.getsize(binary_path) != binary_size:
+        raise ValueError("binary size does not match flutter_meta.json provenance")
+    digest = hashlib.sha256()
+    with open(binary_path, "rb") as bf:
+        while True:
+            chunk = bf.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    if digest.hexdigest() != binary_sha256:
+        raise ValueError("binary SHA-256 does not match flutter_meta.json provenance")
+
+    pointer_size = meta["pointer_size"]
     log("  pointer_size: %d" % pointer_size)
 
     stats = {
@@ -101,6 +341,10 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
     thr_fields = meta.get("thr_fields", [])
     classes = meta.get("classes", [])
     struct_names = {}  # dart class_name -> C struct name
+    owner_counts = {}
+    for cls in classes:
+        cname = cls["class_name"]
+        owner_counts[cname] = owner_counts.get(cname, 0) + 1
 
     header_lines = []
     header_lines.append("// Auto-generated by aotopsy for IDA")
@@ -114,14 +358,15 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
         cname = cls.get("class_name", "")
         if not cname:
             continue
-        sname = "Dart_" + sanitize(cname)
+        sname = "Dart_%s_cid%d" % (sanitize(cname), cls["class_id"])
         size = cls.get("instance_size", 0)
         if size <= 0:
             continue
         fields = cls.get("fields", [])
         header_lines.append(build_class_struct(sname, size, fields, pointer_size))
         header_lines.append("")
-        struct_names[cname] = sname
+        if owner_counts[cname] == 1:
+            struct_names[cname] = sname
 
     header = "\n".join(header_lines)
 
@@ -149,29 +394,11 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
     for entry in functions:
         known_starts.add(int(entry["addr"], 16))
 
-    # P2.5-5: Staleness check — warn if the binary hash doesn't match.
-    meta_hash = meta.get("binary_hash", "")
-    if meta_hash:
-        if not binary_path:
-            log("  WARNING: binary_path not provided — staleness hash check skipped.")
-        else:
-            import hashlib
-            try:
-                with open(binary_path, "rb") as bf:
-                    file_hash = hashlib.md5(bf.read()).hexdigest()
-                if file_hash != meta_hash:
-                    log("  WARNING: binary hash mismatch! flutter_meta.json may be stale.")
-                    log("    meta hash:  %s" % meta_hash)
-                    log("    file hash:  %s" % file_hash)
-                    log("    Proceeding anyway — split operations will be limited to known function boundaries.")
-            except Exception:
-                pass  # hash check is best-effort
-
     split_count = 0
     split_skipped = 0
     for entry in functions:
         addr = int(entry["addr"], 16)
-        name = entry["name"]
+        name = function_identifier(entry["name"], addr)
         size = entry.get("size", 0)
 
         # Split mid-function addresses (Dart checked/unchecked entries).
@@ -206,10 +433,9 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
                 if ida_funcs.add_func(addr, end):
                     stats["functions_created"] += 1
 
-        flags = idc.SN_NOWARN | idc.SN_NOCHECK
+        flags = idc.SN_NOWARN
         if not idc.set_name(addr, name, flags):
-            fallback = "%s_%x" % (name, addr)
-            idc.set_name(addr, fallback, flags)
+            raise ValueError("IDA rejected sanitized function identifier %r at 0x%x" % (name, addr))
         stats["functions_named"] += 1
 
     if split_count or split_skipped:
@@ -230,7 +456,7 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
         addr = int(entry["addr"], 16)
         owner = entry.get("owner", "")
         pc = entry.get("param_count", 0)
-        name = entry["name"]
+        name = function_identifier(entry["name"], addr)
 
         proto = build_function_prototype(name, owner, pc, struct_names)
         if not proto:
@@ -267,19 +493,16 @@ def apply_metadata(meta, idc, ida_funcs, ida_typeinf, ida_auto=None, binary_path
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 aotopsy_apply.py <libapp.so> [<flutter_meta.json>] [<output_dir>]")
-        sys.exit(1)
+        raise RuntimeError("Usage: python3 aotopsy_apply.py <libapp.so> [<flutter_meta.json>] [<output_dir>]")
 
     binary_path = sys.argv[1]
     meta_path = resolve_meta_path(sys.argv)
     out_dir = sys.argv[3] if len(sys.argv) > 3 else None
 
     if not os.path.exists(binary_path):
-        log("ERROR: binary not found: %s" % binary_path)
-        sys.exit(1)
+        raise RuntimeError("binary not found: %s" % binary_path)
     if meta_path is None or not os.path.exists(meta_path):
-        log("ERROR: flutter_meta.json not found. Pass as argument or place script in <output>/ida/")
-        sys.exit(1)
+        raise RuntimeError("flutter_meta.json not found. Pass as argument or place script in <output>/ida/")
 
     log("aotopsy_apply (IDA): loading %s" % meta_path)
     with open(meta_path, "r") as f:
@@ -292,15 +515,7 @@ def main():
 
     result = idapro.open_database(binary_path, True)
     if result != 0:
-        # Try fresh — delete stale database files.
-        for ext in (".i64", ".idb", ".id0", ".id1", ".id2", ".nam", ".til"):
-            p = binary_path + ext
-            if os.path.exists(p):
-                os.remove(p)
-        result = idapro.open_database(binary_path, True)
-        if result != 0:
-            log("ERROR: failed to open database (code %d)" % result)
-            sys.exit(1)
+        raise RuntimeError("failed to open database (code %d)" % result)
     log("  database opened")
 
     # ---- Import IDA modules (only after db is open) ----
@@ -341,12 +556,9 @@ def main():
             os.makedirs(out_dir)
 
         name_by_addr = {}
-        owner_by_addr = {}
         for entry in functions:
             a = entry["addr"]
             name_by_addr[a] = entry["name"]
-            if entry.get("owner"):
-                owner_by_addr[a] = entry["owner"]
 
         index = []
         for addr_str in focus:
@@ -379,16 +591,11 @@ def main():
 
                 c_code = str(cfunc)
 
-                safe_name = addr_str.replace("0x", "") + "_" + sanitize_filename(fn_name)
-                owner = owner_by_addr.get(addr_str, "")
-                if owner:
-                    sub = sanitize_filename(owner)
-                    sub_dir = os.path.join(out_dir, sub)
-                    if not os.path.exists(sub_dir):
-                        os.makedirs(sub_dir)
-                    out_file = os.path.join(sub, safe_name + ".c")
-                else:
-                    out_file = safe_name + ".c"
+                # Address is the artifact identity. Avoid a separate recovered
+                # owner directory sanitizer whose case/device/truncation rules
+                # could merge distinct paths on Windows.
+                safe_name = addr_str.replace("0x", "") + "_" + sanitize(fn_name)
+                out_file = safe_name + ".c"
 
                 with open(os.path.join(out_dir, out_file), "w") as cf:
                     cf.write(c_code)
@@ -413,8 +620,8 @@ def main():
         with open(os.path.join(out_dir, "index.json"), "w") as idx:
             json.dump(index, idx, indent=2)
         log("  decompiled=%d failed=%d" % (decompiled, decompile_failed))
-    elif not has_decompiler:
-        log("Phase 5: skipped (no Hex-Rays)")
+    elif focus and not has_decompiler:
+        raise RuntimeError("Hex-Rays decompiler unavailable for %d focus functions" % len(focus))
     elif not out_dir:
         log("Phase 5: skipped (no output dir)")
     else:
@@ -435,6 +642,7 @@ def main():
             stats["comments_set"],
             decompiled,
         ))
+    _write_apply_ok(out_dir, len(functions), decompiled, decompile_failed, len(focus), meta["binary_sha256"])
 
 
 # ============================================================
@@ -453,7 +661,7 @@ def build_dart_thread_struct(thr_fields):
     skipped_overlap = []
     for f in sorted_fields:
         off = f["offset"]
-        name = sanitize(f["name"])
+        name = "%s_o%x" % (sanitize(f["name"]), off)
         if off > prev_end:
             lines.append("  char _pad%d[%d];" % (pad_idx, off - prev_end))
             pad_idx += 1
@@ -477,7 +685,6 @@ def build_dart_thread_struct(thr_fields):
 def build_class_struct(sname, size, fields, pointer_size):
     """Build a Dart class struct as C declaration."""
     field_sz = pointer_size
-    field_type = "int" if pointer_size == 4 else "void*"
 
     sorted_fields = sorted(fields, key=lambda f: f.get("byte_offset", 0))
 
@@ -486,7 +693,16 @@ def build_class_struct(sname, size, fields, pointer_size):
     pad_idx = 0
     for f in sorted_fields:
         off = f.get("byte_offset", 0)
-        fname = sanitize(f.get("name", "field_%x" % off))
+        fname = "%s_o%x" % (sanitize(f.get("name", "field_%x" % off)), off)
+        if pointer_size == 4:
+            # A compressed Dart reference is a 32-bit encoded pointer value;
+            # do not lie to IDA by widening it to a host void*. Raw slots are
+            # also 32-bit, but remain honest integer storage either way.
+            field_type = "unsigned int"
+        elif f["is_reference"]:
+            field_type = "void*"
+        else:
+            field_type = "unsigned long long"
         if off < prev_end:
             continue
         if off > prev_end:
@@ -617,4 +833,10 @@ def _retype_ida_registers(cfunc, ea, ida_hexrays, has_thr_fields):
 
 
 if __name__ == "__main__":
-    main()
+    out_dir = sys.argv[3] if len(sys.argv) > 3 else None
+    try:
+        main()
+    except Exception as e:
+        log("ERROR: %s" % str(e))
+        _write_apply_failed(out_dir, str(e))
+        sys.exit(1)

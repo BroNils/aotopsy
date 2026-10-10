@@ -5,6 +5,399 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The `gh` fallback tests run on Windows.** `internal/sdktest` faked `gh` with a
+  `#!/bin/sh` script, which Windows cannot execute, so four tests failed there on
+  every run since they were added, and `TestOfflineModeNeverInvokesGH` passed only
+  because the fake could not start. The test binary now installs a copy of itself
+  as `gh[.exe]` and `TestMain` turns that copy into the fake (`fakegh_test.go`), so
+  the same code path runs on every OS. Test-only change; no product behaviour moves.
+- **A stale compare no longer narrows a rewritten register (ARM64).** `CMP W1,#c;
+  <flag-preserving instruction that rewrites X1>; B.EQ` narrowed the NEW value of
+  X1, because the edge narrowing reads the block-exit state. The compare is now
+  dropped as soon as an instruction writes the compared register. Golden outputs
+  are unchanged (no site on the four golden samples hit it).
+- **String-interpolation idiom no longer invents operands.** `_StringBase._interpolate`
+  takes ONE `List` argument and `_interpolateSingle` takes one `Object?` in all 23
+  supported SDKs (`string_patch.dart`; `kernel_to_il.cc` emits `argument_count = 1`),
+  so the parts are the array's element stores, not the call's comma-separated
+  arguments. The idiom now rewrites only `_interpolate([...list literal...])` and
+  `_interpolateSingle(x)` and leaves multi-argument calls alone (it used to print
+  `"$null$accumulator$local_m16"`). The non-existent `_StringBase.concat` rewrite
+  was removed (string `+` is an operator method).
+- **Decompiler output: literals and redundant masks.** String/`null`/`true`/`false`
+  literals are no longer printed as `"x" & 0xffffffff`; a mask is not applied on top
+  of an expression already masked at least as narrowly; x64 `R8L..R15L` (Go syntax's
+  32-bit view) are aliased to their 64-bit register (they used to be treated as
+  separate registers and leaked as `r11l`). Elided stack-overflow / write-barrier stub
+  blocks are no longer reported as orphans. Ground-truth gate, 3.9.2 arm64/x64:
+  masked literals 140/129 -> 2/2, double masks 6/58 -> 0, literal recall x64
+  45.2% -> 52.4%; x64 `orphan_block` rose 111 -> 143 (box/Smi diamonds now reach the
+  walker's depth budget; recorded in the floor comment).
+- **Indirect-call candidates no longer merge unrelated selectors.** The dispatch
+  table packs selector rows by row displacement, so slot `selector_offset + cid`
+  of a class a selector does not implement usually holds another selector's
+  entry. Candidate scans now accept a slot only when its Code's declaring class
+  is the receiver class or one of its superclasses and its selector leaf is the
+  row's leaf (`typetrack/selector_rows.go`); selector immediates per method name
+  are inferred from the rows instead of `slot - ownerCID`. On a real 3.9.2 app a
+  Map-literal call had 576 "targets" of unrelated names; polymorphic sites with
+  mixed leaves went from 2780 to 0 and the largest set is a real row (~170).
+  `selector_dispatch_xref.jsonl` now has one entry per row instead of per slot.
+- **Default run exceeded the 2.5 GB address-space budget.** `internal/signal`
+  imported `net` (only for `ParseIP`), which linked cgo and glibc's per-thread
+  malloc arenas (~1 GB of address space); it uses `net/netip` now and
+  `TestCommandDoesNotLinkNetOrCgo` guards the binary.
+- **Per-file fsync made large runs 3-4x slower.** Staged artifact writes defer
+  fsync to the directory transaction, whose commit syncs files with a worker pool.
+- **`platform_channels.jsonl` finds the framework's `const MethodChannel` /
+  `EventChannel` / `BasicMessageChannel` instances** (exact evidence,
+  `confidence: high`, `const_instances`) in addition to the string+call join.
+  Record schema: `channel_name`, `channel_types[]`, `call_sites[]`,
+  `const_instances`, `confidence`.
+- Full-AOT closure calls are labelled `object_field(Closure.entry_point)` by exact
+  SDK shape (arm64 `LDR X2,[X0,#d]; BLR X2`, x64 `MOV RCX,[RAX+d]; CALL RCX`;
+  displacement derived from `runtime_offsets_extracted.h`, 2.14.0..3.13.0)
+  instead of raw `object_field+N` guesses.
+- JSONL writer and reader limits are one 1 GiB / 10M-row budget (a 129k-function
+  app writes ~340 MB of evidence); `signal_graph.json` may be up to 1 GiB when
+  `meta` reads it.
+
+### Changed
+- **Decompiler binds stack-passed call arguments to the call (3.0.5+).** From 3.0.5 the
+  compiler writes every stack argument with a `MoveArgumentInstr` inserted immediately before the
+  call (`FlowGraph::InsertMoveArguments`; il_arm64.cc / il_x64.cc), to the pre-reserved
+  outgoing area at `[SP + index*8]`, with the LAST stack argument at `SP+0`
+  (`dart_calling_conventions.cc ComputeCallingConvention`). The SP-relative slots written since
+  the previous call are therefore exactly the call's stack arguments, so they are now printed as
+  its argument list (deepest slot first) and the redundant `stack_sp = ...` statements are
+  removed. Only for a contiguous run `SP+0..SP+8(k-1)`, never for VM stub callees. In 3.0.5..3.3.x
+  (no register calling convention: `dart_calling_conventions.cc` first exists at 3.4.3) the
+  stack arguments are the whole list; from 3.4 they follow the register arguments. 3.9.2, first
+  3000 functions: stack-slot statements arm64 2679 -> 155, x64 3256 -> 699; ground-truth gate
+  `stack_sp_leak` 140/142 -> 0/2.
+- **Decompiler names switchable (instance) calls: `recv.name(args)` instead of
+  `dynamicCall(dispatchTarget, ...)`.** `FlowGraphCompiler::EmitInstanceCallAOT` (read at x64
+  2.10.0 / 2.12.0 / 3.9.2 / 3.13.0; arm64 per the audit) loads the receiver from
+  `[SP + (SizeWithoutTypeArgs-1)*8]` (R0 / RDX), the UnlinkedCall into IC_DATA_REG (R5 / RBX) and
+  the SwitchableCallMiss stub into LR / RCX, then calls. The UnlinkedCall's `target_name` is the
+  selector (`dyn:` prefix = dynamic-invocation forwarder, `Symbols::DynamicPrefix` in every
+  version). The call is recognised from the register pair {IC_DATA_REG, LR} of the LDP (arm64; the
+  pool-slot ORDER flips at 3.10.7 but the registers do not) or the RBX pool load (x64), and printed
+  only when the receiver is exactly the first bound stack argument (so type-argument vectors and
+  unbound slots are left as before). Getters/setters/operators/`[]` print as such. Also: an
+  `ldr/ldp reg, [x]` with no displacement whose base holds `PP+N` now resolves to pool element N.
+  Measured on the first 3000 functions: `dynamicCall(` 357 -> 348 (3.9.2 arm64), 401 -> 392 (3.9.2
+  x64), 472 -> 450 (2.12.0 arm64). The ceiling is low by construction: switchable calls are only
+  189 call sites in the whole 2.12.0 sample (3734 BLRs are dispatch-table calls, which already
+  carry their selector).
+  **Second step (this replaces the display-based recogniser above):** the call is now identified by
+  the OBJECT in IC_DATA_REG, not by how its pool entry prints. `cluster` captures the
+  CallSiteData refs of every `UnlinkedCall` and `MegamorphicCache` (`Result.CallSites`;
+  `EmitMegamorphicInstanceCall`, which is the 2.x AOT form of the same call, loads a
+  MegamorphicCache with the identical `LDP {R5, LR}` -- 139 of the 189 call sites of the 2.12.0
+  sample), `cluster.ArgsDescriptorDecoder` decodes `args_descriptor`, and the decompiler gets
+  selector + exact argument count + named arguments through `FuncIR.CallSiteAt`. The call is
+  rendered only when the bound stack arguments are exactly the descriptor's count (plus the
+  type-argument vector when `type_args_len > 0`), and named arguments print as `name: value`.
+  The descriptor's argument count equals the receiver slot `[SP+(count-1)*8]` at **every** one of
+  the ~520 switchable sites of the 21 arm64 corpus samples (0 mismatches;
+  `TestSwitchableReceiverSlotMatchesArgumentsDescriptor`). Descriptors are decoded two ways, both
+  read from the SDK at every md5 bucket: the VM's pre-allocated `cached_args_descriptors_`
+  (`Serializer::AddBaseObjects` hands them the first reference ids, in order: first id 25 on
+  2.10.0, 19 on 2.12..2.17.6, 20 on 2.18/2.19, 21 on 3.0.5/3.1.0, 22 on 3.2.5..3.4.3, 21 on
+  3.5.0..3.12.2; 32 entries, plus 3 type-argument entries from 3.9.2) and, because 3.13.0 no
+  longer adds them as base objects (AOT base objects are the 7 Roots), real Arrays of Smi
+  objects (`Result.MintValues`). 2.12.0 arm64, first 3000 functions: `dynamicCall(` 472 -> 398.
+- **A receiver's class bound now selects the dispatch-table row (selector-only calls).** For a
+  selector-only dispatch (`SUB X, cid, #imm; LDR X30,[DT, X, LSL #3]; BLR`) the callee is the
+  slot `imm + cid(receiver)`. When the receiver object is a `ClassBound(C)` (declared parameter /
+  field / return types, the owner of an instance method), its runtime classes are the classes that
+  extend or implement C (`ClassHierarchy`, proven on the corpus above; Null always kept), and the
+  row leaf is now elected among THOSE classes' slots instead of among every class. That is the
+  fix, not just a narrowing: row displacement packs rows into each other's holes, so the global
+  vote let whichever selector owned the most slots in the region win -- on 3.9.2 a `String`-typed
+  receiver's call was reported as `PointerEvent.get:pointer`, `Element.inflateWidget` as
+  `Object.==`, `_AsyncStarStreamController.add` as `PointerEvent.get:pointer`. The receiver's own
+  slot is in the selector's row by construction (`SelectorRow::FillTable` writes `offset + cid`
+  for every concrete subclass interval), which is why electing among the receiver's classes is
+  sound; an empty bounded answer, an unknown bound or a hierarchy with an unresolved edge fall back
+  to the unbounded scan. Lattice: `SelectorDispatch(imm, recvBound)`, joins drop a disagreeing bound
+  and keep the selector. Per-record effect on the golden samples (arm64; the x86_64 path is
+  unchanged, see below): 3.9.2 88 records, 2.12.0 63, 3.13.0 81, no record added or removed, only
+  `target/targets/candidates` change, e.g. `Element.updateChildren: Object.== ->
+  Element.inflateWidget`, `RenderBox.performResize: Object.get:runtimeType ->
+  RenderBox.get:constraints`, `NavigatorState.activate: 34 get:iterator candidates -> 9, all List
+  types`. Monomorphic sites -27/-19/-34 are wrong single answers that became honest candidate sets.
+  Not done: x86_64 still takes the unbounded prescan path (separate transfer function, no
+  `SelectorDispatch` lattice there).
+- **x86_64 gets the F4 source link and the receiver bound (P5).** On ARM64 a class-id register
+  remembers the object its header was read from (`SrcReg`), which gives (a) the receiver bound
+  for selector-only dispatch and (b) object narrowing on the equality edge of a class-id
+  compare. The x86_64 transfer functions had neither: the header load
+  (`mov r32,[obj-1]`, or `movzx r,word [obj+1]` through 2.18) now links the register to `obj`,
+  the exact `shr r,kClassIdTagPos` keeps the link, writes to the object register drop it
+  (`dropWrittenSrcLinksX86`, `x86.DstRegsOfInst`), the dispatch call asks
+  `x86ReceiverBound` (same `sel_recv_*` counters as ARM64), and the equality edge uses the
+  shared `narrowByClassIDCompare`. 3.12.2 x64: receiver-bound sites 0 -> 128, `narrow_src_hits`
+  0 -> 1321, 64 call_edges records change (50 shrink to subsets, e.g. `Set.contains`
+  implementations for `_IconButtonDefaultsM3.get:overlayColor`, `_slowSetRange` for the typed-list
+  views), 3.9.2 x64 and 2.14.0 x64 gain the same. Still open on x86_64: 1924 of 3366 selector sites
+  have no source link at all (3.12.2), i.e. the class id does not come from the direct
+  `mov; shr` shape.
+- **Receiver bounds no longer die when the object register is overwritten (both
+  architectures).** Classifying the 1924 unlinked x86_64 selector sites of the 3.12.2 sample by
+  the instruction before the call showed one shape: `mov ecx,[rax-1]; shr ecx,12; mov rdi,rax;
+  mov rax,[r14+DT]; call [rax+8*rcx+imm]` -- the object's register is reused for the dispatch
+  table before the class id is consumed, so the link was dropped one instruction early (1753
+  sites; the 2.x form `push rax` instead of `mov rdi,rax`, 2.14.0). Three changes:
+  `updateSrcLinksX86` moves a link to an intact 64-bit register copy of the object instead of
+  dropping it; `LoadClassIdMayBeSmi`'s Smi path (`test al,1; mov ecx,kSmiCid; je`) is linked to its
+  object, only when the immediate is the snapshot's own `_Smi` cid; and the class bound of the
+  object is STAMPED on the header/class-id value while the link is alive
+  (`stampReceiverBounds`, `TypeLattice.RecvBound` on header and class-id kinds, preserved by
+  UBFX/SHR and by joins when both paths agree), so the bound survives the register being
+  overwritten -- the class id remains the class id of that object. ARM64 uses the same core
+  (`receiverBound`). Receiver-bound selector sites: 3.12.2 x64 128 -> 359, 2.14.0 x64 18 -> 232,
+  3.9.2 arm64 306 -> 322, 2.12.0 arm64 157 -> 257; polymorphic candidates 3.12.2 x64 172k -> 150k
+  and 2.14.0 x64 148k -> 133k; `narrow_src_hits` 1321 -> 1845 on 3.12.2 x64.
+- **Stack-passed parameters now carry their declared class.** The entry stack seed held only the
+  receiver; every other stack parameter started as Top, and the dominant source of Top receivers at
+  selector-only sites is exactly a load from a frame slot (1140 of 2438 on 3.9.2; the rest are
+  moves/adds of other values, spills and call results). `cluster.ParamFrameSlot` generalizes
+  `ReceiverFrameSlot` (parameter i at `FP + (kParamEndSlotFromFp + num_fixed - i) * word`,
+  confirmed on 2.12.0 arm64: a two-parameter `operator+` loads its receiver at `[x29,#24]` and its
+  argument at `[x29,#16]`), under the same preconditions (stack calling convention -- every function
+  before the register CC, the snapshot-proven stack-CC ones after it -- no optional parameters, not
+  suspendable, signature agreeing on the arity). The declared class is an upper bound
+  (`ClassBound`), never an exact class. Receiver-bound sites 221 -> 306 (3.9.2), 109 -> 157
+  (2.12.0), 213 -> 310 (3.13.0); call_edges records changed 64 / 7 / 66 (candidate sets shrink to
+  the declared type's subtypes, e.g. `Set.contains` implementations, `InheritedElement.get:widget`);
+  on 3.12.2 x64 call_edges are unchanged but +6 evidence records and more field readers are
+  attributed (`field_type_declared_hits` 432 -> 438).
+- **Without a receiver fact, a selector-only call reports the UNION of the proven rows at its
+  imm, not the winner of a vote.** Rows of unrelated class families legitimately SHARE an imm
+  (`RowFitter::TryFit` only requires the row's own cids to be free: dispatch_table_generator.cc,
+  read at 2.12.0 and 3.9.2), so the same `imm` is `handleTapCancel` for a tap recognizer,
+  `_doRequestFocus` for a FocusNode and `get:hasListener` for a StreamController -- a single
+  elected leaf could only ever be right for one of them. A slot proves its row when EVERY concrete
+  class below its owner (extends tree, `Abstract` flag from the new hierarchy capture) has a slot at
+  `imm + cid` with the same leaf (`SelectorRow::FillTable` fills a class's whole concrete subtree;
+  sufficient, not necessary -- a descendant whose Function has no code stays empty, so one complete
+  slot per leaf is enough); every leaf with a proven slot is reported. When nothing proves a row the
+  old most-frequent-leaf vote is the fallback. Validated against the receiver-bound answers as an
+  oracle (the bounded sites, ~91 on 3.9.2 and ~64 on 2.12.0): the old vote contained the bounded
+  answer at 30/91 and 31/64; the union at 91/91 and 64/64, i.e. nothing real is dropped any more.
+  The price is honest: candidate counts rise (polymorphic_candidates 3.9.2 163k -> 196k) and 25%
+  of the former `monomorphic` answers (`Object.==` for `InheritedElement.notifyClients`,
+  `ChangeNotifier.addListener` for `_AnimatedState.build`, ...) become candidate sets. Affects both
+  architectures (x86_64 reaches `selectorCandidates` through its prescan): per-record golden deltas
+  3.9.2 arm64 1814, 2.12.0 955, 3.13.0 1658, 3.12.2 x64 1270 records, no record added or removed,
+  only `target/targets/candidates` change.
+- **Class hierarchy capture (P1 of the type-test work): `implements` edges and the abstract
+  bit.** `readFillClass` read and discarded `UntaggedClass::interfaces` and `state_bits`; both
+  are now kept (`ClassInfo.InterfacesRefID`, `StateBits`, `IsAbstract()`), and
+  `cluster.NewClassHierarchy` merges isolate + VM snapshot into `extends`/`implements` edges
+  plus the abstract flag. SDK facts read per version: `interfaces` is the field four slots
+  before `super_type` in every layout (index 5 on 13 refs, 6 on 15/16; `raw_object.h`
+  UntaggedClass at 2.12.0, 2.14.0, 3.9.2, 3.13.0); the abstract bit is bit 6 of `state_bits_`
+  (`Const 0, Implemented 1, ClassFinalized 2..3, ClassLoading 4..5, Abstract 6`) in every
+  version (object.h `Class::StateBits` through 3.5.0, the BitField chain from 3.6.2, md5-identical
+  3.6.2..3.13.0); mixins need no field (kernel_loader.cc skips `kMixinType`; a transformed
+  mixin application `S&M` has the mixin among its `interfaces`, `ASSERT(interface_count > 0)`).
+  Proven on the corpus, not assumed: on all 24 arm64 samples every super/interface ref resolves
+  to a class (0 unresolved), `_OneByteString <: String <: Comparable`,
+  `_GrowableList <: List <: Iterable`, `_Smi/_Double <: num` hold and `List`/`Iterable` are
+  abstract while `_GrowableList`/`_OneByteString` are not (`TestClassHierarchyOnCorpus`; the
+  first version of that test was vacuous -- library-mangled names `_Smi@0150898` -- and the
+  non-vacuity guard caught it). Pure capture: no output changes.
+- **VM stub Code objects in the pool were named from the wrong end of the stub list (all
+  versions).** `BuildPoolLookups` zipped `vmResult.Codes[i]` against the stub list in
+  `StubCode::Init` emission order, but an AOT Code cluster is written in IMAGE order
+  (`CodeSerializationCluster::WriteAlloc` sorts by instructions id, `CompareCodeOrderInfo`;
+  the image is the reverse of the emission order). Evidence in the corpus, not inference: on the
+  `-gt-` builds 2.13.0..2.16.0 the `Precompiled_Stub_*` ELF symbols in ascending address order are
+  exactly the image-order table (`TestVMStubOrderMatchesSymbolTable`), and on 2.10.0..2.14.0 the
+  stub slot paired with an UnlinkedCall must be `SwitchableCallMiss` / with a MegamorphicCache
+  `MegamorphicCall` (`TestVMStubPairSlotsAreNamedByTheirStub`: it displayed `NotLoaded` /
+  `Subtype5TestCache` before, proven failing on a clean HEAD worktree). The emission-order
+  function `VMStubNamesInClusterOrder` is deleted; `VMStubNamesInImageOrder` is the single list.
+  Per-record effect (call_edges only `target`/`via` change, no record added or removed): 3.9.2
+  arm64 426 edges, 3.12.2 x64 405, 2.12.0 arm64 754, e.g. 114x `AllocateInt32Array` ->
+  `InstantiateTypeArguments`, 111x `AllocateFloat32x4Array` -> `InstanceOf`, 20x
+  `OptimizedIdenticalWithNumberCheck` (`===`), the JIT-only `*Breakpoint`/`*InlineCache` stubs
+  that cannot occur in AOT are gone; 2.12.0: 225x `FrameAwaitingMaterialization` ->
+  `CallBootstrapNative`. 3.13.0 has no VM snapshot and is unaffected.
+- **Typetrack resolves switchable calls by the UnlinkedCall/MegamorphicCache selector.** There
+  was no handler for the pool-pair `LDP R5, LR, [PP + n]` at all: LR kept the *stub* slot, whose
+  display is a pool-name artifact, so 150 call edges of the 2.12.0 sample were recorded with the
+  bogus target `Subtype5TestCache` (139) or `TopTypeTypeTest` (11). `handlePPLoad` now types both
+  words of the pair (and accumulates `ADD X16, PP, #hi, LSL #12; ADD X16, X16, #lo`, the form
+  LoadDoubleWordFromPoolIndex uses past the LDP range), and the BLR through LR takes the
+  call-site fact. x64 gets the same for `call RCX` after `RBX <- UnlinkedCall`. A `dyn:foo`
+  call resolves by `foo` (`Resolver::ResolveDynamic*` demangles it before the lookup; same logic
+  at 2.12.0 and 3.9.2, `DemangleDynamicInvocationForwarderName` in every supported version).
+  Per-record golden deltas (all explained, none unexplained): 2.12.0 arm64 150 records bogus
+  target -> real candidate sets (140 polymorphic, 10 single), no record added or removed;
+  3.9.2 / 3.13.0 arm64 and 3.12.2 x64 +3 previously unresolved `dyn:` sites each. MegamorphicCache
+  objects are now named by their selector (`NameIdx 0`, as UnlinkedCall): corpus `named`
+  +3/+4 on 2.10.0/2.12.0, asm annotations `<MegamorphicCache>` -> selector (139 lines).
+  *Open, separate defect found on the way:* the stub slot of these pairs displays as a wrong stub
+  name on 2.12.0 (`Subtype5TestCache` for MegamorphicCall) -- a stub-name table problem, see
+  `.tmp/review/SESSION-LOG-2026-10.md`.
+- **Decompiler binds pushed call arguments to the call (<= 2.19.0).** Before 3.0.5 arguments are
+  pushed (`PushArgumentInstr`) and the caller drops them after the call (`Drop(argc)`), so the
+  argument count is the stack-pointer adjustment right after the call (`ADD X15,X15,#8*argc` /
+  `ADD RSP,8*argc`). The lifter now records pushes (`str/stp [x15,#-N]!`, x64 `push`) in push
+  order (`ArgumentsPusher` uses `PushPair(reg, pending)`: in `STP Xa,Xb` Xb is the EARLIER
+  argument), and the call takes the last `argc` of them and removes their `push(...)`
+  statements. Never for VM stub callees, never when the next instruction is not the drop.
+  2.12.0 arm64, first 3000 functions: stack-slot statements 11329 -> 1215, calls with arguments
+  1570 -> 2816.
+- **Lifter: an instruction with no handler no longer leaves its destination's old value in place.**
+  `ApplyOther` silently skipped unknown mnemonics, so a register written by e.g. `SBFIZ` kept the
+  value from BEFORE the instruction and later reads printed it (`describeConfig` showed
+  `"$name v$name"` instead of the version). Unhandled destinations are now dropped, and `SBFX`/
+  `SBFIZ` with `#1` (SmiUntag/SmiTag, `kSmiTagSize = 1`) are modelled (`x >> 1`, `x << 1`).
+  `raw_register` on the arm64 ground truth 42 -> 49 (unknown values show as the register).
+- **The "rejoin-only else" collapse is limited to Smi tests.** `if (c) { L: X } else { goto L }`
+  is only value-preserving for a bit-0 test (`>> 0 & 1`), where both paths hold the same value;
+  for any other condition (e.g. `enabled ? "on" : "off"`) the structured walk prints the join
+  under one path's register state, so the condition is the only hint left and must stay.
+- **Decompiler no longer lists write-barrier / stack-overflow stub blocks as lost code, and
+  straight-line continuations no longer consume nesting depth.** The barrier-check block can be
+  emitted as a helper after the orphan scan runs, so its stub path was not yet marked as elided
+  and showed up as `// orphan block N` (with a `goto` to it left behind). An unreached block that
+  is only a call to a `*WriteBarrier` / `StackOverflowStub*` symbol is now accounted for. Also,
+  a fallthrough, unconditional jump or elided-branch edge opens no construct, so it no longer
+  counts against `maxDepth` (that bounds nesting, not function length). 3.9.2 ground-truth gate:
+  `orphan_block` 107/143 -> 11/47 and `goto_block` 127/133 -> 32/38 (arm64/x64); first 3000
+  functions: orphan blocks arm64 423 -> 157, x64 3797 (before the decompiler series) -> 2400.
+- **x86-64 alignment padding is no longer reported as an orphan block.** A function's code
+  range is padded with `int3` (0xCC) to its alignment; the tail after the final `jmp`
+  decoded as a block of its own with no predecessor and was listed as lost code. That was
+  91% of all x64 orphans (2180 of 2400 in the first 3000 functions of the 3.9.2 sample).
+  An unreachable block made only of `int3`/`nop` is now accounted for. The barrier /
+  stack-overflow stub recogniser also resolves calls made through the Thread stub table
+  (`call [r14+disp]`, `ldr x30,[THR,#off]; blr x30`). First 3000 functions: x64 orphan blocks
+  2400 -> 166 (arm64 stays at 157: those are the bodies of the WriteBarrier wrapper stubs
+  themselves, which are real code); ground-truth gate x64 `orphan_block` 47 -> 10.
+- **Decompiler rebuilds string templates from the interpolation array.** A Dart
+  interpolation compiles to `CreateArray(n)` + one `StoreIndexed` per piece +
+  `_StringBase._interpolate(list)` (one argument; `kernel_binary_flowgraph.cc`
+  `BuildStringConcatenation`), and an Array's element `i` sits at tagged offset
+  `f23 + 8*i` (uncompressed) or `f15 + 4*i` (compressed >= 2.14.0)
+  (`runtime_offsets_extracted.h` `Array_data_offset` 24 / 16). A new statement-tree
+  pass folds the three shapes real output shows (array temp, array pushed inline,
+  array copied to a frame slot that the call overwrites) into `"..$x..${e}"`, only when
+  the element indices are exactly 0..n-1, no construct sits between allocation and call,
+  and every piece survives being evaluated at the call (a call-valued piece may not be
+  reordered past any statement, a memory read may not cross a call or store, a local may
+  not be reassigned). A bare `$ident` followed by an identifier character is written
+  `${ident}`. A second rule collapses `if (c) { L: X } else { goto L }` when `c` contains
+  no call (what an array store's Smi/barrier check leaves once the stub is elided).
+  First 3000 functions of the 3.9.2 sample: remaining `_interpolate(` calls 253 -> 190
+  (arm64), 255 -> 189 (x64); template strings 6/0 -> 54/56. Ground-truth gate: `goto_block`
+  249/257 -> 127/133. The shared call regex now also matches empty-argument calls
+  (`_interpolate()`), the dominant real shape.
+- **Decompiler collapses BoxInt64 Smi-or-Mint diamonds.** `BoxInt64Instr::EmitNativeCode`
+  (read and diffed in all 23 SDK trees) tags the value when it fits a Smi and otherwise
+  allocates a Mint and stores the value; both paths continue at the same label and hold
+  the same Dart int. The emitter showed this as a nested `if/else` whose miss branch is only
+  the `Allocate...Mint...` stub call plus a `goto`. A new statement-tree pass removes the
+  diamond when (and only when) the miss branch contains nothing else. 3.9.2 ground-truth gate:
+  `goto_block` 277/285 -> 249/257 (arm64/x64), x64 `const_masked` 29 -> 1. `orphan_block`
+  is unchanged: orphans are decided by the walk's depth budget before this pass runs.
+- **Removed two unfounded annotations.** The `// null-safety: nullable variables`
+  comment (a `== null` compare does not prove a nullable type: the compiler emits
+  null compares for caller-side assert-assignable checks, `??`/`?.` lowering and
+  defensive checks) and the integer-literal guess in `// local types` (a bare integer
+  may be a raw machine immediate, not a Dart int). String/bool/double literals and
+  declared/IR types are still annotated.
+- **Parameters keep neutral `argN` names.** The type-derived renaming (`str0`,
+  `n1`, `flag2`, `callback3`) invented roles: positional parameter names are not in
+  a Full-AOT snapshot in any supported version (>=2.14.0 does not serialize them;
+  2.10.0..2.13.0 overwrite them with `<optimized out>`, measured on four samples
+  and traced to `ProgramVisitor::PrepareParameterNames`). The declared type is
+  still shown in the signature.
+- **Removed the usage-count temp renaming from the decompiler.** The pass that
+  renamed temps to `result`/`flag`/`counter`/`accumulator` from occurrence counts
+  asserted roles the binary does not have, and its choice changed after unrelated
+  edits (a `StringBuffer.writeln()` result was printed as `counter`, then as
+  `accumulator`). Temps keep their neutral `tN` names. `compare.ReplaceIdentToken`
+  (a one-line wrapper) was deleted in favour of `stmt.ReplaceIdent`.
+- **Class-id compares narrow the object they were read from (ARM64).** A class
+  id now remembers the register whose header it came from (dropped as soon as
+  that register is rewritten); `cmp cid,#c; b.eq`, including the Smi-tagged
+  `LSL #1` form, narrows that object to exactly that class on the equal edge.
+  `narrow_hits` 0 -> 81 on 3.9.2, `narrow_no_type` 297 -> 216. It does NOT change
+  any call resolution (monomorphic and resolved counts are identical); it is
+  groundwork. New report counters: `narrow_src_hits`, `sel_recv_bound/top/nolink`
+  (only ~4-8% of selector-only dispatch sites have a class-bounded receiver).
+- **Decompiler annotates class-id tests.** `classId(x) == N` and unsigned cid
+  range tests get a trailing comment naming the classes at the ends of the range.
+  It does not claim which type `T` the test implements (the VM's ranges follow
+  `implements` and merge across abstract classes).
+- **Output layout:** `--graph`, `parity` and `_debug symbolmap` write into
+  `<out>/graph`, `<out>/parity` and `<out>/symbolmap` instead of replacing `<out>`.
+  `_debug render` no longer writes `reachable.dot/svg` (the structural closure from
+  all source SCCs covered every function by construction) and `--cfg` takes
+  `--cfg-max` (default 500). `export-dart --max` defaults to 0 (unlimited).
+- Snapshots whose features string targets another architecture/OS than the ELF
+  (or an unsupported OS) are rejected; `knownHashes` lost the 18 entries that no SDK
+  tag reproduces and regained the Dart 3.0.0-3.0.2 hash.
+- Ghidra/IDA integrations publish only after a completion sentinel
+  (`.aotopsy-apply-ok` / `.aotopsy-apply-failed`) validated against the staged
+  `.c` files; IDA works on a private copy and never touches the input directory.
+- `typetrack` no longer uses observed const-instance field types or RTA filtering
+  (the Full-AOT snapshot carries only declared field types: `guarded_cid` /
+  exactness are written only for non-AOT kinds in every supported SDK).
+- **`_debug fingerprint` now has a source-bounded report contract and accepts
+  only supported Dart AOT ELF inputs.** The JSON report no longer exposes the
+  old `flutter_version`, generic `confidence`, or `exec_section_size` fields.
+  It now separates exact file/build/snapshot identities from heuristic Dart
+  `Version::String()` evidence with fields such as `file_sha256`, `elf_class`,
+  `snapshot_hash`, `version_evidence`, `version_confidence`,
+  `mapped_executable_size`, and explicit evidence limitations/conflicts.
+  Flutter marker text is diagnostic only and is not promoted to Dart-version
+  evidence. The command now uses the same validated ELF reader as the analyzer,
+  so its input scope is ELF64 little-endian ET_DYN AArch64/x86-64 rather than an
+  arbitrary ELF file. External consumers of the previous fingerprint JSON
+  schema must update their field names and confidence handling.
+
+### Removed
+- **Function fingerprint dictionary (cross-sample name transfer).** The feature
+  existed and has been removed entirely: the `build-fingerprint-dict` and
+  `apply-fingerprint-dict` commands, the `function_fingerprints.jsonl` artifact,
+  `Opts.FingerprintDictionary`, and the `compare.FunctionDictionary` /
+  `CrossSampleDictionary` library. Its idea was to hash each function's
+  instruction bytes in a binary whose names are known and propose those names
+  for the same bytes in a stripped or obfuscated binary of the same Dart
+  version and architecture. A byte hash is not proof of a name (the same
+  instructions can read different object-pool contents, and small functions
+  collide), the dictionary stopped being applied to names, and nothing in the
+  CLI consumed it any more. History, for anyone who wants to bring it back
+  (`git show <commit>:<path>`):
+  - `c164512` (2026-08-19, #7) added the library
+    (`internal/decompiler/compare/fingerprint_dict.go`, `cross_sample.go`) and
+    the `function_fingerprints.jsonl` writer
+    (`internal/analysis/r2_fingerprint_export.go`).
+  - `0fdbf49` (2026-09-02, #13) added the CLI commands
+    (`cmd/aotopsy/cmd_fingerprint_dict.go`). Last release that has it: v1.6.0.
+  - `498c0b2` (2026-09-29) added the pipeline hook
+    (`internal/analysis/fingerprint_dictionary.go`) that applied dictionary
+    names to unnamed functions.
+  - `0c80f93` (2026-10-01) stopped applying names: the hook only counted
+    heuristic matches and logged them.
+  - `b66f5ed` removed it (2026-10-01). Restore with
+    `git show b66f5ed^:<path>`.
+
+  Any user of `function_fingerprints.jsonl` or the two commands must stay on
+  v1.6.0 or earlier, or recompute hashes themselves. The golden records no
+  longer list `function_fingerprints.jsonl`.
+
 ## [1.6.0] - 2026-09-09
 
 The Ghidra and IDA integration was documented, wired into the CLI, and read by

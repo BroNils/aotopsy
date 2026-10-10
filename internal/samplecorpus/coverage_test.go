@@ -1,6 +1,7 @@
 package samplecorpus_test
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,11 +31,19 @@ import (
 // documented as 2.17.6 and 3.1.0 -- had silently become symlinks to 3.9.2 and
 // 3.11.0 builds, so the family looked covered and was not.
 //
-// This test reports rather than fails. A missing sample is not something the
-// code can fix, and a permanently-red test is precisely the failure mode this
-// package exists to end. It fails only on something actionable: a registry
-// entry whose file is present but is not the version its name claims.
+// A checkout with no samples/ directory skips, because CI does not carry the
+// corpus. Once a corpus is present it is expected to be complete: missing or
+// extra binaries and identity mismatches are fixture drift and fail here.
 func TestCorpusCoverage(t *testing.T) {
+	if err := samplecorpus.ValidateRegistry(); err != nil {
+		t.Fatalf("registry invariant: %v", err)
+	}
+	if err := samplecorpus.RequireCompleteCorpus(); err != nil {
+		if errors.Is(err, samplecorpus.ErrNoCorpus) {
+			t.Skip("no samples/ directory in this checkout")
+		}
+		t.Fatalf("corpus completeness: %v", err)
+	}
 	type family struct {
 		profiles []string
 		samples  []string
@@ -58,17 +67,11 @@ func TestCorpusCoverage(t *testing.T) {
 
 	present := 0
 	for _, s := range samplecorpus.Registry {
-		path := samplecorpus.Path(s.FileName())
-		if path == "" {
-			continue
+		_, err := samplecorpus.RequireSample(s.FileName())
+		if err != nil {
+			t.Fatalf("resolve %s: %v", s.FileName(), err)
 		}
 		present++
-		got := detectVersion(t, path)
-		if got != s.DartVersion {
-			// Actionable, and the whole point of the naming scheme.
-			t.Error(samplecorpus.VersionMismatch(s, got))
-			continue
-		}
 		p := snapshot.ProfileForVersion(s.DartVersion)
 		if p == nil {
 			t.Errorf("sample %s is a version with no profile", s.FileName())
@@ -100,11 +103,6 @@ func TestCorpusCoverage(t *testing.T) {
 			n, len(f.profiles), f.profiles[0], f.profiles[len(f.profiles)-1], state)
 	}
 	fmt.Fprintf(&b, "  samples present: %d of %d registered\n", present, len(samplecorpus.Registry))
-	for _, s := range samplecorpus.Registry {
-		if samplecorpus.Path(s.FileName()) == "" {
-			fmt.Fprintf(&b, "  missing: %-22s %s\n", s.FileName(), s.Note)
-		}
-	}
 	t.Log(b.String())
 
 	if uncovered > 0 {
@@ -114,15 +112,73 @@ func TestCorpusCoverage(t *testing.T) {
 	}
 }
 
-func detectVersion(t *testing.T, path string) string {
-	t.Helper()
-	info, err := samplecorpus.Extract(path)
-	if err != nil {
-		t.Errorf("open %s: %v", path, err)
-		return ""
+func TestRegistryMatchesIndependentManifest(t *testing.T) {
+	if err := samplecorpus.ValidateRegistry(); err != nil {
+		t.Fatal(err)
 	}
-	if info == nil || info.Version == nil {
-		return ""
+	if got := len(samplecorpus.ExpectedFiles()); got != samplecorpus.ExpectedSampleCount {
+		t.Fatalf("manifest count = %d, want %d", got, samplecorpus.ExpectedSampleCount)
 	}
-	return info.Version.DartVersion
+}
+
+func TestValidateRegistryRejectsDuplicateRegistration(t *testing.T) {
+	original := samplecorpus.Registry
+	samplecorpus.Registry = append(append([]samplecorpus.Sample(nil), original...), original[0])
+	t.Cleanup(func() { samplecorpus.Registry = original })
+
+	if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "duplicate Registry filename") {
+		t.Fatalf("ValidateRegistry error = %v, want duplicate filename error", err)
+	}
+}
+
+func TestValidateRegistryRejectsMissingRegistration(t *testing.T) {
+	original := samplecorpus.Registry
+	samplecorpus.Registry = append([]samplecorpus.Sample(nil), original[1:]...)
+	t.Cleanup(func() { samplecorpus.Registry = original })
+
+	if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "absent from Registry") {
+		t.Fatalf("ValidateRegistry error = %v, want missing registration error", err)
+	}
+}
+
+func TestValidateRegistryRejectsBrokenTwinContract(t *testing.T) {
+	original := samplecorpus.Registry
+	mutated := append([]samplecorpus.Sample(nil), original...)
+	for i := range mutated {
+		if mutated[i].TwinOf != "" {
+			mutated[i].TwinOf = "dart-3.10.7-arm64.so"
+			samplecorpus.Registry = mutated
+			t.Cleanup(func() { samplecorpus.Registry = original })
+			if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "not source/version/arch-identical") {
+				t.Fatalf("ValidateRegistry error = %v, want false-twin identity error", err)
+			}
+			return
+		}
+	}
+	t.Fatal("registry has no declared ground-truth twin to corrupt")
+}
+
+func TestValidateRegistryRejectsUnknownSourceSet(t *testing.T) {
+	original := samplecorpus.Registry
+	mutated := append([]samplecorpus.Sample(nil), original...)
+	mutated[0].SourceSet = "ad_hoc_unverified_source"
+	samplecorpus.Registry = mutated
+	t.Cleanup(func() { samplecorpus.Registry = original })
+
+	if err := samplecorpus.ValidateRegistry(); err == nil || !strings.Contains(err.Error(), "unknown source set") {
+		t.Fatalf("ValidateRegistry error = %v, want unknown source-set error", err)
+	}
+}
+
+func TestDifferentialSourceSetsExcludeSymbolOracles(t *testing.T) {
+	for setName, members := range samplecorpus.DifferentialSourceSets() {
+		if len(members) < 2 {
+			t.Fatalf("source set %q has only %d differential member(s)", setName, len(members))
+		}
+		for _, s := range members {
+			if s.SymbolOracle {
+				t.Fatalf("source set %q includes symbol oracle %s in differential population", setName, s.FileName())
+			}
+		}
+	}
 }

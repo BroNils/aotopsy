@@ -16,7 +16,7 @@ func TestNilSymbolLookupIsSafeOnBothArches(t *testing.T) {
 	// x86_64: `call rel32` — the instruction whose classification resolves a
 	// target name.
 	x86Code := []byte{0xe8, 0x00, 0x00, 0x00, 0x00} // call +0
-	res := ScanX86FunctionCFG(x86Code, 0x1000, nil, nil, "fn", nil)
+	res := ScanX86FunctionCFG("3.12.2", ClosureEntry{}, x86Code, 0x1000, nil, nil, "fn", nil)
 	if len(res.Edges) == 0 {
 		t.Fatalf("expected a call edge from `call rel32`")
 	}
@@ -29,7 +29,7 @@ func TestNilSymbolLookupIsSafeOnBothArches(t *testing.T) {
 
 	// ARM64: `bl #0` at 0x1000.
 	insts := []Inst{{Addr: 0x1000, Raw: 0x94000000, Size: 4, Text: "bl #0"}}
-	edges := ExtractCallEdgesCFG("fn", insts, nil, nil)
+	edges := ExtractCallEdgesCFG("fn", insts, nil, nil, nil)
 	if len(edges) == 0 {
 		t.Fatalf("expected a call edge from `bl`")
 	}

@@ -3,33 +3,49 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
+	"aotopsy/internal/naming"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/strxref"
 )
 
 // cmdStrings implements "aotopsy _debug strings" for searching and xref'ing strings in snapshots.
 func cmdStrings(args []string) error {
-	fs := flag.NewFlagSet("strings", flag.ExitOnError)
+	fs := flag.NewFlagSet("strings", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so")
 	maxSteps := fs.Int("max-steps", 0, "global loop cap")
 	which := fs.String("which", "both", "which snapshot: vm, isolate, or both")
 	maxLen := fs.Int("max-len", 200, "max display length per string (0 = unlimited)")
 	names := fs.Bool("names", false, "extract and display named objects (Function, Class, Library, Script)")
 	find := fs.String("find", "", "only show strings containing this substring (case-insensitive)")
-	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) load it from the object pool")
-	xrefMaxScan := fs.Int("xref-max-scan", 0, "cap how many functions --xref scans (0 = scan all)")
+	xref := fs.Bool("xref", false, "for each string matched by --find, also show which function(s) reference its object-pool slot")
+	xrefMaxScan := fs.Int("xref-max-scan", 0, fmt.Sprintf("cap how many functions --xref scans (0 = safe default %d)", strxref.DefaultMaxScan))
+	xrefMaxRefs := fs.Int("xref-max-refs", 0, fmt.Sprintf("cap retained --xref matches (0 = safe default %d)", strxref.DefaultMaxRefs))
+	xrefUnbounded := fs.Bool("xref-unbounded", false, "allow --xref to scan an unbounded number of functions (retained matches remain capped)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	for name, value := range map[string]int{
+		"max-steps":     *maxSteps,
+		"max-len":       *maxLen,
+		"xref-max-scan": *xrefMaxScan,
+		"xref-max-refs": *xrefMaxRefs,
+	} {
+		if err := requireNonNegativeFlag(name, value); err != nil {
+			return err
+		}
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
+	}
+	if *which != "vm" && *which != "isolate" && *which != "both" {
+		return fmt.Errorf("invalid --which %q (want vm, isolate, or both)", *which)
 	}
 	if *xref && *find == "" {
 		return fmt.Errorf("--xref requires --find")
@@ -46,11 +62,14 @@ func cmdStrings(args []string) error {
 	}
 	defer func() { _ = ef.Close() }()
 
-	if info.Version != nil && info.Version.DartVersion != "" {
-		fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
+	if info.Version == nil {
+		return fmt.Errorf("HALT_UNKNOWN_VERSION: snapshot hash %s has no verified parser profile", info.SnapshotHash())
 	}
-	if info.Version != nil && !info.Version.Supported {
-		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.VmHeader.SnapshotHash)
+	if info.Version != nil && info.Version.DartVersion != "" {
+		cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
+	}
+	if !info.Version.Supported {
+		return fmt.Errorf("HALT_UNSUPPORTED_VERSION: Dart %s (hash %s)", info.Version.DartVersion, info.SnapshotHash())
 	}
 
 	type target struct {
@@ -59,20 +78,37 @@ func cmdStrings(args []string) error {
 		snapshotSize int64
 	}
 	var targets []target
-	switch {
-	case *names:
-		targets = []target{
-			{"VM", info.VmData.Data, info.VmHeader.TotalSize},
-			{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+	if info.UnifiedSnapshot {
+		if *which == "vm" {
+			return fmt.Errorf("--which vm is unavailable: this Dart version has a unified snapshot")
 		}
-	case *which == "vm":
-		targets = []target{{"VM", info.VmData.Data, info.VmHeader.TotalSize}}
-	case *which == "isolate":
-		targets = []target{{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize}}
-	default:
-		targets = []target{
-			{"VM", info.VmData.Data, info.VmHeader.TotalSize},
-			{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+		h := info.PrimaryHeader()
+		if h == nil {
+			return fmt.Errorf("unified snapshot has no parsed header")
+		}
+		targets = []target{{"Unified", info.IsolateData.Data, h.TotalSize}}
+	} else {
+		if *names && flagWasSet(fs, "which") && *which != "both" {
+			return fmt.Errorf("--names requires --which both on legacy split snapshots because owner/name resolution spans VM and isolate snapshots")
+		}
+		if info.VmHeader == nil || info.IsolateHeader == nil {
+			return fmt.Errorf("legacy snapshot is missing VM or isolate header")
+		}
+		switch {
+		case *names:
+			targets = []target{
+				{"VM", info.VmData.Data, info.VmHeader.TotalSize},
+				{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+			}
+		case *which == "vm":
+			targets = []target{{"VM", info.VmData.Data, info.VmHeader.TotalSize}}
+		case *which == "isolate":
+			targets = []target{{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize}}
+		case *which == "both":
+			targets = []target{
+				{"VM", info.VmData.Data, info.VmHeader.TotalSize},
+				{"Isolate", info.IsolateData.Data, info.IsolateHeader.TotalSize},
+			}
 		}
 	}
 
@@ -84,26 +120,22 @@ func cmdStrings(args []string) error {
 
 	for _, t := range targets {
 		if len(t.data) < 64 {
-			fmt.Fprintf(os.Stderr, "%s: data too short (%d bytes)\n", t.name, len(t.data))
-			continue
+			return fmt.Errorf("%s: data too short (%d bytes)", t.name, len(t.data))
 		}
 
 		clusterStart, err := snapshot.FindClusterDataStart(t.data)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s cluster start: %w", t.name, err)
 		}
 
 		isVM := t.name == "VM"
 		result, err := cluster.ScanClusters(t.data, clusterStart, info.Version, isVM, opts)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: scan error: %v\n", t.name, err)
-			continue
+			return fmt.Errorf("%s scan: %w", t.name, err)
 		}
 
-		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: fill error: %v\n", t.name, err)
-			continue
+		if err := cluster.ReadFill(t.data, result, info.Version, isVM, t.snapshotSize, opts); err != nil {
+			return fmt.Errorf("%s fill: %w", t.name, err)
 		}
 
 		parsed = append(parsed, parsedTarget{name: t.name, result: result})
@@ -216,10 +248,10 @@ func cmdStrings(args []string) error {
 
 	if *xref {
 		if len(matchedRefIDs) == 0 {
-			fmt.Fprintf(os.Stderr, "\n--xref: no strings matched %q, nothing to cross-reference\n", *find)
+			cli.Errf("\n--xref: no strings matched %q, nothing to cross-reference\n", *find)
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool loads...\n", len(matchedRefIDs))
+		cli.Errf("\n--xref: cross-referencing %d matched string ref(s) against every function's object-pool references...\n", len(matchedRefIDs))
 
 		ctx, err := analysis.LoadContext(*libapp)
 		if err != nil {
@@ -229,20 +261,58 @@ func cmdStrings(args []string) error {
 
 		refSet := make(map[int]bool, len(matchedRefIDs))
 		for _, r := range matchedRefIDs {
-			refSet[r] = true
+			if provenPoolStringRef(ctx.Pool, r) {
+				refSet[r] = true
+			}
+		}
+		if len(refSet) == 0 {
+			cli.Errf("--xref: matched text has no CID-proven String object in the app/VM pool; refusing numeric RefID collision\n")
+			return nil
 		}
 		poolIndices := ctx.PoolIndicesForRefIDs(refSet)
 		if len(poolIndices) == 0 {
-			fmt.Fprintf(os.Stderr, "--xref: matched string(s) aren't referenced by any object-pool slot in the app isolate (may only appear in the VM-isolate table, which functions can't directly index into the same way)\n")
+			cli.Errf("--xref: matched string(s) aren't referenced by any object-pool slot in the app isolate (may only appear in the VM-isolate table, which functions can't directly index into the same way)\n")
 			return nil
 		}
 
-		refs, scanned := strxref.FindPoolReferences(ctx, poolIndices, strxref.Options{MaxScan: *xrefMaxScan})
-		fmt.Fprintf(os.Stderr, "--xref: scanned %d function(s), found %d reference(s)\n\n", scanned, len(refs))
-		for _, r := range refs {
-			fmt.Printf("  used in: %s @ 0x%x (pool load @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
+		res, err := strxref.FindPoolReferences(ctx, poolIndices, strxref.Options{
+			MaxScan:        *xrefMaxScan,
+			AllowUnbounded: *xrefUnbounded,
+			MaxRefs:        *xrefMaxRefs,
+		})
+		if err != nil {
+			return fmt.Errorf("--xref: %w", err)
+		}
+		status := "complete"
+		if !res.Complete() {
+			status = "INCOMPLETE"
+		}
+		cli.Errf("--xref: attempted %d function(s), scanned %d, found %d reference(s), status=%s\n\n", res.Attempted, res.Scanned, len(res.References), status)
+		for _, r := range res.References {
+			fmt.Printf("  used in: %s @ 0x%x (pool reference @ 0x%x, pool[%d])\n", r.FuncName, r.FuncVA, r.InstrAddr, r.PoolIndex)
+		}
+		if res.ScanLimitReached {
+			return fmt.Errorf("--xref: incomplete result: function scan cap reached; raise --xref-max-scan or use --xref-unbounded")
+		}
+		if res.ReferenceLimitReached {
+			return fmt.Errorf("--xref: incomplete result: reference cap reached; raise --xref-max-refs")
 		}
 	}
 
 	return nil
+}
+
+func provenPoolStringRef(pl *naming.PoolLookups, ref int) bool {
+	if pl == nil || pl.CT == nil {
+		return false
+	}
+	isStringCID := func(cid int) bool {
+		return (pl.CT.OneByteString != 0 && cid == pl.CT.OneByteString) ||
+			(pl.CT.TwoByteString != 0 && cid == pl.CT.TwoByteString) ||
+			(pl.CT.String != 0 && cid == pl.CT.String)
+	}
+	if cid, ok := pl.CIDForRef(ref); ok {
+		return isStringCID(cid)
+	}
+	return false
 }

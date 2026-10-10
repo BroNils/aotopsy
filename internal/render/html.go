@@ -7,17 +7,19 @@ import (
 	"strings"
 
 	"aotopsy/internal/disasm"
-	"aotopsy/internal/strutil"
+	"aotopsy/internal/thraudit"
 )
 
 // WriteIndexHTML writes a small HTML page summarizing the disasm output.
 func WriteIndexHTML(w io.Writer, stats CallgraphStats, unresTHR []disasm.UnresolvedTHRRecord, title string,
-	hasCallgraphSVG, hasClassgraphSVG, hasReachableSVG bool,
-	entryPoints []string, reachableCount int, cfgCount int) {
+	hasCallgraphSVG, hasClassgraphSVG bool,
+	rootCandidates []string, cfgCount int, cfgLinks map[string]string) error {
+	ew := &errorWriter{w: w}
+	w = ew
 
-	blrPct := 0.0
-	if stats.BLREdges > 0 {
-		blrPct = float64(stats.BLRAnnotated) / float64(stats.BLREdges) * 100
+	indirectPct := 0.0
+	if stats.IndirectCallSites > 0 {
+		indirectPct = float64(stats.IndirectStaticResolved) / float64(stats.IndirectCallSites) * 100
 	}
 
 	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
@@ -50,12 +52,19 @@ a { color: #0B3D91; }
 	_, _ = fmt.Fprintln(w, "<table>")
 	_, _ = fmt.Fprintf(w, "<tr><td>Functions</td><td class=\"num\">%d</td></tr>\n", stats.TotalFunctions)
 	_, _ = fmt.Fprintf(w, "<tr><td>Owner classes</td><td class=\"num\">%d</td></tr>\n", stats.UniqueOwners)
-	_, _ = fmt.Fprintf(w, "<tr><td>Total edges</td><td class=\"num\">%d</td></tr>\n", stats.TotalEdges)
-	_, _ = fmt.Fprintf(w, "<tr><td>BL (direct)</td><td class=\"num\">%d</td></tr>\n", stats.BLEdges)
-	_, _ = fmt.Fprintf(w, "<tr><td>BLR (indirect)</td><td class=\"num\">%d</td></tr>\n", stats.BLREdges)
-	_, _ = fmt.Fprintf(w, "<tr><td>BLR annotated</td><td class=\"num\">%d (%.1f%%)</td></tr>\n", stats.BLRAnnotated, blrPct)
-	_, _ = fmt.Fprintf(w, "<tr><td>Entry points</td><td class=\"num\">%d</td></tr>\n", len(entryPoints))
-	_, _ = fmt.Fprintf(w, "<tr><td>Reachable functions</td><td class=\"num\">%d</td></tr>\n", reachableCount)
+	_, _ = fmt.Fprintf(w, "<tr><td>Call sites</td><td class=\"num\">%d</td></tr>\n", stats.TotalCallSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Direct call sites</td><td class=\"num\">%d</td></tr>\n", stats.DirectCallSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Indirect call sites</td><td class=\"num\">%d</td></tr>\n", stats.IndirectCallSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Unsupported call-kind sites</td><td class=\"num\">%d</td></tr>\n", stats.UnsupportedCallSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Indirect static-resolved</td><td class=\"num\">%d (%.1f%%)</td></tr>\n", stats.IndirectStaticResolved, indirectPct)
+	_, _ = fmt.Fprintf(w, "<tr><td>Indirect unresolved</td><td class=\"num\">%d</td></tr>\n", stats.IndirectUnresolved)
+	_, _ = fmt.Fprintf(w, "<tr><td>Polymorphic sites</td><td class=\"num\">%d</td></tr>\n", stats.PolymorphicSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Incomplete polymorphic sites</td><td class=\"num\">%d</td></tr>\n", stats.IncompletePolymorphicSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Unknown candidate-count sites</td><td class=\"num\">%d</td></tr>\n", stats.UnknownCandidateCountSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Static target relations</td><td class=\"num\">%d</td></tr>\n", stats.StaticTargetRelations)
+	_, _ = fmt.Fprintf(w, "<tr><td>Runtime-observed sites</td><td class=\"num\">%d</td></tr>\n", stats.RuntimeObservedSites)
+	_, _ = fmt.Fprintf(w, "<tr><td>Runtime target relations</td><td class=\"num\">%d</td></tr>\n", stats.RuntimeTargetRelations)
+	_, _ = fmt.Fprintf(w, "<tr><td>Static root candidates</td><td class=\"num\">%d</td></tr>\n", len(rootCandidates))
 	_, _ = fmt.Fprintf(w, "<tr><td>Unresolved THR</td><td class=\"num\">%d</td></tr>\n", len(unresTHR))
 	if cfgCount > 0 {
 		_, _ = fmt.Fprintf(w, "<tr><td>CFGs generated</td><td class=\"num\">%d</td></tr>\n", cfgCount)
@@ -91,8 +100,8 @@ a { color: #0B3D91; }
 		}
 		color := provColors[prov]
 		barW := 0
-		if stats.TotalEdges > 0 {
-			barW = count * 200 / stats.TotalEdges
+		if stats.TotalCallSites > 0 {
+			barW = count * 200 / stats.TotalCallSites
 			if barW < 2 {
 				barW = 2
 			}
@@ -106,16 +115,13 @@ a { color: #0B3D91; }
 	_, _ = fmt.Fprintln(w, "<h2>Graphs</h2>")
 	_, _ = fmt.Fprint(w, "<p>")
 	var links []string
-	if hasReachableSVG {
-		links = append(links, `<a href="reachable.svg">Reachable call tree</a>`)
-	}
 	if hasClassgraphSVG {
 		links = append(links, `<a href="classgraph.svg">Class-level graph</a>`)
 	}
 	if hasCallgraphSVG {
 		links = append(links, `<a href="callgraph.svg">Function-level graph</a>`)
 	}
-	if cfgCount > 0 {
+	if len(cfgLinks) > 0 {
 		links = append(links, `<a href="cfg/">Per-function CFGs</a>`)
 	}
 	if len(links) == 0 {
@@ -130,26 +136,28 @@ a { color: #0B3D91; }
 	}
 	_, _ = fmt.Fprintln(w, "</p>")
 
-	// Entry points.
-	if len(entryPoints) > 0 {
-		_, _ = fmt.Fprintln(w, "<h2>Entry Points</h2>")
-		_, _ = fmt.Fprintf(w, "<p>%d functions with no incoming BL edges (roots of the call tree):</p>\n", len(entryPoints))
+	// Structural static roots. These are deliberately not called language-level
+	// entry points: root cycles have multiple candidates and no single proven EP.
+	if len(rootCandidates) > 0 {
+		_, _ = fmt.Fprintln(w, "<h2>Static Root Candidates</h2>")
+		_, _ = fmt.Fprintf(w, "<p>%d function(s) in source components of the resolved static call graph:</p>\n", len(rootCandidates))
 		_, _ = fmt.Fprintln(w, "<table>")
 		_, _ = fmt.Fprintln(w, "<tr><th>Function</th></tr>")
 		limit := 50
-		if len(entryPoints) < limit {
-			limit = len(entryPoints)
+		if len(rootCandidates) < limit {
+			limit = len(rootCandidates)
 		}
-		for _, ep := range entryPoints[:limit] {
+		for _, ep := range rootCandidates[:limit] {
 			cfgLink := ""
-			if cfgCount > 0 {
-				safe := safeFuncNameHTML(ep)
-				cfgLink = fmt.Sprintf(` <a href="cfg/%s.svg" style="font-size:11px">[cfg]</a>`, safe)
+			if rel, ok := cfgLinks[ep]; ok {
+				if href, safe := safeRelativeArtifactLink(rel); safe {
+					cfgLink = fmt.Sprintf(" <a href=\"%s\" style=\"font-size:11px\">[cfg]</a>", htmlEscape(href))
+				}
 			}
 			_, _ = fmt.Fprintf(w, "<tr><td class=\"ep\">%s%s</td></tr>\n", htmlEscape(ep), cfgLink)
 		}
-		if len(entryPoints) > limit {
-			_, _ = fmt.Fprintf(w, "<tr><td>... and %d more</td></tr>\n", len(entryPoints)-limit)
+		if len(rootCandidates) > limit {
+			_, _ = fmt.Fprintf(w, "<tr><td>... and %d more</td></tr>\n", len(rootCandidates)-limit)
 		}
 		_, _ = fmt.Fprintln(w, "</table>")
 	}
@@ -165,7 +173,10 @@ a { color: #0B3D91; }
 		}
 		maxCount := stats.TopOwners[0].Count
 		for _, nc := range stats.TopOwners[:limit] {
-			barW := nc.Count * 120 / maxCount
+			barW := 2
+			if maxCount > 0 {
+				barW = nc.Count * 120 / maxCount
+			}
 			if barW < 2 {
 				barW = 2
 			}
@@ -179,7 +190,7 @@ a { color: #0B3D91; }
 	if len(stats.TopCallers) > 0 {
 		_, _ = fmt.Fprintln(w, "<h2>Top Callers</h2>")
 		_, _ = fmt.Fprintln(w, "<table>")
-		_, _ = fmt.Fprintln(w, "<tr><th>Function</th><th>Outgoing</th></tr>")
+		_, _ = fmt.Fprintln(w, "<tr><th>Function</th><th>Call sites</th></tr>")
 		limit := 15
 		if len(stats.TopCallers) < limit {
 			limit = len(stats.TopCallers)
@@ -194,7 +205,7 @@ a { color: #0B3D91; }
 	if len(stats.TopCallees) > 0 {
 		_, _ = fmt.Fprintln(w, "<h2>Top Callees</h2>")
 		_, _ = fmt.Fprintln(w, "<table>")
-		_, _ = fmt.Fprintln(w, "<tr><th>Function</th><th>Incoming</th></tr>")
+		_, _ = fmt.Fprintln(w, "<tr><th>Function</th><th>Static relations</th></tr>")
 		limit := 15
 		if len(stats.TopCallees) < limit {
 			limit = len(stats.TopCallees)
@@ -205,21 +216,45 @@ a { color: #0B3D91; }
 		_, _ = fmt.Fprintln(w, "</table>")
 	}
 
+	if len(stats.TopRuntimeCallees) > 0 {
+		_, _ = fmt.Fprintln(w, "<h2>Top Runtime-Observed Callees</h2>")
+		_, _ = fmt.Fprintln(w, "<table>")
+		_, _ = fmt.Fprintln(w, "<tr><th>Function</th><th>Observations</th></tr>")
+		limit := 15
+		if len(stats.TopRuntimeCallees) < limit {
+			limit = len(stats.TopRuntimeCallees)
+		}
+		for _, nc := range stats.TopRuntimeCallees[:limit] {
+			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td class=\"num\">%d</td></tr>\n", htmlEscape(nc.Name), nc.Count)
+		}
+		_, _ = fmt.Fprintln(w, "</table>")
+	}
+
 	// Unresolved THR summary.
 	if len(unresTHR) > 0 {
 		_, _ = fmt.Fprintln(w, "<h2>Unresolved THR Accesses</h2>")
-		// Group by offset.
+		// Group by exact signed offset + evidence shape. Different access modes or
+		// heuristic classes at the same offset must not be silently merged.
 		type offInfo struct {
-			offset string
-			class  string
-			count  int
+			offset     int64
+			access     thraudit.AccessMode
+			class      thraudit.THRClass
+			confidence thraudit.EvidenceConfidence
+			count      int
 		}
-		offMap := make(map[string]*offInfo)
+		type offKey struct {
+			offset     int64
+			access     thraudit.AccessMode
+			class      thraudit.THRClass
+			confidence thraudit.EvidenceConfidence
+		}
+		offMap := make(map[offKey]*offInfo)
 		for _, r := range unresTHR {
-			if oi, ok := offMap[r.THROffset]; ok {
+			key := offKey{r.THROffset, r.Access, r.HeuristicClass, r.Confidence}
+			if oi, ok := offMap[key]; ok {
 				oi.count++
 			} else {
-				offMap[r.THROffset] = &offInfo{r.THROffset, r.Class, 1}
+				offMap[key] = &offInfo{r.THROffset, r.Access, r.HeuristicClass, r.Confidence, 1}
 			}
 		}
 		// Sort by offset for stable output.
@@ -228,18 +263,28 @@ a { color: #0B3D91; }
 			offSlice = append(offSlice, oi)
 		}
 		sort.Slice(offSlice, func(i, j int) bool {
-			return offSlice[i].offset < offSlice[j].offset
+			if offSlice[i].offset != offSlice[j].offset {
+				return offSlice[i].offset < offSlice[j].offset
+			}
+			if offSlice[i].access != offSlice[j].access {
+				return offSlice[i].access < offSlice[j].access
+			}
+			if offSlice[i].class != offSlice[j].class {
+				return offSlice[i].class < offSlice[j].class
+			}
+			return offSlice[i].confidence < offSlice[j].confidence
 		})
 		_, _ = fmt.Fprintln(w, "<table>")
-		_, _ = fmt.Fprintln(w, "<tr><th>Offset</th><th>Class</th><th>Count</th></tr>")
+		_, _ = fmt.Fprintln(w, "<tr><th>Offset</th><th>Access</th><th>Evidence</th><th>Confidence</th><th>Count</th></tr>")
 		for _, oi := range offSlice {
-			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td class=\"num\">%d</td></tr>\n",
-				htmlEscape(oi.offset), htmlEscape(oi.class), oi.count)
+			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%d</td></tr>\n",
+				htmlEscape(thraudit.FormatTHROffset(oi.offset)), htmlEscape(string(oi.access)), htmlEscape(string(oi.class)), htmlEscape(string(oi.confidence)), oi.count)
 		}
 		_, _ = fmt.Fprintln(w, "</table>")
 	}
 
 	_, _ = fmt.Fprintln(w, "</body></html>")
+	return ew.err
 }
 
 func htmlEscape(s string) string {
@@ -248,13 +293,4 @@ func htmlEscape(s string) string {
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
-}
-
-// safeFuncNameHTML converts a function name to a safe filename.
-// Must match sanitizeFilename in cmd/aotopsy/disasm.go.
-func safeFuncNameHTML(name string) string {
-	// P4-5: Use shared SanitizeFilename to match the canonical implementation.
-	// Previously this had its own replacer that didn't strip non-printable
-	// runes, causing broken asm links for names with special characters.
-	return strutil.SanitizeFilename(name)
 }

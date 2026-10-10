@@ -7,6 +7,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"aotopsy/internal/disasm"
+	"aotopsy/internal/jsonutil"
+)
+
+const (
+	maxBlutterCompareFileBytes = int64(256 << 20)
+	maxBlutterCompareLineBytes = 4 << 20
+	maxBlutterASMFiles         = 100_000
 )
 
 // BlutterComparison compares aotopsy's output against blutter's output
@@ -118,7 +127,7 @@ func CompareBlutter(blutterDir, aotopsyDir string) (*BlutterComparison, error) {
 		allVAs[va] = true
 	}
 
-	for va := range allVAs {
+	for _, va := range SortedVAs(allVAs) {
 		bName, bOk := blutterNames[va]
 		aName, aOk := aotopsyNames[va]
 
@@ -149,8 +158,14 @@ func CompareBlutter(blutterDir, aotopsyDir string) (*BlutterComparison, error) {
 	}
 
 	// Count classes.
-	c.AotopsyClasses = countLines(filepath.Join(aotopsyDir, "classes.jsonl"))
-	c.BlutterClasses = countBlutterClasses(blutterDir)
+	c.AotopsyClasses, err = countLines(filepath.Join(aotopsyDir, "classes.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("count aotopsy classes: %w", err)
+	}
+	c.BlutterClasses, err = countBlutterClasses(blutterDir)
+	if err != nil {
+		return nil, fmt.Errorf("count blutter classes: %w", err)
+	}
 
 	return c, nil
 }
@@ -190,8 +205,10 @@ func loadBlutterFuncNames(blutterDir string) (map[string]string, error) {
 	asmDir := filepath.Join(blutterDir, "asm")
 	entries, err := os.ReadDir(asmDir)
 	if err != nil {
-		// asm/ might not exist; return empty.
-		return make(map[string]string), nil
+		return nil, err
+	}
+	if len(entries) > maxBlutterASMFiles {
+		return nil, fmt.Errorf("blutter asm directory has %d entries, exceeds limit %d", len(entries), maxBlutterASMFiles)
 	}
 	names := make(map[string]string)
 	for _, entry := range entries {
@@ -199,13 +216,7 @@ func loadBlutterFuncNames(blutterDir string) (map[string]string, error) {
 			continue
 		}
 		path := filepath.Join(asmDir, entry.Name())
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
+		if err := scanCompareTextFile(path, func(line string) error {
 			// blutter format: function name is in a comment or label.
 			// Look for "0xADDR: <name>" or "; <name>" patterns.
 			if strings.HasPrefix(line, "0x") {
@@ -216,12 +227,17 @@ func loadBlutterFuncNames(blutterDir string) (map[string]string, error) {
 					// Extract function name from the line.
 					name := extractFuncNameFromAsm(rest)
 					if name != "" {
+						if old, exists := names[va]; exists && old != name {
+							return fmt.Errorf("conflicting names at %s: %q and %q", va, old, name)
+						}
 						names[va] = name
 					}
 				}
 			}
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
-		_ = f.Close()
 	}
 	return names, nil
 }
@@ -229,21 +245,16 @@ func loadBlutterFuncNames(blutterDir string) (map[string]string, error) {
 // loadAotopsyFuncNames reads functions.jsonl and returns VA → name.
 func loadAotopsyFuncNames(aotopsyDir string) (map[string]string, error) {
 	path := filepath.Join(aotopsyDir, "functions.jsonl")
-	f, err := os.Open(path)
+	records, err := jsonutil.ReadJSONL[disasm.FuncRecord](path, jsonutil.StandardLimits)
 	if err != nil {
-		return make(map[string]string), nil
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	names := make(map[string]string)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Parse JSON: {"pc":"0x...","name":"...","size":...}
-		pc := extractJSONField(line, "\"pc\":\"")
-		name := extractJSONField(line, "\"name\":\"")
-		if pc != "" && name != "" {
-			names[pc] = name
+	names := make(map[string]string, len(records))
+	for _, rec := range records {
+		if old, exists := names[rec.PC]; exists && old != rec.Name {
+			return nil, fmt.Errorf("conflicting aotopsy names at %s: %q and %q", rec.PC, old, rec.Name)
 		}
+		names[rec.PC] = rec.Name
 	}
 	return names, nil
 }
@@ -258,18 +269,21 @@ func extractFuncNameFromAsm(line string) string {
 	return ""
 }
 
-// extractJSONField extracts a string field value from a JSON line.
-func extractJSONField(line, key string) string {
-	idx := strings.Index(line, key)
-	if idx < 0 {
-		return ""
+// stripHexSuffix removes the trailing _<hex> address suffix that
+// QualifiedCodeName appends (e.g. "Duration.compareTo_80" → "Duration.compareTo").
+func stripHexSuffix(name string) string {
+	// Find the last underscore followed by hex digits.
+	idx := strings.LastIndex(name, "_")
+	if idx < 0 || idx == len(name)-1 {
+		return name
 	}
-	start := idx + len(key)
-	end := strings.Index(line[start:], "\"")
-	if end < 0 {
-		return ""
+	suffix := name[idx+1:]
+	for _, c := range suffix {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return name
+		}
 	}
-	return line[start : start+end]
+	return name[:idx]
 }
 
 // normalizeName strips address suffixes and normalizes naming
@@ -288,40 +302,63 @@ func normalizeName(name string) string {
 }
 
 // countLines counts non-empty lines in a file.
-func countLines(path string) int {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
-	defer func() { _ = f.Close() }()
+func countLines(path string) (int, error) {
 	count := 0
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) != "" {
+	err := scanCompareTextFile(path, func(line string) error {
+		if strings.TrimSpace(line) != "" {
 			count++
 		}
-	}
-	return count
+		return nil
+	})
+	return count, err
 }
 
 // countBlutterClasses counts class definitions in blutter output.
-func countBlutterClasses(blutterDir string) int {
+func countBlutterClasses(blutterDir string) (int, error) {
 	// blutter emits class info in objs.txt or pp.txt.
 	// This is a simplified counter.
 	path := filepath.Join(blutterDir, "objs.txt")
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
-	defer func() { _ = f.Close() }()
 	count := 0
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), "class ") {
+	err := scanCompareTextFile(path, func(line string) error {
+		if strings.Contains(line, "class ") {
 			count++
 		}
+		return nil
+	})
+	return count, err
+}
+
+func scanCompareTextFile(path string, fn func(string) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
-	return count
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		_ = f.Close()
+		return fmt.Errorf("not a regular file")
+	}
+	if st.Size() > maxBlutterCompareFileBytes {
+		_ = f.Close()
+		return fmt.Errorf("file is %d bytes, exceeds limit %d", st.Size(), maxBlutterCompareFileBytes)
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxBlutterCompareLineBytes)
+	for scanner.Scan() {
+		if err := fn(scanner.Text()); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func pct(n, total int) float64 {
@@ -331,8 +368,8 @@ func pct(n, total int) float64 {
 	return float64(n) / float64(total) * 100
 }
 
-// SortedVAs returns sorted VAs from a name map (for deterministic output).
-func SortedVAs(m map[string]string) []string {
+// SortedVAs returns sorted VAs from any string-keyed map.
+func SortedVAs[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -12,14 +13,14 @@ func TestColorHex(t *testing.T) {
 		c    Color
 		want string
 	}{
-		{"Green", GreenColor, "#00FF00"},
-		{"Gold", GoldColor, "#FFC800"},
-		{"Blue", BlueColor, "#87CEEB"},
-		{"Pink", PinkColor, "#FF80C0"},
-		{"Orange", OrangeColor, "#FF8000"},
-		{"Red", RedColor, "#FF4444"},
-		{"Muted", MutedColor, "#808080"},
-		{"White", WhiteColor, "#FFFFFF"},
+		{"Green", greenColor, "#00FF00"},
+		{"Gold", goldColor, "#FFC800"},
+		{"Blue", blueColor, "#87CEEB"},
+		{"Pink", pinkColor, "#FF80C0"},
+		{"Orange", orangeColor, "#FF8000"},
+		{"Red", redColor, "#FF4444"},
+		{"Muted", mutedColor, "#808080"},
+		{"White", whiteColor, "#FFFFFF"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -32,56 +33,61 @@ func TestColorHex(t *testing.T) {
 
 func TestColorModes(t *testing.T) {
 	// ColorTrue
-	trueStr := GoldColor.ANSI(ColorTrue)
+	trueStr := goldColor.ANSI(ColorTrue)
 	if trueStr != "\033[38;2;255;200;0m" {
 		t.Errorf("unexpected truecolor: %q", trueStr)
 	}
 
 	// Color256
-	c256Str := GoldColor.ANSI(Color256)
+	c256Str := goldColor.ANSI(Color256)
 	if c256Str != "\033[38;5;220m" {
 		t.Errorf("unexpected 256-color: %q", c256Str)
 	}
 
 	// Color16
-	c16Str := GoldColor.ANSI(Color16)
+	c16Str := goldColor.ANSI(Color16)
 	if c16Str != "\033[93m" {
 		t.Errorf("unexpected 16-color: %q", c16Str)
 	}
 
 	// ColorNone
-	cNoneStr := GoldColor.ANSI(ColorNone)
+	cNoneStr := goldColor.ANSI(ColorNone)
 	if cNoneStr != "" {
 		t.Errorf("unexpected none color: %q", cNoneStr)
 	}
 }
 
-func TestColorWrapAndFormat(t *testing.T) {
-	origMode := currentMode
-	defer SetColorMode(origMode)
-
-	// Enabled
-	SetColorMode(ColorTrue)
-	s := GoldColor.S("test")
-	if !strings.HasPrefix(s, "\033[38;2;255;200;0m") || !strings.HasSuffix(s, Reset) {
-		t.Errorf("unexpected colored wrap: %q", s)
+func TestSafeLineBlocksLineAndTerminalInjection(t *testing.T) {
+	got := SafeLine("bad\nforged\tfield\r\x1b[8mhidden\x1b[0m\x1b]0;title\aend")
+	if got != "bad forged fieldhiddenend" {
+		t.Fatalf("SafeLine = %q", got)
 	}
-
-	f := GoldColor.F("%d values", 42)
-	if !strings.Contains(f, "42 values") || !strings.HasSuffix(f, Reset) {
-		t.Errorf("unexpected colored format: %q", f)
+	if strings.ContainsAny(got, "\r\n\t\x1b\a") {
+		t.Fatalf("SafeLine leaked terminal control: %q", got)
 	}
+}
 
-	// Disabled
-	SetColorMode(ColorNone)
-	sDisabled := GoldColor.S("plain")
-	if sDisabled != "plain" {
-		t.Errorf("expected plain text when disabled, got %q", sDisabled)
+func TestSafeLineNormalizesUnicodeControlsAndMalformedUTF8(t *testing.T) {
+	input := "left\u009bright\u202eabc\u2028next" + string([]byte{0xff}) + "end"
+	got := SafeLine(input)
+	if got != "leftrightabc next\ufffdend" {
+		t.Fatalf("SafeLine unicode handling = %q", got)
 	}
+	if strings.ContainsAny(got, "\u009b\u202e\u2028") {
+		t.Fatalf("SafeLine leaked Unicode terminal/spoofing control: %q", got)
+	}
+}
 
-	fDisabled := GoldColor.F("%d values", 42)
-	if fDisabled != "42 values" {
-		t.Errorf("expected plain text when disabled, got %q", fDisabled)
+func TestDiagnosticBufferCapsWhileDrainingWrites(t *testing.T) {
+	b := NewDiagnosticBuffer(4)
+	if n, err := b.Write([]byte("abcdef")); err != nil || n != 6 {
+		t.Fatalf("Write = (%d, %v), want (6, nil)", n, err)
+	}
+	if n, err := b.Write([]byte("gh")); err != nil || n != 2 {
+		t.Fatalf("draining Write = (%d, %v), want (2, nil)", n, err)
+	}
+	if got := b.String(); got != "abcd [truncated]" {
+		t.Fatalf("DiagnosticBuffer = %q", got)
 	}
 }
 
@@ -124,6 +130,7 @@ func TestDetectColorMode(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("CLICOLOR", "1")
 	t.Setenv("CLICOLOR_FORCE", "")
+	t.Setenv("TERM", "xterm-256color")
 
 	// Force mode
 	t.Setenv("CLICOLOR_FORCE", "1")
@@ -151,6 +158,32 @@ func TestDetectColorMode(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 	if mode := DetectColorMode(nil); mode != ColorNone {
 		t.Errorf("expected ColorNone under dumb, got %v", mode)
+	}
+
+	// TERM=dumb is authoritative even when COLORTERM claims truecolor.
+	t.Setenv("COLORTERM", "truecolor")
+	if mode := DetectColorMode(nil); mode != ColorNone {
+		t.Errorf("TERM=dumb must beat COLORTERM=truecolor, got %v", mode)
+	}
+}
+
+func TestDetectColorModeRejectsNonTerminalCharacterDevice(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if isTerminalFile(f) {
+		t.Fatalf("%s was classified as a terminal", os.DevNull)
+	}
+	if mode := DetectColorMode(f); mode != ColorNone {
+		t.Fatalf("DetectColorMode(%s) = %v, want ColorNone", os.DevNull, mode)
 	}
 }
 
@@ -180,6 +213,7 @@ func TestNoColorBeatsForce(t *testing.T) {
 func TestForceBeatsCliColorZero(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("CLICOLOR", "0")
 	t.Setenv("CLICOLOR_FORCE", "1")
 
@@ -207,7 +241,7 @@ func TestForcedDumbTerminalStillGetsAnsi(t *testing.T) {
 func TestLogger(t *testing.T) {
 	var buf bytes.Buffer
 	l := NewLogger(&buf, false)
-	l.color = true
+	l.mode = ColorTrue
 
 	// Printf
 	l.Printf("hello %s\n", "world")
@@ -245,20 +279,208 @@ func TestLogger(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Errorf("expected empty buffer in quiet mode, got %q", buf.String())
 	}
+	lQuiet.Warn("degraded: %s", "still visible")
+	if got := buf.String(); !strings.Contains(got, "warning: degraded: still visible") {
+		t.Errorf("quiet mode hid warning: %q", got)
+	}
 }
 
-func TestMakeLogfAndMakeStagef(t *testing.T) {
+func TestLoggerStripsANSIForGenericWriter(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
 	var buf bytes.Buffer
-	logf := MakeLogf(false, &buf)
-	logf("msg: %d\n", 123)
-	if buf.String() != "msg: 123\n" {
-		t.Errorf("unexpected logf output: %q", buf.String())
+	l := NewLogger(&buf, false)
+	l.Printf("%svalue%s\n", goldColor.ANSI(ColorTrue), "\x1b[0m")
+	l.Stage("meta", "%s%d%s functions", goldColor.ANSI(ColorTrue), 7, "\x1b[0m")
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("non-terminal writer received ANSI: %q", buf.String())
 	}
-	buf.Reset()
+	if !strings.Contains(buf.String(), "value\n") || !strings.Contains(buf.String(), "meta 7 functions") {
+		t.Fatalf("ANSI stripping damaged content: %q", buf.String())
+	}
+}
 
-	stagef := MakeStagef(false, &buf)
-	stagef("myStage", "count=%d", 5)
-	if !strings.Contains(buf.String(), "myStage") || !strings.Contains(buf.String(), "count=5") {
-		t.Errorf("unexpected stagef output: %q", buf.String())
+func TestLoggerStripsANSIForRegularFile(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	f, err := os.CreateTemp(t.TempDir(), "log-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewLogger(f, false)
+	l.Printf("%sx%s\n", goldColor.ANSI(ColorTrue), "\x1b[0m")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "\x1b[") || string(b) != "x\n" {
+		t.Fatalf("regular-file log = %q, want plain x\\n", b)
+	}
+}
+
+func TestLoggerGenericWriterHonorsForce(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "")
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("%sx%s", Gold, Reset)
+	if !strings.Contains(buf.String(), "\x1b[") {
+		t.Fatalf("forced generic writer lost ANSI: %q", buf.String())
+	}
+}
+
+func TestInvalidColorModeProducesNoANSI(t *testing.T) {
+	if got := goldColor.ANSI(ColorMode(99)); got != "" {
+		t.Fatalf("invalid color mode emitted escape residue: %q", got)
+	}
+}
+
+func TestLoggerColoredModeAllowsOnlyTrustedStyle(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.mode = ColorTrue
+	l.Printf("%sok%s attacker=%s\n", Gold, Reset, "\x1b[8mHIDDEN\x1b[0m\x1b]0;pwned\a\x1b[3Avisible")
+	got := buf.String()
+	if strings.Contains(got, "[8m") || strings.Contains(got, "]0;") || strings.Contains(got, "[3A") || strings.ContainsRune(got, '\a') {
+		t.Fatalf("colored logger leaked terminal control: %q", got)
+	}
+	if !strings.Contains(got, goldColor.ANSI(ColorTrue)) || !strings.Contains(got, "HIDDENvisible") {
+		t.Fatalf("colored logger damaged trusted SGR/content: %q", got)
+	}
+}
+
+func TestLoggerRendersTrustedStyleForItsOwnMode(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.mode = Color16
+	l.Printf("%sx%s", Gold, Reset)
+	if got, want := buf.String(), "\x1b[93mx\x1b[0m"; got != want {
+		t.Fatalf("Color16 logger output = %q, want %q", got, want)
+	}
+}
+
+func TestLoggerSanitizesEachFormattedArgument(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%s count=%04d ratio=%.2f padded=[%*s]\n", "one\nforged\tfield", 7, 1.25, 5, "x")
+	got := buf.String()
+	if got != "value=one forged field count=0007 ratio=1.25 padded=[    x]\n" {
+		t.Fatalf("formatted log = %q", got)
+	}
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("untrusted argument forged extra lines: %q", got)
+	}
+}
+
+func TestLoggerSanitizesRuneFormattedInteger(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%c end\n", '\n')
+	got := buf.String()
+	if got != "value=  end\n" {
+		t.Fatalf("rune-formatted integer log = %q", got)
+	}
+	if strings.Count(got, "\n") != 1 {
+		t.Fatalf("rune-formatted integer forged extra lines: %q", got)
+	}
+}
+
+func TestLoggerPreservesIntegerTypeFormatting(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("%T", 7)
+	if got := buf.String(); got != "int" {
+		t.Fatalf("integer type formatting = %q, want int", got)
+	}
+}
+
+func TestLoggerPreservesIndexedDynamicWidthAndPrecision(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("[%[2]*.[3]*[1]s]\n", "abcdef", 5, 3)
+	if got := buf.String(); got != "[  abc]\n" {
+		t.Fatalf("indexed dynamic formatting = %q", got)
+	}
+}
+
+func TestLoggerSanitizesRuneReusedAsDynamicWidth(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	for _, value := range []int{'\n', '\u202e'} {
+		buf.Reset()
+		l.Printf("value=%[1]*[1]c end\n", value)
+		got := buf.String()
+		if strings.Count(got, "\n") != 1 || strings.ContainsRune(got, '\u202e') {
+			t.Fatalf("indexed width/rune argument %U forged terminal layout: %q", rune(value), got)
+		}
+	}
+}
+
+type maliciousWidth int
+
+func (maliciousWidth) String() string {
+	return "visible\nFORGED\x1b[2J\u202etext"
+}
+
+func TestLoggerSanitizesInvalidStarOperandReusedAsVisibleValue(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewLogger(&buf, false)
+	l.Printf("value=%[1]*[1]v end\n", maliciousWidth(4))
+	got := buf.String()
+	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, '\u202e') {
+		t.Fatalf("reused invalid star operand forged terminal output: %q", got)
+	}
+	if !strings.Contains(got, "visible FORGEDtext") {
+		t.Fatalf("sanitization lost printable reused argument content: %q", got)
+	}
+}
+
+func TestIsTerminalFileIsFalseForClosedAndNilFiles(t *testing.T) {
+	if isTerminalFile(nil) {
+		t.Fatal("nil file classified as a terminal")
+	}
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if isTerminalFile(f) {
+		t.Fatal("closed file classified as a terminal")
+	}
+}
+
+func TestErrfSanitizesUntrustedArgumentsOnCurrentStderr(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "")
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	orig := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = orig }()
+
+	const rlo = rune(0x202e) // right-to-left override, built from the code point on purpose
+	Errf("symbol %s at 0x%x\n", "evil\nFORGED\x1b[2J"+string(rlo)+"text", 0x10)
+
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Count(got, "\n") != 1 || strings.Contains(got, "\x1b[") || strings.ContainsRune(got, rlo) {
+		t.Fatalf("Errf let untrusted text forge terminal output: %q", got)
+	}
+	if !strings.Contains(got, "symbol evil FORGEDtext at 0x10") {
+		t.Fatalf("Errf lost printable content: %q", got)
 	}
 }

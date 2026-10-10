@@ -41,9 +41,9 @@ func ElfStubName(syms map[uint64]string, funcVA uint64, fallback string) string 
 	if name == "" {
 		return fallback
 	}
-	// These names are Dart-side prose, not identifiers: "stub AwaitStub",
-	// "assert type is HitTestTarget", "new Duration". Spaces would break
-	// consumers that treat a function name as one token, so they become
-	// underscores -- the text is preserved, only the separator changes.
-	return strings.ReplaceAll(name, " ", "_")
+	// Keep the ELF's semantic label intact. Names elsewhere in this package
+	// already contain prose such as "new Duration"; filesystem/token-safe
+	// spelling belongs at the consumer boundary (FuncRelPath, renderers), not in
+	// the identity resolver itself.
+	return name
 }

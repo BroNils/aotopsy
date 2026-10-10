@@ -1,11 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"sort"
+	"strings"
+
+	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 type dart2Bucket struct {
@@ -18,41 +22,42 @@ type dart2Bucket struct {
 
 // cmdDart2Buckets implements "aotopsy _debug dart2-buckets": Dart 2.x bucket analysis.
 func cmdDart2Buckets(args []string) error {
-	fs := flag.NewFlagSet("dart2-buckets", flag.ExitOnError)
+	fs := flag.NewFlagSet("dart2-buckets", flag.ContinueOnError)
 	inventoryPath := fs.String("inventory", "", "path to flutter_inventory.jsonl")
 	outPath := fs.String("out", "", "output JSONL path")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *inventoryPath == "" || *outPath == "" {
 		return fmt.Errorf("--inventory and --out are required")
 	}
+	same, err := output.SamePath(*inventoryPath, *outPath)
+	if err != nil {
+		return fmt.Errorf("compare dart2-buckets input/output paths: %w", err)
+	}
+	if same {
+		return fmt.Errorf("dart2-buckets output must not replace its inventory input")
+	}
 
-	data, err := os.ReadFile(*inventoryPath)
+	rows, err := jsonutil.ReadJSONL[analysis.InventoryRow](*inventoryPath, jsonutil.StandardLimits)
 	if err != nil {
 		return fmt.Errorf("read inventory: %w", err)
 	}
 
-	type invRow struct {
-		SampleID     string `json:"sample_id"`
-		SnapshotHash string `json:"snapshot_hash"`
-		DartVersion  string `json:"dart_version"`
-		Features     string `json:"features"`
-	}
-
 	buckets := map[string]*dart2Bucket{}
-	lines := splitLines(data)
-	for _, line := range lines {
-		if len(line) == 0 {
+	for _, row := range rows {
+		if strings.TrimSpace(row.SampleID) == "" || strings.TrimSpace(row.APKPath) == "" {
+			return fmt.Errorf("inventory record has missing sample_id or apk_path")
+		}
+		if row.Error != "" || !row.DeclaredLibapp {
 			continue
 		}
-		var row invRow
-		if err := json.Unmarshal(line, &row); err != nil {
-			continue
+		if strings.TrimSpace(row.ABI) == "" {
+			return fmt.Errorf("inventory record for sample %q declares libapp but has no abi", row.SampleID)
 		}
 		if row.SnapshotHash == "" || row.DartVersion == "" {
-			continue
+			return fmt.Errorf("inventory record for successful sample %q is missing snapshot_hash or dart_version", row.SampleID)
 		}
 		if row.DartVersion[0] != '2' {
 			continue
@@ -81,20 +86,11 @@ func cmdDart2Buckets(args []string) error {
 		return sorted[i].Hash < sorted[j].Hash
 	})
 
-	f, err := os.Create(*outPath)
-	if err != nil {
-		return fmt.Errorf("create: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	enc := json.NewEncoder(f)
-	for _, b := range sorted {
-		if err := enc.Encode(b); err != nil {
-			return fmt.Errorf("encode: %w", err)
-		}
+	if _, err := jsonutil.WriteJSONLFile(*outPath, sorted); err != nil {
+		return fmt.Errorf("write output: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "dart2-buckets: %d hashes, %d total samples\n", len(sorted), func() int {
+	cli.Errf("dart2-buckets: %d hashes, %d total samples\n", len(sorted), func() int {
 		n := 0
 		for _, b := range sorted {
 			n += b.Count

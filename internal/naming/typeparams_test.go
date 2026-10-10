@@ -135,7 +135,7 @@ func TestFuncTypeParamNames_Chain(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Skip("runUnaryGuarded not present in this sample")
+		t.Fatal("runUnaryGuarded not recovered from canonical 3.9.2 corpus sample")
 	}
 }
 
@@ -194,5 +194,30 @@ func TestStringForRefFallsBackToVM(t *testing.T) {
 	}
 	if _, ok := pl.StringForRef(99999); ok {
 		t.Error("unknown ref above BaseObjLimit resolved to a string")
+	}
+}
+
+func TestBuildFuncTypeParamNamesPreservesUnknownSlots(t *testing.T) {
+	res := &cluster.Result{
+		FuncTypes: []cluster.FuncTypeInfo{{RefID: 10, TypeParamsRefID: 20}},
+		TypeParameters: []cluster.TypeParametersInfo{{
+			RefID:         20,
+			NamesArrayRef: 30,
+			BoundsRef:     cluster.RefNull,
+		}},
+		Arrays: []cluster.ArrayInfo{{RefID: 30, ElementRefIDs: []int{40, 41}}},
+	}
+	pl := &PoolLookups{
+		RefToStr:     map[int]string{41: "U"},
+		VmRefToStr:   map[int]string{},
+		VmRefCID:     map[int]int{},
+		BaseObjLimit: 1,
+	}
+	got := BuildFuncTypeParamNames(res, pl)[10]
+	if len(got) != 2 {
+		t.Fatalf("generic parameter arity = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].Name != "?" || got[1].Name != "U" {
+		t.Fatalf("generic parameter order = %+v, want [?, U]", got)
 	}
 }

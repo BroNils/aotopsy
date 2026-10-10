@@ -3,9 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/frida"
@@ -13,7 +13,7 @@ import (
 
 // cmdX64Refs implements "aotopsy _debug x64refs": x86_64 disasm/callers-of/hash-scan.
 func cmdX64Refs(args []string) error {
-	fs := flag.NewFlagSet("x64refs", flag.ExitOnError)
+	fs := flag.NewFlagSet("x64refs", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (x86_64)")
 	find := fs.String("find", "", "substring to search for in resolved pool-entry display strings (case-sensitive); empty = dump all pool refs found")
 	maxHits := fs.Int("max", 200, "stop after this many matches (0 = unlimited)")
@@ -25,8 +25,45 @@ func cmdX64Refs(args []string) error {
 	disasmByCodeIndex := fs.Int("disasm-by-code-index", -1, "Function.CodeIndex to disassemble")
 	hashScan := fs.Bool("hash-scan", false, "scan every function for hash-op instruction density")
 	hashScanMinOps := fs.Int("hash-scan-min-ops", 8, "minimum hash-op count for a function to be reported by --hash-scan")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if err := requireNonNegativeFlag("max", *maxHits); err != nil {
+		return err
+	}
+	if err := requireNonNegativeFlag("hash-scan-min-ops", *hashScanMinOps); err != nil {
+		return err
+	}
+	if *cidName < -1 {
+		return fmt.Errorf("--cid-name must be >= -1")
+	}
+	if *disasmByCodeIndex < -1 {
+		return fmt.Errorf("--disasm-by-code-index must be >= -1")
+	}
+	actionCount := 0
+	for _, active := range []bool{
+		*disasmFuncVA != "",
+		*callersOfVA != "",
+		*disasmByCodeIndex >= 0,
+		*cidName >= 0,
+		*hashScan,
+		*indirectCalls || *indirectInFunc != "",
+	} {
+		if active {
+			actionCount++
+		}
+	}
+	if actionCount > 1 {
+		return fmt.Errorf("x64refs action flags are mutually exclusive")
+	}
+	if *find != "" && actionCount > 0 {
+		return fmt.Errorf("--find only applies to the default pool-reference scan")
+	}
+	if flagWasSet(fs, "hash-scan-min-ops") && !*hashScan {
+		return fmt.Errorf("--hash-scan-min-ops requires --hash-scan")
+	}
+	if flagWasSet(fs, "max") && (*disasmFuncVA != "" || *disasmByCodeIndex >= 0 || *cidName >= 0 || *hashScan) {
+		return fmt.Errorf("--max does not apply to the selected x64refs action")
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
@@ -39,6 +76,9 @@ func cmdX64Refs(args []string) error {
 		return err
 	}
 	defer func() { _ = sc.Close() }()
+	if sc.IsARM64 {
+		return fmt.Errorf("x64refs requires an x86_64 libapp.so; %s is ARM64", *libapp)
+	}
 
 	info := sc.Info
 	result := sc.Result
@@ -49,23 +89,21 @@ func cmdX64Refs(args []string) error {
 	pl := sc.Pool
 	poolDisplay := sc.PoolDisplay
 
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s\n", info.Version.DartVersion)
-	fmt.Fprintf(os.Stderr, "ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
+	cli.Errf("Dart SDK version: %s\n", info.Version.DartVersion)
+	cli.Errf("ranges: %d, pool: %d entries (%d resolved)\n", len(ranges), len(result.Pool), len(poolDisplay))
 
 	if *disasmFuncVA != "" {
-		var targetVA uint64
-		_, _ = fmt.Sscanf(*disasmFuncVA, "0x%x", &targetVA)
-		if targetVA == 0 {
-			_, _ = fmt.Sscanf(*disasmFuncVA, "%x", &targetVA)
+		targetVA, err := parseHexAddress("disasm-func", *disasmFuncVA)
+		if err != nil {
+			return err
 		}
 		return analysis.DumpFuncDisasm(targetVA, ranges, code, codeOff, codeVA, pl, poolDisplay)
 	}
 
 	if *callersOfVA != "" {
-		var targetVA uint64
-		_, _ = fmt.Sscanf(*callersOfVA, "0x%x", &targetVA)
-		if targetVA == 0 {
-			_, _ = fmt.Sscanf(*callersOfVA, "%x", &targetVA)
+		targetVA, err := parseHexAddress("callers-of", *callersOfVA)
+		if err != nil {
+			return err
 		}
 		return analysis.FindCallersOf(targetVA, ranges, code, codeOff, codeVA, pl, *maxHits)
 	}
@@ -73,6 +111,9 @@ func cmdX64Refs(args []string) error {
 	if *disasmByCodeIndex >= 0 {
 		targetIdx := *disasmByCodeIndex
 		if info.Version.CodeIndexOneBased {
+			if *disasmByCodeIndex == 0 {
+				return fmt.Errorf("--disasm-by-code-index is one-based for Dart %s; index 0 is invalid", info.Version.DartVersion)
+			}
 			targetIdx = *disasmByCodeIndex - 1
 		}
 		for _, r := range ranges {
@@ -87,7 +128,7 @@ func cmdX64Refs(args []string) error {
 				if !ok {
 					return fmt.Errorf("CodeRange with Index==%d starts before the instructions image", targetIdx)
 				}
-				fmt.Fprintf(os.Stderr, "resolved code index %d -> %s @ 0x%x\n", *disasmByCodeIndex, funcName, funcVA)
+				cli.Errf("resolved code index %d -> %s @ 0x%x\n", *disasmByCodeIndex, funcName, funcVA)
 				return analysis.DumpFuncDisasm(funcVA, ranges, code, codeOff, codeVA, pl, poolDisplay)
 			}
 		}
@@ -107,7 +148,7 @@ func cmdX64Refs(args []string) error {
 			}
 		}
 		if !found {
-			fmt.Fprintf(os.Stderr, "cid=%d not found in class cluster (%d classes total) -- may be a predefined/VM cid, not an app class\n", *cidName, len(result.Classes))
+			cli.Errf("cid=%d not found in class cluster (%d classes total) -- may be a predefined/VM cid, not an app class\n", *cidName, len(result.Classes))
 		}
 		return nil
 	}
@@ -119,10 +160,9 @@ func cmdX64Refs(args []string) error {
 	if *indirectCalls || *indirectInFunc != "" {
 		scanRanges := ranges
 		if *indirectInFunc != "" {
-			var targetVA uint64
-			_, _ = fmt.Sscanf(*indirectInFunc, "0x%x", &targetVA)
-			if targetVA == 0 {
-				_, _ = fmt.Sscanf(*indirectInFunc, "%x", &targetVA)
+			targetVA, err := parseHexAddress("indirect-calls-in", *indirectInFunc)
+			if err != nil {
+				return err
 			}
 			scanRanges = nil
 			found := cluster.FindRangeContainingVA(ranges, codeVA, codeOff, targetVA)
@@ -133,14 +173,14 @@ func cmdX64Refs(args []string) error {
 				return fmt.Errorf("no range contains VA 0x%x", targetVA)
 			}
 		}
-		calls, err := frida.ScanIndirectCalls(scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
+		calls, err := frida.ScanIndirectCalls(info.Version.DartVersion, scanRanges, code, codeOff, codeVA, pl, poolDisplay, *maxHits)
 		if err != nil {
 			return err
 		}
 		for _, c := range calls {
 			fmt.Printf("%s @ 0x%x  [%s]  %s  ; %s\n", c.FuncName, c.Addr, c.Kind, c.Text, c.Detail)
 		}
-		fmt.Fprintf(os.Stderr, "total indirect call sites: %d\n", len(calls))
+		cli.Errf("total indirect call sites: %d\n", len(calls))
 		return nil
 	}
 

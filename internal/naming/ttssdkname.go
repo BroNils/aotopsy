@@ -29,13 +29,18 @@ import (
 // arguments is not, because a library URL and a class name are both just
 // underscore-separated tokens once the SDK has scrubbed them.
 //
-// TypeTestingStubNamer::StringifyType (type_testing_stubs.cc, read at 2.18.0
-// and 3.3.0):
+// TypeTestingStubNamer::StringifyType (type_testing_stubs.cc, exact SDK refs):
 //
 //	curl = OS::SCreate(Z, "%s_", lib.url())            // "dart:core_"
 //	name = AssemblerSafeName(SCreate("%s_%s", curl, klass.ScrubbedNameCString()))
-//	for i in 0..klass.NumTypeParameters()-1:
-//	    name = SCreate("%s__%s", name, StringifyType(args[len(args)-n+i]))
+//	<=3.0: for i in 0..klass.NumTypeParameters()-1:
+//	          name += "__" + StringifyType(args[len(args)-n+i])
+//	>=3.1: for arg in args:
+//	          name += "__" + StringifyType(arg)
+//
+// 3.0.5 is the last verified trailing-own-parameter implementation; 3.1.0 is
+// the first verified whole-vector implementation. ttsNameContext.argumentRefs
+// carries that boundary for both readable and VM-form names.
 //
 // Note the doubled separator: curl already ends in '_' and the format adds
 // another, which is why `dart:core` + `List` comes out as `dart_core__List`
@@ -46,90 +51,62 @@ import (
 // buildTypeTestingStubSDKNames returns the VM's own spelling of each
 // type-testing stub name, keyed by the tested Type's ref ID.
 //
-// Empty when the Dart version's Types cannot be resolved to a class, matching
-// buildTypeNames -- the two are built from the same inputs and must
-// agree on which Types they can name.
+// Entries are emitted only when the VM spelling is reproducible exactly. That
+// includes every required generic argument and library prefix; classes whose
+// SDK name would depend on the runtime `nolib<n>` nonce are omitted.
 func buildTypeTestingStubSDKNames(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) map[int]string {
-	if len(result.Types) == 0 {
+	if len(result.Types) == 0 && len(result.RecordTypes) == 0 {
 		return nil
 	}
-	b := newTTSSDKBuilder(result, l, ct)
-	out := make(map[int]string, len(result.Types))
+	b := newTTSSDKBuilder(result, l, ct, dartVersion)
+	out := make(map[int]string, len(result.Types)+len(result.RecordTypes))
 	for i := range result.Types {
 		t := &result.Types[i]
-		if s := b.stringifyType(t, 0); s != "" {
+		if s := b.stringifyType(t, make(map[int]bool)); s != "" {
 			out[t.RefID] = "TypeTestingStub_" + s
+		}
+	}
+	for i := range result.RecordTypes {
+		rt := &result.RecordTypes[i]
+		if s := b.stringifyRecordType(rt, make(map[int]bool)); s != "" {
+			out[rt.RefID] = "TypeTestingStub_" + s
 		}
 	}
 	return out
 }
 
 type ttsSDKBuilder struct {
-	classByCID map[int32]*cluster.ClassInfo
-	classNames map[int32]string
-	libURLs    map[int32]string
-	typeByRef  map[int]*cluster.TypeInfo
-	taByRef    map[int]*cluster.TypeArgumentsInfo
-	ct         *snapshot.CIDTable
+	names   *ttsNameContext
+	libURLs map[int32]string
 }
 
-func newTTSSDKBuilder(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable) *ttsSDKBuilder {
+func newTTSSDKBuilder(result *cluster.Result, l *PoolLookups, ct *snapshot.CIDTable, dartVersion string) *ttsSDKBuilder {
 	b := &ttsSDKBuilder{
-		classByCID: make(map[int32]*cluster.ClassInfo, len(result.Classes)),
-		classNames: make(map[int32]string, len(result.Classes)),
-		libURLs:    make(map[int32]string, len(result.Classes)),
-		typeByRef:  make(map[int]*cluster.TypeInfo, len(result.Types)),
-		taByRef:    make(map[int]*cluster.TypeArgumentsInfo, len(result.TypeArguments)),
-		ct:         ct,
+		names:   newTTSNameContext(result, l, ct, dartVersion),
+		libURLs: make(map[int32]string, len(result.Classes)),
 	}
 	for i := range result.Classes {
 		ci := &result.Classes[i]
-		b.classByCID[ci.ClassID] = ci
-		no, ok := l.RefToNamed[ci.RefID]
-		if ok {
-			name := l.ResolveName(no)
-			if name == "" {
-				name = l.ResolveVMName(no)
-			}
-			if name != "" {
-				b.classNames[ci.ClassID] = name
-			}
-		}
 		if ci.LibraryRefID >= 0 {
-			if lo, ok := l.RefToNamed[ci.LibraryRefID]; ok {
-				url := l.ResolveName(lo)
-				if url == "" {
-					url = l.ResolveVMName(lo)
-				}
-				if url != "" {
-					b.libURLs[ci.ClassID] = url
-				}
+			if url := l.ResolveObjectName(ci.LibraryRefID); url != "" {
+				b.libURLs[ci.ClassID] = url
 			}
 		}
-	}
-	for i := range result.Types {
-		b.typeByRef[result.Types[i].RefID] = &result.Types[i]
-	}
-	for i := range result.TypeArguments {
-		b.taByRef[result.TypeArguments[i].RefID] = &result.TypeArguments[i]
 	}
 	return b
 }
 
 // stringifyType mirrors TypeTestingStubNamer::StringifyType. Returns "" when
 // the class cannot be resolved, so a partial name is never invented.
-func (b *ttsSDKBuilder) stringifyType(t *cluster.TypeInfo, depth int) string {
-	if t == nil || depth > 4 {
+func (b *ttsSDKBuilder) stringifyType(t *cluster.TypeInfo, path map[int]bool) string {
+	if t == nil || path[t.RefID] {
 		return ""
 	}
-	name, ok := b.classNames[t.ClassID]
-	if !ok {
-		if b.ct == nil {
-			return ""
-		}
-		if name = cluster.CidNameV(int(t.ClassID), b.ct); name == "" {
-			return ""
-		}
+	path[t.RefID] = true
+	defer delete(path, t.RefID)
+	name := b.names.className(t.ClassID)
+	if name == "" {
+		return ""
 	}
 	// `curl` already ends in '_', and the format string adds another.
 	curl := ""
@@ -137,43 +114,74 @@ func (b *ttsSDKBuilder) stringifyType(t *cluster.TypeInfo, depth int) string {
 		curl = u + "_"
 	} else {
 		// The SDK emits `nolib<n>_` here, with a counter we cannot
-		// reproduce, so a class whose library is unknown gets no prefix
-		// rather than a fabricated one.
-		curl = ""
+		// reproduce. This map is used as an exact alternative spelling in
+		// the symtab differential, so omitting the prefix would create a
+		// shortened identity. Refuse the VM-form name instead.
+		return ""
 	}
 	s := assemblerSafeName(fmt.Sprintf("%s_%s", curl, name))
 
-	// Only the trailing NumTypeParameters() arguments are named, and only
-	// when the type actually carries arguments.
-	if t.ArgumentsRef > 0 {
-		if ta, ok := b.taByRef[t.ArgumentsRef]; ok && len(ta.TypeRefs) > 0 {
-			n := b.numTypeParameters(t.ClassID, len(ta.TypeRefs))
-			start := len(ta.TypeRefs) - n
-			for i := start; i < len(ta.TypeRefs); i++ {
-				arg := b.stringifyType(b.typeByRef[ta.TypeRefs[i]], depth+1)
-				if arg == "" {
-					// A type parameter (`X0`) or an unresolved class. The
-					// SDK would print something; we cannot, so the name
-					// stops being reproducible and is dropped entirely
-					// rather than emitted short.
-					return ""
-				}
-				s += "__" + arg
-			}
+	refs, ok := b.names.argumentRefs(t)
+	if !ok {
+		return ""
+	}
+	for _, ref := range refs {
+		arg := b.stringifyRef(ref, path)
+		if arg == "" {
+			return ""
 		}
+		s += "__" + arg
 	}
 	return s
 }
 
-// numTypeParameters is Class::NumTypeParameters, which the snapshot does not
-// carry directly. The SDK names the LAST n arguments, where n is the class's
-// own parameter count; a superclass's arguments come first in the vector.
-//
-// Without the count, the whole vector is used. That is exact for a class whose
-// superclass is non-generic -- the common case -- and over-long otherwise, so
-// such a name simply fails to match rather than matching something wrong.
-func (b *ttsSDKBuilder) numTypeParameters(cid int32, have int) int {
-	return have
+func (b *ttsSDKBuilder) stringifyRef(ref int, path map[int]bool) string {
+	if t, ok := b.names.typeByRef[ref]; ok {
+		return b.stringifyType(t, path)
+	}
+	if rt, ok := b.names.recordTypeByRef[ref]; ok {
+		return b.stringifyRecordType(rt, path)
+	}
+	if no, ok := b.names.typeParameterForRef(ref); ok {
+		if name, ok := b.names.typeParameterTTSName(no); ok {
+			// TypeTestingStubNamer uses the TypeParameter's source name through
+			// Dart 2.13 and CanonicalNameCString from 2.14 onward. Neither branch
+			// appends the TypeParameter's `?` suffix.
+			return assemblerSafeName(name)
+		}
+	}
+	return ""
+}
+
+// stringifyRecordType mirrors the RecordType branch in
+// TypeTestingStubNamer::StringifyTypeTo (Dart 3.0+): "Record", then one
+// "__<field-type>" per field and "_<field-name>" on named fields.
+func (b *ttsSDKBuilder) stringifyRecordType(rt *cluster.RecordTypeInfo, path map[int]bool) string {
+	if rt == nil || path[rt.RefID] {
+		return ""
+	}
+	path[rt.RefID] = true
+	defer delete(path, rt.RefID)
+	fieldRefs, fieldNames, ok := b.names.recordComponents(rt)
+	if !ok {
+		return ""
+	}
+	positional := len(fieldRefs) - len(fieldNames)
+	if positional < 0 {
+		return ""
+	}
+	s := "Record"
+	for i, ref := range fieldRefs {
+		field := b.stringifyRef(ref, path)
+		if field == "" {
+			return ""
+		}
+		s += "__" + field
+		if i >= positional {
+			s += "_" + assemblerSafeName(fieldNames[i-positional])
+		}
+	}
+	return assemblerSafeName(s)
 }
 
 // assemblerSafeName is TypeTestingStubNamer::AssemblerSafeName: every byte

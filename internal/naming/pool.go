@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"aotopsy/internal/cluster"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/snapshot"
 	"aotopsy/internal/vmtables"
 )
@@ -13,6 +14,10 @@ type CodeNameInfo struct {
 	FuncName   string
 	OwnerName  string
 	ParamCount int // total visible parameters (fixed + optional, excluding implicit 'this')
+	// ParamCountKnown distinguishes a genuine zero-parameter declaration from
+	// missing arity metadata. ParamCount alone cannot: zero was historically
+	// used for both and downstream code silently treated "unknown" as no args.
+	ParamCountKnown bool
 
 	// FixedParamsWithReceiver is num_fixed_parameters as the SDK counts it:
 	// the fixed parameters INCLUDING the implicit receiver, and excluding
@@ -32,6 +37,25 @@ type CodeNameInfo struct {
 	// IsSuspendable is modifier() != kNoModifier: async, sync* or async*.
 	// The other half of the copy-parameters predicate.
 	IsSuspendable bool
+	// MayUseRegisterCC means the snapshot metadata does not itself rule out the
+	// Dart register calling convention for this Function. It is deliberately
+	// NOT the claim that the function actually uses registers: since 3.4.3 the
+	// precompiler can force an otherwise eligible function back to the stack via
+	// unboxing metadata, and that metadata is not serialized in a full AOT
+	// snapshot. Consumers must require independent call-site evidence before
+	// assigning parameters to registers.
+	MayUseRegisterCC bool
+	// MustUseStackCC is a stronger, source-grounded negative: versions before
+	// 3.4.3, generics, closures/tear-offs and FFI trampolines cannot use the Dart
+	// register calling convention. Unknown Function kinds leave both flags false.
+	MustUseStackCC bool
+	// ReceiverKnown/HasImplicitReceiver describe whether this Function has the
+	// implicit `this` parameter. Class ownership alone is insufficient: static
+	// methods are class-owned too, and seeding their arg0 with the owner class was
+	// a confident false type. kind_tag_.is_static and FunctionType.HasImplicit are
+	// independent sources; disagreement intentionally degrades to unknown.
+	ReceiverKnown       bool
+	HasImplicitReceiver bool
 	// IsConstructor marks a generative constructor or factory, recovered
 	// from UntaggedFunction::Kind. See cluster.NamedObject.IsConstructor.
 	IsConstructor bool
@@ -47,6 +71,51 @@ type CodeNameInfo struct {
 	// non-closures. It, not OwnerName, qualifies a closure's displayed name --
 	// see CodeNameInfo.Qualified and BuildClosureParents.
 	EnclosingFunction string
+}
+
+func functionCallConventionDisposition(dartVersion string, owner *cluster.NamedObject, ft *cluster.FuncTypeInfo) (mayRegister, mustStack bool) {
+	if !sdk.HasDartRegisterCallingConvention(dartVersion) {
+		return false, true
+	}
+	if owner != nil && owner.HasKindTag {
+		switch owner.FuncKind {
+		case cluster.FunctionKindClosure,
+			cluster.FunctionKindImplicitClosure,
+			cluster.FunctionKindFieldInitializer,
+			cluster.FunctionKindMethodExtractor,
+			cluster.FunctionKindNoSuchMethodDispatcher,
+			cluster.FunctionKindInvokeFieldDispatcher,
+			cluster.FunctionKindIrregexp,
+			cluster.FunctionKindDynamicInvocationForwarder,
+			cluster.FunctionKindFfiTrampoline:
+			return false, true
+		}
+	}
+	// Function::IsGeneric is derived from Function.signature(). The weak
+	// signature is often absent from a full AOT snapshot, so lack of a captured
+	// FunctionType is UNKNOWN, not evidence for stack calling. `mayRegister`
+	// deliberately means "not ruled out by serialized metadata"; actual register
+	// locations still require independent multi-call-site machine-code evidence.
+	if ft != nil && ft.TypeParamsRefID > cluster.RefNull {
+		return false, true
+	}
+	return true, false
+}
+
+func functionReceiverDisposition(owner *cluster.NamedObject, ft *cluster.FuncTypeInfo) (known, implicit bool) {
+	if owner != nil && owner.HasKindTag {
+		known = true
+		implicit = !owner.IsStatic
+	}
+	if ft == nil {
+		return known, implicit
+	}
+	if known && implicit != ft.HasImplicit {
+		// Two independently-decoded metadata sources disagree. Do not pick one
+		// and fabricate a receiver; make downstream analysis earn it elsewhere.
+		return false, false
+	}
+	return true, ft.HasImplicit
 }
 
 // PoolLookups holds the lookup maps needed for pool entry resolution.
@@ -86,6 +155,18 @@ type PoolLookups struct {
 	// were nameable from data already parsed. Built alongside TypeNames, from
 	// the same lookups. All-or-nothing per list: see typeArgsListString.
 	TypeArgumentNames map[int]string
+	// TypeTestingStubNames is the exact readable identity of each statically
+	// reproducible type-testing stub. Unlike TypeNames (a best-effort pool
+	// display), this map never drops generic arguments or nullability and never
+	// guesses across the Dart 3.1 argument-selection transition. It is therefore
+	// the only Type-derived map safe for Code names and call targets.
+	TypeTestingStubNames map[int]string
+
+	// SourceTypeNames is the Dart-source spelling of each Type whose identity the
+	// snapshot proves completely (List<int?>). It is what ExactTypeName serves to
+	// signatures: unlike the stub identities it never contains a canonical
+	// type-parameter name (X0, C1X0) and renders legacy nullability without `*`.
+	SourceTypeNames map[int]string
 
 	// TypeTestingStubSDKNames is the same stubs in the VM's OWN spelling --
 	// `TypeTestingStub_dart_core__List__dart_core__int` where TypeNames plus
@@ -112,6 +193,10 @@ type PoolLookups struct {
 // BuildPoolLookups builds the lookup maps from a fill result.
 // vmResult is optional — if non-nil, VM snapshot strings/names are used to resolve base object refs.
 // codeIndexOneBased must be true for Dart ≥2.16 (see VersionProfile.CodeIndexOneBased).
+// firstEntryWithCode is the isolate InstructionsTable.FirstEntryWithCode, or -1
+// when the table is unavailable. It is required to translate one-based
+// Function.code_index values into Code.ClusterIndex values without confusing
+// the table's discarded/stub prefix with the Code cluster.
 // dartVersion selects the VM-isolate base object name table; pass "" to leave
 // those references unnamed.
 // dartVersion also decides whether type-testing-stub naming runs at all; see
@@ -121,7 +206,7 @@ type PoolLookups struct {
 // different questions that happened to have the same answer, and coupling them
 // broke as soon as one changed: correcting 2.15.0's Type layout (it is a
 // scalar there, not a ref) silently switched TTS naming on for that version.
-func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, dartVersion string) *PoolLookups {
+func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *cluster.Result, codeIndexOneBased bool, firstEntryWithCode int, dartVersion string) *PoolLookups {
 	l := &PoolLookups{
 		RefToStr:        make(map[int]string),
 		RefToNamed:      make(map[int]*cluster.NamedObject),
@@ -177,23 +262,25 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	closureParents := BuildClosureParents(result, l)
 	l.ClosureParents = closureParents
 
-	byCodeIndex := CodeIndexToFunc(result, ct, codeIndexOneBased)
+	byCodeIndex := CodeIndexToFunc(result, ct, codeIndexOneBased, firstEntryWithCode)
 
 	// Build code ref→name.
 	l.CodeNames = make(map[int]CodeNameInfo)
 	typeNames, typeArgNames := buildTypeNames(result, l, ct, dartVersion)
 	l.TypeNames = typeNames
 	l.TypeArgumentNames = typeArgNames
+	l.TypeTestingStubNames = buildExactTypeTestingStubNames(result, l, ct, dartVersion)
+	l.SourceTypeNames = buildExactSourceTypeNames(result, l, ct, dartVersion)
 	l.TypeTestingStubSDKNames = buildTypeTestingStubSDKNames(result, l, ct, dartVersion)
 	for _, ce := range result.Codes {
-		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex)
+		owner, ok := ResolveCodeOwner(ce, l.RefToNamed, byCodeIndex, ct)
 		if !ok {
 			// A Code with no Function owner is not necessarily anonymous:
 			// the SDK gives a type-testing stub the tested Type as its
 			// owner (type_testing_stubs.cc, `code.set_owner(type)`), which
 			// is why these fail both the CodeIndex cross-reference and the
 			// RefToNamed lookup. See buildTypeNames.
-			if name := TypeTestingStubName(typeNames, ce.OwnerRef); name != "" {
+			if name := l.TypeTestingStubNames[ce.OwnerRef]; name != "" {
 				l.CodeNames[ce.RefID] = CodeNameInfo{FuncName: name}
 			}
 			continue
@@ -212,10 +299,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		// on the 3.12 x86_64 sample and 877 of 1286 on 3.x ARM64 -- and
 		// every single one of them, 910 of 910 and 877 of 877, resolves
 		// through the VM table.
-		funcName := l.ResolveName(owner)
-		if funcName == "" {
-			funcName = l.ResolveVMName(owner)
-		}
+		funcName := l.ResolveIsolateName(owner)
 		ci := CodeNameInfo{
 			FuncName:          funcName,
 			OwnerName:         l.ResolveOwnerName(owner),
@@ -237,9 +321,12 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 		}
 		// Follow Function→FunctionType chain for parameter count.
 		ci.IsSuspendable = owner.IsSuspendable
+		var signature *cluster.FuncTypeInfo
 		if owner.SignatureRefID > 0 {
 			if ft, ok := funcTypeByRef[owner.SignatureRefID]; ok {
+				signature = ft
 				ci.ParamCount = ft.NumFixed + ft.NumOptional
+				ci.ParamCountKnown = true
 				ci.FixedParamsWithReceiver = ft.NumFixed
 				if ft.HasImplicit {
 					ci.FixedParamsWithReceiver++
@@ -247,32 +334,31 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				ci.OptionalParams = ft.NumOptional
 			}
 		}
+		ci.ReceiverKnown, ci.HasImplicitReceiver = functionReceiverDisposition(owner, signature)
 		// Dart 2.x keeps arity on the Function object instead
 		// (UntaggedFunction.packed_fields_), so the signature chain above
 		// yields nothing there and ParamCount came out 0 for EVERY 2.x
 		// function. num_fixed_parameters counts the implicit receiver, and
 		// kind_tag_ says whether there is one, so the visible count is
 		// fixed + optional minus the receiver for instance methods.
-		if ci.ParamCount == 0 && owner.NumFixedParams >= 0 {
+		if !ci.ParamCountKnown && owner.NumFixedParams >= 0 {
 			visible := owner.NumFixedParams + owner.NumOptionalParams
 			if owner.HasKindTag && !owner.IsStatic && visible > 0 {
 				visible--
 			}
 			ci.ParamCount = visible
+			ci.ParamCountKnown = true
 			// owner.NumFixedParams already counts the receiver.
 			ci.FixedParamsWithReceiver = owner.NumFixedParams
 			ci.OptionalParams = owner.NumOptionalParams
 		}
+		ci.MayUseRegisterCC, ci.MustUseStackCC = functionCallConventionDisposition(dartVersion, owner, signature)
 		l.CodeNames[ce.RefID] = ci
 	}
 	for _, ce := range result.Codes {
 		ci := l.CodeNames[ce.RefID]
-		if ci.FuncName != "" {
-			if ci.OwnerName != "" {
-				l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
-			} else {
-				l.CodeRefDisplay[ce.RefID] = ci.FuncName
-			}
+		if name := ci.DisplayName(); name != "" {
+			l.CodeRefDisplay[ce.RefID] = name
 		}
 	}
 
@@ -280,9 +366,10 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// VM stubs (WriteBarrier, AllocateObject, etc.) have no Function
 	// owner — ResolveCodeOwner fails for them. Their names come from
 	// VM_STUB_CODE_LIST + VM_TYPE_TESTING_STUB_CODE_LIST
-	// (vmtables.VMStubNamesInClusterOrder), which is ordered by creation
-	// order (VM_STUB_CODE_LIST order with TTS after Subtype7TestCache),
-	// matching vmResult.Codes[i] cluster serialization order.
+	// (vmtables.VMStubNamesInImageOrder): the VM Code cluster is written in
+	// IMAGE order, which is the reverse of StubCode::Init emission order (see
+	// that function for the evidence). Zipping the emission order here named
+	// every VM Code in the pool by the stub at the opposite end of the list.
 	//
 	// This runs BEFORE the Function-owner resolution below so that stub
 	// names take precedence over Function owner names. Without this
@@ -291,11 +378,9 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// and the stub naming loop skips it — the correct name
 	// "UnknownDartCode" is never assigned.
 	//
-	// X-2: Previously used VMStubNames (164 entries, no TTS), missing
-	// the 9 type-testing stubs at indices 164-172. Now uses
-	// VMStubNamesInClusterOrder (173 entries with TTS).
+	// The list includes the 9 type-testing stubs (173 entries on 3.12.2).
 	if vmResult != nil {
-		vmStubNames := vmtables.VMStubNamesInClusterOrder(dartVersion)
+		vmStubNames := vmtables.VMStubNamesInImageOrder(dartVersion)
 		if len(vmStubNames) > 0 {
 			for i, ce := range vmResult.Codes {
 				if i >= len(vmStubNames) {
@@ -322,16 +407,21 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 	// no-op for VM snapshots — but it's kept as a safety net for any
 	// future VM Code that isn't a stub.
 	if vmResult != nil {
-		vmByCodeIndex := CodeIndexToFunc(vmResult, ct, codeIndexOneBased)
+		// We do not have the VM snapshot's InstructionsTable in this builder.
+		// In the one-based era, passing -1 disables the cross-reference and
+		// falls back to OwnerRef rather than applying the isolate table's FEC to
+		// a different numbering domain. In practice VM stubs were already named
+		// by the SDK stub table above.
+		vmByCodeIndex := CodeIndexToFunc(vmResult, ct, codeIndexOneBased, -1)
 		for _, ce := range vmResult.Codes {
 			if _, exists := l.CodeNames[ce.RefID]; exists {
 				continue
 			}
-			owner, ok := ResolveCodeOwner(ce, l.VmRefToNamed, vmByCodeIndex)
+			owner, ok := ResolveCodeOwner(ce, l.VmRefToNamed, vmByCodeIndex, ct)
 			if !ok {
 				continue
 			}
-			funcName := l.ResolveVMName(owner)
+			funcName := l.resolveVMName(owner)
 			if funcName == "" {
 				continue
 			}
@@ -343,7 +433,7 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 					// PatchClass. A VM-snapshot function like dart:_runtime's
 					// _runMain is owned by "::", so without this it rendered
 					// `::._runMain`.
-					ownerName = l.resolveClassName(vmOwner, 0)
+					ownerName = l.resolveVMClassName(vmOwner, 0)
 				}
 			}
 			ci := CodeNameInfo{
@@ -355,12 +445,8 @@ func BuildPoolLookups(result *cluster.Result, ct *snapshot.CIDTable, vmResult *c
 				ci.IsConstructor = true
 			}
 			l.CodeNames[ce.RefID] = ci
-			if ci.FuncName != "" {
-				if ci.OwnerName != "" {
-					l.CodeRefDisplay[ce.RefID] = ci.OwnerName + "." + ci.FuncName
-				} else {
-					l.CodeRefDisplay[ce.RefID] = ci.FuncName
-				}
+			if name := ci.DisplayName(); name != "" {
+				l.CodeRefDisplay[ce.RefID] = name
 			}
 		}
 	}
@@ -400,38 +486,170 @@ func (l *PoolLookups) StringForRef(ref int) (string, bool) {
 	return "", false
 }
 
-// isStringCID reports whether a CID is one of the String subclasses.
-func isStringCID(cid int, ct *snapshot.CIDTable) bool {
-	return cid == ct.OneByteString || cid == ct.TwoByteString ||
-		(ct.String != 0 && cid == ct.String)
+// CIDForRef resolves the object CID in the namespace visible to the app
+// snapshot. App/isolate refs win. VM refs are visible only in the base-object
+// prefix assigned before isolate clusters are deserialized; above BaseObjLimit
+// the two snapshots have independent numeric ref spaces.
+func (l *PoolLookups) CIDForRef(ref int) (int, bool) {
+	if l == nil || ref <= cluster.RefNull {
+		return 0, false
+	}
+	if cid, ok := l.RefCID[ref]; ok {
+		return cid, true
+	}
+	if ref < l.BaseObjLimit {
+		cid, ok := l.VmRefCID[ref]
+		return cid, ok
+	}
+	return 0, false
 }
 
-func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
-	if no.OwnerRefID < 0 {
-		return ""
+// NamedObjectForRef resolves a NamedObject in the namespace visible to the app
+// snapshot. A VM object is eligible only when the ref is inside the shared
+// base-object prefix. Callers that are explicitly traversing vmResult itself
+// should stay inside package naming and use VmRefToNamed directly.
+func (l *PoolLookups) NamedObjectForRef(ref int) (*cluster.NamedObject, bool) {
+	if l == nil || ref <= cluster.RefNull {
+		return nil, false
 	}
-	owner, ok := l.RefToNamed[no.OwnerRefID]
-	if !ok {
-		if l.VmRefToNamed != nil {
-			if vmOwner, vmOK := l.VmRefToNamed[no.OwnerRefID]; vmOK {
-				return l.resolveClassName(vmOwner, 0)
-			}
-		}
-		return ""
+	if no, ok := l.RefToNamed[ref]; ok {
+		return no, no != nil
 	}
-	return l.resolveClassName(owner, 0)
+	if ref < l.BaseObjLimit {
+		no, ok := l.VmRefToNamed[ref]
+		return no, ok && no != nil
+	}
+	return nil, false
 }
 
-func (l *PoolLookups) ResolveName(no *cluster.NamedObject) string {
-	if no.NameRefID >= 0 {
-		if s, ok := l.RefToStr[no.NameRefID]; ok {
-			return s
+// ResolveObjectName resolves the semantic name of an object ref visible from
+// the app snapshot. Once a ref is proven to be a VM base object, its internal
+// NameRefID belongs to the VM namespace and may legitimately be above the app's
+// BaseObjLimit; resolveVMName handles that second hop.
+func (l *PoolLookups) ResolveObjectName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	if no, ok := l.RefToNamed[ref]; ok && no != nil {
+		return l.ResolveIsolateName(no)
+	}
+	if ref < l.BaseObjLimit {
+		if no, ok := l.VmRefToNamed[ref]; ok && no != nil {
+			return l.resolveVMName(no)
 		}
 	}
 	return ""
 }
 
-func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
+// ResolveVMObjectName resolves a NamedObject that belongs to vmResult itself.
+// Unlike ResolveObjectName, the reference is interpreted in the VM snapshot's
+// own namespace and is therefore not restricted to the app-visible base prefix.
+// Callers should use this only while explicitly traversing vmResult.
+func (l *PoolLookups) ResolveVMObjectName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	no, ok := l.VmRefToNamed[ref]
+	if !ok || no == nil {
+		return ""
+	}
+	return l.resolveVMName(no)
+}
+
+// FunctionDisplayName returns the SDK-style semantic display name for an
+// app/isolate Function ref. It deliberately operates before any filename or
+// token sanitization so the same identity can be reused by analysis consumers.
+func (l *PoolLookups) FunctionDisplayName(ref int) string {
+	if l == nil || l.CT == nil {
+		return ""
+	}
+	no, ok := l.RefToNamed[ref]
+	if !ok || no == nil || no.CID != l.CT.Function {
+		return ""
+	}
+	return l.functionDisplayName(no)
+}
+
+// functionDisplayName resolves an already-identified app Function without
+// requiring that the caller re-find it in RefToNamed. This is needed for
+// discarded Functions, whose NamedObject is already the authoritative object
+// being traversed.
+func (l *PoolLookups) functionDisplayName(no *cluster.NamedObject) string {
+	if l == nil || l.CT == nil || no == nil || no.CID != l.CT.Function {
+		return ""
+	}
+	leaf := l.ResolveIsolateName(no)
+	if leaf == "" {
+		return ""
+	}
+	ci := CodeNameInfo{
+		FuncName:          leaf,
+		OwnerName:         l.ResolveOwnerName(no),
+		EnclosingFunction: l.ClosureParents[no.RefID],
+	}
+	if no.IsConstructor() {
+		ci.FuncName = "new " + leaf
+		ci.IsConstructor = true
+	}
+	return ci.DisplayName()
+}
+
+// ExactTypeName returns a Dart-source type name only when the snapshot data is
+// sufficient to reconstruct the complete type identity. It deliberately does
+// not fall back to TypeNames: that map is display-oriented and may omit generic
+// arguments, which is acceptable for an object-pool annotation but would turn a
+// function signature into a confident false claim.
+//
+// Ordinary Type objects reuse the exact-or-empty type-testing-stub namer. The
+// two VM-isolate singleton types that have no TypeInfo in the older snapshot
+// layouts (dynamic and void) are recognized from the SDK-versioned base-object
+// table. Anything else stays unknown and callers should render `dynamic`.
+func (l *PoolLookups) ExactTypeName(ref int) string {
+	if l == nil || ref <= cluster.RefNull {
+		return ""
+	}
+	if name := l.SourceTypeNames[ref]; name != "" {
+		return name
+	}
+	if ref >= 1 && ref <= len(l.BaseObjectNames) {
+		if name, ok := singletonTypeName(l.BaseObjectNames[ref-1]); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// isStringCID reports whether a CID is one of the String subclasses.
+func isStringCID(cid int, ct *snapshot.CIDTable) bool {
+	return (ct.OneByteString != 0 && cid == ct.OneByteString) ||
+		(ct.TwoByteString != 0 && cid == ct.TwoByteString) ||
+		(ct.String != 0 && cid == ct.String)
+}
+
+func (l *PoolLookups) ResolveOwnerName(no *cluster.NamedObject) string {
+	if no == nil || no.OwnerRefID <= cluster.RefNull {
+		return ""
+	}
+	owner, ok := l.RefToNamed[no.OwnerRefID]
+	if !ok {
+		// The app snapshot reuses VM snapshot references only for the base-object
+		// prefix. Above BaseObjLimit the numeric ref spaces overlap but refer to
+		// unrelated objects, so an unrestricted VM fallback can fabricate an owner
+		// from a coincidentally-equal VM ref.
+		if no.OwnerRefID < l.BaseObjLimit && l.VmRefToNamed != nil {
+			if vmOwner, vmOK := l.VmRefToNamed[no.OwnerRefID]; vmOK {
+				return l.resolveVMClassName(vmOwner, 0)
+			}
+		}
+		return ""
+	}
+	return l.resolveIsolateClassName(owner, 0)
+}
+
+func (l *PoolLookups) resolveVMName(no *cluster.NamedObject) string {
+	if no == nil {
+		return ""
+	}
 	if no.NameRefID >= 0 {
 		if s, ok := l.VmRefToStr[no.NameRefID]; ok {
 			return s
@@ -440,8 +658,23 @@ func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
 	return ""
 }
 
-// resolveClassName turns a Class-or-PatchClass NamedObject into a class name,
-// hopping through PatchClass and falling back to the VM string table.
+// resolveIsolateName resolves a name carried by an app/isolate object. Its
+// NameRefID may point at an app string or at a VM-isolate base object, but may
+// not fall through to an arbitrary VM ref above the base-object prefix: the two
+// snapshots allocate independent ref spaces there.
+func (l *PoolLookups) ResolveIsolateName(no *cluster.NamedObject) string {
+	if no == nil || no.NameRefID <= cluster.RefNull {
+		return ""
+	}
+	if s, ok := l.StringForRef(no.NameRefID); ok {
+		return s
+	}
+	return ""
+}
+
+// resolveIsolateClassName turns an app Class-or-PatchClass NamedObject into a
+// class name, hopping through PatchClass and using VM data only for shared base
+// objects. resolveVMClassName handles genuine VM snapshot objects separately.
 //
 // Two gaps this closes, both measured on the ground-truth twins where the ELF
 // carries the owner and we did not (2.14.0/2.18.0/3.9.2 arm64):
@@ -461,7 +694,7 @@ func (l *PoolLookups) ResolveVMName(no *cluster.NamedObject) string {
 // per-library class that owns top-level functions and fields.
 const topLevelClassName = "::"
 
-func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) string {
+func (l *PoolLookups) resolveIsolateClassName(owner *cluster.NamedObject, depth int) string {
 	if owner == nil || depth > 4 {
 		return ""
 	}
@@ -472,13 +705,7 @@ func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) st
 	// symbol table on ~390 functions per prose sample. The name can come from
 	// EITHER string table -- a dart:_runtime function like _runMain resolves
 	// its "::" owner through the VM table -- so the check must cover both.
-	if n := l.ResolveName(owner); n != "" {
-		if n == topLevelClassName {
-			return ""
-		}
-		return n
-	}
-	if n := l.ResolveVMName(owner); n != "" {
+	if n := l.ResolveIsolateName(owner); n != "" {
 		if n == topLevelClassName {
 			return ""
 		}
@@ -487,7 +714,33 @@ func (l *PoolLookups) resolveClassName(owner *cluster.NamedObject, depth int) st
 	// A PatchClass wraps the real Class in its OwnerRefID; hop to it.
 	if l.CT != nil && owner.CID == l.CT.PatchClass && owner.OwnerRefID >= 0 {
 		if wrapped, ok := l.RefToNamed[owner.OwnerRefID]; ok {
-			return l.resolveClassName(wrapped, depth+1)
+			return l.resolveIsolateClassName(wrapped, depth+1)
+		}
+		if owner.OwnerRefID < l.BaseObjLimit {
+			if wrapped, ok := l.VmRefToNamed[owner.OwnerRefID]; ok {
+				return l.resolveVMClassName(wrapped, depth+1)
+			}
+		}
+	}
+	return ""
+}
+
+// resolveVMClassName is the VM-snapshot counterpart of resolveIsolateClassName.
+// VM NamedObjects may legitimately refer to VM strings above the app snapshot's
+// base-object prefix, so their namespace must remain unrestricted here.
+func (l *PoolLookups) resolveVMClassName(owner *cluster.NamedObject, depth int) string {
+	if owner == nil || depth > 4 {
+		return ""
+	}
+	if n := l.resolveVMName(owner); n != "" {
+		if n == topLevelClassName {
+			return ""
+		}
+		return n
+	}
+	if l.CT != nil && owner.CID == l.CT.PatchClass && owner.OwnerRefID >= 0 {
+		if wrapped, ok := l.VmRefToNamed[owner.OwnerRefID]; ok {
+			return l.resolveVMClassName(wrapped, depth+1)
 		}
 	}
 	return ""
@@ -576,10 +829,7 @@ func (r *TypeParamResolver) classDisplayName(cid int32) string {
 		}
 		ci := r.result.Classes[i]
 		if no, ok := r.pl.RefToNamed[ci.RefID]; ok {
-			if s := r.pl.ResolveName(no); s != "" {
-				return s
-			}
-			if s := r.pl.ResolveVMName(no); s != "" {
+			if s := r.pl.ResolveIsolateName(no); s != "" {
 				return s
 			}
 		}
@@ -664,6 +914,9 @@ func (l *PoolLookups) baseObjectName(refID int) string {
 	if refID == 1 {
 		return "null"
 	}
+	if refID >= l.BaseObjLimit {
+		return ""
+	}
 	if refID < 1 || refID > len(l.BaseObjectNames) {
 		return ""
 	}
@@ -682,7 +935,7 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 			// can have a RefToStr entry at the same ref ID, producing
 			// false positive string references that inflate signal
 			// counts and mislead the signal report.
-			isStringCID := false
+			isString := false
 			if l.CT != nil {
 				if cid, ok := l.RefCID[pe.RefID]; ok {
 					// Non-compressed-pointers snapshots store string refs under
@@ -690,35 +943,27 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 					// OneByteString/TwoByteString subclass CIDs. Accept all three
 					// so ROData strings (the common case for desktop AOT) resolve
 					// to their actual value instead of a "<String>" placeholder.
-					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
-				} else if cid, ok := l.VmRefCID[pe.RefID]; ok {
-					isStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
+					isString = isStringCID(cid, l.CT)
+				} else if pe.RefID > cluster.RefNull && pe.RefID < l.BaseObjLimit {
+					if cid, ok := l.VmRefCID[pe.RefID]; ok {
+						isString = isStringCID(cid, l.CT)
+					}
 				}
 			}
-			if isStringCID {
+			if isString {
 				if s, ok := l.RefToStr[pe.RefID]; ok {
 					display[pe.Index] = fmt.Sprintf("%q", s)
-				} else if s, ok := l.VmRefToStr[pe.RefID]; ok {
-					display[pe.Index] = fmt.Sprintf("%q", s)
+				} else if pe.RefID > cluster.RefNull && pe.RefID < l.BaseObjLimit {
+					if s, ok := l.VmRefToStr[pe.RefID]; ok {
+						display[pe.Index] = fmt.Sprintf("%q", s)
+					} else {
+						display[pe.Index] = "<String>"
+					}
+				} else {
+					display[pe.Index] = "<String>"
 				}
 			} else if no, ok := l.RefToNamed[pe.RefID]; ok {
-				name := l.ResolveName(no)
-				if name == "" {
-					// ResolveName only checks the app-isolate string table
-					// (RefToStr). A NamedObject's NameRefID can just as
-					// well point into the VM-isolate base-object region
-					// instead (shared objects/strings common across every
-					// app using this Dart SDK build) -- confirmed a real,
-					// same-class gap as the one fixed in LoadContext/
-					// decompile_native_cmd.go for pool-level VmRefToStr
-					// lookups: this call site never tried ResolveVMName as
-					// a fallback, so a resolvable name here still fell
-					// through to a generic "<ClassName>" placeholder.
-					// cmd/aotopsy/refinfo.go's listToplevelFunctions
-					// already uses exactly this ResolveName-then-
-					// ResolveVMName fallback pattern; mirrored here.
-					name = l.ResolveVMName(no)
-				}
+				name := l.ResolveIsolateName(no)
 				if name != "" {
 					// Fields share leaf names across owners (e.g. uHb on Wja, Yja, aka).
 					// Qualify with owner when available so pool dumps disambiguate them.
@@ -788,16 +1033,23 @@ func ResolvePoolDisplay(pool []cluster.PoolEntry, l *PoolLookups) map[int]string
 					isVMStringCID := false
 					if l.CT != nil {
 						if cid, ok2 := l.VmRefCID[pe.RefID]; ok2 {
-							isVMStringCID = cid == l.CT.OneByteString || cid == l.CT.TwoByteString || cid == l.CT.String
+							isVMStringCID = isStringCID(cid, l.CT)
 						}
 					}
 					if isVMStringCID {
 						display[pe.Index] = fmt.Sprintf("%q", s)
+					} else if cidNum, ok := l.VmRefCID[pe.RefID]; ok {
+						cidName := cluster.CidNameV(cidNum, l.CT)
+						if cidName != "" {
+							display[pe.Index] = fmt.Sprintf("<vm:%s>", cidName)
+						} else {
+							display[pe.Index] = fmt.Sprintf("<vm:%d>", pe.RefID)
+						}
 					} else {
-						display[pe.Index] = s
+						display[pe.Index] = fmt.Sprintf("<vm:%d>", pe.RefID)
 					}
 				} else if no, ok := l.VmRefToNamed[pe.RefID]; ok {
-					name := l.ResolveVMName(no)
+					name := l.resolveVMName(no)
 					if name != "" {
 						display[pe.Index] = name
 					} else {

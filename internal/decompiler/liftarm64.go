@@ -2,12 +2,12 @@ package decompiler
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"aotopsy/internal/arch/arm64"
 	"aotopsy/internal/disasm"
 	"aotopsy/internal/sdk"
+	"aotopsy/internal/snapshot"
 )
 
 // ARM64 Dart AOT reserved-register roles are now defined in internal/sdk,
@@ -15,23 +15,28 @@ import (
 // them into the FuncIR; the constants themselves are shared with disasm,
 // typetrack, and signal.
 
-// arm64ArgRegs is the SDK-verified Dart calling-convention argument
-// register set (constants_arm64.h DartCallingConvention::kCpuRegistersForArgs
-// = {R1, R2, R3, R5, R6, R7}), NOT the C ABI x0–x7. The previous x0–x7 list
-// included R0 (kClassIdReg) and R4 (ARGS_DESC_REG), which are NOT argument
-// registers — declaring them as args leaked confident-wrong parameter names.
-var arm64ArgRegs = sdk.DartArgRegNames(sdk.ArchARM64)
-
 // BuildARM64IR lifts a disassembled ARM64 function (as produced by
 // aotopsy's existing internal/disasm.Disassemble+BuildCFG) into the
-// arch-neutral FuncIR the pseudocode emitter consumes.
-func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
+// arch-neutral FuncIR the pseudocode emitter consumes. cc is deliberately a
+// per-function input: a global SDK register table does not prove that this
+// particular Function uses it.
+func BuildARM64IR(name, dartVersion string, compressedPointers bool, insts []disasm.Inst, cc sdk.RegisterCallingConvention) *FuncIR {
 	if len(insts) == 0 {
-		return newFuncIR(name, 0)
+		fir := newFuncIR(name, 0)
+		fir.DartVersion = dartVersion
+		return fir
 	}
 	cfg := disasm.BuildCFG(name, insts)
+	poolLoadsByPC := make(map[uint64][]disasm.ARM64PoolAccess)
+	for _, access := range disasm.ExtractARM64PoolAccesses(insts, nil) {
+		if access.Kind != disasm.ARM64PoolAccessLoad || access.RegClass != disasm.ARM64PoolRegGPR {
+			continue
+		}
+		poolLoadsByPC[access.PC] = append(poolLoadsByPC[access.PC], access)
+	}
 	fir := newFuncIR(name, insts[0].Addr)
-	fir.ArgRegs = arm64ArgRegs
+	fir.DartVersion = dartVersion
+	fir.ArgRegs = append([]string(nil), cc.GPRNames...)
 	fir.FrameReg = sdk.ARM64FrameRegStr
 	fir.ReturnReg = sdk.ARM64ReturnRegStr
 	fir.LinkReg = sdk.ARM64LinkRegStr
@@ -40,26 +45,36 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	fir.PoolIndexOf = func(disp int64) (int, bool) { return disasm.ARM64PoolIndex(int(disp)) }
 	fir.ThreadReg = sdk.ARM64ThreadRegStr
 	fir.NullReg = sdk.ARM64NullRegStr
-	fir.HeapBitsReg = sdk.ARM64HeapBitsStr
+	fir.HeapBitsReg, fir.HeapBaseReg, fir.BarrierMaskReg = sdk.ARM64HeapRegisterRoles(dartVersion, compressedPointers)
 	fir.StackReg = sdk.ARM64StackRegStr
 	fir.CodeReg = sdk.ARM64CodeRegStr
 	fir.ArgsDescReg = sdk.ARM64ArgsDescStr
-	fir.FpuArgRegs = sdk.ARM64FpuArgRegNames()
-	fir.FpuReturnReg = sdk.ARM64FpuReturnRegName
-	fir.TypeTestABIRegs = sdk.TypeTestRegNames(true)
+	fir.ICDataReg = sdk.ARM64ICDataStr
+	fir.FpuArgRegs = append([]string(nil), cc.FPUName...)
+	fir.FpuReturnReg = cc.FPUReturn
+	fir.TypeTestABIRegs = sdk.TypeTestRegNames(dartVersion, true)
 
 	for _, bb := range cfg.Blocks {
 		blk := Block{ID: bb.ID, IsTerm: bb.IsTerm}
 		if bb.Start < len(insts) {
 			blk.StartVA = insts[bb.Start].Addr
 		}
-		// Pool bases established by `add xT, PP, #hi` earlier in this
-		// block, keyed by destination register. Block-local on purpose:
-		// carrying them across a control-flow join would pair an ADD on
-		// one path with an LDR on another.
-		poolBase := map[int]int64{}
 		for i := bb.Start; i < bb.End && i < len(insts); i++ {
-			blk.Instrs = append(blk.Instrs, liftARM64Instr(insts[i], poolBase))
+			var scalarPoolLoad *disasm.ARM64PoolAccess
+			loads := poolLoadsByPC[insts[i].Addr]
+			// FuncIR has one Op/Target per machine instruction. A scalar LDR
+			// therefore maps exactly; an LDP has two independent destinations
+			// and remains OpOther until the IR grows a multi-result operation.
+			if len(loads) == 1 {
+				scalarPoolLoad = &loads[0]
+			}
+			lifted := liftARM64Instr(insts[i], scalarPoolLoad)
+			if len(loads) == 2 && strings.EqualFold(insts[i].Mnemonic, "ldp") {
+				for _, l := range loads {
+					lifted.PoolLoads = append(lifted.PoolLoads, PoolLoad{Reg: sdk.ARM64RegName(l.Reg), Index: l.PoolIndex})
+				}
+			}
+			blk.Instrs = append(blk.Instrs, lifted)
 		}
 		for _, s := range bb.Succs {
 			blk.Succs = append(blk.Succs, Succ{BlockID: s.BlockID, Cond: s.Cond})
@@ -69,24 +84,23 @@ func BuildARM64IR(name string, insts []disasm.Inst) *FuncIR {
 	return fir
 }
 
-// liftARM64Instr lifts one instruction. poolBase carries the two-instruction
-// object-pool form across the block (see trackARM64PoolBase); it is mutated
-// as instructions define and redefine registers.
-func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
+// liftARM64Instr lifts one instruction. scalarPoolLoad is supplied by the same
+// canonical SDK-shape extractor used by disassembly/dataflow and strxref, so
+// pool provenance cannot drift between those consumers.
+func liftARM64Instr(inst disasm.Inst, scalarPoolLoad *disasm.ARM64PoolAccess) Instr {
 	mnemonic := strings.ToLower(inst.Mnemonic)
 	src := strings.ToLower(inst.Text)
 	ir := Instr{Addr: inst.Addr, Src: src, PoolIndex: -1}
+	for _, reg := range arm64.DstRegsOfInst(inst.Raw) {
+		if name := sdk.ARM64RegName(reg); name != "" {
+			ir.DefRegs = append(ir.DefRegs, name)
+		}
+	}
 
-	// Resolve against the base BEFORE this instruction updates the map:
-	// `add x2, x27, #0x4000; ldr x2, [x2, #8]` reuses the same register,
-	// and the load reads the base the add produced.
-	baseIdx := arm64PoolIndexViaBase(inst, poolBase)
-	defer trackARM64PoolBase(inst, poolBase)
-
-	if baseIdx >= 0 && (mnemonic == "ldr" || mnemonic == "ldur") {
+	if scalarPoolLoad != nil {
 		ir.Op = OpLoadPool
-		ir.PoolIndex = baseIdx
-		ir.Target = firstOperandReg(inst.Operands)
+		ir.PoolIndex = scalarPoolLoad.PoolIndex
+		ir.Target = sdk.ARM64RegName(scalarPoolLoad.Reg)
 		return ir
 	}
 
@@ -127,7 +141,9 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 		ir.Op = OpBranch
 		ir.Target = fmt.Sprintf("0x%x", bi.Target)
 		ir.CondKind = "cmp"
-		ir.CondOp = arm64CondOp(strings.ToLower(firstOperandToken(inst.Operands)))
+		cc := strings.ToLower(firstOperandToken(inst.Operands))
+		ir.CondOp = arm64CondOp(cc)
+		ir.CondUnsigned = arm64CondUnsigned(cc)
 	case mnemonic == "br":
 		// P6: br xN — indirect branch (jump table, tail call, or computed goto).
 		// Mark as OpJump with the register as target so the emitter can
@@ -164,10 +180,6 @@ func liftARM64Instr(inst disasm.Inst, poolBase map[int]int64) Instr {
 				}
 			}
 		}
-	case (mnemonic == "ldr" || mnemonic == "ldur") && isARM64PoolLoad(inst.Operands):
-		ir.Op = OpLoadPool
-		ir.PoolIndex = arm64PoolIndex(inst.Operands)
-		ir.Target = firstOperandReg(inst.Operands)
 	}
 	return ir
 }
@@ -221,6 +233,14 @@ func arm64CondOp(cc string) string {
 	return "?"
 }
 
+func arm64CondUnsigned(cc string) bool {
+	switch cc {
+	case "lo", "cc", "ls", "hi", "hs", "cs":
+		return true
+	}
+	return false
+}
+
 // firstOperandToken extracts the first comma-separated token from an
 // operand string, e.g. "LS, .+0x3c" -> "LS" (the condition-code token
 // this disassembler's "b" mnemonic rendering puts first).
@@ -230,93 +250,6 @@ func firstOperandToken(operands string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[0])
-}
-
-// trackARM64PoolBase maintains the register -> pool-base map for the
-// two-instruction object-pool form.
-//
-// Dart's LoadWordFromPoolIndex emits a single `ldr xD, [PP, #imm]` only
-// while the displacement fits the 12-bit unsigned-offset field. Past that
-// it emits `add xT, PP, #hi` then `ldr xD, [xT, #lo]`, and the lifter
-// recognised only the first form -- so on a real production binary 38716
-// of 64601 pool loads (60%) produced no OpLoadPool at all, and every
-// string, class and stub reference behind them was invisible to the
-// pseudocode, to strxref, and to anything else reading PoolIndex.
-func trackARM64PoolBase(inst disasm.Inst, poolBase map[int]int64) {
-	if rd, rn, imm, ok := arm64.ADD64Immediate(inst.Raw); ok && rn == sdk.ARM64PP && rd < 31 {
-		poolBase[rd] = int64(imm)
-		return
-	}
-	// Anything else that writes a tracked register invalidates it. A base
-	// that survived its register being overwritten would resolve a later
-	// load against an address that no longer exists.
-	for _, rd := range arm64.DstRegsOfInst(inst.Raw) {
-		delete(poolBase, rd)
-	}
-}
-
-// arm64PoolIndexViaBase resolves `ldr xD, [xT, #lo]` where xT was set by
-// an earlier `add xT, PP, #hi`, returning the pool slot index or -1.
-func arm64PoolIndexViaBase(inst disasm.Inst, poolBase map[int]int64) int {
-	if len(poolBase) == 0 {
-		return -1
-	}
-	base, off, ok := arm64.LDR64UnsignedOffset(inst.Raw)
-	if !ok {
-		b, _, o, uok := arm64.LDUR64(inst.Raw)
-		if !uok {
-			return -1
-		}
-		base, off = b, o
-	}
-	hi, tracked := poolBase[base]
-	if !tracked {
-		return -1
-	}
-	idx, ok := disasm.ARM64PoolIndex(int(hi + int64(off)))
-	if !ok {
-		return -1
-	}
-	return idx
-}
-
-// isARM64PoolLoad recognizes "ldr/ldur xD, [x27, #imm]" (or w-register
-// variants) -- a load from the object pool register.
-func isARM64PoolLoad(operands string) bool {
-	lower := strings.ToLower(operands)
-	return strings.Contains(lower, "["+sdk.ARM64PoolRegStr) || strings.Contains(lower, "[ "+sdk.ARM64PoolRegStr)
-}
-
-// arm64PoolIndex extracts the #imm offset from a "[x27, #imm]" operand
-// and converts it to a pool slot index via disasm.ARM64PoolIndex, which
-// carries the SDK layout constants (elements start at +16, 8 bytes each,
-// PP untagged on ARM64).
-func arm64PoolIndex(operands string) int {
-	i := strings.Index(operands, "#")
-	if i < 0 {
-		return -1
-	}
-	rest := operands[i+1:]
-	end := strings.IndexAny(rest, "] \t")
-	if end >= 0 {
-		rest = rest[:end]
-	}
-	rest = strings.TrimSuffix(rest, "]")
-	var v int64
-	var err error
-	if strings.HasPrefix(rest, "0x") {
-		v, err = strconv.ParseInt(rest[2:], 16, 64)
-	} else {
-		v, err = strconv.ParseInt(rest, 10, 64)
-	}
-	if err != nil || v < 0 {
-		return -1
-	}
-	idx, ok := disasm.ARM64PoolIndex(int(v))
-	if !ok {
-		return -1
-	}
-	return idx
 }
 
 // applyOtherARM64 handles ARM64-only mnemonics in ApplyOther's switch.
@@ -343,9 +276,37 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 				}
 			}
 			old := s.lookupReg(dst)
-			s.setReg(dst, fmt.Sprintf("(%s | (%s << %s))", old, imm, shift))
+			expr := fmt.Sprintf("((%s & ~(0xffff << %s)) | ((%s & 0xffff) << %s))", old, shift, imm, shift)
+			// A W-register write zero-extends into the corresponding X register.
+			if strings.HasPrefix(dst, "w") {
+				expr = fmt.Sprintf("(%s & 0xffffffff)", expr)
+			}
+			s.setReg(dst, expr)
 		}
 		return "", false, true
+	case "sbfx", "sbfiz":
+		// Signed bitfield extract / insert-in-zeros. The two shapes the compiler
+		// emits for compressed Smis (kSmiTagSize = 1):
+		//   SBFX  Xd, Xn, #1, #w  : SmiUntag with sign extension  -> Xn >> 1
+		//   SBFIZ Xd, Xn, #1, #31 : SmiTag of a 31-bit value       -> Xn << 1
+		// Anything else is a different bitfield operation: its destination is
+		// left unknown (the generic default drops it) rather than guessed.
+		if len(ops) >= 4 {
+			dst := strings.ToLower(ops[0])
+			src := operandExpr(fir, s, ops[1])
+			lsb, ok1 := parseImm(ops[2])
+			width, ok2 := parseImm(ops[3])
+			if ok1 && ok2 && lsb == 1 && width >= 31 {
+				if mnemonic == "sbfx" {
+					s.setReg(dst, fmt.Sprintf("(%s >> 1)", src))
+					return "", false, true
+				}
+				s.setReg(dst, fmt.Sprintf("(%s << 1)", src))
+				return "", false, true
+			}
+			delete(s.Regs, canonReg(dst))
+			return "", false, true
+		}
 	case "ubfx":
 		if len(ops) >= 4 {
 			dst := strings.ToLower(ops[0])
@@ -356,7 +317,8 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			// The well-known Dart object class-id bitfield idiom
 			// (lsb=12 / 0xc, width=20 / 0x14 on ARM64) renders directly as
 			// classId(...) instead of the generic bitField(...) form.
-			if ok1 && ok2 && pos == sdk.ClassIdTagPosV3 && width == sdk.ClassIdTagSizeV3 {
+			classIDPos, classIDSize, layoutOK := snapshot.ClassIdTagLayout(fir.DartVersion)
+			if ok1 && ok2 && layoutOK && pos == int64(classIDPos) && width == int64(classIDSize) {
 				expr = fmt.Sprintf("classId(%s)", strings.TrimSuffix(src, "._tag"))
 			}
 			s.setReg(dst, expr)
@@ -384,9 +346,15 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			rhs, ok := shiftedOperand(fir, s, ops, 1)
 			s.LastCmp = [2]string{operandExpr(fir, s, ops[0]), negateExpr(rhs)}
 			s.HasCmp = ok
+			s.CmpBits = cmpBitWidthFromOperand(ops[0])
 		}
 		return "", false, true
 	case "str", "stur":
+		if len(ops) >= 2 && isArm64PreIndexSPPush(fir, ops[1]) {
+			v := operandExpr(fir, s, ops[0])
+			s.Pushed = append(s.Pushed, v)
+			return fmt.Sprintf("push(%s);", v), true, true
+		}
 		if len(ops) >= 2 {
 			line, hasLine := applyStore(fir, s, ops[1], ops[0])
 			return line, hasLine, true
@@ -432,6 +400,12 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 					return "", false, true
 				}
 			}
+			if isArm64PreIndexSPPush(fir, ops[2]) {
+				a, b := operandExpr(fir, s, ops[0]), operandExpr(fir, s, ops[1])
+				pushed := pushedByStp(a, b)
+				s.Pushed = append(s.Pushed, pushed...)
+				return fmt.Sprintf("push(%s);\npush(%s);", pushed[0], pushed[1]), true, true
+			}
 			// Store pair: stp src1, src2, [mem] — emit as two stores.
 			line1, handled := applyStore(fir, s, ops[2], ops[0])
 			op := parseOperand(ops[2])
@@ -453,10 +427,11 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 			dst := strings.ToLower(ops[0])
 			src1 := operandExpr(fir, s, ops[1])
 			src2 := operandExpr(fir, s, ops[2])
-			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[3])))
+			cc := strings.ToLower(strings.TrimSpace(ops[3]))
+			condOp := arm64CondOp(cc)
 			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[3]))
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, arm64CondUnsigned(cc)); ok {
+				condStr = rendered
 			}
 			var elseExpr string
 			switch mnemonic {
@@ -475,10 +450,11 @@ func applyOtherARM64(fir *FuncIR, s *LiftState, mnemonic string, ops []string) (
 	case "cset", "csetm":
 		if len(ops) >= 2 {
 			dst := strings.ToLower(ops[0])
-			condOp := arm64CondOp(strings.ToLower(strings.TrimSpace(ops[1])))
+			cc := strings.ToLower(strings.TrimSpace(ops[1]))
+			condOp := arm64CondOp(cc)
 			condStr := fmt.Sprintf("/* %s */", strings.ToLower(ops[1]))
-			if s.HasCmp && condOp != "?" {
-				condStr = fmt.Sprintf("%s %s %s", s.LastCmp[0], condOp, s.LastCmp[1])
+			if rendered, ok := rememberedCmpCondition(s, condOp, arm64CondUnsigned(cc)); ok {
+				condStr = rendered
 			}
 			if mnemonic == "cset" {
 				s.setReg(dst, fmt.Sprintf("(%s ? 1 : 0)", condStr))

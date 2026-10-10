@@ -1,9 +1,12 @@
 package analysis
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"aotopsy/internal/output"
 )
 
 // The Ghidra/IDA integration assets were absent from a clean clone for several
@@ -222,5 +225,38 @@ func TestCopyArtifactsFailsWhenAssetsMissing(t *testing.T) {
 	}
 	if got, err := CopyIDAArtifacts(outDir); err == nil {
 		t.Errorf("CopyIDAArtifacts succeeded with no assets installed: %s", got)
+	}
+}
+
+func TestAugmentOutputGenerationFailurePreservesCurrentGeneration(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "out")
+	tx, err := output.BeginDirTransaction(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.WriteArtifactFile(tx.StageDir(), "existing.txt", []byte("old"), 0o600); err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected integration artifact failure")
+	err = augmentOutputGeneration(outDir, func(stage string) error {
+		if err := output.WriteArtifactFile(stage, "ghidra/first.py", []byte("partial"), 0o600); err != nil {
+			return err
+		}
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("augment error = %v, want injected failure", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(outDir, "existing.txt")); err != nil || string(b) != "old" {
+		t.Fatalf("failed augmentation changed current generation: %q, %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "ghidra", "first.py")); !os.IsNotExist(err) {
+		t.Fatalf("partial integration artifact became current: %v", err)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"aotopsy/internal/decompiler/compare"
 	"aotopsy/internal/decompiler/stmt"
 	"aotopsy/internal/sdk"
 )
@@ -108,11 +107,6 @@ func TestQualityGateArm64AndX64Synthetic(t *testing.T) {
 	x64Art := EmitPseudocode(x64Fir, nil, nil)
 	if probs := ValidateSource(x64Art.Source); len(probs) > 0 {
 		t.Errorf("x86_64 pseudocode validation failed: %v\nSource:\n%s", probs, x64Art.Source)
-	}
-
-	idStats := compare.CollectIdentStats(armArt.Source)
-	if len(idStats) == 0 {
-		t.Errorf("expected ident stats on ARM64, got 0")
 	}
 }
 
@@ -518,19 +512,31 @@ func TestStringInterpolationIdiom(t *testing.T) {
 	input := []string{
 		"dynamic sample() {",
 		`  final msg = _StringBase._interpolate(["Hello, ", name, "!"]);`,
+		`  final one = _StringBase._interpolateSingle(x);`,
+		// Real output carries a register list, not the List literal: the parts are
+		// not visible in the call, so nothing may be invented from it.
+		`  final raw = _StringBase._interpolate(null, acc, local_m16);`,
+		// `_StringBase.concat` does not exist in any supported SDK (string `+` is
+		// an operator method), so it must never be rewritten to an interpolation.
 		`  final pair = _StringBase.concat(a, b);`,
 		"  return msg;",
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "_StringBase._interpolate") || strings.Contains(compacted, "_StringBase.concat") {
-		t.Errorf("Phase 5 violation: string interpolation call was not converted:\n%s", compacted)
+	if strings.Contains(compacted, `_StringBase._interpolate(["Hello`) || strings.Contains(compacted, "_interpolateSingle") {
+		t.Errorf("single-argument interpolation call was not converted:\n%s", compacted)
 	}
 	if !strings.Contains(compacted, `"Hello, $name!"`) {
 		t.Errorf("expected template literal '\"Hello, $name!\"', got:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, `"$a$b"`) {
-		t.Errorf("expected template literal '\"$a$b\"', got:\n%s", compacted)
+	if !strings.Contains(compacted, `"$x"`) {
+		t.Errorf("expected template literal '\"$x\"', got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "_interpolate(null, acc, local_m16)") {
+		t.Errorf("a multi-argument _interpolate call must be left untouched, got:\n%s", compacted)
+	}
+	if !strings.Contains(compacted, "_StringBase.concat(a, b)") {
+		t.Errorf("_StringBase.concat is not an SDK function and must not be rewritten, got:\n%s", compacted)
 	}
 }
 
@@ -553,6 +559,54 @@ func TestReturnTypeEmission(t *testing.T) {
 	art := EmitPseudocode(fir, nil, nil)
 	if !strings.HasPrefix(strings.TrimSpace(art.Source), "int computeScore()") {
 		t.Errorf("expected signature to start with 'int computeScore()', got:\n%s", art.Source)
+	}
+}
+
+func TestReturnDoesNotFabricateUntrackedMachineRegister(t *testing.T) {
+	for _, tc := range []struct {
+		name, ret string
+	}{
+		{"arm64", sdk.ARM64ReturnRegStr},
+		{"x64", sdk.X86ReturnRegStr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fir := newFuncIR("unknownReturn", 0x1000)
+			fir.ReturnReg = tc.ret
+			fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Op: OpReturn, Src: "ret"}}})
+			src := EmitPseudocode(fir, nil, nil).Source
+			if strings.Contains(src, "return "+tc.ret+";") {
+				t.Fatalf("untracked machine return register leaked as source value:\n%s", src)
+			}
+			if !strings.Contains(src, "return;") {
+				t.Fatalf("unknown return should degrade to bare return:\n%s", src)
+			}
+		})
+	}
+}
+
+func TestVoidReturnIgnoresStaleTrackedRegister(t *testing.T) {
+	fir := newFuncIR("voidFn", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.ReturnType = "void"
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{
+		{Op: OpOther, Src: "mov x0, #99"},
+		{Op: OpReturn, Src: "ret"},
+	}})
+	src := EmitPseudocode(fir, nil, nil).Source
+	if strings.Contains(src, "return 99;") || !strings.Contains(src, "return;") {
+		t.Fatalf("declared void function emitted a value return:\n%s", src)
+	}
+}
+
+func TestArm64UntouchedFpuArgumentIsNotAssumedReturned(t *testing.T) {
+	fir := newFuncIR("unknownFpuReturn", 0x1000)
+	fir.ReturnReg = sdk.ARM64ReturnRegStr
+	fir.FpuArgRegs = []string{"v0"}
+	fir.FpuReturnReg = "v0"
+	fir.addBlock(Block{ID: 0, StartVA: 0x1000, Instrs: []Instr{{Op: OpReturn, Src: "ret"}}})
+	src := EmitPseudocode(fir, nil, nil).Source
+	if strings.Contains(src, "fparg0") {
+		t.Fatalf("FPU ABI slot was fabricated as an undeclared source parameter:\n%s", src)
 	}
 }
 
@@ -603,8 +657,12 @@ func TestNullAwareAndCascadeReconstruction(t *testing.T) {
 	}
 }
 
-// TestAsyncStateMachineLinearization verifies Phase 7: async state machine dispatch is unwrapped into linear await statements.
-func TestAsyncStateMachineLinearization(t *testing.T) {
+// A sequential integer branch inside an async function is still ordinary source
+// control flow unless the machine code proves a suspension dispatcher. Compact
+// SuspendState lowering stores a resume PC, not these small state ordinals, so
+// flattening this tree would delete a real condition. Exact await helper text may
+// still be normalized inside the preserved branch.
+func TestAsyncIntegerBranchesAreNotFlattenedAsStateMachine(t *testing.T) {
 	input := []string{
 		"dynamic fetchUser() async {",
 		"  if (state == 0) {",
@@ -617,14 +675,14 @@ func TestAsyncStateMachineLinearization(t *testing.T) {
 		"}",
 	}
 	compacted := compactLines(strings.Join(input, "\n"))
-	if strings.Contains(compacted, "if (state == 0)") || strings.Contains(compacted, "} else if (state == 1)") {
-		t.Errorf("Phase 7 violation: async state machine dispatch was not unwrapped:\n%s", compacted)
+	if !strings.Contains(compacted, "if (state == 0)") || !strings.Contains(compacted, "} else if (state == 1)") {
+		t.Errorf("ordinary async integer branches were flattened/fabricated:\n%s", compacted)
 	}
-	if !strings.Contains(compacted, "await") {
-		t.Errorf("expected linear await in output:\n%s", compacted)
+	if !strings.Contains(compacted, "final t1 = await fut;") {
+		t.Errorf("exact await helper normalization was lost:\n%s", compacted)
 	}
 	if !strings.Contains(compacted, "return parseUser(") {
-		t.Errorf("expected return parseUser in output:\n%s", compacted)
+		t.Errorf("branch body was lost:\n%s", compacted)
 	}
 }
 
@@ -719,5 +777,30 @@ func TestTypedDeclarations(t *testing.T) {
 	}
 	if !strings.Contains(compacted, `final UserModel user = UserModel();`) {
 		t.Errorf("expected typed UserModel declaration, got:\n%s", compacted)
+	}
+}
+
+func TestTypedCollectionDeclarationsFollowDartLiteralGrammar(t *testing.T) {
+	input := []string{
+		"dynamic collections() {",
+		"  final empty = {};",
+		`  final strings = {"a:b"};`,
+		"  final ternary = {cond ? a : b};",
+		"  final nestedMapSet = {{1: 2}};",
+		"  final map = {1: 2};",
+		"  return empty;",
+		"}",
+	}
+	got := compactLines(strings.Join(input, "\n"))
+	for _, want := range []string{
+		"final Map empty = {};",
+		`final Set strings = {"a:b"};`,
+		"final Set ternary = {cond ? a : b};",
+		"final Set nestedMapSet = {{1: 2}};",
+		"final Map map = {1: 2};",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }

@@ -49,9 +49,21 @@ cosign verify-blob \
 gh attestation verify ./aotopsy --repo BroNils/aotopsy
 ```
 
-## Handling of analyzed apps
+## Responsible use
 
 AOTopsy runs entirely offline and does not transmit analyzed binaries or extracted data
-anywhere. When reverse-engineering third-party apps, follow the applicable laws and terms;
-recovered secrets, keys, or endpoints are the responsibility of the operator and must not
-be committed to this repository.
+anywhere. Use it on software you own, or that you are authorized to analyze: your own
+apps, malware samples you are investigating, or targets inside the scope of a bug bounty
+program or vulnerability disclosure policy.
+
+- Do not use it to analyze software you have no right to analyze, to circumvent licensing,
+  DRM, or anti-cheat, or to gain unauthorized access to anything. The maintainers do not
+  support or endorse such use.
+- Laws and license terms about reverse engineering differ by jurisdiction and by product.
+  Checking them before you start is the operator's responsibility.
+- Report vulnerabilities you find in someone else's app to its vendor, following their
+  disclosure policy.
+- Secrets, keys, or endpoints recovered from any binary are the operator's responsibility
+  and must not be committed to this repository.
+- Test binaries (`samples/`) are never committed or redistributed. Do not open issues or
+  pull requests that attach application binaries you do not have the right to share.

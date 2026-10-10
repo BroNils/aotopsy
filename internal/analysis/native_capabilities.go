@@ -7,20 +7,25 @@ import (
 	"aotopsy/internal/sdk"
 )
 
-// NativeCapability is one VM native the snapshot can reach.
+// NativeCapability is an exact SDK-native name present in the snapshot string
+// inventory. Presence proves the native identity is available in the recovered
+// snapshot; it does not prove an application function calls or reaches it.
 type NativeCapability struct {
-	Name     string `json:"name"`
-	Category string `json:"category"`
-	RefID    int    `json:"ref_id"`
+	Name               string `json:"name"`
+	Category           string `json:"category"`
+	RefID              int    `json:"ref_id"`
+	Evidence           string `json:"evidence"`
+	IdentityConfidence string `json:"identity_confidence"`
+	UsageEvidence      string `json:"usage_evidence"`
 }
 
-// BuildNativeCapabilities lists the VM native functions a snapshot can
-// reach, classified by what reaching them means.
+// BuildNativeCapabilities inventories exact VM native names found in recovered
+// snapshot strings. It is a capability/inventory surface, not call evidence.
 //
 // These names sit in the object pool as ordinary strings -- Ffi_dl_open,
 // File_Open, Socket_CreateConnect, Process_Start -- and they are the most
-// durable behavioural evidence a stripped binary offers: the VM resolves
-// natives by name at runtime, so obfuscation cannot touch them.
+// durable native-identity evidence a stripped binary offers: the VM resolves
+// natives by name at runtime, so obfuscation cannot touch those names.
 //
 // They are deliberately NOT read from string_refs. Nothing in generated
 // Dart code loads them -- measured: zero of the 105 native names in
@@ -34,7 +39,7 @@ type NativeCapability struct {
 // Both snapshots are scanned. Most native names live in the VM snapshot's
 // string pool, not the isolate's: reading only the isolate found 20 of the
 // 105 that a raw `strings` sweep shows.
-func BuildNativeCapabilities(isolate, vm *cluster.Result) []NativeCapability {
+func BuildNativeCapabilities(dartVersion string, isolate, vm *cluster.Result) []NativeCapability {
 	seen := make(map[string]bool, 128)
 	var out []NativeCapability
 	for _, res := range []*cluster.Result{vm, isolate} {
@@ -45,12 +50,19 @@ func BuildNativeCapabilities(isolate, vm *cluster.Result) []NativeCapability {
 			if seen[ps.Value] {
 				continue
 			}
-			cat, ok := sdk.DartNativeCategory(ps.Value)
+			cat, ok := sdk.DartNativeCategory(dartVersion, ps.Value)
 			if !ok {
 				continue
 			}
 			seen[ps.Value] = true
-			out = append(out, NativeCapability{Name: ps.Value, Category: cat, RefID: ps.RefID})
+			out = append(out, NativeCapability{
+				Name:               ps.Value,
+				Category:           cat,
+				RefID:              ps.RefID,
+				Evidence:           "snapshot_native_name",
+				IdentityConfidence: "high",
+				UsageEvidence:      "not_established",
+			})
 		}
 	}
 	// Deterministic order: the artifact is hashed by the golden gate, and

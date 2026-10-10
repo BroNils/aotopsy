@@ -12,7 +12,7 @@ func TestELFStubNameOnlyFillsAGap(t *testing.T) {
 		0x15b58c: "stub _iso_stub_AwaitStub",
 		0x1364f8: "assert type is HitTestTarget",
 	}
-	if got, want := ElfStubName(syms, 0x15b58c, "sub_2560c"), "stub__iso_stub_AwaitStub"; got != want {
+	if got, want := ElfStubName(syms, 0x15b58c, "sub_2560c"), "stub _iso_stub_AwaitStub"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	// An address the table does not describe keeps the placeholder.
@@ -25,14 +25,12 @@ func TestELFStubNameOnlyFillsAGap(t *testing.T) {
 	}
 }
 
-// These names are Dart-side prose rather than identifiers -- "new Duration",
-// "assert type is HitTestTarget" -- so a consumer that splits a function name
-// on whitespace would see several tokens. The text is kept; only the
-// separator changes.
-func TestELFStubNameHasNoSpaces(t *testing.T) {
+// ELF fallback is semantic identity. Sanitizing it here would make the same
+// name differ depending on whether it came from the snapshot or the ELF.
+func TestELFStubNamePreservesSemanticProse(t *testing.T) {
 	syms := map[uint64]string{0x10: "assert type is HitTestTarget"}
 	got := ElfStubName(syms, 0x10, "sub_10")
-	if want := "assert_type_is_HitTestTarget"; got != want {
+	if want := "assert type is HitTestTarget"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

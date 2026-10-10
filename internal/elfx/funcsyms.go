@@ -22,27 +22,56 @@ import "debug/elf"
 // ("stub CheckIsolateFieldAccess", "assert type is HitTestTarget",
 // "new Duration"), so callers must not assume identifier syntax.
 
-// FuncSymbols returns virtual address -> symbol name for every STT_FUNC
-// symbol in `.symtab`. Returns nil when the binary is stripped, which is the
-// normal case for a production build and is not an error.
-func (f *File) FuncSymbols() map[uint64]string {
-	syms, err := f.ELF.Symbols()
-	if err != nil {
-		return nil // no .symtab: stripped
+// FuncSymbols returns virtual address -> symbol name for every STT_FUNC symbol
+// in `.symtab`. A genuinely stripped binary returns (nil,nil); malformed symbol
+// tables are errors and must never be disguised as "stripped", because callers
+// use this API as an external naming ground-truth gate.
+func (f *File) FuncSymbols() (map[uint64]string, error) {
+	if f == nil || !f.symtabPresent {
+		return nil, nil
 	}
-	out := make(map[uint64]string, len(syms))
-	for _, s := range syms {
-		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Name == "" || s.Value == 0 {
+	if err := f.ensureStaticSymbolTable(); err != nil {
+		return nil, err
+	}
+	if len(f.symtab) == 0 {
+		return nil, nil
+	}
+	out := make(map[uint64]string, len(f.symtab))
+	for _, s := range f.symtab {
+		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Name == "" || s.Section == elf.SHN_UNDEF {
 			continue
 		}
-		// Two symbols on one address would make the choice arbitrary; keep
-		// the first and do not overwrite, so the result is deterministic.
-		if _, exists := out[s.Value]; !exists {
+		// Values in the reserved section-index range are not indexes into
+		// f.elfFile.Sections. SHN_ABS and SHN_COMMON are valid ELF values, while
+		// SHN_XINDEX means the real index lives in SHT_SYMTAB_SHNDX (which
+		// debug/elf does not resolve for symbols). None identifies an executable
+		// section we can safely use as function ground truth, so skip them.
+		if s.Section >= elf.SHN_LORESERVE {
+			continue
+		}
+		sectionIndex := int(s.Section)
+		if sectionIndex < 0 || sectionIndex >= len(f.elfFile.Sections) {
+			return nil, malformedf("function symbol %q has invalid section index %d", s.Name, s.Section)
+		}
+		sec := f.elfFile.Sections[sectionIndex]
+		if sec == nil || sec.Flags&elf.SHF_EXECINSTR == 0 {
+			continue
+		}
+		// A STT_FUNC tag alone is not proof that the symbol points into the
+		// section it names. Malformed/legacy tables can carry container symbols
+		// or out-of-range values; never expose those as callable addresses.
+		if err := f.validateExecutableSymbol(s); err != nil {
+			return nil, malformedf("function symbol %q: %v", s.Name, err)
+		}
+		// Same-VA aliases are common enough to preserve, but choosing by symbol
+		// table order would make attacker-controlled ordering observable. Use a
+		// stable lexical primary name instead.
+		if old, exists := out[s.Value]; !exists || s.Name < old {
 			out[s.Value] = s.Name
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }

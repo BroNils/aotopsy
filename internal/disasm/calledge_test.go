@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"aotopsy/internal/arch/arm64"
+	"aotopsy/internal/sdk"
 	"aotopsy/internal/vmtables"
 )
 
@@ -78,7 +79,7 @@ func TestExtractCallEdgesCFG_BL(t *testing.T) {
 		0x100C: "target_func",
 	})
 
-	edges := ExtractCallEdgesCFG("test_fn", insts, symbols, nil)
+	edges := ExtractCallEdgesCFG("test_fn", insts, symbols, nil, nil)
 	if len(edges) != 1 {
 		t.Fatalf("got %d edges, want 1", len(edges))
 	}
@@ -104,10 +105,10 @@ func TestExtractCallEdgesCFG_BLR_WithProvenance(t *testing.T) {
 		{Addr: 0x1004, Raw: blrX16, Text: "BLR X16"},
 	}
 
-	thrFields := vmtables.THRFields("3.10.7", true)
+	thrFields := vmtables.THRFields(vmtables.TargetProfile{DartVersion: "3.10.7", Architecture: vmtables.ArchitectureARM64, CompressedPointers: true})
 	thrAnn := THRContextAnnotator(insts, thrFields)
 
-	edges := ExtractCallEdgesCFG("test_fn", insts, nil, []Annotator{thrAnn})
+	edges := ExtractCallEdgesCFG("test_fn", insts, nil, []Annotator{thrAnn}, nil)
 	if len(edges) != 1 {
 		t.Fatalf("got %d edges, want 1", len(edges))
 	}
@@ -144,7 +145,7 @@ func TestInferCallArgRegMaskLocal(t *testing.T) {
 		{Addr: 0x1010, Raw: blTarget},
 	}
 
-	mask := inferCallArgRegMaskLocal(insts, 4)
+	mask := inferCallArgRegMaskLocal(insts, 4, 0)
 	// Expected bits set:
 	// pos 0 (R1) -> bit 0 (1)
 	// pos 1 (R2) -> bit 1 (2)
@@ -157,5 +158,30 @@ func TestInferCallArgRegMaskLocal(t *testing.T) {
 	}
 	if gotCount := inferCallArgCountLocal(insts, 4); gotCount != 3 {
 		t.Errorf("inferCallArgCountLocal count = %d, want 3", gotCount)
+	}
+}
+
+func TestInferCallArgRegMaskDoesNotCrossBasicBlockStart(t *testing.T) {
+	insts := []Inst{
+		{Addr: 0x1000, Raw: 0xD2800141}, // MOV X1,#10 in predecessor/dead span
+		{Addr: 0x1004, Raw: 0xD2800282}, // MOV X2,#20 outside call block
+		{Addr: 0x1008, Raw: 0xD28003C5}, // MOV X5,#30 inside call block
+		{Addr: 0x100c, Raw: 0x94000002}, // BL
+	}
+	if got := inferCallArgRegMaskLocal(insts, 3, 2); got != 0b1000 {
+		t.Fatalf("mask crossed block boundary: got 0b%b, want 0b1000", got)
+	}
+}
+
+func TestCodeEntryPointDispAOTOnly(t *testing.T) {
+	for _, off := range []int{0x7, 0xf, 0x17, 0x1f} {
+		if !sdk.IsCodeEntryPointDisp(off) {
+			t.Errorf("AOT Code entry-point displacement %#x rejected", off)
+		}
+	}
+	for _, off := range []int{0x3, 0xb} {
+		if sdk.IsCodeEntryPointDisp(off) {
+			t.Errorf("non-AOT compressed-layout displacement %#x accepted", off)
+		}
 	}
 }

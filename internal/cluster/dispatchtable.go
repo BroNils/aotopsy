@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"os"
+	"unsafe"
 
 	"aotopsy/internal/dartfmt"
 	"aotopsy/internal/snapshot"
@@ -86,8 +87,13 @@ const (
 // Returns an error (not a guess) if ObjectStoreAOTFieldCount is 0
 // (unverified for this Dart version) or result.FillEnd is unset (0,
 // meaning ReadFill was never run).
-func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable) ([]DispatchTableEntry, error) {
-
+func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionProfile, table *InstructionsTable, opts dartfmt.Options) ([]DispatchTableEntry, error) {
+	if result == nil {
+		return nil, fmt.Errorf("dispatch table: nil cluster result")
+	}
+	if !snapshot.IsExactSupportedProfile(profile) {
+		return nil, fmt.Errorf("dispatch table: exact supported snapshot profile required")
+	}
 	if result.FillEnd <= 0 {
 		return nil, fmt.Errorf("dispatch table: ReadFill must run first (FillEnd unset)")
 	}
@@ -101,6 +107,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// We build a refID → CodeEntry lookup from result.Codes.
 	useTextOffsetFallback := table == nil
 	if useTextOffsetFallback {
+		if !profile.CodeTextOffsetDelta {
+			return nil, fmt.Errorf("dispatch table: InstructionsTable required for Dart %s", profile.DartVersion)
+		}
 		if len(result.Codes) == 0 {
 			return nil, fmt.Errorf("dispatch table: no Codes available for Dart %s TextOffset fallback", profile.DartVersion)
 		}
@@ -112,24 +121,16 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 		// This will be done after reading first_code_id below.
 	}
 
-	s := dartfmt.NewStreamAt(data, result.FillEnd)
-	fillRefUnsigned := profile.FillRefUnsigned
-
-	// 0. The Roots prefix, from 3.13.0 on: VM bootstrap objects and the
-	// predefined class table, read before anything else. Zero on every
-	// earlier version. See snapshot.VersionProfile.RootsPrefixRefCount for
-	// the SDK derivation and for what breaks when it is skipped.
-	for i := 0; i < profile.RootsPrefixRefCount; i++ {
-		if _, err := readRef(s, fillRefUnsigned); err != nil {
-			return nil, fmt.Errorf("dispatch table: roots prefix ref %d/%d: %w", i, profile.RootsPrefixRefCount, err)
-		}
+	s, err := dartfmt.NewStreamAt(data, result.FillEnd)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch table: stream start: %w", err)
 	}
+	fillRefUnsigned := profile.FillRefUnsigned
+	maxSteps := opts.EffectiveMaxSteps()
 
-	// 1. ObjectStore fields -- kept, indexed by their position in the
-	// serialized range (ObjectStore::from() through to_snapshot(kFullAOT)).
-	// ReadObjectStoreRefs reads the same prefix on its own for callers that
-	// need the names before type tracking runs; the two must stay identical,
-	// which is why this loop fills the same slice rather than a private one.
+	// 0-1. Roots prefix (3.13.0+) plus ObjectStore fields. The exact same walk
+	// is used by ReadObjectStoreRefs for early name resolution; centralizing it
+	// prevents those two consumers from drifting on a future roots-layout change.
 	//
 	// These used to be read and thrown away, on the grounds that the
 	// dispatch table only needs the stream advanced. But 89 of these fields
@@ -139,16 +140,8 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// every one of them falls through to `sub_<pcOffset>`. Measured on
 	// dart-3.9.2-gt-arm64: 85 of 8049 ranges unnamed, and all 85 are
 	// `_iso_stub_*` in the ELF symbol table.
-	osRefs := make([]int, 0, profile.ObjectStoreAOTFieldCount)
-	for i := 0; i < profile.ObjectStoreAOTFieldCount; i++ {
-		r, err := readRef(s, fillRefUnsigned)
-		if err != nil {
-			return nil, fmt.Errorf("dispatch table: object_store field %d/%d: %w", i, profile.ObjectStoreAOTFieldCount, err)
-		}
-		osRefs = append(osRefs, int(r))
-	}
-	if result.ObjectStoreRefs == nil {
-		result.ObjectStoreRefs = osRefs
+	if err := readObjectStoreRefsFromStream(s, result, profile); err != nil {
+		return nil, fmt.Errorf("dispatch table: %w", err)
 	}
 
 	// 2. initial_field_table, 3. shared_initial_field_table.
@@ -173,13 +166,11 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	// type-inference stage -- no typetrack_report.json and every BLR edge left
 	// unresolved. It went unnoticed because the only samples this was ever run
 	// against were 3.7.0 and 3.10.7, where reading both is correct.
-	readInitial := snapshot.VersionAtLeast(profile.DartVersion, "2.18.0")
-	readShared := snapshot.VersionAtLeast(profile.DartVersion, "3.5.0")
 	tables := make([]string, 0, 2)
-	if readInitial {
+	if profile.RootsHasInitialFieldTable {
 		tables = append(tables, "initial_field_table")
 	}
-	if readShared {
+	if profile.RootsHasSharedInitialFieldTable {
 		tables = append(tables, "shared_initial_field_table")
 	}
 	for _, name := range tables {
@@ -189,6 +180,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 		}
 		if err != nil {
 			return nil, fmt.Errorf("dispatch table: %s count: %w", name, err)
+		}
+		if n < 0 || n > int64(maxSteps) {
+			return nil, fmt.Errorf("dispatch table: %s count %d exceeds max_steps %d", name, n, maxSteps)
 		}
 		for i := int64(0); i < n; i++ {
 			if _, err := readRef(s, fillRefUnsigned); err != nil {
@@ -205,12 +199,15 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	if length == 0 {
 		return nil, nil
 	}
-	// P5-3 (D-027): Cap length against data size to prevent OOM on
-	// malformed input. Each dispatch table entry requires at least 1
-	// byte in the encoded stream, so length can't exceed len(data)*8.
-	maxLen := int64(len(data)) * 8
-	if length > maxLen {
-		return nil, fmt.Errorf("dispatch table: length %d exceeds data bounds %d (corrupt snapshot?)", length, maxLen)
+	if length < 0 || length > int64(maxSteps) {
+		return nil, fmt.Errorf("dispatch table: length %d exceeds max_steps %d", length, maxSteps)
+	}
+	if opts.MaxBytes > 0 {
+		entrySize := int64(unsafe.Sizeof(DispatchTableEntry{}))
+		maxEntries := int64(opts.MaxBytes) / entrySize
+		if length > maxEntries {
+			return nil, fmt.Errorf("dispatch table: decoded output for %d entries exceeds max_bytes %d", length, opts.MaxBytes)
+		}
 	}
 	firstCodeID, err := s.ReadUnsigned()
 	if err != nil {
@@ -238,7 +235,7 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 	var value DispatchTableEntry
 	repeatCount := int64(0)
 
-	entries := make([]DispatchTableEntry, 0, length)
+	entries := make([]DispatchTableEntry, 0, initialCaptureCap(length, s.Remaining()))
 	for i := int64(0); i < length; i++ {
 		if repeatCount > 0 {
 			e := value
@@ -266,6 +263,9 @@ func ParseDispatchTable(data []byte, result *Result, profile *snapshot.VersionPr
 			// previous entry's value); repeatCount governs how many
 			// MORE entries after this one also get it.
 			repeatCount = encoded - 1
+			if repeatCount > length-i-1 {
+				return entries, fmt.Errorf("dispatch table: entry %d repeat count %d exceeds remaining %d entries", i, repeatCount, length-i-1)
+			}
 		default:
 			// code_index encoding is version-dependent:
 			// Dart >=2.16: code_index is 1-based (0=LazyCompile stub),

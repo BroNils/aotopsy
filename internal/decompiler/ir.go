@@ -10,7 +10,6 @@
 package decompiler
 
 import (
-	"sort"
 	"strings"
 
 	"aotopsy/internal/cluster"
@@ -30,6 +29,13 @@ const (
 	OpLoadPool
 )
 
+// PoolLoad is one destination register of a paired pool load and the pool
+// index it receives.
+type PoolLoad struct {
+	Reg   string
+	Index int
+}
+
 // Instr is one lifted instruction. Src is the normalized, lowercased
 // "mnemonic operand1, operand2, ..." text for BOTH architectures -- ARM64
 // and x86_64 instructions are rendered into the same textual shape so a
@@ -40,10 +46,20 @@ type Instr struct {
 	Op     Op
 	Src    string
 	Target string // resolved target: "0x<hex>" VA, a register name (indirect), or "" if RET
-	// PoolIndex is set for OpLoadPool when the pool slot index is known
-	// (ARM64: MOV Xd, [x27/PP, #imm]; x86_64: MOV reg, [r15+imm]). For
-	// OpLoadPool, Target holds the destination register name.
+	// DefRegs is the canonical general-purpose register write-set for this
+	// instruction. Downstream dataflow consumers use it to invalidate facts on
+	// actual writes rather than guessing from mnemonic text. Names use the same
+	// lowercase 64-bit spelling as FuncIR.ArgRegs (xN / rax..r15).
+	DefRegs []string
+	// PoolIndex is set for OpLoadPool when the pool slot index is known.
+	// ARM64 uses the canonical SDK LoadWordFromPoolIndex shape extractor
+	// (direct and materialized-address forms); x86_64 uses static MOV loads from
+	// [r15+disp]. For OpLoadPool, Target holds the destination register name.
 	PoolIndex int
+	// PoolLoads lists the two pool words an ARM64 LDP loads (the IR has one
+	// Target per instruction, so a pair cannot be an OpLoadPool). Set only for
+	// an LDP the canonical pool-access extractor resolved, base and index.
+	PoolLoads []PoolLoad
 
 	// OpBranch condition classification -- the emitter builds the actual
 	// condition expression at walk time (against the live LiftState), so
@@ -53,8 +69,12 @@ type Instr struct {
 	//   CondKind "bittest0"/"bittest1" -> ((CondReg >> CondBit) & 1) == 0 / != 0
 	CondKind string
 	CondOp   string // Dart comparison operator, e.g. "==", "!=", "<", "<=", ">", ">="
-	CondReg  string
-	CondBit  int
+	// CondUnsigned distinguishes carry/unsigned conditions (ARM64 HI/HS/LO/LS,
+	// x86 A/AE/B/BE) from signed comparisons. Collapsing the two changes branch
+	// semantics for values with the high bit set.
+	CondUnsigned bool
+	CondReg      string
+	CondBit      int
 
 	// IsDispatchCall marks an OpCall as a DispatchTable call, with
 	// DispatchSelector holding its selector offset. The two are separate
@@ -85,27 +105,29 @@ type Block struct {
 // FuncIR is one function's arch-neutral intermediate representation, the
 // direct input to the pseudocode emitter (emit.go).
 type FuncIR struct {
-	Name      string
-	EntryVA   uint64
-	Blocks    []Block
-	blockByVA map[uint64]int
-	ArgRegs   []string // arg0..argN register names in calling-convention order
-	FrameReg  string   // frame/stack-relative base register name (ARM64: x29; x86_64: rbp)
-	ReturnReg string   // register holding the return value (ARM64: x0; x86_64: rax)
-	LinkReg   string   // return-address register alias name, if any (ARM64: x30; x86_64: "" -- on the stack)
-	PoolReg   string   // object-pool base register (ARM64: x27; x86_64: r15)
-	ThreadReg string   // Dart Thread*-holding register (ARM64: x26/THR; x86_64: r14)
+	Name        string
+	DartVersion string
+	EntryVA     uint64
+	Blocks      []Block
+	blockByVA   map[uint64]int
+	ArgRegs     []string // arg0..argN register names in calling-convention order
+	FrameReg    string   // frame/stack-relative base register name (ARM64: x29; x86_64: rbp)
+	ReturnReg   string   // register holding the return value (ARM64: x0; x86_64: rax)
+	LinkReg     string   // return-address register alias name, if any (ARM64: x30; x86_64: "" -- on the stack)
+	PoolReg     string   // object-pool base register (ARM64: x27; x86_64: r15)
+	ThreadReg   string   // Dart Thread*-holding register (ARM64: x26/THR; x86_64: r14)
 	// NullReg is the register that permanently caches Object::null(), so
 	// every read of it is the literal `null`. ARM64 only (NULL_REG = R22);
 	// empty on x86_64, which has no such register and loads null from the
 	// object pool instead. See arm64NullReg for the SDK reference and the
 	// sample check behind it.
 	NullReg string
-	// HeapBitsReg is the register holding HEAP_BITS, whose left shift by 32
-	// yields heap_base and so marks a compressed-pointer decompression.
-	// ARM64 only; x86_64 adds Thread.heap_base instead. See
-	// isPointerDecompression.
-	HeapBitsReg string
+	// ARM64 heap/GC pinned registers changed at Dart 2.14. HeapBitsReg is R28
+	// in 2.14+; older releases use BarrierMaskReg=R28 and Dart 2.13 compressed
+	// builds additionally use HeapBaseReg=R23. x86_64 uses Thread fields instead.
+	HeapBitsReg    string
+	HeapBaseReg    string
+	BarrierMaskReg string
 
 	// CodeReg holds the current Code object pointer at function entry
 	// (CODE_REG: x24 on ARM64, r12 on x86_64). The prologue derives PP from it
@@ -119,12 +141,15 @@ type FuncIR struct {
 	// ARM64 -- which overlaps the x0..x7 arg display and so was already seeded --
 	// r10 on x86_64, where it was not and leaked). Seeded as "argsDesc".
 	ArgsDescReg string
+	// ICDataReg is IC_DATA_REG, which a switchable call loads with its
+	// UnlinkedCall (x5 / rbx). See switchable.go.
+	ICDataReg string
 
-	// FpuArgRegs holds the FPU argument register names (ARM64: v0-v5;
-	// x86_64: xmm1-xmm6) in calling-convention order. Used by the lifter
-	// to recognize FPU argument patterns and by the emitter to display
-	// double/float parameters. Empty when the architecture has no FPU
-	// calling convention (not currently the case for either supported arch).
+	// FpuArgRegs holds the architecture's possible FPU argument registers
+	// (ARM64: v0-v5; x86_64: xmm1-xmm6) in calling-convention allocation order.
+	// It is ABI metadata, NOT proof that a particular source parameter occupies
+	// one of these slots: exact per-function Representation/unboxing is required
+	// for that mapping and is not always serialized in Full AOT.
 	FpuArgRegs []string
 	// FpuReturnReg holds the FPU return register name (ARM64: v0; x86_64:
 	// xmm0). Used to recognize double return values.
@@ -300,21 +325,21 @@ type FuncIR struct {
 	// EmitPseudocode runs.
 	FieldNameResolver func(classID int, byteOffset int64) string `json:"-"`
 
-	// IsAsync is set when the function is detected as async. Detection paths:
-	// 1. Direct BL to symbols containing "init_async"/"return_async" (pre-scan)
-	// 2. THR stub calls to suspend_state_*_entry_point (emitIndirectCall)
-	// 3. SuspendState CID in pool loads (decompile_native_cmd.go)
-	// 4. Call targets containing "_SuspendState" + "_await"/"_resume"/"_yield"/"_initAsync"/"_returnAsync"
-	// 5. Call targets containing "Future.delayed"/"Future._asyncComplete"/"Future._thenAwait"
-	// 6. Post-walk patch if any of the above set IsAsync during walking
+	// IsAsync is set from the serialized Function modifier when owner metadata is
+	// available, with SDK-classified suspendable stubs as a fallback while walking
+	// code. async* also sets it; sync* deliberately does not.
 	IsAsync bool `json:"-"`
+	// SuspendModifierKnown means IsAsync/IsSyncStar/IsAsyncStar came from the
+	// serialized Function modifier. When true, code-pattern/stub detection may
+	// corroborate the value but must not override it.
+	SuspendModifierKnown bool `json:"-"`
 
 	// IsSyncStar is set when the function is detected as a sync* generator.
-	// Detection: call targets containing "InitSyncStar" or "_initSyncStar".
+	// Prefer serialized Function modifier; SDK-classified stubs are a fallback.
 	IsSyncStar bool `json:"-"`
 
 	// IsAsyncStar is set when the function is detected as an async* generator.
-	// Detection: call targets containing "YieldAsyncStar" or "_yieldAsyncStar".
+	// Prefer serialized Function modifier; SDK-classified stubs are a fallback.
 	IsAsyncStar bool `json:"-"`
 
 	// SwitchCases holds recovered switch/case dispatch info for indirect
@@ -337,8 +362,10 @@ type FuncIR struct {
 	// FieldNameResolver can use it for per-class field name resolution.
 	ReceiverClassID int `json:"-"`
 
-	// ReturnType holds the recovered or inferred return type name (e.g. "String", "int", "bool", "void").
-	// When non-empty, the signature emits `<ReturnType> funcName(...)` instead of `dynamic funcName(...)`.
+	// ReturnType holds an exact return type name recovered from serialized
+	// Function/FunctionType result_type metadata. It is intentionally empty when
+	// the complete type cannot be reconstructed; the emitter then uses dynamic
+	// rather than inferring a type from the function's spelling or body.
 	ReturnType string `json:"-"`
 
 	// ClassNameToID maps a class name to its class ID. It lets the emitter tag a
@@ -352,6 +379,37 @@ type FuncIR struct {
 	// of a known class yields an object of `a`'s type, so a following `.b`
 	// resolves. Nil disables chain typing.
 	FieldTypeResolver func(classID int, byteOffset int64) int `json:"-"`
+
+	// ClassNameForCID returns the name of the class with this cid, or "". It
+	// annotates class-id range/equality tests with the classes they cover.
+	// Nil disables the annotation.
+	ClassNameForCID func(cid int) string `json:"-"`
+
+	// CallSiteAt resolves an object-pool index to the CallSiteData object
+	// (UnlinkedCall / MegamorphicCache) stored there, if that is what it is.
+	// It is what identifies a switchable call by the OBJECT it loads rather
+	// than by how the pool entry happens to print. Nil disables switchable-call
+	// recovery.
+	CallSiteAt func(poolIndex int) (CallSite, bool) `json:"-"`
+}
+
+// CallSite is the resolved content of a CallSiteData pool object: the selector
+// the call names and the shape of its arguments (ArgumentsDescriptor).
+type CallSite struct {
+	// Selector is target_name as stored: `foo`, `get:foo`, `set:foo`, an
+	// operator such as `+` or `[]`, each optionally prefixed `dyn:` (the
+	// dynamic-invocation forwarder name, Symbols::DynamicPrefix).
+	Selector string
+	// Count is the number of passed arguments, receiver included and type
+	// arguments excluded; TypeArgsLen > 0 means a type-argument vector is passed
+	// as one more leading argument. Positional is the positional count
+	// (receiver included).
+	Count       int
+	TypeArgsLen int
+	Positional  int
+	// NamedArgs maps an argument's index among the Count passed arguments to the
+	// name it is passed under.
+	NamedArgs map[int]string
 }
 
 // AllocatedClassID returns the class ID a callee name allocates, or 0. A Dart
@@ -401,76 +459,6 @@ type TryRegionEntry struct {
 	HandlerVA uint64
 }
 
-// SnapTryRegionsToBlocks widens each try region outward to basic-block
-// boundaries and reports how many regions grew.
-//
-// This is sound, not a heuristic. A basic block is straight-line code with a
-// single entry, so control cannot enter it partway: if ANY pc in a block is
-// inside try N, every pc in that block is inside try N. Snapping therefore
-// cannot over-claim coverage.
-//
-// It matters because raw PcDescriptor ranges are severe lower bounds --
-// descriptors only exist at call sites and runtime calls, so a try whose body
-// contains one call yields a range of a single instruction. Snapping recovers
-// the enclosing straight-line code, which is what a reader actually wants and
-// what any future `try { }` structuring needs.
-//
-// It does NOT fix the other under-report: two nested trys can still merge when
-// descriptors are too sparse to separate them.
-func (f *FuncIR) SnapTryRegionsToBlocks() int {
-	if len(f.TryRegions) == 0 || len(f.Blocks) == 0 {
-		return 0
-	}
-	// Block extent: [StartVA, last instruction's Addr]. The end is inclusive of
-	// the final instruction's address; regions use an exclusive end, so callers
-	// get lastAddr+1 at minimum. Instruction width is unknown here (x86_64 is
-	// variable length), so the next block's StartVA is used where available.
-	type extent struct{ start, end uint64 }
-	extents := make([]extent, 0, len(f.Blocks))
-	for i := range f.Blocks {
-		b := &f.Blocks[i]
-		if len(b.Instrs) == 0 {
-			continue
-		}
-		e := b.Instrs[len(b.Instrs)-1].Addr + 1
-		extents = append(extents, extent{start: b.StartVA, end: e})
-	}
-	if len(extents) == 0 {
-		return 0
-	}
-	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
-	// A block's true end is the next block's start when they are contiguous,
-	// which recovers the final instruction's width.
-	for i := 0; i+1 < len(extents); i++ {
-		if extents[i+1].start > extents[i].end {
-			extents[i].end = extents[i+1].start
-		}
-	}
-
-	widened := 0
-	for i := range f.TryRegions {
-		r := &f.TryRegions[i]
-		newStart, newEnd := r.StartVA, r.EndVA
-		for _, e := range extents {
-			// Overlap test against the region's original extent.
-			if e.end <= r.StartVA || e.start >= r.EndVA {
-				continue
-			}
-			if e.start < newStart {
-				newStart = e.start
-			}
-			if e.end > newEnd {
-				newEnd = e.end
-			}
-		}
-		if newStart != r.StartVA || newEnd != r.EndVA {
-			widened++
-			r.StartVA, r.EndVA = newStart, newEnd
-		}
-	}
-	return widened
-}
-
 // CatchClause renders the Dart catch binding this handler actually has.
 //
 // Driven by needs_stacktrace: a source-level `catch (e)` sets it false and
@@ -497,8 +485,31 @@ type ExceptionHandlerEntry struct {
 
 // BlockByVA resolves a block by its start address.
 func (f *FuncIR) BlockByVA(va uint64) (int, bool) {
-	id, ok := f.blockByVA[va]
-	return id, ok
+	if f.blockByVA != nil {
+		// The index is authoritative once newFuncIR built it: a miss is a branch
+		// target outside the function (tail call), not a reason to scan every block.
+		id, ok := f.blockByVA[va]
+		return id, ok && id >= 0 && id < len(f.Blocks)
+	}
+	// FuncIR is exported and a few callers/tests construct it directly rather
+	// than through addBlock, leaving blockByVA nil. Scan instead of silently
+	// treating EntryVA/branch targets as block 0/missing.
+	for i := range f.Blocks {
+		if f.Blocks[i].StartVA == va {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (f *FuncIR) entryBlockID() (int, bool) {
+	if len(f.Blocks) == 0 {
+		return 0, false
+	}
+	if id, ok := f.BlockByVA(f.EntryVA); ok {
+		return id, true
+	}
+	return 0, false
 }
 
 func newFuncIR(name string, entryVA uint64) *FuncIR {

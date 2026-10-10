@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"aotopsy/internal/decompiler"
-	"aotopsy/internal/samplecorpus"
 )
 
 // TestDecompileFidelityCensus is a measurement harness (NOT a gate; skipped
@@ -26,7 +25,7 @@ func TestDecompileFidelityCensus(t *testing.T) {
 	samples := []string{
 		"dart-3.12.2-sampleapp-arm64.so",
 		"dart-3.7.0-sampleapp2-x64.so",
-		"dart-3.9.2-gt-arm64.so",
+		"dart-3.9.2-arm64.so",
 		"dart-3.12.2-x64.so",
 	}
 
@@ -58,11 +57,7 @@ func TestDecompileFidelityCensus(t *testing.T) {
 	}
 
 	for _, name := range samples {
-		path := samplecorpus.Path(name)
-		if path == "" {
-			t.Logf("%s: absent", name)
-			continue
-		}
+		path := corpusSample(t, name)
 		ctx, err := LoadContext(path)
 		if err != nil {
 			t.Logf("%s: LoadContext: %v", name, err)

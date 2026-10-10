@@ -7,23 +7,42 @@ import (
 	"os"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/ffitrace"
+	"aotopsy/internal/jsonutil"
+	"aotopsy/internal/output"
 )
 
 // cmdFFITrace implements "aotopsy _debug ffi-trace --lib <path>":
-// static detection of dart:ffi DynamicLibrary.open/lookup call sites.
+// static detection of dart:ffi DynamicLibrary.open/lookup call sites and
+// compiler-generated Dart-to-native FFI wrappers.
 func cmdFFITrace(args []string) error {
-	fs := flag.NewFlagSet("ffi-trace", flag.ExitOnError)
+	fs := flag.NewFlagSet("ffi-trace", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	out := fs.String("out", "", "write findings as JSONL to this path (default: stdout)")
 	filter := fs.String("filter", "", "restrict to functions whose resolved name contains this substring")
 	maxScan := fs.Int("max-scan", 0, "cap how many functions ffi-trace processes (0 = package default of 500)")
 	allowUnbounded := fs.Bool("allow-unbounded", false, "scan EVERY function, no cap")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
+	}
+	if err := requireNonNegativeFlag("max-scan", *maxScan); err != nil {
+		return err
+	}
+	if *allowUnbounded && flagWasSet(fs, "max-scan") {
+		return fmt.Errorf("--allow-unbounded and --max-scan are mutually exclusive")
 	}
 	if *libapp == "" {
 		return fmt.Errorf("--lib is required")
+	}
+	if *out != "" {
+		same, err := output.SamePath(*libapp, *out)
+		if err != nil {
+			return fmt.Errorf("ffi-trace: compare input/output paths: %w", err)
+		}
+		if same {
+			return fmt.Errorf("ffi-trace output must not replace the input binary")
+		}
 	}
 
 	ctx, err := analysis.LoadContext(*libapp)
@@ -31,30 +50,27 @@ func cmdFFITrace(args []string) error {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
+	cli.Errf("Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
-	findings, scanned := ffitrace.Trace(ctx, ffitrace.Options{
+	// Trace intentionally derives literal arguments from each outgoing call
+	// site's own stack/register setup. Do not run BuildArgRegMasks here: that
+	// whole-binary pass describes callees' incoming Dart calling conventions,
+	// costs far more than a bounded ffi-trace, and is not evidence for the
+	// arguments of the call site currently being inspected.
+	traceResult, err := ffitrace.Trace(ctx, ffitrace.Options{
 		MaxScan:        *maxScan,
 		AllowUnbounded: *allowUnbounded,
 		Filter:         *filter,
 	})
-
-	w := os.Stdout
-	if *out != "" {
-		f, err := os.Create(*out)
-		if err != nil {
-			return fmt.Errorf("create %s: %w", *out, err)
-		}
-		defer func() { _ = f.Close() }()
-		w = f
+	if err != nil {
+		return err
+	}
+	if traceResult.ScanLimitReached {
+		return fmt.Errorf("ffi-trace: incomplete result: function scan cap reached; raise --max-scan or use --allow-unbounded")
 	}
 
-	enc := json.NewEncoder(w)
 	dynCalls, nativeCalls, resolved := 0, 0, 0
-	for _, f := range findings {
-		if err := enc.Encode(f); err != nil {
-			return err
-		}
+	for _, f := range traceResult.Findings {
 		switch f.Kind {
 		case "dynamic_library_call":
 			dynCalls++
@@ -65,7 +81,19 @@ func cmdFFITrace(args []string) error {
 			nativeCalls++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "ffi-trace: scanned %d function(s), %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
-		scanned, dynCalls, resolved, nativeCalls, len(findings))
+	if *out != "" {
+		if _, err := jsonutil.WriteJSONLFile(*out, traceResult.Findings); err != nil {
+			return fmt.Errorf("write %s: %w", *out, err)
+		}
+	} else {
+		enc := json.NewEncoder(os.Stdout)
+		for i := range traceResult.Findings {
+			if err := enc.Encode(&traceResult.Findings[i]); err != nil {
+				return fmt.Errorf("encode finding %d: %w", i, err)
+			}
+		}
+	}
+	cli.Errf("ffi-trace: attempted %d function(s), scanned %d, %d dynamic_library_call finding(s) (%d with a resolved literal arg), %d native_call_site finding(s), %d total\n",
+		traceResult.Attempted, traceResult.Scanned, dynCalls, resolved, nativeCalls, len(traceResult.Findings))
 	return nil
 }

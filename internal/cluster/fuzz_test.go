@@ -25,3 +25,12 @@ func FuzzDecodePcDescriptors(f *testing.F) {
 		_, _ = DecodePcDescriptors(payload)
 	})
 }
+
+func FuzzDecodeCompressedStackMaps(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{4, 0, 0, 0, 0x80})
+	f.Add([]byte{8, 0, 0, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		_, _ = DecodeCompressedStackMaps(payload, nil)
+	})
+}

@@ -8,6 +8,11 @@ docs/
 .graph/
 .devin/
 .handoff/
+.audit_golden/
+.audit_probe/
+.audit_runner/
+.audit_closure/
+internal/vmtables/.audit_closure/
 *.so
 *.o
 *.dylib
@@ -29,6 +34,7 @@ __pycache__/
 docs_internal/
 HANDOFF_REPORT.md
 GEMINI.md
+STEROIDS.md
 
 # Compiled Go binaries (root-level)
 /codealign

@@ -1,10 +1,6 @@
 package disasm
 
-import (
-	"testing"
-
-	"aotopsy/internal/arch/arm64"
-)
+import "testing"
 
 func TestDecodeBranch_RET(t *testing.T) {
 	// RET (X30) = 0xD65F03C0
@@ -109,29 +105,9 @@ func TestDecodeBranch_NotBranch(t *testing.T) {
 	}
 }
 
-func TestSignExtend(t *testing.T) {
-	tests := []struct {
-		val  uint32
-		bits int
-		want int32
-	}{
-		{0x04, 19, 4},       // positive
-		{0x7FFFF, 19, -1},   // -1 in 19-bit
-		{0x3FFF, 14, -1},    // -1 in 14-bit
-		{0x2000, 14, -8192}, // MSB set in 14-bit
-	}
-	for _, tc := range tests {
-		got := arm64.SignExtend(tc.val, tc.bits)
-		if got != tc.want {
-			t.Errorf("signExtend(0x%x, %d) = %d, want %d", tc.val, tc.bits, got, tc.want)
-		}
-	}
-}
-
-// B.AL and B.NV use the B.cond encoding but always branch, so they are
-// unconditional. dart-lang/sdk's runtime/vm/constants_arm64.h names them
-// `AL = 14, // always (unconditional)` and `NV = 15`, and ARM defines the
-// 0b1111 encoding to behave as always.
+// B.AL used the B.cond encoding in Dart <=2.14 but is unconditional. NV is
+// not a valid emitted branch: older Dart used it only as a far-branch sentinel
+// rewritten to NOP, and >=2.15 asserts against it.
 //
 // Reporting them as conditional gave the CFG a fallthrough edge that cannot
 // be taken, and made the decompiler render the branch with the literal
@@ -139,26 +115,13 @@ func TestSignExtend(t *testing.T) {
 // which is not valid Dart. That shape appeared 28148 times in the Dart 2.12
 // sample. The encoding below, 0x5400004e, is one such instruction taken from
 // it verbatim: `B AL, .+0x8`.
-func TestDecodeBranchTreatsAlwaysConditionsAsUnconditional(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		raw  uint32
-	}{
-		{"B.AL from the 2.12 sample", 0x5400004e},
-		{"B.NV", 0x5400004f},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			bi := DecodeBranch(tc.raw, 0x1000)
-			if bi == nil {
-				t.Fatal("not decoded as a branch at all")
-			}
-			if bi.Cond {
-				t.Error("an always-taken branch must not be reported as conditional")
-			}
-			if bi.Target != 0x1008 {
-				t.Errorf("target = 0x%x, want 0x1008", bi.Target)
-			}
-		})
+func TestDecodeBranchTreatsALAsUnconditionalAndRejectsNV(t *testing.T) {
+	bi := DecodeBranch(0x5400004e, 0x1000) // real Dart 2.12 B.AL +8
+	if bi == nil || bi.Cond || bi.Target != 0x1008 {
+		t.Fatalf("B.AL decode = %+v, want unconditional target 0x1008", bi)
+	}
+	if bi := DecodeBranch(0x5400004f, 0x1000); bi != nil {
+		t.Fatalf("reserved B.NV decoded as executable branch: %+v", bi)
 	}
 	// Every other condition code stays conditional.
 	for cond := uint32(0); cond < 14; cond++ {

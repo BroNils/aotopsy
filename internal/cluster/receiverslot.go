@@ -2,10 +2,11 @@ package cluster
 
 // Receiver frame-slot recovery for Dart versions before 3.4.3.
 //
-// Up to and including 3.3.0 there is no register calling convention --
-// `DartCallingConvention` does not exist in constants_arm64.h at that tag and
-// first appears at 3.4.3 -- so arguments arrive on the stack and the receiver
-// has to be located in the frame.
+// Up to and including 3.3.x there is no register calling convention --
+// `DartCallingConvention` does not exist in constants_arm64.h at those tags and
+// first appears at SDK 3.4.0 (3.4.3 is the first supported profile of that
+// line) -- so arguments arrive on the stack and the receiver has to be located
+// in the frame.
 //
 // Whether there IS a static slot is decided by
 // PrologueBuilder::BuildParameterHandling (prologue_builder.cc), which emits
@@ -77,12 +78,26 @@ const ParamEndSlotFromFP = 1
 //     depends on what the CALLER passed. Returning a made-up offset here
 //     produced a seed no load could ever match.
 func ReceiverFrameSlot(numFixedWithReceiver, numOptional int, suspendable bool, wordSize int64) (int64, bool) {
-	if numFixedWithReceiver <= 0 {
+	return ParamFrameSlot(numFixedWithReceiver, numOptional, suspendable, 0, wordSize)
+}
+
+// ParamFrameSlot is the FP-relative BYTE offset of fixed parameter `index` (0 =
+// the receiver of an instance method, else the first parameter), under the same
+// conditions as ReceiverFrameSlot. The constant-index shape of
+// PrologueBuilder::BuildParameterHandling loads parameter i at
+//
+//	FP + (kParamEndSlotFromFp + num_fixed - i) * wordSize
+//
+// so the slots descend by one word per parameter, the receiver being the highest
+// (see the derivation above; confirmed on 2.12.0 arm64: a two-parameter
+// operator+ loads its receiver at [x29,#24] and its argument at [x29,#16]).
+func ParamFrameSlot(numFixedWithReceiver, numOptional int, suspendable bool, index int, wordSize int64) (int64, bool) {
+	if numFixedWithReceiver <= 0 || index < 0 || index >= numFixedWithReceiver {
 		return 0, false
 	}
 	if numOptional > 0 || suspendable {
 		// Function::MakesCopyOfParameters(). No static slot exists.
 		return 0, false
 	}
-	return int64(ParamEndSlotFromFP+numFixedWithReceiver) * wordSize, true
+	return int64(ParamEndSlotFromFP+numFixedWithReceiver-index) * wordSize, true
 }

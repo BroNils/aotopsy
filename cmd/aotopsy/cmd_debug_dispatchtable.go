@@ -3,21 +3,21 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"aotopsy/internal/analysis"
+	"aotopsy/internal/cli"
 	"aotopsy/internal/cluster"
 )
 
 // cmdDispatchTable implements "aotopsy _debug dispatch-table --lib <path>":
 // statically recovers real function/stub names for the AOT snapshot's DispatchTable.
 func cmdDispatchTable(args []string) error {
-	fs := flag.NewFlagSet("dispatch-table", flag.ExitOnError)
+	fs := flag.NewFlagSet("dispatch-table", flag.ContinueOnError)
 	libapp := fs.String("lib", "", "path to libapp.so (ARM64 or x86_64)")
 	filter := fs.String("filter", "", "only print entries whose resolved name contains this substring")
 	showAll := fs.Bool("all", false, "print every entry, including null/unresolved (default: only entries with a resolved name)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoPositionals(fs, args); err != nil {
 		return err
 	}
 	if *libapp == "" {
@@ -29,14 +29,14 @@ func cmdDispatchTable(args []string) error {
 		return err
 	}
 	defer func() { _ = ctx.Close() }()
-	fmt.Fprintf(os.Stderr, "Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
+	cli.Errf("Dart SDK version: %s, arch64: %v\n", ctx.DartVersion, ctx.IsARM64)
 
 	entries, err := analysis.ResolveDispatchTable(ctx)
 	if err != nil {
 		return err
 	}
 	if entries == nil {
-		fmt.Fprintf(os.Stderr, "dispatch-table: no dispatch table in this snapshot (length 0)\n")
+		cli.Errf("dispatch-table: no dispatch table in this snapshot (length 0)\n")
 		return nil
 	}
 
@@ -73,7 +73,7 @@ func cmdDispatchTable(args []string) error {
 		printed++
 	}
 
-	fmt.Fprintf(os.Stderr, "dispatch-table: %d entries total (null=%d code=%d stub=%d unnamed=%d), printed %d\n",
+	cli.Errf("dispatch-table: %d entries total (null=%d code=%d stub=%d unnamed=%d), printed %d\n",
 		len(entries), nullCount, codeCount, stubCount, unnamedCount, printed)
 	return nil
 }

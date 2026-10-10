@@ -12,7 +12,10 @@ import "aotopsy/internal/sdk"
 // decompiler operands) by a constant number of slots, which is invisible in
 // aggregate and silently wrong in every individual line.
 //
-// From dart-lang/sdk (verified at tag 3.9.2):
+// From dart-lang/sdk. The 64-bit AOT layout is also re-derived across every
+// exact supported release by sdk.TestStableObjectFactsMatchSDK; ARM64/x64 PP
+// tag conventions were cross-checked in assembler_{arm64,x64}.cc across the
+// same supported range:
 //
 //	runtime/vm/compiler/runtime_offsets_extracted.h, AOT 64-bit blocks:
 //	  AOT_ObjectPool_elements_start_offset = 0x10   // 16

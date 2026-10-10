@@ -8,6 +8,19 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 
 > **Fork notice:** AOTopsy is a fork of **unflutter**, originally by **Anthony Zboralski**. The original `zboralski/unflutter` repository is no longer available (removed by the author); a community continuation exists at [`KristijanZic/unflutter`](https://github.com/KristijanZic/unflutter). All credit for the original snapshot parser, cluster deserializer, ARM64 disassembly pipeline, and Ghidra/IDA integration belongs to the original author. AOTopsy extends it with x86_64 support, a native decompiler, whole-program type inference, Frida script generation, and comprehensive documentation.
 
+## Intended Use
+
+AOTopsy is a static analysis tool for defensive and educational work:
+
+- security research and vulnerability analysis of apps you own, or are authorized to test (for example under a bug bounty program or a vulnerability disclosure policy);
+- malware and threat analysis, where the sample is the subject of the investigation;
+- privacy and compliance audits of your own Flutter apps, and recovering the source of your own app when it is lost;
+- interoperability work, teaching, and research on the Dart AOT snapshot format.
+
+It reads a binary offline and writes reports. It does not patch, repackage, or attack anything.
+
+It is not intended for, and the maintainers do not support: analyzing software you have no right to analyze, circumventing licensing, DRM, or anti-cheat, extracting credentials or secrets from other people's apps, or any other unauthorized access. Whether a given analysis is lawful depends on your jurisdiction and on the license terms of the software you analyze; that responsibility is yours. See [SECURITY.md](SECURITY.md#responsible-use).
+
 ## What It Recovers
 
 | Output | What it is |
@@ -163,7 +176,7 @@ aotopsy export-dart --lib libapp.so --out ./lib/ --filter Auth   # targeted expo
 
 Produces clean, idiomatic Dart code directly from binary machine instructions:
 - **Structural Control Flow**: `for-in` iterators, `while`, `for`, `try-catch-finally` with exact PC bounding.
-- **Async/Await Linearization**: Unwraps `_SuspendState` state machines into linear `await future` and `await for`.
+- **Async/Await Linearization**: Rewrites `_SuspendState._await` helper calls and `_StreamIterator` loops into `await future` and `await for`; the resume-state branch structure is preserved.
 - **Lambda Inlining**: Synthesizes arrow callbacks `(item) => process(item)` directly at call sites.
 - **Type Lattice**: Propagates concrete Dart types (`String`, `int`, `UserModel`) across SSA values without running a live VM.
 - **Dart Idioms**: Null-aware (`?.`, `??`, `??=`), cascade (`..`), Set/List/Map literals, string interpolation (`"${a}${b}"`).
@@ -190,7 +203,7 @@ Both reject x86_64 input. Use `decompile-native` for x86_64 pseudocode.
 
 ```bash
 aotopsy _debug decompile-native --lib libapp.so --func 0x1a92728 --gen-frida --gen-frida-out hooks.js
-frida -U -f com.example.app -l hooks.js --no-pause
+frida -U -f com.example.app -l hooks.js
 ```
 
 See `FRIDA.md` for the full guide.
@@ -201,8 +214,8 @@ See `FRIDA.md` for the full guide.
 aotopsy _debug strings --lib libapp.so --find "X-Signature" --xref   # which function loads this string?
 aotopsy _debug ffi-trace --lib libapp.so --filter MyClass            # dart:ffi call sites
 aotopsy _debug dispatch-table --lib libapp.so --filter MyClass       # dispatch table entries
-aotopsy _debug fingerprint --lib libapp.so                           # build-id and version markers
-aotopsy _debug funcdiff --old old.so --new new.so                    # function set diff
+aotopsy _debug fingerprint --lib libapp.so                           # ELF/snapshot identity + Dart version evidence
+aotopsy _debug funcdiff --old old.so --new new.so                    # function identity + instruction-byte diff
 aotopsy _debug symbolmap --stripped lib.so --unstripped debug.so     # resolve stripped targets
 ```
 
@@ -256,8 +269,8 @@ internal/
   output/             JSONL and SARIF 2.1.0 serialization
   decompiler/         Dart-AOT pseudocode decompiler (both architectures)
   typetrack/          Whole-program type inference and receiver recovery
-  fingerprint/        Build-id and version marker identification
-  funcdiff/           Function-set diffing between builds
+  fingerprint/        ELF/snapshot identity and bounded version evidence
+  funcdiff/           Function identity + instruction-byte diffing between builds
   symbolmap/          Stripped-vs-unstripped symbol resolution
   ffitrace/           Static dart:ffi call-site tracing
   strxref/            String-to-function cross-referencing
