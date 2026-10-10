@@ -195,7 +195,14 @@ gate permanently red, which is exactly why that gate could not exist before.
 
 - `gofmt -l` over `cmd/ internal/ tools/` — must be empty.
 - `staticcheck ./...` — must be clean. Fix findings; do not suppress them. A gate
-  whose baseline is a list of exceptions is not a gate.
+  whose baseline is a list of exceptions is not a gate. This job pins Go (1.26.9)
+  and staticcheck (v0.8.1) to exact versions: staticcheck only reads the export
+  data of the Go versions it was built against, and `stable` + `@latest` went red
+  on a Go patch release with no change in the repo. Bump both in one commit and
+  run the new pair locally first.
+- `SDK drift gates` read Dart SDK sources through the GitHub API; their disk cache
+  is persisted with `actions/cache`, because refetching it every run exhausts the
+  1000 requests/hour job-token quota.
 - `go build`, `go vet`, `go test -shuffle=on` on ubuntu, macos and windows.
 - race + coverage, with a floor (currently 18%, measured 20.0% without the
   corpus). Raise it when it is comfortably clear; never lower it to make a red
