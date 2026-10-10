@@ -118,6 +118,7 @@ jobs:
       # exceeded for installation"). Keep the cache between runs. Entries
       # carry their own provenance envelope, which sdktest checks on read.
       - name: Restore SDK cache
+        id: sdkrestore
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/aotopsy-sdk-cache
@@ -176,8 +177,10 @@ jobs:
             h=$(cd "$AOTOPSY_SDK_CACHE_DIR" && find . -type f | LC_ALL=C sort | sha256sum | cut -c1-16)
             echo "hash=$h" >> "$GITHUB_OUTPUT"
           fi
+      # Skipped when the cache that was restored already holds exactly these
+      # files; saving an existing key only produces a warning.
       - name: Save SDK cache
-        if: always() && steps.sdkcache.outputs.hash != ''
+        if: always() && steps.sdkcache.outputs.hash != '' && steps.sdkrestore.outputs.cache-matched-key != format('aotopsy-sdk-{0}-{1}', runner.os, steps.sdkcache.outputs.hash)
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/aotopsy-sdk-cache
