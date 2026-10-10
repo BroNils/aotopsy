@@ -2,6 +2,10 @@
 
 AOTopsy generates ready-to-run [Frida](https://frida.re) scripts that hook functions resolved during static analysis. This bridges the gap between what static analysis can determine (function names, call graphs, pseudocode) and what only runtime observation can reveal (argument values, virtual dispatch targets, code path reachability).
 
+> **Authorized use only.** Attach generated scripts only to apps you own or are
+> authorized to test (see [SECURITY.md](SECURITY.md#responsible-use)). The scripts are
+> read-only observers: they log calls and arguments, they do not modify the target.
+
 ```mermaid
 sequenceDiagram
     participant User

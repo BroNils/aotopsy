@@ -13,6 +13,15 @@ another. So a fresh clone won't have it — that's normal, not missing.
 If it doesn't exist yet, create your own with sample paths and integration
 test env vars for your machine.
 
+## Project purpose and sample provenance
+
+AOTopsy is a static analyzer for Dart AOT snapshots, built for defensive and
+educational use: security research, malware analysis, audits of one's own apps, and
+documenting the snapshot format (see README "Intended Use" and SECURITY.md "Responsible
+use"). `samples/` is gitignored and test binaries are never committed or redistributed.
+Real app names and anything extracted from a binary (keys, domains) stay out of tracked
+files and commit messages; use the pseudonyms from AGENTS-local.md.
+
 ## ⚠️ Host memory limits — read before running anything heavy
 
 This repo's analysis pipeline is memory-intensive. The specific host RAM,

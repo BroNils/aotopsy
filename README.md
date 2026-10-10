@@ -8,6 +8,19 @@ A Dart AOT snapshot analyzer. Turns `libapp.so` — the compiled Dart code insid
 
 > **Fork notice:** AOTopsy is a fork of **unflutter**, originally by **Anthony Zboralski**. The original `zboralski/unflutter` repository is no longer available (removed by the author); a community continuation exists at [`KristijanZic/unflutter`](https://github.com/KristijanZic/unflutter). All credit for the original snapshot parser, cluster deserializer, ARM64 disassembly pipeline, and Ghidra/IDA integration belongs to the original author. AOTopsy extends it with x86_64 support, a native decompiler, whole-program type inference, Frida script generation, and comprehensive documentation.
 
+## Intended Use
+
+AOTopsy is a static analysis tool for defensive and educational work:
+
+- security research and vulnerability analysis of apps you own, or are authorized to test (for example under a bug bounty program or a vulnerability disclosure policy);
+- malware and threat analysis, where the sample is the subject of the investigation;
+- privacy and compliance audits of your own Flutter apps, and recovering the source of your own app when it is lost;
+- interoperability work, teaching, and research on the Dart AOT snapshot format.
+
+It reads a binary offline and writes reports. It does not patch, repackage, or attack anything.
+
+It is not intended for, and the maintainers do not support: analyzing software you have no right to analyze, circumventing licensing, DRM, or anti-cheat, extracting credentials or secrets from other people's apps, or any other unauthorized access. Whether a given analysis is lawful depends on your jurisdiction and on the license terms of the software you analyze; that responsibility is yours. See [SECURITY.md](SECURITY.md#responsible-use).
+
 ## What It Recovers
 
 | Output | What it is |
