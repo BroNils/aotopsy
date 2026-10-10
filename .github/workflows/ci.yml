@@ -93,6 +93,17 @@ jobs:
   sdk-drift:
     name: SDK drift gates
     runs-on: ubuntu-latest
+    # A pull request from a branch of this repository is the same commit the
+    # push to that branch already checks, and it could not reuse that push's
+    # cache anyway: a cache is only visible to the ref that wrote it and to the
+    # default branch. Running both just doubles the API traffic. Pull requests
+    # from forks still run the gate.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # Filling an empty cache takes most of the hourly request quota (about 900
+    # requests), so two cold runs at once cannot both finish. Queue them.
+    concurrency:
+      group: sdk-drift
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
